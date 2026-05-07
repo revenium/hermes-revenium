@@ -4,6 +4,7 @@ description: "MANDATORY budget check BEFORE EVERY OPERATION — read ~/.hermes/s
 version: 1.0.0
 author: Revenium
 license: MIT
+category: DevOps
 platforms: [macos, linux]
 required_environment_variables:
   - REVENIUM_API_KEY
@@ -14,7 +15,7 @@ required_credential_files:
     description: Revenium CLI credentials (API key, team-id, tenant-id, owner-id)
 metadata:
   hermes:
-    tags: [revenium, budgets, finops, metering, observability]
+    tags: [DevOps, FinOps, revenium, budgets, metering, observability]
     category: devops
 ---
 
