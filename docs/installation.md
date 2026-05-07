@@ -2,13 +2,12 @@
 
 ## GitHub tap workflow
 
-After publishing this repository to GitHub:
-
 ```bash
-hermes skills tap add <github-owner>/hermes-revenium-skill
-hermes skills search revenium --source github
-hermes skills install <github-owner>/hermes-revenium-skill/skills/revenium
+hermes skills tap add revenium/hermes-revenium
+hermes skills install revenium/hermes-revenium/skills/revenium --force
 ```
+
+The `--force` flag is required because Hermes' security scanner correctly flags the skill's crontab installer as a persistence mechanism. See the "About the `--force` flag" callout in the [README](../README.md) for details.
 
 Hermes discovers custom taps by scanning the repo's `skills/` directory. This repository intentionally places the skill at:
 
@@ -25,7 +24,7 @@ For local iteration, point Hermes at the repo directly:
 ```yaml
 skills:
   external_dirs:
-    - /Users/johndemic/Development/projects/revenium/hermes-revenium-skill/skills
+    - /absolute/path/to/hermes-revenium/skills
 ```
 
 Hermes treats external skill directories as read-only discovery sources. The local `~/.hermes/skills/` directory still wins if the same skill name exists in both places.

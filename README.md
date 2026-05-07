@@ -6,7 +6,7 @@ Budget enforcement and token metering for [Hermes Agent](https://hermes-agent.no
 
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) installed and running
 - [Revenium](https://app.revenium.ai/connections) API key, Team ID, Tenant ID, and User ID
-- [`revenium` CLI](https://docs.revenium.io/for-ai-agents) — `brew install revenium/tap/revenium`
+- [`revenium` CLI](https://github.com/revenium/revenium-cli) — `brew install revenium/tap/revenium`
 - `sqlite3` and `python3` on `PATH`
 
 Verify:
@@ -22,12 +22,15 @@ python3 --version
 ### Option 1: GitHub tap (recommended)
 
 ```bash
-hermes skills tap add <github-owner>/hermes-revenium
-hermes skills search revenium --source github
-hermes skills install <github-owner>/hermes-revenium/skills/revenium
+hermes skills tap add revenium/hermes-revenium
+hermes skills install revenium/hermes-revenium/skills/revenium --force
 ```
 
 Hermes discovers tap repositories by scanning the repo's `skills/` directory, which is why the skill lives at `skills/revenium/`.
+
+> **About the `--force` flag and the security scan.** Hermes' install-time scanner classifies this skill as `DANGEROUS` and lists ~6 `MEDIUM persistence` findings against `install-cron.sh`, `cron.sh`, and `uninstall-cron.sh`. That's the scanner correctly detecting a real behavior: the skill installs a per-minute crontab entry to meter `~/.hermes/state.db` into Revenium. The cron is required for the skill to function — there is no version of this without it. `--force` acknowledges that and proceeds. Review the findings yourself if you want to confirm they're all crontab-related; the scripts are also viewable in [`skills/revenium/scripts/`](skills/revenium/scripts/) before you install.
+>
+> If the scanner reports `CRITICAL persistence` findings referencing `AGENTS.md` or a `post-install.sh`, those are stale artifacts from a previous (non-Hermes) install in your `~/.hub/quarantine/revenium/` cache. Clean it with `rm -rf ~/.hub/quarantine/revenium` and re-run the install — the genuine Hermes skill has no such files.
 
 ### Option 2: Local development
 
@@ -60,7 +63,7 @@ bash examples/setup-local.sh
 To make this skill discoverable through Hermes' skill index:
 
 ```bash
-hermes skills publish skills/revenium --to github --repo <github-owner>/hermes-revenium
+hermes skills publish skills/revenium --to github --repo revenium/hermes-revenium
 ```
 
 ## First-time setup
