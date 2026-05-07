@@ -66,24 +66,35 @@ To make this skill discoverable through Hermes' skill index:
 hermes skills publish skills/revenium --to github --repo revenium/hermes-revenium
 ```
 
+## Required: install the metering cron
+
+After installing the skill (any of the options above), run this once to install the per-minute crontab entry:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install-cron.sh
+```
+
+The cron meters `~/.hermes/state.db` into Revenium and refreshes `~/.hermes/state/revenium/budget-status.json`. Hermes can't add crontab entries itself, so this step is manual. **Without it, the agent will tell you "Budget status not yet available" before every operation** — that's the skill correctly detecting the missing cron.
+
+To confirm:
+
+```bash
+crontab -l | grep hermes-revenium-metering   # one entry
+tail -f ~/.hermes/state/revenium/revenium-metering.log
+```
+
 ## First-time setup
 
-Setup runs the first time you use the skill — Hermes walks you through it. The skill will:
+Once the cron is in place, setup runs the first time you use the skill — Hermes walks you through it. The skill will:
 
 1. Verify the `revenium` CLI is configured (asks for API key, Team ID, Tenant ID, User ID if not).
 2. Optionally ask for an organization name (for Revenium reporting attribution).
 3. Ask for a budget threshold and period (`DAILY`, `WEEKLY`, `MONTHLY`, `QUARTERLY`).
 4. Ask whether the agent runs autonomously and, if so, which Hermes messaging channel should receive halt notifications.
 5. Delete any pre-existing `Hermes …` budget alerts (to prevent duplicates) and create a fresh one.
-6. Write `~/.hermes/state/revenium/config.json` and install the metering cron.
+6. Write `~/.hermes/state/revenium/config.json`.
 
 Setup is atomic — if any step fails, no partial config is written. The full step-by-step flow lives in [`skills/revenium/references/setup.md`](skills/revenium/references/setup.md).
-
-To verify the cron is running after setup:
-
-```bash
-tail -f ~/.hermes/state/revenium/revenium-metering.log
-```
 
 ## How it works
 
