@@ -12,7 +12,18 @@ if [[ ! -f "${CONFIG_FILE}" ]]; then
   exit 1
 fi
 
-ALERT_ID=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}'))['alertId'])" 2>/dev/null)
+read_config_field() {
+  CONFIG_FILE="${CONFIG_FILE}" KEY="$1" python3 - <<'PY'
+import json, os
+val = json.load(open(os.environ['CONFIG_FILE'])).get(os.environ['KEY'], '')
+if isinstance(val, bool):
+    print('true' if val else 'false')
+else:
+    print(val if val is not None else '')
+PY
+}
+
+ALERT_ID=$(read_config_field alertId)
 if [[ -z "${ALERT_ID}" ]]; then
   echo "No alertId in config"
   exit 1
@@ -24,34 +35,40 @@ if [[ -z "${BUDGET_JSON}" ]]; then
   exit 1
 fi
 
-AUTONOMOUS=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('autonomousMode', False))" 2>/dev/null || echo "False")
-NOTIFY_CHANNEL=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('notifyChannel', ''))" 2>/dev/null || true)
-NOTIFY_TARGET=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('notifyTarget', ''))" 2>/dev/null || true)
+AUTONOMOUS=$(read_config_field autonomousMode)
+NOTIFY_CHANNEL=$(read_config_field notifyChannel)
+NOTIFY_TARGET=$(read_config_field notifyTarget)
 
-HALT_TRANSITION=$(python3 <<PYEOF
-import json
+# Update budget-status.json and decide if we just transitioned into halt.
+HALT_OUTPUT=$(
+  BUDGET_STATUS_FILE="${BUDGET_STATUS_FILE}" \
+  BUDGET_JSON="${BUDGET_JSON}" \
+  AUTONOMOUS="${AUTONOMOUS}" \
+  python3 - <<'PY'
+import json, os
 from datetime import datetime, timezone
 from pathlib import Path
 
-data = json.loads('''${BUDGET_JSON}''')
+status_file = Path(os.environ['BUDGET_STATUS_FILE'])
+budget_json = os.environ['BUDGET_JSON']
+autonomous = os.environ['AUTONOMOUS'] == 'true'
+
+data = json.loads(budget_json)
 data['lastChecked'] = datetime.now(timezone.utc).isoformat()
 current = float(data.get('currentValue', 0))
 threshold = float(data.get('threshold', 0))
 exceeded = current > threshold if threshold > 0 else False
 data['exceeded'] = exceeded
-if 'note' in data:
-    del data['note']
+data.pop('note', None)
 
-path = Path('${BUDGET_STATUS_FILE}')
-prev_halted = False
 prev = {}
+prev_halted = False
 try:
-    prev = json.loads(path.read_text())
-    prev_halted = prev.get('halted', False)
+    prev = json.loads(status_file.read_text())
+    prev_halted = bool(prev.get('halted', False))
 except Exception:
-    prev = {}
+    pass
 
-autonomous = '${AUTONOMOUS}' == 'True'
 halt_transition = False
 if autonomous and exceeded and not prev_halted:
     data['halted'] = True
@@ -63,24 +80,34 @@ elif prev_halted:
 else:
     data['halted'] = False
 
-path.write_text(json.dumps(data, indent=2) + '
-')
+status_file.write_text(json.dumps(data, indent=2) + '\n')
+
+percent = (current / threshold * 100) if threshold > 0 else 0
+status = 'EXCEEDED' if exceeded else 'OK'
+halted_tag = ' [HALTED]' if data.get('halted') else ''
 print(f"HALT_TRANSITION={'true' if halt_transition else 'false'}")
-print(f"Budget: ${current:.2f} / ${threshold:.2f} ({'EXCEEDED' if exceeded else 'OK'}){' [HALTED]' if data.get('halted') else ''}")
-PYEOF
+print(f"CURRENT={current:.2f}")
+print(f"THRESHOLD={threshold:.2f}")
+print(f"PERCENT={percent:.0f}")
+print(f"SUMMARY=Budget: ${current:.2f} / ${threshold:.2f} ({status}){halted_tag}")
+PY
 )
 
-echo "${HALT_TRANSITION}" | tail -1
+echo "${HALT_OUTPUT}" | sed -n 's/^SUMMARY=//p'
 
-if echo "${HALT_TRANSITION}" | head -1 | grep -q "HALT_TRANSITION=true"; then
+if echo "${HALT_OUTPUT}" | grep -q '^HALT_TRANSITION=true$'; then
   if [[ -n "${NOTIFY_CHANNEL}" && -n "${NOTIFY_TARGET}" ]]; then
-    CURRENT_VALUE=$(python3 -c "import json; print(f"${json.load(open('${BUDGET_STATUS_FILE}')).get('currentValue', 0):.2f}")" 2>/dev/null || echo "?")
-    THRESHOLD=$(python3 -c "import json; print(f"${json.load(open('${BUDGET_STATUS_FILE}')).get('threshold', 0):.2f}")" 2>/dev/null || echo "?")
-    PERCENT=$(python3 -c "import json; d=json.load(open('${BUDGET_STATUS_FILE}')); print(f"{float(d.get('currentValue',0))/float(d.get('threshold',1))*100:.0f}")" 2>/dev/null || echo "?")
-    MSG="Budget halt active. Spent \$${CURRENT_VALUE} of \$${THRESHOLD} (${PERCENT}%). All autonomous operations are now stopped. To resume: bash ~/.hermes/skills/revenium/scripts/clear-halt.sh"
+    CURRENT_VALUE=$(echo "${HALT_OUTPUT}" | sed -n 's/^CURRENT=//p')
+    THRESHOLD_VALUE=$(echo "${HALT_OUTPUT}" | sed -n 's/^THRESHOLD=//p')
+    PERCENT=$(echo "${HALT_OUTPUT}" | sed -n 's/^PERCENT=//p')
+    MSG="Budget halt active. Spent \$${CURRENT_VALUE} of \$${THRESHOLD_VALUE} (${PERCENT}%). All autonomous operations are now stopped. To resume: bash ~/.hermes/skills/revenium/scripts/clear-halt.sh"
 
     if command -v hermes >/dev/null 2>&1; then
-      hermes chat --toolsets messaging -q "Use the send_message tool to send this exact message to ${NOTIFY_CHANNEL}:${NOTIFY_TARGET}: ${MSG}" >/dev/null 2>&1 &&         echo "Halt notification sent via Hermes ${NOTIFY_CHANNEL}" ||         echo "Failed to send halt notification via Hermes ${NOTIFY_CHANNEL}"
+      if hermes chat --toolsets messaging -q "Use the send_message tool to send this exact message to ${NOTIFY_CHANNEL}:${NOTIFY_TARGET}: ${MSG}" >/dev/null 2>&1; then
+        echo "Halt notification sent via Hermes ${NOTIFY_CHANNEL}"
+      else
+        echo "Failed to send halt notification via Hermes ${NOTIFY_CHANNEL}"
+      fi
     else
       echo "hermes CLI not available — halt notification not sent"
     fi

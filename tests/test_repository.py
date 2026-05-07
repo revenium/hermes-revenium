@@ -1,4 +1,5 @@
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -52,6 +53,21 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('.hermes', text)
         self.assertIn('state/revenium', text)
         self.assertNotIn('.openclaw', text)
+
+    def test_shell_scripts_have_valid_syntax(self):
+        scripts = sorted((SKILL / 'scripts').glob('*.sh'))
+        self.assertTrue(scripts, 'no shell scripts found')
+        for script in scripts:
+            result = subprocess.run(
+                ['bash', '-n', str(script)],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                result.returncode,
+                0,
+                f'syntax error in {script.name}: {result.stderr}',
+            )
 
 
 if __name__ == '__main__':
