@@ -9,7 +9,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 
 ## Phases
 
-- [ ] **Phase 1: Path Foundation** - Declare `TAXONOMY_FILE` and `MARKERS_DIR` in `common.sh`; create directory with `chmod 700`; extend path-discipline test.
+- [x] **Phase 1: Path Foundation** - Declare `TAXONOMY_FILE` and `MARKERS_DIR` in `common.sh`; create directory with `chmod 700`; extend path-discipline test. (2026-05-12)
 - [ ] **Phase 2: Prompt Design & Marker Contract** - End-load the SKILL.md classification block, seed taxonomy, define marker schema; ship BEFORE any cron behavior changes to bound halt-check regression risk.
 - [ ] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency.
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
@@ -102,7 +102,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Path Foundation | 0/1 | Planned | - |
+| 1. Path Foundation | 1/1 | Complete | 2026-05-12 |
 | 2. Prompt Design & Marker Contract | 0/0 | Not started | - |
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 0/0 | Not started | - |
 | 4. Wire Enrichment | 0/0 | Not started | - |
