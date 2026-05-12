@@ -210,6 +210,8 @@ The repo ships stdlib `unittest` smoke checks covering expected files, frontmatt
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
+Beyond the automated smoke checks, a manual halt-check survivability test plan — operator runbook is documented at `skills/revenium/references/halt-survivability.md`. Run it before any release that modifies the `SKILL.md` halt block to confirm the halt-check anchor still fires correctly under context dilution in long sessions.
+
 ## Notes
 
 - This repo is Hermes-only and intentionally clean — no legacy runtime assumptions from the source skill it was forked from.
