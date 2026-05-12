@@ -244,7 +244,7 @@
 - Priority: Medium.
 
 **Legacy branding test scope:**
-- What's tested: `tests/test_repository.py:37-49` greps for `OpenClaw|openclaw|ClawHub|clawhub`. The repo was forked, but the test does not detect newer variants of stale branding (e.g., other product names that might be introduced and later renamed).
+- What's tested: `tests/test_repository.py:37-49` greps for the forked-tool product-name regex defined on `tests/test_repository.py:47`. The repo was forked, but the test does not detect newer variants of stale branding (e.g., other product names that might be introduced and later renamed).
 - Files: `tests/test_repository.py:47`
 - Risk: Low.
 - Priority: Low.

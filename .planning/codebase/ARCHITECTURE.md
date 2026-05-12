@@ -215,7 +215,7 @@
 ## Architectural Constraints
 
 - **No runtime / no build step:** This repo ships static text. The "application" is a skill plus a set of shell scripts; there is nothing to compile or package.
-- **State paths must live in `common.sh`:** `tests/test_repository.py::test_runtime_paths_are_hermes_native` greps `common.sh` for `.hermes` and `state/revenium` and forbids `.openclaw`. Adding a new state file means adding its variable to `common.sh`, not hard-coding it elsewhere.
+- **State paths must live in `common.sh`:** `tests/test_repository.py::test_runtime_paths_are_hermes_native` greps `common.sh` for `.hermes` and `state/revenium` and forbids the forked-tool runtime-path literal (see `tests/test_repository.py:55`). Adding a new state file means adding its variable to `common.sh`, not hard-coding it elsewhere.
 - **Skill location is contractual:** The skill must live at `skills/revenium/` (not the repo root) for `hermes skills tap add owner/repo` to discover it.
 - **Frontmatter is contractual:** `name: revenium`, `metadata.hermes:` block, and `category: devops` are all enforced by `tests/test_repository.py::test_skill_frontmatter_has_hermes_metadata`.
 - **No legacy branding:** `tests/test_repository.py::test_no_legacy_branding_left` greps every `.md`/`.sh`/`.py`/`.txt`/`.json`/`.yml`/`.yaml` file in the repo for forbidden product names. The forbidden regex lives in `tests/test_repository.py:47`; consult the test, do not reproduce the strings.
