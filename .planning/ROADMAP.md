@@ -59,8 +59,11 @@ Plans:
   3. Running the cron against a session with zero markers in the window emits exactly one `revenium meter completion` call whose argv differs from the legacy single-call path only by the addition of `--task-type unclassified` — verified by snapshot-diff test (CRON-07).
   4. Overlapping cron ticks: starting a second `cron.sh` while the first is still running causes the second to exit cleanly with a `prior tick still active` log line and never appends to the ledger — confirmed via `flock(2)` lockfile test on `~/.hermes/state/revenium/cron.lock` (CRON-08).
   5. A synthetic S2-bias test fixture (small classification turn + large work turn) shows the documented 50/50 attribution and the cron emits a `classification-dominated window` warning to the log — the bias direction is pinned by the test, not hidden (TEST-04, Pitfall 5).
-**Plans**: TBD
-**Research needed**: Before planning begins, use the `manage_metering` MCP tool to verify Revenium server-side `--operation-type` default behavior. If the absence of `--operation-type` differs in cost from explicit `CHAT`, WIRE-01 will require a release-note migration path (per SUMMARY.md research flag).
+**Plans**: 1 plan (single fat plan locked by D-01; load-bearing per PITFALLS Pitfall 8)
+**Research needed**: Before planning begins, use the `manage_metering` MCP tool to verify Revenium server-side `--operation-type` default behavior. If the absence of `--operation-type` differs in cost from explicit `CHAT`, WIRE-01 will require a release-note migration path (per SUMMARY.md research flag). [RESOLVED in 03-RESEARCH.md Summary point 4 — Phase 3 does NOT add a default; Phase 4 (WIRE-01) owns that decision.]
+
+Plans:
+- [ ] 03-01-PLAN.md — Single fat plan: split_strategies.py + LOCK_FILE in common.sh + hermes-report.sh marker reader + per-marker emission + v2 ledger writes + extended transaction-id + zero-marker fallthrough + fail-open per-session tolerance + cron.sh fcntl flock + references/setup.md S2 bias framing + TEST-03 conservation + TEST-04 bias pinning + ledger v1/v2 discrimination (TAX-05, MARK-04, CRON-01, CRON-02, CRON-03, CRON-04, CRON-05, CRON-06, CRON-07, CRON-08, CRON-09, COMPAT-02, COMPAT-03, TEST-03, TEST-04)
 
 ### Phase 4: Wire Enrichment
 **Goal**: Each split metering call carries the richest `--operation-type`, `--agent`, and `--trace-id` available from the marker, with a documented, conservative fallback to today's hardcoded values; provider inference and cost scaling never regress across any split call.
@@ -109,7 +112,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 |-------|----------------|--------|-----------|
 | 1. Path Foundation | 1/1 | Complete | 2026-05-12 |
 | 2. Prompt Design & Marker Contract | 0/3 | Not started | - |
-| 3. Cron Marker Reader + Equal-Split + Ledger v2 | 0/0 | Not started | - |
+| 3. Cron Marker Reader + Equal-Split + Ledger v2 | 0/1 | Planned | - |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
 
