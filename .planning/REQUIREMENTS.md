@@ -127,7 +127,7 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 | MARK-01 | Phase 2 | Pending |
 | MARK-02 | Phase 2 | Pending |
 | MARK-03 | Phase 2 | Pending |
-| MARK-04 | Phase 2 | Pending |
+| MARK-04 | Phase 3 | Pending |
 | MARK-05 | Phase 2 | Pending |
 | PROMPT-01 | Phase 2 | Pending |
 | PROMPT-02 | Phase 2 | Pending |

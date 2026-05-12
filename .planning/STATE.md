@@ -2,26 +2,26 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-05-12T19:34:34.397Z"
+status: completed
+last_updated: "2026-05-12T20:49:20.057Z"
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 4
-  completed_plans: 1
-  percent: 25
+  completed_plans: 4
+  percent: 40
 ---
 
 # Project State
 
-**Last Updated:** 2026-05-12 (Phase 2 planning complete)
+**Last Updated:** 2026-05-12 (Phase 2 execution complete — verifier PASSED)
 **Project:** Hermes-Revenium Task-Type Metering
 
 ## Project Reference
 
 **Core Value:** Every metered completion that leaves this skill carries an accurate, consistently-spelled `--task-type` so Revenium analytics group spend by what the agent actually did, not just by session.
 
-**Current Focus:** Phase 02 — prompt-design-marker-contract
+**Current Focus:** Phase 02 complete — ready for Phase 03 planning (Cron Marker Reader + Equal-Split + Ledger v2)
 
 **Key Files:**
 
@@ -33,20 +33,21 @@ progress:
 - `.planning/codebase/ARCHITECTURE.md` — existing two-half design
 - `skills/revenium/scripts/common.sh` — single source of truth for state paths
 - `skills/revenium/scripts/hermes-report.sh` — cron pipeline reporter (to be extended in Phase 3)
-- `skills/revenium/SKILL.md` — in-session skill prompt (to be extended in Phase 2)
+- `skills/revenium/SKILL.md` — in-session skill prompt (Phase 2 appended classification block)
+- `skills/revenium/task-taxonomy.json` — seed taxonomy (Phase 2)
+- `skills/revenium/references/task-taxonomy.md` — cold-path agent reference (Phase 2)
+- `skills/revenium/references/halt-survivability.md` — manual halt-check survivability operator runbook (Phase 2)
 
 ## Current Position
 
-Phase: 02 (prompt-design-marker-contract) — EXECUTING
-Plan: 1 of 3
-**Phase:** 02 (Prompt Design & Marker Contract)
-**Plans:** 3 of 3 planned, 0 of 3 executed
-**Status:** Executing Phase 02
-**Progress:** 1/5 phases complete
+**Phase:** 02 (Prompt Design & Marker Contract) — COMPLETE
+**Plans:** 3 of 3 executed; verifier PASSED (5/5 automated SC; SC1 human gate before release)
+**Status:** Ready for Phase 03 planning
+**Progress:** 2/5 phases complete
 
 ```
 [██████████] 100% Phase 1: Path Foundation                              Complete
-[░░░░░░░░░░] 0%   Phase 2: Prompt Design & Marker Contract              Ready to execute
+[██████████] 100% Phase 2: Prompt Design & Marker Contract              Complete
 [░░░░░░░░░░] 0%   Phase 3: Cron Marker Reader + Equal-Split + Ledger v2 Not started
 [░░░░░░░░░░] 0%   Phase 4: Wire Enrichment                              Not started
 [░░░░░░░░░░] 0%   Phase 5: Housekeeping & Compat Hardening              Not started
@@ -59,7 +60,7 @@ Plan: 1 of 3
 | v1 requirements | 37 |
 | Mapped to phases | 37 (100%) |
 | Phases planned | 2/5 |
-| Phases complete | 1/5 |
+| Phases complete | 2/5 |
 | Granularity | coarse |
 | Mode | yolo / standard horizontal-layers |
 
@@ -79,11 +80,17 @@ From `PROJECT.md` Key Decisions (all carry-forward from project initialization):
 8. **Classify substantive turns only.** Trivial acks would pollute the taxonomy.
 9. **Taxonomy growth is agent-managed; no automatic merge pass in v1.** Dedupe tooling is v2.
 
+### Phase 2 Resolutions
+
+- **HERMES_SESSION_ID mechanism pinned (Option b):** `os.environ.get("HERMES_SESSION_ID") or f"pseudo-{int(time.time())}"`. Phase 3 cron reconciles markers against `state.db` so the pseudo-id fallback is acceptable as a transitional mechanism.
+- **D-04 surfacing channel:** README.md is the durable surfacing for `halt-survivability.md` (CLAUDE.md is `.gitignored` by project policy; local edit non-durable, accepted by operator).
+- **TAX-05 → Phase 3:** cron-side tolerance to missing/malformed taxonomy is cron work.
+- **MARK-04 → Phase 3:** cron-side torn-line reader test is cron work; Phase 2 shipped the schema contract that makes the tolerance trivial.
+
 ### Open Questions / Carry-Forward Items
 
 - **PROJECT.md "bias self-cancels" framing contradicts PITFALLS research.** The S2 equal-split bias is one-directional, not self-cancelling. Worth a re-confirmation with the team and a PROJECT.md Key Decisions update at the next phase transition. Ship the bias warning in `references/setup.md` regardless.
 - **`manage_metering` verification of Revenium server-side `--operation-type` default.** Phase 3 research flag. Must happen before WIRE-01 ships in Phase 4.
-- **Long-session halt-check survivability test plan.** Phase 2 research flag. Manual E2E test plan must exist before Phase 2 plan execution.
 
 ### Blockers
 
@@ -91,21 +98,27 @@ None.
 
 ## Session Continuity
 
-**Last Session:** 2026-05-12 (Phase 2 planning: research → plan → checker → revise → checker PASS)
+**Last Session:** 2026-05-12 (Phase 2 execution: 3 plans in 3 waves, 9/9 unittest tests pass, verifier PASSED)
 
-**Next Session:** Run `/gsd-execute-phase 2` to execute the 3 Phase 2 plans in sequence (waves 1 → 2 → 3, sequential due to shared `tests/test_repository.py` ownership):
+**Next Session:** Run `/gsd-plan-phase 3` to plan the Cron Marker Reader + Equal-Split + Ledger v2 phase. Phase 3 must ship as ONE coherent migration — partial adoption breaks the load-bearing idempotency invariant. Phase 3 picks up TAX-05 and MARK-04 as carry-forwards from Phase 2 reassignment.
 
-- 02-01: Seed `task-taxonomy.json` (8 labels), `references/task-taxonomy.md` cold-path doc, install-time copy in `setup-local.sh`, TEST-02 schema invariant, and `test_taxonomy_atomic_write_pattern` round-trip (covers ROADMAP SC5)
-- 02-02: `references/halt-survivability.md` operator runbook, surface it in `CLAUDE.md` and `README.md` (per D-04), TEST-01 marker schema invariant
-- 02-03: Append `## FINAL ACTION — TASK CLASSIFICATION` section to `SKILL.md` with canonical Python heredoc marker-write snippet (must resolve `HERMES_SESSION_ID` mechanism — env var, `state.db` lookup, or timestamp fallback) and `test_prompt_ordering_invariant` (PROMPT-07)
+**Phase 2 delivered (across multiple commits on main):**
+
+- `skills/revenium/task-taxonomy.json` — 8-label seed fixture, all keys match `^[a-z][a-z0-9_]{1,47}$`
+- `skills/revenium/references/task-taxonomy.md` — cold-path agent reference with atomic-write pattern, blocklist, mint policy
+- `skills/revenium/references/halt-survivability.md` — manual E2E operator runbook (2x2 matrix: short/long context × Anthropic/OpenAI), surfaced in README.md
+- `skills/revenium/SKILL.md` — `## FINAL ACTION — TASK CLASSIFICATION` section at line 279 with substantive-turn rule, 4 canonical examples, trivial blocklist, canonical Python heredoc marker-write snippet. Halt anchor at line 24 byte-unchanged.
+- `examples/setup-local.sh` — install-time guarded copy of seed taxonomy
+- `tests/test_repository.py` — 4 new test methods: `test_taxonomy_file_schema`, `test_taxonomy_atomic_write_pattern`, `test_marker_file_schema`, `test_prompt_ordering_invariant`. All 9 tests pass.
+
+**Operator gate before any release that modifies SKILL.md:** Run the halt-survivability runbook at `skills/revenium/references/halt-survivability.md` to confirm the verbatim halt string still fires under context dilution in long sessions. This is the SC1 human-verification gate the gsd-verifier flagged.
 
 **Notes for Future Sessions:**
 
-- Phase 2 plans assume Hermes exposes `HERMES_SESSION_ID` as an env var; the executor MUST verify this empirically and pick a fallback if not — `[ASSUMED]` tag must be removed from `SKILL.md` before plan 02-03 Task 1 completes.
-- Phase 3 has two research flags — verify Revenium server-side `--operation-type` default via the `manage_metering` MCP tool, and confirm S2 bias documentation framing with the operator. **TAX-05 was reassigned from Phase 2 to Phase 3** (cron-side tolerance to missing/malformed taxonomy is cron behavior); Phase 3 planning should pick this up.
-- Phase 3 must ship as one coherent migration (CRON-01 through CRON-09 + COMPAT-02/03 + TEST-03/04 + TAX-05). Splitting it breaks the idempotency invariant.
-- Phase 2 must ship BEFORE Phase 3 to bound the halt-check regression risk (PITFALLS HIGH severity).
-- The PROMPT-07 test must use U+2014 em dash (`—`), not ASCII hyphen, in the literal `ABSOLUTE FIRST — HALT CHECK (NON-NEGOTIABLE)` — PATTERNS.md and the plan-checker both flagged this.
+- Phase 3 must ship as one coherent migration (TAX-05 + MARK-04 + CRON-01..09 + COMPAT-02/03 + TEST-03/04). Splitting it breaks the idempotency invariant.
+- Phase 3 research flags: verify Revenium server-side `--operation-type` default via `manage_metering` MCP tool; confirm S2 bias documentation framing with operator.
+- CLAUDE.md is `.gitignored` by project policy — durable surfacing happens in README.md.
+- PROMPT-07 uses U+2014 em dash literals (bytes E2 80 94) — preserve this when extending the test.
 
 ---
 *State initialized: 2026-05-12 at roadmap creation*
