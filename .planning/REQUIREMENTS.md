@@ -123,7 +123,7 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 | TAX-02 | Phase 2 | Pending |
 | TAX-03 | Phase 2 | Pending |
 | TAX-04 | Phase 2 | Pending |
-| TAX-05 | Phase 2 | Pending |
+| TAX-05 | Phase 3 | Pending |
 | MARK-01 | Phase 2 | Pending |
 | MARK-02 | Phase 2 | Pending |
 | MARK-03 | Phase 2 | Pending |

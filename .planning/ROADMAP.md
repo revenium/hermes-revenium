@@ -34,7 +34,7 @@ Plans:
 ### Phase 2: Prompt Design & Marker Contract
 **Goal**: A Hermes session loaded with the updated skill (a) still emits the verbatim halt string in response to a halted budget within long sessions, and (b) appends well-formed marker lines to `~/.hermes/state/revenium/markers/<sid>.jsonl` for substantive turns, with one GUARDRAIL marker per classification turn.
 **Depends on**: Phase 1
-**Requirements**: TAX-01, TAX-02, TAX-03, TAX-04, TAX-05, MARK-01, MARK-02, MARK-03, MARK-04, MARK-05, PROMPT-01, PROMPT-02, PROMPT-03, PROMPT-04, PROMPT-05, PROMPT-06, PROMPT-07, TEST-01, TEST-02
+**Requirements**: TAX-01, TAX-02, TAX-03, TAX-04, MARK-01, MARK-02, MARK-03, MARK-04, MARK-05, PROMPT-01, PROMPT-02, PROMPT-03, PROMPT-04, PROMPT-05, PROMPT-06, PROMPT-07, TEST-01, TEST-02
 **Success Criteria** (what must be TRUE):
   1. In a Hermes session at representative long context length (~10K tokens of prior turns) with `budget-status.json` set to `halted: true`, the agent emits the contractual halt string verbatim on the next operation — confirmed by manual end-to-end test plan recorded in `references/halt-survivability.md`.
   2. After a representative substantive turn (e.g., a code-review request with tool calls), running `cat ~/.hermes/state/revenium/markers/<sid>.jsonl` shows exactly two new lines (one GUARDRAIL classification marker, one CHAT work marker), each < 1024 bytes, each parseable as JSON with only the allow-listed keys `{muid, ts, sid, task_type, operation_type}` plus optional `{turn_seq, agent, trace_id, model}`.
@@ -45,14 +45,14 @@ Plans:
 **Research needed**: Manual long-session halt-check survivability E2E test plan is authored as part of plan 02-02 (`skills/revenium/references/halt-survivability.md`) before plan 02-03 lands the SKILL.md prompt edit.
 
 Plans:
-- [ ] 02-01-PLAN.md — Seed taxonomy fixture + references/task-taxonomy.md cold-path doc + install-time copy in setup-local.sh + TEST-02 (TAX-01, TAX-02, TAX-03, TAX-04, TAX-05, PROMPT-06, TEST-02)
+- [ ] 02-01-PLAN.md — Seed taxonomy fixture + references/task-taxonomy.md cold-path doc + install-time copy in setup-local.sh + TEST-02 (TAX-01, TAX-02, TAX-03, TAX-04, PROMPT-06, TEST-02)
 - [ ] 02-02-PLAN.md — Marker schema TEST-01 + references/halt-survivability.md E2E runbook (MARK-01, MARK-02, MARK-03, MARK-04, MARK-05, TEST-01)
 - [ ] 02-03-PLAN.md — Append `## FINAL ACTION — TASK CLASSIFICATION` to SKILL.md (4 examples + blocklist + canonical marker-write Python snippet) + PROMPT-07 prompt-invariant test + HERMES_SESSION_ID resolution (PROMPT-01, PROMPT-02, PROMPT-03, PROMPT-04, PROMPT-05, PROMPT-07)
 
 ### Phase 3: Cron Marker Reader + Equal-Split + Ledger v2
 **Goal**: When the cron runs against a session that has N markers since the previous ledger row, it emits N `revenium meter completion` calls whose per-field token splits sum exactly to the session delta, with marker-aware idempotency surviving any partial multi-call failure.
 **Depends on**: Phase 2 (must ship after the prompt change so any halt-check regression is unambiguously attributable to the prompt, not to cron behavior changes — load-bearing PITFALLS constraint).
-**Requirements**: CRON-01, CRON-02, CRON-03, CRON-04, CRON-05, CRON-06, CRON-07, CRON-08, CRON-09, COMPAT-02, COMPAT-03, TEST-03, TEST-04
+**Requirements**: TAX-05, CRON-01, CRON-02, CRON-03, CRON-04, CRON-05, CRON-06, CRON-07, CRON-08, CRON-09, COMPAT-02, COMPAT-03, TEST-03, TEST-04
 **Success Criteria** (what must be TRUE):
   1. Running `hermes-report.sh` against a synthetic `state.db` plus N markers (for N in {1, 2, 5, 10}) emits exactly N `revenium meter completion` calls, each carrying the per-marker `--task-type`, `--operation-type`, and `--transaction-id ${sid}-${total_tokens}-${muid}`; the sum of `input/output/cache_read/cache_write/total/cost` across the N calls equals the input delta byte-for-byte (conservation test TEST-03 / COMPAT-02).
   2. Killing the cron between meter call 3 and call 5 of a 5-marker batch and re-running on the next tick re-emits exactly markers 4 and 5 (using their unique `muid`-extended transaction-ids), never re-emits markers 1-3, and never loses markers 4-5 — confirmed by per-call ledger-line audit fixture (COMPAT-03, Pitfall 8).
