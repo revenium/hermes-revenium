@@ -16,6 +16,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
             SKILL / 'references' / 'troubleshooting.md',
+            SKILL / 'task-taxonomy.json',
+            SKILL / 'references' / 'task-taxonomy.md',
             SKILL / 'scripts' / 'common.sh',
             SKILL / 'scripts' / 'install-cron.sh',
             SKILL / 'scripts' / 'uninstall-cron.sh',
@@ -57,6 +59,29 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('TAXONOMY_FILE=', text)
         self.assertRegex(text, r'MARKERS_DIR="\$\{REVENIUM_MARKERS_DIR:-\$\{STATE_DIR\}/markers\}"')
         self.assertIn('markers', text)
+
+    def test_taxonomy_file_schema(self):
+        """Seed task-taxonomy.json has correct schema and all labels match the regex."""
+        import json, re
+        taxonomy_path = SKILL / 'task-taxonomy.json'
+        self.assertTrue(taxonomy_path.exists(), 'task-taxonomy.json missing from skill root')
+        data = json.loads(taxonomy_path.read_text())
+        self.assertIn('labels', data, 'taxonomy missing top-level "labels" key')
+        labels = data['labels']
+        self.assertIsInstance(labels, dict, '"labels" must be a dict')
+        label_regex = re.compile(r'^[a-z][a-z0-9_]{1,47}$')
+        forbidden = {'ack', 'acknowledgment', 'greeting', 'confirmation', 'hello', 'thanks'}
+        expected_labels = ['research', 'analysis', 'generation', 'review',
+                           'code_review', 'refactor', 'planning', 'debugging']
+        self.assertEqual(list(labels.keys()), expected_labels,
+                         'seed taxonomy labels must match D-06 order exactly')
+        for label, schema in labels.items():
+            self.assertRegex(label, label_regex, f'label "{label}" fails regex')
+            self.assertNotIn(label, forbidden, f'forbidden label "{label}" in seed taxonomy')
+            self.assertIn('description', schema, f'label "{label}" missing description')
+            self.assertIn('examples', schema, f'label "{label}" missing examples')
+            self.assertIsInstance(schema['description'], str, f'label "{label}" description must be str')
+            self.assertIsInstance(schema['examples'], list, f'label "{label}" examples must be list')
 
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
