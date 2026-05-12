@@ -18,6 +18,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'references' / 'troubleshooting.md',
             SKILL / 'task-taxonomy.json',
             SKILL / 'references' / 'task-taxonomy.md',
+            SKILL / 'references' / 'halt-survivability.md',
             SKILL / 'scripts' / 'common.sh',
             SKILL / 'scripts' / 'install-cron.sh',
             SKILL / 'scripts' / 'uninstall-cron.sh',
@@ -156,6 +157,47 @@ class RepositoryTests(unittest.TestCase):
             self.assertNotIn("PARTIAL:", result.stdout)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_marker_file_schema(self):
+        """Marker fixture records contain only allow-listed keys and are < 1024 bytes."""
+        import json, re
+        allow_listed_required = {'muid', 'ts', 'sid', 'task_type', 'operation_type'}
+        allow_listed_optional = {'turn_seq', 'agent', 'trace_id', 'model'}
+        all_allowed = allow_listed_required | allow_listed_optional
+        # Two markers per substantive turn (Pitfall 4): one GUARDRAIL for classification
+        # work, one CHAT for the task work. muid is 33-char lowercase hex per MARK-03
+        # (recipe: f"{int(time.time_ns()//1_000_000):013x}{secrets.token_hex(10)}").
+        fixture_records = [
+            {"muid": "01893b8a300abcdef0123456789abcdef", "ts": 1715515200.0, "sid": "test-session",
+             "task_type": "code_review", "operation_type": "GUARDRAIL"},
+            {"muid": "01893b8a301abcdef0123456789abcde1", "ts": 1715515201.0, "sid": "test-session",
+             "task_type": "code_review", "operation_type": "CHAT"},
+        ]
+        for record in fixture_records:
+            # MARK-02 + MARK-05: no free-form fields outside the allow-list
+            extra_keys = set(record.keys()) - all_allowed
+            self.assertEqual(extra_keys, set(), f'non-allow-listed keys: {extra_keys}')
+            # All 5 required keys must be present
+            self.assertTrue(allow_listed_required.issubset(set(record.keys())),
+                            f'missing required keys: {allow_listed_required - set(record.keys())}')
+            # MARK-01: single write line as compact JSONL
+            line = json.dumps(record, separators=(',', ':')) + '\n'
+            # MARK-02: line budget < 1024 bytes
+            self.assertLess(len(line.encode('utf-8')), 1024, 'marker record exceeds 1024 bytes')
+            # task_type must be lowercase snake_case matching the taxonomy label regex
+            self.assertRegex(record['task_type'], r'^[a-z][a-z0-9_]{1,47}$',
+                             f'task_type "{record["task_type"]}" violates label regex')
+            # operation_type must be in the documented OpenInference span_kind vocabulary
+            self.assertIn(record['operation_type'],
+                          {'CHAT', 'GUARDRAIL', 'TOOL', 'AGENT', 'LLM', 'CHAIN',
+                           'RETRIEVER', 'EMBEDDING', 'RERANKER', 'EVALUATOR', 'UNKNOWN'},
+                          f'operation_type "{record["operation_type"]}" not in span_kind vocabulary')
+            # MARK-03: muid must be a 33-char lowercase hex string (ULID-style sortable id)
+            self.assertRegex(record['muid'], r'^[0-9a-f]{33}$',
+                             f'muid "{record["muid"]}" must be 33-char lowercase hex (MARK-03)')
+        # Pitfall 4 invariant: fixture must include exactly one GUARDRAIL and one CHAT
+        self.assertEqual({r['operation_type'] for r in fixture_records}, {'GUARDRAIL', 'CHAT'},
+                         'fixture must include exactly one GUARDRAIL and one CHAT marker per substantive turn')
 
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
