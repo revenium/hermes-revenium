@@ -46,7 +46,7 @@ Plans:
 
 Plans:
 - [x] 02-01-PLAN.md — Seed taxonomy fixture + references/task-taxonomy.md cold-path doc + install-time copy in setup-local.sh + TEST-02 (TAX-01, TAX-02, TAX-03, TAX-04, PROMPT-06, TEST-02)
-- [ ] 02-02-PLAN.md — Marker schema TEST-01 + references/halt-survivability.md E2E runbook (MARK-01, MARK-02, MARK-03, MARK-04, MARK-05, TEST-01)
+- [x] 02-02-PLAN.md — Marker schema TEST-01 + references/halt-survivability.md E2E runbook (MARK-01, MARK-02, MARK-03, MARK-04, MARK-05, TEST-01)
 - [ ] 02-03-PLAN.md — Append `## FINAL ACTION — TASK CLASSIFICATION` to SKILL.md (4 examples + blocklist + canonical marker-write Python snippet) + PROMPT-07 prompt-invariant test + HERMES_SESSION_ID resolution (PROMPT-01, PROMPT-02, PROMPT-03, PROMPT-04, PROMPT-05, PROMPT-07)
 
 ### Phase 3: Cron Marker Reader + Equal-Split + Ledger v2
