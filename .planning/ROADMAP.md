@@ -26,7 +26,10 @@ Every metered completion that leaves this skill carries an accurate, consistentl
   2. `examples/setup-local.sh` (or the install path it invokes) creates `MARKERS_DIR` with mode 700 on a fresh install; `stat -f %A` (macOS) or `stat -c %a` (Linux) confirms `700` on the directory.
   3. `python3 -m unittest tests.test_repository.RepositoryTests.test_runtime_paths_are_hermes_native` passes with the extended assertions on `task-taxonomy.json` and `markers` substrings in `common.sh`.
   4. No behavior change observable from a Hermes session or a cron run — pre-existing `hermes-report.sh` / `budget-check.sh` flows continue to ship token deltas and write `budget-status.json` exactly as before.
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 01-01-PLAN.md — Declare TAXONOMY_FILE and MARKERS_DIR in common.sh, chmod 700 MARKERS_DIR in install-cron.sh, extend test_runtime_paths_are_hermes_native (PATH-01, PATH-02, PATH-03)
 
 ### Phase 2: Prompt Design & Marker Contract
 **Goal**: A Hermes session loaded with the updated skill (a) still emits the verbatim halt string in response to a halted budget within long sessions, and (b) appends well-formed marker lines to `~/.hermes/state/revenium/markers/<sid>.jsonl` for substantive turns, with one GUARDRAIL marker per classification turn.
@@ -99,7 +102,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Path Foundation | 0/0 | Not started | - |
+| 1. Path Foundation | 0/1 | Planned | - |
 | 2. Prompt Design & Marker Contract | 0/0 | Not started | - |
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 0/0 | Not started | - |
 | 4. Wire Enrichment | 0/0 | Not started | - |
