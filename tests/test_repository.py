@@ -83,6 +83,80 @@ class RepositoryTests(unittest.TestCase):
             self.assertIsInstance(schema['description'], str, f'label "{label}" description must be str')
             self.assertIsInstance(schema['examples'], list, f'label "{label}" examples must be list')
 
+    # Single-writer round-trip per Phase 2 SC5; concurrent multi-writer fixture deferred to Phase 3 (RESEARCH.md note: v1 has single-writer-per-session).
+    def test_taxonomy_atomic_write_pattern(self):
+        """Atomic write pattern (flock + write-to-tmp + os.rename) never produces partial reads (Phase 2 SC5)."""
+        import json, os, shutil, subprocess, sys, tempfile
+
+        reader_src = (
+            "import json, sys\n"
+            "path = sys.argv[1]\n"
+            "try:\n"
+            "    with open(path, 'rb') as f:\n"
+            "        data = f.read()\n"
+            "    parsed = json.loads(data)\n"
+            "    n = len(parsed.get('labels', {}))\n"
+            "    print(f'OK:{n}')\n"
+            "    sys.exit(0)\n"
+            "except Exception as e:\n"
+            "    print(f'PARTIAL:{e}')\n"
+            "    sys.exit(1)\n"
+        )
+
+        tmpdir = tempfile.mkdtemp(prefix="gsd-atomic-")
+        try:
+            target = os.path.join(tmpdir, "task-taxonomy.json")
+
+            # Seed: write initial state via atomic pattern
+            pre_state = {"labels": {"seed": {"description": "seed", "examples": ["a", "b"]}}}
+            with tempfile.NamedTemporaryFile("w", dir=tmpdir, delete=False, suffix=".tmp") as tmp:
+                json.dump(pre_state, tmp, indent=2, ensure_ascii=True)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+                tmpname = tmp.name
+            os.rename(tmpname, target)
+
+            # Reader must see complete pre-state (1 label)
+            result = subprocess.run(
+                [sys.executable, "-c", reader_src, target],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f"reader failed on pre-state: {result.stdout} {result.stderr}")
+            self.assertTrue(result.stdout.startswith("OK:1"),
+                            f"expected OK:1, got: {result.stdout!r}")
+            self.assertNotIn("PARTIAL:", result.stdout)
+
+            # Second atomic write: add a second label
+            import fcntl
+            post_state = {
+                "labels": {
+                    "seed": {"description": "seed", "examples": ["a", "b"]},
+                    "minted": {"description": "minted", "examples": ["c", "d"]},
+                }
+            }
+            with open(target, "r+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                with tempfile.NamedTemporaryFile("w", dir=tmpdir, delete=False, suffix=".tmp") as tmp:
+                    json.dump(post_state, tmp, indent=2, ensure_ascii=True)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    tmpname = tmp.name
+                os.rename(tmpname, target)
+
+            # Reader must see complete post-state (2 labels)
+            result = subprocess.run(
+                [sys.executable, "-c", reader_src, target],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f"reader failed on post-state: {result.stdout} {result.stderr}")
+            self.assertTrue(result.stdout.startswith("OK:2"),
+                            f"expected OK:2, got: {result.stdout!r}")
+            self.assertNotIn("PARTIAL:", result.stdout)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
         self.assertTrue(scripts, 'no shell scripts found')
