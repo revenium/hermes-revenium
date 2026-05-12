@@ -53,6 +53,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('.hermes', text)
         self.assertIn('state/revenium', text)
         self.assertNotIn('.openclaw', text)
+        self.assertIn('task-taxonomy.json', text)
+        self.assertIn('TAXONOMY_FILE=', text)
+        self.assertRegex(text, r'MARKERS_DIR="\$\{REVENIUM_MARKERS_DIR:-\$\{STATE_DIR\}/markers\}"')
+        self.assertIn('markers', text)
 
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
