@@ -14,8 +14,10 @@ LEDGER_FILE="${STATE_DIR}/revenium-hermes.ledger"
 LOG_FILE="${STATE_DIR}/revenium-metering.log"
 ENV_FILE="${STATE_DIR}/env"
 STATE_DB="${HERMES_HOME}/state.db"
+TAXONOMY_FILE="${REVENIUM_TAXONOMY_FILE:-${STATE_DIR}/task-taxonomy.json}"
+MARKERS_DIR="${REVENIUM_MARKERS_DIR:-${STATE_DIR}/markers}"
 
-mkdir -p "${STATE_DIR}"
+mkdir -p "${STATE_DIR}" "${MARKERS_DIR}"
 
 ensure_path() {
   local brew_prefix=""
