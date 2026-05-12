@@ -89,8 +89,8 @@ From `PROJECT.md` Key Decisions (all carry-forward from project initialization):
 
 ### Open Questions / Carry-Forward Items
 
-- **PROJECT.md "bias self-cancels" framing contradicts PITFALLS research.** The S2 equal-split bias is one-directional, not self-cancelling. Worth a re-confirmation with the team and a PROJECT.md Key Decisions update at the next phase transition. Ship the bias warning in `references/setup.md` regardless.
-- **`manage_metering` verification of Revenium server-side `--operation-type` default.** Phase 3 research flag. Must happen before WIRE-01 ships in Phase 4.
+- **PROJECT.md "bias self-cancels" framing** — **RESOLVED** by Phase 3 CONTEXT.md D-16: PITFALLS one-directional framing ships in `references/setup.md`. PROJECT.md itself will be updated in a Phase 5 housekeeping pass to avoid project-doc churn mid-Phase-3.
+- **`manage_metering` verification of Revenium server-side `--operation-type` default.** Phase 3 research flag — gsd-phase-researcher will run this via the `manage_metering` MCP tool. The finding informs Phase 4 (WIRE-01) but does NOT block Phase 3 plan kickoff (per Phase 3 CONTEXT.md research_gates note).
 
 ### Blockers
 
