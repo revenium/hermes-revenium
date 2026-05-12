@@ -199,6 +199,21 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual({r['operation_type'] for r in fixture_records}, {'GUARDRAIL', 'CHAT'},
                          'fixture must include exactly one GUARDRAIL and one CHAT marker per substantive turn')
 
+    def test_prompt_ordering_invariant(self):
+        """Halt-check anchor appears before the classification anchor in SKILL.md."""
+        text = (SKILL / 'SKILL.md').read_text()
+        halt_anchor = 'ABSOLUTE FIRST — HALT CHECK (NON-NEGOTIABLE)'
+        classify_anchor = 'FINAL ACTION — TASK CLASSIFICATION'
+        self.assertIn(halt_anchor, text,
+                      'halt-check anchor missing from SKILL.md — do not remove or rename it')
+        self.assertIn(classify_anchor, text,
+                      'classification anchor missing from SKILL.md — Phase 2 deliverable not present')
+        self.assertLess(
+            text.index(halt_anchor),
+            text.index(classify_anchor),
+            'halt-check anchor must appear before classification anchor in SKILL.md',
+        )
+
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
         self.assertTrue(scripts, 'no shell scripts found')
