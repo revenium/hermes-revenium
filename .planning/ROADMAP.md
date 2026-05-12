@@ -29,7 +29,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 **Plans**: 1 plan
 
 Plans:
-- [ ] 01-01-PLAN.md — Declare TAXONOMY_FILE and MARKERS_DIR in common.sh, chmod 700 MARKERS_DIR in install-cron.sh, extend test_runtime_paths_are_hermes_native (PATH-01, PATH-02, PATH-03)
+- [x] 01-01-PLAN.md — Declare TAXONOMY_FILE and MARKERS_DIR in common.sh, chmod 700 MARKERS_DIR in install-cron.sh, extend test_runtime_paths_are_hermes_native (PATH-01, PATH-02, PATH-03)
 
 ### Phase 2: Prompt Design & Marker Contract
 **Goal**: A Hermes session loaded with the updated skill (a) still emits the verbatim halt string in response to a halted budget within long sessions, and (b) appends well-formed marker lines to `~/.hermes/state/revenium/markers/<sid>.jsonl` for substantive turns, with one GUARDRAIL marker per classification turn.
