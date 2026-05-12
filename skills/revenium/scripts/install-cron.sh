@@ -7,6 +7,7 @@ source "${SCRIPT_DIR}/common.sh"
 
 ensure_path
 mkdir -p "${STATE_DIR}"
+chmod 700 "${MARKERS_DIR}"
 chmod +x "${SKILL_DIR}/scripts/"*.sh
 
 CRON_SCRIPT="${SKILL_DIR}/scripts/cron.sh"
