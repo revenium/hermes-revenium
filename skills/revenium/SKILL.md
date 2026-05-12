@@ -275,3 +275,143 @@ When the user invokes `/revenium`:
 - `bash ~/.hermes/skills/revenium/scripts/cron.sh` updates `~/.hermes/state/revenium/budget-status.json`.
 - Revenium receives transactions from `~/.hermes/state.db` (visible in the Revenium UI under metering).
 - When over budget with autonomous mode on, `budget-status.json` flips to `halted: true` and Hermes sends the halt notification through the configured messaging channel.
+
+## FINAL ACTION — TASK CLASSIFICATION
+
+After you have responded to the user, your last action before yielding back is to classify the
+just-completed turn and write one or two marker records so the cron pipeline can attribute token
+spend to a meaningful activity label. This is closing discipline — it mirrors the halt check at
+the top of this file, which is opening discipline. Neither replaces the other.
+
+> **Hard rule (D-09):** Classify the turn if ANY of: (a) you called a tool other than read-only file inspection; (b) you produced > 200 words of new content; (c) the user asked a question requiring multi-step reasoning. Skip the turn if your entire output is ≤ 2 sentences and called no tools.
+
+When uncertain whether a turn crosses the threshold, skip — do not write a marker. The cron
+falls back to `--task-type unclassified` for un-marked deltas. Under-classification is
+recoverable; over-classification permanently pollutes the taxonomy.
+
+### Examples
+
+**Example 1 — Clear substantive (CLASSIFY):**
+The user asked for a code review. You read two files with `read_file` and ran `grep` to find
+usages. You wrote a 12-sentence review with suggested changes.
+- Trigger: rule (a) — called tools (read_file, grep).
+- Decision: **classify** with `task_type = code_review`.
+
+**Example 2 — Clear trivial (SKIP):**
+The user typed "what is 2+2?" You replied "4." in one sentence. No tools called.
+- Trigger: none — ≤ 2 sentences, no tools.
+- Decision: **skip** — no marker written.
+
+**Example 3 — Borderline classify (CLASSIFY):**
+The user asked you to explain how POSIX O_APPEND atomicity works. You wrote a five-paragraph
+explanation covering the kernel guarantee, practical limits on macOS vs Linux, and the
+belt-and-suspenders flock recommendation. No tools were called.
+- Trigger: rule (b) — > 200 words of new content.
+- Decision: **classify** with `task_type = analysis`.
+
+**Example 4 — Borderline skip (SKIP):**
+The user said "good morning, can you confirm you're ready?" You replied:
+"Good morning — ready when you are." over two lines. No tools called.
+- Trigger: none — despite being multi-line, the response is ≤ 2 sentences and called no tools.
+- Decision: **skip** — no marker written.
+
+### Lookup-first reuse
+
+Before minting a new label, read the live taxonomy and reuse any existing label that fits the
+turn's semantics. New labels are minted ONLY when no existing label clearly fits. Reuse is
+aggressive — fragmentation (`code_review` vs `code-review`) is permanent harm; minting a
+slightly-too-broad label is recoverable.
+
+```python
+import json, os
+
+taxonomy_path = os.path.expanduser("~/.hermes/state/revenium/task-taxonomy.json")
+try:
+    with open(taxonomy_path) as f:
+        taxonomy = json.load(f)
+    candidate = next(
+        (label for label in taxonomy.get("labels", {}) if label in <turn_description_keywords>),
+        None
+    )
+except (FileNotFoundError, json.JSONDecodeError):
+    candidate = None
+# If candidate is None, mint a new snake_case label matching ^[a-z][a-z0-9_]{1,47}$
+```
+
+For the full schema, normalization rules, and the atomic mint pattern, see
+`references/task-taxonomy.md`. The seed file ships at `skills/revenium/task-taxonomy.json`; the
+live mutable copy is at `~/.hermes/state/revenium/task-taxonomy.json`.
+
+### Trivial-label blocklist
+
+The cron rejects markers carrying any of these `task_type` values — they indicate the hard rule
+was not applied and a trivial acknowledgment was mis-classified as substantive work:
+
+- `ack`
+- `acknowledgment`
+- `greeting`
+- `confirmation`
+- `hello`
+- `thanks`
+
+This list is closed-set for v1. New entries require a release.
+
+### Marker write
+
+The marker write is your last action before yielding back to the user. It is intentionally
+placed here — physically last — so recency bias works in its favor. It is the step most likely
+to be skipped under context pressure; placing it last makes it hardest to overlook.
+
+Write two marker records for every substantive turn: one with `operation_type = "GUARDRAIL"`
+(the classification decision itself, metered as a guardrail span per PROMPT-04) and one with
+`operation_type = "CHAT"` (the task work). Two records per turn is the correct invariant.
+
+```python
+import fcntl
+import json
+import os
+import secrets
+import time
+
+# Session ID resolution: primary mechanism is the HERMES_SESSION_ID environment variable,
+# which Hermes is expected to set for every agent invocation. If the env var is absent
+# (e.g., older Hermes versions or non-Hermes environments), fall back to a timestamp-based
+# pseudo-session-id. The fallback produces a new ID on every Python invocation, so markers
+# written across separate invocations within the same Hermes session may land in different
+# files. This is a documented limitation — the cron's Phase 3 session reconciliation against
+# state.db is the authoritative cross-check; the marker filename only needs to be groupable
+# per logical conversation.
+session_id = os.environ.get("HERMES_SESSION_ID") or f"pseudo-{int(time.time())}"
+
+markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
+os.makedirs(markers_dir, exist_ok=True)
+marker_path = os.path.join(markers_dir, f"{session_id}.jsonl")
+
+def muid():
+    # 13-char millisecond hex timestamp prefix (sortable) + 20-char random hex suffix
+    # Total: 33 chars, collision-safe on a single machine, no pip dependency (MARK-03)
+    return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
+
+def write_marker(task_type, operation_type):
+    record = {
+        "muid": muid(),
+        "ts": time.time(),
+        "sid": session_id,
+        "task_type": task_type,       # replace with the looked-up or minted label
+        "operation_type": operation_type,
+    }
+    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
+    encoded = line.encode("utf-8")
+    # Single O_APPEND write; atomic on local POSIX fs for records < 1024 bytes
+    with open(marker_path, "ab", buffering=0) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(encoded)
+
+# Replace "code_review" below with the label from your taxonomy lookup or mint.
+# Call write_marker twice: once for the classification turn (GUARDRAIL), once for the work (CHAT).
+write_marker("code_review", "GUARDRAIL")
+write_marker("code_review", "CHAT")
+```
+
+If the turn was a skip (≤ 2 sentences, no tools), no marker is written; the cron will fall back
+to `--task-type unclassified` for that session delta.
