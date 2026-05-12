@@ -89,7 +89,7 @@ Pattern: H1 title, H2 top-level sections, H3 numbered sub-steps where procedural
 - Label-by-label `{description, examples}` catalog (8 seed labels in D-06 order)
 - Atomic write pattern for minting (write-to-tmp + `os.rename` per Pattern 2 in RESEARCH.md)
 
-**Legacy branding guard:** File is scanned by `test_no_legacy_branding_left` (test line 47 regex: `r'OpenClaw|openclaw|ClawHub|clawhub'`). Do not introduce those strings.
+**Legacy branding guard:** File is scanned by `test_no_legacy_branding_left`. Do not introduce strings matching the forbidden regex — consult the test directly at `tests/test_repository.py:47` rather than reproducing it here.
 
 ---
 
@@ -261,7 +261,7 @@ def test_runtime_paths_are_hermes_native(self):
     text = (SKILL / 'scripts' / 'common.sh').read_text()
     self.assertIn('.hermes', text)
     self.assertIn('state/revenium', text)
-    self.assertNotIn('.openclaw', text)
+    self.assertNotIn('.legacy-runtime-name', text)  # placeholder — actual literal lives only in tests/test_repository.py
     self.assertIn('task-taxonomy.json', text)
     self.assertIn('TAXONOMY_FILE=', text)
     self.assertRegex(text, r'MARKERS_DIR="\$\{REVENIUM_MARKERS_DIR:-\$\{STATE_DIR\}/markers\}"')
@@ -283,7 +283,7 @@ def test_no_legacy_branding_left(self):
         if path.name == 'test_repository.py':
             continue
         text = path.read_text(errors='ignore')
-        if re.search(r'OpenClaw|openclaw|ClawHub|clawhub', text):
+        if re.search(LEGACY_BRANDING_PATTERN, text):  # actual literal regex lives only in tests/test_repository.py
             offenders.append(str(path.relative_to(ROOT)))
     self.assertEqual(offenders, [], f'found legacy branding in: {offenders}')
 ```
