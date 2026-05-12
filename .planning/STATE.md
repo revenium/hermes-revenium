@@ -14,14 +14,14 @@ progress:
 
 # Project State
 
-**Last Updated:** 2026-05-12
+**Last Updated:** 2026-05-12 (Phase 2 planning complete)
 **Project:** Hermes-Revenium Task-Type Metering
 
 ## Project Reference
 
 **Core Value:** Every metered completion that leaves this skill carries an accurate, consistently-spelled `--task-type` so Revenium analytics group spend by what the agent actually did, not just by session.
 
-**Current Focus:** Phase 01 — Path Foundation
+**Current Focus:** Phase 02 — Prompt Design & Marker Contract (plans ready to execute)
 
 **Key Files:**
 
@@ -37,19 +37,17 @@ progress:
 
 ## Current Position
 
-Phase: 01 (Path Foundation) — EXECUTING
-Plan: 1 of 1
-**Phase:** 2
-**Plan:** Not started
-**Status:** Ready to plan
-**Progress:** 0/5 phases complete
+**Phase:** 02 (Prompt Design & Marker Contract)
+**Plans:** 3 of 3 planned, 0 of 3 executed
+**Status:** Ready to execute
+**Progress:** 1/5 phases complete
 
 ```
-[░░░░░░░░░░] 0%   Phase 1: Path Foundation             Not started
-[░░░░░░░░░░] 0%   Phase 2: Prompt Design & Marker Contract   Not started
-[░░░░░░░░░░] 0%   Phase 3: Cron Marker Reader + Equal-Split + Ledger v2   Not started
-[░░░░░░░░░░] 0%   Phase 4: Wire Enrichment             Not started
-[░░░░░░░░░░] 0%   Phase 5: Housekeeping & Compat Hardening   Not started
+[██████████] 100% Phase 1: Path Foundation                              Complete
+[░░░░░░░░░░] 0%   Phase 2: Prompt Design & Marker Contract              Ready to execute
+[░░░░░░░░░░] 0%   Phase 3: Cron Marker Reader + Equal-Split + Ledger v2 Not started
+[░░░░░░░░░░] 0%   Phase 4: Wire Enrichment                              Not started
+[░░░░░░░░░░] 0%   Phase 5: Housekeeping & Compat Hardening              Not started
 ```
 
 ## Performance Metrics
@@ -58,8 +56,8 @@ Plan: 1 of 1
 |--------|-------|
 | v1 requirements | 37 |
 | Mapped to phases | 37 (100%) |
-| Phases planned | 0/5 |
-| Phases complete | 0/5 |
+| Phases planned | 2/5 |
+| Phases complete | 1/5 |
 | Granularity | coarse |
 | Mode | yolo / standard horizontal-layers |
 
@@ -91,16 +89,20 @@ None.
 
 ## Session Continuity
 
-**Last Session:** 2026-05-12T18:30:26.260Z
+**Last Session:** 2026-05-12 (Phase 2 planning: research → plan → checker → revise → checker PASS)
 
-**Next Session:** Run `/gsd-plan-phase 1` to decompose Phase 1 (Path Foundation) into executable plans. Phase 1 uses standard repository patterns and does NOT need a phase-research step.
+**Next Session:** Run `/gsd-execute-phase 2` to execute the 3 Phase 2 plans in sequence (waves 1 → 2 → 3, sequential due to shared `tests/test_repository.py` ownership):
+- 02-01: Seed `task-taxonomy.json` (8 labels), `references/task-taxonomy.md` cold-path doc, install-time copy in `setup-local.sh`, TEST-02 schema invariant, and `test_taxonomy_atomic_write_pattern` round-trip (covers ROADMAP SC5)
+- 02-02: `references/halt-survivability.md` operator runbook, surface it in `CLAUDE.md` and `README.md` (per D-04), TEST-01 marker schema invariant
+- 02-03: Append `## FINAL ACTION — TASK CLASSIFICATION` section to `SKILL.md` with canonical Python heredoc marker-write snippet (must resolve `HERMES_SESSION_ID` mechanism — env var, `state.db` lookup, or timestamp fallback) and `test_prompt_ordering_invariant` (PROMPT-07)
 
 **Notes for Future Sessions:**
 
-- Phase 2 has a research flag — author the long-session halt-check survivability E2E test plan before plan execution begins.
-- Phase 3 has two research flags — verify Revenium server-side `--operation-type` default via the `manage_metering` MCP tool, and confirm S2 bias documentation framing with the operator.
-- Phase 3 must ship as one coherent migration (CRON-01 through CRON-09 + COMPAT-02/03 + TEST-03/04). Splitting it breaks the idempotency invariant.
+- Phase 2 plans assume Hermes exposes `HERMES_SESSION_ID` as an env var; the executor MUST verify this empirically and pick a fallback if not — `[ASSUMED]` tag must be removed from `SKILL.md` before plan 02-03 Task 1 completes.
+- Phase 3 has two research flags — verify Revenium server-side `--operation-type` default via the `manage_metering` MCP tool, and confirm S2 bias documentation framing with the operator. **TAX-05 was reassigned from Phase 2 to Phase 3** (cron-side tolerance to missing/malformed taxonomy is cron behavior); Phase 3 planning should pick this up.
+- Phase 3 must ship as one coherent migration (CRON-01 through CRON-09 + COMPAT-02/03 + TEST-03/04 + TAX-05). Splitting it breaks the idempotency invariant.
 - Phase 2 must ship BEFORE Phase 3 to bound the halt-check regression risk (PITFALLS HIGH severity).
+- The PROMPT-07 test must use U+2014 em dash (`—`), not ASCII hyphen, in the literal `ABSOLUTE FIRST — HALT CHECK (NON-NEGOTIABLE)` — PATTERNS.md and the plan-checker both flagged this.
 
 ---
 *State initialized: 2026-05-12 at roadmap creation*
