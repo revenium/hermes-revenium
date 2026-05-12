@@ -9,6 +9,16 @@ rm -rf "${TARGET_DIR}"
 cp -R "${REPO_ROOT}/skills/revenium" "${TARGET_DIR}"
 chmod +x "${TARGET_DIR}/scripts/"*.sh
 
+STATE_DIR_DEFAULT="${REVENIUM_STATE_DIR:-${HOME}/.hermes/state/revenium}"
+TAXONOMY_DEST="${REVENIUM_TAXONOMY_FILE:-${STATE_DIR_DEFAULT}/task-taxonomy.json}"
+mkdir -p "$(dirname "${TAXONOMY_DEST}")"
+if [[ ! -f "${TAXONOMY_DEST}" ]]; then
+  cp "${REPO_ROOT}/skills/revenium/task-taxonomy.json" "${TAXONOMY_DEST}"
+  echo "Seeded ${TAXONOMY_DEST}"
+else
+  echo "Taxonomy already exists at ${TAXONOMY_DEST}, not overwriting"
+fi
+
 echo "Installed skill to ${TARGET_DIR}"
 echo ""
 echo "Next steps:"
