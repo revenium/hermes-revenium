@@ -707,22 +707,25 @@ The `security_enforcement` config key is absent from `.planning/config.json`; tr
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Install-time taxonomy copy behavior**
    - What we know: `task-taxonomy.json` seeds in `skills/revenium/`; the live file lives at `${TAXONOMY_FILE}` = `${STATE_DIR}/task-taxonomy.json`
    - What's unclear: Does `setup-local.sh` copy the seed file? Does `install-cron.sh`? Or does the agent create it on first use if absent?
    - Recommendation: Planner should specify `setup-local.sh` performs a `cp` of the seed file on first install (with `[ -f "${TAXONOMY_FILE}" ] || cp ...` guard to avoid overwriting a live taxonomy). This is the cleanest install-time behavior and is consistent with how `config.json` is handled.
+   - **RESOLVED:** Plan 02-01 Task 3 — setup-local.sh adds a guarded cp that never overwrites an agent-mutated taxonomy.
 
 2. **SKILL.md category frontmatter casing**
    - What we know: Frontmatter has `category: DevOps` (capital D, capital O) in the body, but `category: devops` in the `metadata.hermes` block. The test `test_skill_frontmatter_has_hermes_metadata` checks for `category: devops` (lowercase). 
    - What's unclear: Does Phase 2 need to touch the frontmatter? No — D-13 says insertions go after `## Verification`, not in the frontmatter.
    - Recommendation: Do not modify the frontmatter. The test passes already; don't risk breaking it.
+   - **RESOLVED:** Plan 02-03 Task 1 — frontmatter unchanged except optional HERMES_SESSION_ID env-var addition. category: devops preserved verbatim.
 
 3. **Session ID availability for marker writes in SKILL.md**
    - What we know: The marker file path is `${MARKERS_DIR}/<session_id>.jsonl`. The agent needs the session ID at write time.
    - What's unclear: How does Hermes expose the current session ID to the agent? Is it an env var (`HERMES_SESSION_ID`)? A file? A tool call result?
    - Recommendation: The SKILL.md snippet should use `os.environ.get("HERMES_SESSION_ID", "unknown")` as the primary mechanism with a fallback. If Hermes does not set this env var, the planner should document an alternative (e.g., `hermes config show session-id` if such a command exists, or a file read from `~/.hermes/state/current-session`). Mark as [ASSUMED] that `HERMES_SESSION_ID` is available.
+   - **RESOLVED:** Plan 02-03 Task 1 — executor MUST pick option (a) HERMES_SESSION_ID env var if verified set by Hermes, OR (b) `state.db` SELECT MAX(rowid) FROM sessions as fallback, OR (c) timestamp-based session-id with documented limitation that markers won't reconcile against state.db. The [ASSUMED] tag in the canonical snippet MUST be removed before the task completes.
 
 ---
 
