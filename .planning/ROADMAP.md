@@ -41,8 +41,13 @@ Plans:
   3. The seed `task-taxonomy.json` ships with 6-8 starting labels, every key matches `^[a-z][a-z0-9_]{1,47}$`, and `python3 -m unittest tests.test_repository` invariant tests for taxonomy and marker schema (TEST-01, TEST-02) pass on the checked-in fixtures.
   4. A prompt-invariant test (PROMPT-07) reading the updated `SKILL.md` confirms the existing halt-block phrasing (`ABSOLUTE FIRST — NON-NEGOTIABLE` or the agreed equivalent) still appears before the new classification block.
   5. Concurrent agent writes to the taxonomy file under `fcntl.flock` produce no partial-read states observable to a separate reader process — verified by a synthetic write-while-read fixture.
-**Plans**: TBD
-**Research needed**: Manual long-session halt-check survivability E2E test plan must be authored before plan execution begins (per SUMMARY.md research flag).
+**Plans**: 3 plans
+**Research needed**: Manual long-session halt-check survivability E2E test plan is authored as part of plan 02-02 (`skills/revenium/references/halt-survivability.md`) before plan 02-03 lands the SKILL.md prompt edit.
+
+Plans:
+- [ ] 02-01-PLAN.md — Seed taxonomy fixture + references/task-taxonomy.md cold-path doc + install-time copy in setup-local.sh + TEST-02 (TAX-01, TAX-02, TAX-03, TAX-04, TAX-05, PROMPT-06, TEST-02)
+- [ ] 02-02-PLAN.md — Marker schema TEST-01 + references/halt-survivability.md E2E runbook (MARK-01, MARK-02, MARK-03, MARK-04, MARK-05, TEST-01)
+- [ ] 02-03-PLAN.md — Append `## FINAL ACTION — TASK CLASSIFICATION` to SKILL.md (4 examples + blocklist + canonical marker-write Python snippet) + PROMPT-07 prompt-invariant test + HERMES_SESSION_ID resolution (PROMPT-01, PROMPT-02, PROMPT-03, PROMPT-04, PROMPT-05, PROMPT-07)
 
 ### Phase 3: Cron Marker Reader + Equal-Split + Ledger v2
 **Goal**: When the cron runs against a session that has N markers since the previous ledger row, it emits N `revenium meter completion` calls whose per-field token splits sum exactly to the session delta, with marker-aware idempotency surviving any partial multi-call failure.
@@ -103,7 +108,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Path Foundation | 1/1 | Complete | 2026-05-12 |
-| 2. Prompt Design & Marker Contract | 0/0 | Not started | - |
+| 2. Prompt Design & Marker Contract | 0/3 | Not started | - |
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 0/0 | Not started | - |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
