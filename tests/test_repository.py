@@ -1021,6 +1021,72 @@ class RepositoryTests(unittest.TestCase):
             _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_never_raises(self):
+        """D-04 / SC4 belt: handler.handle MUST NOT raise out of handle() for ANY error
+        path. Inject failures at every helper boundary and confirm the handler swallows
+        and logs them instead of propagating."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-noraise-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "noraise-sid"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user"}) + "\n")
+                f.write(json.dumps({"role": "tool"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            context = {
+                "platform": "test", "user_id": "u",
+                "session_id": sid,
+                "message": "x" * 100,
+                "response": "y" * 600,  # > 200 chars, defeats trivial skip
+            }
+
+            # Case A — call_llm raises
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = RuntimeError("boom from call_llm")
+                # MUST NOT raise
+                asyncio.run(handler.handle("agent:end", context))
+            # Marker file SHOULD exist with task_type=unclassified (LLM failure fallthrough)
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            self.assertTrue(marker_path.is_file())
+            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
+            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+
+            # Case B — _write_marker_pair raises (filesystem-level catastrophic failure)
+            shutil.rmtree(handler.MARKERS_DIR, ignore_errors=True)
+            with unittest.mock.patch.object(handler, '_write_marker_pair') as mock_write:
+                mock_write.side_effect = OSError("disk full")
+                # MUST NOT raise
+                asyncio.run(handler.handle("agent:end", context))
+
+            # Case C — wrong event type → silent early return
+            asyncio.run(handler.handle("session:start", context))
+
+            # Case D — missing session_id → silent early return
+            asyncio.run(handler.handle("agent:end", {"platform": "x"}))
+
+            # Case E — call_llm returns garbage object that defeats .choices[0].message.content
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.return_value = object()  # neither attribute nor mapping interface
+                # MUST NOT raise; should write unclassified
+                asyncio.run(handler.handle("agent:end", context))
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_revenium_classifier_dedupe(self):
         """HOOK-07 / D-13: when a fresh GUARDRAIL+CHAT pair already exists in the marker
         file (within 30s), the hook skips the write to avoid double-writes with the
