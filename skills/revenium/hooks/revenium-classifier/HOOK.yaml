@@ -1,0 +1,4 @@
+name: revenium-classifier
+description: Classifies each Hermes agent:end turn and writes a marker pair (GUARDRAIL + CHAT) for Revenium task-type attribution. See ~/.hermes/skills/revenium/ for the consumer pipeline.
+events:
+  - agent:end
