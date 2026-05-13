@@ -40,6 +40,12 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('category: devops', text)
 
     def test_no_legacy_branding_left(self):
+        # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
+        # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning
+        # state — it contains anti-pattern callouts that intentionally quote the
+        # forbidden tokens inside backticks while explaining what to avoid. Scanning
+        # .planning/ would flag those meta-references and defeat the guard's purpose
+        # (catching reintroduction into shipped artifacts).
         offenders = []
         for path in ROOT.rglob('*'):
             if not path.is_file():
@@ -48,9 +54,12 @@ class RepositoryTests(unittest.TestCase):
                 continue
             if path.name == 'test_repository.py':
                 continue
+            rel = path.relative_to(ROOT)
+            if rel.parts and rel.parts[0] == '.planning':
+                continue
             text = path.read_text(errors='ignore')
             if re.search(r'OpenClaw|openclaw|ClawHub|clawhub', text):
-                offenders.append(str(path.relative_to(ROOT)))
+                offenders.append(str(rel))
         self.assertEqual(offenders, [], f'found legacy branding in: {offenders}')
 
     def test_runtime_paths_are_hermes_native(self):
