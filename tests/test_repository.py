@@ -1467,6 +1467,34 @@ class RepositoryTests(unittest.TestCase):
             _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_setup_md_has_mechanical_classification_hook_section(self):
+        """HOOK-10 / D-16: references/setup.md carries a 'Mechanical classification hook'
+        section that documents the install path, gateway-restart requirement, and the
+        Conflict-C1/C2 anti-pattern callout against `hermes hooks list`."""
+        text = (SKILL / 'references' / 'setup.md').read_text(encoding='utf-8')
+        # Section heading present (H2)
+        self.assertIn('## Mechanical classification hook', text,
+                      'setup.md must carry the Phase 6 hook section per D-16')
+        # Gateway-restart instruction present
+        self.assertIn('hermes gateway restart', text,
+                      'setup.md must document the post-install gateway-restart step')
+        # Anti-pattern callout against the shell-hook CLI (Conflict C1)
+        self.assertRegex(text, r'Do NOT.*hermes hooks list',
+                         'setup.md must warn against using `hermes hooks list` for the event hook')
+        # Hook directory documented
+        self.assertIn('~/.hermes/hooks/revenium-classifier/', text,
+                      'setup.md must reference the canonical hook install path')
+        # Subagent mention
+        self.assertTrue('subagent' in text.lower(),
+                        'setup.md must mention subagent inheritance')
+        # D-16: new section appears AFTER "How attribution works"
+        attr_idx = text.find('## How attribution works')
+        hook_idx = text.find('## Mechanical classification hook')
+        self.assertGreater(attr_idx, -1, '"## How attribution works" heading must exist in setup.md')
+        self.assertGreater(hook_idx, -1, '"## Mechanical classification hook" heading must exist in setup.md')
+        self.assertGreater(hook_idx, attr_idx,
+                           'D-16: "Mechanical classification hook" section must appear AFTER "How attribution works"')
+
     def test_revenium_classifier_marker_pair(self):
         """HOOK-06: handler._write_marker_pair writes exactly two records (one GUARDRAIL,
         one CHAT) to <MARKERS_DIR>/<sid>.jsonl with the Phase 2 schema, < 1024 bytes each,
