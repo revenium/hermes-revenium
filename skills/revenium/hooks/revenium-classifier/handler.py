@@ -146,13 +146,76 @@ def _budget_halted() -> bool:
 
 
 def _read_taxonomy_labels() -> list:
-    """Stub — T09 implements. Returns empty label list."""
+    """Read TAXONOMY_FILE and return the sorted list of existing label keys. The
+    live taxonomy is at ~/.hermes/state/revenium/task-taxonomy.json (managed by
+    Phase 2). Returns [] on any failure — the LLM will mint a new label."""
+    try:
+        data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
+        labels = data.get("labels", {})
+        if isinstance(labels, dict):
+            return sorted(labels.keys())
+    except Exception:
+        pass
     return []
 
 
+def _build_classification_prompt(user_msg: str, assistant_resp: str, labels: list) -> str:
+    """Build the compact lookup-first classification prompt per D-06 + D-09."""
+    labels_block = ", ".join(labels) if labels else "(no existing labels yet)"
+    # Cap the labels block at ~1 KB so the taxonomy growing to dozens of labels
+    # does not blow out the prompt size.
+    if len(labels_block) > 1024:
+        labels_block = labels_block[:1024] + " ... [truncated]"
+    # Bound the previews to ~1 KB each so the whole prompt fits ~2 KB per D-06.
+    user_preview = (user_msg or "")[:800]
+    asst_preview = (assistant_resp or "")[:800]
+    return (
+        "You are classifying a Hermes session turn for spend attribution. "
+        "Output ONLY a single snake_case label, no explanation, no quotes, no punctuation.\n\n"
+        f"Existing labels: {labels_block}\n\n"
+        "Pick the single best-fitting existing label by exact match. "
+        "If NONE fit, mint a new label matching ^[a-z][a-z0-9_]{1,47}$. "
+        "Forbidden labels (do NOT emit): ack, acknowledgment, greeting, confirmation, hello, thanks.\n\n"
+        f"User message preview:\n{user_preview}\n\n"
+        f"Assistant response preview:\n{asst_preview}\n\n"
+        "Label:"
+    )
+
+
 async def _classify_via_llm(context: dict, response_preview: str) -> str:
-    """Stub — T09 implements. Returns 'unclassified'."""
-    return "unclassified"
+    """Invoke the user's main budgeted LLM via agent.auxiliary_client.call_llm.
+    Per Pitfall 8 + A3 + D-06: NO `task=` argument so the call uses the user's
+    main provider+model from config.yaml. Returns the LLM-emitted raw string;
+    caller validates against LABEL_RE + TRIVIAL_BLOCKLIST via _validate_label."""
+    if call_llm is None:
+        return "unclassified"
+    labels = _read_taxonomy_labels()
+    prompt = _build_classification_prompt(
+        context.get("message", "") or "",
+        response_preview,
+        labels,
+    )
+    try:
+        response = await asyncio.to_thread(
+            call_llm,
+            messages=[
+                {"role": "system", "content": "You classify Hermes turns into task_type labels. Output only the label."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=64,
+            timeout=10.0,
+        )
+        # Extract content; tolerate openai SDK response shape variations.
+        try:
+            raw = response.choices[0].message.content
+        except AttributeError:
+            # Older SDK form: dict-like
+            raw = response["choices"][0]["message"]["content"]
+        return (raw or "").strip()
+    except Exception as exc:
+        logger.warning("revenium-classifier LLM call failed: %s", exc)
+        return "unclassified"
 
 
 def _validate_label(label: str) -> str:
@@ -236,25 +299,12 @@ async def handle(event_type: str, context: dict) -> None:
             )
             return
 
-        # Step 5 (T08 STUB — replaced by T09 with the full classification logic).
-        # Land an unconditional call_llm invocation here so that T08's halt-gate
-        # test (mock_llm.assert_not_called) meaningfully pins the gate's semantic
-        # effect. If we reach this line, the halt-gate did NOT fire and the LLM
-        # SHOULD be invoked. T09 replaces this stub with the real prompt-building
-        # + validation pipeline; the test contract for the halt-gate is preserved.
-        if call_llm is not None:
-            try:
-                await asyncio.to_thread(
-                    call_llm,
-                    messages=[{"role": "user", "content": (response_preview or "")[:800]}],
-                    temperature=0.0,
-                    max_tokens=64,
-                    timeout=10.0,
-                )
-            except Exception as exc:
-                logger.warning("revenium-classifier LLM stub call failed: %s", exc)
-        # Step 6 stub — write unclassified for now; T09 wires the real label.
-        await asyncio.to_thread(_write_marker_pair, sid, "unclassified")
+        # Step 5 — LLM classification (D-06 / HOOK-05).
+        raw_label = await _classify_via_llm(context, response_preview)
+        task_type = _validate_label(raw_label)
+
+        # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
+        await asyncio.to_thread(_write_marker_pair, sid, task_type)
     except Exception as exc:
         logger.warning(
             "revenium-classifier hook failed for sid=%s: %s",
