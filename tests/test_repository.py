@@ -1021,6 +1021,100 @@ class RepositoryTests(unittest.TestCase):
             _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_llm_label(self):
+        """HOOK-05 / D-06: mocked call_llm returns 'code_review'; the marker pair
+        carries task_type=code_review."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-llm-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            # Seed a session jsonl with one tool to defeat the heuristic skip
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260513_120100_testsubstantive"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user", "content": "x"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "code_review"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp) as mock_llm:
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_called_once()
+                kwargs = mock_llm.call_args.kwargs
+                self.assertNotIn('task', kwargs, "call_llm MUST be invoked WITHOUT task= per Pitfall 8 / A3")
+                self.assertEqual(kwargs.get('temperature'), 0.0)
+                self.assertEqual(kwargs.get('max_tokens'), 64)
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
+            self.assertEqual({r['task_type'] for r in recs}, {'code_review'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_llm_blocklist_fallthrough(self):
+        """HOOK-05 / D-09: when call_llm returns a forbidden label, _validate_label
+        falls through to 'unclassified'. Also covers regex-violation case."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-block-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260513_120100_testsubstantive"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user"}) + "\n")
+                f.write(json.dumps({"role": "tool"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Direct _validate_label coverage
+            self.assertEqual(handler._validate_label("ack"), "unclassified")
+            self.assertEqual(handler._validate_label("code-review"), "unclassified")  # hyphen violates regex
+            self.assertEqual(handler._validate_label(""), "unclassified")
+            self.assertEqual(handler._validate_label("research"), "research")
+            self.assertEqual(handler._validate_label("CODE_REVIEW"), "code_review")  # lowercased
+
+            # End-to-end: LLM returns 'thanks' → marker file has 'unclassified'
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "thanks"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
+            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_revenium_classifier_halt_unclassified(self):
         """HOOK-04 / D-08: when budget-status.json::halted is True, the LLM is NOT called
         and a marker pair with task_type=unclassified is written."""
