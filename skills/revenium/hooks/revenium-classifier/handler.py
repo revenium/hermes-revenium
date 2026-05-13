@@ -60,8 +60,36 @@ def _walk_to_root_session(sid: str, max_depth: int = 10) -> str:
 
 
 def _count_tools_in_current_turn(sid: str) -> int:
-    """Stub — T06 implements. Returns 0 (no tools detected)."""
-    return 0
+    """Return the count of role:tool entries in ~/.hermes/sessions/<sid>.jsonl
+    between the most recent role:user line and EOF. Returns 0 if the file is
+    missing, unreadable, or has no user line. Used by D-07 heuristic skip."""
+    path = SESSIONS_DIR / f"{sid}.jsonl"
+    if not path.is_file():
+        return 0
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    last_user_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        try:
+            obj = json.loads(lines[i])
+        except json.JSONDecodeError:
+            continue
+        if obj.get("role") == "user":
+            last_user_idx = i
+            break
+    if last_user_idx is None:
+        return 0
+    tool_count = 0
+    for line in lines[last_user_idx + 1:]:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("role") == "tool":
+            tool_count += 1
+    return tool_count
 
 
 def _read_latest_task_type(sid: str) -> "str | None":
@@ -142,9 +170,36 @@ async def handle(event_type: str, context: dict) -> None:
     if not sid:
         return
     try:
-        # T04-T11 fill in the body. Scaffold stops here so the test suite
-        # passes during partial implementation.
-        pass
+        # Step 1 — subagent inheritance (D-05). Stub returns input sid until T07
+        # fills in _walk_to_root_session + _read_latest_task_type.
+        root_sid = _walk_to_root_session(sid)
+        if root_sid != sid:
+            parent_task = _read_latest_task_type(root_sid)
+            if parent_task:
+                await asyncio.to_thread(_write_marker_pair, sid, parent_task)
+                return
+            # Parent has no marker yet — fall through to classify as if root.
+
+        # Step 2 — heuristic skip-fast-path (D-07 / HOOK-02).
+        response_preview = context.get("response", "") or ""
+        tool_count = _count_tools_in_current_turn(sid)
+        if tool_count == 0 and len(response_preview) < 200:
+            return  # trivial — skip marker entirely
+
+        # Step 3 — D-13 belt: did the agent already self-classify? (T10)
+        # if _recent_marker_pair_exists(sid, within_seconds=30):
+        #     return
+
+        # Step 4 — budget gate (D-08 / HOOK-04). (T08)
+        # if _budget_halted():
+        #     await asyncio.to_thread(_write_marker_pair, sid, "unclassified")
+        #     logger.warning(...)
+        #     return
+
+        # Step 5 — LLM classification (D-06 / HOOK-05). (T09)
+        # task_type = _validate_label(await _classify_via_llm(context, response_preview))
+        # Step 6 — atomic write (D-10, D-14 / HOOK-06).
+        # await asyncio.to_thread(_write_marker_pair, sid, task_type)
     except Exception as exc:
         logger.warning(
             "revenium-classifier hook failed for sid=%s: %s",
