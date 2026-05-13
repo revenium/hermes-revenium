@@ -65,21 +65,27 @@ def equal_split(delta: dict, n: int) -> list:
 
 
 def parse_prior_state(ledger_path, sid, total_tokens):
-    """Read ledger and return (prior_ts, prior_muids) for the (sid, total_tokens) key.
+    """Read ledger and return (prior_ts, prior_muids) for sid.
 
     ledger_path: str path to revenium-hermes.ledger
     sid: str Hermes session id (MUST NOT contain ':' — A2 mitigation)
-    total_tokens: int cumulative total_tokens for this delta window
+    total_tokens: int cumulative total_tokens for the current delta window
+                  (kept in the signature for forward compatibility but no
+                  longer narrows prior_muids — see below).
 
     Returns (prior_ts, prior_muids):
-      - prior_ts: float, the cutoff timestamp for marker filtering. v2-takes-precedence
-        per Pitfall D: when any v2 row exists for this sid, prior_ts is the MAX ts
-        across all matching v2 rows; otherwise fall back to MAX ts across v1 rows
-        for this sid. Returns 0.0 if no rows match this sid at all.
-      - prior_muids: set[str], the UNION of field-5 values across all v2 rows
-        matching (sid, total_tokens). Muids belonging to a DIFFERENT total_tokens
-        are NOT included — they belong to a different delta window. Returns set()
-        if no v2 rows match this (sid, total_tokens).
+      - prior_ts: float, the latest ledger timestamp seen for this sid.
+        v2-takes-precedence per Pitfall D: when any v2 row exists for this sid,
+        prior_ts is the MAX ts across all v2 rows for this sid; otherwise fall
+        back to MAX ts across v1 rows for this sid. Returns 0.0 if no rows
+        match this sid at all. Used for v1-fallback marker filtering only.
+      - prior_muids: set[str], the GLOBAL set of all field-5 muids across all
+        v2 rows for this sid — across every total_tokens window, not just the
+        current one. This makes partial-failure recovery (COMPAT-03 / SC2)
+        correct: muids 1-3 of a 5-marker batch that crashed between calls 3
+        and 5 stay in this set forever, and muids 4-5 (never written to the
+        ledger) stay OUT of this set, so the cron emits them on the next tick
+        regardless of the new total_tokens.
 
     Field-count discrimination (D-07/D-08/D-10):
       - 4 fields ("HERMES:<sid>:<total_tokens>:<ts>") = v1 row
@@ -87,6 +93,15 @@ def parse_prior_state(ledger_path, sid, total_tokens):
 
     Defense in depth (A2 mitigation): asserts `':' not in sid` so a future sid
     format change can't silently corrupt field-count discrimination.
+
+    History note: an earlier draft narrowed prior_muids to the exact
+    (sid, total_tokens) window. Testing T08's partial-failure recovery
+    showed that combined with the cron's ts-based marker filter, that
+    narrower scope made SC2 unachievable — markers 4-5 of a partial-failure
+    batch have ts < the successful ledger rows' ts and were wrongly skipped.
+    Global muid dedup is sufficient (any muid that ever made it to the
+    ledger never repeats) and lets the cron drop the ts filter for v2
+    sessions, which is the simpler invariant.
     """
     assert ':' not in sid, "sid must not contain ':' (would corrupt field-count discrimination)"
 
@@ -112,7 +127,7 @@ def parse_prior_state(ledger_path, sid, total_tokens):
                 if row_sid != sid:
                     continue
                 try:
-                    row_total = int(parts[2])
+                    int(parts[2])
                 except (TypeError, ValueError):
                     continue
                 try:
@@ -124,14 +139,13 @@ def parse_prior_state(ledger_path, sid, total_tokens):
                     if row_ts > v1_ts_max:
                         v1_ts_max = row_ts
                 elif len(parts) == 5:
-                    # v2 row — one muid in field 5
+                    # v2 row — one muid in field 5; collect across ALL total_tokens
                     has_v2 = True
                     if row_ts > v2_ts_max:
                         v2_ts_max = row_ts
-                    if row_total == total_tokens:
-                        muid = parts[4]
-                        if muid:
-                            prior_muids.add(muid)
+                    muid = parts[4]
+                    if muid:
+                        prior_muids.add(muid)
                 # parts > 5 = malformed; ignore defensively (no production writer produces this)
     except FileNotFoundError:
         return (0.0, set())

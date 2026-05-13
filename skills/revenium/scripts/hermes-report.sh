@@ -300,13 +300,27 @@ if marker_path.is_file():
                     continue
                 if not all(k in m for k in REQUIRED_KEYS):
                     continue
+                # Primary dedup: global muid set. parse_prior_state returns
+                # every muid ever ledger'd for this sid across all total_tokens
+                # windows, so a muid that already shipped will be in this set
+                # regardless of which tick reported it. Partial-failure recovery
+                # (COMPAT-03 / SC2) relies on this: muids 4-5 of a 5-marker batch
+                # whose tick crashed between calls 3 and 5 stay OUT of the set
+                # and are correctly re-emitted on the next tick.
                 if m['muid'] in prior_muids:
                     continue
-                try:
-                    if float(m['ts']) <= prior_ts:
+                # Secondary (v1-only) fallback: when no v2 muids exist yet for
+                # this sid (fresh upgrade, ledger has only v1 rows), use the
+                # ts cutoff to avoid mass-emitting any marker history that
+                # predates the upgrade. Once any v2 row exists, prior_muids is
+                # the complete record and the ts filter is harmful (it would
+                # skip un-emitted markers whose ts predates the latest v2 row).
+                if not prior_muids:
+                    try:
+                        if float(m['ts']) <= prior_ts:
+                            continue
+                    except (TypeError, ValueError):
                         continue
-                except (TypeError, ValueError):
-                    continue
                 if m.get('task_type') in FORBIDDEN:
                     continue
                 markers.append(m)

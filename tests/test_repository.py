@@ -288,6 +288,388 @@ class RepositoryTests(unittest.TestCase):
                 f'syntax error in {script.name}: {result.stderr}',
             )
 
+    def test_cron_marker_split_end_to_end(self):
+        """TEST-03 / COMPAT-02 / COMPAT-03: synthetic state.db + marker fixture ->
+        exactly N Revenium invocations with byte-exact conservation, idempotent
+        across simulated partial failure, and zero-marker fallthrough emits exactly
+        one call whose argv differs from the legacy form only by --task-type
+        unclassified (SC3 byte-diff invariant, B4)."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+        from decimal import Decimal
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        HERMES_REPORT = SCRIPTS_DIR / 'hermes-report.sh'
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def make_markers(n, sid, ts_base=1715515000.0):
+            return [
+                {
+                    'muid': f'01893b8a3{i:02x}abcdef0123456789abcdef0',
+                    'ts': ts_base + i + 1,
+                    'sid': sid,
+                    'task_type': 'code_review' if i % 2 == 0 else 'refactor',
+                    'operation_type': 'CHAT',
+                }
+                for i in range(n)
+            ]
+
+        def run_cron(env, invocations_log):
+            """Invoke hermes-report.sh once, parsing the invocation log into
+            argv lists. Returns (exit_code, [argv_list, ...])."""
+            if os.path.exists(invocations_log):
+                os.unlink(invocations_log)
+            open(invocations_log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            invocations = []
+            with open(invocations_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    # The shim writes shell-escaped args; round-trip via shlex.
+                    import shlex
+                    invocations.append(shlex.split(line))
+            return result.returncode, invocations, result.stdout + result.stderr
+
+        def argv_to_flags(argv):
+            """Convert flat argv to {flag: value} dict for assertions."""
+            d = {}
+            i = 0
+            while i < len(argv):
+                tok = argv[i]
+                if tok.startswith('--'):
+                    if i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                        d[tok] = argv[i + 1]
+                        i += 2
+                    else:
+                        d[tok] = True
+                        i += 1
+                else:
+                    i += 1
+            return d
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-cron-e2e-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            ledger = os.path.join(state_dir, 'revenium-hermes.ledger')
+
+            # Build the revenium shim. Critical: place it at ${HOME}/.local/bin
+            # because common.sh::ensure_path prepends a fixed list of directories
+            # (including /opt/homebrew/bin where the real revenium lives) AFTER
+            # whatever PATH we set. ${HOME}/.local/bin is the LAST prepend in
+            # ensure_path's loop, so it ends up FIRST in PATH; the shim wins.
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            invocations_log = os.path.join(tmpdir, 'invocations.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    # Emit each arg shell-escaped on one line per invocation.\n'
+                    '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
+                    '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'INVOCATIONS_LOG': invocations_log,
+                'TZ': 'UTC',
+            }
+
+            # =====================================================
+            # Sub-case 1: N markers in {1, 2, 5, 10} -> N invocations
+            # with conservation invariant byte-exact across all fields.
+            # =====================================================
+            for n in (1, 2, 5, 10):
+                sid = f'20260512_120000_n{n:02d}'
+                input_tokens = 10000 + n * 11
+                output_tokens = 4000 + n * 7
+                cache_read = 200 + n * 3
+                cache_write = 100 + n * 5
+                total_tokens = input_tokens + output_tokens
+                estimated_cost = '0.123456'
+
+                # Reset fixture state for each N.
+                for path in (state_db, ledger):
+                    if os.path.exists(path):
+                        os.unlink(path)
+                for f_ in os.listdir(markers_dir):
+                    os.unlink(os.path.join(markers_dir, f_))
+
+                build_state_db(state_db, [{
+                    'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                    'input_tokens': input_tokens, 'output_tokens': output_tokens,
+                    'cache_read': cache_read, 'cache_write': cache_write,
+                    'reasoning': 0, 'estimated_cost': estimated_cost,
+                    'api_calls': n, 'started_at': 1715514000.0,
+                    'ended_at': 1715515100.0,
+                    'billing_provider': 'anthropic',
+                }])
+
+                with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                    for m in make_markers(n, sid):
+                        f.write(json.dumps(m, separators=(',', ':')) + '\n')
+
+                rc, invocations, output = run_cron(base_env, invocations_log)
+                self.assertEqual(rc, 0, f'cron exit {rc} for n={n}: {output}')
+                self.assertEqual(len(invocations), n,
+                                 f'expected {n} invocations, got {len(invocations)}: {output}')
+
+                # Conservation invariant per field.
+                sum_input = sum(int(argv_to_flags(a)['--input-tokens']) for a in invocations)
+                sum_output = sum(int(argv_to_flags(a)['--output-tokens']) for a in invocations)
+                sum_cache_read = sum(int(argv_to_flags(a)['--cache-read-tokens']) for a in invocations)
+                sum_cache_write = sum(int(argv_to_flags(a)['--cache-creation-tokens']) for a in invocations)
+                sum_total = sum(int(argv_to_flags(a)['--total-tokens']) for a in invocations)
+
+                self.assertEqual(sum_input, input_tokens,
+                                 f'input conservation violated at n={n}')
+                self.assertEqual(sum_output, output_tokens,
+                                 f'output conservation violated at n={n}')
+                self.assertEqual(sum_cache_read, cache_read,
+                                 f'cache_read conservation violated at n={n}')
+                self.assertEqual(sum_cache_write, cache_write,
+                                 f'cache_write conservation violated at n={n}')
+                self.assertEqual(sum_total, input_tokens + output_tokens,
+                                 f'total conservation violated at n={n}')
+
+                # Cost conservation byte-exact via Decimal.
+                cost_strs = [argv_to_flags(a).get('--total-cost', '0') for a in invocations]
+                cost_sum = sum(Decimal(c) for c in cost_strs)
+                self.assertEqual(cost_sum, Decimal(estimated_cost),
+                                 f'cost conservation violated at n={n}: {cost_strs}')
+
+                # Per-marker flags present on every invocation; transaction-id
+                # matches ${sid}-${total_tokens}-${muid} shape.
+                expected_muids = [m['muid'] for m in make_markers(n, sid)]
+                for argv in invocations:
+                    flags = argv_to_flags(argv)
+                    self.assertIn('--task-type', flags)
+                    self.assertIn('--operation-type', flags)
+                    txid = flags.get('--transaction-id', '')
+                    prefix = f'{sid}-{total_tokens}-'
+                    self.assertTrue(txid.startswith(prefix),
+                                    f'transaction-id "{txid}" missing prefix "{prefix}" at n={n}')
+                    suffix_muid = txid[len(prefix):]
+                    self.assertIn(suffix_muid, expected_muids,
+                                  f'transaction-id muid suffix not in expected muids at n={n}')
+
+            # =====================================================
+            # Sub-case 2: zero markers -> exactly one call with
+            # --task-type unclassified and NO --operation-type;
+            # transaction-id is ${sid}-${total_tokens} (B4: no muid suffix).
+            # =====================================================
+            sid_zero = '20260512_120000_zero'
+            input_tokens = 7000
+            output_tokens = 2000
+            total_tokens = input_tokens + output_tokens
+
+            for path in (state_db, ledger):
+                if os.path.exists(path):
+                    os.unlink(path)
+            for f_ in os.listdir(markers_dir):
+                os.unlink(os.path.join(markers_dir, f_))
+
+            build_state_db(state_db, [{
+                'id': sid_zero, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': input_tokens, 'output_tokens': output_tokens,
+                'cache_read': 100, 'cache_write': 50,
+                'reasoning': 0, 'estimated_cost': '0.045000',
+                'api_calls': 1, 'started_at': 1715514000.0,
+                'ended_at': 1715515100.0,
+                'billing_provider': 'anthropic',
+            }])
+            # No marker file for sid_zero -> zero-marker fallthrough.
+
+            rc, invocations, output = run_cron(base_env, invocations_log)
+            self.assertEqual(rc, 0, f'zero-marker cron exit {rc}: {output}')
+            self.assertEqual(len(invocations), 1,
+                             f'zero-marker expected 1 call, got {len(invocations)}: {output}')
+
+            flags = argv_to_flags(invocations[0])
+            self.assertEqual(flags.get('--task-type'), 'unclassified',
+                             'zero-marker fallthrough must use --task-type unclassified')
+            self.assertNotIn('--operation-type', flags,
+                             'zero-marker fallthrough must NOT emit --operation-type '
+                             '(Phase 4 WIRE-01 owns that decision)')
+            self.assertEqual(flags.get('--transaction-id'), f'{sid_zero}-{total_tokens}',
+                             'B4: zero-marker --transaction-id must be ${sid}-${total_tokens} '
+                             '(no synthetic muid suffix in wire id)')
+
+            # The ledger row for the zero-marker path must carry a synthetic
+            # non-empty muid in field 5 (D-11). Read the ledger and confirm.
+            with open(ledger) as f:
+                ledger_lines = [l.rstrip('\n') for l in f if l.strip()]
+            zero_rows = [l for l in ledger_lines if l.startswith(f'HERMES:{sid_zero}:')]
+            self.assertEqual(len(zero_rows), 1,
+                             f'expected 1 ledger row for zero-marker session, got {len(zero_rows)}')
+            fields = zero_rows[0].split(':')
+            self.assertEqual(len(fields), 5,
+                             f'D-07: zero-marker ledger row must have 5 colon-fields, got {len(fields)}')
+            self.assertTrue(fields[4].startswith('unclassified-'),
+                            f'D-11: zero-marker synthetic muid must use unclassified- prefix, '
+                            f'got {fields[4]!r}')
+            self.assertGreater(len(fields[4]), len('unclassified-'),
+                               'D-11: zero-marker synthetic muid must be non-empty')
+
+            # =====================================================
+            # Sub-case 3: idempotency under simulated partial failure
+            # (COMPAT-03, Pitfall 8). Run with 5 markers at total_tokens=T1;
+            # truncate ledger to first 3 rows (simulating cron killed between
+            # meter call 3 and call 5). Then bump state.db total_tokens to T2>T1
+            # (real-world cron tick: agent kept running between minutes) and
+            # rerun; assert exactly 2 NEW invocations corresponding to muids 4-5.
+            #
+            # Note on the outer pre-filter (hermes-report.sh:71): it short-circuits
+            # any (sid, total_tokens) tuple already in the ledger to (a) preserve v1
+            # backward-compat idempotency and (b) prevent zero-marker re-emission
+            # on each tick. The realistic recovery scenario is "tokens have grown",
+            # so we bump T1 -> T2 between runs. The per-muid dedup inside
+            # parse_prior_state then correctly identifies muids 4-5 as un-emitted
+            # (their ts > the latest ledger row's ts).
+            # =====================================================
+            sid_pf = '20260512_120000_pf05'
+            input_tokens_t1 = 10000
+            output_tokens_t1 = 4000
+            cache_read_t1 = 250
+            cache_write_t1 = 125
+            estimated_cost_t1 = '0.250000'
+            total_tokens_t1 = input_tokens_t1 + output_tokens_t1
+
+            for path in (state_db, ledger):
+                if os.path.exists(path):
+                    os.unlink(path)
+            for f_ in os.listdir(markers_dir):
+                os.unlink(os.path.join(markers_dir, f_))
+
+            build_state_db(state_db, [{
+                'id': sid_pf, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': input_tokens_t1, 'output_tokens': output_tokens_t1,
+                'cache_read': cache_read_t1, 'cache_write': cache_write_t1,
+                'reasoning': 0, 'estimated_cost': estimated_cost_t1,
+                'api_calls': 5, 'started_at': 1715514000.0,
+                'ended_at': 1715515100.0,
+                'billing_provider': 'anthropic',
+            }])
+            pf_markers = make_markers(5, sid_pf)
+            with open(os.path.join(markers_dir, f'{sid_pf}.jsonl'), 'w') as f:
+                for m in pf_markers:
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+
+            # Run 1: all 5 markers reported at total_tokens=T1.
+            rc, run1_invocations, output1 = run_cron(base_env, invocations_log)
+            self.assertEqual(rc, 0, f'partial-failure run1 exit {rc}: {output1}')
+            self.assertEqual(len(run1_invocations), 5,
+                             f'partial-failure run1 expected 5 calls, got {len(run1_invocations)}: {output1}')
+
+            # Simulate partial failure: truncate ledger to first 3 rows for sid_pf.
+            with open(ledger) as f:
+                all_rows = [l for l in f if l.strip()]
+            sid_pf_rows = [l for l in all_rows if l.startswith(f'HERMES:{sid_pf}:')]
+            self.assertEqual(len(sid_pf_rows), 5,
+                             f'expected 5 rows for {sid_pf} after run1, got {len(sid_pf_rows)}')
+            kept = [l for l in all_rows if not l.startswith(f'HERMES:{sid_pf}:')]
+            kept.extend(sid_pf_rows[:3])
+            with open(ledger, 'w') as f:
+                f.writelines(kept)
+
+            # Bump state.db total_tokens (T2 > T1) to simulate the agent
+            # continuing to consume tokens between cron ticks. The 5 original
+            # markers stay in place; muids 4-5 still have ts > the latest
+            # ledger row's ts, so parse_prior_state filters them as un-emitted.
+            new_input_tokens = input_tokens_t1 + 600
+            new_output_tokens = output_tokens_t1 + 400
+            new_total_tokens = new_input_tokens + new_output_tokens
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                'UPDATE sessions SET input_tokens=?, output_tokens=? WHERE id=?',
+                (new_input_tokens, new_output_tokens, sid_pf),
+            )
+            conn.commit()
+            conn.close()
+
+            # Run 2: only the 2 missing muids should be emitted; transaction-id
+            # carries the NEW total_tokens (T2) per CRON-04.
+            rc, run2_invocations, output2 = run_cron(base_env, invocations_log)
+            self.assertEqual(rc, 0, f'partial-failure run2 exit {rc}: {output2}')
+            self.assertEqual(len(run2_invocations), 2,
+                             f'partial-failure run2 expected 2 calls (muids 4-5), '
+                             f'got {len(run2_invocations)}: {output2}')
+
+            replayed_muids = []
+            for argv in run2_invocations:
+                txid = argv_to_flags(argv).get('--transaction-id', '')
+                prefix = f'{sid_pf}-{new_total_tokens}-'
+                self.assertTrue(txid.startswith(prefix),
+                                f'replay transaction-id "{txid}" missing prefix "{prefix}"')
+                replayed_muids.append(txid[len(prefix):])
+
+            expected_replay_muids = {pf_markers[3]['muid'], pf_markers[4]['muid']}
+            self.assertEqual(set(replayed_muids), expected_replay_muids,
+                             f'partial-failure replay must emit exactly muids 4-5, '
+                             f'got {replayed_muids}')
+
+            # Run 3 (re-running without any further state.db change) MUST emit
+            # zero new invocations because the new rows added by run 2 trip the
+            # outer (sid, T2) pre-filter. This proves the ledger is now consistent.
+            rc, run3_invocations, output3 = run_cron(base_env, invocations_log)
+            self.assertEqual(rc, 0, f'partial-failure run3 exit {rc}: {output3}')
+            self.assertEqual(len(run3_invocations), 0,
+                             f'partial-failure run3 expected 0 calls (fully reported), '
+                             f'got {len(run3_invocations)}: {output3}')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()
