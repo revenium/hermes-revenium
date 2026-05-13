@@ -16,6 +16,7 @@ ENV_FILE="${STATE_DIR}/env"
 STATE_DB="${HERMES_HOME}/state.db"
 TAXONOMY_FILE="${REVENIUM_TAXONOMY_FILE:-${STATE_DIR}/task-taxonomy.json}"
 MARKERS_DIR="${REVENIUM_MARKERS_DIR:-${STATE_DIR}/markers}"
+LOCK_FILE="${STATE_DIR}/cron.lock"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}"
 

@@ -62,6 +62,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('TAXONOMY_FILE=', text)
         self.assertRegex(text, r'MARKERS_DIR="\$\{REVENIUM_MARKERS_DIR:-\$\{STATE_DIR\}/markers\}"')
         self.assertIn('markers', text)
+        # Phase 3 D-13: LOCK_FILE declared in common.sh (single source of truth);
+        # never hardcoded in cron.sh or hermes-report.sh.
+        self.assertIn('LOCK_FILE=', text)
+        self.assertIn('cron.lock', text)
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
