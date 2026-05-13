@@ -131,7 +131,35 @@ def _read_latest_task_type(sid: str) -> "str | None":
 
 
 def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0) -> bool:
-    """Stub — T10 implements. Returns False (no recent pair)."""
+    """D-13: return True if the marker file's tail carries a GUARDRAIL+CHAT pair
+    whose most recent ts is within `within_seconds` of time.time(). Used to skip
+    the hook write when the agent's SKILL.md FINAL ACTION snippet already wrote
+    markers for this turn. Per Pitfall 6 option (a) — wall-clock proximity."""
+    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    if not marker_path.is_file():
+        return False
+    try:
+        lines = marker_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    # Walk backward, collect GUARDRAIL+CHAT pair within the window.
+    now = time.time()
+    seen_ops = set()
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ts = rec.get("ts")
+        op = rec.get("operation_type")
+        if not isinstance(ts, (int, float)) or not isinstance(op, str):
+            continue
+        if (now - ts) > within_seconds:
+            break  # records are timestamp-ordered (append-only); no point continuing
+        if op in ("GUARDRAIL", "CHAT"):
+            seen_ops.add(op)
+            if seen_ops >= {"GUARDRAIL", "CHAT"}:
+                return True
     return False
 
 
@@ -287,9 +315,9 @@ async def handle(event_type: str, context: dict) -> None:
         if tool_count == 0 and len(response_preview) < 200:
             return  # trivial — skip marker entirely
 
-        # Step 3 — D-13 belt: did the agent already self-classify? (T10)
-        # if _recent_marker_pair_exists(sid, within_seconds=30):
-        #     return
+        # Step 3 — D-13 belt: did the agent already self-classify? (HOOK-07)
+        if _recent_marker_pair_exists(sid, within_seconds=30.0):
+            return  # agent's FINAL ACTION wrote markers in the last 30s; don't double-write
 
         # Step 4 — budget gate (D-08 / HOOK-04).
         if _budget_halted():
