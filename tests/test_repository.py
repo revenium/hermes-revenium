@@ -827,6 +827,120 @@ class RepositoryTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_ledger_v1_v2_discrimination(self):
+        """D-10 / B6 / Pitfall D: parse_prior_state correctly distinguishes
+        v1 (4-field) from v2 (5-field) ledger rows by len(line.split(':')).
+
+        Exercises the production helper directly (B6 — test is load-bearing,
+        not decorative). Pitfall D ("v2-takes-precedence for ts") is verified
+        by a fixture where the v1 row has a ts LATER than any v2 row: the
+        helper must still return the latest v2 ts as prior_ts when any v2
+        rows exist for the sid. A2 (sid-with-colons) defense is verified by
+        the AssertionError sub-test.
+
+        Note on prior_muids semantics: the helper returns the GLOBAL set of
+        every v2 muid ledger'd for sid (across all total_tokens windows), not
+        narrowed to the exact total_tokens. This is the load-bearing
+        invariant for partial-failure recovery in test_cron_marker_split_end_to_end."""
+        import os
+        import sys
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        from split_strategies import parse_prior_state  # noqa: WPS433
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-discrim-')
+        try:
+            ledger_path = os.path.join(tmpdir, 'revenium-hermes.ledger')
+
+            # Mixed-format fixture for sid-A: one v1 row (4 fields) and four v2
+            # rows (5 fields, one muid each per B1). Two of the v2 rows share
+            # total_tokens with the v1 row; three v2 rows share total_tokens=5000.
+            with open(ledger_path, 'w') as f:
+                f.write(
+                    # v1 row (D-08: preserved indefinitely)
+                    'HERMES:sid-A:1000:1715515000.000\n'
+                    # v2 rows at total_tokens=1000 (one muid each per B1)
+                    'HERMES:sid-A:1000:1715515100.500:muidA\n'
+                    # v2 rows at total_tokens=5000
+                    'HERMES:sid-A:5000:1715515150.000:muidB\n'
+                    'HERMES:sid-A:5000:1715515180.000:muidC\n'
+                    'HERMES:sid-A:5000:1715515200.000:muidD\n'
+                )
+
+            # Query (sid-A, total_tokens=1000): prior_muids is the GLOBAL set
+            # across all v2 rows for sid-A. prior_ts is the latest v2 ts for
+            # sid-A (v2-takes-precedence per Pitfall D).
+            prior_ts, prior_muids = parse_prior_state(ledger_path, 'sid-A', 1000)
+            self.assertEqual(prior_ts, 1715515200.000,
+                             'v2-takes-precedence: prior_ts must be the MAX v2 ts for sid')
+            self.assertEqual(prior_muids, {'muidA', 'muidB', 'muidC', 'muidD'},
+                             'prior_muids is the GLOBAL set across all (sid, *) v2 rows')
+
+            # Query (sid-A, total_tokens=5000): same global muids, same prior_ts.
+            prior_ts, prior_muids = parse_prior_state(ledger_path, 'sid-A', 5000)
+            self.assertEqual(prior_ts, 1715515200.000)
+            self.assertEqual(prior_muids, {'muidA', 'muidB', 'muidC', 'muidD'})
+
+            # Query (sid-A, total_tokens=9999): no rows match this exact
+            # total_tokens, but the helper still returns the global view per
+            # sid — every v2 muid that ever shipped stays in the set.
+            prior_ts, prior_muids = parse_prior_state(ledger_path, 'sid-A', 9999)
+            self.assertEqual(prior_ts, 1715515200.000)
+            self.assertEqual(prior_muids, {'muidA', 'muidB', 'muidC', 'muidD'})
+
+            # Query (sid-Z, anything): no rows at all for this sid.
+            prior_ts, prior_muids = parse_prior_state(ledger_path, 'sid-Z', 1234)
+            self.assertEqual(prior_ts, 0.0)
+            self.assertEqual(prior_muids, set())
+
+            # Pitfall D verification: a v1 row with a LATER ts than any v2 row
+            # must NOT override the v2-takes-precedence rule. Build a second
+            # fixture and confirm.
+            ledger_p2 = os.path.join(tmpdir, 'pitfall-d.ledger')
+            with open(ledger_p2, 'w') as f:
+                f.write(
+                    # v1 row with very large ts (e.g., far-future cleanup)
+                    'HERMES:sid-A:1000:9999999999.000\n'
+                    # v2 row with smaller ts
+                    'HERMES:sid-A:1000:1715515100.500:muidA\n'
+                )
+            prior_ts, prior_muids = parse_prior_state(ledger_p2, 'sid-A', 1000)
+            self.assertEqual(prior_ts, 1715515100.500,
+                             'Pitfall D: v2 ts takes precedence over a LATER v1 ts when '
+                             'any v2 row exists for the sid')
+            self.assertEqual(prior_muids, {'muidA'})
+
+            # v1-only fixture: no v2 rows. prior_ts falls back to v1 max; muids empty.
+            ledger_v1 = os.path.join(tmpdir, 'v1-only.ledger')
+            with open(ledger_v1, 'w') as f:
+                f.write(
+                    'HERMES:sid-B:500:1715515000.000\n'
+                    'HERMES:sid-B:1500:1715515050.000\n'
+                )
+            prior_ts, prior_muids = parse_prior_state(ledger_v1, 'sid-B', 1500)
+            self.assertEqual(prior_ts, 1715515050.000,
+                             'v1-only ledger: prior_ts is the MAX v1 ts for sid')
+            self.assertEqual(prior_muids, set(),
+                             'v1-only ledger: prior_muids is empty (no v2 rows)')
+
+            # Missing ledger file: helper returns (0.0, set()) without raising.
+            prior_ts, prior_muids = parse_prior_state(
+                os.path.join(tmpdir, 'does-not-exist.ledger'), 'sid-A', 1000,
+            )
+            self.assertEqual(prior_ts, 0.0)
+            self.assertEqual(prior_muids, set())
+
+            # A2 defense: sid containing ':' must raise AssertionError so a
+            # future sid-format change can't silently corrupt field-count
+            # discrimination.
+            with self.assertRaises(AssertionError):
+                parse_prior_state(ledger_path, 'sid:with:colons', 1000)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()
