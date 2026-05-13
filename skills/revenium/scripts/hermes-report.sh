@@ -213,6 +213,154 @@ else:
       fi
     fi
 
+    # Phase 3 (CRON-01 / MARK-04 / TAX-05 / D-14 / D-15 / D-18): per-session marker reader.
+    # Reads ${MARKERS_DIR}/${sid}.jsonl filtered by the prior ledger row's cutoff (ts,
+    # muids) via the shared parse_prior_state helper (B6). Emits the S2 telemetry log
+    # lines locked by D-18. This commit (T04) does NOT yet change wire behavior — the
+    # legacy single-call cmd array below is still emitted unchanged. T05 introduces the
+    # per-marker cutover wrapped in 'if n_markers > 0' / else.
+    local marker_rows=()
+    local n_markers=0
+    local prior_muids_count=0
+    local s2_info_line=""
+    local s2_warn_line=""
+    local read_ok="true"
+    local marker_output=""
+    marker_output=$(
+      MARKERS_DIR="${MARKERS_DIR}" \
+      SID="${sid}" \
+      TOTAL_TOKENS="${total_tokens}" \
+      DELTA_TOTAL="${delta_total}" \
+      SCRIPT_DIR="${SCRIPT_DIR}" \
+      LEDGER_PATH="${LEDGER_FILE}" \
+      python3 - <<'PY' 2>&1
+import json
+import os
+import sys
+from pathlib import Path
+
+try:
+    sys.path.insert(0, os.environ['SCRIPT_DIR'])
+    from split_strategies import parse_prior_state
+except Exception as exc:
+    # B6 / Pitfall A defense: if the helper can't be imported, fall through to
+    # the legacy single-call path. The bash side sees READ_OK=false.
+    print(f"READ_OK=false")
+    print(f"READ_ERR=import: {exc}")
+    sys.exit(0)
+
+markers_dir = os.environ['MARKERS_DIR']
+sid = os.environ['SID']
+try:
+    total_tokens = int(os.environ['TOTAL_TOKENS'])
+except (TypeError, ValueError):
+    total_tokens = 0
+try:
+    delta_total = int(os.environ['DELTA_TOTAL'])
+except (TypeError, ValueError):
+    delta_total = 0
+ledger_path = os.environ['LEDGER_PATH']
+
+# A2 defense lives inside parse_prior_state (asserts ':' not in sid). Catch the
+# AssertionError here and fall through to the legacy path with a warn log.
+try:
+    prior_ts, prior_muids = parse_prior_state(ledger_path, sid, total_tokens)
+except AssertionError as exc:
+    print("READ_OK=false")
+    print(f"READ_ERR=sid-format: {exc}")
+    sys.exit(0)
+except Exception as exc:
+    print("READ_OK=false")
+    print(f"READ_ERR=parse: {exc}")
+    sys.exit(0)
+
+# TAX-05 (D-14) trivial-label blocklist enforced cron-side as defense-in-depth.
+FORBIDDEN = {'ack', 'acknowledgment', 'greeting', 'confirmation', 'hello', 'thanks'}
+REQUIRED_KEYS = ('muid', 'ts', 'sid', 'task_type', 'operation_type')
+
+marker_path = Path(markers_dir) / f"{sid}.jsonl"
+markers = []
+read_ok = True
+read_err = ""
+if marker_path.is_file():
+    try:
+        with marker_path.open() as f:
+            for line in f:
+                line = line.rstrip('\n')
+                if not line:
+                    continue
+                # T-03-04 defense: cap per-line memory at 4 KB.
+                if len(line) > 4096:
+                    continue
+                # MARK-04 / D-15: per-line try/except. A torn last line or any
+                # malformed line is skipped; loop continues.
+                try:
+                    m = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not all(k in m for k in REQUIRED_KEYS):
+                    continue
+                if m['muid'] in prior_muids:
+                    continue
+                try:
+                    if float(m['ts']) <= prior_ts:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                if m.get('task_type') in FORBIDDEN:
+                    continue
+                markers.append(m)
+    except OSError as exc:
+        # D-14 / D-15: any other file-read OSError falls through.
+        read_ok = False
+        read_err = f"oserror: {exc}"
+
+n = len(markers)
+# D-18 telemetry log lines — locked text, do NOT paraphrase. mean_per_marker
+# uses floor-division of the CURRENT-TICK delta (W2). Only emitted when n>0;
+# the zero-marker fallthrough has no S2 telemetry per D-18.
+if read_ok and n > 0:
+    mean_per_marker = delta_total // n if n > 0 else 0
+    print(f"S2_INFO=window={n}, mean_per_marker={mean_per_marker}")
+    if n == 2 and any(m.get('operation_type') == 'GUARDRAIL' for m in markers):
+        print("S2_WARN=classification-dominated window, attribution may be lossy")
+
+print(f"READ_OK={'true' if read_ok else 'false'}")
+if read_err:
+    print(f"READ_ERR={read_err}")
+print(f"N_MARKERS={n}")
+print(f"PRIOR_MUIDS_COUNT={len(prior_muids)}")
+print(f"MARKERS_JSON={json.dumps(markers, separators=(',', ':'))}")
+PY
+    ) || marker_output=""
+
+    if [[ -n "${marker_output}" ]]; then
+      read_ok=$(echo "${marker_output}" | sed -n 's/^READ_OK=//p' | head -1)
+      read_ok="${read_ok:-false}"
+      n_markers=$(echo "${marker_output}" | sed -n 's/^N_MARKERS=//p' | head -1)
+      n_markers="${n_markers:-0}"
+      prior_muids_count=$(echo "${marker_output}" | sed -n 's/^PRIOR_MUIDS_COUNT=//p' | head -1)
+      prior_muids_count="${prior_muids_count:-0}"
+      s2_info_line=$(echo "${marker_output}" | sed -n 's/^S2_INFO=//p' | head -1)
+      s2_warn_line=$(echo "${marker_output}" | sed -n 's/^S2_WARN=//p' | head -1)
+      local read_err
+      read_err=$(echo "${marker_output}" | sed -n 's/^READ_ERR=//p' | head -1)
+      if [[ "${read_ok}" != "true" ]]; then
+        warn "marker-read fall-through: session=${sid} reason=${read_err:-unknown}"
+        n_markers=0
+      fi
+    else
+      warn "marker-read fall-through: session=${sid} reason=empty-output"
+      n_markers=0
+    fi
+
+    if [[ -n "${s2_info_line}" ]]; then
+      info "S2: ${s2_info_line}"
+    fi
+    if [[ -n "${s2_warn_line}" ]]; then
+      warn "S2: ${s2_warn_line}"
+    fi
+
     local cmd=(
       revenium meter completion
       --model "${clean_model}"
