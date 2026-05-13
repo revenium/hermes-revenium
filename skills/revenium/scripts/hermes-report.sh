@@ -361,52 +361,184 @@ PY
       warn "S2: ${s2_warn_line}"
     fi
 
-    local cmd=(
-      revenium meter completion
-      --model "${clean_model}"
-      --provider "${provider}"
-      --input-tokens "${delta_input}"
-      --output-tokens "${delta_output}"
-      --cache-read-tokens "${delta_cache_read}"
-      --cache-creation-tokens "${delta_cache_write}"
-      --total-tokens "${delta_total}"
-      --stop-reason "END"
-      --request-time "${request_time}"
-      --completion-start-time "${request_time}"
-      --response-time "${response_time}"
-      --request-duration "${duration_ms}"
-      --agent "Hermes"
-      --transaction-id "${sid}-${total_tokens}"
-      --trace-id "${sid}"
-      --is-streamed
-      --quiet
-    )
+    # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
+    # per-marker Revenium calls with extended transaction-id and per-call v2
+    # ledger writes. Else fall through to the legacy single-call path (T06
+    # finalizes that branch with --task-type unclassified + synthetic muid).
+    # The per-session idempotency pre-filter on line 71 already short-circuits
+    # sessions whose (sid, total_tokens) already has any v2 row — the precise
+    # per-muid dedupe happens INSIDE the T04 marker reader via parse_prior_state.
+    if [[ "${n_markers}" -gt 0 ]]; then
+      # === Per-marker emission (CRON-01..06) ===
+      local markers_json
+      markers_json=$(echo "${marker_output}" | sed -n 's/^MARKERS_JSON=//p' | head -1)
+      local delta_fields_json
+      delta_fields_json=$(
+        DELTA_INPUT="${delta_input}" \
+        DELTA_OUTPUT="${delta_output}" \
+        DELTA_CACHE_READ="${delta_cache_read}" \
+        DELTA_CACHE_WRITE="${delta_cache_write}" \
+        DELTA_TOTAL="${delta_total}" \
+        DELTA_COST="${delta_cost}" \
+        python3 - <<'PY' 2>/dev/null || echo '{}'
+import json, os
+print(json.dumps({
+    "input": int(os.environ.get('DELTA_INPUT', '0') or '0'),
+    "output": int(os.environ.get('DELTA_OUTPUT', '0') or '0'),
+    "cache_read": int(os.environ.get('DELTA_CACHE_READ', '0') or '0'),
+    "cache_write": int(os.environ.get('DELTA_CACHE_WRITE', '0') or '0'),
+    "total": int(os.environ.get('DELTA_TOTAL', '0') or '0'),
+    "cost": os.environ.get('DELTA_COST', '0') or '0',
+}, separators=(',', ':')))
+PY
+      )
 
-    if [[ -n "${billing_provider}" ]]; then
-      cmd+=(--model-source "${billing_provider}")
-    fi
-    if [[ "${delta_cost}" != "0" && "${delta_cost}" != "0.0" ]]; then
-      cmd+=(--total-cost "${delta_cost}")
-    fi
-    if [[ -n "${ORG_NAME}" ]]; then
-      cmd+=(--organization-name "${ORG_NAME}")
-    fi
-    if [[ -n "${source}" ]]; then
-      cmd+=(--environment "${source}")
-    fi
+      # B5: second heredoc — merge markers with equal_split outputs into one
+      # pipe-delimited row per marker for bash consumption. Cost is serialized
+      # as a STRING so Decimal precision round-trips across the bash boundary.
+      local split_rows
+      split_rows=$(
+        MARKERS_JSON="${markers_json}" \
+        DELTA_FIELDS_JSON="${delta_fields_json}" \
+        N_MARKERS="${n_markers}" \
+        SCRIPT_DIR="${SCRIPT_DIR}" \
+        python3 - <<'PY' 2>&1
+import json, os, sys
+try:
+    sys.path.insert(0, os.environ['SCRIPT_DIR'])
+    from split_strategies import equal_split
+    markers = json.loads(os.environ['MARKERS_JSON'])
+    delta = json.loads(os.environ['DELTA_FIELDS_JSON'])
+    n = int(os.environ['N_MARKERS'])
+    splits = equal_split(delta, n)
+    for marker, split in zip(markers, splits):
+        # Pipe-delimited; cost is a string for byte-exact round-trip.
+        print(f"{marker['muid']}|{marker['task_type']}|{marker['operation_type']}|"
+              f"{split['input']}|{split['output']}|{split['cache_read']}|"
+              f"{split['cache_write']}|{split['total']}|{split['cost']}")
+except Exception as exc:
+    print(f"SPLIT_ERROR={exc}", file=sys.stderr)
+    sys.exit(3)
+PY
+      ) || split_rows=""
 
-    local cmd_output cmd_exit
-    cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
+      if [[ -z "${split_rows}" ]]; then
+        warn "split-emit fall-through: session=${sid} reason=empty-split-rows"
+        # If the split fails, do NOT silently re-emit as legacy — the markers
+        # were valid (n_markers > 0) but the splitter or json round-trip
+        # broke. Skip this session entirely; the next tick retries.
+        ((skipped_count++)) || true
+        continue
+      fi
 
-    if [[ "${cmd_exit}" -eq 0 ]]; then
-      local now_ts
-      now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
-      echo "${ledger_key}:${now_ts}" >> "${LEDGER_FILE}"
-      ((reported_count++)) || true
-      info "Reported: session=${sid} model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}"
+      local row muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost
+      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost; do
+        [[ -z "${muid}" ]] && continue
+
+        local cmd=(
+          revenium meter completion
+          --model "${clean_model}"
+          --provider "${provider}"
+          --input-tokens "${d_in}"
+          --output-tokens "${d_out}"
+          --cache-read-tokens "${d_cr}"
+          --cache-creation-tokens "${d_cw}"
+          --total-tokens "${d_tot}"
+          --stop-reason "END"
+          --request-time "${request_time}"
+          --completion-start-time "${request_time}"
+          --response-time "${response_time}"
+          --request-duration "${duration_ms}"
+          --agent "Hermes"
+          --transaction-id "${sid}-${total_tokens}-${muid}"
+          --trace-id "${sid}"
+          --is-streamed
+          --quiet
+          --task-type "${t_type}"
+          --operation-type "${op_type}"
+        )
+
+        if [[ -n "${billing_provider}" ]]; then
+          cmd+=(--model-source "${billing_provider}")
+        fi
+        if [[ "${d_cost}" != "0" && "${d_cost}" != "0.000000" && "${d_cost}" != "0.0" ]]; then
+          cmd+=(--total-cost "${d_cost}")
+        fi
+        if [[ -n "${ORG_NAME}" ]]; then
+          cmd+=(--organization-name "${ORG_NAME}")
+        fi
+        if [[ -n "${source}" ]]; then
+          cmd+=(--environment "${source}")
+        fi
+
+        local cmd_output cmd_exit
+        cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
+
+        if [[ "${cmd_exit}" -eq 0 ]]; then
+          # CRON-06 / D-07 / B1 / Pitfall 8: write the v2 ledger row IMMEDIATELY
+          # after each successful call (ONE row per muid; NEVER batched). Field
+          # 5 carries EXACTLY ONE muid — never a CSV.
+          local now_ts
+          now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
+          echo "HERMES:${sid}:${total_tokens}:${now_ts}:${muid}" >> "${LEDGER_FILE}"
+          ((reported_count++)) || true
+          info "Reported: session=${sid} muid=${muid} task_type=${t_type} op_type=${op_type} in=${d_in} out=${d_out}"
+        else
+          # Pitfall 8: on failure, do NOT append a ledger row. The next tick
+          # re-reads the marker (still absent from prior_muids) and retries.
+          warn "Failed: session=${sid} muid=${muid} exit=${cmd_exit} output=${cmd_output}"
+          warn "Command: ${cmd[*]}"
+        fi
+      done <<< "${split_rows}"
     else
-      warn "Failed: session=${sid} exit=${cmd_exit} output=${cmd_output}"
-      warn "Command: ${cmd[*]}"
+      # === Legacy single-call path (T06 finalizes to v2 with synthetic muid + --task-type unclassified) ===
+      local cmd=(
+        revenium meter completion
+        --model "${clean_model}"
+        --provider "${provider}"
+        --input-tokens "${delta_input}"
+        --output-tokens "${delta_output}"
+        --cache-read-tokens "${delta_cache_read}"
+        --cache-creation-tokens "${delta_cache_write}"
+        --total-tokens "${delta_total}"
+        --stop-reason "END"
+        --request-time "${request_time}"
+        --completion-start-time "${request_time}"
+        --response-time "${response_time}"
+        --request-duration "${duration_ms}"
+        --agent "Hermes"
+        --transaction-id "${sid}-${total_tokens}"
+        --trace-id "${sid}"
+        --is-streamed
+        --quiet
+      )
+
+      if [[ -n "${billing_provider}" ]]; then
+        cmd+=(--model-source "${billing_provider}")
+      fi
+      if [[ "${delta_cost}" != "0" && "${delta_cost}" != "0.0" ]]; then
+        cmd+=(--total-cost "${delta_cost}")
+      fi
+      if [[ -n "${ORG_NAME}" ]]; then
+        cmd+=(--organization-name "${ORG_NAME}")
+      fi
+      if [[ -n "${source}" ]]; then
+        cmd+=(--environment "${source}")
+      fi
+
+      local cmd_output cmd_exit
+      cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
+
+      if [[ "${cmd_exit}" -eq 0 ]]; then
+        local now_ts
+        now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
+        echo "${ledger_key}:${now_ts}" >> "${LEDGER_FILE}"
+        ((reported_count++)) || true
+        info "Reported: session=${sid} model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}"
+      else
+        warn "Failed: session=${sid} exit=${cmd_exit} output=${cmd_output}"
+        warn "Command: ${cmd[*]}"
+      fi
     fi
   done <<< "${sessions}"
 
