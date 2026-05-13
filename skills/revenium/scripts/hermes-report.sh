@@ -491,7 +491,16 @@ PY
         fi
       done <<< "${split_rows}"
     else
-      # === Legacy single-call path (T06 finalizes to v2 with synthetic muid + --task-type unclassified) ===
+      # === Zero-marker fallthrough (CRON-07 / D-11 / D-14 / D-15 / B4) ===
+      # No markers in this window. Reasons: older install with no agent classification,
+      # missing/empty marker file, all marker lines unparseable, or this session's
+      # marker file was unreadable (TAX-05 / MARK-04 tolerance — see T04 reader heredoc).
+      # Argv differs from the pre-Phase-3 legacy single-call ONLY by the addition of
+      # --task-type unclassified (SC3 byte-diff invariant). Do NOT emit --operation-type:
+      # Phase 4 owns the WIRE-01 default decision per CONTEXT.md research_gates.
+      # B4: --transaction-id stays as ${sid}-${total_tokens} — the synthetic muid that
+      # appears in the v2 ledger row's field 5 is a LEDGER-SIDE identifier only, NEVER
+      # in the wire transaction-id. Extending --transaction-id here would break SC3.
       local cmd=(
         revenium meter completion
         --model "${clean_model}"
@@ -511,6 +520,7 @@ PY
         --trace-id "${sid}"
         --is-streamed
         --quiet
+        --task-type "unclassified"
       )
 
       if [[ -n "${billing_provider}" ]]; then
@@ -530,11 +540,17 @@ PY
       cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 
       if [[ "${cmd_exit}" -eq 0 ]]; then
-        local now_ts
+        # CRON-06 / D-07 / D-09 / D-11 / B1: write v2 ledger row with synthetic
+        # placeholder muid. Field 5 holds EXACTLY one value (not a CSV) per B1
+        # one-row-per-muid lock. The `unclassified-` prefix marks this row as
+        # the zero-marker path so the field-count discrimination remains reliable
+        # (v2 = 5 fields, never empty tail).
+        local now_ts synthetic_muid
         now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
-        echo "${ledger_key}:${now_ts}" >> "${LEDGER_FILE}"
+        synthetic_muid="unclassified-${now_ts//./}"
+        echo "HERMES:${sid}:${total_tokens}:${now_ts}:${synthetic_muid}" >> "${LEDGER_FILE}"
         ((reported_count++)) || true
-        info "Reported: session=${sid} model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}"
+        info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}"
       else
         warn "Failed: session=${sid} exit=${cmd_exit} output=${cmd_output}"
         warn "Command: ${cmd[*]}"
