@@ -82,3 +82,35 @@ The cron emits two S2 telemetry log lines per session per tick to make this visi
 Attribution is driven entirely by the `task_type` and `operation_type` fields the agent writes into each marker line (per the Phase 2 marker schema; see `references/task-taxonomy.md`). The cron does not infer task types from prompts or model output — every marker the agent emits maps to exactly one `revenium meter completion` call with those fields passed through verbatim. When a session window has zero markers (legacy install, missing marker file, all lines unparseable), the cron falls through to a single call with `--task-type unclassified` and no `--operation-type` — argv-compatible with the pre-Phase-3 single-call form so backward-compat installs keep metering unchanged.
 
 This framing supersedes any earlier "self-cancels over many windows" mention in older planning notes — the bias is one-directional (GUARDRAIL is overstated, never understated) and does NOT average out across ticks.
+
+## Mechanical classification hook
+
+Phase 6 ships an in-process Hermes lifecycle hook at `~/.hermes/hooks/revenium-classifier/` that classifies every `agent:end` turn and writes the GUARDRAIL + CHAT marker pair the cron consumes. This hook is the mechanical floor — it fires regardless of whether the agent self-classifies via the FINAL ACTION block in `SKILL.md`. Both pathways write to the same `~/.hermes/state/revenium/markers/<sid>.jsonl`; the hook tail-checks for a recent agent-written pair (within 30 seconds) before writing to avoid duplicates.
+
+Subagent sessions (where `state.db.sessions.parent_session_id` is non-null) inherit the root user-facing session's `task_type` — one classification per user-request lineage, no per-subagent LLM call. The hook also gates its LLM call on `budget-status.json::halted`; if the budget is halted, the hook writes `task_type: unclassified` and emits a `WARN` log line instead of spending against the halted budget.
+
+The hook is installed by `examples/setup-local.sh` into `~/.hermes/hooks/revenium-classifier/`. **`hermes skills install` does NOT relocate the `hooks/` subdirectory** — operators installing via that path must additionally copy `~/.hermes/skills/revenium/hooks/revenium-classifier/` to `~/.hermes/hooks/revenium-classifier/` themselves.
+
+After installing or updating the hook, **run `hermes gateway restart`**. Hermes loads hooks once at gateway startup; there is no file-watch reload.
+
+To verify the hook loaded, inspect the gateway startup log for:
+
+```
+[hooks] Loaded hook 'revenium-classifier' for events: ['agent:end']
+```
+
+Or run a one-shot discovery check:
+
+```
+cd ~/.hermes/hermes-agent && ./venv/bin/python3 -c \
+  "from gateway.hooks import HookRegistry; r=HookRegistry(); r.discover_and_load(); print(r.loaded_hooks)"
+```
+
+Or a direct filesystem check:
+
+```
+test -f ~/.hermes/hooks/revenium-classifier/HOOK.yaml
+test -f ~/.hermes/hooks/revenium-classifier/handler.py
+```
+
+**Do NOT** use `hermes hooks list` or `hermes hooks test` to verify — that CLI is for shell hooks declared in `~/.hermes/config.yaml`, a different subsystem. The two hook systems share a name but are wired separately.
