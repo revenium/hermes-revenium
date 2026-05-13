@@ -670,6 +670,163 @@ class RepositoryTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_s2_bias_50_50_attribution(self):
+        """TEST-04 / D-17 / Pitfall 5: pins the documented S2 bias direction.
+
+        GUARDRAIL share is an UPPER BOUND, not an estimate (see
+        references/setup.md "How attribution works"). The S2 equal-split
+        gives 50/50 attribution between a tiny GUARDRAIL classification
+        marker and a large work marker — the bias is intentional and
+        documented. This test fails-loud if the splitter ever starts
+        approximating real token weight; D-18 telemetry lines are
+        asserted verbatim so a refactor cannot silently drift them.
+
+        Layer 1: pure-function pin on equal_split. Layer 2: full
+        cron pipeline emits the locked S2_INFO and S2_WARN log phrases
+        per D-18."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+        from decimal import Decimal
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        HERMES_REPORT = SCRIPTS_DIR / 'hermes-report.sh'
+
+        # ===== Layer 1: pure-function pin =====
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        from split_strategies import equal_split  # noqa: WPS433 (intentional dynamic import)
+
+        layer1_delta = {
+            "input": 8000, "output": 0, "cache_read": 0, "cache_write": 0,
+            "total": 8000, "cost": "0.080000",
+        }
+        layer1_splits = equal_split(layer1_delta, 2)
+        self.assertEqual(layer1_splits[0]["input"], 4000,
+                         "S2 50/50 bias: marker 0 must receive exactly half of input")
+        self.assertEqual(layer1_splits[1]["input"], 4000,
+                         "S2 50/50 bias: marker 1 must receive exactly half of input")
+        self.assertEqual(layer1_splits[0]["total"], 4000,
+                         "S2 50/50 bias: marker 0 must receive exactly half of total")
+        self.assertEqual(layer1_splits[1]["total"], 4000,
+                         "S2 50/50 bias: marker 1 must receive exactly half of total")
+        self.assertEqual(Decimal(layer1_splits[0]["cost"]) + Decimal(layer1_splits[1]["cost"]),
+                         Decimal("0.080000"),
+                         "Cost conservation must be Decimal-exact across S2 split")
+
+        # ===== Layer 2: full cron pipeline emits locked D-18 telemetry =====
+        tmpdir = tempfile.mkdtemp(prefix='gsd-s2-bias-')
+        try:
+            shim_home = os.path.join(tmpdir, 'home')
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(bin_dir)
+            state_db = os.path.join(hermes_home, 'state.db')
+            invocations_log = os.path.join(tmpdir, 'invocations.log')
+
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
+                    '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            # D-17 fixture sizes: 1 large work-turn (~8000) + 1 small GUARDRAIL
+            # classification (~300). The session-total delta is 8300; the
+            # cron's S2_INFO line uses `delta_total // n` so n=2 -> 4150 (W1).
+            sid = '20260512_120000_bias'
+            input_tokens = 6000
+            output_tokens = 2300
+            total_tokens = input_tokens + output_tokens  # 8300
+
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            conn.execute(
+                'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (sid, 'claude-sonnet-4-6', 'test',
+                 input_tokens, output_tokens, 0, 0, 0, '0.083000', 2,
+                 1715514000.0, 1715515100.0, 'anthropic'),
+            )
+            conn.commit()
+            conn.close()
+
+            markers = [
+                # Marker 0: large work-turn (CHAT)
+                {'muid': '01893b8a300abcdef0123456789abcdef0',
+                 'ts': 1715515001.0, 'sid': sid,
+                 'task_type': 'code_review', 'operation_type': 'CHAT'},
+                # Marker 1: small GUARDRAIL classification
+                {'muid': '01893b8a301abcdef0123456789abcdef0',
+                 'ts': 1715515002.0, 'sid': sid,
+                 'task_type': 'planning', 'operation_type': 'GUARDRAIL'},
+            ]
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                for m in markers:
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'INVOCATIONS_LOG': invocations_log,
+                'TZ': 'UTC',
+            }
+            open(invocations_log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f'cron exit {result.returncode}: {result.stderr}')
+
+            combined = result.stdout + result.stderr
+            self.assertIn('S2: window=2, mean_per_marker=4150', combined,
+                          f'D-18 INFO line not emitted (W1: locked exact value '
+                          f'delta_total=8300 // n=2 == 4150). Got:\n{combined}')
+            self.assertIn('S2: classification-dominated window, attribution may be lossy',
+                          combined,
+                          f'D-18 WARN line not emitted on n=2 + any GUARDRAIL marker. '
+                          f'Got:\n{combined}')
+
+            # Sanity: both markers must have been emitted (exactly 2 invocations,
+            # one with --operation-type CHAT and one with --operation-type GUARDRAIL).
+            with open(invocations_log) as f:
+                lines = [l.rstrip('\n') for l in f if l.strip()]
+            self.assertEqual(len(lines), 2,
+                             f'expected 2 invocations for 2 markers, got {len(lines)}')
+            self.assertTrue(any('--operation-type GUARDRAIL' in l for l in lines),
+                            'S2 bias test: GUARDRAIL invocation missing')
+            self.assertTrue(any('--operation-type CHAT' in l for l in lines),
+                            'S2 bias test: CHAT invocation missing')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()
