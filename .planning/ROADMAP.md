@@ -14,6 +14,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 - [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
+- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture.
 
 ## Phase Details
 
@@ -86,6 +87,27 @@ Plans:
   3. `docs/installation.md` and `references/setup.md` describe the new marker / taxonomy contract, the S2 bias direction (GUARDRAIL share is an upper bound), and the `prune-markers.sh` operator invocation; no new docs reintroduce any string forbidden by `test_no_legacy_branding_left`.
 **Plans**: TBD
 
+### Phase 6: Mechanical Classification via Hermes agent:end Hook
+**Goal**: When a Hermes session — primary or subagent — completes a turn, a Hermes lifecycle hook deterministically writes a marker record at `~/.hermes/state/revenium/markers/<sid>.jsonl` with a meaningful `task_type` and `operation_type`, independent of whether the agent loaded the `revenium` skill or executed the FINAL ACTION self-classification code. Token attribution by activity in Revenium becomes observable without depending on agent compliance.
+**Depends on**: Phase 3 (cron-side marker reader must exist for hook-written markers to flow to Revenium). Independent of Phase 4 and Phase 5 — can ship in parallel.
+**Requirements**: TBD (will be assigned during /gsd-discuss-phase 6 — preliminary scope: HOOK-01 through HOOK-08 covering: install path, event subscription, classification, parent-inheritance, LLM call budget, distribution via `hermes skills install`, deprecation/downgrade of SKILL.md FINAL ACTION enforcement, integration tests via `hermes hooks test`).
+**Success Criteria** (what must be TRUE):
+  1. `~/.hermes/hooks/revenium-classifier/` exists with `HOOK.yaml` declaring at least the `agent:end` event and `handler.py` implementing `async def handle(event_type, context)` — discovery and load succeed under `hermes hooks list`.
+  2. After a fresh substantive Hermes session that the agent does NOT manually classify (no `skill_view("revenium")` call, no `write_marker` invocation), the next cron tick reports the session's tokens to Revenium with a meaningful `--task-type` (not `unclassified`) — proven by an end-to-end fixture that exercises a synthetic agent turn through `hermes hooks test agent:end --payload-file <fixture>` and asserts a marker file appears at the expected path.
+  3. For a subagent session with `parent_session_id != NULL` in state.db, the marker file's `task_type` matches the parent's `task_type` — verified by a synthetic two-session fixture where the parent is classified first and the child inherits, recorded as an integration test.
+  4. The classifier consults the budgeted LLM for substantive turns AND is bounded by Revenium's halt-check: if `budget-status.json` shows `halted: true` the hook skips the LLM call and writes `task_type: unclassified` with a `WARN` log line. No silent budget overrun from the classifier itself.
+  5. `python3 -m unittest discover -s tests -p 'test_*.py' -v` passes including new tests for the classifier (heuristic skip-fast-path on trivial turns, LLM call invocation contract, parent_session_id inheritance via state.db join). No regressions in existing Phase 1-3 tests.
+  6. `hermes skills install revenium/hermes-revenium/skills/revenium --force` either installs the hook directly into `~/.hermes/hooks/` OR `examples/setup-local.sh` (or a documented post-install step) does so — distribution mechanism is operator-discoverable from `references/setup.md`.
+**Plans**: TBD
+**Locked decisions (from UAT discussion 2026-05-13)**:
+  - Subagent task_type inheritance: walk `state.db.sessions.parent_session_id` to the root user-facing parent; subagent inherits the root's task_type. Single classification per request lineage.
+  - Classifier: LLM-assisted using the Revenium-budgeted model. Heuristic fast-paths for trivial turns (≤ 2 sentences AND zero tools = skip). Budget halt gates the LLM call.
+**Research needed**:
+  - Hermes hook payload schema for `agent:end` (what fields `context` carries — session_id, message history, tool calls). Inspect `hermes-agent/gateway/hooks.py` for HookRegistry.emit() callers.
+  - Hook distribution mechanism: does `hermes skills install` already copy hooks from a skill's `hooks/` subdirectory? Or do they need explicit installation?
+  - Subagent transcript availability — is `~/.hermes/sessions/<subagent_sid>.jsonl` always written, or only for some subagent types?
+  - LLM call from within a hook handler — what async API surface does the hook get? Direct `httpx` to the provider, or a Hermes-internal helper?
+
 ## Phase Dependencies
 
 ```
@@ -97,11 +119,14 @@ Phase 2 (Prompt Design & Marker Contract)   ← MUST ship before Phase 3 (halt-c
    ▼
 Phase 3 (Cron Marker Reader + Equal-Split + Ledger v2)   ← ONE coherent migration
    │
-   ▼
-Phase 4 (Wire Enrichment)   ← requires markers in real traffic
-   │
-   ▼
-Phase 5 (Housekeeping & Compat Hardening)   ← operational hygiene
+   ├──────────────────────────────────┐
+   ▼                                  ▼
+Phase 4 (Wire Enrichment)         Phase 6 (Mechanical Classification via agent:end hook)
+   │                                  │   ← unblocked by Phase 3; can ship in parallel
+   ▼                                  │   with Phase 4 / Phase 5; required for end-user
+Phase 5 (Housekeeping)                │   observability of taskType attribution
+   │                                  │
+   └──────────────────────────────────┘
 ```
 
 The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phase 3 so any halt-check regression after the new prompt content is unambiguously attributable to the prompt change rather than to concurrent cron behavior changes. Phase 3 lands as one coherent migration because partial adoption (split path without per-marker ledger lines, or new ledger without conservation test) breaks the load-bearing idempotency invariant.
@@ -112,9 +137,10 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 |-------|----------------|--------|-----------|
 | 1. Path Foundation | 1/1 | Complete | 2026-05-12 |
 | 2. Prompt Design & Marker Contract | 0/3 | Not started | - |
-| 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Executed (verification pending) | 2026-05-13 |
+| 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
+| 6. Mechanical Classification via agent:end Hook | 0/0 | Not started — surfaced by Phase 3 UAT | - |
 
 ## Research Flags
 
