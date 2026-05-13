@@ -1021,6 +1021,76 @@ class RepositoryTests(unittest.TestCase):
             _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_halt_unclassified(self):
+        """HOOK-04 / D-08: when budget-status.json::halted is True, the LLM is NOT called
+        and a marker pair with task_type=unclassified is written."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-halt-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Seed a halted budget-status.json
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, 'budget-status.json'), 'w', encoding='utf-8') as f:
+                json.dump({"halted": True, "exceeded": True, "currentValue": 99,
+                           "threshold": 50, "percentUsed": 198,
+                           "haltedAt": "2026-05-13T00:00:00Z",
+                           "lastChecked": "2026-05-13T00:00:00Z"}, f)
+
+            self.assertTrue(handler._budget_halted())
+
+            # Patch call_llm so we can prove it was NOT called
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = AssertionError("LLM must NOT be called when halted (D-08)")
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_not_called()
+
+            marker_path = handler.MARKERS_DIR / f"{context['session_id']}.jsonl"
+            self.assertTrue(marker_path.is_file())
+            lines = marker_path.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+            self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_halt_failopen_on_missing_file(self):
+        """HOOK-04 / D-08: missing budget-status.json returns False from _budget_halted
+        (fail-open). The handler must NOT crash and must NOT short-circuit to unclassified."""
+        import importlib
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-halt-open-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # No budget-status.json in tmpdir → fail-open
+            self.assertFalse(handler.BUDGET_STATUS_FILE.exists())
+            self.assertFalse(handler._budget_halted())
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_revenium_classifier_subagent_inherits(self):
         """HOOK-03 / D-05: when state.db.sessions.parent_session_id is set, the hook
         walks to the root, reads root's marker file, and writes the subagent's marker

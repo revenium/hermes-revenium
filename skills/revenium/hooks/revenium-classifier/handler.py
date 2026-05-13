@@ -136,8 +136,13 @@ def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0) -> bool:
 
 
 def _budget_halted() -> bool:
-    """Stub — T08 implements. Returns False (fail-open)."""
-    return False
+    """Read budget-status.json and return True if halted. Fail-open on any
+    filesystem or JSON error per D-08."""
+    try:
+        data = json.loads(BUDGET_STATUS_FILE.read_text(encoding="utf-8"))
+        return bool(data.get("halted", False))
+    except Exception:
+        return False
 
 
 def _read_taxonomy_labels() -> list:
@@ -223,16 +228,33 @@ async def handle(event_type: str, context: dict) -> None:
         # if _recent_marker_pair_exists(sid, within_seconds=30):
         #     return
 
-        # Step 4 — budget gate (D-08 / HOOK-04). (T08)
-        # if _budget_halted():
-        #     await asyncio.to_thread(_write_marker_pair, sid, "unclassified")
-        #     logger.warning(...)
-        #     return
+        # Step 4 — budget gate (D-08 / HOOK-04).
+        if _budget_halted():
+            await asyncio.to_thread(_write_marker_pair, sid, "unclassified")
+            logger.warning(
+                "revenium-classifier: budget halted, wrote unclassified for sid=%s", sid
+            )
+            return
 
-        # Step 5 — LLM classification (D-06 / HOOK-05). (T09)
-        # task_type = _validate_label(await _classify_via_llm(context, response_preview))
-        # Step 6 — atomic write (D-10, D-14 / HOOK-06).
-        # await asyncio.to_thread(_write_marker_pair, sid, task_type)
+        # Step 5 (T08 STUB — replaced by T09 with the full classification logic).
+        # Land an unconditional call_llm invocation here so that T08's halt-gate
+        # test (mock_llm.assert_not_called) meaningfully pins the gate's semantic
+        # effect. If we reach this line, the halt-gate did NOT fire and the LLM
+        # SHOULD be invoked. T09 replaces this stub with the real prompt-building
+        # + validation pipeline; the test contract for the halt-gate is preserved.
+        if call_llm is not None:
+            try:
+                await asyncio.to_thread(
+                    call_llm,
+                    messages=[{"role": "user", "content": (response_preview or "")[:800]}],
+                    temperature=0.0,
+                    max_tokens=64,
+                    timeout=10.0,
+                )
+            except Exception as exc:
+                logger.warning("revenium-classifier LLM stub call failed: %s", exc)
+        # Step 6 stub — write unclassified for now; T09 wires the real label.
+        await asyncio.to_thread(_write_marker_pair, sid, "unclassified")
     except Exception as exc:
         logger.warning(
             "revenium-classifier hook failed for sid=%s: %s",
