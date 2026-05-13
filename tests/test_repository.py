@@ -5,6 +5,51 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'revenium'
+HOOK_DIR = SKILL / 'hooks' / 'revenium-classifier'
+
+
+def _agent_aux_client_available() -> bool:
+    """True iff `from agent.auxiliary_client import call_llm` succeeds. Phase 6
+    hook tests that exercise the real LLM call require this; mocked tests do not."""
+    try:
+        from agent.auxiliary_client import call_llm  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _setup_hook_env(tmpdir):
+    """Returns (env_snapshot, sys_path_added, hermes_home, state_dir, markers_dir).
+    Caller must call _restore_hook_env in finally."""
+    import os
+    import sys
+    hermes_home = os.path.join(tmpdir, 'hh')
+    state_dir = os.path.join(hermes_home, 'state', 'revenium')
+    markers_dir = os.path.join(state_dir, 'markers')
+    os.makedirs(markers_dir, mode=0o700)
+    snapshot = {k: os.environ.get(k) for k in (
+        'HERMES_HOME', 'REVENIUM_STATE_DIR', 'REVENIUM_MARKERS_DIR',
+        'REVENIUM_TAXONOMY_FILE',
+    )}
+    os.environ['HERMES_HOME'] = hermes_home
+    os.environ['REVENIUM_STATE_DIR'] = state_dir
+    os.environ['REVENIUM_MARKERS_DIR'] = markers_dir
+    sys_path_added = str(HOOK_DIR) not in sys.path
+    if sys_path_added:
+        sys.path.insert(0, str(HOOK_DIR))
+    return snapshot, sys_path_added, hermes_home, state_dir, markers_dir
+
+
+def _restore_hook_env(snapshot, sys_path_added):
+    import os
+    import sys
+    if sys_path_added and str(HOOK_DIR) in sys.path:
+        sys.path.remove(str(HOOK_DIR))
+    for k, v in snapshot.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 class RepositoryTests(unittest.TestCase):
@@ -28,6 +73,12 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'clear-halt.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
+            # Phase 6 — agent:end classifier hook (HOOK-01)
+            SKILL / 'hooks' / 'revenium-classifier' / 'HOOK.yaml',
+            SKILL / 'hooks' / 'revenium-classifier' / 'handler.py',
+            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
+            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
+            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -939,6 +990,41 @@ class RepositoryTests(unittest.TestCase):
                 parse_prior_state(ledger_path, 'sid:with:colons', 1000)
         finally:
             import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_marker_pair(self):
+        """HOOK-06: handler._write_marker_pair writes exactly two records (one GUARDRAIL,
+        one CHAT) to <MARKERS_DIR>/<sid>.jsonl with the Phase 2 schema, < 1024 bytes each,
+        muid matching the 33-char hex regex, with atomic O_APPEND + flock semantics."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-pair-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            marker_path = handler._write_marker_pair('test-sid-pair', 'code_review')
+            self.assertEqual(str(marker_path), os.path.join(md, 'test-sid-pair.jsonl'))
+            lines = marker_path.read_text(encoding='utf-8').splitlines()
+            self.assertEqual(len(lines), 2, f'expected 2 markers, got {len(lines)}')
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
+            for r in recs:
+                self.assertEqual(r['sid'], 'test-sid-pair')
+                self.assertEqual(r['task_type'], 'code_review')
+                self.assertRegex(r['muid'], r'^[0-9a-f]{33}$')
+                self.assertEqual(set(r.keys()), {'muid', 'ts', 'sid', 'task_type', 'operation_type'})
+            for l in lines:
+                self.assertLess(len((l + '\n').encode('utf-8')), 1024, 'marker line exceeds 1024 bytes')
+        finally:
+            _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
