@@ -14,7 +14,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 - [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
-- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture.
+- [x] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (completed 2026-05-13)
 
 ## Phase Details
 
@@ -101,7 +101,7 @@ Plans:
 **Plans**: 1 plan (single fat plan; load-bearing tight coupling between manifest + handler + install + tests + docs)
 
 Plans:
-- [ ] 06-01-PLAN.md — Single fat plan: HOOK.yaml + handler.py with subagent-inherit + heuristic-skip + budget-halt + LLM-classify + atomic marker pair write + D-13 dedupe + setup-local.sh hook copy + setup.md docs + 6 unittest methods + 3 synthetic agent:end fixtures (HOOK-01..HOOK-10)
+- [x] 06-01-PLAN.md — Single fat plan: HOOK.yaml + handler.py with subagent-inherit + heuristic-skip + budget-halt + LLM-classify + atomic marker pair write + D-13 dedupe + setup-local.sh hook copy + setup.md docs + 6 unittest methods + 3 synthetic agent:end fixtures (HOOK-01..HOOK-10)
 **Locked decisions (from UAT discussion 2026-05-13)**:
   - Subagent task_type inheritance: walk `state.db.sessions.parent_session_id` to the root user-facing parent; subagent inherits the root's task_type. Single classification per request lineage.
   - Classifier: LLM-assisted using the Revenium-budgeted model. Heuristic fast-paths for trivial turns (≤ 2 sentences AND zero tools = skip). Budget halt gates the LLM call.
@@ -143,7 +143,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
-| 6. Mechanical Classification via agent:end Hook | 0/1 | Not started | - |
+| 6. Mechanical Classification via agent:end Hook | 1/1 | Complete   | 2026-05-13 |
 
 ## Research Flags
 
