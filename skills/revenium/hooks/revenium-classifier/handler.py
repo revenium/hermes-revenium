@@ -55,8 +55,25 @@ logger = logging.getLogger("revenium_classifier")
 
 
 def _walk_to_root_session(sid: str, max_depth: int = 10) -> str:
-    """Stub — T07 implements. Returns input sid (treat as root)."""
-    return sid
+    """Walk state.db.sessions.parent_session_id chain. Returns input sid if it has
+    no parent. Read-only URI mode prevents WAL lock contention with Hermes writer.
+    Depth-capped to defeat pathological corrupted parent chains."""
+    try:
+        uri = f"file:{STATE_DB}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            current = sid
+            for _ in range(max_depth):
+                row = conn.execute(
+                    "SELECT parent_session_id FROM sessions WHERE id = ?", (current,)
+                ).fetchone()
+                if row is None or row[0] is None:
+                    return current
+                current = row[0]
+            return current
+    except sqlite3.OperationalError:
+        return sid  # locked, missing, or any sqlite error → treat as root
+    except Exception:
+        return sid  # belt: D-04 invariant
 
 
 def _count_tools_in_current_turn(sid: str) -> int:
@@ -93,7 +110,23 @@ def _count_tools_in_current_turn(sid: str) -> int:
 
 
 def _read_latest_task_type(sid: str) -> "str | None":
-    """Stub — T07 implements. Returns None (no inherited task_type)."""
+    """Return the task_type of the most recent valid marker record for `sid`, or None
+    if the file is missing or has no valid records. Used by D-05 subagent inheritance."""
+    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    if not marker_path.is_file():
+        return None
+    try:
+        lines = marker_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        tt = rec.get("task_type")
+        if isinstance(tt, str) and LABEL_RE.match(tt):
+            return tt
     return None
 
 
