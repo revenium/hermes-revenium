@@ -1021,6 +1021,120 @@ class RepositoryTests(unittest.TestCase):
             _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_subagent_inherits(self):
+        """HOOK-03 / D-05: when state.db.sessions.parent_session_id is set, the hook
+        walks to the root, reads root's marker file, and writes the subagent's marker
+        pair with the inherited task_type. NO LLM call."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+        import time as _time
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-subagent-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Seed a state.db with parent + child rows
+            state_db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(state_db_path)
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('root-sid-1', None))
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('child-sid-1', 'root-sid-1'))
+            conn.commit()
+            conn.close()
+
+            # Seed the parent's marker file with task_type=research
+            parent_marker = os.path.join(md, 'root-sid-1.jsonl')
+            with open(parent_marker, 'w', encoding='utf-8') as f:
+                rec = {"muid": "f" * 33, "ts": _time.time() - 60, "sid": "root-sid-1",
+                       "task_type": "research", "operation_type": "GUARDRAIL"}
+                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                rec2 = dict(rec, operation_type="CHAT")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+
+            # Patch call_llm so we can prove the LLM was NOT called
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = AssertionError("LLM must NOT be called for subagent (D-05)")
+                context = {
+                    "platform": "test", "user_id": "u",
+                    "session_id": "child-sid-1",
+                    "message": "x",
+                    "response": "Found 3 references to FlockGuard in the repository, see lines 42, 87, 134" + " padding " * 50,
+                }
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_not_called()
+
+            # Assert the child's marker file has task_type=research, GUARDRAIL+CHAT
+            child_marker = handler.MARKERS_DIR / 'child-sid-1.jsonl'
+            self.assertTrue(child_marker.is_file())
+            lines = child_marker.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['task_type'] for r in recs}, {'research'})
+            self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_walk_to_root(self):
+        """HOOK-03: _walk_to_root_session handles missing file, missing row, and depth cap."""
+        import importlib
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-walk-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Case A — missing state.db file → returns input sid
+            self.assertEqual(handler._walk_to_root_session('nope'), 'nope')
+
+            # Case B — seed db with row that has no parent → returns input sid
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('root', None))
+            conn.commit()
+            conn.close()
+            self.assertEqual(handler._walk_to_root_session('root'), 'root')
+
+            # Case C — chain of 3 → walks to root
+            conn = sqlite3.connect(db_path)
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('mid', 'root'))
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('leaf', 'mid'))
+            conn.commit()
+            conn.close()
+            self.assertEqual(handler._walk_to_root_session('leaf'), 'root')
+
+            # Case D — depth cap: chain of 15 self-loops → returns after max_depth steps
+            conn = sqlite3.connect(db_path)
+            for i in range(15):
+                conn.execute("INSERT OR REPLACE INTO sessions VALUES (?, ?)",
+                             (f'loop{i}', f'loop{i+1}'))
+            conn.commit()
+            conn.close()
+            # Should not infinite-loop — return after max_depth iterations
+            result = handler._walk_to_root_session('loop0', max_depth=10)
+            self.assertIsInstance(result, str)
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_revenium_classifier_substantive_uses_session_jsonl_tool_count(self):
         """HOOK-02 / Pitfall 3: when the session jsonl has tool entries, _count_tools_in_current_turn
         returns the right count and the trivial-skip path does NOT trigger even for short responses."""
