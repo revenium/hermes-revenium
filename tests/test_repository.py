@@ -992,6 +992,66 @@ class RepositoryTests(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_trivial_skip(self):
+        """HOOK-02 / D-07: a turn with no tools in the session jsonl AND response < 200 chars
+        must skip marker write — no file created."""
+        import asyncio
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-trivial-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            fixture_path = HOOK_DIR / 'test-payloads' / 'trivial-turn.json'
+            context = json.loads(fixture_path.read_text())
+            # No session jsonl exists in tmp HERMES_HOME → _count_tools_in_current_turn returns 0
+            asyncio.run(handler.handle("agent:end", context))
+            self.assertFalse(
+                (handler.MARKERS_DIR / f"{context['session_id']}.jsonl").exists(),
+                "trivial turn must NOT create marker file (HOOK-02 / D-07)",
+            )
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_substantive_uses_session_jsonl_tool_count(self):
+        """HOOK-02 / Pitfall 3: when the session jsonl has tool entries, _count_tools_in_current_turn
+        returns the right count and the trivial-skip path does NOT trigger even for short responses."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-toolcount-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            sessions_dir = os.path.join(hh, 'sessions')
+            os.makedirs(sessions_dir, exist_ok=True)
+            sid = "session-with-tools"
+            jsonl_path = os.path.join(sessions_dir, f"{sid}.jsonl")
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({"role": "user", "content": "x"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file", "content": "..."}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "terminal", "content": "..."}) + "\n")
+                f.write(json.dumps({"role": "assistant", "content": "ok"}) + "\n")
+            self.assertEqual(handler._count_tools_in_current_turn(sid), 2)
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_revenium_classifier_marker_pair(self):
         """HOOK-06: handler._write_marker_pair writes exactly two records (one GUARDRAIL,
         one CHAT) to <MARKERS_DIR>/<sid>.jsonl with the Phase 2 schema, < 1024 bytes each,
