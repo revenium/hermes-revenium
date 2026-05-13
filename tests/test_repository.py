@@ -1021,6 +1021,77 @@ class RepositoryTests(unittest.TestCase):
             _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_dedupe(self):
+        """HOOK-07 / D-13: when a fresh GUARDRAIL+CHAT pair already exists in the marker
+        file (within 30s), the hook skips the write to avoid double-writes with the
+        agent's FINAL ACTION code path."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import time
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-dedupe-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            # Seed substantive context (defeat heuristic skip)
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260513_120100_testsubstantive"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user"}) + "\n")
+                f.write(json.dumps({"role": "tool"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Pre-seed the marker file with an agent-written GUARDRAIL+CHAT pair (fresh)
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            now = time.time()
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                rec1 = {"muid": "a" * 33, "ts": now - 1.0, "sid": sid,
+                        "task_type": "code_review", "operation_type": "GUARDRAIL"}
+                rec2 = dict(rec1, muid="b" * 33, ts=now - 0.5, operation_type="CHAT")
+                f.write(json.dumps(rec1, separators=(",", ":")) + "\n")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+
+            self.assertTrue(handler._recent_marker_pair_exists(sid, within_seconds=30.0))
+
+            # Patch call_llm so we can prove it was NOT called
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = AssertionError("LLM must NOT be called when agent already wrote markers")
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_not_called()
+
+            # Marker file should still have exactly 2 lines (no hook-added lines)
+            lines = marker_path.read_text().splitlines()
+            self.assertEqual(len(lines), 2, f"hook double-wrote; got {len(lines)} lines")
+
+            # Now age the markers beyond 30s and try again — hook should write
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                rec1['ts'] = now - 120
+                rec2['ts'] = now - 120
+                f.write(json.dumps(rec1, separators=(",", ":")) + "\n")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+            self.assertFalse(handler._recent_marker_pair_exists(sid, within_seconds=30.0))
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "research"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+                asyncio.run(handler.handle("agent:end", context))
+            # Now marker file has 4 lines (2 stale + 2 new from hook)
+            lines = marker_path.read_text().splitlines()
+            self.assertEqual(len(lines), 4)
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_revenium_classifier_llm_label(self):
         """HOOK-05 / D-06: mocked call_llm returns 'code_review'; the marker pair
         carries task_type=code_review."""
