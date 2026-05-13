@@ -5,6 +5,51 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'revenium'
+HOOK_DIR = SKILL / 'hooks' / 'revenium-classifier'
+
+
+def _agent_aux_client_available() -> bool:
+    """True iff `from agent.auxiliary_client import call_llm` succeeds. Phase 6
+    hook tests that exercise the real LLM call require this; mocked tests do not."""
+    try:
+        from agent.auxiliary_client import call_llm  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _setup_hook_env(tmpdir):
+    """Returns (env_snapshot, sys_path_added, hermes_home, state_dir, markers_dir).
+    Caller must call _restore_hook_env in finally."""
+    import os
+    import sys
+    hermes_home = os.path.join(tmpdir, 'hh')
+    state_dir = os.path.join(hermes_home, 'state', 'revenium')
+    markers_dir = os.path.join(state_dir, 'markers')
+    os.makedirs(markers_dir, mode=0o700)
+    snapshot = {k: os.environ.get(k) for k in (
+        'HERMES_HOME', 'REVENIUM_STATE_DIR', 'REVENIUM_MARKERS_DIR',
+        'REVENIUM_TAXONOMY_FILE',
+    )}
+    os.environ['HERMES_HOME'] = hermes_home
+    os.environ['REVENIUM_STATE_DIR'] = state_dir
+    os.environ['REVENIUM_MARKERS_DIR'] = markers_dir
+    sys_path_added = str(HOOK_DIR) not in sys.path
+    if sys_path_added:
+        sys.path.insert(0, str(HOOK_DIR))
+    return snapshot, sys_path_added, hermes_home, state_dir, markers_dir
+
+
+def _restore_hook_env(snapshot, sys_path_added):
+    import os
+    import sys
+    if sys_path_added and str(HOOK_DIR) in sys.path:
+        sys.path.remove(str(HOOK_DIR))
+    for k, v in snapshot.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
 
 
 class RepositoryTests(unittest.TestCase):
@@ -28,6 +73,12 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'clear-halt.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
+            # Phase 6 — agent:end classifier hook (HOOK-01)
+            SKILL / 'hooks' / 'revenium-classifier' / 'HOOK.yaml',
+            SKILL / 'hooks' / 'revenium-classifier' / 'handler.py',
+            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
+            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
+            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -939,6 +990,544 @@ class RepositoryTests(unittest.TestCase):
                 parse_prior_state(ledger_path, 'sid:with:colons', 1000)
         finally:
             import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_trivial_skip(self):
+        """HOOK-02 / D-07: a turn with no tools in the session jsonl AND response < 200 chars
+        must skip marker write — no file created."""
+        import asyncio
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-trivial-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            fixture_path = HOOK_DIR / 'test-payloads' / 'trivial-turn.json'
+            context = json.loads(fixture_path.read_text())
+            # No session jsonl exists in tmp HERMES_HOME → _count_tools_in_current_turn returns 0
+            asyncio.run(handler.handle("agent:end", context))
+            self.assertFalse(
+                (handler.MARKERS_DIR / f"{context['session_id']}.jsonl").exists(),
+                "trivial turn must NOT create marker file (HOOK-02 / D-07)",
+            )
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_never_raises(self):
+        """D-04 / SC4 belt: handler.handle MUST NOT raise out of handle() for ANY error
+        path. Inject failures at every helper boundary and confirm the handler swallows
+        and logs them instead of propagating."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-noraise-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "noraise-sid"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user"}) + "\n")
+                f.write(json.dumps({"role": "tool"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            context = {
+                "platform": "test", "user_id": "u",
+                "session_id": sid,
+                "message": "x" * 100,
+                "response": "y" * 600,  # > 200 chars, defeats trivial skip
+            }
+
+            # Case A — call_llm raises
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = RuntimeError("boom from call_llm")
+                # MUST NOT raise
+                asyncio.run(handler.handle("agent:end", context))
+            # Marker file SHOULD exist with task_type=unclassified (LLM failure fallthrough)
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            self.assertTrue(marker_path.is_file())
+            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
+            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+
+            # Case B — _write_marker_pair raises (filesystem-level catastrophic failure)
+            shutil.rmtree(handler.MARKERS_DIR, ignore_errors=True)
+            with unittest.mock.patch.object(handler, '_write_marker_pair') as mock_write:
+                mock_write.side_effect = OSError("disk full")
+                # MUST NOT raise
+                asyncio.run(handler.handle("agent:end", context))
+
+            # Case C — wrong event type → silent early return
+            asyncio.run(handler.handle("session:start", context))
+
+            # Case D — missing session_id → silent early return
+            asyncio.run(handler.handle("agent:end", {"platform": "x"}))
+
+            # Case E — call_llm returns garbage object that defeats .choices[0].message.content
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.return_value = object()  # neither attribute nor mapping interface
+                # MUST NOT raise; should write unclassified
+                asyncio.run(handler.handle("agent:end", context))
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_dedupe(self):
+        """HOOK-07 / D-13: when a fresh GUARDRAIL+CHAT pair already exists in the marker
+        file (within 30s), the hook skips the write to avoid double-writes with the
+        agent's FINAL ACTION code path."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import time
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-dedupe-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            # Seed substantive context (defeat heuristic skip)
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260513_120100_testsubstantive"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user"}) + "\n")
+                f.write(json.dumps({"role": "tool"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Pre-seed the marker file with an agent-written GUARDRAIL+CHAT pair (fresh)
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            now = time.time()
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                rec1 = {"muid": "a" * 33, "ts": now - 1.0, "sid": sid,
+                        "task_type": "code_review", "operation_type": "GUARDRAIL"}
+                rec2 = dict(rec1, muid="b" * 33, ts=now - 0.5, operation_type="CHAT")
+                f.write(json.dumps(rec1, separators=(",", ":")) + "\n")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+
+            self.assertTrue(handler._recent_marker_pair_exists(sid, within_seconds=30.0))
+
+            # Patch call_llm so we can prove it was NOT called
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = AssertionError("LLM must NOT be called when agent already wrote markers")
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_not_called()
+
+            # Marker file should still have exactly 2 lines (no hook-added lines)
+            lines = marker_path.read_text().splitlines()
+            self.assertEqual(len(lines), 2, f"hook double-wrote; got {len(lines)} lines")
+
+            # Now age the markers beyond 30s and try again — hook should write
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                rec1['ts'] = now - 120
+                rec2['ts'] = now - 120
+                f.write(json.dumps(rec1, separators=(",", ":")) + "\n")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+            self.assertFalse(handler._recent_marker_pair_exists(sid, within_seconds=30.0))
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "research"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+                asyncio.run(handler.handle("agent:end", context))
+            # Now marker file has 4 lines (2 stale + 2 new from hook)
+            lines = marker_path.read_text().splitlines()
+            self.assertEqual(len(lines), 4)
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_llm_label(self):
+        """HOOK-05 / D-06: mocked call_llm returns 'code_review'; the marker pair
+        carries task_type=code_review."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-llm-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            # Seed a session jsonl with one tool to defeat the heuristic skip
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260513_120100_testsubstantive"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user", "content": "x"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "code_review"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp) as mock_llm:
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_called_once()
+                kwargs = mock_llm.call_args.kwargs
+                self.assertNotIn('task', kwargs, "call_llm MUST be invoked WITHOUT task= per Pitfall 8 / A3")
+                self.assertEqual(kwargs.get('temperature'), 0.0)
+                self.assertEqual(kwargs.get('max_tokens'), 64)
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
+            self.assertEqual({r['task_type'] for r in recs}, {'code_review'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_llm_blocklist_fallthrough(self):
+        """HOOK-05 / D-09: when call_llm returns a forbidden label, _validate_label
+        falls through to 'unclassified'. Also covers regex-violation case."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-block-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260513_120100_testsubstantive"
+            with open(os.path.join(hh, 'sessions', f"{sid}.jsonl"), 'w') as f:
+                f.write(json.dumps({"role": "user"}) + "\n")
+                f.write(json.dumps({"role": "tool"}) + "\n")
+
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Direct _validate_label coverage
+            self.assertEqual(handler._validate_label("ack"), "unclassified")
+            self.assertEqual(handler._validate_label("code-review"), "unclassified")  # hyphen violates regex
+            self.assertEqual(handler._validate_label(""), "unclassified")
+            self.assertEqual(handler._validate_label("research"), "research")
+            self.assertEqual(handler._validate_label("CODE_REVIEW"), "code_review")  # lowercased
+
+            # End-to-end: LLM returns 'thanks' → marker file has 'unclassified'
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "thanks"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
+            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_halt_unclassified(self):
+        """HOOK-04 / D-08: when budget-status.json::halted is True, the LLM is NOT called
+        and a marker pair with task_type=unclassified is written."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-halt-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Seed a halted budget-status.json
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, 'budget-status.json'), 'w', encoding='utf-8') as f:
+                json.dump({"halted": True, "exceeded": True, "currentValue": 99,
+                           "threshold": 50, "percentUsed": 198,
+                           "haltedAt": "2026-05-13T00:00:00Z",
+                           "lastChecked": "2026-05-13T00:00:00Z"}, f)
+
+            self.assertTrue(handler._budget_halted())
+
+            # Patch call_llm so we can prove it was NOT called
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = AssertionError("LLM must NOT be called when halted (D-08)")
+                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                context = json.loads(fixture.read_text())
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_not_called()
+
+            marker_path = handler.MARKERS_DIR / f"{context['session_id']}.jsonl"
+            self.assertTrue(marker_path.is_file())
+            lines = marker_path.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+            self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_halt_failopen_on_missing_file(self):
+        """HOOK-04 / D-08: missing budget-status.json returns False from _budget_halted
+        (fail-open). The handler must NOT crash and must NOT short-circuit to unclassified."""
+        import importlib
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-halt-open-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # No budget-status.json in tmpdir → fail-open
+            self.assertFalse(handler.BUDGET_STATUS_FILE.exists())
+            self.assertFalse(handler._budget_halted())
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_subagent_inherits(self):
+        """HOOK-03 / D-05: when state.db.sessions.parent_session_id is set, the hook
+        walks to the root, reads root's marker file, and writes the subagent's marker
+        pair with the inherited task_type. NO LLM call."""
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+        import time as _time
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-subagent-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Seed a state.db with parent + child rows
+            state_db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(state_db_path)
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('root-sid-1', None))
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('child-sid-1', 'root-sid-1'))
+            conn.commit()
+            conn.close()
+
+            # Seed the parent's marker file with task_type=research
+            parent_marker = os.path.join(md, 'root-sid-1.jsonl')
+            with open(parent_marker, 'w', encoding='utf-8') as f:
+                rec = {"muid": "f" * 33, "ts": _time.time() - 60, "sid": "root-sid-1",
+                       "task_type": "research", "operation_type": "GUARDRAIL"}
+                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                rec2 = dict(rec, operation_type="CHAT")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+
+            # Patch call_llm so we can prove the LLM was NOT called
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
+                mock_llm.side_effect = AssertionError("LLM must NOT be called for subagent (D-05)")
+                context = {
+                    "platform": "test", "user_id": "u",
+                    "session_id": "child-sid-1",
+                    "message": "x",
+                    "response": "Found 3 references to FlockGuard in the repository, see lines 42, 87, 134" + " padding " * 50,
+                }
+                asyncio.run(handler.handle("agent:end", context))
+                mock_llm.assert_not_called()
+
+            # Assert the child's marker file has task_type=research, GUARDRAIL+CHAT
+            child_marker = handler.MARKERS_DIR / 'child-sid-1.jsonl'
+            self.assertTrue(child_marker.is_file())
+            lines = child_marker.read_text().splitlines()
+            self.assertEqual(len(lines), 2)
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['task_type'] for r in recs}, {'research'})
+            self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_walk_to_root(self):
+        """HOOK-03: _walk_to_root_session handles missing file, missing row, and depth cap."""
+        import importlib
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-walk-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            # Case A — missing state.db file → returns input sid
+            self.assertEqual(handler._walk_to_root_session('nope'), 'nope')
+
+            # Case B — seed db with row that has no parent → returns input sid
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('root', None))
+            conn.commit()
+            conn.close()
+            self.assertEqual(handler._walk_to_root_session('root'), 'root')
+
+            # Case C — chain of 3 → walks to root
+            conn = sqlite3.connect(db_path)
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('mid', 'root'))
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", ('leaf', 'mid'))
+            conn.commit()
+            conn.close()
+            self.assertEqual(handler._walk_to_root_session('leaf'), 'root')
+
+            # Case D — depth cap: chain of 15 self-loops → returns after max_depth steps
+            conn = sqlite3.connect(db_path)
+            for i in range(15):
+                conn.execute("INSERT OR REPLACE INTO sessions VALUES (?, ?)",
+                             (f'loop{i}', f'loop{i+1}'))
+            conn.commit()
+            conn.close()
+            # Should not infinite-loop — return after max_depth iterations
+            result = handler._walk_to_root_session('loop0', max_depth=10)
+            self.assertIsInstance(result, str)
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_substantive_uses_session_jsonl_tool_count(self):
+        """HOOK-02 / Pitfall 3: when the session jsonl has tool entries, _count_tools_in_current_turn
+        returns the right count and the trivial-skip path does NOT trigger even for short responses."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-toolcount-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            sessions_dir = os.path.join(hh, 'sessions')
+            os.makedirs(sessions_dir, exist_ok=True)
+            sid = "session-with-tools"
+            jsonl_path = os.path.join(sessions_dir, f"{sid}.jsonl")
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({"role": "user", "content": "x"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file", "content": "..."}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "terminal", "content": "..."}) + "\n")
+                f.write(json.dumps({"role": "assistant", "content": "ok"}) + "\n")
+            self.assertEqual(handler._count_tools_in_current_turn(sid), 2)
+        finally:
+            _restore_hook_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_setup_md_has_mechanical_classification_hook_section(self):
+        """HOOK-10 / D-16: references/setup.md carries a 'Mechanical classification hook'
+        section that documents the install path, gateway-restart requirement, and the
+        Conflict-C1/C2 anti-pattern callout against `hermes hooks list`."""
+        text = (SKILL / 'references' / 'setup.md').read_text(encoding='utf-8')
+        # Section heading present (H2)
+        self.assertIn('## Mechanical classification hook', text,
+                      'setup.md must carry the Phase 6 hook section per D-16')
+        # Gateway-restart instruction present
+        self.assertIn('hermes gateway restart', text,
+                      'setup.md must document the post-install gateway-restart step')
+        # Anti-pattern callout against the shell-hook CLI (Conflict C1)
+        self.assertRegex(text, r'Do NOT.*hermes hooks list',
+                         'setup.md must warn against using `hermes hooks list` for the event hook')
+        # Hook directory documented
+        self.assertIn('~/.hermes/hooks/revenium-classifier/', text,
+                      'setup.md must reference the canonical hook install path')
+        # Subagent mention
+        self.assertTrue('subagent' in text.lower(),
+                        'setup.md must mention subagent inheritance')
+        # D-16: new section appears AFTER "How attribution works"
+        attr_idx = text.find('## How attribution works')
+        hook_idx = text.find('## Mechanical classification hook')
+        self.assertGreater(attr_idx, -1, '"## How attribution works" heading must exist in setup.md')
+        self.assertGreater(hook_idx, -1, '"## Mechanical classification hook" heading must exist in setup.md')
+        self.assertGreater(hook_idx, attr_idx,
+                           'D-16: "Mechanical classification hook" section must appear AFTER "How attribution works"')
+
+    def test_revenium_classifier_marker_pair(self):
+        """HOOK-06: handler._write_marker_pair writes exactly two records (one GUARDRAIL,
+        one CHAT) to <MARKERS_DIR>/<sid>.jsonl with the Phase 2 schema, < 1024 bytes each,
+        muid matching the 33-char hex regex, with atomic O_APPEND + flock semantics."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-pair-')
+        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        try:
+            if 'handler' in sys.modules:
+                importlib.reload(sys.modules['handler'])
+            import handler
+
+            marker_path = handler._write_marker_pair('test-sid-pair', 'code_review')
+            self.assertEqual(str(marker_path), os.path.join(md, 'test-sid-pair.jsonl'))
+            lines = marker_path.read_text(encoding='utf-8').splitlines()
+            self.assertEqual(len(lines), 2, f'expected 2 markers, got {len(lines)}')
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
+            for r in recs:
+                self.assertEqual(r['sid'], 'test-sid-pair')
+                self.assertEqual(r['task_type'], 'code_review')
+                self.assertRegex(r['muid'], r'^[0-9a-f]{33}$')
+                self.assertEqual(set(r.keys()), {'muid', 'ts', 'sid', 'task_type', 'operation_type'})
+            for l in lines:
+                self.assertLess(len((l + '\n').encode('utf-8')), 1024, 'marker line exceeds 1024 bytes')
+        finally:
+            _restore_hook_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
