@@ -278,74 +278,28 @@ When the user invokes `/revenium`:
 
 ## FINAL ACTION — TASK CLASSIFICATION
 
-After you have responded to the user, your last action before yielding back is to classify the
-just-completed turn and write one or two marker records so the cron pipeline can attribute token
-spend to a meaningful activity label. This is closing discipline — it mirrors the halt check at
-the top of this file, which is opening discipline. Neither replaces the other.
+**MANDATORY — NON-NEGOTIABLE. Execute before EVERY yield back to the user on a substantive turn.** This is closing discipline; it mirrors the HALT CHECK at the top of this file (opening discipline). Skipping this step when it is required is a protocol violation — it leaves the cron pipeline blind to what you actually did and pollutes attribution with `unclassified` rows.
 
-> **Hard rule (D-09):** Classify the turn if ANY of: (a) you called a tool other than read-only file inspection; (b) you produced > 200 words of new content; (c) the user asked a question requiring multi-step reasoning. Skip the turn if your entire output is ≤ 2 sentences and called no tools.
+### Trigger (binary — no judgment calls)
 
-When uncertain whether a turn crosses the threshold, skip — do not write a marker. The cron
-falls back to `--task-type unclassified` for un-marked deltas. Under-classification is
-recoverable; over-classification permanently pollutes the taxonomy.
+You **MUST** classify the turn if ANY of these are true:
+- You called any tool other than read-only file inspection. `read_file` alone does not count. `terminal`, `execute_code`, `write_file`, `patch`, `browser_*`, `memory`, `delegate_task`, `search_files`, `process`, `vision_analyze`, etc. ALL count.
+- You produced > 200 words of new content in your response.
+- The user asked a question that required multi-step reasoning to answer.
 
-### Examples
+You **MUST** skip the marker write ONLY when ALL of these are true:
+- Your entire response is ≤ 2 sentences.
+- You called zero tools.
 
-**Example 1 — Clear substantive (CLASSIFY):**
-The user asked for a code review. You read two files with `read_file` and ran `grep` to find
-usages. You wrote a 12-sentence review with suggested changes.
-- Trigger: rule (a) — called tools (read_file, grep).
-- Decision: **classify** with `task_type = code_review`.
+There is no "borderline / when in doubt skip" path. If you can argue either side, you have already triggered rule (a), (b), or (c) — classify.
 
-**Example 2 — Clear trivial (SKIP):**
-The user typed "what is 2+2?" You replied "4." in one sentence. No tools called.
-- Trigger: none — ≤ 2 sentences, no tools.
-- Decision: **skip** — no marker written.
+### Required action sequence
 
-**Example 3 — Borderline classify (CLASSIFY):**
-The user asked you to explain how POSIX O_APPEND atomicity works. You wrote a five-paragraph
-explanation covering the kernel guarantee, practical limits on macOS vs Linux, and the
-belt-and-suspenders flock recommendation. No tools were called.
-- Trigger: rule (b) — > 200 words of new content.
-- Decision: **classify** with `task_type = analysis`.
+Before your final response yields back to the user, you **MUST** call `execute_code` with the snippet below. **DO NOT skip it. DO NOT defer it to "next turn". DO NOT respond to the user without performing it.** The success print line (`markers written: <path>`) is your confirmation that the action completed.
 
-**Example 4 — Borderline skip (SKIP):**
-The user said "good morning, can you confirm you're ready?" You replied:
-"Good morning — ready when you are." over two lines. No tools called.
-- Trigger: none — despite being multi-line, the response is ≤ 2 sentences and called no tools.
-- Decision: **skip** — no marker written.
+**Step 1 — pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent harm; minting a slightly-too-broad label is recoverable.
 
-### Lookup-first reuse
-
-Before minting a new label, read the live taxonomy and reuse any existing label that fits the
-turn's semantics. New labels are minted ONLY when no existing label clearly fits. Reuse is
-aggressive — fragmentation (`code_review` vs `code-review`) is permanent harm; minting a
-slightly-too-broad label is recoverable.
-
-```python
-import json, os
-
-taxonomy_path = os.path.expanduser("~/.hermes/state/revenium/task-taxonomy.json")
-try:
-    with open(taxonomy_path) as f:
-        taxonomy = json.load(f)
-    candidate = next(
-        (label for label in taxonomy.get("labels", {}) if label in <turn_description_keywords>),
-        None
-    )
-except (FileNotFoundError, json.JSONDecodeError):
-    candidate = None
-# If candidate is None, mint a new snake_case label matching ^[a-z][a-z0-9_]{1,47}$
-```
-
-For the full schema, normalization rules, and the atomic mint pattern, see
-`references/task-taxonomy.md`. The seed file ships at `skills/revenium/task-taxonomy.json`; the
-live mutable copy is at `~/.hermes/state/revenium/task-taxonomy.json`.
-
-### Trivial-label blocklist
-
-The cron rejects markers carrying any of these `task_type` values — they indicate the hard rule
-was not applied and a trivial acknowledgment was mis-classified as substantive work:
+The cron REJECTS markers carrying any of these `task_type` values — using them is a protocol violation:
 
 - `ack`
 - `acknowledgment`
@@ -354,64 +308,65 @@ was not applied and a trivial acknowledgment was mis-classified as substantive w
 - `hello`
 - `thanks`
 
-This list is closed-set for v1. New entries require a release.
+For the full schema, normalization rules, and the atomic mint pattern, see `references/task-taxonomy.md`. The seed file ships at `skills/revenium/task-taxonomy.json`; the live mutable copy is at `~/.hermes/state/revenium/task-taxonomy.json`.
 
-### Marker write
-
-The marker write is your last action before yielding back to the user. It is intentionally
-placed here — physically last — so recency bias works in its favor. It is the step most likely
-to be skipped under context pressure; placing it last makes it hardest to overlook.
-
-Write two marker records for every substantive turn: one with `operation_type = "GUARDRAIL"`
-(the classification decision itself, metered as a guardrail span per PROMPT-04) and one with
-`operation_type = "CHAT"` (the task work). Two records per turn is the correct invariant.
+**Step 2 — call `execute_code` with this snippet.** Replace `"code_review"` with the label you picked in Step 1. Both calls happen in the same `execute_code` invocation — one with `operation_type="GUARDRAIL"` (the classification span), one with `operation_type="CHAT"` (the work span). Two records per substantive turn is the load-bearing invariant — exactly one is a protocol violation, zero on a substantive turn is a protocol violation.
 
 ```python
-import fcntl
-import json
-import os
-import secrets
-import time
+import fcntl, json, os, secrets, time
 
-# Session ID resolution: primary mechanism is the HERMES_SESSION_ID environment variable,
-# which Hermes is expected to set for every agent invocation. If the env var is absent
-# (e.g., older Hermes versions or non-Hermes environments), fall back to a timestamp-based
-# pseudo-session-id. The fallback produces a new ID on every Python invocation, so markers
-# written across separate invocations within the same Hermes session may land in different
-# files. This is a documented limitation — the cron's Phase 3 session reconciliation against
-# state.db is the authoritative cross-check; the marker filename only needs to be groupable
-# per logical conversation.
 session_id = os.environ.get("HERMES_SESSION_ID") or f"pseudo-{int(time.time())}"
-
 markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
-os.makedirs(markers_dir, exist_ok=True)
+os.makedirs(markers_dir, mode=0o700, exist_ok=True)
 marker_path = os.path.join(markers_dir, f"{session_id}.jsonl")
 
 def muid():
     # 13-char millisecond hex timestamp prefix (sortable) + 20-char random hex suffix
-    # Total: 33 chars, collision-safe on a single machine, no pip dependency (MARK-03)
+    # = 33 chars total, collision-safe on a single machine, no pip dependency (MARK-03)
     return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
 
 def write_marker(task_type, operation_type):
-    record = {
-        "muid": muid(),
-        "ts": time.time(),
-        "sid": session_id,
-        "task_type": task_type,       # replace with the looked-up or minted label
-        "operation_type": operation_type,
-    }
+    record = {"muid": muid(), "ts": time.time(), "sid": session_id,
+              "task_type": task_type, "operation_type": operation_type}
     line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
-    encoded = line.encode("utf-8")
-    # Single O_APPEND write; atomic on local POSIX fs for records < 1024 bytes
     with open(marker_path, "ab", buffering=0) as f:
         fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(encoded)
+        f.write(line.encode("utf-8"))
 
-# Replace "code_review" below with the label from your taxonomy lookup or mint.
-# Call write_marker twice: once for the classification turn (GUARDRAIL), once for the work (CHAT).
-write_marker("code_review", "GUARDRAIL")
-write_marker("code_review", "CHAT")
+# REPLACE "code_review" with your Step 1 label.
+write_marker("code_review", "GUARDRAIL")  # classification span
+write_marker("code_review", "CHAT")       # work span
+print(f"markers written: {marker_path}")
 ```
 
-If the turn was a skip (≤ 2 sentences, no tools), no marker is written; the cron will fall back
-to `--task-type unclassified` for that session delta.
+### Self-check before yielding
+
+Immediately before yielding your final response, answer these three questions to yourself. If markers were required and you have not written them, fix it NOW — call `execute_code` with the snippet above before sending your response. Do not promise to do it next turn. There is no next turn for this protocol.
+
+1. Did I call any tool other than `read_file` in this turn? → if yes, markers REQUIRED.
+2. Did I produce > 200 words of new content? → if yes, markers REQUIRED.
+3. Did I just call `execute_code` with the `write_marker` snippet above? → if markers were REQUIRED, YES is the only acceptable answer.
+
+### Examples
+
+**Example 1 — Clear substantive (CLASSIFY):**
+User asked for a code review. You called `read_file` twice and `terminal` once (for grep). You wrote 12 sentences with suggested changes.
+- Rule (a) triggered: `terminal` is a non-read-only tool.
+- Required action: `write_marker("code_review", "GUARDRAIL")` then `write_marker("code_review", "CHAT")`.
+
+**Example 2 — Clear trivial (SKIP):**
+User typed "what is 2+2?" You replied "4." in one sentence. No tools called.
+- All skip conditions met: ≤ 2 sentences AND zero tools.
+- Required action: NONE. No marker written.
+
+**Example 3 — Borderline classify (CLASSIFY):**
+User asked you to explain POSIX O_APPEND atomicity. You wrote a five-paragraph response covering the kernel guarantee, macOS vs Linux behavior, and the belt-and-suspenders flock recommendation. No tools were called.
+- Rule (b) triggered: > 200 words of new content.
+- Required action: `write_marker("analysis", "GUARDRAIL")` then `write_marker("analysis", "CHAT")`.
+
+**Example 4 — Borderline skip (SKIP):**
+User said "good morning, can you confirm you're ready?" You replied "Good morning — ready when you are." over two short lines. No tools called.
+- All skip conditions met: ≤ 2 sentences AND zero tools.
+- Required action: NONE.
+
+Writing a marker on a clear-skip turn pollutes the taxonomy. Skipping a marker on a clear-classify turn breaks attribution. The rule is binary by design — there is no middle ground.
