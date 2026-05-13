@@ -73,6 +73,19 @@ Requirements for the initial release. Each maps to roadmap phases. Drawn from PR
 - [ ] **TEST-04**: A synthetic-bias test pins the documented S2 attribution behavior (small classification turn + large work turn → 50/50) so the known bias direction is explicit, not hidden
 - [ ] **TEST-05**: `test_no_legacy_branding_left` continues to pass for any new content; the project does NOT scrub pre-existing offenders in `.planning/codebase/*.md` (those are tracked separately)
 
+### Mechanical Classification Hook (Phase 6)
+
+- [ ] **HOOK-01**: `skills/revenium/hooks/revenium-classifier/HOOK.yaml` + `handler.py` ship in the skill at the canonical path; HOOK.yaml carries `name: revenium-classifier`, `events: [agent:end]`, and a description; handler.py exposes `async def handle(event_type: str, context: dict) -> None` matching the contract in `~/.hermes/hermes-agent/gateway/hooks.py::HookRegistry.discover_and_load()`.
+- [ ] **HOOK-02**: Handler implements the D-07 heuristic skip-fast-path: if the count of `role: tool` entries since the most recent `role: user` line in `~/.hermes/sessions/<sid>.jsonl` is zero AND `len(context['response']) < 200`, the handler returns without writing any marker.
+- [ ] **HOOK-03**: Handler walks `state.db.sessions.parent_session_id` (read-only `sqlite3.connect(..., uri=True)`, depth-capped at 10) to the root user-facing session. If the resolved root is different from the input sid AND the root's marker file carries a recent valid task_type, the subagent's marker pair inherits that task_type and the LLM is NOT called.
+- [ ] **HOOK-04**: Handler reads `~/.hermes/state/revenium/budget-status.json` before the LLM call. If `halted: true`, the LLM call is skipped, the marker pair is written with `task_type: "unclassified"`, and a WARN line is logged. If the file is missing or unreadable the handler falls open (treats as not halted).
+- [ ] **HOOK-05**: Handler imports `agent.auxiliary_client.call_llm` lazily (module-level `try/except ImportError → call_llm = None`); when call_llm is available the handler invokes it via `await asyncio.to_thread(call_llm, messages=[...], temperature=0.0, max_tokens=64, timeout=10.0)` with NO `task=` argument (per Pitfall 8 + A3 + D-06: the classifier MUST use the user's main budgeted model). The LLM's returned label is validated against `^[a-z][a-z0-9_]{1,47}$` AND the trivial blocklist `{ack, acknowledgment, greeting, confirmation, hello, thanks}`; on validation failure the marker pair is written with `task_type: "unclassified"`.
+- [ ] **HOOK-06**: Handler writes exactly two markers per substantive turn (one with `operation_type: "GUARDRAIL"`, one with `operation_type: "CHAT"`) to `~/.hermes/state/revenium/markers/<sid>.jsonl` using `O_APPEND` + `fcntl.LOCK_EX`. Each record matches the Phase 2 schema `{muid, ts, sid, task_type, operation_type}` (required) plus optional `{turn_seq, agent, trace_id, model}`, is < 1024 bytes, with `muid` = 33-char lowercase hex per MARK-03 (`f"{int(time.time_ns()//1_000_000):013x}" + secrets.token_hex(10)`).
+- [ ] **HOOK-07**: Before writing, handler reads the tail of `~/.hermes/state/revenium/markers/<sid>.jsonl` and skips the write if a GUARDRAIL+CHAT pair whose `ts` is within 30 seconds of `time.time()` already exists (D-13 belt-and-suspenders for the SKILL.md FINAL ACTION snippet running on the same turn).
+- [ ] **HOOK-08**: `examples/setup-local.sh` unconditionally replaces `~/.hermes/hooks/revenium-classifier/` with the in-skill copy at `skills/revenium/hooks/revenium-classifier/` on every install; the script's "Next steps" echo block documents `hermes gateway restart` as a required post-install action.
+- [ ] **HOOK-09**: `tests/test_repository.py` extends `test_expected_files_exist` with the 5 new hook files and adds 6 new test methods covering HOOK-02..HOOK-07 plus the 3 synthetic test-payload fixtures. The hook handler is import-conditional under `@unittest.skipUnless(_agent_aux_client_available(), ...)` for tests that exercise the real call_llm path; all other tests mock `handler.call_llm` and run unconditionally. Tests use `tempfile.mkdtemp(prefix='gsd-hook-')` + env redirect (`HERMES_HOME`, `REVENIUM_STATE_DIR`) — same pattern as `test_cron_marker_split_end_to_end`.
+- [ ] **HOOK-10**: `skills/revenium/references/setup.md` carries a `## Mechanical classification hook` section AFTER the existing `## How attribution works` documenting (a) installation via `examples/setup-local.sh`, (b) the mandatory `hermes gateway restart` post-install step, (c) the gateway startup-log verification line, and (d) an explicit "do NOT use `hermes hooks list`" callout that distinguishes the event-hook subsystem from the shell-hook CLI.
+
 ## v2 Requirements
 
 Deferred to future release. Acknowledged but not in v1 roadmap.
@@ -158,10 +171,20 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 | TEST-03 | Phase 3 | Pending |
 | TEST-04 | Phase 3 | Pending |
 | TEST-05 | Phase 5 | Pending |
+| HOOK-01 | Phase 6 | Pending |
+| HOOK-02 | Phase 6 | Pending |
+| HOOK-03 | Phase 6 | Pending |
+| HOOK-04 | Phase 6 | Pending |
+| HOOK-05 | Phase 6 | Pending |
+| HOOK-06 | Phase 6 | Pending |
+| HOOK-07 | Phase 6 | Pending |
+| HOOK-08 | Phase 6 | Pending |
+| HOOK-09 | Phase 6 | Pending |
+| HOOK-10 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 37 total
-- Mapped to phases: 37
+- v1 requirements: 47 total
+- Mapped to phases: 47
 - Unmapped: 0
 
 ---
