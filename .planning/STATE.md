@@ -2,26 +2,26 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-last_updated: "2026-05-12T23:59:16.735Z"
+status: executed
+last_updated: "2026-05-13T00:50:00.000Z"
 progress:
   total_phases: 5
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 5
-  completed_plans: 4
-  percent: 80
+  completed_plans: 5
+  percent: 100
 ---
 
 # Project State
 
-**Last Updated:** 2026-05-12 (Phase 2 execution complete — verifier PASSED)
+**Last Updated:** 2026-05-13 (Phase 3 execution complete — 12/12 tasks landed, 14/14 tests green; verification pending)
 **Project:** Hermes-Revenium Task-Type Metering
 
 ## Project Reference
 
 **Core Value:** Every metered completion that leaves this skill carries an accurate, consistently-spelled `--task-type` so Revenium analytics group spend by what the agent actually did, not just by session.
 
-**Current Focus:** Phase 03 — cron-marker-reader-equal-split-ledger-v2
+**Current Focus:** Phase 3 execution complete — ready for `/gsd-verify-work` or Phase 4 kickoff
 
 **Key Files:**
 
@@ -40,17 +40,15 @@ progress:
 
 ## Current Position
 
-Phase: 03 (cron-marker-reader-equal-split-ledger-v2) — EXECUTING
-Plan: 1 of 1
-**Phase:** 02 (Prompt Design & Marker Contract) — COMPLETE
-**Plans:** 3 of 3 executed; verifier PASSED (5/5 automated SC; SC1 human gate before release)
-**Status:** Executing Phase 03
-**Progress:** 2/5 phases complete
+**Phase:** 03 (Cron Marker Reader + Equal-Split + Ledger v2) — EXECUTED
+**Plans:** 1 of 1 executed (single fat plan per D-01, 12 atomic commits T01-T12)
+**Status:** Ready for verification (`/gsd-verify-work 3`)
+**Progress:** 3/5 phases executed
 
 ```
 [██████████] 100% Phase 1: Path Foundation                              Complete
 [██████████] 100% Phase 2: Prompt Design & Marker Contract              Complete
-[░░░░░░░░░░] 0%   Phase 3: Cron Marker Reader + Equal-Split + Ledger v2 Not started
+[██████████] 100% Phase 3: Cron Marker Reader + Equal-Split + Ledger v2 Executed (verification pending)
 [░░░░░░░░░░] 0%   Phase 4: Wire Enrichment                              Not started
 [░░░░░░░░░░] 0%   Phase 5: Housekeeping & Compat Hardening              Not started
 ```
@@ -61,8 +59,8 @@ Plan: 1 of 1
 |--------|-------|
 | v1 requirements | 37 |
 | Mapped to phases | 37 (100%) |
-| Phases planned | 2/5 |
-| Phases complete | 2/5 |
+| Phases planned | 3/5 |
+| Phases complete | 3/5 (Phase 3 verification pending) |
 | Granularity | coarse |
 | Mode | yolo / standard horizontal-layers |
 
@@ -82,6 +80,17 @@ From `PROJECT.md` Key Decisions (all carry-forward from project initialization):
 8. **Classify substantive turns only.** Trivial acks would pollute the taxonomy.
 9. **Taxonomy growth is agent-managed; no automatic merge pass in v1.** Dedupe tooling is v2.
 
+### Phase 3 Execution Notes (2026-05-13)
+
+- **All 12 tasks landed atomically.** Commit chain: `cd34a20` → `c59d823` → `51b4ad5` → `7b523ff` → `525773a` (CUTOVER) → `a273c06` (pre-resume scope fix) → `ce874bf` (pre-resume state/deferred-items) → `6769275` → `08af84b` → `ad57d24` → `081ee67` → `585497b` → `242699a` → T12 final audit.
+- **Two API-error recoveries during executor spawns.** Spawn 1 landed T01-T05 before timeout; spawn 2 landed T06 before another timeout. Remaining T07-T12 executed inline to avoid further timeouts. All deviations and recoveries documented in `03-01-SUMMARY.md`.
+- **Two load-bearing design deviations from the plan (both surfaced by tests):**
+  1. T07 flock heredoc — the plan's `<&9` stdin redirection silently bypasses contention. Switched to bare `python3 - <<'PY'` with `fcntl.flock(9, ...)` on bash's inherited fd 9. PLAN.md and RESEARCH.md should be updated in Phase 5 housekeeping.
+  2. `parse_prior_state` semantics — narrowed-to-total_tokens muids + ts cutoff made SC2 partial-failure recovery unachievable. Changed to GLOBAL per-sid muids; ts cutoff is now v1-only fallback. T10's plan-spec assertions also reflect the global semantics.
+- **Pre-existing legacy-branding test scope fix** — planning artifacts (PLAN.md/RESEARCH.md/PATTERNS.md) contained forbidden tokens in backticks while quoting anti-patterns. User-approved fix: scope `test_no_legacy_branding_left` to exclude `.planning/`.
+- **`deferred-items.md` from the prior executor run is now RESOLVED.** Phase 5 cleanup can delete the file.
+- **All 5 success criteria verified by automated tests.** Test count: 14 (was 11 pre-Phase-3).
+
 ### Phase 2 Resolutions
 
 - **HERMES_SESSION_ID mechanism pinned (Option b):** `os.environ.get("HERMES_SESSION_ID") or f"pseudo-{int(time.time())}"`. Phase 3 cron reconciles markers against `state.db` so the pseudo-id fallback is acceptable as a transitional mechanism.
@@ -100,9 +109,9 @@ None.
 
 ## Session Continuity
 
-**Last Session:** 2026-05-12T21:15:25.091Z
+**Last Session:** 2026-05-13T00:50:00.000Z
 
-**Next Session:** Run `/gsd-plan-phase 3` to plan the Cron Marker Reader + Equal-Split + Ledger v2 phase. Phase 3 must ship as ONE coherent migration — partial adoption breaks the load-bearing idempotency invariant. Phase 3 picks up TAX-05 and MARK-04 as carry-forwards from Phase 2 reassignment.
+**Next Session:** Run `/gsd-verify-work 3` to confirm Phase 3 success criteria, then `/gsd-plan-phase 4` to plan Wire Enrichment. Phase 3 has 12 atomic commits, 5 SC verified by tests, 14/14 suite green.
 
 **Phase 2 delivered (across multiple commits on main):**
 

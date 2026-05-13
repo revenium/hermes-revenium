@@ -11,7 +11,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 
 - [x] **Phase 1: Path Foundation** - Declare `TAXONOMY_FILE` and `MARKERS_DIR` in `common.sh`; create directory with `chmod 700`; extend path-discipline test. (2026-05-12)
 - [x] **Phase 2: Prompt Design & Marker Contract** - End-load the SKILL.md classification block, seed taxonomy, define marker schema; ship BEFORE any cron behavior changes to bound halt-check regression risk. (2026-05-12)
-- [ ] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency.
+- [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
 
@@ -63,7 +63,7 @@ Plans:
 **Research needed**: Before planning begins, use the `manage_metering` MCP tool to verify Revenium server-side `--operation-type` default behavior. If the absence of `--operation-type` differs in cost from explicit `CHAT`, WIRE-01 will require a release-note migration path (per SUMMARY.md research flag). [RESOLVED in 03-RESEARCH.md Summary point 4 — Phase 3 does NOT add a default; Phase 4 (WIRE-01) owns that decision.]
 
 Plans:
-- [ ] 03-01-PLAN.md — Single fat plan: split_strategies.py + LOCK_FILE in common.sh + hermes-report.sh marker reader + per-marker emission + v2 ledger writes + extended transaction-id + zero-marker fallthrough + fail-open per-session tolerance + cron.sh fcntl flock + references/setup.md S2 bias framing + TEST-03 conservation + TEST-04 bias pinning + ledger v1/v2 discrimination (TAX-05, MARK-04, CRON-01, CRON-02, CRON-03, CRON-04, CRON-05, CRON-06, CRON-07, CRON-08, CRON-09, COMPAT-02, COMPAT-03, TEST-03, TEST-04)
+- [x] 03-01-PLAN.md — Single fat plan: split_strategies.py + LOCK_FILE in common.sh + hermes-report.sh marker reader + per-marker emission + v2 ledger writes + extended transaction-id + zero-marker fallthrough + fail-open per-session tolerance + cron.sh fcntl flock + references/setup.md S2 bias framing + TEST-03 conservation + TEST-04 bias pinning + ledger v1/v2 discrimination (TAX-05, MARK-04, CRON-01, CRON-02, CRON-03, CRON-04, CRON-05, CRON-06, CRON-07, CRON-08, CRON-09, COMPAT-02, COMPAT-03, TEST-03, TEST-04)
 
 ### Phase 4: Wire Enrichment
 **Goal**: Each split metering call carries the richest `--operation-type`, `--agent`, and `--trace-id` available from the marker, with a documented, conservative fallback to today's hardcoded values; provider inference and cost scaling never regress across any split call.
@@ -112,7 +112,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 |-------|----------------|--------|-----------|
 | 1. Path Foundation | 1/1 | Complete | 2026-05-12 |
 | 2. Prompt Design & Marker Contract | 0/3 | Not started | - |
-| 3. Cron Marker Reader + Equal-Split + Ledger v2 | 0/1 | Planned | - |
+| 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Executed (verification pending) | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
 
