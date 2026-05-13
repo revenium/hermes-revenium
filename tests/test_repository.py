@@ -26,6 +26,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'budget-check.sh',
             SKILL / 'scripts' / 'hermes-report.sh',
             SKILL / 'scripts' / 'clear-halt.sh',
+            # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
+            SKILL / 'scripts' / 'split_strategies.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -198,6 +200,50 @@ class RepositoryTests(unittest.TestCase):
         # Pitfall 4 invariant: fixture must include exactly one GUARDRAIL and one CHAT
         self.assertEqual({r['operation_type'] for r in fixture_records}, {'GUARDRAIL', 'CHAT'},
                          'fixture must include exactly one GUARDRAIL and one CHAT marker per substantive turn')
+
+    def test_split_strategies_conservation(self):
+        """COMPAT-02 / TEST-03 pure-function half: sum of split numeric fields equals input
+        delta byte-exact across N in {1, 2, 5, 10} with divisible AND non-divisible deltas."""
+        import sys
+        from decimal import Decimal
+        sys.path.insert(0, str(SKILL / 'scripts'))
+        from split_strategies import equal_split, INT_FIELDS, COST_FIELD
+        cases = [
+            # (delta, n) — RESEARCH.md Example 3 verbatim, plus n=1
+            ({"input": 8000, "output": 3000, "cache_read": 100, "cache_write": 50,
+              "total": 11000, "cost": "0.123456"}, 1),
+            ({"input": 8000, "output": 3000, "cache_read": 100, "cache_write": 50,
+              "total": 11000, "cost": "0.123456"}, 2),
+            ({"input": 8000, "output": 3000, "cache_read": 100, "cache_write": 50,
+              "total": 11000, "cost": "0.123456"}, 5),
+            ({"input": 8001, "output": 3001, "cache_read": 101, "cache_write": 51,
+              "total": 11003, "cost": "0.987654"}, 10),  # non-divisible by N
+        ]
+        for delta, n in cases:
+            splits = equal_split(delta, n)
+            self.assertEqual(len(splits), n, f"expected {n} splits for n={n}")
+            for k in INT_FIELDS:
+                self.assertEqual(sum(s[k] for s in splits), delta[k],
+                                 f"conservation violated for {k} at n={n}")
+            # Decimal-exact cost conservation
+            self.assertEqual(
+                sum(Decimal(s[COST_FIELD]) for s in splits),
+                Decimal(delta[COST_FIELD]),
+                f"cost conservation violated at n={n}",
+            )
+
+    def test_split_strategies_pluggable_shape(self):
+        """D-06: the module docstring records the plug-in contract for future S3/S4
+        strategies so contributors know the seam is locked-down. Contract-on-docstring
+        test (cheap to maintain, hard to silently break)."""
+        import sys
+        sys.path.insert(0, str(SKILL / 'scripts'))
+        import split_strategies
+        doc = split_strategies.__doc__ or ''
+        self.assertIn('def weighted_split', doc,
+                      'docstring must record def weighted_split signature per D-06')
+        self.assertIn('def guardrail_estimator_split', doc,
+                      'docstring must record def guardrail_estimator_split signature per D-06')
 
     def test_prompt_ordering_invariant(self):
         """Halt-check anchor appears before the classification anchor in SKILL.md."""
