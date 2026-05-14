@@ -14,7 +14,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 - [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
-- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 surfaced 2026-05-13; gap closure in 06-02-PLAN.md migrates to hermes_cli on_session_end plugin for universal session coverage)
+- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 gap closure executed 2026-05-14 via 06-02-PLAN.md → hermes_cli on_session_end plugin; phase pending Mac Studio re-UAT — VERIFICATION.md status: requires_rerun_uat)
 
 ## Phase Details
 
@@ -102,7 +102,7 @@ Plans:
 
 Plans:
 - [x] 06-01-PLAN.md — Single fat plan: HOOK.yaml + handler.py with subagent-inherit + heuristic-skip + budget-halt + LLM-classify + atomic marker pair write + D-13 dedupe + setup-local.sh hook copy + setup.md docs + 6 unittest methods + 3 synthetic agent:end fixtures (HOOK-01..HOOK-10)
-- [ ] 06-02-PLAN.md — Gap closure: factor classifier into shared module, add on_session_end plugin (plugin.yaml + __init__.py), delete agent:end gateway hook, migrate setup-local.sh + tests + setup.md, add HOOK-11 (HOOK-01..HOOK-10 carried, HOOK-11 added)
+- [x] 06-02-PLAN.md — Gap closure: factor classifier into shared module, add on_session_end plugin (plugin.yaml + __init__.py), delete agent:end gateway hook, migrate setup-local.sh + tests + setup.md, add HOOK-11 (HOOK-01..HOOK-10 carried, HOOK-11 added)
 **Locked decisions (from UAT discussion 2026-05-13)**:
   - Subagent task_type inheritance: walk `state.db.sessions.parent_session_id` to the root user-facing parent; subagent inherits the root's task_type. Single classification per request lineage.
   - Classifier: LLM-assisted using the Revenium-budgeted model. Heuristic fast-paths for trivial turns (≤ 2 sentences AND zero tools = skip). Budget halt gates the LLM call.
@@ -144,7 +144,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
-| 6. Mechanical Classification via agent:end Hook | 1/2 | In progress — G-01 gap closure planned in 06-02-PLAN.md | 2026-05-13 |
+| 6. Mechanical Classification via agent:end Hook | 2/2 | Plans executed — pending Mac Studio re-UAT for G-01 closure (VERIFICATION.md: requires_rerun_uat) | 2026-05-14 |
 
 ## Research Flags
 
