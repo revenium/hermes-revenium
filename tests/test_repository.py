@@ -1338,6 +1338,99 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_prompt_mint_first_bias(self):
+        """Regression guard for the mint-first prompt rewrite.
+
+        Asserts that _build_classification_prompt returns a string containing:
+        - The mint-first anchor phrase "Mint a SPECIFIC, DESCRIPTIVE label"
+        - All five concrete example labels anchoring 2-4 word granularity
+        - An AVOID line that names the bland catch-alls
+        - The regex contract ^[a-z][a-z0-9_]{1,47}$
+        - The forbidden-labels line containing 'ack'
+        - A reuse-as-narrow-exception framing (not the old 'Pick the single best-fitting')
+
+        Also pins the prompt size to <= 4096 chars so D-06 prompt-size invariant
+        cannot silently regress.
+        """
+        import importlib
+        import sys
+        import tempfile
+        import os
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-prompt-bias-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            result = handler._build_classification_prompt(
+                "user message text",
+                "assistant response text",
+                ["generation", "code_review", "research"],
+            )
+
+            # Mint-first anchor phrase
+            self.assertIn(
+                "Mint a SPECIFIC, DESCRIPTIVE label",
+                result,
+                "Prompt must contain the mint-first anchor phrase",
+            )
+
+            # Concrete example labels anchoring granularity
+            for example in (
+                "weekly_pr_review",
+                "prod_log_triage",
+                "news_summary",
+                "sql_query_debug",
+                "release_notes_draft",
+            ):
+                self.assertIn(example, result, f"Prompt must contain example label '{example}'")
+
+            # AVOID line naming bland catch-alls
+            self.assertIn(
+                "AVOID",
+                result,
+                "Prompt must contain an explicit AVOID line",
+            )
+            self.assertIn(
+                "generation",
+                result,
+                "Prompt AVOID line must name 'generation'",
+            )
+
+            # Regex contract present
+            self.assertIn(
+                "^[a-z][a-z0-9_]{1,47}$",
+                result,
+                "Prompt must contain the regex contract ^[a-z][a-z0-9_]{1,47}$",
+            )
+
+            # Forbidden-labels line present
+            self.assertIn(
+                "ack",
+                result,
+                "Prompt must retain the forbidden-labels line containing 'ack'",
+            )
+
+            # Old bland framing must be gone
+            self.assertNotIn(
+                "Pick the single best-fitting existing label",
+                result,
+                "Old lookup-first framing must not appear in the mint-first prompt",
+            )
+
+            # Prompt-size invariant: fits within ~4 KB
+            self.assertLessEqual(
+                len(result),
+                4096,
+                f"Prompt must be <= 4096 chars; got {len(result)}",
+            )
+        finally:
+            _restore_plugin_env(snap, added)
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_revenium_classifier_halt_unclassified(self):
         """HOOK-04 / D-08: when budget-status.json::halted is True, the LLM is NOT called
         and a marker pair with task_type=unclassified is written."""
