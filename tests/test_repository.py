@@ -611,9 +611,8 @@ class RepositoryTests(unittest.TestCase):
             flags = argv_to_flags(invocations[0])
             self.assertEqual(flags.get('--task-type'), 'unclassified',
                              'zero-marker fallthrough must use --task-type unclassified')
-            self.assertNotIn('--operation-type', flags,
-                             'zero-marker fallthrough must NOT emit --operation-type '
-                             '(Phase 4 WIRE-01 owns that decision)')
+            self.assertEqual(flags.get('--operation-type'), 'CHAT',
+                             'zero-marker fallthrough must emit --operation-type CHAT (WIRE-01 / D-22)')
             self.assertEqual(flags.get('--transaction-id'), f'{sid_zero}-{total_tokens}',
                              'B4: zero-marker --transaction-id must be ${sid}-${total_tokens} '
                              '(no synthetic muid suffix in wire id)')

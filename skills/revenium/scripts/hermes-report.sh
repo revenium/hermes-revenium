@@ -607,9 +607,7 @@ PY
       # No markers in this window. Reasons: older install with no agent classification,
       # missing/empty marker file, all marker lines unparseable, or this session's
       # marker file was unreadable (TAX-05 / MARK-04 tolerance — see T04 reader heredoc).
-      # Argv differs from the pre-Phase-3 legacy single-call ONLY by the addition of
-      # --task-type unclassified (SC3 byte-diff invariant). Do NOT emit --operation-type:
-      # Phase 4 owns the WIRE-01 default decision per CONTEXT.md research_gates.
+      # WIRE-01 / D-22: emit --operation-type CHAT — gate discharged in 04-RESEARCH.md (Revenium server-side default; cost parity verified across 50+ historical records).
       # B4: --transaction-id stays as ${sid}-${total_tokens} — the synthetic muid that
       # appears in the v2 ledger row's field 5 is a LEDGER-SIDE identifier only, NEVER
       # in the wire transaction-id. Extending --transaction-id here would break SC3.
@@ -633,6 +631,7 @@ PY
         --is-streamed
         --quiet
         --task-type "unclassified"
+        --operation-type "CHAT"
       )
 
       if [[ -n "${billing_provider}" ]]; then
