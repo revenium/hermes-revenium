@@ -161,5 +161,52 @@ The load-bearing invariant: **on every Hermes session turn yield-back, exactly t
 
 ---
 
+## Gap-closure addendum (2026-05-13 — post-UAT)
+
+Surfaced by operator UAT on the Mac Studio (172.16.1.175) against gsd/phase-6-uat @ f3f4efa. See `06-HUMAN-UAT.md G-01` and `06-VERIFICATION.md` (status: gaps_found) for the evidence trail.
+
+### What broke
+
+`agent:end` is emitted exclusively from `hermes-agent/gateway/run.py:7631` — only platform-served gateway sessions (Telegram / Discord / Slack / WhatsApp / Webhook). CLI sessions (`hermes chat -q`), interactive `hermes chat`, ACP integrations, and gateway-internal cron-ticker sessions complete `run_conversation()` without ever emitting `agent:end`. Two synthetic CLI substantive turns confirmed this: hook loaded at gateway startup, but zero marker files were written for either turn.
+
+The Phase 6 phase goal ("a Hermes lifecycle hook deterministically writes a marker record ... independent of whether the agent loaded the revenium skill or executed the FINAL ACTION self-classification code") is therefore not achieved for the dominant dev-time path.
+
+### Locked decision (D-19)
+
+**Replace the `agent:end` gateway-hook integration with a `hermes_cli` plugin that registers `on_session_end`.**
+
+Why `on_session_end`:
+- Emitted from `hermes-agent/run_agent.py:15164` at the end of EVERY `run_conversation()` call
+- Fires for ALL session sources: gateway-served (Telegram et al.) AND CLI one-shot AND interactive AND ACP AND cron-spawned
+- Payload provided: `session_id`, `completed`, `interrupted`, `model`, `platform` — exactly the fields the existing handler.py expects
+
+Why a plugin and not a hook:
+- The two events (`agent:end`, `on_session_end`) belong to two different registration mechanisms in Hermes. Gateway hooks (YAML manifest under `~/.hermes/hooks/`) listen to gateway-bus events. Plugins (Python `register(ctx)` under `~/.hermes/plugins/`) listen to CLI/agent-core bus events. We have to switch registration mechanisms because the event we want lives on the other bus.
+- Reference pattern: `hermes-agent/plugins/disk-cleanup/` ships exactly the shape we need — `plugin.yaml` manifest + `__init__.py` with `register(ctx)` that calls `ctx.register_hook("on_session_end", handler)`.
+
+### Out of scope (deliberately)
+
+- Keeping the gateway hook alongside the plugin. `on_session_end` already fires for gateway-served sessions (because gateway/run.py invokes `run_conversation()`), so the gateway hook would double-fire and require dedup. Single-firing is the cleaner invariant — delete the old hook outright.
+- Editing upstream `hermes-agent/` source to make `agent:end` fire from `run_agent.py`. We do not own that codebase.
+
+### What the gap-closure plan must do
+
+| Concern | Action |
+|---------|--------|
+| Plugin manifest | Add `skills/revenium/plugins/revenium-classifier/plugin.yaml` (`name: revenium-classifier`, `hooks: [on_session_end]`, description). |
+| Plugin entrypoint | Add `skills/revenium/plugins/revenium-classifier/__init__.py` exporting `def register(ctx)` that registers `on_session_end → handler`. Reuse classification + marker-write helpers from the existing `handler.py`. |
+| Shared module refactor | Factor the classification + marker-write logic from `skills/revenium/hooks/revenium-classifier/handler.py` into a shared module (`skills/revenium/plugins/revenium-classifier/classifier.py` or similar). Both the new plugin entrypoint AND tests should import from the shared module so duplicate code does not drift. |
+| Remove gateway hook | Delete `skills/revenium/hooks/revenium-classifier/{HOOK.yaml, handler.py, test-payloads/}`. The gateway hook is redundant under the plugin and creates a double-fire / dedup contract that we explicitly do not want. |
+| Distribution | Update `examples/setup-local.sh` so it (a) copies `skills/revenium/plugins/revenium-classifier/` to `~/.hermes/plugins/revenium-classifier/` and (b) adds `revenium-classifier` to `plugins.enabled` in `~/.hermes/config.yaml` (with an idempotent yaml-aware insert; if config.yaml is missing, print a one-line manual step). Remove the old hook-copy block. Keep the "Restart Hermes gateway" next-step line. |
+| Tests | Migrate the 6 HOOK-* test methods in `tests/test_repository.py` to invoke the plugin entrypoint (or the shared module) instead of `handler.handle`. Keep the underlying classification/marker-pair/inheritance/halt/dedupe assertions. Update `test_revenium_classifier_files_exist` to assert the plugin path (`skills/revenium/plugins/revenium-classifier/`) and remove the hook-path assertion. |
+| Docs | Update `skills/revenium/references/setup.md`'s "Mechanical classification hook" section to describe the plugin: new install path, gateway-restart still required (plugin manager loads at agent startup), and a one-line note that the plugin covers gateway + CLI + ACP + interactive + cron — not just gateway. |
+| ROADMAP / REQUIREMENTS | Add a `HOOK-11` requirement for "plugin-based universal session coverage" and check it off when the gap is closed. Update Phase 6 ROADMAP success criteria SC1 / SC2 strings to refer to the plugin path + plugin-loader log line instead of `[hooks] Loaded hook ...`. Mark G-01 as resolved in the verification table. |
+| UAT re-run on Mac Studio | The new plan should land back on `gsd/phase-6-uat` for a second operator UAT — both a CLI substantive turn AND a Telegram message should produce marker files with non-`unclassified` task_type. The cron tick should then ship `--task-type <label>` to Revenium. |
+
+The renaming from "hook" to "plugin" is **load-bearing** for ROADMAP / SC1 / SC2 phrasing — they currently say `~/.hermes/hooks/revenium-classifier/...` and `[hooks] Loaded hook 'revenium-classifier'`. The gap-closure plan must update those success-criteria strings too, otherwise the verifier will mark the gap unclosed even after the code works.
+
+---
+
 *Phase: 06-mechanical-classification-agent-end-hook*
 *Context gathered: 2026-05-13 via Phase 3 UAT findings + Hermes hook discovery + locked design decisions (subagent inheritance, LLM-assisted classification)*
+*Gap-closure addendum: 2026-05-13 via Mac Studio UAT — D-19 locked: switch from gateway `agent:end` hook to `hermes_cli` `on_session_end` plugin*
