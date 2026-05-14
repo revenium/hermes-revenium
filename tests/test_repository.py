@@ -1016,9 +1016,10 @@ class RepositoryTests(unittest.TestCase):
             import shutil
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def test_revenium_classifier_trivial_skip(self):
-        """HOOK-02 / D-07: a turn with no tools in the session jsonl AND response < 200 chars
-        must skip marker write — no file created."""
+    def test_revenium_classifier_no_tools_classified_not_skipped(self):
+        """HOTFIX D-07 mirror: D-07 trivial-skip removed. A turn with no tools and a short
+        response must now flow through to the LLM classifier step (and in the test env where
+        call_llm is None, must produce an 'unclassified' marker file)."""
         import asyncio
         import importlib
         import json
@@ -1043,9 +1044,9 @@ class RepositoryTests(unittest.TestCase):
                 model=context.get('model'),
                 platform=context.get('platform'),
             ))
-            self.assertFalse(
+            self.assertTrue(
                 (handler.MARKERS_DIR / f"{context['session_id']}.jsonl").exists(),
-                "trivial turn must NOT create marker file (HOOK-02 / D-07)",
+                "no-tools turn must NOW create marker file — D-07 skip removed; classifier falls through to unclassified write",
             )
         finally:
             _restore_plugin_env(snap, added)
