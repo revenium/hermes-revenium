@@ -1,0 +1,5 @@
+name: revenium-classifier
+version: 1.0.0
+description: Universal-coverage Hermes plugin that classifies every run_conversation() session end and writes a GUARDRAIL+CHAT marker pair for Revenium task-type attribution. Covers gateway-served, CLI, interactive, ACP, and cron sessions.
+hooks:
+  - on_session_end
