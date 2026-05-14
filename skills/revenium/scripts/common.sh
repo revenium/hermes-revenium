@@ -16,9 +16,10 @@ ENV_FILE="${STATE_DIR}/env"
 STATE_DB="${HERMES_HOME}/state.db"
 TAXONOMY_FILE="${REVENIUM_TAXONOMY_FILE:-${STATE_DIR}/task-taxonomy.json}"
 MARKERS_DIR="${REVENIUM_MARKERS_DIR:-${STATE_DIR}/markers}"
+MARKERS_READY_DIR="${REVENIUM_MARKERS_READY_DIR:-${STATE_DIR}/markers/.ready}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 
-mkdir -p "${STATE_DIR}" "${MARKERS_DIR}"
+mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}"
 
 ensure_path() {
   local brew_prefix=""
