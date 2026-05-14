@@ -207,6 +207,60 @@ The renaming from "hook" to "plugin" is **load-bearing** for ROADMAP / SC1 / SC2
 
 ---
 
+## Gap-closure addendum #2 (2026-05-14 — post-UAT round 2)
+
+UAT round 2 on Mac Studio (172.16.1.175 against `gsd/phase-6-uat @ 5f493c0`, plans 06-01 + 06-02 deployed) confirmed plan 06-02's architectural fix LANDED — the `hermes_cli` plugin loads, `register(ctx)` runs cleanly, `on_session_end` callback fires. But a CLI substantive turn still produced no marker file. See `06-HUMAN-UAT.md::G-02` for the full evidence trail.
+
+### What broke (G-02)
+
+`classifier._count_tools_in_current_turn(sid)` reads `~/.hermes/sessions/<sid>.jsonl` to count tool calls in the current turn. `hermes_cli/oneshot.py::_create_session_db_for_oneshot` writes session data only to `~/.hermes/state.db`, not to the per-session JSONL the gateway uses. The file is **absent** for CLI one-shot sessions.
+
+With JSONL absent → `_count_tools_in_current_turn` returns 0. The `on_session_end` payload also doesn't include `response` text, so `response_preview = ""` → `len < 200`. Both heuristic-skip conditions match (`tool_count == 0` AND `response < 200 chars`) → the classifier correctly takes the trivial-skip path and writes no marker. Every CLI substantive turn is silently mis-classified as trivial.
+
+The unit tests didn't catch this because every test fixture creates a synthetic tmpdir JSONL — the JSONL-absent branch was never exercised. Production CLI hits that branch on every invocation.
+
+### Locked decision (D-20)
+
+**Switch the tool-count source of truth from the per-session JSONL to `state.db.sessions.tool_call_count`. JSONL becomes a fallback.**
+
+Why state.db is the right source:
+- `tool_call_count` is populated for **every** session source (CLI, gateway-served, interactive, ACP, cron) — it's a column on the `sessions` table, written by every code path that runs `run_conversation`.
+- The classifier already opens `state.db` via `sqlite3.connect(..., mode=ro)` for the parent-session walk in `_walk_to_root_session`. Adding a query against the same row is one extra parameterized SELECT.
+- No new privilege boundary — same read-only connection.
+- The fallback semantics: if state.db row is missing (very rare — would only happen if the on_session_end fires before the row is committed, which the upstream code at run_agent.py:15164 explicitly orders AFTER the session-DB write), fall back to JSONL. JSONL absent in that fallback → 0 (current behavior). Belt-and-braces; the primary path is state.db.
+
+### Scope discipline (locked)
+
+This plan is **narrowly scoped to G-02 only**. Out of scope for 06-03:
+- The "tool-less Telegram turn gets trivial-skipped because response_preview is always 0" concern. Surfaced during diagnosis but operator decision: tool-less + short-response turns are arguably correctly classified as trivial chatter per the Phase 2 intent ("classify substantive turns only"). If it turns out tool-less production turns ARE substantive and need attribution, address in a follow-up — do not bundle here.
+- The 3 code-review blockers in `06-02-REVIEW.md` (CR-01 subagent dedup, CR-02 walk-to-root depth-cap, CR-03 flow-style YAML). CR-01 and CR-02 are pre-existing carry-forward bugs from 06-01; CR-03 doesn't fire on the Mac Studio (no flow-style enabled list). Schedule a separate polish pass after Phase 6 closes.
+
+### What the gap-closure plan must do
+
+| Concern | Action |
+|---------|--------|
+| `_count_tools_in_current_turn` rewrite | In `skills/revenium/plugins/revenium-classifier/classifier.py`, rewrite `_count_tools_in_current_turn(sid)` to query `state.db.sessions.tool_call_count WHERE id = ?` first (using the same `mode=ro` URI pattern already in `_walk_to_root_session`). Return that integer. On `sqlite3.OperationalError` (db locked, missing) OR `None` row OR `None` value → fall back to the existing JSONL-reading path. On JSONL absent → 0 (current end-state for the fallback). D-04 invariant preserved: every exception path returns an integer; never raises. |
+| Test: state.db row drives the count (positive) | New unit test: synthetic state.db with `INSERT INTO sessions (id, source, started_at, tool_call_count) VALUES ('test-sid', 'cli', 0, 3);` AND no JSONL file at `~/.hermes/sessions/test-sid.jsonl` — assert `_count_tools_in_current_turn('test-sid') == 3`. This is the test the round-1 plan-checker should have asked for. |
+| Test: JSONL fallback (negative) | New unit test: state.db without the sid (or with tool_call_count NULL), JSONL has 5 role:tool entries — assert `_count_tools_in_current_turn('test-sid') == 5`. |
+| Test: both absent → 0 | New unit test: neither state.db row nor JSONL — assert `_count_tools_in_current_turn('test-sid') == 0`. (Should already pass, but assert explicitly so the heuristic-skip-on-empty-session contract is pinned.) |
+| Test: behavioral — CLI substantive turn writes marker | New end-to-end test that simulates a CLI substantive turn (state.db row with tool_call_count=2, no JSONL) and asserts that `run_classification` produces a marker file with a non-`unclassified` `task_type`. This is the test that would have caught G-02 in CI. Mock `call_llm` to return a valid label. |
+| HOOK-12 requirement | Add `HOOK-12` to `.planning/REQUIREMENTS.md`: "Tool-count signal MUST be sourced from `state.db.sessions.tool_call_count` (universal — populated for every session source), with JSONL as fallback. The classifier MUST NOT mis-classify CLI / interactive / ACP / cron sessions as trivial solely because the gateway-style JSONL is absent." |
+| ROADMAP success criteria update | Update Phase 6 ROADMAP SC2 to explicitly say "covers every session source including those without per-session JSONL (CLI one-shot, ACP, cron) — verified by an end-to-end test that creates a state.db row with `tool_call_count > 0` and NO JSONL, then asserts the classifier writes a marker file with non-`unclassified` `task_type`". |
+| VERIFICATION.md G-02 transition | Update `06-VERIFICATION.md::gaps[G-02].gap_closure` from `pending` to `executed`. Keep `status: requires_rerun_uat` until UAT round 3 confirms a CLI substantive turn produces a marker on Mac Studio. |
+| UAT round 3 on Mac Studio | After execution: re-run UAT 3 on `gsd/phase-6-uat`. Confirm: `hermes chat -q "..."` substantive turn → marker file appears with non-`unclassified` task_type → next cron tick ships `--task-type <label>` to Revenium (not `unclassified`). Mac Studio config.yaml already has `plugins.enabled: revenium-classifier` from UAT-2; no setup re-run needed. |
+
+### Out of scope (deliberately)
+
+- Touching anything else in `classifier.py` beyond `_count_tools_in_current_turn`.
+- Changing the heuristic-skip threshold or logic shape.
+- Adding the response-text signal to the substance heuristic.
+- Touching `__init__.py::_on_session_end` callback signature.
+- Migrating any of the existing 12 HOOK-* tests (they use synthetic JSONL; preserve as-is).
+- Touching setup-local.sh, references/setup.md, REQUIREMENTS HOOK-01..HOOK-11 (carried unchanged from 06-02).
+
+---
+
 *Phase: 06-mechanical-classification-agent-end-hook*
 *Context gathered: 2026-05-13 via Phase 3 UAT findings + Hermes hook discovery + locked design decisions (subagent inheritance, LLM-assisted classification)*
 *Gap-closure addendum: 2026-05-13 via Mac Studio UAT — D-19 locked: switch from gateway `agent:end` hook to `hermes_cli` `on_session_end` plugin*
+*Gap-closure addendum #2: 2026-05-14 via Mac Studio UAT round 2 — D-20 locked: switch tool-count source from per-session JSONL to state.db.sessions.tool_call_count, JSONL fallback*
