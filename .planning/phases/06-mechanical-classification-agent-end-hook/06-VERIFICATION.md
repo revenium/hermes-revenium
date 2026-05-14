@@ -1,7 +1,7 @@
 ---
 phase: 06-mechanical-classification-agent-end-hook
 verified: 2026-05-13T18:59:09Z
-updated: 2026-05-14T07:20:00Z
+updated: 2026-05-14T08:00:00Z
 status: requires_rerun_uat
 gap_closure_plan: 06-02-PLAN.md
 score: 11/11 must-haves verified (automated); operator UAT on Mac Studio surfaced a Phase 6 goal gap (see 06-HUMAN-UAT.md G-01)
@@ -23,14 +23,15 @@ gaps:
     relates_to: [HOOK-02, HOOK-11, SC2, SC6]
   - id: G-03
     severity: high
-    gap_closure: pending
-    gap_closure_plan: TBD (06-04-PLAN.md)
+    gap_closure: executed
+    gap_closure_plan: 06-04-PLAN.md
+    gap_closure_outcome: "code fix landed (plugin __init__.py writes per-session sentinel at MARKERS_READY_DIR/<sid> after every on_session_end outcome — happy path + D-04 error-path belt; hermes-report.sh session SELECT filters by sentinel-or-aged with default 120s settle window via REVENIUM_CRON_SETTLE_SECONDS). G-03 is closed by code; behaviorally closed only after UAT round 4 records a CLI substantive turn straddling a minute boundary producing a marker file AND that marker reaching Revenium with the correct task_type (NOT unclassified). The six new HOOK-13 tests (2 sentinel-write + 3 cron-filter + 1 end-to-end) pin the regression guard in CI."
     summary: "Cron-ticker races the on_session_end classifier. For CLI sessions whose final turn straddles a minute boundary, the cron ticks (~6s before the plugin's LLM-driven classification completes) and ships task_type=unclassified to Revenium. The marker arrives 6s later but the cron's ledger is idempotent — future ticks skip the session forever. Surfaced by UAT round 3 (2026-05-14T07:12Z): sid 20260514_031132_a7aa8e has a correct marker on disk (task_type=generation) but Revenium received task_type=unclassified. state.db.ended_at is NULL for CLI sessions (hermes_cli/oneshot.py doesn't populate it), so the cron can't filter on session-completeness. See 06-HUMAN-UAT.md G-03 for evidence and closure options (a)-(d)."
-    relates_to: [HOOK-12, SC2, SC5, Phase-3-cron-pipeline]
+    relates_to: [HOOK-13, SC5, Phase-3-cron-pipeline]
 re_verification:
   previous_status: human_needed
   previous_score: 11/11 must-haves verified (automated)
-  gaps_closed: [G-01, G-02]
+  gaps_closed: [G-01, G-02, G-03]
   gaps_remaining: [G-03]
   regressions: []
 human_verification:

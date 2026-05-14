@@ -12,10 +12,37 @@ plugin unhealthy.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
-from .classifier import run_classification
+from .classifier import run_classification, MARKERS_READY_DIR
 
 logger = logging.getLogger("revenium_classifier")
+
+
+def _write_sentinel(session_id) -> None:
+    """D-21 sentinel write: emits an empty file at MARKERS_READY_DIR / session_id
+    to signal to the cron pipeline that the plugin has completed processing for
+    this session. Cron's session-SELECT filter at hermes-report.sh treats sentinel
+    presence as 'plugin signalled ready' and reports the session this tick;
+    sentinel absence defers reporting until the session's started_at ages past
+    REVENIUM_CRON_SETTLE_SECONDS (default 120s).
+
+    D-04 belt: any IOError / OSError / PermissionError on the sentinel write is
+    logged and swallowed — the sentinel is best-effort, and the cron's
+    aged-safety-net handles silent failures. This helper NEVER raises.
+    """
+    if not session_id:
+        return
+    try:
+        MARKERS_READY_DIR.mkdir(parents=True, exist_ok=True)
+        sentinel_path = MARKERS_READY_DIR / session_id
+        sentinel_path.touch(exist_ok=True)
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier sentinel write failed for sid=%s: %s",
+            session_id,
+            exc,
+        )
 
 
 def _on_session_end(
@@ -37,6 +64,12 @@ def _on_session_end(
     logged here. The plugin manager only marks plugins unhealthy when their
     callbacks raise — we never propagate.
 
+    D-21: after run_classification completes (every outcome — substantive
+    marker write, trivial-skip, inheritance, halt-unclassified), AND in the
+    outer except handler (D-04 belt extension), we write a per-session
+    sentinel at MARKERS_READY_DIR / session_id so the cron pipeline can
+    proceed without racing the LLM classifier.
+
     **kwargs absorbs any additional fields a future Hermes version may add
     to the on_session_end payload, keeping the plugin forward-compatible.
     """
@@ -50,6 +83,7 @@ def _on_session_end(
             message=None,
             response=None,
         )
+        _write_sentinel(session_id)
     except Exception as exc:
         logger.warning(
             "revenium-classifier on_session_end failed for sid=%s completed=%s interrupted=%s: %s",
@@ -58,6 +92,7 @@ def _on_session_end(
             interrupted,
             exc,
         )
+        _write_sentinel(session_id)
 
 
 def register(ctx) -> None:
