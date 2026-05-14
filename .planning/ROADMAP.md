@@ -14,7 +14,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 - [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
-- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 + G-02 closed by 06-02 + 06-03. UAT round 3 confirmed marker writes correctly. G-03 surfaced — cron ticker races the plugin's LLM classifier by ~6s, shipping unclassified to Revenium before the marker arrives on disk. Pending 06-04 cron settle fix + UAT round 4.)
+- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 + G-02 closed by 06-02 + 06-03. UAT round 3 confirmed marker writes correctly. G-03 surfaced — cron ticker races the plugin's LLM classifier by ~6s, shipping unclassified to Revenium before the marker arrives on disk. Pending 06-04 cron settle fix + UAT round 4; gap closure in 06-04-PLAN.md adds a plugin sentinel + cron settle-window filter so cron only reports sessions whose plugin has finished classification.)
 
 ## Phase Details
 
@@ -90,20 +90,21 @@ Plans:
 ### Phase 6: Mechanical Classification via Hermes agent:end Hook
 **Goal**: When a Hermes session — primary or subagent — completes a turn, a Hermes lifecycle hook deterministically writes a marker record at `~/.hermes/state/revenium/markers/<sid>.jsonl` with a meaningful `task_type` and `operation_type`, independent of whether the agent loaded the `revenium` skill or executed the FINAL ACTION self-classification code. Token attribution by activity in Revenium becomes observable without depending on agent compliance.
 **Depends on**: Phase 3 (cron-side marker reader must exist for hook-written markers to flow to Revenium). Independent of Phase 4 and Phase 5 — can ship in parallel.
-**Requirements**: HOOK-01, HOOK-02, HOOK-03, HOOK-04, HOOK-05, HOOK-06, HOOK-07, HOOK-08, HOOK-09, HOOK-10, HOOK-11, HOOK-12
+**Requirements**: HOOK-01, HOOK-02, HOOK-03, HOOK-04, HOOK-05, HOOK-06, HOOK-07, HOOK-08, HOOK-09, HOOK-10, HOOK-11, HOOK-12, HOOK-13
 **Success Criteria** (what must be TRUE):
   1. `~/.hermes/plugins/revenium-classifier/` exists with `plugin.yaml` declaring at least `on_session_end` and `__init__.py` exposing `def register(ctx)` — discovery and load succeed under direct filesystem inspection (`test -f`) AND the Hermes plugin-manager startup log shows the plugin-load line (reference shape: `hermes-agent/plugins/disk-cleanup/` at startup).
   2. After a fresh substantive Hermes session that the agent does NOT manually classify, the next cron tick reports the session's tokens to Revenium with a meaningful `--task-type` (not `unclassified`) — proven by an end-to-end fixture that exercises `register(ctx)` and the synchronous `on_session_end` callback with a synthetic context and asserts a marker file appears at the expected path. Covers every session source (gateway-served, CLI one-shot, interactive, ACP, cron) because `on_session_end` is emitted from `run_agent.py` for every `run_conversation()` invocation, not from the gateway-specific `agent:end` emit site. Specifically covers sessions without per-session JSONL (CLI one-shot, ACP, cron) — verified by an end-to-end test that creates a state.db row with `tool_call_count > 0` and NO `~/.hermes/sessions/<sid>.jsonl`, then asserts the classifier writes a marker file with a non-`unclassified` `task_type`.
   3. For a subagent session with `parent_session_id != NULL` in state.db, the marker file's `task_type` matches the parent's `task_type` — verified by a synthetic two-session fixture where the parent is classified first and the child inherits, recorded as an integration test.
   4. The classifier consults the budgeted LLM for substantive turns AND is bounded by Revenium's halt-check: if `budget-status.json` shows `halted: true` the plugin skips the LLM call and writes `task_type: unclassified` with a `WARN` log line. No silent budget overrun from the classifier itself.
-  5. `python3 -m unittest discover -s tests -p 'test_*.py' -v` passes including new tests for the classifier (heuristic skip-fast-path on trivial turns, LLM call invocation contract, parent_session_id inheritance via state.db join). No regressions in existing Phase 1-3 tests.
+  5. `python3 -m unittest discover -s tests -p 'test_*.py' -v` passes including new tests for the classifier (heuristic skip-fast-path on trivial turns, LLM call invocation contract, parent_session_id inheritance via state.db join). No regressions in existing Phase 1-3 tests. Additionally, the next cron tick after on_session_end ships --task-type <meaningful-label> to Revenium — verified by an end-to-end fixture that creates a session, fires on_session_end (writing both the marker AND the sentinel at ${MARKERS_READY_DIR}/<sid>), then invokes hermes-report.sh and asserts the resulting revenium meter completion call carries the marker's task_type, NOT unclassified. The cron's session SELECT filter at hermes-report.sh respects (sentinel exists for sid) OR (started_at < now - REVENIUM_CRON_SETTLE_SECONDS, default 120s); sessions without sentinels that are younger than the settle window are deferred to a later tick.
   6. `bash examples/setup-local.sh` installs the plugin into `~/.hermes/plugins/revenium-classifier/` AND adds `revenium-classifier` to `~/.hermes/config.yaml::plugins.enabled` — distribution mechanism is operator-discoverable from `references/setup.md`.
-**Plans**: 3 plans (06-01 ships the original gateway-hook implementation, 06-02 closes G-01 with the hermes_cli plugin migration, 06-03 closes G-02 with the state.db tool-count source-of-truth swap)
+**Plans**: 4 plans (06-01 ships the original gateway-hook implementation, 06-02 closes G-01 with the hermes_cli plugin migration, 06-03 closes G-02 with the state.db tool-count source-of-truth swap, 06-04 closes G-03 with the plugin-sentinel + cron settle-window filter)
 
 Plans:
 - [x] 06-01-PLAN.md — Single fat plan: HOOK.yaml + handler.py with subagent-inherit + heuristic-skip + budget-halt + LLM-classify + atomic marker pair write + D-13 dedupe + setup-local.sh hook copy + setup.md docs + 6 unittest methods + 3 synthetic agent:end fixtures (HOOK-01..HOOK-10)
 - [x] 06-02-PLAN.md — Gap closure: factor classifier into shared module, add on_session_end plugin (plugin.yaml + __init__.py), delete agent:end gateway hook, migrate setup-local.sh + tests + setup.md, add HOOK-11 (HOOK-01..HOOK-10 carried, HOOK-11 added)
 - [x] 06-03-PLAN.md — Gap closure: rewrite _count_tools_in_current_turn to query state.db.sessions.tool_call_count first (universal source — populated for every session source) with JSONL fallback; add 3 unit tests + 1 end-to-end test; add HOOK-12 (HOOK-01..HOOK-11 carried, HOOK-12 added)
+- [ ] 06-04-PLAN.md — Gap closure: plugin writes per-session sentinel at MARKERS_READY_DIR/<sid> after every on_session_end outcome; hermes-report.sh session SELECT filters by (sentinel exists OR started_at older than REVENIUM_CRON_SETTLE_SECONDS, default 120s); add 5 unit tests + 1 end-to-end test; add HOOK-13 (HOOK-01..HOOK-12 carried, HOOK-13 added)
 **Locked decisions (from UAT discussion 2026-05-13)**:
   - Subagent task_type inheritance: walk `state.db.sessions.parent_session_id` to the root user-facing parent; subagent inherits the root's task_type. Single classification per request lineage.
   - Classifier: LLM-assisted using the Revenium-budgeted model. Heuristic fast-paths for trivial turns (≤ 2 sentences AND zero tools = skip). Budget halt gates the LLM call.
@@ -145,7 +146,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
-| 6. Mechanical Classification via agent:end Hook | 3/3 | G-01 + G-02 closed (UAT-3 confirmed marker writes correctly); G-03 surfaced — cron race ships unclassified ahead of marker; pending 06-04 settle fix | 2026-05-14 |
+| 6. Mechanical Classification via agent:end Hook | 3/4 | In progress — G-03 gap closure planned in 06-04-PLAN.md | 2026-05-14 |
 
 ## Research Flags
 
@@ -159,10 +160,10 @@ Phases 1 and 5 use standard repository patterns (path additions, housekeeping mi
 
 ## Coverage
 
-- **v1 requirements:** 49
-- **Mapped to phases:** 49
+- **v1 requirements:** 50
+- **Mapped to phases:** 50
 - **Unmapped:** 0
-- **Categories:** PATH (3), TAX (5), MARK (5), PROMPT (7), CRON (9), WIRE (4), COMPAT (4), TEST (5), HOOK (12)
+- **Categories:** PATH (3), TAX (5), MARK (5), PROMPT (7), CRON (9), WIRE (4), COMPAT (4), TEST (5), HOOK (13)
 
 TEST requirements are distributed across the phases that own the code under test:
 - TEST-01 (marker schema) → Phase 2
