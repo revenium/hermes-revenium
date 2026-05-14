@@ -1541,6 +1541,200 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_tool_count_uses_state_db(self):
+        """HOOK-12 / D-20: when state.db.sessions has a row for the sid with tool_call_count
+        populated, _count_tools_in_current_turn returns that value WITHOUT consulting the
+        per-session JSONL. Closes G-02 (CLI sessions have no JSONL but populated state.db).
+        Pins the primary path."""
+        import importlib
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-stateddb-toolcount-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Build state.db row with tool_call_count populated; NO JSONL file on disk
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", ('test-sid', None, 3))
+            conn.commit()
+            conn.close()
+
+            # JSONL absence is load-bearing for this test — proves the primary path returns
+            # the state.db value without falling back.
+            self.assertFalse(os.path.exists(os.path.join(hh, 'sessions', 'test-sid.jsonl')))
+
+            self.assertEqual(handler._count_tools_in_current_turn('test-sid'), 3)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_tool_count_falls_back_to_jsonl(self):
+        """HOOK-12 / D-20 fallback: when state.db has no row for the sid OR has a row
+        with tool_call_count=NULL, _count_tools_in_current_turn falls through to the
+        JSONL read. Preserves the existing 12 HOOK-* test fixtures' load-bearing semantics."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-jsonl-fallback-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # state.db row exists for 'test-sid' but tool_call_count is NULL — forces fallback
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", ('test-sid', None, None))
+            conn.commit()
+            conn.close()
+
+            # JSONL has 1 role:user followed by 5 role:tool entries → fallback returns 5
+            sessions_dir = os.path.join(hh, 'sessions')
+            os.makedirs(sessions_dir, exist_ok=True)
+            jsonl_path = os.path.join(sessions_dir, 'test-sid.jsonl')
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({"role": "user", "content": "x"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "terminal"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "terminal"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "grep"}) + "\n")
+
+            self.assertEqual(handler._count_tools_in_current_turn('test-sid'), 5)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_tool_count_both_absent(self):
+        """HOOK-12 / D-20: when neither state.db has a row for the sid NOR a JSONL file
+        exists, _count_tools_in_current_turn returns 0. Pins the heuristic-skip-on-empty-session
+        contract."""
+        import importlib
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-toolcount-both-absent-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # No state.db file, no JSONL file — both data sources absent
+            self.assertFalse(os.path.exists(os.path.join(hh, 'state.db')))
+            self.assertFalse(os.path.exists(os.path.join(hh, 'sessions', 'test-sid.jsonl')))
+
+            self.assertEqual(handler._count_tools_in_current_turn('test-sid'), 0)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_tool_count_end_to_end_cli_substantive(self):
+        """HOOK-12 / G-02 regression guard: when state.db.sessions has tool_call_count=2 for a CLI
+        session AND ~/.hermes/sessions/<sid>.jsonl does NOT exist (the exact UAT-2 production shape
+        that produced no marker file), classifier.run_classification(...) drives the full pipeline
+        and writes a GUARDRAIL+CHAT marker pair with a non-unclassified task_type. This is the test
+        that would have caught G-02 in CI on 2026-05-13 before the operator UAT had to surface it."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-e2e-cli-substantive-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Build the production CLI shape: state.db row with tool_call_count=2 + NO JSONL.
+            # parent_session_id NULL so the subagent inheritance branch (D-05) does not fire.
+            # tool_call_count=2 to defeat the trivial-skip threshold.
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", ('cli-sid', None, 2))
+            conn.commit()
+            conn.close()
+
+            # JSONL absence is the load-bearing premise — this is what produced G-02 in production.
+            self.assertFalse(os.path.exists(os.path.join(hh, 'sessions', 'cli-sid.jsonl')))
+
+            # Seed an empty taxonomy and a NOT-halted budget-status so the LLM-classification
+            # branch is reachable.
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, 'task-taxonomy.json'), 'w', encoding='utf-8') as f:
+                json.dump({"labels": {"code_review": {"description": "Code review work"}}}, f)
+            with open(os.path.join(sd, 'budget-status.json'), 'w', encoding='utf-8') as f:
+                json.dump({"halted": False}, f)
+
+            # Patch call_llm to return content 'code_review'. Same stub shape as
+            # test_revenium_classifier_llm_label (lines 1211-1262): mock_resp.choices[0].message.content.
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "code_review"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+                # response='' mirrors production CLI behavior — on_session_end payload does NOT
+                # include response text. The test proves that despite empty response_preview, the
+                # state.db tool_call_count=2 keeps the helper above the trivial-skip threshold
+                # (the heuristic requires BOTH tool_count==0 AND len(response)<200; tool_count=2
+                # breaks the AND).
+                handler.run_classification(
+                    session_id='cli-sid',
+                    model='qwen3.6-plus',
+                    platform='cli',
+                    message='Review src/foo.py for race conditions',
+                    response='',
+                )
+
+            # Assertions: marker file exists with 2 records, both task_type='code_review',
+            # one GUARDRAIL + one CHAT.
+            marker_path = os.path.join(md, 'cli-sid.jsonl')
+            self.assertTrue(os.path.exists(marker_path),
+                            'marker file MUST exist — G-02 regression guard')
+            with open(marker_path, 'r', encoding='utf-8') as f:
+                lines = [json.loads(l) for l in f.read().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 2,
+                             'marker file MUST contain exactly 2 records (GUARDRAIL + CHAT)')
+            self.assertEqual(lines[0]['task_type'], 'code_review',
+                             'first record MUST carry task_type=code_review (not unclassified)')
+            self.assertEqual(lines[1]['task_type'], 'code_review',
+                             'second record MUST carry task_type=code_review (not unclassified)')
+            self.assertEqual({lines[0]['operation_type'], lines[1]['operation_type']},
+                             {'GUARDRAIL', 'CHAT'},
+                             'marker pair MUST be one GUARDRAIL + one CHAT')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_setup_md_has_mechanical_classification_hook_section(self):
         """HOOK-10 / D-16: references/setup.md carries a 'Mechanical classification hook'
         section that documents the install path, gateway-restart requirement, and the
