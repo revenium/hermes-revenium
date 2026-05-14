@@ -14,7 +14,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 - [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
-- [x] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (completed 2026-05-13)
+- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (gaps_found 2026-05-13 — G-01: agent:end only fires for platform-served gateway sessions; CLI / cron sessions uncovered)
 
 ## Phase Details
 
@@ -143,7 +143,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
-| 6. Mechanical Classification via agent:end Hook | 1/1 | Complete   | 2026-05-13 |
+| 6. Mechanical Classification via agent:end Hook | 1/1 | Gaps found (G-01 — CLI/cron sessions uncovered) | 2026-05-13 |
 
 ## Research Flags
 

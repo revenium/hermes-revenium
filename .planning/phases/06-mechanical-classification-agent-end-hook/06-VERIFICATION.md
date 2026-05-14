@@ -1,14 +1,20 @@
 ---
 phase: 06-mechanical-classification-agent-end-hook
 verified: 2026-05-13T18:59:09Z
-status: human_needed
-score: 11/11 must-haves verified (automated); 1 SC requires human gateway/UAT verification
+updated: 2026-05-13T19:38:00Z
+status: gaps_found
+score: 11/11 must-haves verified (automated); operator UAT on Mac Studio surfaced a Phase 6 goal gap (see 06-HUMAN-UAT.md G-01)
 overrides_applied: 0
+gaps:
+  - id: G-01
+    severity: high
+    summary: "agent:end hook does not fire for non-platform-served sessions (CLI `hermes chat -q`, cron-ticker invocations). The Phase 6 goal ('a Hermes lifecycle hook deterministically writes a marker record ... independent of whether the agent loaded the revenium skill or executed FINAL ACTION') is not achieved for CLI sessions, which is the dominant dev-time path and the original adoption-gap Phase 6 was created to close. Evidence: two CLI substantive turns on 2026-05-13T19:32-19:33 produced no marker file and no hook-related log entries despite the hook being loaded at gateway startup. See 06-HUMAN-UAT.md for full evidence."
+    relates_to: [HOOK-01, HOOK-02, HOOK-05, HOOK-06, SC1, SC2, SC6]
 re_verification:
-  previous_status: none
-  previous_score: n/a
+  previous_status: human_needed
+  previous_score: 11/11 must-haves verified (automated)
   gaps_closed: []
-  gaps_remaining: []
+  gaps_remaining: [G-01]
   regressions: []
 human_verification:
   - test: "Operator-side UAT — load hook, restart gateway, exercise a fresh substantive Hermes session WITHOUT loading the revenium skill, and confirm marker pair appears with a non-`unclassified` task_type."
