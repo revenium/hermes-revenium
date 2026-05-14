@@ -88,7 +88,13 @@ Plans:
   1. Running `bash ~/.hermes/skills/revenium/scripts/prune-markers.sh` (added in this phase) against a fixture with marker files whose latest-reported ledger row is older than N days removes those files and leaves files for active sessions untouched; behavior is idempotent across repeated runs.
   2. `python3 -m unittest discover -s tests -p 'test_*.py' -v` passes end-to-end on the repository as shipped at the end of this phase, including `test_skill_frontmatter_has_hermes_metadata`, `test_runtime_paths_are_hermes_native`, `test_no_legacy_branding_left`, and `test_shell_scripts_have_valid_syntax` (COMPAT-04, TEST-05).
   3. `docs/installation.md` and `references/setup.md` describe the new marker / taxonomy contract, the S2 bias direction (GUARDRAIL share is an upper bound), and the `prune-markers.sh` operator invocation; no new docs reintroduce any string forbidden by `test_no_legacy_branding_left`.
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 05-01-PLAN.md — prune-markers.sh + common.sh retention knob + E2E prune test (COMPAT-04, TEST-05)
+- [ ] 05-02-PLAN.md — classifier mint-back (D-32) + recency-order sort (D-33) + 2 regression tests (COMPAT-04, TEST-05)
+- [ ] 05-03-PLAN.md — Phase 4 review WRs cleanup: WR-01 pipe sanitization + WR-02 dead-var removal + WR-03 test env isolation (COMPAT-04, TEST-05)
+- [ ] 05-04-PLAN.md — Docs pass: PROJECT.md D-3/D-8 rewrite + Evolution Notes + README/setup.md/task-taxonomy.md truth refresh + REQUIREMENTS/ROADMAP finalize (COMPAT-04, TEST-05)
 
 ### Phase 6: Mechanical Classification via Hermes agent:end Hook
 **Goal**: When a Hermes session — primary or subagent — completes a turn, a Hermes lifecycle hook deterministically writes a marker record at `~/.hermes/state/revenium/markers/<sid>.jsonl` with a meaningful `task_type` and `operation_type`, independent of whether the agent loaded the `revenium` skill or executed the FINAL ACTION self-classification code. Token attribution by activity in Revenium becomes observable without depending on agent compliance.
