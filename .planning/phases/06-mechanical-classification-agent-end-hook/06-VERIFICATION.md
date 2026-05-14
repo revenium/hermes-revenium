@@ -2,12 +2,15 @@
 phase: 06-mechanical-classification-agent-end-hook
 verified: 2026-05-13T18:59:09Z
 updated: 2026-05-13T19:38:00Z
-status: gaps_found
+status: requires_rerun_uat
+gap_closure_plan: 06-02-PLAN.md
 score: 11/11 must-haves verified (automated); operator UAT on Mac Studio surfaced a Phase 6 goal gap (see 06-HUMAN-UAT.md G-01)
 overrides_applied: 0
 gaps:
   - id: G-01
     severity: high
+    gap_closure: planned
+    gap_closure_plan: 06-02-PLAN.md
     summary: "agent:end hook does not fire for non-platform-served sessions (CLI `hermes chat -q`, cron-ticker invocations). The Phase 6 goal ('a Hermes lifecycle hook deterministically writes a marker record ... independent of whether the agent loaded the revenium skill or executed FINAL ACTION') is not achieved for CLI sessions, which is the dominant dev-time path and the original adoption-gap Phase 6 was created to close. Evidence: two CLI substantive turns on 2026-05-13T19:32-19:33 produced no marker file and no hook-related log entries despite the hook being loaded at gateway startup. See 06-HUMAN-UAT.md for full evidence."
     relates_to: [HOOK-01, HOOK-02, HOOK-05, HOOK-06, SC1, SC2, SC6]
 re_verification:
@@ -17,18 +20,18 @@ re_verification:
   gaps_remaining: [G-01]
   regressions: []
 human_verification:
-  - test: "Operator-side UAT — load hook, restart gateway, exercise a fresh substantive Hermes session WITHOUT loading the revenium skill, and confirm marker pair appears with a non-`unclassified` task_type."
+  - test: "Operator-side UAT — install plugin, restart gateway, exercise a fresh substantive Hermes session WITHOUT loading the revenium skill, and confirm marker pair appears with a non-`unclassified` task_type."
     expected: |
-      (1) `bash examples/setup-local.sh` succeeds and reports `Installed hook to ~/.hermes/hooks/revenium-classifier`.
+      (1) `bash examples/setup-local.sh` succeeds and reports `Installed plugin to ~/.hermes/plugins/revenium-classifier` AND idempotently adds `revenium-classifier` to `plugins.enabled` in `~/.hermes/config.yaml` (a re-run produces no duplicate entry).
       (2) `hermes gateway restart` succeeds.
-      (3) Gateway startup log emits: `[hooks] Loaded hook 'revenium-classifier' for events: ['agent:end']`.
-      (4) After a substantive turn in a fresh Hermes session (no skill_view("revenium"), no manual classification), `~/.hermes/state/revenium/markers/<sid>.jsonl` contains a GUARDRAIL+CHAT marker pair with a meaningful (non-`unclassified`) `task_type`.
+      (3) Gateway startup log shows the plugin loader picking up `revenium-classifier` (exact log-line shape to be confirmed during re-UAT — operator records the actual string into `06-HUMAN-UAT.md`).
+      (4) After a substantive turn in a fresh Hermes session (no skill_view("revenium"), no manual classification, AND the turn was driven via CLI `hermes chat -q` OR interactive OR ACP — i.e., a non-gateway-served path), `~/.hermes/state/revenium/markers/<sid>.jsonl` contains a GUARDRAIL+CHAT marker pair with a meaningful (non-`unclassified`) `task_type`.
       (5) On the next cron tick, `revenium meter completion` is invoked with `--task-type <meaningful-label>` (not `unclassified`).
     why_human: |
       Requires a running Hermes gateway process, a real substantive turn through an LLM, and Revenium CLI configuration — cannot be exercised in CI. This is the manual UAT gate the SUMMARY.md flags before Phase 6 is marked Verified (see "Manual UAT gate" in 06-01-SUMMARY.md and ROADMAP SC1/SC2/SC6).
   - test: "Subagent inheritance UAT — drive a `delegate_task`-style child session and confirm the child's marker file inherits the parent's `task_type`."
     expected: |
-      A subagent session whose `state.db.sessions.parent_session_id` points at a root session with task_type=research produces a marker file at `~/.hermes/state/revenium/markers/<child-sid>.jsonl` carrying `task_type: research` on both records, with NO LLM call recorded against the subagent budget.
+      A subagent session whose `state.db.sessions.parent_session_id` points at a root session with task_type=research produces a marker file at `~/.hermes/state/revenium/markers/<child-sid>.jsonl` carrying `task_type: research` on both records, with NO LLM call recorded against the subagent budget. The plugin's `on_session_end` callback fires for every subagent run_conversation() exit (not the gateway-only `agent:end` event).
     why_human: |
       Hermes' subagent dispatch (delegate_task lineage, real state.db.sessions parent chain) cannot be exercised without running Hermes end-to-end. Synthetic test (`test_revenium_classifier_subagent_inherits`) proves the helpers correctly, but operator confirmation of real-world `parent_session_id` shape is required (ROADMAP SC3).
 ---
@@ -112,7 +115,7 @@ No hollow props or static-only data sources detected. The handler's outputs flow
 | D-17/D-18 zero-diff invariants                                                                       | `git diff aba6d0c -- skills/revenium/SKILL.md skills/revenium/scripts/hermes-report.sh skills/revenium/scripts/split_strategies.py skills/revenium/scripts/cron.sh skills/revenium/scripts/common.sh skills/revenium/task-taxonomy.json` | 0 lines of diff                                                                                                                                                                  | PASS   |
 | All Phase-6-modified files free of unresolved debt markers (TBD/FIXME/XXX/TODO/HACK/PLACEHOLDER)    | grep across handler.py, HOOK.yaml, setup-local.sh, setup.md additions, test_repository.py    | Zero matches                                                                                                                                                                     | PASS   |
 | `bash -n examples/setup-local.sh` passes                                                            | `bash -n examples/setup-local.sh`                                                              | OK                                                                                                                                                                                | PASS   |
-| Gateway startup log emission `[hooks] Loaded hook 'revenium-classifier' for events: ['agent:end']` observed in a real Hermes gateway | (operator must run `hermes gateway restart` and grep the gateway log)                         | Cannot run in CI                                                                                                                                                                  | SKIP — routed to human verification |
+| Plugin-manager startup log emission for `revenium-classifier` observed in a real Hermes gateway (exact string captured during re-UAT against the on_session_end plugin) | (operator must run `hermes gateway restart` and grep the gateway log)                         | Cannot run in CI                                                                                                                                                                  | SKIP — routed to human verification |
 | Real subagent turn (delegate_task lineage) inherits parent task_type in production state.db          | Operator must dispatch a delegate_task, then read child sid's marker file                     | Cannot run in CI                                                                                                                                                                  | SKIP — routed to human verification |
 
 ### Probe Execution
@@ -172,10 +175,10 @@ hermes gateway restart
 ```
 
 **Expected:**
-1. `bash examples/setup-local.sh` reports `Installed hook to ~/.hermes/hooks/revenium-classifier`.
+1. `bash examples/setup-local.sh` reports `Installed plugin to ~/.hermes/plugins/revenium-classifier` AND idempotently adds `revenium-classifier` to `plugins.enabled` in `~/.hermes/config.yaml` (a re-run produces no duplicate entry).
 2. `hermes gateway restart` succeeds.
-3. Gateway startup log emits: `[hooks] Loaded hook 'revenium-classifier' for events: ['agent:end']`.
-4. After the substantive turn yields back, `~/.hermes/state/revenium/markers/<sid>.jsonl` contains a GUARDRAIL+CHAT marker pair with a meaningful (non-`unclassified`) `task_type` matching the live taxonomy.
+3. The Hermes plugin-manager startup log shows the plugin loader picking up `revenium-classifier` (exact string captured during re-UAT, recorded into `06-HUMAN-UAT.md`).
+4. After the substantive turn yields back, `~/.hermes/state/revenium/markers/<sid>.jsonl` contains a GUARDRAIL+CHAT marker pair with a meaningful (non-`unclassified`) `task_type` matching the live taxonomy. The turn was driven via a non-gateway-served path (CLI `hermes chat -q` OR interactive OR ACP) — the `on_session_end` plugin covers every `run_conversation()` exit, not just gateway-served sessions.
 5. The next cron tick (within 60s) invokes `revenium meter completion` with `--task-type <meaningful-label>` (not `unclassified`).
 
 **Why human:** Requires a running Hermes gateway process, a real LLM-driven substantive turn, and Revenium CLI configuration. Cannot be exercised in CI. This is the operator UAT gate explicitly called out in 06-01-SUMMARY.md.
@@ -199,6 +202,12 @@ No BLOCKERS — every plan-declared must-have truth is observable in the codebas
 Two WARNINGs (CR-01 and CR-02 from 06-REVIEW.md) flag correctness bugs in the subagent inheritance branch and the depth-cap path of `_walk_to_root_session`. These do NOT block the phase goal under normal operation — the happy-path subagent flow inherits correctly, and depth-cap-overflow / parent-chain cycles are anomalous data conditions. Both are documented in the Anti-Patterns table for follow-up consideration in a Phase 6.5 / Phase 7 hardening pass.
 
 The phase status is `human_needed` because two ROADMAP success criteria (SC1: gateway-load log emission; SC2/SC3/SC6: production substantive + subagent UAT) cannot be verified without a running Hermes gateway and a real LLM turn. The SUMMARY explicitly flags this as the "Manual UAT gate before Phase 6 is marked Verified."
+
+### Gap closure (added 2026-05-13 post-UAT)
+
+G-01 is now planned for closure in `06-02-PLAN.md` per the locked decision D-19 (see `06-CONTEXT.md` gap-closure addendum). The migration path replaces the `agent:end` gateway hook with a `hermes_cli` plugin registering `on_session_end` — emitted from `run_agent.py:15164` for every `run_conversation()` invocation, covering gateway-served + CLI + interactive + ACP + cron sessions. The plan adds requirement HOOK-11 to capture the universal-coverage invariant, factors the classification logic into a shared `classifier.py` module so the existing HOOK-* tests keep passing through the refactor, and updates ROADMAP Phase 6 SC1/SC2/SC6 wording. After 06-02 lands the operator UAT documented in `06-HUMAN-UAT.md` will be re-run on Mac Studio against the new plugin path; both a CLI substantive turn AND a Telegram message should produce non-`unclassified` markers.
+
+Note: plan 06-01 landed 12 HOOK-* test methods, not the 6-method minimum estimated in the CONTEXT.md gap-closure addendum table. This plan migrates all 12 to the shared `classifier.py` module.
 
 ---
 

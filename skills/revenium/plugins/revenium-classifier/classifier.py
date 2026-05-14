@@ -1,13 +1,12 @@
-"""Hermes agent:end event hook — mechanical task-type classifier.
+"""Shared classifier module for the revenium-classifier hermes_cli plugin.
 
-Fires once per agent turn yielding back to the user. Writes a marker pair
-(one GUARDRAIL classification span + one CHAT work span) into
-~/.hermes/state/revenium/markers/<sid>.jsonl, matching the Phase 2 marker
-schema the Phase 3 cron pipeline already consumes.
+Invoked from skills/revenium/plugins/revenium-classifier/__init__.py via
+on_session_end. Carries the full D-04..D-14 + D-05..D-09 pipeline factored
+out so the plugin entrypoint and tests both import it.
 
-Invariant D-04: this handler MUST NEVER raise out of handle(). Every error
-path is caught and logged with logger.warning. Hermes' HookRegistry.emit()
-catches but does not retry; an uncaught exception silently drops one turn's
+Invariant D-04: this module's async entry point MUST NEVER raise out of
+run_classification_async(). Every error path is caught and logged with
+logger.warning. An uncaught exception silently drops one turn's
 classification — same failure mode as the agent skipping FINAL ACTION.
 
 Module-level path constants mirror skills/revenium/scripts/common.sh. They
@@ -27,7 +26,7 @@ import time
 from pathlib import Path
 
 # Lazy import — keeps the module importable in the test environment where
-# Hermes' venv is not available. Tests patch handler.call_llm directly.
+# Hermes' venv is not available. Tests patch classifier.call_llm directly.
 try:
     from agent.auxiliary_client import call_llm  # type: ignore
 except ImportError:
@@ -133,7 +132,7 @@ def _read_latest_task_type(sid: str) -> "str | None":
 def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0) -> bool:
     """D-13: return True if the marker file's tail carries a GUARDRAIL+CHAT pair
     whose most recent ts is within `within_seconds` of time.time(). Used to skip
-    the hook write when the agent's SKILL.md FINAL ACTION snippet already wrote
+    the plugin write when the agent's SKILL.md FINAL ACTION snippet already wrote
     markers for this turn. Per Pitfall 6 option (a) — wall-clock proximity."""
     marker_path = MARKERS_DIR / f"{sid}.jsonl"
     if not marker_path.is_file():
@@ -248,7 +247,7 @@ async def _classify_via_llm(context: dict, response_preview: str) -> str:
 
 def _validate_label(label: str) -> str:
     """Returns label if it matches LABEL_RE AND is not in TRIVIAL_BLOCKLIST,
-    else returns 'unclassified'. D-09 enforcement at the handler boundary."""
+    else returns 'unclassified'. D-09 enforcement at the classifier boundary."""
     if not label:
         return "unclassified"
     cleaned = label.strip().lower()
@@ -291,51 +290,95 @@ def _write_marker_pair(sid: str, task_type: str) -> Path:
     return marker_path
 
 
-async def handle(event_type: str, context: dict) -> None:
-    """Hermes agent:end event handler. D-04: never raises out of handle()."""
-    if event_type != "agent:end":
-        return
-    sid = context.get("session_id")
-    if not sid:
+async def run_classification_async(
+    session_id: str,
+    model: "str | None" = None,
+    platform: "str | None" = None,
+    message: "str | None" = None,
+    response: "str | None" = None,
+) -> None:
+    """Async classifier entry point. D-04: never raises out of this function.
+
+    Drives the D-04..D-14 pipeline: subagent inheritance → heuristic skip →
+    D-13 dedupe → budget gate → LLM classification → validated label →
+    atomic marker pair write. Invoked from the plugin entrypoint's sync
+    wrapper run_classification() via asyncio.run().
+    """
+    if not session_id:
         return
     try:
-        # Step 1 — subagent inheritance (D-05). Stub returns input sid until T07
-        # fills in _walk_to_root_session + _read_latest_task_type.
-        root_sid = _walk_to_root_session(sid)
-        if root_sid != sid:
+        # Step 1 — subagent inheritance (D-05).
+        root_sid = _walk_to_root_session(session_id)
+        if root_sid != session_id:
             parent_task = _read_latest_task_type(root_sid)
             if parent_task:
-                await asyncio.to_thread(_write_marker_pair, sid, parent_task)
+                await asyncio.to_thread(_write_marker_pair, session_id, parent_task)
                 return
             # Parent has no marker yet — fall through to classify as if root.
 
         # Step 2 — heuristic skip-fast-path (D-07 / HOOK-02).
-        response_preview = context.get("response", "") or ""
-        tool_count = _count_tools_in_current_turn(sid)
+        response_preview = response or ""
+        tool_count = _count_tools_in_current_turn(session_id)
         if tool_count == 0 and len(response_preview) < 200:
             return  # trivial — skip marker entirely
 
         # Step 3 — D-13 belt: did the agent already self-classify? (HOOK-07)
-        if _recent_marker_pair_exists(sid, within_seconds=30.0):
+        if _recent_marker_pair_exists(session_id, within_seconds=30.0):
             return  # agent's FINAL ACTION wrote markers in the last 30s; don't double-write
 
         # Step 4 — budget gate (D-08 / HOOK-04).
         if _budget_halted():
-            await asyncio.to_thread(_write_marker_pair, sid, "unclassified")
+            await asyncio.to_thread(_write_marker_pair, session_id, "unclassified")
             logger.warning(
-                "revenium-classifier: budget halted, wrote unclassified for sid=%s", sid
+                "revenium-classifier: budget halted, wrote unclassified for sid=%s", session_id
             )
             return
 
         # Step 5 — LLM classification (D-06 / HOOK-05).
-        raw_label = await _classify_via_llm(context, response_preview)
+        raw_label = await _classify_via_llm(
+            {"message": message or ""},
+            response_preview,
+        )
         task_type = _validate_label(raw_label)
 
         # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
-        await asyncio.to_thread(_write_marker_pair, sid, task_type)
+        await asyncio.to_thread(_write_marker_pair, session_id, task_type)
     except Exception as exc:
         logger.warning(
-            "revenium-classifier hook failed for sid=%s: %s",
-            context.get("session_id", "?"),
+            "revenium-classifier classifier failed for sid=%s: %s",
+            session_id,
+            exc,
+        )
+
+
+def run_classification(
+    session_id: str,
+    model: "str | None" = None,
+    platform: "str | None" = None,
+    message: "str | None" = None,
+    response: "str | None" = None,
+) -> None:
+    """Synchronous convenience wrapper. Drives run_classification_async via
+    asyncio.run(). The plugin entrypoint (`_on_session_end`) is synchronous per
+    the Hermes plugin contract, so this wrapper bridges the sync→async gap.
+
+    D-04 belt at the sync boundary: any exception escaping asyncio.run is
+    caught here and logged via logger.warning. The plugin entrypoint stays
+    clean and never sees a propagating exception.
+    """
+    try:
+        asyncio.run(
+            run_classification_async(
+                session_id=session_id,
+                model=model,
+                platform=platform,
+                message=message,
+                response=response,
+            )
+        )
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier run_classification failed for sid=%s: %s",
+            session_id,
             exc,
         )
