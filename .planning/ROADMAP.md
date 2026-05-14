@@ -14,7 +14,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 - [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
-- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 architecturally closed by 06-02-PLAN.md; G-02 closed in code by 06-03-PLAN.md — state.db tool-count primary + JSONL fallback. Phase pending Mac Studio UAT round 3 for behavioral closure of both gaps — VERIFICATION.md status: requires_rerun_uat)
+- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 + G-02 closed by 06-02 + 06-03. UAT round 3 confirmed marker writes correctly. G-03 surfaced — cron ticker races the plugin's LLM classifier by ~6s, shipping unclassified to Revenium before the marker arrives on disk. Pending 06-04 cron settle fix + UAT round 4.)
 
 ## Phase Details
 
@@ -145,7 +145,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
-| 6. Mechanical Classification via agent:end Hook | 3/3 | Plans complete — pending Mac Studio UAT round 3 (G-01 + G-02 behavioral closure) | 2026-05-14 |
+| 6. Mechanical Classification via agent:end Hook | 3/3 | G-01 + G-02 closed (UAT-3 confirmed marker writes correctly); G-03 surfaced — cron race ships unclassified ahead of marker; pending 06-04 settle fix | 2026-05-14 |
 
 ## Research Flags
 

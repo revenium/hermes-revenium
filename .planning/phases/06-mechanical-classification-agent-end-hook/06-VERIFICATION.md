@@ -1,7 +1,7 @@
 ---
 phase: 06-mechanical-classification-agent-end-hook
 verified: 2026-05-13T18:59:09Z
-updated: 2026-05-14T00:00:00Z
+updated: 2026-05-14T07:20:00Z
 status: requires_rerun_uat
 gap_closure_plan: 06-02-PLAN.md
 score: 11/11 must-haves verified (automated); operator UAT on Mac Studio surfaced a Phase 6 goal gap (see 06-HUMAN-UAT.md G-01)
@@ -9,23 +9,29 @@ overrides_applied: 0
 gaps:
   - id: G-01
     severity: high
-    gap_closure: executed
+    gap_closure: closed
     gap_closure_plan: 06-02-PLAN.md
-    gap_closure_outcome: "architectural fix landed (plugin replaces gateway hook, on_session_end fires for CLI sessions). G-01 is architecturally closed but behaviorally blocked by G-02 — see 06-HUMAN-UAT.md status_after_06_02."
+    gap_closure_outcome: "Architectural fix landed in 06-02 (plugin replaces gateway hook, on_session_end fires for all session sources). Behavioral close confirmed transitively by UAT round 3: the CLI substantive turn produced a correct marker file once G-02's heuristic gap was closed by 06-03. G-01 is fully closed."
     summary: "agent:end hook does not fire for non-platform-served sessions (CLI `hermes chat -q`, cron-ticker invocations). The Phase 6 goal ('a Hermes lifecycle hook deterministically writes a marker record ... independent of whether the agent loaded the revenium skill or executed FINAL ACTION') is not achieved for CLI sessions, which is the dominant dev-time path and the original adoption-gap Phase 6 was created to close. Evidence: two CLI substantive turns on 2026-05-13T19:32-19:33 produced no marker file and no hook-related log entries despite the hook being loaded at gateway startup. See 06-HUMAN-UAT.md for full evidence."
     relates_to: [HOOK-01, HOOK-02, HOOK-05, HOOK-06, SC1, SC2, SC6]
   - id: G-02
     severity: high
-    gap_closure: executed
+    gap_closure: closed
     gap_closure_plan: 06-03-PLAN.md
-    gap_closure_outcome: "code fix landed (state.db.sessions.tool_call_count primary source + JSONL fallback in _count_tools_in_current_turn). G-02 is closed by code; behaviorally closed only after UAT round 3 records the CLI substantive turn producing a marker file with non-unclassified task_type on Mac Studio. The four new HOOK-12 tests (3 unit + 1 end-to-end) pin the regression guard in CI."
+    gap_closure_outcome: "Behaviorally closed by Mac Studio UAT round 3 (2026-05-14T07:11Z): CLI substantive turn sid 20260514_031132_a7aa8e produced a marker file with task_type=generation (non-unclassified) despite JSONL being absent for the session. State.db primary path correctly identified tool_call_count=1 → heuristic skip did not fire → LLM classification ran → label `generation` written. The four HOOK-12 tests pin the CI regression guard."
     summary: "Substance heuristic mis-classifies CLI sessions as trivial because `~/.hermes/sessions/<sid>.jsonl` is absent for `hermes chat -q` sessions. `classifier._count_tools_in_current_turn` returns 0 (no file), and the on_session_end payload provides no response text — so the heuristic-skip-fast-path triggers for every CLI substantive turn and no marker is written. State.db has the signal (tool_call_count, message_count populated) but the classifier doesn't consult it. Surfaced by UAT round 2 on Mac Studio (2026-05-13T22:50Z). See 06-HUMAN-UAT.md G-02 for evidence and closure options."
     relates_to: [HOOK-02, HOOK-11, SC2, SC6]
+  - id: G-03
+    severity: high
+    gap_closure: pending
+    gap_closure_plan: TBD (06-04-PLAN.md)
+    summary: "Cron-ticker races the on_session_end classifier. For CLI sessions whose final turn straddles a minute boundary, the cron ticks (~6s before the plugin's LLM-driven classification completes) and ships task_type=unclassified to Revenium. The marker arrives 6s later but the cron's ledger is idempotent — future ticks skip the session forever. Surfaced by UAT round 3 (2026-05-14T07:12Z): sid 20260514_031132_a7aa8e has a correct marker on disk (task_type=generation) but Revenium received task_type=unclassified. state.db.ended_at is NULL for CLI sessions (hermes_cli/oneshot.py doesn't populate it), so the cron can't filter on session-completeness. See 06-HUMAN-UAT.md G-03 for evidence and closure options (a)-(d)."
+    relates_to: [HOOK-12, SC2, SC5, Phase-3-cron-pipeline]
 re_verification:
   previous_status: human_needed
   previous_score: 11/11 must-haves verified (automated)
-  gaps_closed: []
-  gaps_remaining: [G-01, G-02]
+  gaps_closed: [G-01, G-02]
+  gaps_remaining: [G-03]
   regressions: []
 human_verification:
   - test: "Operator-side UAT — install plugin, restart gateway, exercise a fresh substantive Hermes session WITHOUT loading the revenium skill, and confirm marker pair appears with a non-`unclassified` task_type."

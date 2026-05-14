@@ -11,6 +11,9 @@ uat_rounds:
   - round: 2
     against: gsd/phase-6-uat @ 5f493c0 (plans 06-01 + 06-02 — on_session_end plugin)
     outcome: G-02 surfaced — plugin loads + callback fires, but substance heuristic misclassifies CLI turns as trivial because ~/.hermes/sessions/<sid>.jsonl is absent for hermes chat -q sessions
+  - round: 3
+    against: gsd/phase-6-uat @ e49611b (plans 06-01 + 06-02 + 06-03 — state.db tool-count primary)
+    outcome: "G-02 CLOSED — marker file with task_type=generation (NOT unclassified) was written for CLI sid 20260514_031132_a7aa8e despite JSONL being absent. BUT G-03 surfaced — cron ticked at 07:12:02 and shipped task_type=unclassified to Revenium 6.47 seconds BEFORE the plugin's on_session_end finished its LLM classification at 07:12:08. Ledger now has an idempotent unclassified entry for the sid; future cron ticks skip the session forever even though the marker exists on disk. Architectural fix (Phase 6) works; cron pipeline (Phase 3) races the classifier."
 ---
 
 ## Current Test
@@ -98,6 +101,57 @@ recommended_action: |
   Run `/gsd-plan-phase 6 --gaps` to plan a gap-closure increment. Decide (a) vs (b) during the discuss/plan step — likely (a) if hermes_cli already has a hook-loading code path that can be reused, otherwise (b).
 
   Both options require checking the contributing audience: do CLI users want / need this attribution split, and is there an `agent:end`-equivalent emit site already in `hermes_cli/main.py` we can hook?
+
+### G-03: cron-ticker races the on_session_end classifier; ships unclassified before marker is written
+severity: high
+status: open
+discovered: 2026-05-14T07:15:00Z
+relates_to: HOOK-12, SC2, SC5, Phase 3 hermes-report.sh cron-tick design
+summary: |
+  The classifier's `on_session_end` callback does an LLM call to assign the task_type (~6 seconds for the qwen3.6-plus configured here). The cron ticker runs every minute against `~/.hermes/state.db`. For CLI sessions whose final turn straddles a minute boundary, the cron may tick AFTER state.db has the token delta but BEFORE on_session_end has written the marker. The cron then takes the D-18 backward-compat path (`--task-type unclassified`) and writes a ledger entry. The marker arrives 6 seconds later but the ledger is idempotent — future cron ticks see the entry and skip the session forever.
+
+  Concrete evidence from UAT round 3 (sid 20260514_031132_a7aa8e on 2026-05-14T07:11:32→07:12:08 UTC):
+  - 07:11:32.51 — session row created in state.db
+  - 07:12:02.08 — cron tick reads state.db, no marker file exists yet, ships task_type=unclassified, writes ledger
+  - 07:12:08.55 — on_session_end fires; classifier writes marker with task_type=generation (6.47s late)
+  - Result: Revenium receives task_type=unclassified for a session that the classifier correctly identified as `generation`.
+
+  state.db's `ended_at` column is NULL for CLI sessions (hermes_cli/oneshot.py doesn't populate it), so the cron can't filter on "ended_at IS NOT NULL". The cron's SELECT in hermes-report.sh has no settle-delay or freshness filter.
+options_for_closure:
+  - "(a) Add a settle-delay filter to hermes-report.sh: skip sessions whose `started_at` is within the last 60-90 seconds. Pros: 1-line SQL change. Cons: long-running sessions (> 1min) still race; doesn't help re-classification of already-shipped sessions."
+  - "(b) Plugin writes a `~/.hermes/state/revenium/markers/.ready/<sid>` sentinel after marker-write. Cron only reports sessions whose sentinel exists OR whose `started_at` is more than N minutes old. Pros: deterministic ordering; works regardless of session duration. Cons: new state path + cleanup logic."
+  - "(c) Plugin populates ended_at in state.db after marker-write. Cron filters `WHERE ended_at IS NOT NULL OR started_at < now - settle`. Pros: reuses existing schema column. Cons: violates 'no writes to state.db' invariant — would need explicit operator decision to relax that rule."
+  - "(d) Re-shipping: cron detects 'shipped-but-now-has-markers' and ships the markers as a follow-up `--cost 0` row with the right task_type. Pros: no settle delay. Cons: doubles the Revenium row count; complicates the analytics math; violates idempotency semantics."
+recommended_action: |
+  Option (a) or (b) — both narrow-scope, both fix the load-bearing case (CLI sessions complete within 1-2 minutes). Run `/gsd-plan-phase 6 --gaps` for plan 06-04 to pick between them and add tests that pin the settle-window behavior. Bias toward (b) — it's deterministic; (a) leaves long-running sessions racing.
+
+### Test 1 — UAT round 3 sub-results (2026-05-14T07:11-07:13 on Mac Studio against gsd/phase-6-uat @ e49611b)
+
+result: partial (4 of 5 sub-steps pass; step 5 fails due to cron race G-03)
+sub_results:
+  - step: "(1) setup-local.sh installs plugin + plugins.enabled is idempotent"
+    status: pass
+    evidence: "setup-local.sh output: 'Installed plugin to ~/.hermes/plugins/revenium-classifier' + 'revenium-classifier already enabled in /Users/johndemic/.hermes/config.yaml' (idempotent — no duplicate)."
+  - step: "(2) hermes gateway restart"
+    status: pass
+    evidence: "'✓ Service restarted'"
+  - step: "(3) Gateway loads the plugin"
+    status: pass
+    evidence: "Plugin manager debug log shows `Plugin revenium-classifier registered hook: on_session_end` (verified in UAT round 2; not re-verified here)."
+  - step: "(4) CLI substantive turn → marker file with non-unclassified task_type"
+    status: pass
+    evidence: |
+      CLI turn `hermes chat -q "Read /Users/johndemic/.hermes/skills/revenium/scripts/cron.sh and explain..."` (sid=20260514_031132_a7aa8e, 1 tool call, 36s duration, model=qwen/qwen3.6-plus, platform=cli, JSONL ABSENT at ~/.hermes/sessions/<sid>.jsonl).
+      Marker file at ~/.hermes/state/revenium/markers/20260514_031132_a7aa8e.jsonl contains 2 records (GUARDRAIL + CHAT), both with `task_type: "generation"` (NOT unclassified).
+      G-02 is BEHAVIORALLY CLOSED. The state.db tool-count primary path correctly identified the session as substantive (tool_call_count=1 from state.db.sessions row → heuristic skip does not fire → LLM classification runs → label "generation" assigned and validated against the taxonomy).
+  - step: "(5) Next cron tick ships --task-type to Revenium"
+    status: fail
+    evidence: |
+      Cron ran at 2026-05-14T07:12:02 and reported the session with `task_type=unclassified`:
+        [2026-05-14T07:12:02Z] [INFO] [revenium] Reported: session=20260514_031132_a7aa8e task_type=unclassified ...
+      Marker was written at 2026-05-14T07:12:08.55 — 6.47s LATER. Cron's ledger:
+        HERMES:20260514_031132_a7aa8e:35550:1778742722.083:unclassified-1778742722083
+      Future cron ticks skip the session per idempotency. G-03 (cron race) blocks SC5 from passing.
 status_after_06_02: |
   G-01's root cause was correctly diagnosed and the architectural fix landed (06-02 — `hermes_cli` plugin registering `on_session_end`). UAT round 2 (2026-05-13T22:50Z on Mac Studio 172.16.1.175 against `gsd/phase-6-uat @ 5f493c0`) confirms:
 
