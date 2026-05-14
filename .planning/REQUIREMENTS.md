@@ -85,6 +85,7 @@ Requirements for the initial release. Each maps to roadmap phases. Drawn from PR
 - [ ] **HOOK-08**: `examples/setup-local.sh` unconditionally replaces `~/.hermes/hooks/revenium-classifier/` with the in-skill copy at `skills/revenium/hooks/revenium-classifier/` on every install; the script's "Next steps" echo block documents `hermes gateway restart` as a required post-install action.
 - [ ] **HOOK-09**: `tests/test_repository.py` extends `test_expected_files_exist` with the 5 new hook files and adds 6 new test methods covering HOOK-02..HOOK-07 plus the 3 synthetic test-payload fixtures. The hook handler is import-conditional under `@unittest.skipUnless(_agent_aux_client_available(), ...)` for tests that exercise the real call_llm path; all other tests mock `handler.call_llm` and run unconditionally. Tests use `tempfile.mkdtemp(prefix='gsd-hook-')` + env redirect (`HERMES_HOME`, `REVENIUM_STATE_DIR`) — same pattern as `test_cron_marker_split_end_to_end`.
 - [ ] **HOOK-10**: `skills/revenium/references/setup.md` carries a `## Mechanical classification hook` section AFTER the existing `## How attribution works` documenting (a) installation via `examples/setup-local.sh`, (b) the mandatory `hermes gateway restart` post-install step, (c) the gateway startup-log verification line, and (d) an explicit "do NOT use `hermes hooks list`" callout that distinguishes the event-hook subsystem from the shell-hook CLI.
+- [ ] **HOOK-11**: Universal session coverage — classification fires on every Hermes session end regardless of source (gateway-served, CLI one-shot, interactive, ACP, cron-spawned), via the hermes_cli plugin system's on_session_end event. Plugin manifest lives at skills/revenium/plugins/revenium-classifier/plugin.yaml; entrypoint at skills/revenium/plugins/revenium-classifier/__init__.py exposes def register(ctx) calling ctx.register_hook("on_session_end", _on_session_end). The previous agent:end gateway-hook integration (HOOK-01..HOOK-10 as originally specified) is superseded — closes G-01.
 
 ## v2 Requirements
 
@@ -181,10 +182,11 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 | HOOK-08 | Phase 6 | Pending |
 | HOOK-09 | Phase 6 | Pending |
 | HOOK-10 | Phase 6 | Pending |
+| HOOK-11 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 47 total
-- Mapped to phases: 47
+- v1 requirements: 48 total
+- Mapped to phases: 48
 - Unmapped: 0
 
 ---
