@@ -1555,9 +1555,9 @@ class RepositoryTests(unittest.TestCase):
         # Anti-pattern callout against the shell-hook CLI (Conflict C1)
         self.assertRegex(text, r'Do NOT.*hermes hooks list',
                          'setup.md must warn against using `hermes hooks list` for the event hook')
-        # Hook directory documented
-        self.assertIn('~/.hermes/hooks/revenium-classifier/', text,
-                      'setup.md must reference the canonical hook install path')
+        # Plugin directory documented
+        self.assertIn('~/.hermes/plugins/revenium-classifier/', text,
+                      'setup.md must reference the canonical plugin install path')
         # Subagent mention
         self.assertTrue('subagent' in text.lower(),
                         'setup.md must mention subagent inheritance')
