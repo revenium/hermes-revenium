@@ -524,10 +524,13 @@ try:
     n = int(os.environ['N_MARKERS'])
     splits = equal_split(delta, n)
     for marker, split in zip(markers, splits):
+        m_agent = marker.get('agent', '')   # optional Phase 2 field; empty string triggers bash :- fallback
+        m_trace = marker.get('trace_id', '')   # optional Phase 2 field; empty string triggers bash :- fallback
+        # NOTE: m_agent / m_trace values MUST NOT contain '|' (pipe-safety; today's only values are pipe-safe fallbacks per D-23).
         # Pipe-delimited; cost is a string for byte-exact round-trip.
         print(f"{marker['muid']}|{marker['task_type']}|{marker['operation_type']}|"
               f"{split['input']}|{split['output']}|{split['cache_read']}|"
-              f"{split['cache_write']}|{split['total']}|{split['cost']}")
+              f"{split['cache_write']}|{split['total']}|{split['cost']}|{m_agent}|{m_trace}")
 except Exception as exc:
     print(f"SPLIT_ERROR={exc}", file=sys.stderr)
     sys.exit(3)
@@ -543,8 +546,8 @@ PY
         continue
       fi
 
-      local row muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost
-      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost; do
+      local row muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
+      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace; do
         [[ -z "${muid}" ]] && continue
 
         local cmd=(
@@ -561,9 +564,9 @@ PY
           --completion-start-time "${request_time}"
           --response-time "${response_time}"
           --request-duration "${duration_ms}"
-          --agent "Hermes"
+          --agent "${m_agent:-Hermes}"
           --transaction-id "${sid}-${total_tokens}-${muid}"
-          --trace-id "${sid}"
+          --trace-id "${m_trace:-${sid}}"
           --is-streamed
           --quiet
           --task-type "${t_type}"
@@ -607,9 +610,7 @@ PY
       # No markers in this window. Reasons: older install with no agent classification,
       # missing/empty marker file, all marker lines unparseable, or this session's
       # marker file was unreadable (TAX-05 / MARK-04 tolerance — see T04 reader heredoc).
-      # Argv differs from the pre-Phase-3 legacy single-call ONLY by the addition of
-      # --task-type unclassified (SC3 byte-diff invariant). Do NOT emit --operation-type:
-      # Phase 4 owns the WIRE-01 default decision per CONTEXT.md research_gates.
+      # WIRE-01 / D-22: emit --operation-type CHAT — gate discharged in 04-RESEARCH.md (Revenium server-side default; cost parity verified across 50+ historical records).
       # B4: --transaction-id stays as ${sid}-${total_tokens} — the synthetic muid that
       # appears in the v2 ledger row's field 5 is a LEDGER-SIDE identifier only, NEVER
       # in the wire transaction-id. Extending --transaction-id here would break SC3.
@@ -633,6 +634,7 @@ PY
         --is-streamed
         --quiet
         --task-type "unclassified"
+        --operation-type "CHAT"
       )
 
       if [[ -n "${billing_provider}" ]]; then
