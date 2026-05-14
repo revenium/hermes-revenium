@@ -114,6 +114,7 @@ None.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260514-n8e | Remove D-07 trivial-skip (mirror Mac Studio hotfix) — silently dropped ~94% of cron sessions | 2026-05-14 | a9f9411 | [260514-n8e-remove-d-07-trivial-skip-from-classifier](./quick/260514-n8e-remove-d-07-trivial-skip-from-classifier/) |
+| 260514-nfb | Rewrite classifier prompt to mint-first bias — surface specific labels instead of collapsing to `generation` | 2026-05-14 | e079144 | [260514-nfb-rewrite-classifier-prompt-to-mint-first-](./quick/260514-nfb-rewrite-classifier-prompt-to-mint-first-/) |
 
 ## Session Continuity
 
