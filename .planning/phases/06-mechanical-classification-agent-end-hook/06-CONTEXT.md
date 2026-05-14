@@ -260,7 +260,82 @@ This plan is **narrowly scoped to G-02 only**. Out of scope for 06-03:
 
 ---
 
+## Gap-closure addendum #3 (2026-05-14 — post-UAT round 3)
+
+UAT round 3 on Mac Studio (172.16.1.175 against `gsd/phase-6-uat @ e49611b`, plans 06-01 + 06-02 + 06-03 deployed) confirmed G-01 + G-02 closure: marker file for CLI sid `20260514_031132_a7aa8e` shows `task_type: "generation"` (non-unclassified). But the cron pipeline shipped `task_type=unclassified` to Revenium 6.47 seconds BEFORE the marker was written. See `06-HUMAN-UAT.md::G-03` for the timeline.
+
+### What broke (G-03)
+
+The classifier's `on_session_end` callback does an LLM call to assign the task_type. For qwen3.6-plus this takes ~5-10 seconds. The cron ticker runs every minute against `~/.hermes/state.db`. Sessions whose final turn straddles a minute boundary race the classifier — if the cron ticks AFTER state.db has the token delta but BEFORE on_session_end has written the marker, the cron takes the D-18 default (`--task-type unclassified`). The cron's ledger is idempotent — once a session is reported, future ticks skip it forever even if a marker arrives 6 seconds later.
+
+Concrete UAT round 3 evidence:
+- 07:11:32.51 — CLI session row created in state.db
+- 07:12:02.08 — cron tick: reads state.db, sees 35,550 tokens, NO marker exists yet, ships `task_type=unclassified`, writes ledger `HERMES:<sid>:35550:1778742722.083:unclassified-1778742722083`
+- 07:12:08.55 — on_session_end fires, classifier writes marker with `task_type=generation` (6.47s late)
+- Result: Revenium received `unclassified`; marker exists on disk but is unreachable by the ledger-idempotent cron.
+
+state.db's `ended_at` column is NULL for CLI sessions (hermes_cli/oneshot.py doesn't populate it), so the cron can't filter on `ended_at IS NOT NULL` to wait for session completion. The cron's existing SELECT in `hermes-report.sh` has no settle-window or freshness filter.
+
+### Locked decision (D-21)
+
+**Plugin writes a sentinel file after every `on_session_end` invocation completes. Cron only reports sessions whose sentinel exists OR whose `started_at` is older than a settle-window (default: 2 minutes).**
+
+Specifically:
+- **Sentinel path:** `~/.hermes/state/revenium/markers/.ready/<sid>` — an empty file (zero bytes), `touch`-style. Module-level constant `MARKERS_READY_DIR` declared in `common.sh` alongside the existing `MARKERS_DIR`.
+- **When the plugin writes a sentinel:** at the END of `_on_session_end` (in `__init__.py`), AFTER `run_classification` returns. Write happens unconditionally — for substantive turns (after marker pair written), trivial-skip turns (after the skip), inheritance turns (after parent task_type adopted), halt turns (after unclassified marker written), and even error paths (catch in the outer try/except, log warning, still write sentinel). The sentinel says "the plugin has finished with this session — cron may proceed."
+- **Cron filter (in `hermes-report.sh` session SELECT):** `WHERE (input_tokens > 0 OR output_tokens > 0) AND (sentinel exists for sid OR started_at < strftime('%s', 'now') - SETTLE_SECONDS)`. The OR is the safety net for sessions where the plugin never fires (uninstalled plugin, plugin crash before the sentinel write, gateway hooks legacy path, etc.) — eventually they all report with the D-18 default. SETTLE_SECONDS = 120 (2 minutes) by default; configurable via env var `REVENIUM_CRON_SETTLE_SECONDS` for operator tuning.
+- **Sentinel lifecycle:** sentinels are append-once, never updated. After a session is reported, the sentinel remains (we don't re-read it; idempotency is in the ledger). Housekeeping (future Phase 5) prunes both the marker file AND the sentinel together when a session is N days old.
+
+Why this approach (not the alternatives):
+- **(a) settle-delay only** (skip sessions younger than N seconds): fails for long-running sessions (> N min) — they're still in flight when the cron runs and would race the LAST classification.
+- **(b) sentinel — chosen.** Deterministic. The plugin signals readiness explicitly. Long-running sessions still tick correctly as the operator drives turns; only the FINAL turn's classification is in flight and the sentinel handles that.
+- **(c) plugin writes ended_at to state.db:** violates the "no writes to state.db" invariant (locked in CLAUDE.md). Out.
+- **(d) re-shipping with `--cost 0` rows:** doubles the Revenium row count and complicates analytics math. Out.
+
+### Scope discipline (locked)
+
+This plan is **narrowly scoped to G-03 only**. Out of scope for 06-04:
+- Touching the classifier itself (`_count_tools_in_current_turn`, `_walk_to_root_session`, `_classify_via_llm`, `_write_marker_pair`, etc.)
+- The 3 code-review issues carried from 06-02-REVIEW.md (CR-01 subagent dedup, CR-02 walk-to-root depth-cap, CR-03 flow-style YAML) — scheduled for a separate polish pass
+- The "tool-less Telegram turn" concern (open issue but distinct from G-03)
+- Heuristic-skip threshold or logic shape
+- Changes to setup-local.sh, references/setup.md, SKILL.md, or HOOK-01..HOOK-12 strings beyond adding HOOK-13
+
+### What the gap-closure plan must do
+
+| Concern | Action |
+|---------|--------|
+| `common.sh` new path constant | Declare `MARKERS_READY_DIR="${STATE_DIR}/markers/.ready"` between `MARKERS_DIR` and `mkdir -p`. Add to the `mkdir -p ...` line so the directory is created on first source. Update `tests/test_repository.py::test_runtime_paths_are_hermes_native` to assert the new path substring. |
+| Plugin sentinel write | In `skills/revenium/plugins/revenium-classifier/__init__.py::_on_session_end`, after `run_classification(...)` returns (in the try block) AND in the outer `except Exception:` handler, write the sentinel: `MARKERS_READY_DIR / sid` — `Path(...).touch(exist_ok=True)`. Sentinel write must NEVER raise (any exception → log + swallow). The point of the sentinel is "the plugin has finished with this session" — fires for every outcome (marker written, trivial-skip, inheritance, halt, error). |
+| Classifier shared module exports `MARKERS_READY_DIR` | Add the constant import in `classifier.py` alongside the existing `MARKERS_DIR` (mirror the path-discipline pattern). Plugin `__init__.py` imports from `.classifier`. |
+| Cron settle filter | In `skills/revenium/scripts/hermes-report.sh`, modify the session SELECT to add the sentinel-or-aged filter. The simplest shape: Python heredoc that lists session candidates from sqlite, then filters by `os.path.exists(MARKERS_READY_DIR / sid) OR started_at < now - SETTLE_SECONDS`. SETTLE_SECONDS = `os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '120')`. Skipped sessions log a single `info` line: `"skipping <sid> — awaiting plugin sentinel (age=Ns < settle=120s)"` so operator can debug. |
+| HOOK-13 requirement | Add `HOOK-13` to `.planning/REQUIREMENTS.md`: "Cron pipeline MUST synchronize with the plugin via a per-session sentinel file at `${MARKERS_READY_DIR}/<sid>`. Sessions WITHOUT a sentinel AND younger than `REVENIUM_CRON_SETTLE_SECONDS` (default 120s) MUST be skipped this tick to give the plugin time to finish classification. Sessions older than the settle window MAY be reported even without a sentinel (D-18 default) to handle plugin-failure cases." |
+| ROADMAP success criteria update | Update Phase 6 SC5 to call out: "the next cron tick after on_session_end ships `--task-type <meaningful-label>` to Revenium — verified by an end-to-end fixture that creates a session, fires on_session_end (writing both the marker AND the sentinel), then invokes `hermes-report.sh` and asserts the resulting `revenium meter completion` call carries the marker's `task_type`, NOT `unclassified`." |
+| Tests: sentinel write (positive) | New unit test: invoke `_on_session_end` directly with a synthetic state.db + mocked classifier; assert `MARKERS_READY_DIR / sid` exists after the call. |
+| Tests: sentinel write on error path (D-04 belt) | New unit test: patch `run_classification` to raise; assert sentinel STILL gets written (D-04 invariant extends to sentinel: never block a session forever just because classification failed). |
+| Tests: cron filter — skip recent-no-sentinel | New unit test: synthetic state.db with a session row whose `started_at` is 30s ago AND no sentinel; assert `hermes-report.sh`'s session-list query SKIPS the sid. |
+| Tests: cron filter — report aged-no-sentinel | New unit test: synthetic state.db with a session row whose `started_at` is 200s ago AND no sentinel; assert the query INCLUDES the sid (safety-net path). |
+| Tests: cron filter — report any-age-with-sentinel | New unit test: synthetic state.db with a session row whose `started_at` is 5s ago AND a sentinel file at `MARKERS_READY_DIR / sid`; assert the query INCLUDES the sid (sentinel path). |
+| Tests: end-to-end (cron + sentinel) | New end-to-end test: synthetic state.db + write a marker file (sid X) + write a sentinel for sid X, invoke `hermes-report.sh` against synthetic HERMES_HOME, assert it ships the markers' `task_type` (not unclassified) to a mocked `revenium meter completion`. This is the CI regression guard for G-03. |
+| VERIFICATION.md G-03 transition | Update `06-VERIFICATION.md::gaps[G-03].gap_closure` from `pending` to `executed`. Keep `status: requires_rerun_uat` until UAT round 4 confirms a CLI substantive turn produces a marker AND that marker reaches Revenium with the correct task_type. |
+| UAT round 4 on Mac Studio | After execution: re-run UAT 4 on `gsd/phase-6-uat`. The test sequence: install (idempotent), restart gateway, drive a CLI substantive turn straddling a minute boundary, wait one minute, confirm cron ships `--task-type <label>` (NOT unclassified) by tailing `~/.hermes/state/revenium/revenium-metering.log`. |
+
+The plugin → sentinel → cron chain is **the load-bearing primary path** for G-03 closure. The aged-safety-net is for the edge cases where the plugin fails silently — without it, a plugin crash would freeze the cron forever for that session.
+
+### Out of scope (deliberately)
+
+- Touching `classifier.py` beyond importing `MARKERS_READY_DIR` (no logic changes to the helpers).
+- Heuristic-skip / response-text / parent-inheritance / budget-halt logic.
+- The CR-01/CR-02/CR-03 code-review issues from 06-02-REVIEW.md.
+- setup-local.sh changes (the new directory is created by `common.sh` sourcing, not by setup-local.sh — same pattern as `MARKERS_DIR` today).
+- HOOK-01..HOOK-12 entry strings (carried unchanged).
+- SKILL.md, the existing 12 HOOK-* tests, the 4 HOOK-12 tests.
+- The cron pipeline's other logic — splits, ledger writes, etc. ONLY the session-selection SELECT changes.
+
+---
+
 *Phase: 06-mechanical-classification-agent-end-hook*
 *Context gathered: 2026-05-13 via Phase 3 UAT findings + Hermes hook discovery + locked design decisions (subagent inheritance, LLM-assisted classification)*
 *Gap-closure addendum: 2026-05-13 via Mac Studio UAT — D-19 locked: switch from gateway `agent:end` hook to `hermes_cli` `on_session_end` plugin*
 *Gap-closure addendum #2: 2026-05-14 via Mac Studio UAT round 2 — D-20 locked: switch tool-count source from per-session JSONL to state.db.sessions.tool_call_count, JSONL fallback*
+*Gap-closure addendum #3: 2026-05-14 via Mac Studio UAT round 3 — D-21 locked: plugin writes per-session sentinel at MARKERS_READY_DIR/<sid> after on_session_end; cron filters sessions by sentinel-or-aged (settle window 120s)*
