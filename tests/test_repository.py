@@ -275,6 +275,7 @@ class RepositoryTests(unittest.TestCase):
         from decimal import Decimal
         sys.path.insert(0, str(SKILL / 'scripts'))
         from split_strategies import equal_split, INT_FIELDS, COST_FIELD
+        QUANT = Decimal("0.000001")
         cases = [
             # (delta, n) — RESEARCH.md Example 3 verbatim, plus n=1
             ({"input": 8000, "output": 3000, "cache_read": 100, "cache_write": 50,
@@ -285,6 +286,13 @@ class RepositoryTests(unittest.TestCase):
               "total": 11000, "cost": "0.123456"}, 5),
             ({"input": 8001, "output": 3001, "cache_read": 101, "cache_write": 51,
               "total": 11003, "cost": "0.987654"}, 10),  # non-divisible by N
+            # G-04 regression: input cost with > 6 decimal places (e.g. qwen3.6-plus's
+            # 0.0119093). Pre-fix this raised AssertionError("conservation violated for cost")
+            # because last_cost.quantize() truncated the 7th digit. Post-fix, the input
+            # is quantized to 6 places up-front so the conservation invariant holds against
+            # the quantized input.
+            ({"input": 35372, "output": 212, "cache_read": 0, "cache_write": 0,
+              "total": 35584, "cost": "0.0119093"}, 2),
         ]
         for delta, n in cases:
             splits = equal_split(delta, n)
@@ -292,10 +300,12 @@ class RepositoryTests(unittest.TestCase):
             for k in INT_FIELDS:
                 self.assertEqual(sum(s[k] for s in splits), delta[k],
                                  f"conservation violated for {k} at n={n}")
-            # Decimal-exact cost conservation
+            # Decimal-exact cost conservation — against the quantized input
+            # (the splitter rounds input to 6 decimal places per G-04 fix).
+            quantized_input_cost = Decimal(delta[COST_FIELD]).quantize(QUANT)
             self.assertEqual(
                 sum(Decimal(s[COST_FIELD]) for s in splits),
-                Decimal(delta[COST_FIELD]),
+                quantized_input_cost,
                 f"cost conservation violated at n={n}",
             )
 
