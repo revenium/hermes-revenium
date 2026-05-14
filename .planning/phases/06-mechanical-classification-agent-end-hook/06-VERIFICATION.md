@@ -9,15 +9,22 @@ overrides_applied: 0
 gaps:
   - id: G-01
     severity: high
-    gap_closure: planned
+    gap_closure: executed
     gap_closure_plan: 06-02-PLAN.md
+    gap_closure_outcome: "architectural fix landed (plugin replaces gateway hook, on_session_end fires for CLI sessions). G-01 is architecturally closed but behaviorally blocked by G-02 — see 06-HUMAN-UAT.md status_after_06_02."
     summary: "agent:end hook does not fire for non-platform-served sessions (CLI `hermes chat -q`, cron-ticker invocations). The Phase 6 goal ('a Hermes lifecycle hook deterministically writes a marker record ... independent of whether the agent loaded the revenium skill or executed FINAL ACTION') is not achieved for CLI sessions, which is the dominant dev-time path and the original adoption-gap Phase 6 was created to close. Evidence: two CLI substantive turns on 2026-05-13T19:32-19:33 produced no marker file and no hook-related log entries despite the hook being loaded at gateway startup. See 06-HUMAN-UAT.md for full evidence."
     relates_to: [HOOK-01, HOOK-02, HOOK-05, HOOK-06, SC1, SC2, SC6]
+  - id: G-02
+    severity: high
+    gap_closure: pending
+    gap_closure_plan: TBD (06-03-PLAN.md)
+    summary: "Substance heuristic mis-classifies CLI sessions as trivial because `~/.hermes/sessions/<sid>.jsonl` is absent for `hermes chat -q` sessions. `classifier._count_tools_in_current_turn` returns 0 (no file), and the on_session_end payload provides no response text — so the heuristic-skip-fast-path triggers for every CLI substantive turn and no marker is written. State.db has the signal (tool_call_count, message_count populated) but the classifier doesn't consult it. Surfaced by UAT round 2 on Mac Studio (2026-05-13T22:50Z). See 06-HUMAN-UAT.md G-02 for evidence and closure options."
+    relates_to: [HOOK-02, HOOK-11, SC2, SC6]
 re_verification:
   previous_status: human_needed
   previous_score: 11/11 must-haves verified (automated)
   gaps_closed: []
-  gaps_remaining: [G-01]
+  gaps_remaining: [G-01, G-02]
   regressions: []
 human_verification:
   - test: "Operator-side UAT — install plugin, restart gateway, exercise a fresh substantive Hermes session WITHOUT loading the revenium skill, and confirm marker pair appears with a non-`unclassified` task_type."

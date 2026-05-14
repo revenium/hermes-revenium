@@ -14,7 +14,7 @@ Every metered completion that leaves this skill carries an accurate, consistentl
 - [x] **Phase 3: Cron Marker Reader + Equal-Split + Ledger v2** - One coherent migration: marker-aware split path, extended `--transaction-id`, 5-field ledger row, `flock(2)` lockfile, pluggable split strategy. Partial adoption breaks idempotency. (2026-05-13)
 - [ ] **Phase 4: Wire Enrichment** - Source `--operation-type` / `--agent` / `--trace-id` from marker fields; preserve provider inference for every split call.
 - [ ] **Phase 5: Housekeeping & Compat Hardening** - Marker file pruning, backward-compat regression tests, end-to-end test fixtures. Operational hygiene with no functional dependency.
-- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 gap closure executed 2026-05-14 via 06-02-PLAN.md → hermes_cli on_session_end plugin; phase pending Mac Studio re-UAT — VERIFICATION.md status: requires_rerun_uat)
+- [ ] **Phase 6: Mechanical Classification via Hermes agent:end Hook** - Replace soft prompt enforcement of FINAL ACTION with a Hermes lifecycle hook that classifies every turn and writes the marker file mechanically. Subagents inherit parent task_type via state.db `parent_session_id`. LLM-assisted classification using the budgeted model. Surfaced by Phase 3 UAT on the Mac Studio — agent-side adoption of the Phase 2 closing-discipline pattern is unreliable in Hermes' lazy-skill-loading + delegate_task subagent architecture. (G-01 architecturally closed by 06-02-PLAN.md; UAT round 2 surfaced G-02 — substance heuristic mis-classifies CLI turns as trivial when ~/.hermes/sessions/<sid>.jsonl is absent. Phase pending 06-03 gap-closure + re-UAT.)
 
 ## Phase Details
 
@@ -144,7 +144,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
 | 4. Wire Enrichment | 0/0 | Not started | - |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
-| 6. Mechanical Classification via agent:end Hook | 2/2 | Plans executed — pending Mac Studio re-UAT for G-01 closure (VERIFICATION.md: requires_rerun_uat) | 2026-05-14 |
+| 6. Mechanical Classification via agent:end Hook | 2/2 | UAT round 2 surfaced G-02 (heuristic mis-skip on absent CLI JSONL) — pending 06-03 gap closure | 2026-05-14 |
 
 ## Research Flags
 

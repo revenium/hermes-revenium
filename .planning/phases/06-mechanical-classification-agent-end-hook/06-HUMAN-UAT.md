@@ -3,7 +3,14 @@ status: diagnosed
 phase: 06-mechanical-classification-agent-end-hook
 source: [06-VERIFICATION.md]
 started: 2026-05-13T19:02:08Z
-updated: 2026-05-13T19:35:00Z
+updated: 2026-05-13T22:55:00Z
+uat_rounds:
+  - round: 1
+    against: gsd/phase-6-uat @ f3f4efa (plan 06-01 only)
+    outcome: G-01 surfaced — agent:end hook gateway-platform-scoped, CLI uncovered
+  - round: 2
+    against: gsd/phase-6-uat @ 5f493c0 (plans 06-01 + 06-02 — on_session_end plugin)
+    outcome: G-02 surfaced — plugin loads + callback fires, but substance heuristic misclassifies CLI turns as trivial because ~/.hermes/sessions/<sid>.jsonl is absent for hermes chat -q sessions
 ---
 
 ## Current Test
@@ -91,3 +98,60 @@ recommended_action: |
   Run `/gsd-plan-phase 6 --gaps` to plan a gap-closure increment. Decide (a) vs (b) during the discuss/plan step — likely (a) if hermes_cli already has a hook-loading code path that can be reused, otherwise (b).
 
   Both options require checking the contributing audience: do CLI users want / need this attribution split, and is there an `agent:end`-equivalent emit site already in `hermes_cli/main.py` we can hook?
+status_after_06_02: |
+  G-01's root cause was correctly diagnosed and the architectural fix landed (06-02 — `hermes_cli` plugin registering `on_session_end`). UAT round 2 (2026-05-13T22:50Z on Mac Studio 172.16.1.175 against `gsd/phase-6-uat @ 5f493c0`) confirms:
+
+  - setup-local.sh installs the plugin to ~/.hermes/plugins/revenium-classifier/ ✓
+  - `~/.hermes/config.yaml::plugins.enabled` correctly contains `revenium-classifier` (idempotent stdlib edit) ✓
+  - The Hermes plugin manager loads the plugin: debug log shows `Plugin revenium-classifier registered hook: on_session_end` and `mgr._hooks.get("on_session_end") = [_on_session_end]` ✓
+  - `hermes plugins list` reports `revenium-classifier ... enabled ... 1.0.0 ... user` ✓
+  - The `_on_session_end` callback fires (verified by direct `invoke_hook(...)` call) ✓
+
+  However, NO marker file is written for CLI substantive turns. The callback silently no-ops because of G-02 (below). G-01 is now scoped to "covered architecturally; blocked behaviorally by G-02".
+
+### G-02: substance heuristic mis-classifies CLI sessions as trivial because `~/.hermes/sessions/<sid>.jsonl` is absent
+severity: high
+status: open
+discovered: 2026-05-13T22:55:00Z
+relates_to: HOOK-02, HOOK-11, SC2, SC6, plan 06-02 truth #4 (heuristic skip-fast-path)
+summary: |
+  `classifier._count_tools_in_current_turn(sid)` reads `~/.hermes/sessions/<sid>.jsonl` to count tool calls in the current turn. For CLI one-shot sessions (`hermes chat -q`), this file does not exist — `hermes_cli/oneshot.py::_create_session_db_for_oneshot` writes session data only to `~/.hermes/state.db`, not to the per-session JSONL the gateway uses.
+
+  With JSONL absent → `_count_tools_in_current_turn` returns 0. The `on_session_end` payload also doesn't include `response` text, so `response_preview = ""` → `len < 200`. Both heuristic-skip conditions match (`tool_count == 0` AND `response < 200 chars`) → the classifier correctly takes the trivial-skip path and writes no marker. Every CLI substantive turn is now silently mis-classified as trivial.
+
+  Evidence:
+  - sid `20260513_225231_cf97de` (CLI turn at 22:52, 2 API calls, 1 tool call): no `~/.hermes/sessions/<sid>.jsonl`, no marker file
+  - Direct `invoke_hook("on_session_end", session_id="20260513_225231_cf97de", ...)` produces no marker either — the callback runs, takes the trivial-skip branch, returns
+  - state.db sessions row HAS the substance signal: `tool_call_count`, `message_count`, `input_tokens`, etc. are all populated for the CLI turn
+options_for_closure:
+  - "(a) Rewrite `_count_tools_in_current_turn` to read `state.db.sessions.tool_call_count` (and possibly `message_count`) FIRST, with JSONL fallback. state.db is the universal source of truth for every session source (gateway, CLI, interactive, ACP, cron). The classifier already opens state.db for the parent_session_id walk — add one query against the same row."
+  - "(b) Make the substance heuristic conditional on JSONL existence: if absent, fall through to LLM classification (no trivial-skip). Risk: every silent CLI turn (e.g., a one-word `/help` query) costs an LLM call. Less defensible than (a)."
+  - "(c) Modify Hermes upstream to write JSONL for CLI sessions too. Out of scope (we don't own hermes-agent)."
+recommended_action: |
+  Run `/gsd-plan-phase 6 --gaps` for plan 06-03. Option (a) is the right call: state.db query is one extra parameterized SELECT, the classifier already opens state.db mode=ro, and the test fixtures can stay (just add the missing JSONL-absent test that this UAT proved was missing). Also add a NEGATIVE test: state.db row with tool_call_count > 0 + missing JSONL must NOT trigger trivial-skip.
+
+  This is the test gap the round-1 code review flagged as "test fixture safety: do tests properly isolate by tmpdir?" — the answer was yes, but the tmpdir always created the JSONL, so the "JSONL absent" branch was untested. Plan 06-03 closes both the code gap and the missing-test gap.
+
+### Test 1 — UAT round 2 sub-results (2026-05-13T22:50Z on Mac Studio against gsd/phase-6-uat @ 5f493c0)
+
+result: failed (still — different root cause)
+sub_results:
+  - step: "(1) setup-local.sh installs plugin + edits config.yaml"
+    status: pass
+    evidence: "stdout: 'Installed plugin to /Users/johndemic/.hermes/plugins/revenium-classifier' AND 'Added plugins.enabled block to /Users/johndemic/.hermes/config.yaml'; on-disk plugin tree contains plugin.yaml + __init__.py + classifier.py + test-payloads/; config.yaml ends with `plugins:\\n  enabled:\\n    - revenium-classifier`"
+  - step: "(2) hermes gateway restart"
+    status: pass
+    evidence: "'✓ Service restarted' at 2026-05-13 22:52:01"
+  - step: "(3) Gateway startup loads the plugin"
+    status: pass
+    evidence: "`hermes plugins list` reports revenium-classifier as 'enabled' from 'user' source; direct `mgr.discover_and_load(force=True)` shows `Plugin revenium-classifier registered hook: on_session_end` and `mgr._hooks['on_session_end'] = [_on_session_end]`. Note: the gateway startup log does NOT print a plugin-load line analogous to the old `[hooks] Loaded hook ...` — plugin loading is silent (Hermes only logs at DEBUG level)."
+  - step: "(4) CLI substantive turn → marker file with non-unclassified task_type"
+    status: fail
+    evidence: |
+      CLI substantive turn driven via `hermes chat -q "Read /Users/johndemic/.hermes/skills/revenium/scripts/budget-check.sh and tell me in 2-3 sentences what halt transition logic it implements."` (sid=20260513_225231_cf97de, 2 API calls, 1 tool call, "Turn ended: reason=text_response", model=qwen/qwen3.6-plus, platform=cli).
+      Marker file at ~/.hermes/state/revenium/markers/20260513_225231_cf97de.jsonl NOT created.
+      Direct callback invocation via `invoke_hook("on_session_end", session_id="20260513_225231_cf97de", ...)` ALSO produced no marker file — confirming the callback runs but exits via trivial-skip.
+      Root cause: G-02 (above) — `_count_tools_in_current_turn` returns 0 for CLI sessions because the gateway-style JSONL is absent.
+  - step: "(5) Next cron tick ships --task-type to Revenium"
+    status: blocked
+    evidence: "Still blocked — no marker file from step (4)."
