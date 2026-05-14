@@ -2175,6 +2175,130 @@ class RepositoryTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_cron_filter_end_to_end_ships_marker_task_type(self):
+        """HOOK-13 / G-03 regression guard: when state.db has a CLI session row
+        (tool_call_count=2, recent started_at) AND a marker file exists at
+        MARKERS_DIR/<sid>.jsonl with task_type='generation' AND a sentinel exists at
+        MARKERS_READY_DIR/<sid>, hermes-report.sh's session SELECT INCLUDES the
+        session AND the downstream revenium meter completion calls carry
+        --task-type generation (NOT --task-type unclassified). This is the test
+        that would have caught G-03 on 2026-05-14 — the cron-race shipping
+        unclassified ahead of the plugin's marker."""
+        import json
+        import os
+        import secrets
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+        from pathlib import Path
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-e2e-cron-sentinel-')
+        try:
+            hh = os.path.join(tmpdir, 'hh')
+            sd = os.path.join(hh, 'state', 'revenium')
+            md = os.path.join(sd, 'markers')
+            mrd = os.path.join(md, '.ready')
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(md, exist_ok=True)
+            os.makedirs(mrd, exist_ok=True)
+            os.makedirs(bin_dir, exist_ok=True)
+
+            # 1. Build state.db row (synthetic CLI session shape with recent started_at).
+            state_db = os.path.join(hh, 'state.db')
+            started_at = int(time.time()) - 5  # within settle window — sentinel must win
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                "CREATE TABLE sessions ("
+                "id TEXT PRIMARY KEY, model TEXT, source TEXT, "
+                "input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL, "
+                "api_call_count INTEGER, started_at INTEGER, ended_at INTEGER, "
+                "billing_provider TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ('cli-sid', 'qwen3.6-plus', 'cli', 1000, 500, 0, 0, 0,
+                 0.05, 1, started_at, None, 'openai', 2),
+            )
+            conn.commit()
+            conn.close()
+
+            # 2. Write the marker file — exactly two records, GUARDRAIL + CHAT pair
+            # with task_type='generation' (matching the classifier's MARK-03 muid format).
+            marker_path = os.path.join(md, 'cli-sid.jsonl')
+
+            def muid():
+                return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
+
+            recs = [
+                {"muid": muid(), "ts": time.time(), "sid": "cli-sid",
+                 "task_type": "generation", "operation_type": "GUARDRAIL"},
+                {"muid": muid(), "ts": time.time(), "sid": "cli-sid",
+                 "task_type": "generation", "operation_type": "CHAT"},
+            ]
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                for r in recs:
+                    f.write(json.dumps(r, separators=(',', ':')) + '\n')
+
+            # 3. Write the sentinel.
+            Path(os.path.join(mrd, 'cli-sid')).touch(exist_ok=True)
+
+            # 4. Stub revenium CLI. Place at $HOME/.local/bin so common.sh::ensure_path
+            # leaves the stub ahead of any real revenium installed on the runner.
+            invocations_log = os.path.join(tmpdir, 'revenium-invocations.log')
+            stub_path = os.path.join(bin_dir, 'revenium')
+            with open(stub_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    f'    printf "%q " "$@" >> "{invocations_log}"\n'
+                    f'    printf "\\n" >> "{invocations_log}"\n'
+                    '    exit 0 ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(stub_path, 0o755)
+
+            # 5. Seed an empty ledger.
+            open(os.path.join(sd, 'revenium-hermes.ledger'), 'w').close()
+
+            # 6. Invoke hermes-report.sh.
+            env = {
+                **os.environ,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'HOME': shim_home,
+                'HERMES_HOME': hh,
+                'REVENIUM_STATE_DIR': sd,
+                'REVENIUM_MARKERS_DIR': md,
+                'REVENIUM_MARKERS_READY_DIR': mrd,
+                'REVENIUM_CRON_SETTLE_SECONDS': '120',
+                'TZ': 'UTC',
+            }
+            result = subprocess.run(
+                ['bash', str(SKILL / 'scripts' / 'hermes-report.sh')],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+
+            # 7. Assertions.
+            self.assertEqual(result.returncode, 0,
+                             f'hermes-report.sh failed: stderr={result.stderr}')
+            self.assertTrue(os.path.exists(invocations_log),
+                            'revenium stub was never invoked — cron may have skipped the session')
+            log_text = open(invocations_log).read()
+            self.assertIn('--task-type generation', log_text,
+                          f'expected --task-type generation in argv; got: {log_text}')
+            self.assertNotIn('--task-type unclassified', log_text,
+                             f'cron shipped unclassified despite marker on disk: {log_text}')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_setup_md_has_mechanical_classification_hook_section(self):
         """HOOK-10 / D-16: references/setup.md carries a 'Mechanical classification hook'
         section that documents the install path, gateway-restart requirement, and the
