@@ -1541,6 +1541,116 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_tool_count_uses_state_db(self):
+        """HOOK-12 / D-20: when state.db.sessions has a row for the sid with tool_call_count
+        populated, _count_tools_in_current_turn returns that value WITHOUT consulting the
+        per-session JSONL. Closes G-02 (CLI sessions have no JSONL but populated state.db).
+        Pins the primary path."""
+        import importlib
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-stateddb-toolcount-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Build state.db row with tool_call_count populated; NO JSONL file on disk
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", ('test-sid', None, 3))
+            conn.commit()
+            conn.close()
+
+            # JSONL absence is load-bearing for this test — proves the primary path returns
+            # the state.db value without falling back.
+            self.assertFalse(os.path.exists(os.path.join(hh, 'sessions', 'test-sid.jsonl')))
+
+            self.assertEqual(handler._count_tools_in_current_turn('test-sid'), 3)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_tool_count_falls_back_to_jsonl(self):
+        """HOOK-12 / D-20 fallback: when state.db has no row for the sid OR has a row
+        with tool_call_count=NULL, _count_tools_in_current_turn falls through to the
+        JSONL read. Preserves the existing 12 HOOK-* test fixtures' load-bearing semantics."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-jsonl-fallback-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # state.db row exists for 'test-sid' but tool_call_count is NULL — forces fallback
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", ('test-sid', None, None))
+            conn.commit()
+            conn.close()
+
+            # JSONL has 1 role:user followed by 5 role:tool entries → fallback returns 5
+            sessions_dir = os.path.join(hh, 'sessions')
+            os.makedirs(sessions_dir, exist_ok=True)
+            jsonl_path = os.path.join(sessions_dir, 'test-sid.jsonl')
+            with open(jsonl_path, 'w', encoding='utf-8') as f:
+                f.write(json.dumps({"role": "user", "content": "x"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "read_file"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "terminal"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "terminal"}) + "\n")
+                f.write(json.dumps({"role": "tool", "name": "grep"}) + "\n")
+
+            self.assertEqual(handler._count_tools_in_current_turn('test-sid'), 5)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_tool_count_both_absent(self):
+        """HOOK-12 / D-20: when neither state.db has a row for the sid NOR a JSONL file
+        exists, _count_tools_in_current_turn returns 0. Pins the heuristic-skip-on-empty-session
+        contract."""
+        import importlib
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-toolcount-both-absent-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # No state.db file, no JSONL file — both data sources absent
+            self.assertFalse(os.path.exists(os.path.join(hh, 'state.db')))
+            self.assertFalse(os.path.exists(os.path.join(hh, 'sessions', 'test-sid.jsonl')))
+
+            self.assertEqual(handler._count_tools_in_current_turn('test-sid'), 0)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_setup_md_has_mechanical_classification_hook_section(self):
         """HOOK-10 / D-16: references/setup.md carries a 'Mechanical classification hook'
         section that documents the install path, gateway-restart requirement, and the
