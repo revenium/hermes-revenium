@@ -109,6 +109,12 @@ From `PROJECT.md` Key Decisions (all carry-forward from project initialization):
 
 None.
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260514-n8e | Remove D-07 trivial-skip (mirror Mac Studio hotfix) — silently dropped ~94% of cron sessions | 2026-05-14 | a9f9411 | [260514-n8e-remove-d-07-trivial-skip-from-classifier](./quick/260514-n8e-remove-d-07-trivial-skip-from-classifier/) |
+
 ## Session Continuity
 
 **Last Session:** 2026-05-13T00:50:00.000Z
