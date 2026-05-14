@@ -619,7 +619,7 @@ No new security concerns introduced by Phase 4. The existing defense-in-depth (a
 
 ---
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 None. All research areas specified in the phase scope were resolved.
 
