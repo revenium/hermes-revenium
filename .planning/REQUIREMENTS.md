@@ -86,6 +86,7 @@ Requirements for the initial release. Each maps to roadmap phases. Drawn from PR
 - [ ] **HOOK-09**: `tests/test_repository.py` extends `test_expected_files_exist` with the 5 new hook files and adds 6 new test methods covering HOOK-02..HOOK-07 plus the 3 synthetic test-payload fixtures. The hook handler is import-conditional under `@unittest.skipUnless(_agent_aux_client_available(), ...)` for tests that exercise the real call_llm path; all other tests mock `handler.call_llm` and run unconditionally. Tests use `tempfile.mkdtemp(prefix='gsd-hook-')` + env redirect (`HERMES_HOME`, `REVENIUM_STATE_DIR`) — same pattern as `test_cron_marker_split_end_to_end`.
 - [ ] **HOOK-10**: `skills/revenium/references/setup.md` carries a `## Mechanical classification hook` section AFTER the existing `## How attribution works` documenting (a) installation via `examples/setup-local.sh`, (b) the mandatory `hermes gateway restart` post-install step, (c) the gateway startup-log verification line, and (d) an explicit "do NOT use `hermes hooks list`" callout that distinguishes the event-hook subsystem from the shell-hook CLI.
 - [ ] **HOOK-11**: Universal session coverage — classification fires on every Hermes session end regardless of source (gateway-served, CLI one-shot, interactive, ACP, cron-spawned), via the hermes_cli plugin system's on_session_end event. Plugin manifest lives at skills/revenium/plugins/revenium-classifier/plugin.yaml; entrypoint at skills/revenium/plugins/revenium-classifier/__init__.py exposes def register(ctx) calling ctx.register_hook("on_session_end", _on_session_end). The previous agent:end gateway-hook integration (HOOK-01..HOOK-10 as originally specified) is superseded — closes G-01.
+- [ ] **HOOK-12**: Tool-count signal MUST be sourced from state.db.sessions.tool_call_count (universal — populated for every session source: gateway-served, CLI one-shot, interactive, ACP, cron) via a parameterized SELECT under the same read-only sqlite3 URI mode already used by _walk_to_root_session, with the per-session ~/.hermes/sessions/<sid>.jsonl read as fallback. The classifier MUST NOT mis-classify CLI / interactive / ACP / cron sessions as trivial solely because the gateway-style JSONL is absent. Closes G-02 surfaced by UAT round 2 on Mac Studio 2026-05-14.
 
 ## v2 Requirements
 
@@ -183,10 +184,11 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 | HOOK-09 | Phase 6 | Pending |
 | HOOK-10 | Phase 6 | Pending |
 | HOOK-11 | Phase 6 | Pending |
+| HOOK-12 | Phase 6 | Pending |
 
 **Coverage:**
-- v1 requirements: 48 total
-- Mapped to phases: 48
+- v1 requirements: 49 total
+- Mapped to phases: 49
 - Unmapped: 0
 
 ---
