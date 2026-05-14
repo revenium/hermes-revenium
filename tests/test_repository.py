@@ -1651,6 +1651,90 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_tool_count_end_to_end_cli_substantive(self):
+        """HOOK-12 / G-02 regression guard: when state.db.sessions has tool_call_count=2 for a CLI
+        session AND ~/.hermes/sessions/<sid>.jsonl does NOT exist (the exact UAT-2 production shape
+        that produced no marker file), classifier.run_classification(...) drives the full pipeline
+        and writes a GUARDRAIL+CHAT marker pair with a non-unclassified task_type. This is the test
+        that would have caught G-02 in CI on 2026-05-13 before the operator UAT had to surface it."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-e2e-cli-substantive-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Build the production CLI shape: state.db row with tool_call_count=2 + NO JSONL.
+            # parent_session_id NULL so the subagent inheritance branch (D-05) does not fire.
+            # tool_call_count=2 to defeat the trivial-skip threshold.
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", ('cli-sid', None, 2))
+            conn.commit()
+            conn.close()
+
+            # JSONL absence is the load-bearing premise — this is what produced G-02 in production.
+            self.assertFalse(os.path.exists(os.path.join(hh, 'sessions', 'cli-sid.jsonl')))
+
+            # Seed an empty taxonomy and a NOT-halted budget-status so the LLM-classification
+            # branch is reachable.
+            os.makedirs(sd, exist_ok=True)
+            with open(os.path.join(sd, 'task-taxonomy.json'), 'w', encoding='utf-8') as f:
+                json.dump({"labels": {"code_review": {"description": "Code review work"}}}, f)
+            with open(os.path.join(sd, 'budget-status.json'), 'w', encoding='utf-8') as f:
+                json.dump({"halted": False}, f)
+
+            # Patch call_llm to return content 'code_review'. Same stub shape as
+            # test_revenium_classifier_llm_label (lines 1211-1262): mock_resp.choices[0].message.content.
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "code_review"
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+                # response='' mirrors production CLI behavior — on_session_end payload does NOT
+                # include response text. The test proves that despite empty response_preview, the
+                # state.db tool_call_count=2 keeps the helper above the trivial-skip threshold
+                # (the heuristic requires BOTH tool_count==0 AND len(response)<200; tool_count=2
+                # breaks the AND).
+                handler.run_classification(
+                    session_id='cli-sid',
+                    model='qwen3.6-plus',
+                    platform='cli',
+                    message='Review src/foo.py for race conditions',
+                    response='',
+                )
+
+            # Assertions: marker file exists with 2 records, both task_type='code_review',
+            # one GUARDRAIL + one CHAT.
+            marker_path = os.path.join(md, 'cli-sid.jsonl')
+            self.assertTrue(os.path.exists(marker_path),
+                            'marker file MUST exist — G-02 regression guard')
+            with open(marker_path, 'r', encoding='utf-8') as f:
+                lines = [json.loads(l) for l in f.read().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 2,
+                             'marker file MUST contain exactly 2 records (GUARDRAIL + CHAT)')
+            self.assertEqual(lines[0]['task_type'], 'code_review',
+                             'first record MUST carry task_type=code_review (not unclassified)')
+            self.assertEqual(lines[1]['task_type'], 'code_review',
+                             'second record MUST carry task_type=code_review (not unclassified)')
+            self.assertEqual({lines[0]['operation_type'], lines[1]['operation_type']},
+                             {'GUARDRAIL', 'CHAT'},
+                             'marker pair MUST be one GUARDRAIL + one CHAT')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_setup_md_has_mechanical_classification_hook_section(self):
         """HOOK-10 / D-16: references/setup.md carries a 'Mechanical classification hook'
         section that documents the install path, gateway-restart requirement, and the
