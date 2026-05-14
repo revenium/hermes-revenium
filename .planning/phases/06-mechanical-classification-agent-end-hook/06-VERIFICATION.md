@@ -1,8 +1,8 @@
 ---
 phase: 06-mechanical-classification-agent-end-hook
 verified: 2026-05-13T18:59:09Z
-updated: 2026-05-14T08:00:00Z
-status: requires_rerun_uat
+updated: 2026-05-14T15:40:00Z
+status: passed
 gap_closure_plan: 06-02-PLAN.md
 score: 11/11 must-haves verified (automated); operator UAT on Mac Studio surfaced a Phase 6 goal gap (see 06-HUMAN-UAT.md G-01)
 overrides_applied: 0
@@ -23,16 +23,23 @@ gaps:
     relates_to: [HOOK-02, HOOK-11, SC2, SC6]
   - id: G-03
     severity: high
-    gap_closure: executed
+    gap_closure: closed
     gap_closure_plan: 06-04-PLAN.md
-    gap_closure_outcome: "code fix landed (plugin __init__.py writes per-session sentinel at MARKERS_READY_DIR/<sid> after every on_session_end outcome — happy path + D-04 error-path belt; hermes-report.sh session SELECT filters by sentinel-or-aged with default 120s settle window via REVENIUM_CRON_SETTLE_SECONDS). G-03 is closed by code; behaviorally closed only after UAT round 4 records a CLI substantive turn straddling a minute boundary producing a marker file AND that marker reaching Revenium with the correct task_type (NOT unclassified). The six new HOOK-13 tests (2 sentinel-write + 3 cron-filter + 1 end-to-end) pin the regression guard in CI."
+    gap_closure_outcome: "Behaviorally closed by Mac Studio UAT round 4 (2026-05-14T15:36Z): sentinel filter works as designed — cron at 15:36:01 successfully admitted the sentinel-marked session and shipped both marker records to Revenium with task_type=generation via two revenium meter completion calls (muids 0019e26fd866b84bd0ee0a061c7c298eb GUARDRAIL + 0019e26fd866be298169ee8514f5958e4 CHAT). Ledger now has two per-marker entries with the correct transaction-id shape. G-03 fully closed."
     summary: "Cron-ticker races the on_session_end classifier. For CLI sessions whose final turn straddles a minute boundary, the cron ticks (~6s before the plugin's LLM-driven classification completes) and ships task_type=unclassified to Revenium. The marker arrives 6s later but the cron's ledger is idempotent — future ticks skip the session forever. Surfaced by UAT round 3 (2026-05-14T07:12Z): sid 20260514_031132_a7aa8e has a correct marker on disk (task_type=generation) but Revenium received task_type=unclassified. state.db.ended_at is NULL for CLI sessions (hermes_cli/oneshot.py doesn't populate it), so the cron can't filter on session-completeness. See 06-HUMAN-UAT.md G-03 for evidence and closure options (a)-(d)."
     relates_to: [HOOK-13, SC5, Phase-3-cron-pipeline]
+  - id: G-04
+    severity: high
+    gap_closure: closed
+    gap_closure_plan: "inline fix (Phase 3 — split_strategies.py + tests/test_repository.py)"
+    gap_closure_outcome: "Surfaced by UAT round 4 as the cause of the empty-split-rows fall-through warnings: pre-existing Phase 3 bug in equal_split's Decimal arithmetic — when input cost has > 6 decimal places (e.g. qwen3.6-plus's 0.0119093), the quantize-to-6-places step in last_cost truncates the 7th digit and the conservation invariant fails. Bug was DORMANT pre-06-04 because the cron always raced the classifier and took the D-18 unclassified path; the 06-04 sentinel filter unblocks the marker-aware split path, which immediately exposes the bug for any LLM whose per-token pricing produces > 6 decimals (most providers). Fix: quantize input cost up-front so per_cost / remainder / last_cost share the same 6-decimal grid. The conservation invariant now holds against the quantized input. Regression test added with the exact UAT-4 delta as the case. Closed inline in commit a91a1a7."
+    summary: "split_strategies.equal_split's Decimal arithmetic loses the 7th decimal place of an input cost with > 6 decimal places. Conservation invariant fails. Manifests as cron-side 'split-emit fall-through: empty-split-rows' warnings for every session whose marker-aware split is attempted. Pre-existing Phase 3 bug, dormant until 06-04 unblocked the marker-aware path."
+    relates_to: [Phase-3-equal_split, COMPAT-02, TEST-03, SC5]
 re_verification:
-  previous_status: human_needed
-  previous_score: 11/11 must-haves verified (automated)
-  gaps_closed: [G-01, G-02, G-03]
-  gaps_remaining: [G-03]
+  previous_status: requires_rerun_uat
+  previous_score: 11/11 must-haves verified (automated); 3 gaps closed in code (G-01, G-02, G-03) + 1 surfaced/closed inline (G-04)
+  gaps_closed: [G-01, G-02, G-03, G-04]
+  gaps_remaining: []
   regressions: []
 human_verification:
   - test: "Operator-side UAT — install plugin, restart gateway, exercise a fresh substantive Hermes session WITHOUT loading the revenium skill, and confirm marker pair appears with a non-`unclassified` task_type."

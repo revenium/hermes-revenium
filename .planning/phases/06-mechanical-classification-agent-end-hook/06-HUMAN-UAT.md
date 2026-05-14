@@ -1,9 +1,9 @@
 ---
-status: diagnosed
+status: resolved
 phase: 06-mechanical-classification-agent-end-hook
 source: [06-VERIFICATION.md]
 started: 2026-05-13T19:02:08Z
-updated: 2026-05-13T22:55:00Z
+updated: 2026-05-14T15:40:00Z
 uat_rounds:
   - round: 1
     against: gsd/phase-6-uat @ f3f4efa (plan 06-01 only)
@@ -14,6 +14,9 @@ uat_rounds:
   - round: 3
     against: gsd/phase-6-uat @ e49611b (plans 06-01 + 06-02 + 06-03 — state.db tool-count primary)
     outcome: "G-02 CLOSED — marker file with task_type=generation (NOT unclassified) was written for CLI sid 20260514_031132_a7aa8e despite JSONL being absent. BUT G-03 surfaced — cron ticked at 07:12:02 and shipped task_type=unclassified to Revenium 6.47 seconds BEFORE the plugin's on_session_end finished its LLM classification at 07:12:08. Ledger now has an idempotent unclassified entry for the sid; future cron ticks skip the session forever even though the marker exists on disk. Architectural fix (Phase 6) works; cron pipeline (Phase 3) races the classifier."
+  - round: 4
+    against: gsd/phase-6-uat @ a91a1a7 (plans 06-01..06-04 + G-04 inline fix)
+    outcome: "🎉 PHASE 6 FULLY VERIFIED END-TO-END. CLI substantive turn sid 20260514_105613_047330 → marker file with task_type=generation + sentinel at MARKERS_READY_DIR/sid → cron at 15:36:01Z admitted the sentinel-marked session via the new filter → split_strategies.equal_split produced conserving splits (after G-04 fix) → two revenium meter completion calls shipped to Revenium with --task-type=generation and per-marker transaction IDs. Ledger now has two per-marker rows. Discovered G-04 mid-flight (pre-existing Phase 3 equal_split bug — input cost > 6 decimals broke conservation invariant; dormant pre-06-04 because cron always raced the classifier). G-04 fixed inline. All four gaps (G-01, G-02, G-03, G-04) closed. SC1+SC2+SC4+SC5+SC6 all behaviorally confirmed. SC3 (subagent inheritance) covered by synthetic test but operator UAT remains optional."
 ---
 
 ## Current Test
