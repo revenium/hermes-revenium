@@ -49,17 +49,21 @@ def equal_split(delta: dict, n: int) -> list:
             splits[i][k] = per
         splits[-1][k] += v - per * n  # remainder absorbed by last marker
         assert sum(s[k] for s in splits) == v, "conservation violated for {0}".format(k)
-    # Cost field — Decimal arithmetic to 6 decimal places
+    # Cost field — Decimal arithmetic to 6 decimal places.
+    # Quantize the input cost up-front so per_cost, remainder, and last_cost
+    # all share the same 6-decimal grid. Without this, an input cost with > 6
+    # decimal places (e.g. "0.0119093" from qwen3.6-plus) loses its 7th digit
+    # in the last_cost quantize step and the conservation invariant fails.
     cost_raw = delta.get(COST_FIELD, "0")
-    cost = Decimal(str(cost_raw))
     quant = Decimal("0.000001")
+    cost = Decimal(str(cost_raw)).quantize(quant)
     per_cost = (cost / Decimal(n)).quantize(quant)
     for i in range(n):
         splits[i][COST_FIELD] = format(per_cost, "f")
     remainder_cost = cost - per_cost * n
-    last_cost = (Decimal(splits[-1][COST_FIELD]) + remainder_cost).quantize(quant)
+    last_cost = Decimal(splits[-1][COST_FIELD]) + remainder_cost
     splits[-1][COST_FIELD] = format(last_cost, "f")
-    # Conservation check (Decimal-exact)
+    # Conservation check (Decimal-exact against the quantized input)
     assert sum(Decimal(s[COST_FIELD]) for s in splits) == cost, "conservation violated for cost"
     return splits
 
