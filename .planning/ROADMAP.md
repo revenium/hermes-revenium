@@ -78,7 +78,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 04-01-PLAN.md — Wire enrichment (WIRE-01..04 + COMPAT-01) — pass-through agent/trace_id from markers, CHAT default for zero-marker fallthrough, 8-provider regression guard
+- [x] 04-01-PLAN.md — Wire enrichment (WIRE-01..04 + COMPAT-01) — pass-through agent/trace_id from markers, CHAT default for zero-marker fallthrough, 8-provider regression guard
 
 ### Phase 5: Housekeeping & Compat Hardening
 **Goal**: Marker files do not grow unbounded on long-running hosts, the project's compat invariants are pinned by automated tests, and the frontmatter / legacy-branding / runtime-path guards continue to pass.
