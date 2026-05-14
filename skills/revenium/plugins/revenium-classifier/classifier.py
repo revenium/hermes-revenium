@@ -329,7 +329,7 @@ async def run_classification_async(
 ) -> None:
     """Async classifier entry point. D-04: never raises out of this function.
 
-    Drives the D-04..D-14 pipeline: subagent inheritance → heuristic skip →
+    Drives the D-04..D-14 pipeline: subagent inheritance →
     D-13 dedupe → budget gate → LLM classification → validated label →
     atomic marker pair write. Invoked from the plugin entrypoint's sync
     wrapper run_classification() via asyncio.run().
@@ -346,12 +346,6 @@ async def run_classification_async(
                 return
             # Parent has no marker yet — fall through to classify as if root.
 
-        # Step 2 — heuristic skip-fast-path (D-07 / HOOK-02).
-        response_preview = response or ""
-        tool_count = _count_tools_in_current_turn(session_id)
-        if tool_count == 0 and len(response_preview) < 200:
-            return  # trivial — skip marker entirely
-
         # Step 3 — D-13 belt: did the agent already self-classify? (HOOK-07)
         if _recent_marker_pair_exists(session_id, within_seconds=30.0):
             return  # agent's FINAL ACTION wrote markers in the last 30s; don't double-write
@@ -365,6 +359,7 @@ async def run_classification_async(
             return
 
         # Step 5 — LLM classification (D-06 / HOOK-05).
+        response_preview = response or ""
         raw_label = await _classify_via_llm(
             {"message": message or ""},
             response_preview,
