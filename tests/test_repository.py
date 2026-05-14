@@ -611,9 +611,8 @@ class RepositoryTests(unittest.TestCase):
             flags = argv_to_flags(invocations[0])
             self.assertEqual(flags.get('--task-type'), 'unclassified',
                              'zero-marker fallthrough must use --task-type unclassified')
-            self.assertNotIn('--operation-type', flags,
-                             'zero-marker fallthrough must NOT emit --operation-type '
-                             '(Phase 4 WIRE-01 owns that decision)')
+            self.assertEqual(flags.get('--operation-type'), 'CHAT',
+                             'zero-marker fallthrough must emit --operation-type CHAT (WIRE-01 / D-22)')
             self.assertEqual(flags.get('--transaction-id'), f'{sid_zero}-{total_tokens}',
                              'B4: zero-marker --transaction-id must be ${sid}-${total_tokens} '
                              '(no synthetic muid suffix in wire id)')
@@ -2474,6 +2473,441 @@ class RepositoryTests(unittest.TestCase):
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_wire_agent_trace_passthrough(self):
+        """WIRE-02 + WIRE-03: pins marker agent/trace_id passthrough to --agent/--trace-id argv.
+
+        Sub-case A (positive): marker pair carries agent='revenium-skill' and
+        trace_id='trace-abc-001' — every captured invocation must carry those values.
+
+        Sub-case B (fallback): same marker pair but agent/trace_id keys omitted —
+        every captured invocation must carry --agent Hermes and --trace-id <sid>
+        (the colon-dash fallback from the marker-driven cmd array)."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        HERMES_REPORT = SCRIPTS_DIR / 'hermes-report.sh'
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def run_cron(env, invocations_log):
+            if os.path.exists(invocations_log):
+                os.unlink(invocations_log)
+            open(invocations_log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            invocations = []
+            with open(invocations_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    import shlex
+                    invocations.append(shlex.split(line))
+            return result.returncode, invocations, result.stdout + result.stderr
+
+        def argv_to_flags(argv):
+            d = {}
+            i = 0
+            while i < len(argv):
+                tok = argv[i]
+                if tok.startswith('--'):
+                    if i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                        d[tok] = argv[i + 1]
+                        i += 2
+                    else:
+                        d[tok] = True
+                        i += 1
+                else:
+                    i += 1
+            return d
+
+        def make_shim(bin_dir, invocations_log):
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
+                    '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+        def make_tmpdir():
+            tmpdir = tempfile.mkdtemp(prefix='gsd-wire-agent-trace-')
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            ledger = os.path.join(state_dir, 'revenium-hermes.ledger')
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            invocations_log = os.path.join(tmpdir, 'invocations.log')
+            make_shim(bin_dir, invocations_log)
+            return tmpdir, hermes_home, state_dir, markers_dir, state_db, ledger, shim_home, bin_dir, invocations_log
+
+        # =====================================================
+        # Sub-case A: markers carry agent + trace_id (positive)
+        # =====================================================
+        with self.subTest(case='positive-agent-trace'):
+            tmpdir, hermes_home, state_dir, markers_dir, state_db, ledger, shim_home, bin_dir, invocations_log = make_tmpdir()
+            try:
+                sid = 'wire-agent-trace-positive'
+                build_state_db(state_db, [{
+                    'id': sid,
+                    'model': 'claude-sonnet-4-6',
+                    'source': 'test',
+                    'input_tokens': 10000,
+                    'output_tokens': 4000,
+                    'cache_read': 200,
+                    'cache_write': 100,
+                    'reasoning': 0,
+                    'estimated_cost': '0.123456',
+                    'api_calls': 2,
+                    'started_at': 1715514000.0,  # Pitfall 6: bypasses G-03 sentinel filter
+                    'ended_at': 1715515100.0,
+                    'billing_provider': 'anthropic',
+                }])
+                # Write GUARDRAIL+CHAT marker pair with agent/trace_id populated
+                marker_path = os.path.join(markers_dir, f'{sid}.jsonl')
+                with open(marker_path, 'w') as f:
+                    f.write(json.dumps({
+                        'muid': '01893b8a300abcdef0123456789abc01',
+                        'ts': 1715515001.0,
+                        'sid': sid,
+                        'task_type': 'code_review',
+                        'operation_type': 'GUARDRAIL',
+                        'agent': 'revenium-skill',
+                        'trace_id': 'trace-abc-001',
+                    }) + '\n')
+                    f.write(json.dumps({
+                        'muid': '01893b8a300abcdef0123456789abc02',
+                        'ts': 1715515002.0,
+                        'sid': sid,
+                        'task_type': 'code_review',
+                        'operation_type': 'CHAT',
+                        'agent': 'revenium-skill',
+                        'trace_id': 'trace-abc-001',
+                    }) + '\n')
+
+                base_env = {
+                    **os.environ,
+                    'HOME': shim_home,
+                    'HERMES_HOME': hermes_home,
+                    'REVENIUM_STATE_DIR': state_dir,
+                    'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                    'INVOCATIONS_LOG': invocations_log,
+                    'TZ': 'UTC',
+                }
+                rc, invocations, output = run_cron(base_env, invocations_log)
+                self.assertEqual(rc, 0, f'positive sub-case cron exit {rc}: {output}')
+                self.assertEqual(len(invocations), 2,
+                                 f'positive sub-case expected 2 invocations (GUARDRAIL+CHAT), got {len(invocations)}: {output}')
+                for argv in invocations:
+                    flags = argv_to_flags(argv)
+                    self.assertEqual(flags.get('--agent'), 'revenium-skill',
+                                     'WIRE-02: --agent must carry marker agent field when present')
+                    self.assertEqual(flags.get('--trace-id'), 'trace-abc-001',
+                                     'WIRE-03: --trace-id must carry marker trace_id field when present')
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # =====================================================
+        # Sub-case B: markers omit agent + trace_id (fallback)
+        # =====================================================
+        with self.subTest(case='fallback-no-agent-trace'):
+            tmpdir, hermes_home, state_dir, markers_dir, state_db, ledger, shim_home, bin_dir, invocations_log = make_tmpdir()
+            try:
+                sid = 'wire-agent-trace-fallback'
+                build_state_db(state_db, [{
+                    'id': sid,
+                    'model': 'claude-sonnet-4-6',
+                    'source': 'test',
+                    'input_tokens': 10000,
+                    'output_tokens': 4000,
+                    'cache_read': 200,
+                    'cache_write': 100,
+                    'reasoning': 0,
+                    'estimated_cost': '0.123456',
+                    'api_calls': 2,
+                    'started_at': 1715514000.0,  # Pitfall 6: bypasses G-03 sentinel filter
+                    'ended_at': 1715515100.0,
+                    'billing_provider': 'anthropic',
+                }])
+                # Write GUARDRAIL+CHAT marker pair WITHOUT agent/trace_id — only the 5 required keys
+                marker_path = os.path.join(markers_dir, f'{sid}.jsonl')
+                with open(marker_path, 'w') as f:
+                    f.write(json.dumps({
+                        'muid': '01893b8a300abcdef0123456789abc03',
+                        'ts': 1715515001.0,
+                        'sid': sid,
+                        'task_type': 'code_review',
+                        'operation_type': 'GUARDRAIL',
+                    }) + '\n')
+                    f.write(json.dumps({
+                        'muid': '01893b8a300abcdef0123456789abc04',
+                        'ts': 1715515002.0,
+                        'sid': sid,
+                        'task_type': 'code_review',
+                        'operation_type': 'CHAT',
+                    }) + '\n')
+
+                base_env = {
+                    **os.environ,
+                    'HOME': shim_home,
+                    'HERMES_HOME': hermes_home,
+                    'REVENIUM_STATE_DIR': state_dir,
+                    'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                    'INVOCATIONS_LOG': invocations_log,
+                    'TZ': 'UTC',
+                }
+                rc, invocations, output = run_cron(base_env, invocations_log)
+                self.assertEqual(rc, 0, f'fallback sub-case cron exit {rc}: {output}')
+                self.assertEqual(len(invocations), 2,
+                                 f'fallback sub-case expected 2 invocations (GUARDRAIL+CHAT), got {len(invocations)}: {output}')
+                for argv in invocations:
+                    flags = argv_to_flags(argv)
+                    self.assertEqual(flags.get('--agent'), 'Hermes',
+                                     'WIRE-02 fallback: --agent must be Hermes when marker omits agent field')
+                    self.assertEqual(flags.get('--trace-id'), sid,
+                                     f'WIRE-03 fallback: --trace-id must be {sid!r} when marker omits trace_id field')
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_wire_no_provider_regression_per_class(self):
+        """WIRE-04 / D-24: 8-provider regression — every per-marker revenium meter
+        completion argv preserves the same --provider / --model / --model-source flags
+        the legacy pre-Phase-3 single-call path would have produced for each of the
+        8 provider classes (anthropic, openai, google, xai, deepseek, meta,
+        openrouter-special, bedrock-special)."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        HERMES_REPORT = SCRIPTS_DIR / 'hermes-report.sh'
+
+        PROVIDER_CASES = [
+            # (label, billing_provider, model, expected_provider, expected_clean_model, expected_model_source)
+            ('anthropic',         'anthropic',  'claude-sonnet-4-6',
+             'anthropic', 'claude-sonnet-4-6',                              'anthropic'),
+            ('openai',            'openai',     'gpt-4o',
+             'openai',    'gpt-4o',                                         'openai'),
+            ('google',            'google',     'gemini-1.5-pro',
+             'google',    'gemini-1.5-pro',                                 'google'),
+            ('xai',               'xai',        'grok-2',
+             'xai',       'grok-2',                                         'xai'),
+            ('deepseek',          'deepseek',   'deepseek-chat',
+             'deepseek',  'deepseek-chat',                                  'deepseek'),
+            ('meta',              '',           'llama-3.1-70b',
+             'meta',      'llama-3.1-70b',                                  None),
+            ('openrouter-special', 'openrouter', 'anthropic/claude-sonnet-4-5',
+             'anthropic', 'claude-sonnet-4-5',                              'openrouter'),
+            ('bedrock-special',   'bedrock',    'anthropic.claude-3-5-sonnet-20241022-v2:0',
+             'anthropic', 'claude-3-5-sonnet-20241022-v2:0',               'bedrock'),
+        ]
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def run_cron(env, invocations_log):
+            if os.path.exists(invocations_log):
+                os.unlink(invocations_log)
+            open(invocations_log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            invocations = []
+            with open(invocations_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    import shlex
+                    invocations.append(shlex.split(line))
+            return result.returncode, invocations, result.stdout + result.stderr
+
+        def argv_to_flags(argv):
+            d = {}
+            i = 0
+            while i < len(argv):
+                tok = argv[i]
+                if tok.startswith('--'):
+                    if i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                        d[tok] = argv[i + 1]
+                        i += 2
+                    else:
+                        d[tok] = True
+                        i += 1
+                else:
+                    i += 1
+            return d
+
+        for (label, billing_provider, model,
+             expected_provider, expected_clean_model, expected_model_source) in PROVIDER_CASES:
+            with self.subTest(case=label):
+                tmpdir = tempfile.mkdtemp(prefix='gsd-wire-provider-e2e-')
+                try:
+                    hermes_home = os.path.join(tmpdir, 'hh')
+                    state_dir = os.path.join(hermes_home, 'state', 'revenium')
+                    markers_dir = os.path.join(state_dir, 'markers')
+                    os.makedirs(markers_dir, mode=0o700)
+                    state_db = os.path.join(hermes_home, 'state.db')
+                    shim_home = os.path.join(tmpdir, 'home')
+                    bin_dir = os.path.join(shim_home, '.local', 'bin')
+                    os.makedirs(bin_dir)
+                    invocations_log = os.path.join(tmpdir, 'invocations.log')
+
+                    # Write the revenium shim
+                    shim = os.path.join(bin_dir, 'revenium')
+                    with open(shim, 'w') as f:
+                        f.write(
+                            '#!/usr/bin/env bash\n'
+                            'case "$1" in\n'
+                            '  config) exit 0 ;;\n'
+                            '  meter)\n'
+                            '    shift; shift\n'
+                            '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
+                            '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
+                            '    exit 0\n'
+                            '    ;;\n'
+                            '  *) exit 0 ;;\n'
+                            'esac\n'
+                        )
+                    os.chmod(shim, 0o755)
+
+                    sid = f'wire-provider-{label}'
+                    build_state_db(state_db, [{
+                        'id': sid,
+                        'model': model,
+                        'source': 'test',
+                        'input_tokens': 10000,
+                        'output_tokens': 4000,
+                        'cache_read': 200,
+                        'cache_write': 100,
+                        'reasoning': 0,
+                        'estimated_cost': '0.123456',
+                        'api_calls': 2,
+                        'started_at': 1715514000.0,  # Pitfall 6: bypasses G-03 sentinel filter
+                        'ended_at': 1715515100.0,
+                        'billing_provider': billing_provider,
+                    }])
+
+                    # Write GUARDRAIL+CHAT marker pair — forces marker-driven split path (N=2)
+                    marker_path = os.path.join(markers_dir, f'{sid}.jsonl')
+                    with open(marker_path, 'w') as f:
+                        f.write(json.dumps({
+                            'muid': f'01893b8a300abcdef0123456789aa01',
+                            'ts': 1715515001.0,
+                            'sid': sid,
+                            'task_type': 'code_review',
+                            'operation_type': 'GUARDRAIL',
+                        }) + '\n')
+                        f.write(json.dumps({
+                            'muid': f'01893b8a300abcdef0123456789aa02',
+                            'ts': 1715515002.0,
+                            'sid': sid,
+                            'task_type': 'code_review',
+                            'operation_type': 'CHAT',
+                        }) + '\n')
+
+                    base_env = {
+                        **os.environ,
+                        'HOME': shim_home,
+                        'HERMES_HOME': hermes_home,
+                        'REVENIUM_STATE_DIR': state_dir,
+                        'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                        'INVOCATIONS_LOG': invocations_log,
+                        'TZ': 'UTC',
+                    }
+
+                    rc, invocations, output = run_cron(base_env, invocations_log)
+                    self.assertEqual(rc, 0, f'{label}: cron exit {rc}: {output}')
+                    self.assertEqual(len(invocations), 2,
+                                     f'{label}: expected 2 invocations (GUARDRAIL+CHAT), '
+                                     f'got {len(invocations)}: {output}')
+
+                    for argv in invocations:
+                        flags = argv_to_flags(argv)
+                        self.assertEqual(flags.get('--provider'), expected_provider,
+                                         f'{label}: --provider mismatch')
+                        self.assertEqual(flags.get('--model'), expected_clean_model,
+                                         f'{label}: --model mismatch')
+                        if expected_model_source is not None:
+                            self.assertEqual(flags.get('--model-source'), expected_model_source,
+                                             f'{label}: --model-source mismatch')
+                        else:
+                            self.assertNotIn('--model-source', flags,
+                                             f'{label}: --model-source must be ABSENT when billing_provider is empty')
+                finally:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == '__main__':

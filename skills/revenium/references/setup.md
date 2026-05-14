@@ -83,6 +83,8 @@ Attribution is driven entirely by the `task_type` and `operation_type` fields th
 
 This framing supersedes any earlier "self-cancels over many windows" mention in older planning notes — the bias is one-directional (GUARDRAIL is overstated, never understated) and does NOT average out across ticks.
 
+When markers carry different `agent` or `trace_id` values across a session, each Revenium meter call records the per-turn attribution; per-session aggregation happens dashboard-side.
+
 ## Mechanical classification hook
 
 Phase 6 ships an in-process Hermes lifecycle plugin at `~/.hermes/plugins/revenium-classifier/` that classifies every `run_conversation()` session end and writes the GUARDRAIL + CHAT marker pair the cron consumes. The plugin registers itself for the `on_session_end` event from the `hermes_cli` plugin bus, which fires for **every** session source — gateway-served (Telegram/Discord/Slack/WhatsApp/Webhook), CLI one-shot (`hermes chat -q`), interactive `hermes chat`, ACP integrations, and gateway-internal cron-ticker sessions. This is the mechanical floor — it fires regardless of whether the agent self-classifies via the FINAL ACTION block in `SKILL.md`. Both pathways write to the same `~/.hermes/state/revenium/markers/<sid>.jsonl`; the plugin tail-checks for a recent agent-written pair (within 30 seconds) before writing to avoid duplicates.

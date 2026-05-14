@@ -75,7 +75,10 @@ Plans:
   2. Non-guardrail markers default to `--operation-type CHAT`; this default is shipped only after Phase 3's `manage_metering` verification confirms no server-side cost-calculation change (gate from WIRE-01).
   3. Each split call carries the same provider/model/source values the legacy single-call path would have used — verified by running a multi-provider fixture (Anthropic, OpenRouter→Anthropic, Bedrock→Claude) and asserting the inferred `--provider` and `--model` flags match the legacy argv for every split (WIRE-04).
   4. A byte-by-byte argv diff between the pre-Phase-4 and post-Phase-4 no-marker fallthrough path shows zero differences except the previously-established `--task-type unclassified` addition — backward compat regression test (COMPAT-01).
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 04-01-PLAN.md — Wire enrichment (WIRE-01..04 + COMPAT-01) — pass-through agent/trace_id from markers, CHAT default for zero-marker fallthrough, 8-provider regression guard
 
 ### Phase 5: Housekeeping & Compat Hardening
 **Goal**: Marker files do not grow unbounded on long-running hosts, the project's compat invariants are pinned by automated tests, and the frontmatter / legacy-branding / runtime-path guards continue to pass.
@@ -144,7 +147,7 @@ The hard ordering constraint (PITFALLS HIGH severity): Phase 2 ships before Phas
 | 1. Path Foundation | 1/1 | Complete | 2026-05-12 |
 | 2. Prompt Design & Marker Contract | 0/3 | Not started | - |
 | 3. Cron Marker Reader + Equal-Split + Ledger v2 | 1/1 | Verified (5/5 UAT pass) — agent-adoption gap deferred to Phase 6 | 2026-05-13 |
-| 4. Wire Enrichment | 0/0 | Not started | - |
+| 4. Wire Enrichment | 1/1 | Executed | 2026-05-14 |
 | 5. Housekeeping & Compat Hardening | 0/0 | Not started | - |
 | 6. Mechanical Classification via agent:end Hook | 4/4 | Verified — UAT-4 confirmed end-to-end (CLI turn → marker → sentinel → cron → Revenium ships --task-type=generation). All 4 gaps closed. | 2026-05-14 |
 

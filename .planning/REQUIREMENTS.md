@@ -47,20 +47,20 @@ Requirements for the initial release. Each maps to roadmap phases. Drawn from PR
 - [ ] **CRON-04**: `--transaction-id` is extended to `${sid}-${total_tokens}-${muid}` so Revenium server-side dedupe catches retries even if the local ledger is lost
 - [ ] **CRON-05**: Ledger row format extends to `HERMES:<sid>:<total_tokens>:<ts>:<comma_separated_muids>`; legacy 4-field rows remain readable (parsed as "no markers reported yet for this delta")
 - [ ] **CRON-06**: Ledger writes happen per-call (not per-batch) so a partial multi-call failure leaves a recoverable state on the next tick
-- [ ] **CRON-07**: When `N == 0` markers exist for a session delta (older install, agent didn't classify, missing file), the cron falls through to the existing single-call path with `--task-type unclassified` and no explicit `--operation-type`
+- [ ] **CRON-07**: When `N == 0` markers exist for a session delta (older install, agent didn't classify, missing file), the cron falls through to the existing single-call path with `--task-type unclassified` and `--operation-type CHAT` (WIRE-01 / D-22 discharged in Phase 4)
 - [ ] **CRON-08**: A file-lock (`flock(2)`) on `~/.hermes/state/revenium/cron.lock` prevents overlapping cron ticks from racing on the ledger
 - [ ] **CRON-09**: The split strategy is invoked through a pluggable seam (a single function or Python class) so S3 (weighted) or S4 (guardrail-estimator) can drop in later without touching the cron's outer loop
 
 ### Wire Enrichment (Adjacent-Flag Wins)
 
-- [ ] **WIRE-01**: `--operation-type` defaults to `CHAT` on non-guardrail work markers (drawn from OpenInference span_kind vocabulary) — only after verifying via the Revenium `manage_metering` tool that this does not change cost calculations for existing users
-- [ ] **WIRE-02**: `--agent` is populated from the marker's `agent` field if present (e.g., the slash-command or skill name); falls back to `"Hermes"` for backward compatibility
-- [ ] **WIRE-03**: `--trace-id` is populated from the marker's `trace_id` if present; falls back to `${sid}` for backward compatibility
-- [ ] **WIRE-04**: Each split call carries the same provider/model/source values as the legacy single-call path (provider inference, cost scaling, OpenRouter/Bedrock special-casing) — no provider regressions
+- [x] **WIRE-01**: `--operation-type` defaults to `CHAT` on non-guardrail work markers (drawn from OpenInference span_kind vocabulary) — only after verifying via the Revenium `manage_metering` tool that this does not change cost calculations for existing users
+- [x] **WIRE-02**: `--agent` is populated from the marker's `agent` field if present (e.g., the slash-command or skill name); falls back to `"Hermes"` for backward compatibility
+- [x] **WIRE-03**: `--trace-id` is populated from the marker's `trace_id` if present; falls back to `${sid}` for backward compatibility
+- [x] **WIRE-04**: Each split call carries the same provider/model/source values as the legacy single-call path (provider inference, cost scaling, OpenRouter/Bedrock special-casing) — no provider regressions
 
 ### Backward Compatibility & Invariants
 
-- [ ] **COMPAT-01**: Existing installs without markers continue to meter exactly as before, differing only in carrying `--task-type unclassified` on the wire (verified via byte-by-byte argv diff against current behavior)
+- [x] **COMPAT-01**: Existing installs without markers continue to meter exactly as before, differing only in carrying `--task-type unclassified` on the wire (verified via byte-by-byte argv diff against current behavior)
 - [ ] **COMPAT-02**: A conservation test pins `sum(split_calls.numeric_fields) == input_delta.numeric_fields` for every supported split width
 - [ ] **COMPAT-03**: Re-running the cron after any partial failure never double-reports an `(sid, muid)` pair to Revenium (re-run audit test)
 - [ ] **COMPAT-04**: The existing skill frontmatter contract (`name: revenium`, `metadata.hermes`, `category: devops`) is preserved — `test_skill_frontmatter_has_hermes_metadata` continues to pass
@@ -161,11 +161,11 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 | CRON-07 | Phase 3 | Pending |
 | CRON-08 | Phase 3 | Pending |
 | CRON-09 | Phase 3 | Pending |
-| WIRE-01 | Phase 4 | Pending |
-| WIRE-02 | Phase 4 | Pending |
-| WIRE-03 | Phase 4 | Pending |
-| WIRE-04 | Phase 4 | Pending |
-| COMPAT-01 | Phase 4 | Pending |
+| WIRE-01 | Phase 4 | Verified (Phase 4) |
+| WIRE-02 | Phase 4 | Verified (Phase 4) |
+| WIRE-03 | Phase 4 | Verified (Phase 4) |
+| WIRE-04 | Phase 4 | Verified (Phase 4) |
+| COMPAT-01 | Phase 4 | Verified (Phase 4) |
 | COMPAT-02 | Phase 3 | Pending |
 | COMPAT-03 | Phase 3 | Pending |
 | COMPAT-04 | Phase 5 | Pending |
@@ -195,4 +195,4 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 
 ---
 *Requirements defined: 2026-05-12*
-*Last updated: 2026-05-12 after roadmap creation*
+*Last updated: 2026-05-14 after Phase 4 wire enrichment (WIRE-01..04 + COMPAT-01 verified)*
