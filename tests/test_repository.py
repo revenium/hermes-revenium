@@ -122,6 +122,8 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('task-taxonomy.json', text)
         self.assertIn('TAXONOMY_FILE=', text)
         self.assertRegex(text, r'MARKERS_DIR="\$\{REVENIUM_MARKERS_DIR:-\$\{STATE_DIR\}/markers\}"')
+        self.assertRegex(text, r'MARKERS_READY_DIR="\$\{REVENIUM_MARKERS_READY_DIR:-\$\{STATE_DIR\}/markers/\.ready\}"')
+        self.assertIn('markers/.ready', text)
         self.assertIn('markers', text)
         # Phase 3 D-13: LOCK_FILE declared in common.sh (single source of truth);
         # never hardcoded in cron.sh or hermes-report.sh.
@@ -496,7 +498,11 @@ class RepositoryTests(unittest.TestCase):
                     if os.path.exists(path):
                         os.unlink(path)
                 for f_ in os.listdir(markers_dir):
-                    os.unlink(os.path.join(markers_dir, f_))
+                    # Skip subdirectories (e.g., .ready/ — G-03 sentinel dir created by common.sh).
+                    full_path = os.path.join(markers_dir, f_)
+                    if os.path.isdir(full_path):
+                        continue
+                    os.unlink(full_path)
 
                 build_state_db(state_db, [{
                     'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
@@ -570,7 +576,11 @@ class RepositoryTests(unittest.TestCase):
                 if os.path.exists(path):
                     os.unlink(path)
             for f_ in os.listdir(markers_dir):
-                os.unlink(os.path.join(markers_dir, f_))
+                # Skip subdirectories (e.g., .ready/ — G-03 sentinel dir created by common.sh).
+                full_path = os.path.join(markers_dir, f_)
+                if os.path.isdir(full_path):
+                    continue
+                os.unlink(full_path)
 
             build_state_db(state_db, [{
                 'id': sid_zero, 'model': 'claude-sonnet-4-6', 'source': 'test',
@@ -642,7 +652,11 @@ class RepositoryTests(unittest.TestCase):
                 if os.path.exists(path):
                     os.unlink(path)
             for f_ in os.listdir(markers_dir):
-                os.unlink(os.path.join(markers_dir, f_))
+                # Skip subdirectories (e.g., .ready/ — G-03 sentinel dir created by common.sh).
+                full_path = os.path.join(markers_dir, f_)
+                if os.path.isdir(full_path):
+                    continue
+                os.unlink(full_path)
 
             build_state_db(state_db, [{
                 'id': sid_pf, 'model': 'claude-sonnet-4-6', 'source': 'test',
