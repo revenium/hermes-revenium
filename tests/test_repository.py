@@ -1749,6 +1749,432 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_sentinel_written_on_happy_path(self):
+        """HOOK-13 / D-21: when _on_session_end completes via the happy path
+        (run_classification returns normally for ANY outcome — substantive marker
+        write, trivial-skip, inheritance, or halt-unclassified), the plugin writes
+        an empty sentinel file at MARKERS_READY_DIR / session_id. The sentinel is
+        the cron's primary readiness signal."""
+        import importlib
+        import importlib.util
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-sentinel-happy-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        ready_dir = os.path.join(sd, 'markers', '.ready')
+        prev_ready = os.environ.get('REVENIUM_MARKERS_READY_DIR')
+        os.environ['REVENIUM_MARKERS_READY_DIR'] = ready_dir
+        os.makedirs(ready_dir, mode=0o700, exist_ok=True)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            # Load the plugin package as a proper package so the relative import
+            # `from .classifier import ...` resolves correctly.
+            mod_name = 'revenium_classifier_sentinel_happy'
+            pkg_init = PLUGIN_DIR / '__init__.py'
+            spec = importlib.util.spec_from_file_location(
+                mod_name,
+                str(pkg_init),
+                submodule_search_locations=[str(PLUGIN_DIR)],
+            )
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+
+            # Patch run_classification on the plugin module to a no-op so we only
+            # exercise the sentinel write.
+            with unittest.mock.patch.object(mod, 'run_classification', return_value=None):
+                mod._on_session_end(
+                    session_id='sid-happy',
+                    completed=True,
+                    interrupted=False,
+                    model='qwen3.6-plus',
+                    platform='cli',
+                )
+
+            sentinel_path = os.path.join(ready_dir, 'sid-happy')
+            self.assertTrue(os.path.exists(sentinel_path),
+                            'sentinel not written for happy path')
+            self.assertEqual(os.path.getsize(sentinel_path), 0,
+                             'sentinel must be zero-byte')
+        finally:
+            if prev_ready is None:
+                os.environ.pop('REVENIUM_MARKERS_READY_DIR', None)
+            else:
+                os.environ['REVENIUM_MARKERS_READY_DIR'] = prev_ready
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_sentinel_written_on_error_path(self):
+        """HOOK-13 / D-21 / D-04 belt: when run_classification raises an exception,
+        _on_session_end catches it, logs a warning, AND STILL writes the sentinel.
+        The sentinel write inside the except handler prevents a classifier crash
+        from freezing a session in the cron's race window. D-04 invariant:
+        _on_session_end never raises out."""
+        import importlib
+        import importlib.util
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-sentinel-error-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        ready_dir = os.path.join(sd, 'markers', '.ready')
+        prev_ready = os.environ.get('REVENIUM_MARKERS_READY_DIR')
+        os.environ['REVENIUM_MARKERS_READY_DIR'] = ready_dir
+        os.makedirs(ready_dir, mode=0o700, exist_ok=True)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            mod_name = 'revenium_classifier_sentinel_error'
+            pkg_init = PLUGIN_DIR / '__init__.py'
+            spec = importlib.util.spec_from_file_location(
+                mod_name,
+                str(pkg_init),
+                submodule_search_locations=[str(PLUGIN_DIR)],
+            )
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+
+            with unittest.mock.patch.object(
+                mod, 'run_classification',
+                side_effect=RuntimeError('synthetic classifier crash'),
+            ):
+                # Must NOT raise — D-04 belt.
+                mod._on_session_end(
+                    session_id='sid-error',
+                    completed=True,
+                    interrupted=False,
+                    model='qwen3.6-plus',
+                    platform='cli',
+                )
+
+            sentinel_path = os.path.join(ready_dir, 'sid-error')
+            self.assertTrue(os.path.exists(sentinel_path),
+                            'sentinel not written on error path — D-04 belt broken')
+            self.assertEqual(os.path.getsize(sentinel_path), 0,
+                             'sentinel must be zero-byte even on error path')
+        finally:
+            if prev_ready is None:
+                os.environ.pop('REVENIUM_MARKERS_READY_DIR', None)
+            else:
+                os.environ['REVENIUM_MARKERS_READY_DIR'] = prev_ready
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_cron_filter_skips_recent_no_sentinel(self):
+        """HOOK-13 / D-21: a session whose started_at is 30s ago (within the 120s
+        settle window) AND has NO sentinel file is SKIPPED by hermes-report.sh's
+        session SELECT filter; the session is NOT shipped to revenium meter
+        completion this tick. Pins the cron's race-defense primary path."""
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-cron-skip-recent-')
+        try:
+            hh = os.path.join(tmpdir, 'hh')
+            sd = os.path.join(hh, 'state', 'revenium')
+            md = os.path.join(sd, 'markers')
+            mrd = os.path.join(md, '.ready')
+            # Stub revenium at $HOME/.local/bin — common.sh::ensure_path prepends
+            # known system paths AFTER setting PATH, and ${HOME}/.local/bin is the
+            # LAST prepend in its loop, so it ends up FIRST in the final PATH.
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(md, exist_ok=True)
+            os.makedirs(mrd, exist_ok=True)
+            os.makedirs(bin_dir, exist_ok=True)
+
+            # Build state.db with one recent session (30s ago) and NO sentinel.
+            state_db = os.path.join(hh, 'state.db')
+            recent_ts = int(time.time()) - 30
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                "CREATE TABLE sessions ("
+                "id TEXT PRIMARY KEY, model TEXT, source TEXT, "
+                "input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL, "
+                "api_call_count INTEGER, started_at INTEGER, ended_at INTEGER, "
+                "billing_provider TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ('sid-recent', 'qwen3.6-plus', 'cli', 100, 50, 0, 0, 0,
+                 0.01, 1, recent_ts, None, 'openai'),
+            )
+            conn.commit()
+            conn.close()
+
+            # Stub revenium CLI.
+            invocations_log = os.path.join(tmpdir, 'revenium-invocations.log')
+            stub_path = os.path.join(bin_dir, 'revenium')
+            with open(stub_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    f'    printf "%q " "$@" >> "{invocations_log}"\n'
+                    f'    printf "\\n" >> "{invocations_log}"\n'
+                    '    exit 0 ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(stub_path, 0o755)
+
+            env = {
+                **os.environ,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'HOME': shim_home,
+                'HERMES_HOME': hh,
+                'REVENIUM_STATE_DIR': sd,
+                'REVENIUM_MARKERS_DIR': md,
+                'REVENIUM_MARKERS_READY_DIR': mrd,
+                'REVENIUM_CRON_SETTLE_SECONDS': '120',
+                'TZ': 'UTC',
+            }
+
+            result = subprocess.run(
+                ['bash', str(SKILL / 'scripts' / 'hermes-report.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            # Confirm the recent-no-sentinel session was NEVER shipped (no meter
+            # completion call appended to the log). The stub only records the
+            # post-`meter completion` argv tail, so absence of file or empty
+            # file == no meter completion call.
+            log_size = os.path.getsize(invocations_log) if os.path.exists(invocations_log) else 0
+            self.assertEqual(log_size, 0,
+                             'recent-no-sentinel session was unexpectedly shipped — '
+                             'invocations log not empty: ' +
+                             (open(invocations_log).read() if log_size else ''))
+
+            # Confirm the cron emitted the skip log line.
+            cron_log_path = os.path.join(sd, 'revenium-metering.log')
+            cron_log = ''
+            if os.path.exists(cron_log_path):
+                cron_log = open(cron_log_path).read()
+            combined = result.stderr + cron_log
+            self.assertIn('awaiting plugin sentinel', combined,
+                          'expected skip log line for recent-no-sentinel session')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_cron_filter_includes_aged_no_sentinel(self):
+        """HOOK-13 / D-21 safety net: a session whose started_at is 200s ago
+        (older than the 120s settle window) AND has NO sentinel is INCLUDED in
+        the cron's session list — D-18 default applies (--task-type unclassified)
+        because no marker file exists. Pins the safety-net path for plugin-failure
+        cases."""
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-cron-aged-')
+        try:
+            hh = os.path.join(tmpdir, 'hh')
+            sd = os.path.join(hh, 'state', 'revenium')
+            md = os.path.join(sd, 'markers')
+            mrd = os.path.join(md, '.ready')
+            # Stub revenium at $HOME/.local/bin — common.sh::ensure_path prepends
+            # known system paths AFTER setting PATH, and ${HOME}/.local/bin is the
+            # LAST prepend in its loop, so it ends up FIRST in the final PATH.
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(md, exist_ok=True)
+            os.makedirs(mrd, exist_ok=True)
+            os.makedirs(bin_dir, exist_ok=True)
+
+            state_db = os.path.join(hh, 'state.db')
+            aged_ts = int(time.time()) - 200
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                "CREATE TABLE sessions ("
+                "id TEXT PRIMARY KEY, model TEXT, source TEXT, "
+                "input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL, "
+                "api_call_count INTEGER, started_at INTEGER, ended_at INTEGER, "
+                "billing_provider TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ('sid-aged', 'qwen3.6-plus', 'cli', 100, 50, 0, 0, 0,
+                 0.01, 1, aged_ts, None, 'openai'),
+            )
+            conn.commit()
+            conn.close()
+
+            invocations_log = os.path.join(tmpdir, 'revenium-invocations.log')
+            stub_path = os.path.join(bin_dir, 'revenium')
+            with open(stub_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    f'    printf "%q " "$@" >> "{invocations_log}"\n'
+                    f'    printf "\\n" >> "{invocations_log}"\n'
+                    '    exit 0 ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(stub_path, 0o755)
+
+            env = {
+                **os.environ,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'HOME': shim_home,
+                'HERMES_HOME': hh,
+                'REVENIUM_STATE_DIR': sd,
+                'REVENIUM_MARKERS_DIR': md,
+                'REVENIUM_MARKERS_READY_DIR': mrd,
+                'REVENIUM_CRON_SETTLE_SECONDS': '120',
+                'TZ': 'UTC',
+            }
+
+            result = subprocess.run(
+                ['bash', str(SKILL / 'scripts' / 'hermes-report.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            self.assertTrue(os.path.exists(invocations_log) and os.path.getsize(invocations_log) > 0,
+                            'aged-no-sentinel session was NOT shipped — safety net broken')
+            log_text = open(invocations_log).read()
+            # Stub records argv AFTER `meter completion` is stripped, so we assert on
+            # downstream flags in the argv tail.
+            self.assertIn('--task-type unclassified', log_text,
+                          'aged-no-sentinel session must ship with D-18 default unclassified')
+
+            cron_log_path = os.path.join(sd, 'revenium-metering.log')
+            cron_log = ''
+            if os.path.exists(cron_log_path):
+                cron_log = open(cron_log_path).read()
+            combined = result.stderr + cron_log
+            self.assertNotIn('skipping sid-aged', combined,
+                             'aged session was unexpectedly skipped')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_cron_filter_includes_any_age_with_sentinel(self):
+        """HOOK-13 / D-21 sentinel-wins: a session whose started_at is 5s ago
+        (well within the 120s settle window) BUT has a sentinel file at
+        MARKERS_READY_DIR/<sid> is INCLUDED in the cron's session list. Pins the
+        sentinel-driven primary path: sentinel presence overrides the age check."""
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+        from pathlib import Path
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-cron-sentinel-wins-')
+        try:
+            hh = os.path.join(tmpdir, 'hh')
+            sd = os.path.join(hh, 'state', 'revenium')
+            md = os.path.join(sd, 'markers')
+            mrd = os.path.join(md, '.ready')
+            # Stub revenium at $HOME/.local/bin — common.sh::ensure_path prepends
+            # known system paths AFTER setting PATH, and ${HOME}/.local/bin is the
+            # LAST prepend in its loop, so it ends up FIRST in the final PATH.
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(md, exist_ok=True)
+            os.makedirs(mrd, exist_ok=True)
+            os.makedirs(bin_dir, exist_ok=True)
+
+            state_db = os.path.join(hh, 'state.db')
+            recent_ts = int(time.time()) - 5
+            conn = sqlite3.connect(state_db)
+            conn.execute(
+                "CREATE TABLE sessions ("
+                "id TEXT PRIMARY KEY, model TEXT, source TEXT, "
+                "input_tokens INTEGER, output_tokens INTEGER, "
+                "cache_read_tokens INTEGER, cache_write_tokens INTEGER, "
+                "reasoning_tokens INTEGER, estimated_cost_usd REAL, "
+                "api_call_count INTEGER, started_at INTEGER, ended_at INTEGER, "
+                "billing_provider TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ('sid-with-sentinel', 'qwen3.6-plus', 'cli', 100, 50, 0, 0, 0,
+                 0.01, 1, recent_ts, None, 'openai'),
+            )
+            conn.commit()
+            conn.close()
+
+            # Write the sentinel — this is the load-bearing setup detail.
+            Path(os.path.join(mrd, 'sid-with-sentinel')).touch(exist_ok=True)
+
+            invocations_log = os.path.join(tmpdir, 'revenium-invocations.log')
+            stub_path = os.path.join(bin_dir, 'revenium')
+            with open(stub_path, 'w', encoding='utf-8') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    f'    printf "%q " "$@" >> "{invocations_log}"\n'
+                    f'    printf "\\n" >> "{invocations_log}"\n'
+                    '    exit 0 ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(stub_path, 0o755)
+
+            env = {
+                **os.environ,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'HOME': shim_home,
+                'HERMES_HOME': hh,
+                'REVENIUM_STATE_DIR': sd,
+                'REVENIUM_MARKERS_DIR': md,
+                'REVENIUM_MARKERS_READY_DIR': mrd,
+                'REVENIUM_CRON_SETTLE_SECONDS': '120',
+                'TZ': 'UTC',
+            }
+
+            result = subprocess.run(
+                ['bash', str(SKILL / 'scripts' / 'hermes-report.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            self.assertTrue(os.path.exists(invocations_log) and os.path.getsize(invocations_log) > 0,
+                            'session with sentinel was NOT shipped despite recent started_at')
+            log_text = open(invocations_log).read()
+            self.assertIn('--task-type unclassified', log_text,
+                          'expected meter completion call (with D-18 default unclassified '
+                          'because no marker exists in MARKERS_DIR for this sid)')
+
+            cron_log_path = os.path.join(sd, 'revenium-metering.log')
+            cron_log = ''
+            if os.path.exists(cron_log_path):
+                cron_log = open(cron_log_path).read()
+            combined = result.stderr + cron_log
+            self.assertNotIn('skipping sid-with-sentinel', combined,
+                             'sentinel-having session was unexpectedly skipped')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_setup_md_has_mechanical_classification_hook_section(self):
         """HOOK-10 / D-16: references/setup.md carries a 'Mechanical classification hook'
         section that documents the install path, gateway-restart requirement, and the
