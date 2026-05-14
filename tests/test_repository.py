@@ -5,12 +5,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'revenium'
-HOOK_DIR = SKILL / 'hooks' / 'revenium-classifier'
+PLUGIN_DIR = SKILL / 'plugins' / 'revenium-classifier'
 
 
 def _agent_aux_client_available() -> bool:
     """True iff `from agent.auxiliary_client import call_llm` succeeds. Phase 6
-    hook tests that exercise the real LLM call require this; mocked tests do not."""
+    plugin tests that exercise the real LLM call require this; mocked tests do not."""
     try:
         from agent.auxiliary_client import call_llm  # noqa: F401
         return True
@@ -18,9 +18,9 @@ def _agent_aux_client_available() -> bool:
         return False
 
 
-def _setup_hook_env(tmpdir):
+def _setup_plugin_env(tmpdir):
     """Returns (env_snapshot, sys_path_added, hermes_home, state_dir, markers_dir).
-    Caller must call _restore_hook_env in finally."""
+    Caller must call _restore_plugin_env in finally."""
     import os
     import sys
     hermes_home = os.path.join(tmpdir, 'hh')
@@ -34,17 +34,17 @@ def _setup_hook_env(tmpdir):
     os.environ['HERMES_HOME'] = hermes_home
     os.environ['REVENIUM_STATE_DIR'] = state_dir
     os.environ['REVENIUM_MARKERS_DIR'] = markers_dir
-    sys_path_added = str(HOOK_DIR) not in sys.path
+    sys_path_added = str(PLUGIN_DIR) not in sys.path
     if sys_path_added:
-        sys.path.insert(0, str(HOOK_DIR))
+        sys.path.insert(0, str(PLUGIN_DIR))
     return snapshot, sys_path_added, hermes_home, state_dir, markers_dir
 
 
-def _restore_hook_env(snapshot, sys_path_added):
+def _restore_plugin_env(snapshot, sys_path_added):
     import os
     import sys
-    if sys_path_added and str(HOOK_DIR) in sys.path:
-        sys.path.remove(str(HOOK_DIR))
+    if sys_path_added and str(PLUGIN_DIR) in sys.path:
+        sys.path.remove(str(PLUGIN_DIR))
     for k, v in snapshot.items():
         if v is None:
             os.environ.pop(k, None)
@@ -73,12 +73,13 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'clear-halt.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
-            # Phase 6 — agent:end classifier hook (HOOK-01)
-            SKILL / 'hooks' / 'revenium-classifier' / 'HOOK.yaml',
-            SKILL / 'hooks' / 'revenium-classifier' / 'handler.py',
-            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
-            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
-            SKILL / 'hooks' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
+            # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
+            SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
+            SKILL / 'plugins' / 'revenium-classifier' / '__init__.py',
+            SKILL / 'plugins' / 'revenium-classifier' / 'classifier.py',
+            SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
+            SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
+            SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -1003,28 +1004,34 @@ class RepositoryTests(unittest.TestCase):
         import tempfile
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-trivial-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
-            fixture_path = HOOK_DIR / 'test-payloads' / 'trivial-turn.json'
+            fixture_path = PLUGIN_DIR / 'test-payloads' / 'trivial-turn.json'
             context = json.loads(fixture_path.read_text())
             # No session jsonl exists in tmp HERMES_HOME → _count_tools_in_current_turn returns 0
-            asyncio.run(handler.handle("agent:end", context))
+            asyncio.run(handler.run_classification_async(
+                session_id=context['session_id'],
+                message=context.get('message'),
+                response=context.get('response'),
+                model=context.get('model'),
+                platform=context.get('platform'),
+            ))
             self.assertFalse(
                 (handler.MARKERS_DIR / f"{context['session_id']}.jsonl").exists(),
                 "trivial turn must NOT create marker file (HOOK-02 / D-07)",
             )
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_never_raises(self):
-        """D-04 / SC4 belt: handler.handle MUST NOT raise out of handle() for ANY error
-        path. Inject failures at every helper boundary and confirm the handler swallows
-        and logs them instead of propagating."""
+        """D-04 / SC4 belt: run_classification_async MUST NOT raise out of the classifier
+        for ANY error path. Inject failures at every helper boundary and confirm the
+        classifier swallows and logs them instead of propagating."""
         import asyncio
         import importlib
         import json
@@ -1035,7 +1042,7 @@ class RepositoryTests(unittest.TestCase):
         import unittest.mock
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-noraise-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
             os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
             sid = "noraise-sid"
@@ -1043,9 +1050,9 @@ class RepositoryTests(unittest.TestCase):
                 f.write(json.dumps({"role": "user"}) + "\n")
                 f.write(json.dumps({"role": "tool"}) + "\n")
 
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             context = {
                 "platform": "test", "user_id": "u",
@@ -1058,7 +1065,13 @@ class RepositoryTests(unittest.TestCase):
             with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
                 mock_llm.side_effect = RuntimeError("boom from call_llm")
                 # MUST NOT raise
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
             # Marker file SHOULD exist with task_type=unclassified (LLM failure fallthrough)
             marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
             self.assertTrue(marker_path.is_file())
@@ -1070,21 +1083,46 @@ class RepositoryTests(unittest.TestCase):
             with unittest.mock.patch.object(handler, '_write_marker_pair') as mock_write:
                 mock_write.side_effect = OSError("disk full")
                 # MUST NOT raise
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
 
-            # Case C — wrong event type → silent early return
-            asyncio.run(handler.handle("session:start", context))
+            # Case C — plugin _on_session_end with garbage session_id swallows the exception
+            # (D-04 belt at the plugin boundary; never raises so the plugin manager
+            # does not mark revenium-classifier unhealthy on a None sid).
+            import importlib.util as _ilu
+            _pkg_init = PLUGIN_DIR / '__init__.py'
+            _spec = _ilu.spec_from_file_location(
+                'revenium_classifier_t05c',
+                str(_pkg_init),
+                submodule_search_locations=[str(PLUGIN_DIR)],
+            )
+            _mod = _ilu.module_from_spec(_spec)
+            sys.modules['revenium_classifier_t05c'] = _mod
+            _spec.loader.exec_module(_mod)
+            # MUST NOT raise on a None session_id
+            _mod._on_session_end(session_id=None, completed=True, interrupted=False)
 
             # Case D — missing session_id → silent early return
-            asyncio.run(handler.handle("agent:end", {"platform": "x"}))
+            asyncio.run(handler.run_classification_async(session_id=''))
 
             # Case E — call_llm returns garbage object that defeats .choices[0].message.content
             with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
                 mock_llm.return_value = object()  # neither attribute nor mapping interface
                 # MUST NOT raise; should write unclassified
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_dedupe(self):
@@ -1102,7 +1140,7 @@ class RepositoryTests(unittest.TestCase):
         import unittest.mock
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-dedupe-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
             # Seed substantive context (defeat heuristic skip)
             os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
@@ -1111,9 +1149,9 @@ class RepositoryTests(unittest.TestCase):
                 f.write(json.dumps({"role": "user"}) + "\n")
                 f.write(json.dumps({"role": "tool"}) + "\n")
 
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             # Pre-seed the marker file with an agent-written GUARDRAIL+CHAT pair (fresh)
             marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
@@ -1130,9 +1168,15 @@ class RepositoryTests(unittest.TestCase):
             # Patch call_llm so we can prove it was NOT called
             with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
                 mock_llm.side_effect = AssertionError("LLM must NOT be called when agent already wrote markers")
-                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                fixture = PLUGIN_DIR / 'test-payloads' / 'substantive-turn.json'
                 context = json.loads(fixture.read_text())
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
                 mock_llm.assert_not_called()
 
             # Marker file should still have exactly 2 lines (no hook-added lines)
@@ -1150,12 +1194,18 @@ class RepositoryTests(unittest.TestCase):
             mock_resp.choices = [unittest.mock.MagicMock()]
             mock_resp.choices[0].message.content = "research"
             with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
             # Now marker file has 4 lines (2 stale + 2 new from hook)
             lines = marker_path.read_text().splitlines()
             self.assertEqual(len(lines), 4)
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_llm_label(self):
@@ -1171,7 +1221,7 @@ class RepositoryTests(unittest.TestCase):
         import unittest.mock
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-llm-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
             # Seed a session jsonl with one tool to defeat the heuristic skip
             os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
@@ -1180,17 +1230,23 @@ class RepositoryTests(unittest.TestCase):
                 f.write(json.dumps({"role": "user", "content": "x"}) + "\n")
                 f.write(json.dumps({"role": "tool", "name": "read_file"}) + "\n")
 
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             mock_resp = unittest.mock.MagicMock()
             mock_resp.choices = [unittest.mock.MagicMock()]
             mock_resp.choices[0].message.content = "code_review"
             with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp) as mock_llm:
-                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                fixture = PLUGIN_DIR / 'test-payloads' / 'substantive-turn.json'
                 context = json.loads(fixture.read_text())
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
                 mock_llm.assert_called_once()
                 kwargs = mock_llm.call_args.kwargs
                 self.assertNotIn('task', kwargs, "call_llm MUST be invoked WITHOUT task= per Pitfall 8 / A3")
@@ -1201,7 +1257,7 @@ class RepositoryTests(unittest.TestCase):
             recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
             self.assertEqual({r['task_type'] for r in recs}, {'code_review'})
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_llm_blocklist_fallthrough(self):
@@ -1217,7 +1273,7 @@ class RepositoryTests(unittest.TestCase):
         import unittest.mock
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-block-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
             os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
             sid = "20260513_120100_testsubstantive"
@@ -1225,9 +1281,9 @@ class RepositoryTests(unittest.TestCase):
                 f.write(json.dumps({"role": "user"}) + "\n")
                 f.write(json.dumps({"role": "tool"}) + "\n")
 
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             # Direct _validate_label coverage
             self.assertEqual(handler._validate_label("ack"), "unclassified")
@@ -1241,15 +1297,21 @@ class RepositoryTests(unittest.TestCase):
             mock_resp.choices = [unittest.mock.MagicMock()]
             mock_resp.choices[0].message.content = "thanks"
             with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
-                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                fixture = PLUGIN_DIR / 'test-payloads' / 'substantive-turn.json'
                 context = json.loads(fixture.read_text())
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
 
             marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
             recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
             self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_halt_unclassified(self):
@@ -1265,11 +1327,11 @@ class RepositoryTests(unittest.TestCase):
         import unittest.mock
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-halt-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             # Seed a halted budget-status.json
             os.makedirs(sd, exist_ok=True)
@@ -1284,9 +1346,15 @@ class RepositoryTests(unittest.TestCase):
             # Patch call_llm so we can prove it was NOT called
             with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
                 mock_llm.side_effect = AssertionError("LLM must NOT be called when halted (D-08)")
-                fixture = HOOK_DIR / 'test-payloads' / 'substantive-turn.json'
+                fixture = PLUGIN_DIR / 'test-payloads' / 'substantive-turn.json'
                 context = json.loads(fixture.read_text())
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
                 mock_llm.assert_not_called()
 
             marker_path = handler.MARKERS_DIR / f"{context['session_id']}.jsonl"
@@ -1297,7 +1365,7 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
             self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_halt_failopen_on_missing_file(self):
@@ -1309,17 +1377,17 @@ class RepositoryTests(unittest.TestCase):
         import tempfile
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-halt-open-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             # No budget-status.json in tmpdir → fail-open
             self.assertFalse(handler.BUDGET_STATUS_FILE.exists())
             self.assertFalse(handler._budget_halted())
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_subagent_inherits(self):
@@ -1338,11 +1406,11 @@ class RepositoryTests(unittest.TestCase):
         import unittest.mock
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-subagent-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             # Seed a state.db with parent + child rows
             state_db_path = os.path.join(hh, 'state.db')
@@ -1371,7 +1439,13 @@ class RepositoryTests(unittest.TestCase):
                     "message": "x",
                     "response": "Found 3 references to FlockGuard in the repository, see lines 42, 87, 134" + " padding " * 50,
                 }
-                asyncio.run(handler.handle("agent:end", context))
+                asyncio.run(handler.run_classification_async(
+                    session_id=context['session_id'],
+                    message=context.get('message'),
+                    response=context.get('response'),
+                    model=context.get('model'),
+                    platform=context.get('platform'),
+                ))
                 mock_llm.assert_not_called()
 
             # Assert the child's marker file has task_type=research, GUARDRAIL+CHAT
@@ -1383,7 +1457,7 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual({r['task_type'] for r in recs}, {'research'})
             self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'})
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_walk_to_root(self):
@@ -1396,11 +1470,11 @@ class RepositoryTests(unittest.TestCase):
         import tempfile
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-walk-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             # Case A — missing state.db file → returns input sid
             self.assertEqual(handler._walk_to_root_session('nope'), 'nope')
@@ -1433,7 +1507,7 @@ class RepositoryTests(unittest.TestCase):
             result = handler._walk_to_root_session('loop0', max_depth=10)
             self.assertIsInstance(result, str)
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_substantive_uses_session_jsonl_tool_count(self):
@@ -1447,11 +1521,11 @@ class RepositoryTests(unittest.TestCase):
         import tempfile
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-toolcount-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             sessions_dir = os.path.join(hh, 'sessions')
             os.makedirs(sessions_dir, exist_ok=True)
@@ -1464,7 +1538,7 @@ class RepositoryTests(unittest.TestCase):
                 f.write(json.dumps({"role": "assistant", "content": "ok"}) + "\n")
             self.assertEqual(handler._count_tools_in_current_turn(sid), 2)
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_setup_md_has_mechanical_classification_hook_section(self):
@@ -1507,11 +1581,11 @@ class RepositoryTests(unittest.TestCase):
         import tempfile
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-hook-pair-')
-        snap, added, hh, sd, md = _setup_hook_env(tmpdir)
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
-            if 'handler' in sys.modules:
-                importlib.reload(sys.modules['handler'])
-            import handler
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
 
             marker_path = handler._write_marker_pair('test-sid-pair', 'code_review')
             self.assertEqual(str(marker_path), os.path.join(md, 'test-sid-pair.jsonl'))
@@ -1527,7 +1601,110 @@ class RepositoryTests(unittest.TestCase):
             for l in lines:
                 self.assertLess(len((l + '\n').encode('utf-8')), 1024, 'marker line exceeds 1024 bytes')
         finally:
-            _restore_hook_env(snap, added)
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_plugin_entrypoint(self):
+        """HOOK-11: plugin __init__.register(ctx) wires on_session_end → _on_session_end;
+        invoking the registered callback synchronously drives the full classification
+        pipeline (subagent → heuristic → halt → LLM → marker pair) and produces a valid
+        GUARDRAIL+CHAT marker pair on disk. Pins the universal-coverage invariant: the
+        plugin entrypoint, when invoked the way the Hermes plugin bus invokes it,
+        produces markers regardless of session source."""
+        import asyncio  # noqa: F401  (kept for parity with other HOOK-* tests)
+        import importlib
+        import importlib.util
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-plugin-entry-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            # Reload the shared classifier module so its env-var-derived path constants
+            # pick up our tmp HERMES_HOME / REVENIUM_STATE_DIR redirects.
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Load the plugin package via spec_from_file_location with submodule_search_locations
+            # — same import pattern Hermes' plugin manager uses to load plugins by path.
+            mod_name = 'revenium_classifier_entrypoint_test'
+            pkg_init = PLUGIN_DIR / '__init__.py'
+            spec = importlib.util.spec_from_file_location(
+                mod_name,
+                str(pkg_init),
+                submodule_search_locations=[str(PLUGIN_DIR)],
+            )
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+
+            # Stub the Hermes plugin context. register_hook records the wiring so we can
+            # invoke the registered callback the way the plugin bus would.
+            registered = {}
+
+            class StubCtx:
+                def register_hook(self, name, cb):
+                    registered[name] = cb
+
+            ctx = StubCtx()
+            mod.register(ctx)
+            self.assertIn('on_session_end', registered,
+                          'register(ctx) must wire on_session_end via ctx.register_hook')
+
+            # Pre-seed the session jsonl so the heuristic skip-fast-path does NOT trigger:
+            # need at least one role:tool entry under the latest role:user line.
+            fixture = PLUGIN_DIR / 'test-payloads' / 'substantive-turn.json'
+            context = json.loads(fixture.read_text())
+            sid = context['session_id']
+            sessions_dir = os.path.join(hh, 'sessions')
+            os.makedirs(sessions_dir, exist_ok=True)
+            with open(os.path.join(sessions_dir, f'{sid}.jsonl'), 'w', encoding='utf-8') as f:
+                f.write(json.dumps({'role': 'user', 'content': context.get('message', '')}) + '\n')
+                f.write(json.dumps({'role': 'tool', 'name': 'read_file'}) + '\n')
+
+            # Patch the shared classifier's call_llm so the plugin pipeline produces a
+            # meaningful task_type. The plugin's relative `from .classifier import
+            # run_classification` resolves to a SUBMODULE of the dynamically-loaded
+            # plugin package (named `<mod_name>.classifier`), not the bare `classifier`
+            # module we patched into `sys.modules` earlier. We patch call_llm on the
+            # plugin's submodule so the call_llm reference inside `_classify_via_llm`
+            # (which uses the module-global) resolves to our mock.
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = 'code_review'
+
+            plugin_classifier_mod = sys.modules[f'{mod_name}.classifier']
+
+            with unittest.mock.patch.object(plugin_classifier_mod, 'call_llm', return_value=mock_resp):
+                # Invoke the registered callback the way the Hermes plugin bus invokes it:
+                # synchronously, with the documented on_session_end kwargs.
+                registered['on_session_end'](
+                    session_id=sid,
+                    completed=True,
+                    interrupted=False,
+                    model='test-model',
+                    platform='cli',
+                )
+
+            # Assert the marker pair landed at the expected path.
+            marker_path = handler.MARKERS_DIR / f'{sid}.jsonl'
+            self.assertTrue(marker_path.is_file(),
+                            f'plugin entrypoint did not produce marker file at {marker_path}')
+            lines = marker_path.read_text(encoding='utf-8').splitlines()
+            self.assertEqual(len(lines), 2,
+                             f'plugin entrypoint must write exactly 2 markers; got {len(lines)}')
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['task_type'] for r in recs}, {'code_review'},
+                             'both markers must carry the LLM-classified task_type')
+            self.assertEqual({r['operation_type'] for r in recs}, {'GUARDRAIL', 'CHAT'},
+                             'plugin entrypoint must write one GUARDRAIL + one CHAT marker')
+        finally:
+            _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
