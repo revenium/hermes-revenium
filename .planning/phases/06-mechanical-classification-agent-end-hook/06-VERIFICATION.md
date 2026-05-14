@@ -1,7 +1,7 @@
 ---
 phase: 06-mechanical-classification-agent-end-hook
 verified: 2026-05-13T18:59:09Z
-updated: 2026-05-13T19:38:00Z
+updated: 2026-05-14T00:00:00Z
 status: requires_rerun_uat
 gap_closure_plan: 06-02-PLAN.md
 score: 11/11 must-haves verified (automated); operator UAT on Mac Studio surfaced a Phase 6 goal gap (see 06-HUMAN-UAT.md G-01)
@@ -16,8 +16,9 @@ gaps:
     relates_to: [HOOK-01, HOOK-02, HOOK-05, HOOK-06, SC1, SC2, SC6]
   - id: G-02
     severity: high
-    gap_closure: pending
-    gap_closure_plan: TBD (06-03-PLAN.md)
+    gap_closure: executed
+    gap_closure_plan: 06-03-PLAN.md
+    gap_closure_outcome: "code fix landed (state.db.sessions.tool_call_count primary source + JSONL fallback in _count_tools_in_current_turn). G-02 is closed by code; behaviorally closed only after UAT round 3 records the CLI substantive turn producing a marker file with non-unclassified task_type on Mac Studio. The four new HOOK-12 tests (3 unit + 1 end-to-end) pin the regression guard in CI."
     summary: "Substance heuristic mis-classifies CLI sessions as trivial because `~/.hermes/sessions/<sid>.jsonl` is absent for `hermes chat -q` sessions. `classifier._count_tools_in_current_turn` returns 0 (no file), and the on_session_end payload provides no response text — so the heuristic-skip-fast-path triggers for every CLI substantive turn and no marker is written. State.db has the signal (tool_call_count, message_count populated) but the classifier doesn't consult it. Surfaced by UAT round 2 on Mac Studio (2026-05-13T22:50Z). See 06-HUMAN-UAT.md G-02 for evidence and closure options."
     relates_to: [HOOK-02, HOOK-11, SC2, SC6]
 re_verification:
