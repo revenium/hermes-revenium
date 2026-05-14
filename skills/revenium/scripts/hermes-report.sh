@@ -57,6 +57,104 @@ main() {
     return
   fi
 
+  # G-03 sentinel-or-aged filter (D-21): drop sessions younger than SETTLE_SECONDS
+  # that have no plugin sentinel at MARKERS_READY_DIR/<sid>. Sessions WITH a sentinel
+  # OR older than the settle window pass through unchanged. The downstream while-loop
+  # below is byte-identical to pre-edit. Soft-fail: on heredoc error, the original
+  # ${sessions} flows through unfiltered (legacy behavior).
+  local sentinel_skipped
+  sentinel_skipped=$(mktemp 2>/dev/null || echo "/tmp/hermes-sentinel-skipped.$$")
+  local filtered_sessions
+  filtered_sessions=$(
+    SESSIONS="${sessions}" \
+    MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
+    REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-120}" \
+    SKIPPED_LOG="${sentinel_skipped}" \
+    python3 - <<'PY' 2>/dev/null
+import os
+import sys
+import time
+from pathlib import Path
+
+try:
+    settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '120'))
+except (TypeError, ValueError):
+    settle_seconds = 120
+
+markers_ready_dir = Path(os.environ.get('MARKERS_READY_DIR', ''))
+skipped_log = os.environ.get('SKIPPED_LOG', '')
+sessions_data = os.environ.get('SESSIONS', '')
+
+now = int(time.time())
+
+try:
+    skip_out = open(skipped_log, 'w', encoding='utf-8') if skipped_log else None
+except OSError:
+    skip_out = None
+
+for raw_line in sessions_data.split('\n'):
+    line = raw_line.rstrip('\n').rstrip('\r')
+    if not line:
+        continue
+    try:
+        parts = line.split('|')
+        # Columns: id|model|source|input|output|cache_read|cache_write|reasoning|
+        #          estimated_cost|api_calls|started_at|ended_at|billing_provider
+        # started_at is index 10 (the 11th column).
+        if len(parts) < 11:
+            # Malformed row — pass through unchanged (soft-fail).
+            print(line)
+            continue
+        sid = parts[0]
+        try:
+            started_at_int = int(float(parts[10]))
+        except (TypeError, ValueError):
+            # Pass through unparseable started_at (soft-fail).
+            print(line)
+            continue
+        age = now - started_at_int
+        try:
+            has_sentinel = (markers_ready_dir / sid).exists() if str(markers_ready_dir) else False
+        except OSError:
+            has_sentinel = False
+        if has_sentinel or age >= settle_seconds:
+            print(line)
+        else:
+            if skip_out is not None:
+                try:
+                    skip_out.write(f"{sid}\t{age}\t{settle_seconds}\n")
+                except OSError:
+                    pass
+    except Exception:
+        # Belt: any unexpected error → pass the row through unmodified.
+        print(line)
+        continue
+
+if skip_out is not None:
+    try:
+        skip_out.close()
+    except OSError:
+        pass
+PY
+  ) || filtered_sessions="${sessions}"
+
+  # Emit one info log line per skipped session via the existing info helper
+  # so the cron log captures the proper timestamp + [INFO ] [revenium] prefix.
+  if [[ -s "${sentinel_skipped}" ]]; then
+    while IFS=$'\t' read -r skip_sid skip_age skip_settle; do
+      [[ -z "${skip_sid}" ]] && continue
+      info "skipping ${skip_sid} — awaiting plugin sentinel (age=${skip_age}s < settle=${skip_settle}s)"
+    done < "${sentinel_skipped}"
+  fi
+  rm -f "${sentinel_skipped}" 2>/dev/null || true
+
+  sessions="${filtered_sessions}"
+
+  if [[ -z "${sessions}" ]]; then
+    info "All candidate sessions deferred — awaiting plugin sentinels."
+    return
+  fi
+
   local reported_count=0
   local skipped_count=0
 
