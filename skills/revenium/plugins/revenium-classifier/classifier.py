@@ -76,9 +76,38 @@ def _walk_to_root_session(sid: str, max_depth: int = 10) -> str:
 
 
 def _count_tools_in_current_turn(sid: str) -> int:
-    """Return the count of role:tool entries in ~/.hermes/sessions/<sid>.jsonl
-    between the most recent role:user line and EOF. Returns 0 if the file is
-    missing, unreadable, or has no user line. Used by D-07 heuristic skip."""
+    """Return the count of tool calls in the just-completed turn for session `sid`.
+    Primary source: `state.db.sessions.tool_call_count` (universal — populated for
+    every session source: gateway-served, CLI one-shot, interactive, ACP, cron).
+    Fallback source: `~/.hermes/sessions/<sid>.jsonl` (scan backward for the last
+    role:user line, count role:tool entries after it). Returns 0 if neither source
+    has the signal. Used by D-07 heuristic skip.
+
+    D-04 invariant: never raises. All sqlite errors fall through to JSONL; all
+    OSError/JSONDecodeError in JSONL fall through to 0. D-20 closes G-02: the
+    gateway-style JSONL is absent for CLI one-shot sessions (`hermes_cli/oneshot.py::_create_session_db_for_oneshot`
+    writes only state.db), so JSONL alone caused every CLI substantive turn to be
+    mis-classified as trivial."""
+    # PRIMARY PATH — state.db.sessions.tool_call_count. Mirrors the same read-only
+    # URI pattern used by _walk_to_root_session above. On any sqlite error, on a
+    # missing row, or on a NULL value, fall through to the JSONL fallback.
+    try:
+        uri = f"file:{STATE_DB}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            row = conn.execute(
+                "SELECT tool_call_count FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                # int() coercion is defensive — sqlite columns are INTEGER affinity
+                # but guard against schema drift where the column might be stored as TEXT.
+                return int(row[0])
+            # row missing or value NULL → fall through to JSONL fallback
+    except sqlite3.OperationalError:
+        pass  # db locked, missing, or schema mismatch → JSONL fallback
+    except Exception:
+        pass  # belt: D-04 invariant — never raise from this helper
+
+    # FALLBACK PATH — read JSONL (preserved verbatim from prior implementation).
     path = SESSIONS_DIR / f"{sid}.jsonl"
     if not path.is_file():
         return 0
