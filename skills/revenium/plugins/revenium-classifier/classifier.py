@@ -217,21 +217,30 @@ def _read_taxonomy_labels() -> list:
 
 
 def _build_classification_prompt(user_msg: str, assistant_resp: str, labels: list) -> str:
-    """Build the compact lookup-first classification prompt per D-06 + D-09."""
+    """Build the mint-first classification prompt per D-06 + D-09.
+
+    Framing: mint a SPECIFIC, DESCRIPTIVE label first; reuse an existing label
+    only if it describes the SAME specific work (not 'close enough').
+    """
     labels_block = ", ".join(labels) if labels else "(no existing labels yet)"
     # Cap the labels block at ~1 KB so the taxonomy growing to dozens of labels
     # does not blow out the prompt size.
     if len(labels_block) > 1024:
         labels_block = labels_block[:1024] + " ... [truncated]"
-    # Bound the previews to ~1 KB each so the whole prompt fits ~2 KB per D-06.
+    # Bound the previews to ~800 chars each so the whole prompt fits ~2 KB per D-06.
     user_preview = (user_msg or "")[:800]
     asst_preview = (assistant_resp or "")[:800]
     return (
         "You are classifying a Hermes session turn for spend attribution. "
         "Output ONLY a single snake_case label, no explanation, no quotes, no punctuation.\n\n"
-        f"Existing labels: {labels_block}\n\n"
-        "Pick the single best-fitting existing label by exact match. "
-        "If NONE fit, mint a new label matching ^[a-z][a-z0-9_]{1,47}$. "
+        "Mint a SPECIFIC, DESCRIPTIVE label that captures what the agent actually did. "
+        "Use 2-4 words joined by underscores. "
+        "Good examples: weekly_pr_review, prod_log_triage, news_summary, sql_query_debug, release_notes_draft.\n\n"
+        "AVOID bland catch-all labels like generation, analysis, review, task when a more specific label fits.\n\n"
+        f"Existing labels (for reference): {labels_block}\n\n"
+        "You MAY reuse one of the existing labels, but only if it describes the SAME specific work — "
+        "not 'close enough'. If no existing label is an exact match for this work, mint a new one.\n\n"
+        "Label format: ^[a-z][a-z0-9_]{1,47}$\n"
         "Forbidden labels (do NOT emit): ack, acknowledgment, greeting, confirmation, hello, thanks.\n\n"
         f"User message preview:\n{user_preview}\n\n"
         f"Assistant response preview:\n{asst_preview}\n\n"
