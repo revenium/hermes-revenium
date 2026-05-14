@@ -1,0 +1,7 @@
+{
+  "platform": "test",
+  "user_id": "test-user",
+  "session_id": "20260513_120100_testsubstantive",
+  "message": "Please review src/foo.py for race conditions",
+  "response": "I reviewed src/foo.py and identified three potential race conditions in the worker pool initialization. First, the futures list is appended to without synchronization. Second, the shutdown signal is not propagated to in-flight tasks. Third, the queue's get_nowait can deadlock under contention. See lines 42, 87, and 134 respectively for the specific fixes."
+}
