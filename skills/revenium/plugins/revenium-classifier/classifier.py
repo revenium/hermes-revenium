@@ -138,6 +138,55 @@ def _count_tools_in_current_turn(sid: str) -> int:
     return tool_count
 
 
+def _read_session_messages(sid: str) -> "tuple[str, str]":
+    """Return (last_user_content, last_assistant_content) for `sid` from state.db.messages.
+
+    The production plugin entrypoint (_on_session_end in __init__.py) always passes
+    message=None and response=None to run_classification. This helper fills the gap by
+    querying state.db.messages so the LLM prompt contains real session content instead of
+    empty strings. Tests that pass content explicitly bypass this via the else branch in
+    run_classification_async Step 5 — this helper is NOT consulted when message and response
+    are already provided.
+
+    Read-only URI mode (`file:...?mode=ro`) prevents WAL lock contention with the Hermes
+    writer, matching the pattern used by _walk_to_root_session and _count_tools_in_current_turn.
+    A try/finally with conn.close() is used rather than a with-block so that the
+    enclosing except can catch and swallow any error at any point in the helper body,
+    preserving the D-04 fail-open invariant: this helper MUST NEVER raise.
+
+    Returns ("", "") if sid is falsy, if state.db does not exist, or on any sqlite,
+    filesystem, or schema error.
+    """
+    if not sid:
+        return ("", "")
+    if not STATE_DB.exists():
+        return ("", "")
+    try:
+        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=2.0)
+        try:
+            cursor = conn.execute(
+                "SELECT role, content FROM messages"
+                " WHERE session_id = ? AND content IS NOT NULL AND content != ''"
+                " ORDER BY timestamp DESC",
+                (sid,),
+            )
+            user_msg = ""
+            asst_msg = ""
+            for row in cursor:
+                role, content = row[0], row[1]
+                if role == "user" and not user_msg:
+                    user_msg = content
+                elif role == "assistant" and not asst_msg:
+                    asst_msg = content
+                if user_msg and asst_msg:
+                    break
+        finally:
+            conn.close()
+        return (user_msg, asst_msg)
+    except Exception:
+        return ("", "")
+
+
 def _read_latest_task_type(sid: str) -> "str | None":
     """Return the task_type of the most recent valid marker record for `sid`, or None
     if the file is missing or has no valid records. Used by D-05 subagent inheritance."""
@@ -368,10 +417,18 @@ async def run_classification_async(
             return
 
         # Step 5 — LLM classification (D-06 / HOOK-05).
-        response_preview = response or ""
+        # Resolve message + response from state.db when caller passed None (the
+        # production path: __init__.py:_on_session_end always passes None). Tests
+        # that pass content explicitly bypass this lookup via the else branch.
+        if not message or not response:
+            db_user, db_asst = _read_session_messages(session_id)
+            user_msg = message or db_user
+            asst_resp = response or db_asst
+        else:
+            user_msg, asst_resp = message, response
         raw_label = await _classify_via_llm(
-            {"message": message or ""},
-            response_preview,
+            {"message": user_msg},
+            asst_resp or "",
         )
         task_type = _validate_label(raw_label)
 

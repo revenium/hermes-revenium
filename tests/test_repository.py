@@ -2568,6 +2568,106 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_revenium_classifier_reads_state_db_content(self):
+        """STATE-DB-MSG-LOOKUP: when __init__.py passes message=None/response=None,
+        run_classification_async reads the last user+assistant messages from
+        state.db.messages and injects them into the LLM prompt. The LLM must receive
+        real session content rather than empty strings.
+
+        Also pins _read_session_messages helper contract: returns (last_user, last_asst)
+        tuple on success; ("", "") for nonexistent sid; ("", "") for falsy sid.
+        """
+        import asyncio
+        import importlib
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-hook-statedb-msg-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Build state.db with sessions + messages tables
+            db_path = os.path.join(hh, 'state.db')
+            sid = "20260514_statedb_msg_test"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT, tool_call_count INTEGER)"
+            )
+            conn.execute(
+                "CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, timestamp INTEGER)"
+            )
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?)", (sid, None, 1))
+            conn.execute(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+                (sid, 'user', 'Summarize today news headlines', None, 1000),
+            )
+            conn.execute(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?)",
+                (sid, 'assistant', 'Top stories: ...', None, 1001),
+            )
+            conn.commit()
+            conn.close()
+
+            # Reload classifier so STATE_DB resolves to the tmp path
+            importlib.reload(sys.modules['classifier'])
+            import classifier as handler  # noqa: F811 — intentional reload
+
+            # Belt-and-suspenders: directly test the helper
+            self.assertEqual(
+                handler._read_session_messages(sid),
+                ("Summarize today news headlines", "Top stories: ..."),
+                "_read_session_messages must return (last_user, last_asst) from state.db",
+            )
+            self.assertEqual(
+                handler._read_session_messages("nonexistent-sid"),
+                ("", ""),
+                "_read_session_messages must return ('', '') for unknown sid",
+            )
+            self.assertEqual(
+                handler._read_session_messages(""),
+                ("", ""),
+                "_read_session_messages must return ('', '') for falsy sid",
+            )
+
+            # End-to-end: run_classification_async with message=None, response=None
+            # must inject state.db content into the LLM call
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = "news_summary"
+
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp) as mock_llm:
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message=None,
+                    response=None,
+                ))
+                mock_llm.assert_called_once()
+                # The user-role message in the LLM call carries the full prompt;
+                # the prompt is built by _build_classification_prompt and passed as
+                # the user-role content in call_llm's messages list.
+                call_messages = mock_llm.call_args.kwargs['messages']
+                full_prompt = " ".join(m['content'] for m in call_messages)
+                self.assertIn(
+                    "Summarize today news headlines",
+                    full_prompt,
+                    "LLM prompt must contain the user message read from state.db",
+                )
+                self.assertIn(
+                    "Top stories",
+                    full_prompt,
+                    "LLM prompt must contain the assistant message read from state.db",
+                )
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
     def test_wire_agent_trace_passthrough(self):
         """WIRE-02 + WIRE-03: pins marker agent/trace_id passthrough to --agent/--trace-id argv.
