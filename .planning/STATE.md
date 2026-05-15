@@ -4,8 +4,8 @@ milestone: v1.1
 milestone_name: Agentic Job Tracking
 status: executing
 stopped_at: Phase 8 context gathered
-last_updated: "2026-05-15T16:52:54.707Z"
-last_activity: 2026-05-15 -- Phase 8 planning complete
+last_updated: "2026-05-15T17:49:15.366Z"
+last_activity: 2026-05-15 -- Phase 08 execution started
 progress:
   total_phases: 5
   completed_phases: 1
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-14)
 
 **Core value:** Every metered completion that leaves this skill carries an accurate, consistently-spelled `--task-type` so Revenium analytics group spend by what the agent actually did, not just by session. v1.1 extends this with agentic-job tracking.
-**Current focus:** Phase 07 — job-marker-schema-state-scaffolding
+**Current focus:** Phase 08 — job-declaration-prompt-block
 
 ## Current Position
 
-Phase: 8
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-05-15 -- Phase 8 planning complete
+Phase: 08 (job-declaration-prompt-block) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 08
+Last activity: 2026-05-15 -- Phase 08 execution started
 
 Progress: [░░░░░░░░░░] 0% (v1.1)
 
