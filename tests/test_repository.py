@@ -3529,6 +3529,11 @@ class RepositoryTests(unittest.TestCase):
 
         Sub-case B: marker-less session produces the same argv as v1.0
         zero-marker fallthrough (--task-type unclassified, --operation-type CHAT).
+
+        Sub-case C (WR-01 / WR-03 regression): a marker file containing a
+        non-object JSON line, or a kind:"job" line with an unhashable
+        agentic_job_id, must skip only the offending line — never abort
+        attribution for the whole session.
         """
         import json
         import os
@@ -3756,6 +3761,40 @@ class RepositoryTests(unittest.TestCase):
                              'Sub-case B: zero-marker fallthrough must use --task-type unclassified')
             self.assertEqual(flags_z.get('--operation-type'), 'CHAT',
                              'Sub-case B: zero-marker fallthrough must emit --operation-type CHAT')
+
+            # =====================================================
+            # Sub-case C (WR-01 / WR-03 regression): malformed lines in the
+            # marker file must skip only themselves — a non-object JSON line
+            # or a kind:"job" line with an unhashable agentic_job_id must not
+            # raise an uncaught exception that aborts the whole session.
+            # =====================================================
+            malformed_lines = [
+                '[1,2,3]',          # WR-01: valid JSON, not an object
+                '"hello"',          # WR-01: valid JSON string scalar
+                '42',               # WR-01: valid JSON number scalar
+                'null',             # WR-01: valid JSON null
+                # WR-03: kind:"job" line whose agentic_job_id is a list.
+                json.dumps({
+                    "kind": "job",
+                    "agentic_job_id": ["not", "a", "string"],
+                    "job_type": "code_review",
+                    "status": "SUCCESS",
+                }, separators=(',', ':')),
+            ]
+            for idx, bad_line in enumerate(malformed_lines):
+                reset_state(include_job_line=False)
+                marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+                with open(marker_file, 'a') as f:
+                    f.write(bad_line + '\n')
+                rc_c, invocations_c, output_c = run_cron(base_env, invocations_log)
+                self.assertEqual(rc_c, 0, f'Sub-case C[{idx}] exit {rc_c}: {output_c}')
+                self.assertEqual(
+                    invocations_c, invocations_a,
+                    f'Sub-case C[{idx}] ({bad_line!r}): a malformed marker line must '
+                    f'skip only itself, leaving task-metering argv byte-identical to '
+                    f'the clean run (got {invocations_c!r}, expected {invocations_a!r}, '
+                    f'output={output_c})',
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
