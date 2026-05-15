@@ -102,39 +102,39 @@ Which phases cover which requirements. Populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SCHEMA-01 | TBD | Pending |
-| SCHEMA-02 | TBD | Pending |
-| SCHEMA-03 | TBD | Pending |
-| SCHEMA-04 | TBD | Pending |
-| SCHEMA-05 | TBD | Pending |
-| DECLARE-01 | TBD | Pending |
-| DECLARE-02 | TBD | Pending |
-| DECLARE-03 | TBD | Pending |
-| DECLARE-04 | TBD | Pending |
-| DECLARE-05 | TBD | Pending |
-| DECLARE-06 | TBD | Pending |
-| CREATE-01 | TBD | Pending |
-| CREATE-02 | TBD | Pending |
-| CREATE-03 | TBD | Pending |
-| CREATE-04 | TBD | Pending |
-| OUTCOME-01 | TBD | Pending |
-| OUTCOME-02 | TBD | Pending |
-| OUTCOME-03 | TBD | Pending |
-| OUTCOME-04 | TBD | Pending |
-| OUTCOME-05 | TBD | Pending |
-| HARDEN-01 | TBD | Pending |
-| HARDEN-02 | TBD | Pending |
-| HARDEN-03 | TBD | Pending |
-| HARDEN-04 | TBD | Pending |
-| TEST-01 | TBD | Pending |
-| TEST-02 | TBD | Pending |
-| TEST-03 | TBD | Pending |
+| SCHEMA-01 | Phase 7 | Pending |
+| SCHEMA-02 | Phase 7 | Pending |
+| SCHEMA-03 | Phase 7 | Pending |
+| SCHEMA-04 | Phase 7 | Pending |
+| SCHEMA-05 | Phase 7 | Pending |
+| DECLARE-01 | Phase 8 | Pending |
+| DECLARE-02 | Phase 8 | Pending |
+| DECLARE-03 | Phase 8 | Pending |
+| DECLARE-04 | Phase 8 | Pending |
+| DECLARE-05 | Phase 8 | Pending |
+| DECLARE-06 | Phase 8 | Pending |
+| CREATE-01 | Phase 9 | Pending |
+| CREATE-02 | Phase 9 | Pending |
+| CREATE-03 | Phase 9 | Pending |
+| CREATE-04 | Phase 9 | Pending |
+| OUTCOME-01 | Phase 10 | Pending |
+| OUTCOME-02 | Phase 10 | Pending |
+| OUTCOME-03 | Phase 10 | Pending |
+| OUTCOME-04 | Phase 10 | Pending |
+| OUTCOME-05 | Phase 10 | Pending |
+| HARDEN-01 | Phase 11 | Pending |
+| HARDEN-02 | Phase 11 | Pending |
+| HARDEN-03 | Phase 11 | Pending |
+| HARDEN-04 | Phase 11 | Pending |
+| TEST-01 | Phase 7 | Pending |
+| TEST-02 | Phase 7 | Pending |
+| TEST-03 | Phase 10 | Pending |
 
 **Coverage:**
 - v1 requirements: 27 total
-- Mapped to phases: 0 (populated by roadmap)
-- Unmapped: 27 ⚠️
+- Mapped to phases: 27 (100%) ✓
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-05-14*
-*Last updated: 2026-05-14 after milestone v1.1 definition*
+*Last updated: 2026-05-15 after v1.1 roadmap creation (Phases 7-11)*
