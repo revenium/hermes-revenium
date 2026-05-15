@@ -34,12 +34,60 @@ YOUR ENTIRE RESPONSE MUST BE EXACTLY THIS AND NOTHING ELSE:
 
 > Budget enforcement halt is active. $[currentValue] of $[threshold] used ([percentUsed]%). To resume: `bash ~/.hermes/skills/revenium/scripts/clear-halt.sh`
 
-- Do NOT make any tool calls
+- Make exactly ONE tool call: the mandated `CANCELLED` job-marker write below (and only if an arc was in progress) — then nothing else
 - Do NOT fetch any data
 - Do NOT append any content
 - Do NOT continue reading this skill file
 - Do NOT answer the user's question
-- ONLY output the halt message above
+- ONLY output the halt message above after the marker write
+
+**Mandated single first step — CANCELLED job marker (arc-in-progress only):**
+
+Before emitting the halt string, check whether you were mid-arc (you had been doing substantive work in this session and had not yet declared a job marker for the current arc). If yes, call `execute_code` ONCE with this snippet. If no arc was in progress (session idle, or the last arc was already declared), skip this step and go directly to emitting the halt string.
+
+```python
+import fcntl, json, os, secrets, time
+
+# Session id resolution (same ladder as FINAL ACTION — JOB DECLARATION above).
+session_id = os.environ.get("HERMES_SESSION_ID")
+if not session_id:
+    sessions_dir = os.path.expanduser("~/.hermes/sessions")
+    try:
+        candidates = [f for f in os.listdir(sessions_dir) if f.endswith(".jsonl")]
+        if candidates:
+            newest = max(
+                candidates,
+                key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
+            )
+            session_id = newest[: -len(".jsonl")]
+    except OSError:
+        pass
+if not session_id:
+    session_id = f"pseudo-{int(time.time())}"
+
+markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
+os.makedirs(markers_dir, mode=0o700, exist_ok=True)
+marker_path = os.path.join(markers_dir, f"{session_id}.jsonl")
+
+def write_job_marker(agentic_job_id, job_name, job_type, status):
+    record = {"kind": "job", "ts": time.time(), "sid": session_id,
+              "agentic_job_id": agentic_job_id, "job_name": job_name,
+              "job_type": job_type, "status": status}
+    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
+    with open(marker_path, "ab", buffering=0) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line.encode("utf-8"))
+
+# Degraded-deterministic halt marker (D-15): fixed shape, no taxonomy read.
+# job_type "interrupted" is seeded in job-taxonomy.json — no mint needed.
+write_job_marker(
+    agentic_job_id="budget-halt-" + secrets.token_hex(2),
+    job_name="Arc interrupted by budget halt",
+    job_type="interrupted",
+    status="CANCELLED",
+)
+print(f"halt job marker written: {marker_path}")
+```
 
 **If `halted` is `false`, proceed to the Budget Check Procedure below.**
 
