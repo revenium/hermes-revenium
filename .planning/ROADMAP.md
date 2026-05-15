@@ -63,7 +63,7 @@ Summary: [MILESTONES.md](./MILESTONES.md)
   3. The prompt gives an operational arc-boundary definition so a multi-activity session produces multiple distinct jobs, and gives conservative `SUCCESS`/`FAILED`/`CANCELLED` criteria — `SUCCESS` only on a confirmed met goal, bias to `CANCELLED` under uncertainty.
   4. The budget-halt path writes a `CANCELLED` terminal job marker before emitting the verbatim halt string, so a budget-interrupted arc still gets an outcome — and the halt-survivability runbook still passes after the `SKILL.md` edit.
 **Plans**: 2 plans
-- [ ] 08-01-PLAN.md — ship the job-taxonomy.json seed, setup-local.sh seed->live copy, and test invariants
+- [x] 08-01-PLAN.md — ship the job-taxonomy.json seed, setup-local.sh seed->live copy, and test invariants
 - [ ] 08-02-PLAN.md — add the SKILL.md JOB DECLARATION section, reconcile the HALT CHECK block, amend halt-survivability.md
 **UI hint**: yes
 
