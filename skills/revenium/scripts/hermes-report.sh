@@ -549,7 +549,7 @@ PY
         continue
       fi
 
-      local row muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
+      local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
       while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace; do
         [[ -z "${muid}" ]] && continue
 
