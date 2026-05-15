@@ -21,6 +21,14 @@ else
   echo "Taxonomy already exists at ${TAXONOMY_DEST}, not overwriting"
 fi
 
+JOB_TAXONOMY_DEST="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR_DEFAULT}/job-taxonomy.json}"
+if [[ ! -f "${JOB_TAXONOMY_DEST}" ]]; then
+  cp "${REPO_ROOT}/skills/revenium/job-taxonomy.json" "${JOB_TAXONOMY_DEST}"
+  echo "Seeded ${JOB_TAXONOMY_DEST}"
+else
+  echo "Job taxonomy already exists at ${JOB_TAXONOMY_DEST}, not overwriting"
+fi
+
 # Phase 6 (gap closure): install the on_session_end classifier PLUGIN into ~/.hermes/plugins/
 # — covers gateway, CLI, interactive, ACP, and cron sessions (universal coverage per HOOK-11).
 # `hermes skills install` does NOT relocate plugins/ subdirs; setup-local does the copy.
