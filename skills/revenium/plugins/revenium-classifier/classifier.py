@@ -252,14 +252,35 @@ def _budget_halted() -> bool:
 
 
 def _read_taxonomy_labels() -> list:
-    """Read TAXONOMY_FILE and return the sorted list of existing label keys. The
-    live taxonomy is at ~/.hermes/state/revenium/task-taxonomy.json (managed by
-    Phase 2). Returns [] on any failure — the LLM will mint a new label."""
+    """Read TAXONOMY_FILE and return labels sorted recent-first, alpha within ties.
+
+    Labels with a `last_seen_at` ISO timestamp within the last 7 days appear
+    first (recent bucket); older labels and labels without `last_seen_at` (seed
+    entries) follow alphabetically. Returns [] on any failure (D-04 fail-open)."""
     try:
         data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
         labels = data.get("labels", {})
-        if isinstance(labels, dict):
-            return sorted(labels.keys())
+        if not isinstance(labels, dict):
+            return []
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        recent_cutoff = now - datetime.timedelta(days=7)
+        recent, older = [], []
+        for key, meta in sorted(labels.items()):  # alpha pre-sort for stable tie-break
+            raw_ts = meta.get("last_seen_at") if isinstance(meta, dict) else None
+            if raw_ts:
+                try:
+                    ts = datetime.datetime.fromisoformat(raw_ts.rstrip("Z")).replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                    if ts >= recent_cutoff:
+                        recent.append((ts, key))
+                        continue
+                except Exception:
+                    pass
+            older.append(key)
+        recent.sort(key=lambda x: x[0], reverse=True)
+        return [k for _, k in recent] + older
     except Exception:
         pass
     return []

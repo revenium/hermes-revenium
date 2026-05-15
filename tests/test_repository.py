@@ -3210,6 +3210,37 @@ class RepositoryTests(unittest.TestCase):
                             'fresh marker must still exist after idempotent re-run')
 
 
+    def test_read_taxonomy_labels_recency_order(self):
+        """D-33: _read_taxonomy_labels returns recent-first within 7-day bucket,
+        alphabetical within older + undated. Seed labels (no last_seen_at) sort last."""
+        import datetime, json, os, importlib, tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot, sys_path_added, hermes_home, state_dir, markers_dir = _setup_plugin_env(tmpdir)
+            try:
+                taxonomy_path = os.path.join(state_dir, 'task-taxonomy.json')
+                now = datetime.datetime.now(datetime.timezone.utc)
+                ts_recent = (now - datetime.timedelta(days=2)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                ts_old = (now - datetime.timedelta(days=10)).strftime('%Y-%m-%dT%H:%M:%SZ')
+                fixture = {
+                    'labels': {
+                        'alpha_old': {'description': None, 'examples': [], 'last_seen_at': ts_old},
+                        'beta_recent': {'description': None, 'examples': [], 'last_seen_at': ts_recent},
+                        'gamma_seed': {'description': 'seed label', 'examples': []},  # no last_seen_at
+                    }
+                }
+                with open(taxonomy_path, 'w') as f:
+                    json.dump(fixture, f)
+                os.environ['REVENIUM_TAXONOMY_FILE'] = taxonomy_path
+                import classifier as cls_module
+                importlib.reload(cls_module)
+                result = cls_module._read_taxonomy_labels()
+                self.assertEqual(result[0], 'beta_recent', 'most recent label must be first')
+                self.assertIn('alpha_old', result[1:], 'older dated label after recent')
+                self.assertEqual(result[-1], 'gamma_seed', 'seed label (no last_seen_at) must be last')
+            finally:
+                os.environ.pop('REVENIUM_TAXONOMY_FILE', None)
+                _restore_plugin_env(snapshot, sys_path_added)
+
     def test_persist_label_to_taxonomy_mint_and_update(self):
         """D-32: _persist_label_to_taxonomy mints new labels, updates existing
         last_seen_at without duplicating, and refuses to mint 'unclassified'."""
