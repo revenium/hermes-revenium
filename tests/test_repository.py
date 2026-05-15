@@ -130,6 +130,11 @@ class RepositoryTests(unittest.TestCase):
         # never hardcoded in cron.sh or hermes-report.sh.
         self.assertIn('LOCK_FILE=', text)
         self.assertIn('cron.lock', text)
+        # Phase 7 D-13: new v1.1 job-tracking state paths declared only in common.sh.
+        self.assertIn('JOBS_LEDGER_FILE=', text)
+        self.assertIn('revenium-jobs.ledger', text)
+        self.assertIn('JOB_TAXONOMY_FILE=', text)
+        self.assertIn('job-taxonomy.json', text)
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
