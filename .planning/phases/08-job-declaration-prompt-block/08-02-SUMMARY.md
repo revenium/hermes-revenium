@@ -146,6 +146,17 @@ No new threat surface beyond the plan's threat model (T-08-04 through T-08-10). 
 
 None. The JOB DECLARATION execute_code snippet uses placeholder variable names (`replace-with-step1-label-`, `replace_with_step2_type`) that agents are instructed to substitute — this is intentional prompt instructional scaffolding, not a data stub affecting functionality.
 
+## Post-checkpoint deviation
+
+**Live validation on Mac Studio host (2026-05-15) found that both job-marker snippets bound the session id via broken auto-detection.**
+
+- **Root cause:** The 3-tier session-id ladder in both the HALT CHECK and JOB DECLARATION `execute_code` snippets was broken in two ways: (1) `execute_code` on the Hermes host does not receive a `HERMES_SESSION_ID` env var, so tier 1 always falls through; (2) the `*.jsonl` glob in `~/.hermes/sessions/` matches only legacy session files — current Hermes writes transcripts as `session_<id>.json`, so the glob always matched stale files from a previous session and silently mis-attributed every job marker to the wrong session. Live proof: a job for session `20260515_162310_593b86` was written into `20260515_141331_1350d1b1.jsonl` (a stale session). This is a Core Value violation (job→session attribution broken).
+- **Fix:** Both the HALT CHECK snippet and the JOB DECLARATION snippet were updated to replace the broken 3-tier ladder with a single explicit agent-substituted `session_id = "REPLACE_WITH_YOUR_SESSION_ID"` placeholder and a fail-loud guard (`raise SystemExit(...)`) that prevents execution if the placeholder is left unsubstituted. The agent is directed to copy its session id from the `Session ID:` line in its system prompt. The TASK CLASSIFICATION snippet received the same cleanup (removing the broken env/filesystem fallbacks, replaced with a stable `HERMES_CLASSIFICATION_SESSION_ID` env var read with a timestamp fallback, since that snippet is handled by the mechanical plugin hook and not agent-substituted).
+- **Instruction text updated:** Both instruction paragraphs for the HALT CHECK and JOB DECLARATION steps were updated to direct the agent to substitute its session id before calling `execute_code`.
+- **Regression test:** `test_job_marker_snippets_bind_explicit_session_id` added to `tests/test_repository.py` — pins that neither `os.environ.get("HERMES_SESSION_ID")` nor `os.listdir(sessions_dir)` appear anywhere in `SKILL.md`, and that exactly 2 occurrences of the explicit `REPLACE_WITH_YOUR_SESSION_ID` placeholder and guard string are present (one in HALT CHECK, one in JOB DECLARATION).
+- **Test count:** 48 → 49 (all passing).
+- **Commit:** fix(08-02): bind job markers to explicit agent-supplied session id
+
 ## Self-Check: PASSED
 
 - [x] `skills/revenium/SKILL.md` contains `## FINAL ACTION — JOB DECLARATION`: FOUND
