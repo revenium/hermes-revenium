@@ -374,11 +374,11 @@ class RepositoryTests(unittest.TestCase):
             'job-declaration anchor must appear after classification anchor in SKILL.md',
         )
 
-    def test_job_marker_snippets_bind_explicit_session_id(self):
-        """Both job-marker execute_code snippets in SKILL.md must take the session
-        id as an explicit agent-substituted value, not via the broken filesystem
-        auto-detection that mis-attributed jobs to stale sessions. Scoped to the
-        job-marker snippets only — the task-classification snippet is out of scope."""
+    def test_job_marker_snippets_resolve_session_id_from_session_files(self):
+        """Both job-marker execute_code snippets must resolve the session id from
+        the current-format ~/.hermes/sessions/session_<id>.json transcripts
+        (newest non-cron), not the broken legacy *.jsonl glob or a HERMES_SESSION_ID
+        env var that execute_code never receives."""
         text = (SKILL / 'SKILL.md').read_text()
         blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
         job_blocks = [b for b in blocks if 'def write_job_marker' in b]
@@ -388,19 +388,22 @@ class RepositoryTests(unittest.TestCase):
             f'JOB DECLARATION), found {len(job_blocks)}')
         for b in job_blocks:
             self.assertIn(
-                'session_id = "REPLACE_WITH_YOUR_SESSION_ID"', b,
-                'job-marker snippet must use the explicit session-id placeholder')
+                'f.startswith("session_")', b,
+                'job-marker snippet must select session_<id>.json transcript files')
             self.assertIn(
-                'session_id not substituted', b,
-                'job-marker snippet must guard against an unsubstituted session id')
+                'f.endswith(".json")', b,
+                'job-marker snippet must select .json transcripts, not legacy .jsonl')
+            self.assertIn(
+                'not f.startswith("session_cron_")', b,
+                'job-marker snippet must exclude cron sessions from id resolution')
+            self.assertNotIn(
+                'endswith(".jsonl")', b,
+                'job-marker snippet must not use the stale legacy *.jsonl glob — '
+                'it matches old session files and mis-attributes markers')
             self.assertNotIn(
                 'os.environ.get("HERMES_SESSION_ID")', b,
-                'job-marker snippet must not use the HERMES_SESSION_ID env fallback '
-                '— execute_code never receives that var')
-            self.assertNotIn(
-                'os.listdir(sessions_dir)', b,
-                'job-marker snippet must not auto-detect the session from the '
-                'sessions directory — that glob mis-attributes markers to stale sessions')
+                'job-marker snippet must not rely on HERMES_SESSION_ID — '
+                'execute_code never receives that var')
 
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))

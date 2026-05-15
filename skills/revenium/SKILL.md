@@ -43,17 +43,33 @@ YOUR ENTIRE RESPONSE MUST BE EXACTLY THIS AND NOTHING ELSE:
 
 **Mandated single first step — CANCELLED job marker (arc-in-progress only):**
 
-Before emitting the halt string, check whether you were mid-arc (you had been doing substantive work in this session and had not yet declared a job marker for the current arc). If yes, substitute your session id (from your system prompt's `Session ID:` line) into the snippet's `session_id` value, then call `execute_code` ONCE with it. If no arc was in progress (session idle, or the last arc was already declared), skip this step and go directly to emitting the halt string.
+Before emitting the halt string, check whether you were mid-arc (you had been doing substantive work in this session and had not yet declared a job marker for the current arc). If yes, call `execute_code` ONCE with this snippet. If no arc was in progress (session idle, or the last arc was already declared), skip this step and go directly to emitting the halt string.
 
 ```python
 import fcntl, json, os, secrets, time
 
-# Session id — substitute the value from your system prompt's "Session ID:" line.
-# Do NOT auto-detect it: execute_code does not receive a HERMES_SESSION_ID env var,
-# and filesystem detection silently mis-attributes the marker to a stale session.
-session_id = "REPLACE_WITH_YOUR_SESSION_ID"
-if not session_id or session_id == "REPLACE_WITH_YOUR_SESSION_ID":
-    raise SystemExit("session_id not substituted — copy it from your system prompt's 'Session ID:' line")
+# Resolve the active Hermes session id. Hermes writes each session transcript
+# as ~/.hermes/sessions/session_<id>.json; the newest non-cron one is the
+# active session. execute_code receives no HERMES_SESSION_ID env var and the
+# legacy *.jsonl files are stale — both are deliberately ignored.
+session_id = ""
+sessions_dir = os.path.expanduser("~/.hermes/sessions")
+try:
+    candidates = [
+        f for f in os.listdir(sessions_dir)
+        if f.startswith("session_") and f.endswith(".json")
+        and not f.startswith("session_cron_")
+    ]
+    if candidates:
+        newest = max(
+            candidates,
+            key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
+        )
+        session_id = newest[len("session_"):-len(".json")]
+except OSError:
+    pass
+if not session_id:
+    session_id = f"pseudo-{int(time.time())}"
 
 markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
 os.makedirs(markers_dir, mode=0o700, exist_ok=True)
@@ -353,29 +369,26 @@ For the full schema, normalization rules, and the atomic mint pattern, see `refe
 ```python
 import fcntl, json, os, secrets, time
 
-# Session id resolution. Priority order:
-#   1. HERMES_SESSION_ID env var (correct when Hermes propagates it to execute_code).
-#   2. Most-recently-modified Hermes session jsonl filename — every agent turn writes
-#      to its own session file, so the newest file IS the active session. This is
-#      what the cron's marker reader (Phase 3, parse_prior_state) expects to find
-#      as the marker FILENAME, so deriving from the session-file path guarantees
-#      the cron will pick up the markers we write here.
-#   3. Last-resort timestamp pseudo-id. Markers under this path will NOT be
-#      attributed to any state.db session — the cron will fall through to
-#      --task-type unclassified for that delta. Avoid if possible.
-session_id = os.environ.get("HERMES_SESSION_ID")
-if not session_id:
-    sessions_dir = os.path.expanduser("~/.hermes/sessions")
-    try:
-        candidates = [f for f in os.listdir(sessions_dir) if f.endswith(".jsonl")]
-        if candidates:
-            newest = max(
-                candidates,
-                key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
-            )
-            session_id = newest[: -len(".jsonl")]
-    except OSError:
-        pass
+# Resolve the active Hermes session id. Hermes writes each session transcript
+# as ~/.hermes/sessions/session_<id>.json; the newest non-cron one is the
+# active session. execute_code receives no HERMES_SESSION_ID env var and the
+# legacy *.jsonl files are stale — both are deliberately ignored.
+session_id = ""
+sessions_dir = os.path.expanduser("~/.hermes/sessions")
+try:
+    candidates = [
+        f for f in os.listdir(sessions_dir)
+        if f.startswith("session_") and f.endswith(".json")
+        and not f.startswith("session_cron_")
+    ]
+    if candidates:
+        newest = max(
+            candidates,
+            key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
+        )
+        session_id = newest[len("session_"):-len(".json")]
+except OSError:
+    pass
 if not session_id:
     session_id = f"pseudo-{int(time.time())}"
 
@@ -479,19 +492,33 @@ If you mint a new `job_type`, persist it back to the live taxonomy atomically (f
 - `FAILED` is narrow: a definitive negative terminal state — the fix didn't fix, the build cannot pass, the goal is objectively unachievable.
 - `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded, or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
 
-**Step 4 — substitute your session id and your Step 1-3 values into the snippet below, then call `execute_code`.** Your session id is in your system prompt on the `Session ID:` line — copy it verbatim into the snippet's `session_id`.
+**Step 4 — call `execute_code` with the snippet below.**
 
 ```python
 import fcntl, json, os, re, secrets, tempfile, time
 
-# Session id — REPLACE the value below with the id from your system prompt's
-# "Session ID:" line. Do NOT auto-detect it: execute_code does not receive a
-# HERMES_SESSION_ID env var, and the Hermes sessions directory filename scheme
-# differs from a bare "<sid>.jsonl", so filesystem detection silently
-# mis-attributes the job to a different (often stale) session.
-session_id = "REPLACE_WITH_YOUR_SESSION_ID"
-if not session_id or session_id == "REPLACE_WITH_YOUR_SESSION_ID":
-    raise SystemExit("session_id not substituted — copy it from your system prompt's 'Session ID:' line")
+# Resolve the active Hermes session id. Hermes writes each session transcript
+# as ~/.hermes/sessions/session_<id>.json; the newest non-cron one is the
+# active session. execute_code receives no HERMES_SESSION_ID env var and the
+# legacy *.jsonl files are stale — both are deliberately ignored.
+session_id = ""
+sessions_dir = os.path.expanduser("~/.hermes/sessions")
+try:
+    candidates = [
+        f for f in os.listdir(sessions_dir)
+        if f.startswith("session_") and f.endswith(".json")
+        and not f.startswith("session_cron_")
+    ]
+    if candidates:
+        newest = max(
+            candidates,
+            key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
+        )
+        session_id = newest[len("session_"):-len(".json")]
+except OSError:
+    pass
+if not session_id:
+    session_id = f"pseudo-{int(time.time())}"
 
 markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
 os.makedirs(markers_dir, mode=0o700, exist_ok=True)
