@@ -130,6 +130,11 @@ class RepositoryTests(unittest.TestCase):
         # never hardcoded in cron.sh or hermes-report.sh.
         self.assertIn('LOCK_FILE=', text)
         self.assertIn('cron.lock', text)
+        # Phase 7 D-13: new v1.1 job-tracking state paths declared only in common.sh.
+        self.assertIn('JOBS_LEDGER_FILE=', text)
+        self.assertIn('revenium-jobs.ledger', text)
+        self.assertIn('JOB_TAXONOMY_FILE=', text)
+        self.assertIn('job-taxonomy.json', text)
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
@@ -3457,6 +3462,300 @@ class RepositoryTests(unittest.TestCase):
                               'pipe parser desync would lose --total-tokens (field 9 absorbed by field 10)')
                 self.assertNotIn('|', flags.get('--agent', ''))
                 self.assertNotIn('\n', flags.get('--trace-id', ''))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_job_marker_schema(self):
+        """TEST-01: pins the kind:"job" marker schema shape per D-03/D-04.
+
+        D-01: discriminated solely by the kind key in markers/<sid>.jsonl.
+        D-02: all keys are snake_case (no uppercase characters).
+        D-03: canonical shape with optional (job_name, ts, sid) and required
+              (kind, agentic_job_id, job_type, status) keys.
+        D-04: reader-required keys are kind, agentic_job_id, job_type, status;
+              optional keys (job_name, ts, sid) may be absent.
+        """
+        import json
+        # Canonical D-03 fixture.
+        job_marker = {
+            "kind": "job",
+            "ts": 1747300000.12,
+            "sid": "abc123",
+            "agentic_job_id": "pr-review-fc7a",
+            "job_name": "Review PR #42",
+            "job_type": "code_review",
+            "status": "SUCCESS",
+        }
+        reader_required = ("kind", "agentic_job_id", "job_type", "status")
+        # D-04: all reader-required keys present in canonical fixture.
+        for k in reader_required:
+            self.assertIn(k, job_marker, f'reader-required key "{k}" missing from canonical fixture')
+        # D-02: all keys are snake_case — no uppercase characters.
+        for k in job_marker:
+            self.assertNotRegex(k, r'[A-Z]', f'key "{k}" must be snake_case (D-02)')
+        # D-01: kind discriminator value is "job".
+        self.assertEqual(job_marker["kind"], "job", 'D-01: kind must equal "job"')
+        # D-03: compact JSONL serialization is under 1024 bytes.
+        line = json.dumps(job_marker, separators=(",", ":")) + "\n"
+        self.assertLess(len(line.encode("utf-8")), 1024,
+                        "D-03: job marker JSONL line must be < 1024 bytes")
+        # D-04: a minimal job marker with only reader-required keys is valid.
+        # job_name, ts, sid are optional and may be absent.
+        minimal = {
+            "kind": "job",
+            "agentic_job_id": "pr-review-fc7a",
+            "job_type": "code_review",
+            "status": "SUCCESS",
+        }
+        for k in reader_required:
+            self.assertIn(k, minimal, f'D-04: reader-required key "{k}" must be present in minimal fixture')
+        self.assertNotIn("job_name", minimal,
+                         "D-04: optional key job_name must be absent from minimal fixture")
+        self.assertNotIn("ts", minimal,
+                         "D-04: optional key ts must be absent from minimal fixture")
+        self.assertNotIn("sid", minimal,
+                         "D-04: optional key sid must be absent from minimal fixture")
+
+    def test_job_marker_does_not_alter_task_completion_argv(self):
+        """TEST-02: a kind:"job" line in the marker file leaves task-metering argv
+        byte-identical to v1.0.
+
+        SCHEMA-04: job-less / marker-less sessions produce byte-identical
+        revenium meter completion argv to v1.0.
+
+        Sub-case A: task markers only vs. task markers + one kind:"job" line —
+        the meter completion argv is byte-identical.
+
+        Sub-case B: marker-less session produces the same argv as v1.0
+        zero-marker fallthrough (--task-type unclassified, --operation-type CHAT).
+        """
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        HERMES_REPORT = SCRIPTS_DIR / 'hermes-report.sh'
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def run_cron(env, invocations_log):
+            """Invoke hermes-report.sh once; return (exit_code, [argv_list, ...])."""
+            if os.path.exists(invocations_log):
+                os.unlink(invocations_log)
+            open(invocations_log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            invocations = []
+            with open(invocations_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    import shlex
+                    invocations.append(shlex.split(line))
+            return result.returncode, invocations, result.stdout + result.stderr
+
+        def argv_to_flags(argv):
+            """Convert flat argv to {flag: value} dict for assertions."""
+            d = {}
+            i = 0
+            while i < len(argv):
+                tok = argv[i]
+                if tok.startswith('--'):
+                    if i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                        d[tok] = argv[i + 1]
+                        i += 2
+                    else:
+                        d[tok] = True
+                        i += 1
+                else:
+                    i += 1
+            return d
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-marker-regression-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            ledger = os.path.join(state_dir, 'revenium-hermes.ledger')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            invocations_log = os.path.join(tmpdir, 'invocations.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
+                    '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'INVOCATIONS_LOG': invocations_log,
+                'TZ': 'UTC',
+            }
+
+            # =====================================================
+            # Sub-case A: task markers only vs. task markers + job line.
+            # The meter completion argv must be byte-identical.
+            # =====================================================
+            sid = '20260512_120000_jobtest'
+            input_tokens = 8000
+            output_tokens = 3000
+            total_tokens = input_tokens + output_tokens
+            estimated_cost = '0.111111'
+
+            # Task markers: two valid v1.0 markers.
+            task_markers = [
+                {
+                    'muid': '01893b8a3{:02x}abcdef0123456789abcdef0'.format(i),
+                    'ts': 1715515000.0 + i + 1,
+                    'sid': sid,
+                    'task_type': 'code_review',
+                    'operation_type': 'CHAT',
+                }
+                for i in range(2)
+            ]
+            # D-03 canonical job marker.
+            job_marker = {
+                "kind": "job",
+                "ts": 1747300000.12,
+                "sid": sid,
+                "agentic_job_id": "pr-review-fc7a",
+                "job_name": "Review PR #42",
+                "job_type": "code_review",
+                "status": "SUCCESS",
+            }
+
+            def reset_state(include_job_line=False):
+                """Reset ledger + state.db + marker file for a fresh run."""
+                for path in (state_db, ledger):
+                    if os.path.exists(path):
+                        os.unlink(path)
+                for f_ in os.listdir(markers_dir):
+                    full_path = os.path.join(markers_dir, f_)
+                    if os.path.isdir(full_path):
+                        continue
+                    os.unlink(full_path)
+                build_state_db(state_db, [{
+                    'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                    'input_tokens': input_tokens, 'output_tokens': output_tokens,
+                    'cache_read': 200, 'cache_write': 100,
+                    'reasoning': 0, 'estimated_cost': estimated_cost,
+                    'api_calls': 2, 'started_at': 1715514000.0,
+                    'ended_at': 1715515100.0,
+                    'billing_provider': 'anthropic',
+                }])
+                marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+                with open(marker_file, 'w') as f:
+                    for m in task_markers:
+                        f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                    if include_job_line:
+                        f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            # Run A: task markers only.
+            reset_state(include_job_line=False)
+            rc_a, invocations_a, output_a = run_cron(base_env, invocations_log)
+            self.assertEqual(rc_a, 0, f'Run A exit {rc_a}: {output_a}')
+            self.assertEqual(len(invocations_a), 2,
+                             f'Run A: expected 2 invocations (one per marker), got {len(invocations_a)}')
+
+            # Run B: same task markers + job line appended.
+            reset_state(include_job_line=True)
+            rc_b, invocations_b, output_b = run_cron(base_env, invocations_log)
+            self.assertEqual(rc_b, 0, f'Run B exit {rc_b}: {output_b}')
+            self.assertEqual(len(invocations_b), 2,
+                             f'Run B: expected 2 invocations (job line must not generate extra call), '
+                             f'got {len(invocations_b)}: {output_b}')
+
+            # Byte-identical argv assertion (SCHEMA-04): same task markers + job line
+            # must produce the exact same meter completion argument lists as task
+            # markers alone. Phase 7 issues no jobs calls, so only meter args matter.
+            self.assertEqual(
+                invocations_a, invocations_b,
+                'SCHEMA-04: adding a kind:"job" line must not alter meter completion argv '
+                f'(Run A={invocations_a!r}, Run B={invocations_b!r})',
+            )
+
+            # =====================================================
+            # Sub-case B: marker-less session produces the same argv as
+            # v1.0 zero-marker fallthrough (--task-type unclassified).
+            # =====================================================
+            sid_zero = '20260512_120000_jobtest_zero'
+            for path in (state_db, ledger):
+                if os.path.exists(path):
+                    os.unlink(path)
+            for f_ in os.listdir(markers_dir):
+                full_path = os.path.join(markers_dir, f_)
+                if os.path.isdir(full_path):
+                    continue
+                os.unlink(full_path)
+            build_state_db(state_db, [{
+                'id': sid_zero, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 5000, 'output_tokens': 2000,
+                'cache_read': 100, 'cache_write': 50,
+                'reasoning': 0, 'estimated_cost': '0.050000',
+                'api_calls': 1, 'started_at': 1715514000.0,
+                'ended_at': 1715515100.0,
+                'billing_provider': 'anthropic',
+            }])
+            # No marker file for sid_zero -> zero-marker fallthrough.
+            rc_z, invocations_z, output_z = run_cron(base_env, invocations_log)
+            self.assertEqual(rc_z, 0, f'Sub-case B exit {rc_z}: {output_z}')
+            self.assertEqual(len(invocations_z), 1,
+                             f'Sub-case B: zero-marker session must emit exactly 1 call, '
+                             f'got {len(invocations_z)}')
+            flags_z = argv_to_flags(invocations_z[0])
+            self.assertEqual(flags_z.get('--task-type'), 'unclassified',
+                             'Sub-case B: zero-marker fallthrough must use --task-type unclassified')
+            self.assertEqual(flags_z.get('--operation-type'), 'CHAT',
+                             'Sub-case B: zero-marker fallthrough must emit --operation-type CHAT')
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
