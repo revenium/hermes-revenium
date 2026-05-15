@@ -49,15 +49,23 @@ fi
 # ---------------------------------------------------------------------------
 while IFS= read -r log_line; do
   info "${log_line}"
-done < <(python3 - <<PY
+done < <(
+  # Pass paths via env (bash 3.2 compatible — `${VAR@Q}` requires bash 4.4+;
+  # CLAUDE.md mandates bash 3.2 compat for macOS stock /bin/bash). Single-
+  # quoted heredoc keeps the Python source verbatim.
+  MARKERS_DIR_PY="${MARKERS_DIR}" \
+  LEDGER_FILE_PY="${LEDGER_FILE}" \
+  MARKER_RETENTION_DAYS_PY="${MARKER_RETENTION_DAYS}" \
+  DRY_RUN_PY="${DRY_RUN}" \
+  python3 - <<'PY'
 import os
 import sys
 import time
 
-markers_dir    = ${MARKERS_DIR@Q}
-ledger_file    = ${LEDGER_FILE@Q}
-retention_days = int(${MARKER_RETENTION_DAYS@Q})
-dry_run        = ${DRY_RUN@Q} == "true"
+markers_dir    = os.environ['MARKERS_DIR_PY']
+ledger_file    = os.environ['LEDGER_FILE_PY']
+retention_days = int(os.environ['MARKER_RETENTION_DAYS_PY'])
+dry_run        = os.environ['DRY_RUN_PY'] == "true"
 
 cutoff_secs = retention_days * 86400
 
