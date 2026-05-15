@@ -353,13 +353,31 @@ For the full schema, normalization rules, and the atomic mint pattern, see `refe
 ```python
 import fcntl, json, os, secrets, time
 
-# Session id is supplied by the mechanical revenium-classifier plugin, which
-# writes task markers on the agent's behalf via the on_session_end hook.
-# When calling this snippet manually (fallback path), copy your session id
-# from the "Session ID:" line in your system prompt.
-session_id = os.environ.get("HERMES_CLASSIFICATION_SESSION_ID", "")
+# Session id resolution. Priority order:
+#   1. HERMES_SESSION_ID env var (correct when Hermes propagates it to execute_code).
+#   2. Most-recently-modified Hermes session jsonl filename — every agent turn writes
+#      to its own session file, so the newest file IS the active session. This is
+#      what the cron's marker reader (Phase 3, parse_prior_state) expects to find
+#      as the marker FILENAME, so deriving from the session-file path guarantees
+#      the cron will pick up the markers we write here.
+#   3. Last-resort timestamp pseudo-id. Markers under this path will NOT be
+#      attributed to any state.db session — the cron will fall through to
+#      --task-type unclassified for that delta. Avoid if possible.
+session_id = os.environ.get("HERMES_SESSION_ID")
 if not session_id:
-    session_id = f"unattributed-{int(time.time())}"
+    sessions_dir = os.path.expanduser("~/.hermes/sessions")
+    try:
+        candidates = [f for f in os.listdir(sessions_dir) if f.endswith(".jsonl")]
+        if candidates:
+            newest = max(
+                candidates,
+                key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
+            )
+            session_id = newest[: -len(".jsonl")]
+    except OSError:
+        pass
+if not session_id:
+    session_id = f"pseudo-{int(time.time())}"
 
 markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
 os.makedirs(markers_dir, mode=0o700, exist_ok=True)
