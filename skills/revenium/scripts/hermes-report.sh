@@ -524,10 +524,13 @@ try:
     n = int(os.environ['N_MARKERS'])
     splits = equal_split(delta, n)
     for marker, split in zip(markers, splits):
-        m_agent = marker.get('agent', '')   # optional Phase 2 field; empty string triggers bash :- fallback
-        m_trace = marker.get('trace_id', '')   # optional Phase 2 field; empty string triggers bash :- fallback
-        # NOTE: m_agent / m_trace values MUST NOT contain '|' (pipe-safety; today's only values are pipe-safe fallbacks per D-23).
-        # Pipe-delimited; cost is a string for byte-exact round-trip.
+        m_agent = marker.get('agent', '')
+        m_trace = marker.get('trace_id', '')
+        # WR-01: sanitize pipe-delimiters and control chars so future upstream writers
+        # cannot corrupt the bash while-read IFS='|' parsing (D-34).
+        for _bad in ('|', '\n', '\r'):
+            m_agent = m_agent.replace(_bad, '_')
+            m_trace = m_trace.replace(_bad, '_')
         print(f"{marker['muid']}|{marker['task_type']}|{marker['operation_type']}|"
               f"{split['input']}|{split['output']}|{split['cache_read']}|"
               f"{split['cache_write']}|{split['total']}|{split['cost']}|{m_agent}|{m_trace}")
