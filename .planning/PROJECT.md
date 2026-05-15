@@ -243,4 +243,4 @@ Dated record of decisions that were rewritten after shipping. Each entry cites t
 | 2026-05-14 | D-8 (trivial-skip) | 260514-n8e | D-07 heuristic skip was dead code — `response=None` always collapses the `len(response) < 200` predicate to `True`, silently dropping ~94% of sessions. Removed from `classifier.py`; classifier now fires on every `on_session_end` event. |
 
 ---
-*Last updated: 2026-05-14 after starting milestone v1.1 (Agentic Job Tracking)*
+*Last updated: 2026-05-15 — Phase 7 complete (job-marker schema & state scaffolding: `kind:"job"` contract frozen, `revenium-jobs.ledger` declared, cron reader branches on `kind`)*
