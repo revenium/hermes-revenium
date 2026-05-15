@@ -2830,6 +2830,9 @@ class RepositoryTests(unittest.TestCase):
                     'HOME': shim_home,
                     'HERMES_HOME': hermes_home,
                     'REVENIUM_STATE_DIR': state_dir,
+                    'REVENIUM_MARKERS_DIR': markers_dir,
+                    'REVENIUM_MARKERS_READY_DIR': os.path.join(markers_dir, '.ready'),
+                    'REVENIUM_TAXONOMY_FILE': os.path.join(state_dir, 'task-taxonomy.json'),
                     'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
                     'INVOCATIONS_LOG': invocations_log,
                     'TZ': 'UTC',
@@ -2892,6 +2895,9 @@ class RepositoryTests(unittest.TestCase):
                     'HOME': shim_home,
                     'HERMES_HOME': hermes_home,
                     'REVENIUM_STATE_DIR': state_dir,
+                    'REVENIUM_MARKERS_DIR': markers_dir,
+                    'REVENIUM_MARKERS_READY_DIR': os.path.join(markers_dir, '.ready'),
+                    'REVENIUM_TAXONOMY_FILE': os.path.join(state_dir, 'task-taxonomy.json'),
                     'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
                     'INVOCATIONS_LOG': invocations_log,
                     'TZ': 'UTC',
@@ -3078,6 +3084,9 @@ class RepositoryTests(unittest.TestCase):
                         'HOME': shim_home,
                         'HERMES_HOME': hermes_home,
                         'REVENIUM_STATE_DIR': state_dir,
+                        'REVENIUM_MARKERS_DIR': markers_dir,
+                        'REVENIUM_MARKERS_READY_DIR': os.path.join(markers_dir, '.ready'),
+                        'REVENIUM_TAXONOMY_FILE': os.path.join(state_dir, 'task-taxonomy.json'),
                         'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
                         'INVOCATIONS_LOG': invocations_log,
                         'TZ': 'UTC',
@@ -3276,6 +3285,180 @@ class RepositoryTests(unittest.TestCase):
             finally:
                 os.environ.pop('REVENIUM_TAXONOMY_FILE', None)
                 _restore_plugin_env(snapshot, sys_path_added)
+
+
+    def test_hermes_report_pipe_safety_marker_sanitization(self):
+        """WR-01 / D-34: a marker carrying `|`, `\\n`, or `\\r` in its agent or
+        trace_id field is sanitized at the Python emission boundary so the
+        bash IFS='|' read parser is not desynchronized. The 11-pipe field
+        count is preserved; d_cost (field 9) does not absorb m_agent content."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        HERMES_REPORT = SCRIPTS_DIR / 'hermes-report.sh'
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def run_cron(env, invocations_log):
+            if os.path.exists(invocations_log):
+                os.unlink(invocations_log)
+            open(invocations_log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            invocations = []
+            with open(invocations_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    import shlex
+                    invocations.append(shlex.split(line))
+            return result.returncode, invocations, result.stdout + result.stderr
+
+        def argv_to_flags(argv):
+            d = {}
+            i = 0
+            while i < len(argv):
+                tok = argv[i]
+                if tok.startswith('--'):
+                    if i + 1 < len(argv) and not argv[i + 1].startswith('--'):
+                        d[tok] = argv[i + 1]
+                        i += 2
+                    else:
+                        d[tok] = True
+                        i += 1
+                else:
+                    i += 1
+            return d
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-pipe-safety-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            ledger = os.path.join(state_dir, 'revenium-hermes.ledger')
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            invocations_log = os.path.join(tmpdir, 'invocations.log')
+
+            # Write the revenium shim
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
+                    '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            sid = 'pipe-safety-pathological'
+            build_state_db(state_db, [{
+                'id': sid,
+                'model': 'claude-sonnet-4-6',
+                'source': 'test',
+                'input_tokens': 10000,
+                'output_tokens': 4000,
+                'cache_read': 200,
+                'cache_write': 100,
+                'reasoning': 0,
+                'estimated_cost': '0.123456',
+                'api_calls': 2,
+                'started_at': 1715514000.0,  # Pitfall 6: bypasses G-03 sentinel filter
+                'ended_at': 1715515100.0,
+                'billing_provider': 'anthropic',
+            }])
+
+            # Pathological marker pair: agent has a literal pipe; trace_id has a literal newline.
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps({
+                    'muid': '01893b8a300abcdef0123456789abc01',
+                    'ts': 1715515001.0,
+                    'sid': sid,
+                    'task_type': 'code_review',
+                    'operation_type': 'GUARDRAIL',
+                    'agent': 'bad|value',
+                    'trace_id': 'bad\nvalue',
+                }) + '\n')
+                f.write(json.dumps({
+                    'muid': '01893b8a300abcdef0123456789abc02',
+                    'ts': 1715515002.0,
+                    'sid': sid,
+                    'task_type': 'code_review',
+                    'operation_type': 'CHAT',
+                    'agent': 'bad|value',
+                    'trace_id': 'bad\nvalue',
+                }) + '\n')
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_MARKERS_DIR': markers_dir,
+                'REVENIUM_MARKERS_READY_DIR': os.path.join(markers_dir, '.ready'),
+                'REVENIUM_TAXONOMY_FILE': os.path.join(state_dir, 'task-taxonomy.json'),
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'INVOCATIONS_LOG': invocations_log,
+                'TZ': 'UTC',
+            }
+            rc, invocations, output = run_cron(base_env, invocations_log)
+            self.assertEqual(rc, 0, f'cron exit {rc}: {output}')
+            self.assertEqual(len(invocations), 2,
+                             f'expected 2 invocations (GUARDRAIL+CHAT) post-sanitization, got {len(invocations)}: {output}')
+            for argv in invocations:
+                flags = argv_to_flags(argv)
+                self.assertEqual(flags.get('--agent'), 'bad_value',
+                                 'WR-01: --agent must carry underscore-sanitized value (| → _)')
+                self.assertEqual(flags.get('--trace-id'), 'bad_value',
+                                 'WR-01: --trace-id must carry underscore-sanitized value (\\n → _)')
+                # Field 9 (--total-tokens) is the last numeric field before m_agent/m_trace;
+                # round-trip proves no desync: a desync would put d_cost content into m_agent.
+                self.assertIn('--total-tokens', flags,
+                              'pipe parser desync would lose --total-tokens (field 9 absorbed by field 10)')
+                self.assertNotIn('|', flags.get('--agent', ''))
+                self.assertNotIn('\n', flags.get('--trace-id', ''))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == '__main__':
