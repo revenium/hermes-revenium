@@ -21,12 +21,12 @@ State scaffolding and the agent↔cron contract extension. Pure additive — no 
 
 The agent-side contract — `SKILL.md` prompt instructing the Hermes agent to declare jobs.
 
-- [ ] **DECLARE-01**: The agent declares a job for each completed task arc by appending a `kind:"job"` marker in its FINAL ACTION, retrospectively (once, at arc end — never mid-arc, never prospectively).
-- [ ] **DECLARE-02**: The agent mints an `agenticJobId` as an LLM business label plus a short hex entropy suffix (e.g. `pr-review-fc7a`), with mint-first anti-collapse prompt framing so labels stay specific.
-- [ ] **DECLARE-03**: The agent identifies task-arc boundaries within a single Hermes session so one multi-activity session produces multiple distinct jobs.
-- [ ] **DECLARE-04**: The agent selects each job's `type` from a closed seed vocabulary of coding-agent job types shipped with the skill.
-- [ ] **DECLARE-05**: The agent self-reports an execution status of `SUCCESS`, `FAILED`, or `CANCELLED` per job, using conservative criteria (report `SUCCESS` only on a confirmed met goal; bias to `CANCELLED` under uncertainty).
-- [ ] **DECLARE-06**: The budget-halt path writes a `CANCELLED` terminal job marker before emitting the verbatim halt string, so a budget-interrupted arc still gets an outcome.
+- [x] **DECLARE-01**: The agent declares a job for each completed task arc by appending a `kind:"job"` marker in its FINAL ACTION, retrospectively (once, at arc end — never mid-arc, never prospectively).
+- [x] **DECLARE-02**: The agent mints an `agenticJobId` as an LLM business label plus a short hex entropy suffix (e.g. `pr-review-fc7a`), with mint-first anti-collapse prompt framing so labels stay specific.
+- [x] **DECLARE-03**: The agent identifies task-arc boundaries within a single Hermes session so one multi-activity session produces multiple distinct jobs.
+- [x] **DECLARE-04**: The agent selects each job's `type` from a closed seed vocabulary of coding-agent job types shipped with the skill.
+- [x] **DECLARE-05**: The agent self-reports an execution status of `SUCCESS`, `FAILED`, or `CANCELLED` per job, using conservative criteria (report `SUCCESS` only on a confirmed met goal; bias to `CANCELLED` under uncertainty).
+- [x] **DECLARE-06**: The budget-halt path writes a `CANCELLED` terminal job marker before emitting the verbatim halt string, so a budget-interrupted arc still gets an outcome.
 
 ### Cron Job Creation & Linkage (CREATE)
 
@@ -107,12 +107,12 @@ Which phases cover which requirements. Populated during roadmap creation.
 | SCHEMA-03 | Phase 7 | Pending |
 | SCHEMA-04 | Phase 7 | Pending |
 | SCHEMA-05 | Phase 7 | Pending |
-| DECLARE-01 | Phase 8 | Pending |
-| DECLARE-02 | Phase 8 | Pending |
-| DECLARE-03 | Phase 8 | Pending |
-| DECLARE-04 | Phase 8 | Pending |
-| DECLARE-05 | Phase 8 | Pending |
-| DECLARE-06 | Phase 8 | Pending |
+| DECLARE-01 | Phase 8 | Complete |
+| DECLARE-02 | Phase 8 | Complete |
+| DECLARE-03 | Phase 8 | Complete |
+| DECLARE-04 | Phase 8 | Complete |
+| DECLARE-05 | Phase 8 | Complete |
+| DECLARE-06 | Phase 8 | Complete |
 | CREATE-01 | Phase 9 | Pending |
 | CREATE-02 | Phase 9 | Pending |
 | CREATE-03 | Phase 9 | Pending |

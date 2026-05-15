@@ -64,7 +64,7 @@ Summary: [MILESTONES.md](./MILESTONES.md)
   4. The budget-halt path writes a `CANCELLED` terminal job marker before emitting the verbatim halt string, so a budget-interrupted arc still gets an outcome — and the halt-survivability runbook still passes after the `SKILL.md` edit.
 **Plans**: 2 plans
 - [x] 08-01-PLAN.md — ship the job-taxonomy.json seed, setup-local.sh seed->live copy, and test invariants
-- [ ] 08-02-PLAN.md — add the SKILL.md JOB DECLARATION section, reconcile the HALT CHECK block, amend halt-survivability.md
+- [x] 08-02-PLAN.md — add the SKILL.md JOB DECLARATION section, reconcile the HALT CHECK block, amend halt-survivability.md
 **UI hint**: yes
 
 ### Phase 9: Cron Job Creation & `--task-id` Linkage
