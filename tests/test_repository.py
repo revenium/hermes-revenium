@@ -71,6 +71,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'budget-check.sh',
             SKILL / 'scripts' / 'hermes-report.sh',
             SKILL / 'scripts' / 'clear-halt.sh',
+            SKILL / 'scripts' / 'prune-markers.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
