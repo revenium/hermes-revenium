@@ -24,6 +24,33 @@ If the taxonomy fragments (`code_review` vs `code-review` vs `review_code`) or
 attribution leaks across tasks, the feature has failed even if the wire
 protocol works.
 
+## Current Milestone: v1.1 Agentic Job Tracking
+
+**Goal:** The skill identifies discrete task arcs as Revenium *agentic jobs* —
+creating each, attributing its AI transactions, and reporting its outcome — so
+spend ties to units of business work, not just sessions or turn-level
+task-types.
+
+**Target features:**
+
+- Agent identifies task-arc boundaries and, in a FINAL ACTION marker, mints a
+  business-meaningful `agenticJobId` (LLM label + entropy suffix) plus job
+  name/type and a self-reported outcome (`SUCCESS` / `FAILED` / `CANCELLED`,
+  with optional business `outcome-type` / `outcome-value` when it has signal).
+- Cron pipeline idempotently runs `revenium jobs create`, stamps
+  `--task-id <agenticJobId>` on every `meter completion` belonging to the job,
+  and closes with `revenium jobs outcome` once the arc terminates.
+- Job markers extend the v1.0 marker-JSONL contract; jobs sit *above*
+  task-types (many task-types roll up into one job).
+- Hardening: discharge v1.0 carry-forward tech debt — mint-back race
+  (`fcntl.flock`), `clear-halt.sh` bash 3.2 compat, retention guard,
+  dead-helper cleanup.
+
+**Key context:** `--task-id` on `revenium meter completion` is the wire
+linkage (value == `agenticJobId`). Job outcomes are immutable — one-shot — so
+the idempotency invariant extends: re-running cron must never double-create a
+job or double-report an outcome.
+
 ## Requirements
 
 ### Validated
@@ -71,17 +98,24 @@ protocol works.
 
 ### Active
 
-<!-- New work for v1.1. All v1.0 items moved to Validated below. -->
+<!-- v1.1 scope. REQ-IDs assigned in REQUIREMENTS.md; this is the feature-level view. -->
 
-(None yet — run `/gsd-new-milestone` to scope v1.1.)
+**Agentic job tracking:**
 
-Likely candidates from v1.0 deferred items / tech debt (see STATE.md `## Deferred Items` and MILESTONES.md):
+- [ ] Agent mints a per-task-arc `agenticJobId` (LLM business label + entropy suffix) with job name/type in a FINAL ACTION marker.
+- [ ] Agent self-reports a job outcome (`SUCCESS` / `FAILED` / `CANCELLED`) plus optional business `outcome-type` / `outcome-value`.
+- [ ] Job markers extend the v1.0 marker-JSONL contract; many task-types roll up under one `agenticJobId`.
+- [ ] Cron idempotently runs `revenium jobs create` per `agenticJobId`.
+- [ ] Cron stamps `--task-id <agenticJobId>` on every `meter completion` belonging to a job.
+- [ ] Cron closes terminated arcs with `revenium jobs outcome` exactly once.
+- [ ] Backward compatibility: marker-less and job-less sessions meter exactly as v1.0 does today.
+
+**Hardening (v1.0 carry-forward):**
 
 - [ ] **Mint-back race window fix.** Add `fcntl.flock` to `_persist_label_to_taxonomy` (currently uses fixed `.tmp` filename without lock; two concurrent `on_session_end` events can race).
 - [ ] **`clear-halt.sh` bash 3.2 compat.** Same `${VAR@Q}` pattern that broke `prune-markers.sh` on Mac Studio is latent-broken in `clear-halt.sh:17`.
 - [ ] **Retention guard.** Validate `REVENIUM_MARKER_RETENTION_DAYS >= 1` in `prune-markers.sh` (currently 0 silently deletes everything).
 - [ ] **Dead helper cleanup.** Remove `_count_tools_in_current_turn` if no callers exist post-v1.0 (kept per D-37 deferred).
-- [ ] **Optional `install-prune-cron.sh`.** If operators report forgetting to run prune manually, ship an opt-in installer that adds a weekly crontab line.
 
 ### Out of Scope
 
@@ -176,6 +210,11 @@ necessary and why attribution is approximate, not exact.
 | Default to `--task-type unclassified` on no-marker sessions | Preserves backward compat for older installs and gives Revenium a non-null bucket for unaccounted spend | — Pending |
 | D-07 heuristic skip removed (was dead code) | The D-07 heuristic skip predicate (`tool_count == 0 AND len(response) < 200`) was always true because `response=None` is always passed from the plugin entrypoint, silently dropping ~94% of sessions. Removed via quick task 260514-n8e; the classifier now fires on every session end | Shipped (Phase 5) |
 | Taxonomy growth is agent-managed, no automatic merge pass | Initial scope; if drift becomes a problem in practice a periodic dedupe pass can be added later | — Pending |
+| v1.1: job granularity = per task arc, not per session | Per-session jobs lose the business-outcome signal; an arc (a goal-directed sequence of turns) is the natural unit. Reuses the v1.0 LLM-classification machinery | — Pending |
+| v1.1: agent declares the job once, at arc end, in the FINAL ACTION marker | Mirrors the v1.0 classify-at-end pattern; cron does create+meter+outcome in one cycle. Avoids start/end marker-pair discipline | — Pending |
+| v1.1: `agenticJobId` = LLM business label + entropy suffix | Human-readable in the Revenium UI; entropy suffix prevents the taxonomy-style fragmentation/collision seen in v1.0 | — Pending |
+| v1.1: `--task-id` on `meter completion` is the tx→job wire link | CLI exposes `--task-id` (value == `agenticJobId`) for correlation; no HTTP shim or SDK dependency needed | — Pending |
+| v1.1: job outcomes are immutable — cron reports each exactly once | Revenium `jobs outcome` is one-shot; the v1.0 ledger idempotency invariant extends to job-create and outcome-report | — Pending |
 
 ## Evolution
 
@@ -204,4 +243,4 @@ Dated record of decisions that were rewritten after shipping. Each entry cites t
 | 2026-05-14 | D-8 (trivial-skip) | 260514-n8e | D-07 heuristic skip was dead code — `response=None` always collapses the `len(response) < 200` predicate to `True`, silently dropping ~94% of sessions. Removed from `classifier.py`; classifier now fires on every `on_session_end` event. |
 
 ---
-*Last updated: 2026-05-14 after Phase 5 housekeeping (D-3 / D-8 rewritten per quick tasks 260514-nfb / 260514-n8e)*
+*Last updated: 2026-05-14 after starting milestone v1.1 (Agentic Job Tracking)*
