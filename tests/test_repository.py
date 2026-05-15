@@ -377,23 +377,30 @@ class RepositoryTests(unittest.TestCase):
     def test_job_marker_snippets_bind_explicit_session_id(self):
         """Both job-marker execute_code snippets in SKILL.md must take the session
         id as an explicit agent-substituted value, not via the broken filesystem
-        auto-detection that mis-attributed jobs to stale sessions."""
+        auto-detection that mis-attributed jobs to stale sessions. Scoped to the
+        job-marker snippets only — the task-classification snippet is out of scope."""
         text = (SKILL / 'SKILL.md').read_text()
-        self.assertNotIn(
-            'os.environ.get("HERMES_SESSION_ID")', text,
-            'SKILL.md still uses the HERMES_SESSION_ID env fallback — execute_code '
-            'never receives that var; remove it.')
-        self.assertNotIn(
-            'os.listdir(sessions_dir)', text,
-            'SKILL.md still auto-detects the session from ~/.hermes/sessions/*.jsonl '
-            '— that glob matches stale files and mis-attributes job markers.')
+        blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
+        job_blocks = [b for b in blocks if 'def write_job_marker' in b]
         self.assertEqual(
-            text.count('session_id = "REPLACE_WITH_YOUR_SESSION_ID"'), 2,
-            'both job-marker snippets (HALT CHECK + JOB DECLARATION) must carry the '
-            'explicit session-id substitution placeholder.')
-        self.assertEqual(
-            text.count("session_id not substituted"), 2,
-            'both job-marker snippets must guard against an unsubstituted session id.')
+            len(job_blocks), 2,
+            'expected exactly 2 job-marker snippets in SKILL.md (HALT CHECK + '
+            f'JOB DECLARATION), found {len(job_blocks)}')
+        for b in job_blocks:
+            self.assertIn(
+                'session_id = "REPLACE_WITH_YOUR_SESSION_ID"', b,
+                'job-marker snippet must use the explicit session-id placeholder')
+            self.assertIn(
+                'session_id not substituted', b,
+                'job-marker snippet must guard against an unsubstituted session id')
+            self.assertNotIn(
+                'os.environ.get("HERMES_SESSION_ID")', b,
+                'job-marker snippet must not use the HERMES_SESSION_ID env fallback '
+                '— execute_code never receives that var')
+            self.assertNotIn(
+                'os.listdir(sessions_dir)', b,
+                'job-marker snippet must not auto-detect the session from the '
+                'sessions directory — that glob mis-attributes markers to stale sessions')
 
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
