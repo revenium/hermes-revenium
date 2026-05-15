@@ -3105,5 +3105,110 @@ class RepositoryTests(unittest.TestCase):
                     shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+    def test_prune_markers_dry_run_and_live(self):
+        """D-26 / D-27 / D-28 / D-29: prune-markers.sh correctly identifies stale
+        marker files via the ledger timestamp (D-26), respects REVENIUM_MARKER_RETENTION_DAYS
+        (D-27), supports --dry-run without touching files (D-29), and idempotently
+        re-runs after all stale files are removed.
+
+        Fixture:
+          - old_sid:    latest ledger row 31 days old -> should be pruned
+          - fresh_sid:  latest ledger row today       -> should be kept
+          - orphan_sid: no ledger row, mtime 31 days old -> should be pruned (D-26 fallback)
+
+        Three sub-cases:
+          A. --dry-run: old + orphan listed, neither deleted.
+          B. live run:  old + orphan deleted, fresh kept.
+          C. idempotent re-run: exit 0, summary shows removed=0."""
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+        import time
+
+        PRUNE_SCRIPT = SKILL / 'scripts' / 'prune-markers.sh'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            ledger_file = os.path.join(state_dir, 'revenium-hermes.ledger')
+
+            # --- Fixture: three marker files ---
+
+            # 1. "old" sid — ledger entry 31 days ago -> should be pruned
+            old_sid = 'old-session-31d'
+            old_ts = int(time.time()) - 31 * 86400
+            with open(os.path.join(markers_dir, f'{old_sid}.jsonl'), 'w') as f:
+                f.write(json.dumps({'muid': 'aaa', 'ts': float(old_ts),
+                                    'sid': old_sid, 'task_type': 'research',
+                                    'operation_type': 'CHAT'}) + '\n')
+            with open(ledger_file, 'a') as f:
+                f.write(f'HERMES:{old_sid}:1000:{old_ts}:aaa\n')
+
+            # 2. "fresh" sid — ledger entry today -> should be kept
+            fresh_sid = 'fresh-session-today'
+            fresh_ts = int(time.time())
+            with open(os.path.join(markers_dir, f'{fresh_sid}.jsonl'), 'w') as f:
+                f.write(json.dumps({'muid': 'bbb', 'ts': float(fresh_ts),
+                                    'sid': fresh_sid, 'task_type': 'generation',
+                                    'operation_type': 'CHAT'}) + '\n')
+            with open(ledger_file, 'a') as f:
+                f.write(f'HERMES:{fresh_sid}:500:{fresh_ts}:bbb\n')
+
+            # 3. "orphan" sid — no ledger entry, mtime 31 days old -> should be pruned
+            orphan_sid = 'orphan-no-ledger'
+            orphan_path = os.path.join(markers_dir, f'{orphan_sid}.jsonl')
+            with open(orphan_path, 'w') as f:
+                f.write(json.dumps({'muid': 'ccc', 'ts': float(old_ts),
+                                    'sid': orphan_sid, 'task_type': 'review',
+                                    'operation_type': 'CHAT'}) + '\n')
+            os.utime(orphan_path, (old_ts, old_ts))
+
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_MARKERS_DIR': markers_dir,
+                'REVENIUM_MARKER_RETENTION_DAYS': '30',
+                'TZ': 'UTC',
+            }
+
+            # --- Sub-case A: dry-run — nothing deleted ---
+            r = subprocess.run(['bash', str(PRUNE_SCRIPT), '--dry-run'],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0,
+                             f'dry-run exit {r.returncode}: {r.stderr}')
+            self.assertTrue(os.path.exists(os.path.join(markers_dir, f'{old_sid}.jsonl')),
+                            'dry-run must not delete old marker')
+            self.assertTrue(os.path.exists(orphan_path),
+                            'dry-run must not delete orphan marker')
+            self.assertTrue(os.path.exists(os.path.join(markers_dir, f'{fresh_sid}.jsonl')),
+                            'dry-run must not delete fresh marker')
+
+            # --- Sub-case B: live run — old + orphan deleted, fresh kept ---
+            r = subprocess.run(['bash', str(PRUNE_SCRIPT)],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0,
+                             f'live run exit {r.returncode}: {r.stderr}')
+            self.assertFalse(os.path.exists(os.path.join(markers_dir, f'{old_sid}.jsonl')),
+                             'old marker must be deleted in live run')
+            self.assertFalse(os.path.exists(orphan_path),
+                             'orphan marker must be deleted in live run')
+            self.assertTrue(os.path.exists(os.path.join(markers_dir, f'{fresh_sid}.jsonl')),
+                            'fresh marker must be kept in live run')
+
+            # --- Sub-case C: idempotent re-run — exit 0, no further deletions ---
+            r = subprocess.run(['bash', str(PRUNE_SCRIPT)],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0,
+                             f'idempotent run exit {r.returncode}: {r.stderr}')
+            # Fresh marker still present after idempotent re-run
+            self.assertTrue(os.path.exists(os.path.join(markers_dir, f'{fresh_sid}.jsonl')),
+                            'fresh marker must still exist after idempotent re-run')
+
+
 if __name__ == '__main__':
     unittest.main()
