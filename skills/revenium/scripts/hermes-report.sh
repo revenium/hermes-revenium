@@ -402,6 +402,11 @@ if marker_path.is_file():
                     m = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # A valid-JSON line that is not an object (list/scalar) has no .get;
+                # skip it before any attribute access so one bad line never aborts
+                # the whole session's attribution (v1.0 'k in m' tolerated this).
+                if not isinstance(m, dict):
+                    continue
                 # Phase 7 (SCHEMA-03 / D-06): branch on kind BEFORE REQUIRED_KEYS check.
                 # This preserves v1.0 byte-identity: absent kind falls through to the
                 # existing REQUIRED_KEYS gate unchanged. A kind:"job" line must never
@@ -409,8 +414,11 @@ if marker_path.is_file():
                 kind = m.get("kind")
                 if kind == "job":
                     # D-04: validate reader-required keys; skip if any missing.
-                    if all(k in m for k in JOB_REQUIRED):
-                        jobs_by_id[m["agentic_job_id"]] = m  # D-12: last line wins
+                    # agentic_job_id must be a non-empty string — a list/dict value
+                    # would raise unhashable TypeError when used as a dict key.
+                    job_id = m.get("agentic_job_id")
+                    if isinstance(job_id, str) and job_id and all(k in m for k in JOB_REQUIRED):
+                        jobs_by_id[job_id] = m  # D-12: last line wins
                     continue  # never reaches task-marker collector
                 elif kind is not None:
                     continue  # unknown kind — skip for forward compat (D-06)
