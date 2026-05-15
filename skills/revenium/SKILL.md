@@ -395,3 +395,172 @@ User said "good morning, can you confirm you're ready?" You replied "Good mornin
 - Required action: NONE.
 
 Writing a marker on a clear-skip turn pollutes the taxonomy. Skipping a marker on a clear-classify turn breaks attribution. The rule is binary by design — there is no middle ground.
+
+## FINAL ACTION — JOB DECLARATION
+
+**MANDATORY — NON-NEGOTIABLE. Execute once, retrospectively, at the end of every completed task arc.** This is arc-closing discipline; it mirrors the TASK CLASSIFICATION section above (per-turn closing discipline) but operates at the level of a coherent unit of business work. Skipping this step leaves spend data with no business context — the cron will attribute those task markers to an undifferentiated session with no `--task-id`.
+
+### Arc definition (goal-continuity rule)
+
+**Same arc:** the same goal, including follow-up fixes, refinements, and corrections of that goal. Example: "the tests fail" sent after "implement X" is still arc X — X is not done until it works. Do NOT declare the job at "implement X" if you know verification is still needed.
+
+**New arc:** a goal that is NOT a continuation of the current one — a genuine topic pivot, a new unrelated request.
+
+**On a genuine pivot before the current arc was declared:** first write a `CANCELLED` job marker for the abandoned arc (prevents attribution leakage into the next job), then treat the new request as a fresh arc.
+
+**Granularity floor:** at minimum, one job per session. A single-goal session produces one job; a multi-goal session produces multiple.
+
+### Trigger (binary — no judgment calls)
+
+Declare a job marker if ANY of these are true:
+- You have just completed the goal the arc was working toward and you have self-verified the result (see SUCCESS bar below).
+- The arc has definitively failed (the fix didn't fix, the build cannot pass, the goal is unachievable).
+- The user has pivoted to a new goal before this arc was declared — write `CANCELLED` for the abandoned arc first.
+
+**Skip the job marker ONLY when ALL of these are true:**
+- Your entire turn was a trivial response (≤ 2 sentences, zero tools called).
+- No arc was in progress at the start of this turn.
+
+### Required action sequence
+
+Before your final response yields back to the user:
+
+**Step 1 — mint an `agentic_job_id`.** Compose a specific business-readable label describing what the arc actually did, then append `secrets.token_hex(2)` (4 hex chars) as an entropy suffix. Example: `pr-review-fc7a`, `fix-auth-race-3b1e`, `weekly-dep-upgrade-9a2c`.
+
+**Anti-collapse rule (critical):** the label MUST be specific enough to be meaningful in a Revenium analytics dashboard. Bad: `task-a12f`, `work-b3c4`, `coding-9d1a`, `generation-4e5f`. Good: `refactor-db-pool-7c2a`, `add-pagination-endpoint-1f3b`. If you find yourself writing a generic label, stop and pick a more specific one. Fragmentation between `code_review` and `code-review` is permanent harm; a generic label is also permanent attribution loss.
+
+**Step 2 — select a `job_type`.** Read the live taxonomy at `~/.hermes/state/revenium/job-taxonomy.json`. Reuse the closest-fitting existing `job_type`. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label ONLY if none fits well.
+
+**Anti-collapse rule (critical):** same pressure as `agentic_job_id`. Bad `job_type` values: `generation`, `task`, `work`, `coding`, `general`. Good: `weekly_dependency_upgrade`, `database_schema_migration`, `pull_request_review`. Mint a specific type when nothing fits — fragmentation is recoverable, a bland label is permanent attribution loss.
+
+If you mint a new `job_type`, persist it back to the live taxonomy atomically (flock + tmp file in same dir + fsync + rename) before writing the job marker.
+
+**Step 3 — determine `status`.** Exactly one of: `SUCCESS`, `FAILED`, `CANCELLED` (uppercase).
+
+- `SUCCESS` requires positive, checkable evidence YOU established in THIS turn: tests run and passed, build green, diff demonstrably correct, question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. No user sign-off required — self-verification is the bar.
+- `FAILED` is narrow: a definitive negative terminal state — the fix didn't fix, the build cannot pass, the goal is objectively unachievable.
+- `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded, or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
+
+**Step 4 — call `execute_code` with the snippet below.**
+
+```python
+import fcntl, json, os, re, secrets, tempfile, time
+
+# Session id resolution. Priority order:
+#   1. HERMES_SESSION_ID env var (correct when Hermes propagates it to execute_code).
+#   2. Most-recently-modified Hermes session jsonl filename — every agent turn writes
+#      to its own session file, so the newest file IS the active session.
+#   3. Last-resort timestamp pseudo-id. Markers under this path will NOT be
+#      attributed to any state.db session.
+session_id = os.environ.get("HERMES_SESSION_ID")
+if not session_id:
+    sessions_dir = os.path.expanduser("~/.hermes/sessions")
+    try:
+        candidates = [f for f in os.listdir(sessions_dir) if f.endswith(".jsonl")]
+        if candidates:
+            newest = max(
+                candidates,
+                key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
+            )
+            session_id = newest[: -len(".jsonl")]
+    except OSError:
+        pass
+if not session_id:
+    session_id = f"pseudo-{int(time.time())}"
+
+markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
+os.makedirs(markers_dir, mode=0o700, exist_ok=True)
+marker_path = os.path.join(markers_dir, f"{session_id}.jsonl")
+
+def write_job_marker(agentic_job_id, job_name, job_type, status):
+    # Phase 7 D-03 frozen shape — reader-required: kind, agentic_job_id, job_type, status
+    record = {"kind": "job", "ts": time.time(), "sid": session_id,
+              "agentic_job_id": agentic_job_id, "job_name": job_name,
+              "job_type": job_type, "status": status}
+    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
+    with open(marker_path, "ab", buffering=0) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line.encode("utf-8"))
+
+# --- Taxonomy: reuse or mint job_type ---
+taxonomy_path = os.path.expanduser("~/.hermes/state/revenium/job-taxonomy.json")
+
+# REPLACE these three values with your Step 1-3 decisions.
+agentic_job_id = "replace-with-step1-label-" + secrets.token_hex(2)
+job_name = "Replace with a short human-readable description of the arc"
+job_type = "replace_with_step2_type"   # from taxonomy or a newly minted snake_case label
+status = "CANCELLED"                    # SUCCESS | FAILED | CANCELLED
+
+# Fail-open: if the taxonomy file is missing or unreadable, treat as empty taxonomy and mint freely.
+existing_types = {}
+if os.path.exists(taxonomy_path):
+    try:
+        with open(taxonomy_path) as f:
+            existing_types = json.load(f).get("labels", {})
+    except Exception:
+        existing_types = {}
+
+# If job_type is newly minted (not in existing taxonomy), persist it atomically.
+if job_type not in existing_types:
+    # Normalize: hyphens/spaces -> underscore, lowercase, strip non-[a-z0-9_]
+    normalized = re.sub(r'[^a-z0-9_]', '', re.sub(r'[-\s]+', '_', job_type.lower()))
+    if re.match(r'^[a-z][a-z0-9_]{1,47}$', normalized):
+        job_type = normalized
+        try:
+            if os.path.exists(taxonomy_path):
+                with open(taxonomy_path, "r+") as f:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    data = json.load(f)
+                    data.setdefault("labels", {})[job_type] = {
+                        "description": job_name,
+                        "examples": [],
+                    }
+                    d = os.path.dirname(taxonomy_path)
+                    with tempfile.NamedTemporaryFile("w", dir=d, delete=False, suffix=".tmp") as tmp:
+                        json.dump(data, tmp, indent=2, ensure_ascii=True)
+                        tmp.flush()
+                        os.fsync(tmp.fileno())
+                        tmpname = tmp.name
+                    os.rename(tmpname, taxonomy_path)
+            else:
+                # Taxonomy file missing — mint freely, no persist (fail-open: do not raise)
+                pass
+        except Exception:
+            pass  # fail-open: taxonomy write failure must not abort job declaration
+
+write_job_marker(agentic_job_id, job_name, job_type, status)
+print(f"job marker written: {marker_path}")
+```
+
+### Self-check before yielding
+
+Immediately before yielding your final response, answer these three questions. If a job marker was required and you have not written it, call `execute_code` with the snippet above before sending your response.
+
+1. Did I just complete, fail, or abandon the goal this arc was working toward? → if yes, a job marker is REQUIRED.
+2. Did I self-verify the outcome (tests ran, build green, answer complete) before setting `status = "SUCCESS"`? → "I made the change but couldn't verify it" means `status = "CANCELLED"`.
+3. Did I just call `execute_code` with `write_job_marker`? → if a marker was REQUIRED, YES is the only acceptable answer.
+
+### Examples
+
+**Example 1 — Arc complete, self-verified (SUCCESS):**
+User asked you to add a pagination endpoint. You wrote the code, ran the test suite (all green), and the diff does what was asked.
+- `agentic_job_id`: `add-pagination-endpoint-3b1e`
+- `job_name`: "Add pagination to /api/users endpoint"
+- `job_type`: `feature_development` (or mint `api_endpoint_development` if more specific)
+- `status`: `SUCCESS` (tests ran and passed — self-verified)
+
+**Example 2 — Arc complete but NOT verified (CANCELLED, not SUCCESS):**
+User asked you to fix a bug. You wrote the fix but did not run the tests (no terminal access, or deferred to user).
+- `status`: `CANCELLED` — you made the change but could not verify it. Do NOT set `SUCCESS` here. The user will verify; if they confirm it works, that is a separate arc.
+
+**Example 3 — Arc definitively failed (FAILED):**
+User asked you to make the CI pipeline green. After 3 attempts the underlying library has a known unresolved upstream bug that makes the goal objectively unachievable today.
+- `agentic_job_id`: `fix-ci-upstream-blocker-9f2a`
+- `job_type`: `debugging`
+- `status`: `FAILED` (definitive negative terminal state — goal is unachievable)
+
+**Example 4 — User pivot before arc declared (CANCELLED for abandoned arc):**
+User asked you to refactor the auth module (arc in progress, not yet declared). Mid-arc, user says "actually forget that — help me write a release announcement."
+- First: write a `CANCELLED` job marker for the abandoned refactor arc (`job_type`: `refactoring`, `status`: `CANCELLED`).
+- Then: begin the new arc (release announcement writing).
+- Reason: prevents the refactor's task markers from leaking attribution into the announcement arc.
