@@ -351,18 +351,27 @@ class RepositoryTests(unittest.TestCase):
                       'docstring must record def guardrail_estimator_split signature per D-06')
 
     def test_prompt_ordering_invariant(self):
-        """Halt-check anchor appears before the classification anchor in SKILL.md."""
+        """Halt-check anchor appears before the classification anchor in SKILL.md,
+        and the job-declaration anchor appears after the classification anchor."""
         text = (SKILL / 'SKILL.md').read_text()
         halt_anchor = 'ABSOLUTE FIRST — HALT CHECK (NON-NEGOTIABLE)'
         classify_anchor = 'FINAL ACTION — TASK CLASSIFICATION'
+        job_anchor = 'FINAL ACTION — JOB DECLARATION'
         self.assertIn(halt_anchor, text,
                       'halt-check anchor missing from SKILL.md — do not remove or rename it')
         self.assertIn(classify_anchor, text,
                       'classification anchor missing from SKILL.md — Phase 2 deliverable not present')
+        self.assertIn(job_anchor, text,
+                      'job-declaration anchor missing from SKILL.md — Phase 8 deliverable not present')
         self.assertLess(
             text.index(halt_anchor),
             text.index(classify_anchor),
             'halt-check anchor must appear before classification anchor in SKILL.md',
+        )
+        self.assertLess(
+            text.index(classify_anchor),
+            text.index(job_anchor),
+            'job-declaration anchor must appear after classification anchor in SKILL.md',
         )
 
     def test_shell_scripts_have_valid_syntax(self):

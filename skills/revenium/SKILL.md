@@ -48,7 +48,7 @@ Before emitting the halt string, check whether you were mid-arc (you had been do
 ```python
 import fcntl, json, os, secrets, time
 
-# Session id resolution (same ladder as FINAL ACTION — JOB DECLARATION above).
+# Session id resolution (same 3-tier ladder as the job-declaration section below).
 session_id = os.environ.get("HERMES_SESSION_ID")
 if not session_id:
     sessions_dir = os.path.expanduser("~/.hermes/sessions")
