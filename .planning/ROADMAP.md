@@ -51,7 +51,7 @@ Summary: [MILESTONES.md](./MILESTONES.md)
   3. The cron marker reader branches on `kind`: absent `kind` is parsed as `"task"` (v1.0 path), `kind:"job"` is collected as a job declaration, unknown `kind` is skipped — and `REQUIRED_KEYS` for task markers is unchanged so an un-modified v1.0 cron skips job lines rather than crashing.
   4. A regression test asserts a job-less / marker-less session produces byte-identical `revenium meter completion` argv to v1.0 — backward compatibility is verified, not assumed.
 **Plans**: 1 plan
-- [ ] 07-01-PLAN.md — common.sh path scaffolding, kind-aware marker reader branch, TEST-01/TEST-02 invariant tests
+- [x] 07-01-PLAN.md — common.sh path scaffolding, kind-aware marker reader branch, TEST-01/TEST-02 invariant tests
 
 ### Phase 8: Job Declaration Prompt Block
 **Goal**: The Hermes agent reliably declares one well-formed, business-meaningful job per completed task arc — minting a specific `agenticJobId`, selecting a seed job type, and self-reporting a conservative outcome — including on the budget-halt path.
