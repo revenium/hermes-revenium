@@ -1,544 +1,580 @@
-# Architecture Research
+# Architecture Research — v1.1 Agentic Job Tracking
 
-**Domain:** Hermes-Revenium task-type metering — extending the existing two-half (in-session prompt ↔ out-of-process cron) skill with per-turn task attribution
-**Researched:** 2026-05-12
-**Confidence:** HIGH for the file-contract / idempotency / atomicity design (verified against existing code and POSIX/Linux O_APPEND semantics); MEDIUM for the taxonomy ergonomics recommendation (best-judgment given agent read/write patterns); HIGH for backward-compat fallthrough (mirrors existing fail-open ledger pattern).
+**Domain:** Cron-driven usage-metering skill (Bash + Python heredocs + sqlite3 + `revenium` CLI)
+**Researched:** 2026-05-14
+**Confidence:** HIGH — verified against live `revenium` CLI behavior and the shipped v1.0 source.
 
----
-
-## Standard Architecture
-
-### System Overview
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│                  Hermes Agent Session (in-process)                        │
-│                                                                           │
-│   SKILL.md prompt — extended with classify-and-emit-marker block          │
-│   `~/.hermes/skills/revenium/SKILL.md`                                    │
-│                                                                           │
-│        1. read  budget-status.json   (existing)                           │
-│        2. read  task-taxonomy.json   (NEW — lookup-first)                 │
-│        3. classify substantive turn  (NEW — agent decides)                │
-│        4. write task-taxonomy.json   (NEW — only when minting)            │
-│        5. append markers/<sid>.jsonl (NEW — one line per turn)            │
-│                                                                           │
-└────┬──────────────────┬──────────────────────────┬───────────────────────┘
-     │ reads/writes     │ reads (cron only writes  │ reads (cron only
-     │ (agent + cron)   │  on fallback / bootstrap)│  reads)
-     ▼                  ▼                          ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│   ~/.hermes/state/revenium/         (state contract surface)              │
-│                                                                           │
-│   ├── config.json                    alertId, autonomousMode, notify     │
-│   ├── budget-status.json             currentValue/threshold/halted        │
-│   ├── revenium-hermes.ledger         HERMES:<sid>:<tokens>:<ts>           │
-│   │                                  HERMES:<sid>:<tokens>:<ts>:<muid>  ← NEW (extended row)
-│   ├── task-taxonomy.json           ← NEW  {label: {description, ...}}    │
-│   ├── markers/                     ← NEW  per-session marker streams      │
-│   │   ├── <session_id_1>.jsonl                                            │
-│   │   └── <session_id_2>.jsonl                                            │
-│   ├── revenium-metering.log          cron log                             │
-│   └── env                            optional env overrides               │
-│                                                                           │
-└────┬──────────────────┬──────────────────────────┬───────────────────────┘
-     │ reads markers    │ reads taxonomy           │ appends ledger
-     │ (new)            │ (fallback validation)    │
-     ▼                  ▼                          ▼
-┌──────────────────────────────────────────────────────────────────────────┐
-│   Cron Pipeline (out-of-process, * * * * *)                               │
-│                                                                           │
-│   `cron.sh` ── `hermes-report.sh` ── `budget-check.sh`                    │
-│                       │                                                   │
-│                       │ extended: after computing per-session delta T,    │
-│                       │   1. enumerate markers for sid written AFTER the  │
-│                       │      previous ledger row's timestamp              │
-│                       │   2. if N markers found: split T equally, emit    │
-│                       │      N `revenium meter completion` calls          │
-│                       │      (last call absorbs remainder)                │
-│                       │   3. if N == 0: fall back to existing single-call │
-│                       │      path with --task-type unclassified           │
-│                       │   4. ledger row format extended to capture the    │
-│                       │      marker UUIDs reported in this run            │
-│                       ▼                                                   │
-│                  Revenium API (`revenium meter completion`)               │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-**The contract surface grows by exactly two new files** (`task-taxonomy.json`, `markers/<session_id>.jsonl`) and one extended file format (`revenium-hermes.ledger`). The skill ↔ cron decoupling is preserved: they never call each other, they communicate only via files under `${STATE_DIR}`.
-
-### Component Responsibilities
-
-| Component | Responsibility | New / Existing |
-|-----------|----------------|----------------|
-| Skill prompt (`SKILL.md`) | Existing budget check; NEW classification block: lookup-first taxonomy read, conservative mint, marker append, GUARDRAIL marker for the classify turn itself | Existing, extended |
-| `common.sh` | Single source of truth for paths; NEW vars: `TAXONOMY_FILE`, `MARKERS_DIR`, and helpers `marker_file_for_sid`, `markers_since` | Existing, extended |
-| `hermes-report.sh` | Existing per-session delta loop; NEW: factored into helpers (`load_markers_for_session`, `split_delta`, `emit_meter_call`) so the new logic is readable | Existing, refactored |
-| Taxonomy file (`task-taxonomy.json`) | Controlled-vocabulary store the agent reads first and writes only when minting | NEW (agent-owned) |
-| Marker file (`markers/<sid>.jsonl`) | Per-session append-only stream of `{ts, marker_uuid, task_type, operation_type, ...}` | NEW (agent-write / cron-read) |
-| Marker reader helper | Pure-function Python heredoc: given `sid` + `since_ts`, return ordered list of unreported marker records and their UUIDs | NEW (lives inside `hermes-report.sh`) |
-| Ledger row | Idempotency key. Extended from `HERMES:<sid>:<total_tokens>:<ts>` to `HERMES:<sid>:<total_tokens>:<ts>:<comma_separated_muids>` (legacy rows without the 5th field remain valid) | Existing, extended |
-
-The split between "agent writes / cron reads" for markers and "cron reads / agent writes" for the taxonomy mirrors the existing `budget-status.json` (cron writes / agent reads) shape — same contract, opposite direction.
+This document answers a single integration question: **how do v1.1 agentic-job
+features attach to the existing v1.0 two-half architecture without redesigning
+it?** It is scoped for the roadmapper and phase planners. It names integration
+points, marks NEW vs MODIFIED, and gives a dependency-ordered build sequence.
 
 ---
 
-## Recommended Project Structure
+## 1. CLI Ground Truth (verified, not assumed)
 
-No new files in the repo tree — all extensions land in existing files or under existing directories:
+These behaviors were probed against the live `revenium` CLI on 2026-05-14 and
+**shape every design decision below**. Confidence: HIGH.
 
-```
-skills/revenium/
-├── SKILL.md                        # EXTENDED: classification + marker emission block
-├── references/
-│   ├── setup.md
-│   ├── troubleshooting.md
-│   └── task-taxonomy.md            # NEW: explains the taxonomy contract to the agent
-└── scripts/
-    ├── common.sh                   # EXTENDED: TAXONOMY_FILE, MARKERS_DIR vars + helpers
-    ├── cron.sh                     # unchanged
-    ├── hermes-report.sh            # EXTENDED: marker-aware split path + legacy fallback
-    ├── budget-check.sh             # unchanged
-    ├── clear-halt.sh               # unchanged
-    ├── install-cron.sh             # unchanged
-    ├── uninstall-cron.sh           # unchanged
-    └── prune-markers.sh            # NEW: housekeeping — remove marker files for sessions
-                                    #      whose latest-reported ledger row is >N days old
-```
+| Probe | Observed behavior | Design consequence |
+|-------|-------------------|--------------------|
+| `revenium jobs create --agentic-job-id <new>` | Exit 0, job created (`id`, `agenticJobId`, `hasOutcome:false`). | Create works. |
+| `revenium jobs create --agentic-job-id <dup>` | **`HTTP 409 ... already exists`** printed to stderr, **exit code still 0**. | **Exit code is useless for idempotency.** Cron MUST NOT trust `$?`. |
+| `revenium jobs get <missing>` | `Error: Resource not found.`, exit 0. | `get` is the reliable existence probe — parse JSON, not exit code. |
+| `revenium jobs get <exists> --output json` | Full JSON: `agenticJobId`, `id`, `hasOutcome` (bool), `executionStatus` (null until outcome), `environment`, `name`, `label`. | `hasOutcome` is the authoritative "outcome already reported" flag. |
+| `revenium jobs outcome <id> --result SUCCESS` | Exit 0, posts `{executionStatus: SUCCESS}` to `/v2/api/jobs/<id>/outcome`. | Outcome works. |
+| `revenium jobs outcome <id> --result FAILED` (2nd call) | **`outcome already reported ... outcomes are immutable`**, **exit code still 0**. | Server enforces one-shot immutability — but cron still must not double-fire (analytics noise, log spam). |
+| `revenium meter completion --task-id <v>` | Flag accepted: *"correlates the completion with an agentic job (use the same value as agenticJobId)"*. | `--task-id` value == `agenticJobId`. Pure pass-through, same shape as v1.0's `--task-type` passthrough. |
+| `revenium jobs create` flags | `--agentic-job-id` (required), `--name`, `--type`, `--environment`, `--version`. | These five map directly onto the marker schema. |
+| `revenium jobs outcome` flags | `--result` (required: SUCCESS/FAILED/CANCELLED), `--outcome-type`, `--outcome-value`, `--outcome-currency`, `--metadata`, `--reported-by`. | `result` is mandatory; the business fields are optional. |
 
-### Structure Rationale
-
-- **No new top-level directories.** The repo is a distribution package; reorganizing structure would force a re-doc of installation paths in `docs/installation.md` and `README.md` for no architectural gain.
-- **`references/task-taxonomy.md`.** The agent (not the human operator) is the consumer of the taxonomy contract. Reference docs are the existing channel by which `SKILL.md` points the agent at long-form guidance (`SKILL.md` lines 267–270). Adding a third reference is cheap and keeps `SKILL.md` short.
-- **`prune-markers.sh`.** Markers will accumulate as sessions die. Pruning is a separable, idempotent housekeeping concern — same flavor as `clear-halt.sh`. Operator-invoked first; can be wired to a less-frequent cron later if needed. Not on the critical path.
-- **Runtime layout under `~/.hermes/state/revenium/`**:
-  - `task-taxonomy.json` lives at the top of `STATE_DIR` (single file, agent's primary contract).
-  - `markers/` is a subdirectory because one file per session keeps the I/O fan-out tractable for both writers (one file lock domain per session) and readers (cron can `ls markers/` and process serially without scanning a giant global log). See "Marker storage tradeoffs" below.
+**The load-bearing fact:** the `revenium` CLI exits 0 on `409 already exists`
+and on `outcome already reported`. **The cron cannot use exit code to decide
+whether a create/outcome succeeded, failed, or was a duplicate.** Idempotency
+must therefore be enforced *locally* by a ledger (the v1.0 discipline), with
+`jobs get --output json` as a secondary server-side reconciliation probe.
 
 ---
 
-## Architectural Patterns
+## 2. Standard Architecture — Where v1.1 Fits
 
-### Pattern 1: Per-session JSONL with O_APPEND-only writes (marker storage)
+### System Overview (v1.1 — NEW marked with ★)
 
-**What:** Each Hermes session gets its own append-only file at `${MARKERS_DIR}/<session_id>.jsonl`. The agent opens with append mode, writes a single complete JSON object followed by `\n`, closes. Never seeks, never rewrites, never deletes a line.
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  IN-SESSION HALF  (skill prompt, runs every Hermes turn)              │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │ SKILL.md                                                       │  │
+│  │  ├─ HALT CHECK / Budget Check        (v1.0, UNCHANGED)          │  │
+│  │  ├─ FINAL ACTION — TASK CLASSIFICATION (v1.0, UNCHANGED)        │  │
+│  │  │    writes task-type marker pairs to markers/<sid>.jsonl      │  │
+│  │  └─ FINAL ACTION — JOB DECLARATION  (NEW ★)                     │  │
+│  │       at task-arc end, appends ONE job marker line             │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │ revenium-classifier plugin (on_session_end) — v1.0, UNCHANGED  │  │
+│  │   writes task-type markers only; does NOT mint jobs            │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │ (filesystem only — no direct calls)
+                ┌───────────────▼────────────────────────────┐
+                │  SHARED STATE  ~/.hermes/state/revenium/    │
+                │   config.json            (v1.0)            │
+                │   budget-status.json     (v1.0)            │
+                │   task-taxonomy.json     (v1.0)            │
+                │   markers/<sid>.jsonl    (v1.0, schema ★)  │
+                │   markers/.ready/<sid>   (v1.0)            │
+                │   revenium-hermes.ledger (v1.0, 5-field)   │
+                │   job-taxonomy.json      (NEW ★, optional) │
+                │   revenium-jobs.ledger   (NEW ★)           │
+                └───────────────┬────────────────────────────┘
+                                │ (filesystem only)
+┌───────────────────────────────▼──────────────────────────────────────┐
+│  CRON HALF  (cron.sh, every minute, outside any Hermes session)       │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │ cron.sh — orchestrator (UNCHANGED: flock, env, child invokes)  │  │
+│  │   └─ hermes-report.sh   (MODIFIED ★)                           │  │
+│  │   └─ budget-check.sh    (UNCHANGED)                            │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│  hermes-report.sh new responsibilities (★):                          │
+│   A. read job markers from markers/<sid>.jsonl alongside task markers │
+│   B. PRE-LOOP: `jobs create` for every NEW agenticJobId (jobs ledger) │
+│   C. IN-LOOP: stamp `--task-id <agenticJobId>` on meter completion    │
+│   D. POST-LOOP: `jobs outcome` for every NEWLY-TERMINATED arc         │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │
+                    revenium CLI → Revenium platform
+                    (jobs create / meter completion --task-id / jobs outcome)
+```
 
-**When to use:** Producer is single-writer-per-file (the agent is the only writer for a given session), the file is read by a cron that scans once a minute, and individual records are small (well under 4KB).
+### Component Responsibilities (v1.1 delta only)
 
-**Trade-offs:**
+| Component | v1.1 Responsibility | NEW / MODIFIED | File |
+|-----------|---------------------|----------------|------|
+| Job-declaration prompt block | At task-arc end, agent appends one `kind:"job"` marker line (id, name, type, environment, result, optional outcome) | **NEW** | `SKILL.md` (new `## FINAL ACTION — JOB DECLARATION` section) |
+| Marker reader | Parse both task-type lines and job lines from the same `<sid>.jsonl`; ignore unknown `kind` values | **MODIFIED** | `hermes-report.sh` (T04 marker-read heredoc) |
+| Job create stage | Pre-loop pass: for each distinct un-created `agenticJobId` across all markers this tick, call `jobs create`, append jobs-ledger row on success-or-409 | **NEW** | `hermes-report.sh` (new function before the session `while` loop) |
+| Task-id stamping | When a marker carries an owning `agentic_job_id`, append `--task-id <id>` to that marker's `meter completion` cmd array | **MODIFIED** | `hermes-report.sh` (per-marker `cmd=(...)` block) |
+| Job outcome stage | Post-loop pass: for each `agenticJobId` whose arc is terminated and not yet outcome-reported, call `jobs outcome`, append jobs-ledger outcome row | **NEW** | `hermes-report.sh` (new function after the session `while` loop) |
+| Jobs ledger | Append-only idempotency ledger for create + outcome, mirroring `revenium-hermes.ledger` discipline | **NEW** | `common.sh` declares `JOBS_LEDGER_FILE`; written by `hermes-report.sh` |
+| Job taxonomy | Optional vocabulary file for job `type` values, mirroring `task-taxonomy.json` | **NEW (optional — see §6)** | `common.sh` declares `JOB_TAXONOMY_FILE` |
+| Classifier plugin | UNCHANGED — keeps writing task-type markers only; jobs are agent-declared, not plugin-derived | unchanged | `plugins/revenium-classifier/classifier.py` |
+| `cron.sh`, `budget-check.sh`, `clear-halt.sh` | UNCHANGED by job tracking (clear-halt gets a *separate* bash-3.2 hardening fix) | unchanged | — |
 
-| Aspect | Per-session JSONL (recommended) | Single global JSONL | Per-day rotation |
-|--------|---------------------------------|---------------------|------------------|
-| Writer contention | Zero (one writer per file) | High (every Hermes session contends on one file) | Moderate (every session contends on today's file) |
-| Reader scan cost | O(active sessions × markers/session) but trivially parallelizable; reader can `stat` each file and skip ones with mtime older than last ledger ts | O(all markers ever) per cron tick unless reader tracks an offset | O(markers since last ledger ts) but session boundaries cross rotation lines |
-| Session affinity | Natural — the file IS the session bucket | Reader must group by `sid` after parsing | Reader must group by `sid` and also stitch across midnight rollover |
-| Pruning | Trivial: delete files for sessions older than retention window | Compaction required (rewrite the global file) | File-based, but mixes sessions from many ages in one file |
-| Failure isolation | A corrupt line affects one session | A corrupt line can break reader for everyone until skipped | Same risk as global |
-| Discoverability | `ls markers/` enumerates sessions cheaply | One file to look at — slightly nicer for `tail -f` debugging | Same as global |
+---
 
-The decisive factor is the existing design's idempotency invariant — the cron reasons per-session, the ledger is keyed by `sid`. Per-session JSONL aligns the marker store with the existing reasoning unit. The other two designs force the reader to do more work to re-impose the same grouping.
+## 3. Marker Schema Evolution (Question 1)
 
-**Example marker record:**
+### The grouping problem
+
+Jobs sit **above** task-types: one task arc (= one `agenticJobId`) spans many
+turns, each of which already emits a task-type marker pair. The schema must
+model "many task-types roll up under one job" without forcing the agent to
+restate the job on every turn.
+
+### Three options considered
+
+| Option | Shape | Verdict |
+|--------|-------|---------|
+| **A. New field on every task marker** | Add `agentic_job_id` to each `{muid,ts,sid,task_type,operation_type}` line | **Rejected.** Forces the agent to know the job id *during* each turn and restate it on every marker write — but the decided design (PROJECT.md D "declare once, at arc end") is exactly the opposite. The agent doesn't have a stable id mid-arc. Also bloats every line and re-opens the v1.0 `REQUIRED_KEYS` contract. |
+| **B. New marker `kind`, same file** | Job declaration is one extra JSONL line in `markers/<sid>.jsonl` with `"kind":"job"`; task markers stay exactly as v1.0 (implicitly `kind:"task"`) | **RECOMMENDED.** One file = one reader, one prune path, one `.ready` sentinel. The arc→turns grouping is recovered cron-side from `(sid, ts-window)`, not from a per-turn field. Backward-compatible: v1.0 task markers have no `kind` key and the reader treats absent `kind` as `"task"`. |
+| **C. Separate `jobs/<sid>.jsonl` file** | Job markers in a parallel directory | Workable but adds a second marker dir, a second `.ready` sentinel question, a second prune target, a second path family in `common.sh`. No upside over B — the two marker kinds share a session id and a lifecycle. |
+
+**Recommendation: Option B — a new `kind` discriminator in the existing
+`markers/<sid>.jsonl`.**
+
+### Recommended schema
+
+**Task-type marker (v1.0 — UNCHANGED, shown for contrast):**
 
 ```json
-{"muid":"01HQ2T8K5RNNNXM6Z6Y9R3X7Q1","ts":1715515443.872,"sid":"f3e2b6...","turn_seq":17,"task_type":"code_review","operation_type":"CHAT","model":"claude-opus-4-7","agent":"Hermes","trace_id":"f3e2b6...:17"}
+{"muid":"...","ts":1715...,"sid":"abc","task_type":"code_review","operation_type":"CHAT"}
 ```
 
-One JSON object per line. The marker UUID (`muid`) is a ULID (sortable by ts) — see Pattern 3.
+**Job marker (NEW — written once per arc by the agent's FINAL ACTION block):**
 
-### Pattern 2: POSIX O_APPEND + sub-PIPE_BUF line writes (atomicity)
-
-**What:** Marker writes use POSIX append mode (`open(path, 'a')` in Python; `>> "${file}"` in bash). Each marker is a single line ≤ a few hundred bytes — far below the Linux 4KB PIPE_BUF threshold under which append-mode writes are observed atomic in practice. The cron reads the whole file (or seeks past a known byte offset and reads to EOF) and never holds a write lock. No advisory locking is required.
-
-**When to use:** Single-writer-per-file (this design), line-oriented records, message size well below the kernel write-atomicity threshold, readers that tolerate trailing partial lines (which never occur in this setup because there's only one writer per file).
-
-**Trade-offs:**
-- POSIX guarantees that `O_APPEND` makes the seek-to-end and the write atomic relative to *other modifications of the file offset* — i.e., another writer's append cannot interleave the offset adjustment. POSIX does **not** guarantee that the *bytes* of two concurrent writes are non-interleaved. However, Linux (`ext4`, `xfs`, `apfs` on macOS in our context) honors the practical convention that writes ≤ PIPE_BUF (4KB on Linux, ≥512B on POSIX) issued with `O_APPEND` are observed atomic, which the wider Linux community has documented and depended on for log files for decades. ([POSIX write spec](https://pubs.opengroup.org/onlinepubs/9699919799/functions/write.html), [Appending to a log — Paul Khuong](https://pvk.ca/Blog/2021/01/22/appending-to-a-log-an-introduction-to-the-linux-dark-arts/), [Appending to a File from Multiple Processes — nullprogram](https://nullprogram.com/blog/2016/08/03/))
-- In our design, **there is only one writer per marker file** (the agent in that session). The atomicity question collapses to "is one process's append-mode write to its own file atomic from a concurrent reader's perspective?" — and the answer for line-sized writes is yes on every filesystem we ship to.
-- The cron reader sees one of two states per line: the full line including `\n` is present, or the line is not present yet. A reader scanning until EOF will never observe a half-written line because the kernel does the write before advancing the file size. (If we were ever in a situation where one write produced bytes that exceeded the kernel write-buffer, we would need to ensure the application calls `write()` exactly once per record; Python's `open(path, 'a').write(line)` for `len(line) < 4096` satisfies this trivially.)
-
-**Why not write-then-rename?**
-- Write-then-rename is the right pattern for *replace-existing-file* updates (this is how `budget-check.sh` writes `budget-status.json` — `Path.write_text` plus an atomic rename). It is the **wrong** pattern for append-only logs: you'd be reading + rewriting the whole file on every turn, which destroys the constant-time append property and the cron-reader's ability to seek past previously-read content.
-
-**Why not lock files?**
-- Single writer per file removes the need. Adding `flock` would add a failure mode (lock held by a crashed process) without removing any actual contention.
-
-**Example agent-side write (Python heredoc-style, since the agent operates via Hermes file tools):**
-
-```python
-import json, os, time, uuid, pathlib
-marker = {
-    "muid":   f"01H{uuid.uuid4().hex[:23].upper()}",   # or a real ULID
-    "ts":     time.time(),
-    "sid":    SESSION_ID,
-    "turn_seq": TURN_SEQ,
-    "task_type": TASK_TYPE,
-    "operation_type": OPERATION_TYPE,
-    "model":  MODEL,
-    "agent":  "Hermes",
-    "trace_id": f"{SESSION_ID}:{TURN_SEQ}",
-}
-path = pathlib.Path(os.path.expanduser(f"~/.hermes/state/revenium/markers/{SESSION_ID}.jsonl"))
-path.parent.mkdir(parents=True, exist_ok=True)
-with path.open("a") as f:                # O_APPEND under the hood
-    f.write(json.dumps(marker, separators=(',', ':')) + "\n")
+```json
+{"kind":"job","jmuid":"<hex>","ts":1715...,"sid":"abc",
+ "agentic_job_id":"refactor-auth-flow-9f2a1c",
+ "name":"Refactor auth flow","type":"refactor","environment":"production",
+ "result":"SUCCESS","outcome_type":"CONVERTED","outcome_value":150}
 ```
 
-Total bytes per write: ~250B. Sub-PIPE_BUF on every platform we target.
+Field notes:
 
-### Pattern 3: Marker-UUID idempotency key (cron-side split + ledger semantics)
+- `kind:"job"` — the discriminator. v1.0 task markers have **no `kind` key**;
+  the reader maps absent → `"task"`. Unknown `kind` values are skipped (forward
+  compat).
+- `jmuid` — job-marker unique id, distinct namespace from task `muid` so the
+  jobs ledger and the transaction ledger never key-collide. Same minting recipe
+  as `muid` (ms-hex timestamp + random hex).
+- `agentic_job_id` — the LLM business label + entropy suffix. This is the value
+  that goes verbatim into `jobs create --agentic-job-id` **and** every
+  `meter completion --task-id`. Must satisfy a slug regex such as
+  `^[a-z0-9][a-z0-9-]{2,62}$` — the CLI accepts it as a free string, but the
+  skill should pin a regex to avoid fragmentation and (critically) **forbid
+  the `:` character** so the jobs ledger's colon-delimited format stays parseable
+  (mirrors `parse_prior_state`'s `assert ':' not in sid`).
+- `name`, `type`, `environment` — pass through to `jobs create` 1:1.
+- `result` — `SUCCESS` | `FAILED` | `CANCELLED`. **Presence of this field is
+  what marks the arc terminated** and eligible for the outcome stage. (If a
+  future design wants "job declared but not yet done", omit `result`; §5 covers
+  that.)
+- `outcome_type`, `outcome_value`, `outcome_currency` — optional business
+  signal, pass through to `jobs outcome`. Cron omits the flags when absent.
 
-**What:** Every marker has a `muid` field (a stable opaque identifier — recommendation: ULID for natural lexical sort order matching ts, but any UUID works). The cron, when it splits a session delta T across N markers, records the set of muids it reported in the ledger row. The ledger row format becomes:
+### Arc → turns grouping (how the cron correlates)
 
-```
-HERMES:<sid>:<total_tokens>:<unix_ts>:<muid1,muid2,...,muidN>
-```
+The job marker does **not** list its member task markers. Correlation is
+positional and cron-side: the job marker's `ts` ends the arc; all task markers
+in `<sid>.jsonl` whose `ts` falls in the arc window get `--task-id` stamped.
 
-A future cron run that finds the same `(sid, total_tokens)` already in the ledger skips it (existing behavior). A future run that finds `(sid, total_tokens)` higher than any existing ledger row computes the *new* set of markers since the previous ledger row's `<unix_ts>` field, skipping any muids already present in the previous row's tail field.
+**Recommended grouping rule (simplest defensible, mirrors S2 equal-split
+philosophy):** *one open job per session at a time.* The most-recent job marker
+preceding (or at) a task marker's `ts` owns that task marker. A session that
+declares jobs J1 (ts=100) then J2 (ts=300) attributes task markers ts∈(—,100]
+to J1 and ts∈(100,300] to J2. Task markers with no preceding job marker get no
+`--task-id` (they meter exactly as v1.0). This needs **no per-turn job field**
+and tolerates the agent forgetting to declare a job (those turns just stay
+job-less — the v1.0 backward-compat guarantee).
 
-**When to use:** Idempotency over a fan-out: one external observation (the session token total) becomes N API calls, and we need to be safe under partial-failure re-runs (cron crashed after 3 of 5 meter calls succeeded).
+### What breaks v1.0 backward-compat — and what does not
 
-**Trade-offs:**
+| Change | Breaks v1.0? | Why |
+|--------|--------------|-----|
+| Adding `kind:"job"` lines to `<sid>.jsonl` | **No** | The v1.0 reader's `REQUIRED_KEYS = (muid,ts,sid,task_type,operation_type)` check (`hermes-report.sh:399`) silently *skips* any line missing those keys. A job line lacks `muid`/`task_type`, so an **un-modified v1.0 cron simply ignores job markers** — it does not crash. Forward-compat is free; only the v1.1 cron acts on them. |
+| Task markers gaining no new keys | **No** | v1.0 task markers are byte-identical. |
+| Marker reader learning to branch on `kind` | **No** | New code path; absent `kind` → `"task"` preserves the exact v1.0 path. |
+| `prune-markers.sh` pruning a file that contains job lines | **No** | Pruning is whole-file by ledger staleness; line shape is irrelevant. |
+| **Renaming/repurposing any of the 5 task-marker keys** | **YES — do not** | The v1.0 `REQUIRED_KEYS` tuple and `tests/test_repository.py` marker-shape tests are contractual. Job data must be *additive* (new keys / new line kind), never a mutation of the task-marker shape. |
 
-| Approach | Idempotency on re-run | Cost |
-|----------|----------------------|------|
-| **Recommended: extend ledger row with reported muids** | Strong — re-run reads the muid set, skips those already reported, emits only the remainder. The existing `(sid, total_tokens)` key still de-dupes "same delta, same set" the way it does today | One column in the ledger; minor grep-and-parse on the cron path |
-| Track per-session marker offsets in a sidecar file | Strong — separate `markers-cursor` file maps `sid` → "last reported byte offset" or "last reported muid index" | Extra state file, extra failure modes (cursor and ledger drift), violates the principle that the ledger is the single source of truth for "what has been reported" |
-| Scan all markers, dedupe by muid against a recent ledger window | Strong but expensive — requires reading multiple ledger rows per session per tick | Higher CPU on every cron tick; complicates the existing simple `tail -1` lookup |
-| Extend the existing `transaction-id` from `${sid}-${total_tokens}` to `${sid}-${total_tokens}-${muid}` | Required regardless of the above choices, because Revenium dedupes on transaction-id and one delta now produces N calls | One-line code change in the meter command |
-
-The recommended ledger extension is backward-compatible: existing rows have four colon-separated fields and the new parsing code treats a missing fifth field as "this row reported one implicit unclassified marker." A new write always emits five fields. The legacy-branding test doesn't care about ledger format.
-
-**Per-meter-call transaction-id (required in all cases):**
-- Today: `--transaction-id "${sid}-${total_tokens}"`.
-- With markers: `--transaction-id "${sid}-${total_tokens}-${muid}"`. Revenium-side dedupe continues to work; partial-failure re-runs of the same (sid, total_tokens, muid) tuple are idempotent at the API layer too.
-
-### Pattern 4: Backward-compat fallthrough on no markers (preserves existing behavior)
-
-**What:** In `hermes-report.sh`, after the per-session delta is computed, the new code path looks for marker records in `${MARKERS_DIR}/${sid}.jsonl` written between the previous ledger row's `<unix_ts>` and "now". If the file doesn't exist, has zero new markers, or fails to parse, the script falls through to **exactly the existing single-call path**, with one change: it adds `--task-type unclassified` to the meter command. No `--operation-type` flag (defaults to `CHAT` on Revenium's side per existing platform behavior).
-
-**When to use:** Any feature extension to a contract-coupled two-half system where older installs and partial-deployment states (skill updated but cron not yet, cron updated but skill not yet) must not break.
-
-**Trade-offs:**
-- Compatibility cost: a one-line check (`[[ -f "${marker_file}" ]] && [[ -s "${marker_file}" ]]`) on the cron side.
-- Permanent behavior: even with markers fully deployed, sessions where the agent didn't classify (e.g., a turn that ran in a context where `SKILL.md` was loaded but the classify block didn't fire, or a session that predates this feature) get `unclassified` rather than a missing label. Revenium gets a non-null bucket. This is explicitly listed in `PROJECT.md` as a goal.
-- No flag gymnastics: the fallthrough is not a feature flag, it is the natural shape of "no input → known default." That's the existing fail-open philosophy of the skill (e.g., `SKILL.md:85`–`88` for missing `budget-status.json`).
-
-**Pseudocode skeleton inside `hermes-report.sh`:**
-
-```bash
-# ... existing delta computation produces delta_input/output/cache_read/cache_write/total/cost ...
-
-marker_file="${MARKERS_DIR}/${sid}.jsonl"
-prev_ts="${last_report_ts:-0}"
-
-if [[ -s "${marker_file}" ]]; then
-    # Python heredoc: emit JSON array of unreported marker records (muid, task_type, op_type)
-    new_markers_json=$(python3 - <<PYEOF || echo "[]"
-import json, sys
-muids_already_reported = set("${prev_reported_muids:-}".split(",")) - {""}
-out = []
-with open("${marker_file}") as f:
-    for line in f:
-        line = line.strip()
-        if not line: continue
-        try: rec = json.loads(line)
-        except json.JSONDecodeError: continue
-        if rec.get("ts", 0) <= ${prev_ts}: continue
-        if rec.get("muid") in muids_already_reported: continue
-        out.append(rec)
-print(json.dumps(out))
-PYEOF
-)
-fi
-
-n=$(python3 -c "import json,sys; print(len(json.loads('''${new_markers_json:-[]}''')))")
-
-if [[ "${n}" -gt 0 ]]; then
-    # split path: emit N meter calls
-    emit_meter_calls_split "${sid}" "${delta_total}" "${delta_input}" "${delta_output}" \
-        "${delta_cache_read}" "${delta_cache_write}" "${delta_cost}" "${new_markers_json}"
-else
-    # fallback path: existing single-call code, with --task-type unclassified
-    emit_meter_call_single "${sid}" "${delta_total}" ... --task-type unclassified
-fi
-```
-
-The big readability win comes from extracting `emit_meter_call_single` and `emit_meter_calls_split` as bash functions inside `hermes-report.sh`. The current 200-line `main()` becomes a much shorter loop that calls one or the other.
-
-### Pattern 5: Equal split with remainder-on-last (S2 implementation)
-
-**What:** Given delta T (total tokens for this report window) and N markers, compute `q = T // N` and `r = T % N`. Emit N meter calls where calls 0..N-2 each report `q` tokens and call N-1 reports `q + r`. Apply the same logic per-field (input, output, cache_read, cache_write, cost). The last call absorbs all remainders to preserve the invariant `Σ(per-call deltas) == per-session delta`.
-
-**When to use:** When you need to split an aggregate value across N rows and rounding matters (it does — Revenium aggregates by sum).
-
-**Trade-offs:**
-- Equal split is the documented S2 approximation from `PROJECT.md`. It's deliberately not weighted by agent / marker / model — that's S3/S4, deferred.
-- Per-field independence: input, output, cache_read, cache_write, cost each get their own integer-division-plus-remainder. The sum-preservation invariant holds per field.
-- Last-marker-absorbs-remainder is biased toward the most recent task. Acceptable bias because (a) remainders are tiny (< N tokens / cost cents); (b) at volume the bias is statistically dominated by the equal-split error itself.
-
-**Example (inline Python heredoc):**
-
-```python
-import json, sys
-markers = json.loads(MARKERS_JSON)
-n = len(markers)
-fields = {"in": INPUT, "out": OUTPUT, "cr": CACHE_READ, "cw": CACHE_WRITE, "tot": TOTAL, "cost": COST}
-q = {k: v // n for k, v in fields.items() if k != "cost"}
-r = {k: v %  n for k, v in fields.items() if k != "cost"}
-# cost is a float; split equally and put residual on last
-cost_q = round(fields["cost"] / n, 6)
-cost_last = round(fields["cost"] - cost_q * (n - 1), 6)
-out = []
-for i, m in enumerate(markers):
-    last = (i == n - 1)
-    out.append({
-        "muid": m["muid"],
-        "task_type": m["task_type"],
-        "operation_type": m.get("operation_type", "CHAT"),
-        "input":  q["in"]  + (r["in"]  if last else 0),
-        "output": q["out"] + (r["out"] if last else 0),
-        "cache_read":  q["cr"] + (r["cr"] if last else 0),
-        "cache_write": q["cw"] + (r["cw"] if last else 0),
-        "total": q["tot"] + (r["tot"] if last else 0),
-        "cost":  cost_last if last else cost_q,
-    })
-print(json.dumps(out))
-```
-
-Bash then loops over the JSON array and emits one `revenium meter completion` per element with the appropriate flags.
+**Net:** Option B is strictly additive. A v1.0-era install upgraded to a v1.1
+cron keeps metering; a v1.1-era marker file read by a v1.0 cron loses only the
+job attribution (graceful degradation). This is the same backward-compat
+posture as v1.0's zero-marker fallthrough.
 
 ---
 
-## Data Flow
+## 4. Cron Flow — Where create/outcome Slot In (Question 2)
 
-### Per-turn write flow (agent-side, inside Hermes session)
-
-```
-[Substantive turn arrives]
-    │
-    │  (existing) read budget-status.json → check halted/exceeded
-    ▼
-[Budget OK → proceed]
-    │
-    │  (NEW) read task-taxonomy.json
-    │     → pick existing label if any fits
-    │     → only mint new label if none fit  (strict lookup-first)
-    │     → if mint: write taxonomy back (atomic write-then-rename)
-    │
-    │  (NEW) write GUARDRAIL marker for this classification step itself
-    │     (open markers/<sid>.jsonl in append mode, one line)
-    │
-    ▼
-[Do the actual user-requested work]
-    │
-    │  (NEW) write CHAT marker (or other op_type) for the work turn
-    │     (append one line)
-    │
-    ▼
-[Respond to user]
-```
-
-Two markers per substantive turn (one GUARDRAIL for the classify step, one CHAT/etc for the work). Trivial turns get zero markers and fall back to `unclassified` on the next cron tick.
-
-### Per-cron-cycle read flow (cron-side, out-of-process)
+### Current `hermes-report.sh` shape (v1.0)
 
 ```
-[cron tick — every minute]
-    │
-    ▼
-cron.sh → hermes-report.sh
-    │
-    ▼
-[Query state.db for sessions with non-zero tokens]
-    │
-    ▼
-[For each session sid:]
-    │
-    ├── lookup last ledger row for sid → (prev_total_tokens, prev_ts, prev_muids)
-    │
-    ├── if curr_total_tokens ≤ prev_total_tokens → skip
-    │
-    ├── compute delta_input/output/cache/cost vs prev (existing math)
-    │
-    ├── (NEW) read markers/<sid>.jsonl, filter:
-    │      ts > prev_ts AND muid ∉ prev_muids
-    │   → ordered list M = [marker_0, ..., marker_{N-1}]
-    │
-    ├── if N == 0:
-    │      → emit ONE meter call with --task-type unclassified  (fallthrough)
-    │      → ledger row: HERMES:sid:total_tokens:now_ts
-    │
-    ├── if N > 0:
-    │      → split delta equally across N markers (remainder on last)
-    │      → for each marker m_i:
-    │           emit meter call with
-    │             --task-type m_i.task_type
-    │             --operation-type m_i.operation_type
-    │             --transaction-id "${sid}-${total_tokens}-${m_i.muid}"
-    │             --trace-id m_i.trace_id  (or existing default)
-    │             --agent m_i.agent         (or existing default)
-    │      → ledger row: HERMES:sid:total_tokens:now_ts:muid_0,muid_1,...,muid_{N-1}
-    │
-    └── only append ledger row on full success of all N calls
-        (partial-success: append a row with the muids that DID succeed;
-         the next tick will see those as already-reported and only retry the rest)
+preflight (tool checks) → query state.db → sentinel/age filter
+  → while-read each session:
+      ├─ idempotency pre-filter (grep ledger for sid:total_tokens)
+      ├─ compute delta + provider inference
+      ├─ T04 marker-read heredoc → markers_json, n_markers
+      └─ if n_markers>0: per-marker loop → meter completion → ledger row
+         else: zero-marker fallthrough → meter completion → ledger row
+  → info "Done"
 ```
 
-### State management invariants
+### Recommended v1.1 shape (★ = new)
 
-- **`task-taxonomy.json`**: atomic write-then-rename when the agent mints a new label (same pattern as `budget-check.sh:83` uses for `budget-status.json`). Reads tolerate "file missing" (taxonomy hasn't been seeded yet) by treating it as empty.
-- **`markers/<sid>.jsonl`**: append-only, never seek, never edit, never delete a line. Lifecycle: created on first marker write for that session, optionally pruned by `prune-markers.sh` once the session is long-dead.
-- **`revenium-hermes.ledger`**: still append-only; row format extended but legacy rows remain parseable. Idempotency check at row 71 of `hermes-report.sh` (`grep -q "^HERMES:${sid}:${total_tokens}:"`) continues to work because the prefix is unchanged. New code parses the optional 5th field.
-- **No in-memory shared state.** Existing principle preserved.
+```
+preflight → query state.db → sentinel/age filter
+  ★ STAGE 1 — JOB SCAN + CREATE  (new function, BEFORE the session loop)
+      ├─ scan every markers/<sid>.jsonl for kind:"job" lines
+      ├─ build set of distinct agentic_job_id seen this tick
+      ├─ for each id NOT in revenium-jobs.ledger as "created":
+      │     revenium jobs create --agentic-job-id <id> [--name --type --environment]
+      │     on exit 0 → append "JOB:<id>:created:<ts>" to jobs ledger
+      │       (exit 0 covers BOTH real-create AND 409-already-exists — both
+      │        mean "the job now exists server-side", which is all we need)
+      └─ continue past per-job failures (set -uo pipefail discipline)
+
+  → while-read each session:                          (MODIFIED)
+      ├─ idempotency pre-filter                        (unchanged)
+      ├─ compute delta + provider                      (unchanged)
+      ├─ T04 marker-read heredoc                       (MODIFIED: also returns
+      │     the job id owning each task marker via the §3 grouping rule)
+      └─ per-marker loop:
+           cmd=( revenium meter completion ... )
+           ★ if marker has owning agentic_job_id:
+                cmd+=(--task-id "<agentic_job_id>")
+           run cmd → on exit 0 → transaction ledger row  (unchanged shape)
+
+  ★ STAGE 3 — JOB OUTCOME  (new function, AFTER the session loop)
+      ├─ for each agentic_job_id whose job marker carries a `result`:
+      │     skip if jobs ledger already has "JOB:<id>:outcome:*"
+      │     probe: revenium jobs get <id> --output json → if hasOutcome:true,
+      │            append the outcome ledger row WITHOUT re-calling (reconcile)
+      │     else:  revenium jobs outcome <id> --result <r> [--outcome-* ...]
+      │            on exit 0 → append "JOB:<id>:outcome:<result>:<ts>"
+      └─ continue past per-job failures
+  → info "Done"
+```
+
+### Why three stages, not one fused pass
+
+- **Create must precede meter** (see §5 ordering) → create is a *pre-loop*
+  stage, not interleaved.
+- **Outcome must follow meter** — an arc's transactions should land before its
+  outcome is reported, so Revenium's job rollup is complete when the outcome
+  posts. Outcome is therefore a *post-loop* stage.
+- The session `while` loop stays almost untouched: the only in-loop change is a
+  conditional `cmd+=(--task-id ...)`, structurally identical to the v1.0
+  conditional `cmd+=(--total-cost ...)` / `cmd+=(--environment ...)` appends
+  already at `hermes-report.sh:579-590`.
+
+### The jobs ledger — extending v1.0 ledger discipline
+
+The transaction ledger keys idempotency on `(sid, total_tokens, muid)`. The
+jobs ledger applies the **same append-only, grep-before-act discipline** to two
+new one-shot operations.
+
+**Recommendation: a parallel file `revenium-jobs.ledger`, not new rows in
+`revenium-hermes.ledger`.** Reason: `parse_prior_state` discriminates v1/v2
+transaction rows purely by **colon field count** (4 vs 5 — see
+`split_strategies.py:94-99`). Adding a third row shape into the same file would
+break that discrimination logic. A separate file keeps the transaction ledger's
+field-count contract untouched.
+
+**Jobs ledger line format:**
+
+```
+JOB:<agentic_job_id>:created:<unix_ts>
+JOB:<agentic_job_id>:outcome:<result>:<unix_ts>
+```
+
+- Idempotency probe for create: `grep -q "^JOB:<id>:created:" revenium-jobs.ledger`.
+- Idempotency probe for outcome: `grep -q "^JOB:<id>:outcome:" revenium-jobs.ledger`.
+- Constraint: `agentic_job_id` must not contain `:` — pin the slug regex in the
+  job-marker schema (§3) and assert it cron-side, exactly as `parse_prior_state`
+  asserts `':' not in sid`.
+- **Write-after-success only.** Append the `created` row only after
+  `jobs create` exits 0; append the `outcome` row only after `jobs outcome`
+  exits 0 (or after a `jobs get` probe confirms `hasOutcome:true`). A tick that
+  crashes between the API call and the ledger append re-attempts next tick —
+  and the server's own 409 / immutability guard makes the retry harmless. This
+  is the **belt-and-suspenders** pattern: local ledger is the fast path, server
+  guard is the safety net.
+
+### Idempotency under partial failure (the SC2-equivalent for jobs)
+
+| Scenario | What happens next tick | Safe? |
+|----------|------------------------|-------|
+| `jobs create` succeeds, ledger append crashes | Next tick re-runs `jobs create` → server 409 → exit 0 → ledger row finally written | ✅ (409 is treated as success) |
+| `jobs create` fails (network) | No ledger row → next tick retries cleanly | ✅ |
+| `jobs outcome` succeeds, ledger append crashes | Next tick: `jobs get` probe sees `hasOutcome:true` → write ledger row, skip the call | ✅ (probe reconciles) |
+| `jobs outcome` fails | No ledger row → next tick retries | ✅ |
+| `meter completion --task-id` fails | v1.0 behavior unchanged — no transaction-ledger row, marker re-emitted next tick (now with the same `--task-id`) | ✅ |
+
+**The `jobs get` probe in Stage 3 is what closes the "outcome succeeded but
+ledger lost it" gap** — the transaction ledger has no equivalent because
+`meter completion` is naturally idempotent on `--transaction-id`, but
+`jobs outcome` is not queryable by transaction id, only by job state.
 
 ---
 
-## Scaling Considerations
+## 5. Ordering & Failure Tolerance (Question 3)
 
-This is a single-host, per-user agent — there is no horizontal scaling story. The relevant axes are turn volume and session count.
+### Ordering within one cron cycle
 
-| Scale | Architecture behavior |
-|-------|-----------------------|
-| Typical (1–10 sessions/host, 10–100 turns/session) | One marker file per session, each a few KB. Cron scans <100KB total each tick. Trivially within budget. |
-| Heavy (100 sessions/host, 1000 turns/session) | Marker files reach ~250KB each. Cron `ls markers/` returns 100 names; reader opens and tail-reads each. Still well under one second per tick. |
-| Pathological (long-lived sessions, never pruned) | Marker files grow unbounded. `prune-markers.sh` removes files for sessions whose latest ledger row is >N days old. Operator-invoked or wired to a daily cron later. |
+`jobs create` for job X **must** logically precede every
+`meter completion --task-id X` for that job. The Stage-1-before-loop design
+guarantees this *within a single tick*.
 
-### Scaling priorities
+### The async-create race
 
-1. **First bottleneck:** cron reader doing full-file scans of huge marker files for old sessions. Mitigation: the per-session ledger lookup gives us `prev_ts`; the reader can seek to the first line with `ts > prev_ts` rather than parse the whole file. ULID muids that sort by ts make this even cheaper (line-prefix scan). Build this in from day one — the cost is one extra Python check.
-2. **Second bottleneck:** taxonomy file growth fragmenting into similar labels. Mitigation is social (lookup-first discipline in `SKILL.md`), not architectural. `PROJECT.md` explicitly defers auto-merge.
-3. **Non-bottleneck:** disk space. Markers at ~250B/turn × 1000 turns = 250KB/session. Hundreds of sessions are a few tens of MB. Trivial.
+Revenium's docs note that `jobs create` may be processed asynchronously, so a
+`meter completion --task-id X` issued microseconds after `jobs create X`
+returns could reference a job the platform hasn't fully materialized yet.
 
----
+**Posture: tolerate it, don't fight it.** Three reasons this is safe:
 
-## Anti-Patterns
+1. **`--task-id` is a correlation tag, not a foreign-key constraint.** A
+   `meter completion` with a `--task-id` that doesn't yet resolve still records
+   the transaction; Revenium back-fills the job association when the job
+   appears. The transaction is never lost.
+2. **The v1.0 cron already buffers ~60-120s.** The sentinel/age filter
+   (`REVENIUM_CRON_SETTLE_SECONDS`, default 120s) means a session's markers are
+   typically read a tick or more after they're written. By the time
+   `meter completion` runs, a job created in the *same* tick's Stage 1 has had
+   the whole session-loop duration to settle; a job created in an *earlier*
+   tick is long-settled.
+3. **Worst case is self-healing.** If a transaction does land before its job,
+   the next arc's transactions and the outcome call still reference the same
+   `agentic_job_id`; Revenium reconciles by id. PROJECT.md already accepts
+   "~60s attribution lag" as in-scope — a sub-second create race is strictly
+   smaller than that accepted envelope.
 
-### Anti-Pattern 1: Putting markers in a single global JSONL
+**Do not** add a polling "wait for job to exist" loop after `jobs create` — it
+would block the per-minute tick, fight `cron.lock`, and chase a race that the
+correlation-by-id model already absorbs.
 
-**What people do:** One `~/.hermes/state/revenium/markers.jsonl` file that every Hermes session appends to.
-**Why it's wrong:**
-- Forces concurrent appends from multiple sessions, putting the O_APPEND-line-atomicity assumption under load it doesn't need to bear.
-- Forces the cron reader to group-by-session after parsing instead of treating the file system as the index.
-- Makes pruning a rewrite operation (compaction) rather than `rm`.
-- Coupling failure: a corrupt or oversized line affects every session's metering for that tick.
-**Do this instead:** One file per session, lifecycle bounded by the session it's named for. Sessions are the existing reasoning unit of the cron; align with it.
+### Failure-tolerance posture (consistent with v1.0)
 
-### Anti-Pattern 2: Calling `revenium meter completion` from inside the agent's turn
+`hermes-report.sh` runs `set -uo pipefail` (**no `-e`**) precisely so a single
+failure doesn't abort the tick. v1.1 extends this:
 
-**What people do:** Have `SKILL.md` instruct the agent to shell out to `revenium meter completion` directly at classification time.
-**Why it's wrong:**
-- The agent does not have access to per-turn token counts; `state.db` only exposes per-session cumulatives. The agent literally cannot supply the right `--input-tokens` value.
-- Adds a synchronous network call to every substantive turn — defeats the entire point of the cron's once-a-minute batching.
-- Couples the two halves directly, violating the load-bearing decoupling principle (CLAUDE.md "Two halves never call each other").
-**Do this instead:** Agent emits markers (free, local file appends). Cron remains the sole API caller and does the math against `state.db`.
-
-### Anti-Pattern 3: Auto-mining task labels from chat history at cron time
-
-**What people do:** Cron-side Python heredoc reads the session's chat log, calls an LLM, generates labels post-hoc.
-**Why it's wrong:**
-- Duplicates the agent's own knowledge (the agent is the best classifier of what it just did).
-- Introduces an LLM call into the cron path — cost, latency, and a new failure mode on the metering plane (which is currently fail-open and dependency-light).
-- Defeats the controlled-vocabulary goal: each cron-side classify call is one-shot, with no access to the host taxonomy file.
-**Do this instead:** Agent classifies in-session (where it has the context), persists to a marker, and the cron faithfully attributes. PROJECT.md "Key Decisions" already commits to this; do not relitigate.
-
-### Anti-Pattern 4: Tracking marker offsets in a sidecar cursor file
-
-**What people do:** A `~/.hermes/state/revenium/markers-cursor.json` mapping `sid → last-reported-byte-offset` to avoid scanning markers since the last ledger row.
-**Why it's wrong:**
-- Adds a second source of truth ("what have we reported?") that can drift from the ledger.
-- Doubles the partial-failure surface: cron crashes between ledger-append and cursor-update → next tick re-reports.
-- The ledger row's `ts` already provides the cheap "since when" filter; we don't need a separate cursor.
-**Do this instead:** Use the ledger row as the only source of truth. Read `(prev_ts, prev_muids)` from the most recent row for that `sid`; filter markers by those two fields.
-
-### Anti-Pattern 5: Modifying or deleting marker lines after writing them
-
-**What people do:** Add an "edit the last marker if the agent realizes it misclassified" path; or "compact" the marker file by replacing N lines with their sum.
-**Why it's wrong:**
-- Breaks the O_APPEND atomicity story. Rewriting requires write-then-rename or in-place truncation, both of which create torn-read windows for the cron.
-- Breaks idempotency: muids the cron has already reported would silently disappear, leaving the ledger pointing at nonexistent markers.
-**Do this instead:** Marker files are append-only. If the agent decides a previous turn was misclassified, it writes a *new* marker reflecting the corrected understanding for the *current* turn; historical markers stay as they are. (Correction semantics are out of scope per PROJECT.md.)
+- **Stage 1 (create):** wrap each `jobs create` so a non-zero/network failure
+  is logged via `warn` and the loop `continue`s — exactly like the per-session
+  `((counter++)) || true; continue` pattern at `hermes-report.sh:548`.
+- **Stage 3 (outcome):** same — a failed `jobs get` probe or `jobs outcome`
+  call logs `warn` and moves on; the missing ledger row guarantees a retry.
+- **In-loop `--task-id`:** stamping is a pure string append to the `cmd` array.
+  It cannot fail on its own; if the marker has no owning job, the flag is simply
+  not added (the v1.0 `cmd+=(...)` conditional idiom).
+- **`cron.sh` is unchanged** — it already calls `hermes-report.sh || true`, so
+  even a catastrophic Stage-1/3 failure cannot block `budget-check.sh`.
+- **Never let a job failure block metering.** Metering (the v1.0 core value)
+  must always run even if `jobs create` is down. Stage 1's only job is to
+  *populate the jobs ledger*; if it does nothing, the session loop still meters
+  every marker — just without `--task-id` (graceful degradation to v1.0
+  behavior). Make Stage 1 a best-effort prelude, never a gate.
 
 ---
 
-## Integration Points
+## 6. New State Paths (Question 4)
 
-### External Services
+All paths declared in `common.sh` **only** — `test_runtime_paths_are_hermes_native`
+fails the build otherwise. Add between `MARKER_RETENTION_DAYS`/`PRUNE_LOCK_FILE`
+(lines 21-22) and the `mkdir -p` line (24), following the `${REVENIUM_*:-...}`
+override idiom.
 
-| Service | Integration Pattern | Notes |
-|---------|---------------------|-------|
-| Revenium platform (`revenium meter completion`) | Sub-process invocation from `hermes-report.sh`, one call per marker | Already integrated. New flags: `--task-type` (from marker), `--operation-type` (from marker, defaults to `CHAT` on platform side), enriched `--transaction-id` (includes `muid`), preserved `--trace-id` / `--agent` (sourced from marker when present, else existing defaults). |
-| `~/.hermes/state.db` | sqlite3 read-only query inside `hermes-report.sh` | Unchanged. The agent still cannot see per-turn tokens; this is the architectural reason markers exist. |
-| Hermes messaging toolset (halt notifications) | Unchanged | Out of this milestone's scope. |
+| Variable | Path | NEW? | Purpose |
+|----------|------|------|---------|
+| `JOBS_LEDGER_FILE` | `${STATE_DIR}/revenium-jobs.ledger` | **NEW — required** | Append-only create+outcome idempotency ledger (§4). Created via `touch` in `hermes-report.sh`, same as `LEDGER_FILE` at line 34. |
+| `JOB_TAXONOMY_FILE` | `${STATE_DIR}/job-taxonomy.json` | **NEW — optional** | Controlled vocabulary for job `type`, mirroring `TAXONOMY_FILE`. See note below. |
 
-### Internal Boundaries
+**No new directory is needed.** Job markers live inside the existing
+`markers/<sid>.jsonl` (Option B), so `MARKERS_DIR` / `MARKERS_READY_DIR` are
+reused unchanged. No `jobs/` directory.
 
-| Boundary | Communication | Notes |
-|----------|---------------|-------|
-| Agent ↔ cron | Filesystem only, under `${STATE_DIR}` | The contract grows by two files (`task-taxonomy.json`, `markers/<sid>.jsonl`) and one extended row format (ledger). No new IPC, no new sockets, no new daemons. |
-| `SKILL.md` ↔ Hermes file tools | Read/write via Hermes' built-in file-edit primitives | The agent appends to JSONL via standard file write; the prompt instructs use of append mode. |
-| `hermes-report.sh` ↔ Python heredocs | In-process subprocess | Pattern already pervasive in the file. New heredocs: marker reader, equal-split computer. Keep each heredoc small and self-contained. |
-| `common.sh` ↔ all scripts | `source` | Add `TAXONOMY_FILE`, `MARKERS_DIR`, optional helpers `marker_file_for_sid`, `ensure_markers_dir`. |
+**On `job-taxonomy.json` (optional):** the v1.0 `task-taxonomy.json` exists to
+fight label *fragmentation* (`code_review` vs `code-review`). The v1.1
+`agentic_job_id` already carries an **entropy suffix** (PROJECT.md decision) —
+so job *ids* cannot fragment-collide by design. Only the job `type` field
+(`refactor`, `loan-processing`, …) is free-text and could fragment. Two stances:
 
----
+- **Minimal (recommended for the first phase):** ship no job-taxonomy file;
+  let `type` be free-text. The entropy suffix already solves the id problem,
+  and `revenium jobs types` exists server-side for `type` discovery.
+- **Mirror-v1.0 (defer / optional):** add `job-taxonomy.json` only if `type`
+  fragmentation is observed in practice. Declaring the *variable* in `common.sh`
+  now (pointing at a file that may not exist) costs nothing and avoids a later
+  `common.sh` churn — the v1.0 `TAXONOMY_FILE` already tolerates a missing file.
 
-## Build Order (Dependency Rationale)
-
-The phase decomposition this architecture implies, ordered by data-flow dependency:
-
-1. **Path foundation (no behavior change).** Add `TAXONOMY_FILE` and `MARKERS_DIR` to `common.sh`. Add `mkdir -p "${MARKERS_DIR}"` near the existing `mkdir -p "${STATE_DIR}"`. Update `test_runtime_paths_are_hermes_native` to assert the new paths are declared in `common.sh`. **Why first:** every later phase reads these vars; landing them in isolation keeps the change small and lets the test machinery move forward independently.
-
-2. **Marker reader + idempotency in the cron (no agent changes yet).** Extend `hermes-report.sh` to: (a) read `markers/<sid>.jsonl` if it exists; (b) implement the new ledger row format (5 fields, backward-compatible parse of 4-field rows); (c) implement the equal-split path; (d) preserve the existing path when N == 0. Test by hand-writing marker files and asserting the cron splits correctly. **Why second:** the cron must understand markers before any agent writes them — otherwise we have a window where the agent writes markers the cron ignores. Building this first means the system stays useful (continues to emit `unclassified`) the moment we deploy.
-
-3. **Taxonomy file + skill-prompt classification block.** Add `references/task-taxonomy.md` describing the contract. Extend `SKILL.md` with the post-budget-check classification block. Seed an initial taxonomy if useful (or let the agent build it). **Why third:** depends on (1) for paths and (2) for the cron's ability to honor the markers the agent will now produce. Once shipped, real markers start flowing.
-
-4. **GUARDRAIL accounting + adjacent-flag enrichment.** Extend the classification block to also write a GUARDRAIL marker for the classify step itself. Wire `--operation-type`, `--agent`, `--trace-id` to flow through from marker fields rather than the current hardcoded defaults. **Why fourth:** measures the cost of the feature itself; only meaningful once markers are flowing in real traffic.
-
-5. **Pruning + housekeeping.** Add `prune-markers.sh`. Document it. Decide whether to wire to a less-frequent cron or leave operator-invoked. **Why last:** no functional dependency on any other phase; purely operational hygiene. Could ship in v2.
-
-6. **Tests for the new contract.** Repository invariant tests for marker-file shape, taxonomy-file shape, cron split behavior under representative inputs. Per `PROJECT.md` "Active" list. **Cross-cutting:** add tests alongside each of phases 1–4 rather than as a single dump at the end.
+`MARKER_RETENTION_DAYS` / `prune-markers.sh` need **no change** — pruning is
+whole-file by ledger staleness; a file containing job lines prunes identically.
+(The jobs ledger itself is tiny and append-only — no pruning needed; if it ever
+matters, that's a future concern, not a v1.1 one.)
 
 ---
 
-## Concrete File-Path Recommendations
+## 7. Data Flow Changes
 
-Declared in `skills/revenium/scripts/common.sh` (lines 10–16, alongside existing paths):
+### NEW flow — Job lifecycle
 
-```bash
-# existing
-STATE_DIR="${REVENIUM_STATE_DIR}"
-CONFIG_FILE="${STATE_DIR}/config.json"
-BUDGET_STATUS_FILE="${STATE_DIR}/budget-status.json"
-LEDGER_FILE="${STATE_DIR}/revenium-hermes.ledger"
-LOG_FILE="${STATE_DIR}/revenium-metering.log"
-ENV_FILE="${STATE_DIR}/env"
-STATE_DB="${HERMES_HOME}/state.db"
-
-# new
-TAXONOMY_FILE="${STATE_DIR}/task-taxonomy.json"
-MARKERS_DIR="${STATE_DIR}/markers"
-
-mkdir -p "${STATE_DIR}" "${MARKERS_DIR}"
+```
+[agent finishes a task arc]
+      ↓  appends ONE kind:"job" line
+markers/<sid>.jsonl
+      ↓  (cron tick N, Stage 1)
+hermes-report.sh job-scan ──→ revenium jobs create ──→ Revenium /v2/api/jobs
+      ↓  on exit 0
+revenium-jobs.ledger  ← "JOB:<id>:created:<ts>"
+      ↓  (same tick, session loop)
+per-marker meter completion --task-id <id> ──→ Revenium (transaction ↔ job link)
+      ↓  (same tick, Stage 3 — result present on job marker)
+jobs get <id> probe → not hasOutcome → revenium jobs outcome <id> --result ...
+      ↓  on exit 0
+revenium-jobs.ledger  ← "JOB:<id>:outcome:<result>:<ts>"
 ```
 
-The agent constructs marker paths as `${MARKERS_DIR}/${session_id}.jsonl`. The cron's reader iterates `${MARKERS_DIR}/*.jsonl` or directly opens by `sid`.
+### MODIFIED flow — Marker read
 
-`test_runtime_paths_are_hermes_native` should grep `common.sh` for `task-taxonomy.json` and `markers` strings to enforce the path-discipline invariant the existing test enforces for `state/revenium` and `.hermes`.
+v1.0: read `<sid>.jsonl` → keep lines passing `REQUIRED_KEYS` → split delta.
+v1.1: read `<sid>.jsonl` → **branch on `kind`**:
+- `kind` absent or `"task"` → v1.0 task-marker path (REQUIRED_KEYS, dedup by
+  `muid`, split).
+- `kind == "job"` → collect into the per-session job list; used by Stage 1
+  (create), the §3 grouping rule (`--task-id` ownership), and Stage 3 (outcome).
+- unknown `kind` → skip (forward compat).
+
+### UNCHANGED flows
+
+Budget check, halt transition, transaction-ledger delta math, provider
+inference, S2 equal split, zero-marker fallthrough, `cron.sh` lock + env, the
+classifier plugin — **none change**. v1.1 is additive at three named seams in
+one file.
+
+---
+
+## 8. Anti-Patterns (v1.1-specific)
+
+### Anti-Pattern 1: Trusting `jobs create` / `jobs outcome` exit codes
+
+**What people do:** `revenium jobs create ... && echo "created"`.
+**Why it's wrong:** the CLI exits **0** on `HTTP 409 already exists` and on
+`outcome already reported`. Exit code cannot distinguish success / duplicate /
+some failures.
+**Do this instead:** treat exit 0 as "the desired server state now holds"
+(for create, 409 *is* success). For the rare cases where you need certainty
+(outcome reconciliation), probe `jobs get --output json` and read `hasOutcome`.
+Drive idempotency from the **local jobs ledger**, never from `$?`.
+
+### Anti-Pattern 2: Putting job rows in `revenium-hermes.ledger`
+
+**What people do:** append `JOB:...` lines to the existing ledger to keep "one
+ledger".
+**Why it's wrong:** `parse_prior_state` discriminates transaction rows by
+colon-field-count (4 = v1, 5 = v2). A third shape corrupts that and breaks the
+`split_strategies.py` contract + its tests.
+**Do this instead:** separate `revenium-jobs.ledger` with its own `JOB:` prefix.
+
+### Anti-Pattern 3: Per-turn `agentic_job_id` on every task marker
+
+**What people do:** add `agentic_job_id` to the task-marker schema so each turn
+self-declares its job.
+**Why it's wrong:** mutates the contractual v1.0 marker shape; forces the agent
+to know a stable job id mid-arc (it doesn't — the decided design is "declare
+once at arc end"); re-opens `REQUIRED_KEYS` and the marker-shape tests.
+**Do this instead:** one `kind:"job"` line per arc; recover the arc→turns
+grouping cron-side by `ts` window (§3).
+
+### Anti-Pattern 4: Gating metering on `jobs create`
+
+**What people do:** `jobs create || exit` before the session loop.
+**Why it's wrong:** if the jobs endpoint is down, the v1.0 core value (metering
+spend) stops — a regression. Job tracking is an *enrichment*, not a gate.
+**Do this instead:** Stage 1 is best-effort; on failure, the session loop still
+meters every marker, just without `--task-id`. Graceful degradation to v1.0.
+
+### Anti-Pattern 5: Polling for the async-created job
+
+**What people do:** after `jobs create`, loop `jobs get` until the job appears,
+then meter.
+**Why it's wrong:** blocks the per-minute tick, fights `cron.lock`, and chases
+a race that correlation-by-id already absorbs (§5).
+**Do this instead:** fire-and-continue. `--task-id` correlates by id whenever
+the job materializes; PROJECT.md already accepts ~60s lag.
+
+---
+
+## 9. Integration Points — Summary Table
+
+| Seam | File:location | NEW / MODIFIED | Change |
+|------|---------------|----------------|--------|
+| Job declaration prompt | `SKILL.md` — after `## FINAL ACTION — TASK CLASSIFICATION` (after line 397) | **NEW** section | Instruct agent to append one `kind:"job"` marker at arc end; specify schema + `agentic_job_id` slug rule. |
+| State paths | `common.sh` — after line 22 (`PRUNE_LOCK_FILE`) | **NEW** | `JOBS_LEDGER_FILE`; optionally `JOB_TAXONOMY_FILE`. |
+| Marker reader | `hermes-report.sh` — T04 heredoc (lines 334-446) | **MODIFIED** | Branch on `kind`; return job markers + per-task-marker owning job id. |
+| Job create stage | `hermes-report.sh` — new function called before the `while IFS='|'` loop (line 161) | **NEW** | Scan markers, `jobs create` new ids, append jobs-ledger `created` rows. |
+| `--task-id` stamping | `hermes-report.sh` — per-marker `cmd=(...)` block (lines 556-577) | **MODIFIED** | Conditional `cmd+=(--task-id "<id>")` when the marker has an owning job. |
+| Job outcome stage | `hermes-report.sh` — new function after `done <<< "${sessions}"` (line 676) | **NEW** | `jobs get` probe + `jobs outcome` for terminated arcs; append jobs-ledger `outcome` rows. |
+| Ledger init | `hermes-report.sh` — near `touch "${LEDGER_FILE}"` (line 34) | **MODIFIED** | `touch "${JOBS_LEDGER_FILE}"`. |
+| Tests | `tests/test_repository.py` | **MODIFIED** | Add job-marker shape test, jobs-ledger format test, `kind`-discrimination backward-compat test. |
+| `cron.sh`, `budget-check.sh`, classifier plugin | — | **UNCHANGED** | No job-tracking change. |
+
+---
+
+## 10. Suggested Build Order (dependency-respecting)
+
+Ordered so each phase is independently testable and nothing depends on a
+not-yet-built piece. Each phase ships behind the v1.0 backward-compat guarantee.
+
+1. **State paths + jobs ledger plumbing.** Add `JOBS_LEDGER_FILE` (and optional
+   `JOB_TAXONOMY_FILE`) to `common.sh`; `touch` it in `hermes-report.sh`. No
+   behavior change — pure scaffolding. *Verifies:* `test_runtime_paths_are_hermes_native`
+   still passes; ledger file is created.
+   *Depends on:* nothing.
+
+2. **Marker schema + reader `kind` branching.** Define the `kind:"job"` schema;
+   teach the T04 heredoc to parse job lines and skip them in the task path.
+   *Verifies:* v1.0 task markers still meter byte-identically (the critical
+   backward-compat test); job lines are collected, not crashed on.
+   *Depends on:* nothing functionally — but the schema must be frozen before
+   phases 3-6.
+
+3. **Job declaration prompt block in `SKILL.md`.** New `## FINAL ACTION — JOB
+   DECLARATION` section; `agentic_job_id` slug rule. Pure prompt — no cron
+   change. *Verifies:* halt-survivability runbook still passes (any `SKILL.md`
+   edit re-triggers it); a manual arc produces a well-formed job line.
+   *Depends on:* phase 2 (schema must be frozen).
+
+4. **Job create stage (Stage 1).** New pre-loop function: scan, `jobs create`,
+   jobs-ledger `created` rows; idempotent across ticks; best-effort failure
+   posture. *Verifies:* re-running cron never double-creates (409-as-success);
+   metering unaffected when jobs endpoint is mocked-down.
+   *Depends on:* phases 1 (ledger) + 2 (reader).
+
+5. **`--task-id` stamping (in-loop).** Conditional `cmd+=(--task-id ...)` using
+   the §3 grouping rule. *Verifies:* markers with an owning job get `--task-id`;
+   job-less markers meter exactly as v1.0; conservation/idempotency tests still
+   green. *Depends on:* phases 2 (reader returns owning id) + 4 (the job exists
+   before it's referenced).
+
+6. **Job outcome stage (Stage 3).** New post-loop function: `jobs get` probe +
+   `jobs outcome`; jobs-ledger `outcome` rows; one-shot. *Verifies:* outcome
+   fires exactly once; partial-failure (ledger-append crash) self-heals via the
+   probe. *Depends on:* phases 1 (ledger) + 2 (reader) + 4 (job must exist to
+   receive an outcome).
+
+7. **Hardening (v1.0 carry-forward — independent track).** `fcntl.flock` on
+   `_persist_label_to_taxonomy`; `clear-halt.sh` bash-3.2 `${VAR@Q}` fix;
+   `prune-markers.sh` retention `>= 1` guard; dead-helper cleanup. *Depends on:*
+   nothing — can run in parallel with phases 1-6 or as a final phase.
+
+**Critical path:** 1 → 2 → 4 → 6, with 3 and 5 hanging off 2/4. Phase 7 is
+fully parallel. The schema freeze at the end of phase 2 is the single
+synchronization point everything downstream relies on.
 
 ---
 
 ## Sources
 
-- [POSIX write() spec — Open Group](https://pubs.opengroup.org/onlinepubs/9699919799/functions/write.html) — O_APPEND atomicity definition (HIGH confidence)
-- [Appending to a log: an introduction to the Linux dark arts — Paul Khuong](https://pvk.ca/Blog/2021/01/22/appending-to-a-log-an-introduction-to-the-linux-dark-arts/) — Linux O_APPEND practical behavior with sub-PIPE_BUF writes (HIGH confidence)
-- [Appending to a File from Multiple Processes — nullprogram](https://nullprogram.com/blog/2016/08/03/) — Cross-platform validation of the single-writer append pattern (HIGH confidence)
-- [POSIX write() is not atomic in the way that you might like — Chris Siebenmann](https://utcc.utoronto.ca/~cks/space/blog/unix/WriteNotVeryAtomic) — Caveats on the "PIPE_BUF applies to regular files" folk wisdom (HIGH confidence)
-- `/Users/johndemic/Development/projects/revenium/hermes-revenium/.planning/codebase/ARCHITECTURE.md` — Existing two-half design (HIGH confidence, internal)
-- `/Users/johndemic/Development/projects/revenium/hermes-revenium/skills/revenium/scripts/hermes-report.sh` — Current loop shape, lines 41–266 (HIGH confidence, internal)
-- `/Users/johndemic/Development/projects/revenium/hermes-revenium/skills/revenium/scripts/common.sh` — Path declarations, lines 6–16 (HIGH confidence, internal)
-- `/Users/johndemic/Development/projects/revenium/hermes-revenium/.planning/PROJECT.md` — Project requirements + Key Decisions (HIGH confidence, internal)
+- Live `revenium` CLI probes (2026-05-14): `jobs --help`, `jobs create --help`,
+  `jobs outcome --help`, `jobs get`, `meter completion --help`, plus duplicate-id
+  (HTTP 409, exit 0) and double-outcome (immutability error, exit 0) behavior
+  tests — **HIGH confidence**, direct observation.
+- `skills/revenium/scripts/hermes-report.sh`, `cron.sh`, `common.sh`,
+  `split_strategies.py`, `SKILL.md` — shipped v1.0 source — **HIGH confidence**.
+- `.planning/PROJECT.md` — v1.1 milestone scope, Key Decisions — **HIGH confidence**.
+- `skills/revenium/plugins/revenium-classifier/classifier.py` — marker-writing
+  plugin (confirmed task-type-only, unchanged by v1.1) — **HIGH confidence**.
 
 ---
-
-*Architecture research for: Hermes-Revenium task-type metering extension*
-*Researched: 2026-05-12*
+*Architecture research for: Hermes-Revenium v1.1 Agentic Job Tracking*
+*Researched: 2026-05-14*

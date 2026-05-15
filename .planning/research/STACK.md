@@ -1,329 +1,229 @@
 # Stack Research
 
-**Domain:** Agent-driven task classification + agent ↔ cron file-based contracts on top of an existing Bash/Python/sqlite3 metering skill
-**Researched:** 2026-05-12
-**Confidence:** HIGH for format/atomicity guidance, HIGH for OpenInference alignment, MEDIUM for OpenTelemetry GenAI alignment (still "Development" status)
+**Domain:** v1.1 "Agentic Job Tracking" — adding Revenium agentic-job lifecycle (`jobs create` / `--task-id` / `jobs outcome`) to the existing `revenium` Hermes skill
+**Researched:** 2026-05-14
+**Confidence:** HIGH — all CLI flags verified against `revenium schema` and `--help` on the authenticated CLI on this host; `--dry-run` exercised against the live `/v2/api/jobs` surface.
 
-This is a milestone extension to `hermes-revenium`. The existing stack (Bash + stdlib Python 3 + sqlite3 + `revenium` CLI + cron, paths declared in `scripts/common.sh`) is **not changing**. This document only covers what we add for marker writing, taxonomy maintenance, and cron-side marker consumption.
+> This supersedes the v1.0 STACK.md (task-classification milestone). The v1.0
+> stack — Bash + stdlib Python 3 + sqlite3 + `revenium` CLI + cron, paths in
+> `scripts/common.sh` — is unchanged. This document only covers the v1.1
+> agentic-job additions.
 
-## TL;DR
+## Bottom Line
 
-| Question | Answer | Confidence |
-|----------|--------|------------|
-| Agent-driven classification approach | Skill-prompt instruction + agent-managed JSON taxonomy file; lookup-first protocol embedded in `SKILL.md`. No SDK, no decorator framework. | HIGH |
-| Agent ↔ cron contract format | Per-session append-only JSONL under `~/.hermes/state/revenium/markers/<session_id>.jsonl`. One record per substantive turn, one `\n`-terminated UTF-8 line. | HIGH |
-| Atomicity on POSIX | Records must be `< 4096 bytes` and written with a single `O_APPEND` write. On Linux ext4 / macOS APFS this is atomic in practice. Hold an advisory `flock(LOCK_EX)` during the write for belt-and-suspenders safety. | HIGH |
-| Operation-type vocabulary | Reuse OpenInference `openinference.span.kind` values (`LLM`, `TOOL`, `AGENT`, `GUARDRAIL`, `CHAIN`, `RETRIEVER`, `EMBEDDING`, `EVALUATOR`, `PROMPT`, `RERANKER`). They are STABLE (1.0+) and cleanly include `GUARDRAIL` (which the OTel spec does not). | HIGH |
-| Task-type vocabulary | Agent-managed, no external standard. The OpenLLMetry RFC `gen_ai.task.type` suggestions (`research`, `analysis`, `generation`, `review`) are useful seed labels but the spec is a draft RFC, not a registry — do not bind. | HIGH |
-| Cron-side consumption | Stdlib Python heredocs only (already in use). No new dependencies. | HIGH |
+**No new tools are needed.** The entire v1.1 feature is expressible with the
+stack already in the repo: `bash` + Python 3 stdlib heredocs + `sqlite3` + the
+`revenium` CLI. The `revenium jobs` subcommand tree and the `--task-id` flag on
+`revenium meter completion` are both present in the CLI installed on this host
+(`/opt/homebrew/bin/revenium`) and were verified directly. There is **no SDK,
+no HTTP client, and no `curl` fallback** — the CLI is the complete and only
+transport. The no-new-runtime-dependency constraint holds with zero deviation.
 
-## Recommended Stack (additions only)
+The only "stack change" is a CLI **version floor**: installs must have a
+`revenium` build new enough to expose `jobs` and `meter completion --task-id`.
+The user just patched the CLI to add `--task-id`; this must be encoded as a
+preflight capability probe (see Version Compatibility below), not assumed.
+
+## Recommended Stack
 
 ### Core Technologies
 
 | Technology | Version | Purpose | Why Recommended |
 |------------|---------|---------|-----------------|
-| Bash + stdlib Python 3 (existing) | as installed | Read marker JSONL, join against ledger, scale deltas per marker | The constraint forbids new runtime deps. `json` and `os` modules in stdlib are sufficient for everything we need; Python heredocs are already the JSON tool in `hermes-report.sh`. |
-| JSON Lines (jsonlines.org) | Format spec (no version) | Marker file format: one record per agent turn | Append-friendly, line-oriented, parseable by a one-line Python heredoc, no schema framework needed. `jsonlines.org` defines exactly what we need: UTF-8, `\n` separator, no BOM, one JSON value per line. |
-| OpenInference span_kind vocabulary | Spec 1.x (Arize-AI) | Authoritative values for `--operation-type` | STABLE since 2024 release. Includes the `GUARDRAIL` value we explicitly need for self-classification overhead — OTel's `gen_ai.operation.name` enum does **not** define this. |
-| POSIX `O_APPEND` + `flock(2)` | OS-level | Multi-writer-safe append from agent process | The agent process is a single writer per session, but cron may read concurrently. `O_APPEND` on a local fs (ext4/APFS) with single `write(2)` calls under 4KB is atomic in practice on every system we support; `flock` is a cheap upgrade. |
+| `revenium` CLI | A build exposing `jobs` + `meter completion --task-id` (verified present on `/opt/homebrew/bin/revenium`, 2026-05-14) | Job lifecycle transport: `jobs create`, `jobs outcome`, and `--task-id` on `meter completion` | It is the *only* sanctioned wire path. v1.0 already shells out to `revenium meter completion`; v1.1 adds two more subcommands of the same binary. No new dependency, no new auth surface, no new error model. |
+| `bash` 4+ (`set -uo pipefail`) | GNU bash 5.2 on this host; must stay bash 3.2-safe per the `clear-halt.sh` carry-forward item | Orchestrates the new job-create / `--task-id` stamping / outcome calls inside `hermes-report.sh` | Same shell the cron pipeline already runs. New logic is array-built CLI invocations (the `cmd=( ... )` pattern at `hermes-report.sh:556-577`), not a new language. |
+| Python 3 stdlib (heredocs) | `python3` already required by `hermes-report.sh:21-24`; stdlib only (`json`, `os`, `sys`, `time`, `fcntl`, `pathlib`) | Parse job markers from JSONL, group markers by `agenticJobId`, serialize/round-trip values across the bash boundary | Identical pattern to the v1.0 `split_strategies.py` marker reader at `hermes-report.sh:334-446`. `fcntl` (stdlib) covers the mint-back-race hardening item — no new package. |
+| `sqlite3` CLI | Already required (`hermes-report.sh:17-20`) | Read-only session query against `~/.hermes/state.db` | Unchanged from v1.0. Jobs add nothing here — job identity comes from marker files, not the DB. |
 
 ### Supporting Libraries
 
 | Library | Version | Purpose | When to Use |
 |---------|---------|---------|-------------|
-| Python `json` (stdlib) | 3.x | Encode marker records, parse marker lines, parse taxonomy | Always. The default `json.dumps(...)` output is already a single line (no `indent`, no internal `\n`). |
-| Python `fcntl` (stdlib) | 3.x | `fcntl.flock(fd, LOCK_EX)` around taxonomy reads/writes | Always for taxonomy mutations. Optional but recommended for marker appends. |
-| Python `os.fsync` / `file.flush` | 3.x | Durability after writing the taxonomy file | Only on taxonomy writes. Do not fsync per marker — too expensive at agent latency. |
-| `flock(1)` CLI (util-linux on Linux, NOT installed on macOS by default) | — | Shell-level locking from `cron.sh` | **Avoid in cron path** — macOS doesn't ship `flock(1)`. Use Python `fcntl.flock` inside heredocs instead. |
+| Python `json` (stdlib) | builtin | Parse the extended job-marker JSONL; build the `--metadata` JSON string for `jobs outcome` | Every cron tick that finds job markers. Already imported in the v1.0 marker reader. |
+| Python `fcntl` (stdlib) | builtin | `flock` around `_persist_label_to_taxonomy`'s temp-file write (v1.0 carry-forward hardening) and around any new job-state file the cron writes | Concurrency-sensitive writes only. POSIX-only — acceptable, the skill declares `platforms: [macos, linux]`. |
+| Python `time` / `pathlib` / `os` / `sys` (stdlib) | builtin | Timestamps, marker-file paths, env passthrough | Already used throughout `hermes-report.sh` heredocs. No change. |
 
 ### Development Tools
 
 | Tool | Purpose | Notes |
 |------|---------|-------|
-| Python `unittest` (existing) | Test marker shape, taxonomy shape, split arithmetic | Already wired up via `tests/test_repository.py`. Add `test_marker_file_shape.py`, `test_taxonomy_file_shape.py`, `test_cron_marker_split.py` alongside it. |
-| `bash -n` syntax check (existing) | Validate new shell paths | Already invoked from `tests/test_repository.py`. Coverage extends automatically when new scripts land under `skills/revenium/scripts/`. |
+| `revenium schema` | Machine-readable CLI command tree (JSON: `commands` / `global_flags` / `exit_codes`) | Source of truth for flag verification. **Caveat:** the schema dump on this host lists the `jobs *` subcommands fully but is **stale for `meter completion`** — `meter completion` is absent from `meter`'s subcommand list even though `revenium meter completion --help` shows the full flag set including `--task-id`. Verify `meter completion` flags via `--help`, not `schema`. |
+| `revenium <cmd> --dry-run` | Preview a `jobs create` / `jobs outcome` call without mutating server state — prints `Path:` and `Body:` | Use in tests and during phase development to confirm request shape. Verified: `jobs create --dry-run` → `POST /v2/api/jobs`, `Body: map[agenticJobId:... name:... type:...]`; `jobs outcome --dry-run` → `POST /v2/api/jobs/<id>/outcome`, `Body: map[executionStatus:SUCCESS]`. |
+| Python `unittest` (stdlib) | Existing `tests/test_repository.py` invariant suite | New job-marker shape / idempotency tests extend this; no new test framework. |
+| `bash -n` | Syntax check, run from inside the Python test suite | Unchanged. |
 
-### What we are NOT installing
+## Verified CLI Surface
 
-There is no `pip install`, no `npm install`, no new system package. Stdlib Python + existing Bash idioms cover everything.
+All of the following were confirmed on the authenticated CLI on this host
+(2026-05-14). Required markers and types are quoted from `revenium schema` /
+`--help` verbatim.
 
-## File Format Specifications
+### `revenium jobs create` — verified
 
-### Marker file: `~/.hermes/state/revenium/markers/<session_id>.jsonl`
-
-**Spec:**
-- One JSON object per line; UTF-8; line terminator `\n`; no BOM
-- Each line ≤ 4096 bytes (PIPE_BUF on Linux; below the macOS-observed 256-byte O_APPEND atomicity floor is **not** practical, but local-fs POSIX semantics make single-write `O_APPEND` safe in practice — see Atomicity section)
-- `json.dumps(record, ensure_ascii=True, separators=(",",":"))` produces a guaranteed single-line string
-- File is per-session — the session ID partitions writers so contention with the cron reader is the only multi-writer concern
-
-**Recommended record schema:**
-```json
-{"ts":1715515200.123,"task_type":"code_review","operation_type":"LLM","note":"reviewed cron.sh changes"}
+```
+revenium jobs create --agentic-job-id <ID> [--name <str>] [--type <str>] [--environment <str>] [--version <str>]
 ```
 
-**Fields:**
-| Field | Type | Required | Notes |
-|-------|------|----------|-------|
-| `ts` | float (unix seconds, ms precision) | yes | Matches the timestamp format already used in the ledger (`time.time():.3f`). |
-| `task_type` | string | yes | Must come from `~/.hermes/state/revenium/task-taxonomy.json`. Use `unclassified` only as the cron's default for missing markers, not as a label the agent ever writes. |
-| `operation_type` | string | yes | One of the OpenInference span_kind enums (see vocabulary section). Defaults: `LLM` for work turns, `GUARDRAIL` for the classification turn itself. |
-| `note` | string | no | Short free-text hint for human debugging. Do not parse it. Keep records small. |
+| Flag | Type | Required | Notes |
+|------|------|----------|-------|
+| `--agentic-job-id` | string | **REQUIRED** | "User-supplied external identifier". This is the `agenticJobId` the agent mints. |
+| `--name` | string | no | "Human-readable job name" |
+| `--type` | string | no | "Job category (e.g. loan-processing)" |
+| `--environment` | string | no | "Deployment environment". Maps cleanly from `state.db.sessions.source` (already passed to `meter completion --environment`). |
+| `--version` | string | no | "Job version identifier" |
 
-**No `session_id` field needed** — it's the filename. Keeping it out of the record keeps each line well under 4KB and makes records context-free.
+`--dry-run` confirms: `POST /v2/api/jobs`, `Body: map[agenticJobId:... name:... type:...]`. Exit `0` on success.
 
-### Taxonomy file: `~/.hermes/state/revenium/task-taxonomy.json`
+### `revenium jobs outcome` — verified
 
-**Spec:**
-```json
-{
-  "version": 1,
-  "updated_at": 1715515200.123,
-  "labels": {
-    "code_review":   {"description": "Reviewing existing code for correctness, style, or fit", "first_seen": 1715000000.0},
-    "refactor":      {"description": "Restructuring code without changing observable behavior", "first_seen": 1715100000.0},
-    "research":      {"description": "Reading docs, exploring the codebase, or searching the web to learn", "first_seen": 1715200000.0}
-  }
-}
+```
+revenium jobs outcome <agenticJobId> --result SUCCESS|FAILED|CANCELLED \
+  [--outcome-type <str>] [--outcome-value <float64>] [--outcome-currency <ISO4217>] \
+  [--metadata <json-string>] [--reported-by <str>]
 ```
 
-**Why a single JSON file (not JSONL):**
-- The whole taxonomy must be read atomically by the agent on every classification turn for the lookup-first protocol
-- Mutations are infrequent (only when minting a new label); a `read → modify → write-to-tmp → rename` pattern is fine
-- `os.rename(tmp, taxonomy_file)` on POSIX is atomic within a single filesystem — the standard atomic-replace idiom
+| Flag / Arg | Type | Required | Notes |
+|------------|------|----------|-------|
+| `<agenticJobId>` | positional arg | **REQUIRED** | Positional, not a flag. |
+| `--result` | string | **REQUIRED** | "Execution result: SUCCESS, FAILED, or CANCELLED". |
+| `--outcome-type` | string | no | "Business outcome type" (e.g. `CONVERTED`). |
+| `--outcome-value` | float64 | no | "Monetary value of the outcome". |
+| `--outcome-currency` | string | no | "Currency code (ISO 4217), defaults to USD". |
+| `--metadata` | string | no | "Additional metadata as JSON string" — build with Python `json.dumps` in a heredoc. |
+| `--reported-by` | string | no | "Identifier of who reported the outcome". |
 
-**Write pattern (Python heredoc inside `SKILL.md` guidance, or a small helper script):**
-```python
-# Read under shared lock, write under exclusive lock + atomic rename
-import fcntl, json, os, tempfile, time
-TAXONOMY = "/path/to/task-taxonomy.json"
+Description literally reads **"Report a job outcome (immutable)"** — confirms the
+one-shot invariant. `--dry-run` confirms: `POST /v2/api/jobs/<id>/outcome`,
+`Body: map[executionStatus:SUCCESS]` (note: `--result SUCCESS` serializes to
+`executionStatus` in the request body).
 
-def add_label(name, description):
-    with open(TAXONOMY, "r+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        data = json.load(f)
-        if name in data["labels"]:
-            return False
-        data["labels"][name] = {"description": description, "first_seen": time.time()}
-        data["updated_at"] = time.time()
-        # Atomic replace
-        d = os.path.dirname(TAXONOMY)
-        with tempfile.NamedTemporaryFile("w", dir=d, delete=False) as tmp:
-            json.dump(data, tmp, ensure_ascii=True, indent=2)
-            tmp.flush(); os.fsync(tmp.fileno())
-            tmpname = tmp.name
-        os.rename(tmpname, TAXONOMY)
-        return True
-```
+### `revenium meter completion --task-id` — verified
 
-Two flock(2)'d processes can both think they're the writer briefly because the lock is on the original `TAXONOMY` fd while the rename swaps the inode; we mitigate by re-reading the existing labels inside the lock so a duplicate `add_label` for the same name is a no-op.
+`--task-id` is present (help text verbatim): *"Task identifier — correlates the
+completion with an agentic job (use the same value as agenticJobId)."* It slots
+into the existing `cmd=( revenium meter completion ... )` array in
+`hermes-report.sh` exactly like the v1.0 `--task-type` / `--operation-type`
+flags. Stamp it conditionally (`cmd+=(--task-id "${agentic_job_id}")`) only when
+the marker carries a job id, so marker-less / job-less sessions stay
+byte-identical to v1.0.
 
-## Vocabulary Recommendations
+> **Schema caveat:** `meter completion` is missing from the `meter` subcommand
+> list in `revenium schema` output (the schema lists `meter api-request`,
+> `api-response`, `audio`, `event`, `image`, `tool-event`, `video` — but not
+> `completion`). So `--task-id` could not be confirmed *from the schema*. It
+> **was** confirmed from `revenium meter completion --help`, which lists all 36
+> flags including `--task-id`. Treat `--help` as authoritative for `meter
+> completion`; treat `schema` as authoritative for `jobs *`.
 
-### `--operation-type` (small, fixed vocabulary): use OpenInference span_kind
+### Idempotency probes — verified
 
-| Value | Use For | Maps To |
-|-------|---------|---------|
-| `LLM` | Default for any agent work turn | OpenInference `LLM` |
-| `GUARDRAIL` | The classification turn itself (token cost of the feature) | OpenInference `GUARDRAIL` |
-| `TOOL` | Pure tool/shell-execution turns (rare in Hermes — most turns mix LLM and tools) | OpenInference `TOOL` |
-| `AGENT` | Multi-step agent orchestration if/when introduced | OpenInference `AGENT` |
-| `RETRIEVER` | Code search / vector store / grep-heavy turns | OpenInference `RETRIEVER` |
-| `CHAIN` | Connector/glue turns between steps | OpenInference `CHAIN` |
-| `EVALUATOR` | Self-eval or judge turns | OpenInference `EVALUATOR` |
-| `EMBEDDING` | Embedding-only turns | OpenInference `EMBEDDING` |
-| `RERANKER` | Reranking turns | OpenInference `RERANKER` |
-| `PROMPT` | Template rendering | OpenInference `PROMPT` |
+The v1.1 idempotency invariant ("re-running cron must never double-create a job
+or double-report an outcome") is satisfiable with CLI calls alone:
 
-**Why OpenInference over OpenTelemetry `gen_ai.operation.name`:**
+- `revenium jobs get <agenticJobId> --output json` returns **process exit `3`**
+  (`not_found`, confirmed with the raw `$?` and no pipeline masking) plus a JSON
+  body `{"error":"Resource not found.","exit_code":3,"status":404}` when the job
+  does not exist. This is a viable "does this job already exist?" probe.
+- **Recommended primary mechanism:** extend the existing append-only ledger / add
+  a sibling job-state file under `~/.hermes/state/revenium/` (path declared in
+  `common.sh`). A local marker that says "job X already created" / "outcome for
+  job X already reported" is cheaper and more reliable than a network probe, and
+  mirrors the v1.0 ledger pattern (`HERMES:<sid>:<total>:<ts>:<muid>`). Use
+  `jobs get` only as a belt-and-braces cross-check.
+- Verified `revenium` exit codes (from `schema.exit_codes`): `ok=0`,
+  `general=1`, `auth=2`, `not_found=3`, `validation=4`, `network=5`. Branch
+  cron retry/skip logic on these.
 
-1. **Stability.** OpenInference is STABLE (1.x). OTel GenAI is still "Development" status as of 2026 and has had breaking changes. Aligning a wire-format field with an experimental spec is a risk we don't need to take.
-2. **`GUARDRAIL` is defined.** OpenInference explicitly defines `GUARDRAIL` ("A span that represents calls to a component to protect against jailbreak user input prompts ..."). We're using it for a slightly different purpose (self-classification overhead), but the analytical intent — "this is overhead, not work" — maps cleanly. OTel has no equivalent.
-3. **OTel's enum is verb-shaped, not category-shaped.** OTel's `gen_ai.operation.name` values are `chat`, `create_agent`, `embeddings`, `execute_tool`, `generate_content`, `invoke_agent`, `invoke_workflow`, `retrieval`, `text_completion`. These describe *what API call was made*, not *what kind of work the agent did*. We want the latter for analytics on the Revenium side. OpenInference's span_kind values are category-shaped and a better fit.
-4. **Spec compatibility cost is low.** A future migration toward `gen_ai.operation.name` is a flat string-substitution if we want it later. We are not embedding ourselves in the wider OTel ecosystem with these strings — Revenium consumes them as opaque labels.
+## Integration Points (for the roadmapper / phase planners)
 
-**OTel mapping for future migration (FYI only, not required now):**
-| Our value (OpenInference) | OTel `gen_ai.operation.name` closest |
-|---------------------------|--------------------------------------|
-| `LLM` | `chat` or `generate_content` |
-| `TOOL` | `execute_tool` |
-| `AGENT` | `invoke_agent` |
-| `EMBEDDING` | `embeddings` |
-| `RETRIEVER` | `retrieval` |
-| `GUARDRAIL` | (no OTel equivalent — keep our own) |
-| `CHAIN` / `EVALUATOR` / `RERANKER` / `PROMPT` | (no OTel equivalents) |
-
-Confidence: HIGH. Confirmed against the OpenInference spec page (Arize-AI) and the OTel registry page.
-
-### `--task-type` (open, agent-managed vocabulary)
-
-There is **no industry-standard controlled vocabulary** for AI agent task types as of 2026. The closest published work:
-
-- **OpenLLMetry RFC #3460** (Traceloop, draft). Proposes `gen_ai.task.type` with suggested values `research`, `analysis`, `generation`, `review`. This is **a draft RFC, not a registry** — its values are seed examples, not a normative vocabulary. Status: HIGH confidence it's a draft, MEDIUM confidence on the exact list.
-- **OpenTelemetry GenAI conventions.** Define `gen_ai.workflow.name` and (in the agent-spans page) `gen_ai.agent.name`, but no enumerated task vocabulary.
-
-**Recommendation:** ship a seed taxonomy populated by the agent on first run, drawing from the OpenLLMetry RFC's four labels plus a Hermes-flavored extension. Concrete seeds:
-
-```json
-{
-  "labels": {
-    "research":      {"description": "Reading docs/code or searching to learn before acting"},
-    "analysis":      {"description": "Diagnosing a bug, profiling, or characterizing behavior"},
-    "generation":    {"description": "Writing new code, tests, or docs from scratch"},
-    "review":        {"description": "Reviewing existing code/PRs/diffs"},
-    "refactor":      {"description": "Restructuring without changing behavior"},
-    "planning":      {"description": "Producing a plan, roadmap, or design doc"},
-    "debugging":     {"description": "Reproducing and fixing a defect"}
-  }
-}
-```
-
-The skill-prompt rule (load-bearing, must be verbatim in `SKILL.md`):
-
-> Before classifying, read `task-taxonomy.json`. If an existing label fits, use it exactly as spelled. Mint a new label only if no existing label is appropriate. New labels must be lowercase, snake_case, ≤ 32 chars.
-
-Confidence: HIGH on "no standard exists", MEDIUM on the specific seed list (the four OpenLLMetry suggestions are explicit; the additions are domain judgement).
-
-## Atomicity & Durability Strategy
-
-### What we need
-
-Atomic single-line appends from one writer (the agent process inside Hermes) with a concurrent reader (cron, every 60s, never writes the marker file). One marker file per session — no cross-session contention.
-
-### POSIX guarantees we can rely on
-
-1. **`O_APPEND` semantics** (POSIX): "the file offset shall be set to the end of the file prior to each write" with no intervening operation. This holds for **local filesystems** — ext4 and APFS both honor it.
-2. **PIPE_BUF (4096 bytes)** is the spec-guaranteed atomic write size for pipes. The popular belief that it applies to file appends is **not in the spec** but holds in practice on ext4/APFS for short single-write appends.
-3. **macOS observed atomicity floor** has been measured as low as 256 bytes in some benchmarks; the reasonable engineering interpretation is "keep records small and don't rely on the 4KB ceiling".
-4. **`os.rename(tmp, dst)` on a single filesystem** is atomic on POSIX — used for taxonomy mutations only.
-
-### Practical rules
-
-- **Marker records must be ≤ 1024 bytes serialized.** Well under all observed atomicity floors, keeps lines easy to grep, leaves headroom for the `note` field.
-- **Open with `O_APPEND` and do one `write(2)`-equivalent call per record.** In Python that means `open(path, "ab")` and a single `f.write(line.encode("utf-8") + b"\n")` followed by `f.flush()`. No higher-level buffering.
-- **Belt-and-suspenders: `fcntl.flock(LOCK_EX)` around the write.** Cost is microseconds, eliminates any residual ambiguity from filesystem-specific edge cases. The cron reader does not need to lock — it reads a snapshot consistent with whatever the file looks like at `open()` time, and torn-write protection from POSIX `O_APPEND` plus our flock means a partial line should never appear.
-- **Do not `os.fsync` per marker.** Crash durability for individual markers is acceptable to lose. Markers are recomputable from the next agent turn or simply absent.
-- **Do `os.fsync` once on taxonomy mutations.** Taxonomy state is harder to reconstruct and should survive crashes.
-- **The cron reader tolerates partial last line.** If the last line doesn't parse, drop it; the next cron cycle will pick it up. (Practical concession; with `O_APPEND` + `flock` we should never see this, but defense in depth is free.)
-
-### Why not pipes / sockets / sqlite
-
-| Alternative | Why not |
-|-------------|---------|
-| Named pipes (`mkfifo`) | Pipes are point-to-point and require a reader to be present. Cron is not present during agent turns. |
-| Unix domain sockets | Adds a daemon. Forbidden by the no-new-runtime-deps constraint. |
-| Write to the existing `state.db` | The skill is a pure consumer of Hermes' DB. Hard rule. |
-| A new sqlite db owned by the skill | sqlite is already a runtime dep, so technically allowed. But: marker files are append-only event streams the cron reads then archives. sqlite is overkill, and a per-session JSONL file is dramatically easier to inspect with `cat`/`tail`/`jq` from the install. Reserve sqlite for the case where we discover we need queries. |
-
-Confidence: HIGH on POSIX semantics and practical recommendations; MEDIUM on the specific 1024-byte ceiling (a defensive choice, not a measured limit).
+| File | Change | Notes |
+|------|--------|-------|
+| `skills/revenium/scripts/common.sh` | Add any new state-file path(s) here — e.g. a job-state / job-ledger file under `${STATE_DIR}`. **Declare nowhere else.** | `test_runtime_paths_are_hermes_native` enforces this. Follow the `${VAR:-default}` env-override shape used at lines 17-22. |
+| `skills/revenium/scripts/hermes-report.sh` | (1) New preflight capability probe for `jobs` + `--task-id` (lines 13-32 area). (2) In the per-marker emission loop (`:553-610`), read `agenticJobId` from the extended marker and `cmd+=(--task-id "${agentic_job_id}")`. (3) New idempotent `jobs create` call before stamping the first completion for a job. (4) New `jobs outcome` call once per terminated arc. | The `cmd=( ... )` array idiom at `:556-577` is the template for the new `jobs` invocations too. Keep the zero-marker / job-less fallthrough (`:611-675`) byte-identical for backward compat. |
+| Job-marker JSONL contract | Extend the v1.0 marker schema with optional job fields (`agenticJobId`, job `name`/`type`, outcome `result` + optional `outcome-*`). | Marker reader at `hermes-report.sh:340-446` already does per-line `json.loads` with `REQUIRED_KEYS` filtering — extend that key set / optional-key handling there. Per-line 4 KB cap and torn-line tolerance already exist. |
+| `skills/revenium/SKILL.md` | FINAL ACTION marker block gains job-mint instructions (mint `agenticJobId`, declare job `name`/`type` + outcome at arc end). | Stack-neutral (prompt text), but it is the producer of the marker fields the cron consumes. |
 
 ## Installation
 
-No new packages.
+No installs. The v1.1 stack is a strict subset of what is already on a working
+v1.0 host:
 
 ```bash
-# Nothing to install. Stdlib only.
-# Verify what is already required:
-command -v python3   # >= 3.7 in practice; json/fcntl/os.fsync all stdlib
-command -v sqlite3   # already required by hermes-report.sh
-command -v revenium  # already required
-```
+# Nothing to install. Required tooling already present and preflight-checked
+# by hermes-report.sh:13-32:
+#   - revenium  (CLI — must expose `jobs` + `meter completion --task-id`)
+#   - sqlite3
+#   - python3   (stdlib only — json, os, sys, time, fcntl, pathlib)
+#   - bash
 
-The only filesystem addition is the markers directory:
-```bash
-mkdir -p "${HERMES_HOME}/state/revenium/markers"
+# The ONLY new preflight: confirm the CLI is new enough (see Version
+# Compatibility). Suggested capability probe, exit-0-and-warn on miss
+# (matches the existing fail-open preflight idiom at hermes-report.sh:13-32):
+revenium jobs --help >/dev/null 2>&1 \
+  || { warn "revenium CLI lacks 'jobs' — skipping job tracking"; }
+revenium meter completion --help 2>&1 | grep -q -- '--task-id' \
+  || { warn "revenium CLI lacks 'meter completion --task-id' — skipping job tracking"; }
 ```
-
-This is created by `install-cron.sh` (or wherever the existing install path lives). Path lives in `scripts/common.sh` per the existing discipline.
 
 ## Alternatives Considered
 
 | Recommended | Alternative | When to Use Alternative |
 |-------------|-------------|-------------------------|
-| Per-session JSONL marker file | One global JSONL marker file with `session_id` in each record | If sessions become very short-lived and the per-session inode churn becomes a problem. Trade-off: global file has multi-writer contention from many agent processes. Per-session is the simpler default. |
-| OpenInference span_kind values for `--operation-type` | OpenTelemetry `gen_ai.operation.name` values | When/if OTel GenAI conventions reach Stable status AND define a `GUARDRAIL` equivalent. Today, no. |
-| Agent-managed flat taxonomy (single file) | Hierarchical taxonomy with category > subtype | If the label set grows past ~50 distinct labels. At that scale a `category/subtype` shape (e.g. `code/review`, `code/refactor`, `docs/write`) might help analytics on the Revenium side. Defer; revisit only if drift becomes visible. |
-| `fcntl.flock` in Python heredocs | `flock(1)` CLI tool | If we ever drop the shell-script-from-cron layer and go pure-Python. Today `flock(1)` is missing on stock macOS, so we don't use it. |
-| `json.dumps(separators=(",",":"))` | `json.dumps()` default (`", "`, `": "`) | The default is also fine since `indent=None` already produces single-line output. Compact form is just slightly smaller. Cosmetic. |
-| Equal split across markers (S2, per PROJECT.md) | Agent-weighted split (S3) or guardrail-estimator (S4) | Already decided in `PROJECT.md`: defer S3/S4 unless attribution drifts noticeably in practice. Stack-level note only: S3 requires the agent to estimate its own per-turn token weight, which it can't reliably do. S4 requires an estimator we'd have to maintain. S2's equal-split is robust to both. |
+| `revenium` CLI for all job calls | Direct HTTP to `/v2/api/jobs` (via `curl` or a Python stdlib `urllib.request` heredoc) | **Never, for v1.1.** Only if a needed operation were CLI-unreachable — it is not. `urllib.request` is stdlib so it would *technically* honor the no-new-dependency rule, but it duplicates the CLI's auth/retry/error model and is a clear deviation from the repo's "CLI is the transport" architecture. Reject. |
+| Local job-state file for idempotency | `revenium jobs get` network probe on every tick | Use the network probe only as a secondary cross-check. A local file is faster, works offline, and matches the v1.0 ledger precedent. |
+| `--metadata` built via Python `json.dumps` heredoc | `jq -n` to build the JSON string | `jq` is *not* a declared dependency of this repo (it happens to be on this host via Anaconda, but `hermes-report.sh` never preflights it). Building JSON in the already-required `python3` keeps the dependency set unchanged. Do not introduce `jq`. |
 
 ## What NOT to Use
 
 | Avoid | Why | Use Instead |
 |-------|-----|-------------|
-| `opentelemetry-sdk`, `opentelemetry-instrumentation-*` Python packages | Heavy. New runtime dep. Marker files do not need to be OTLP spans — Revenium is the sink, not an OTel collector. The wire protocol is `revenium meter completion`, not OTLP. | Stdlib `json`. Adopt OpenInference span_kind **values** without adopting the SDK. |
-| `openllmetry-sdk` / Traceloop SDK | Decorator-based instrumentation framework. Requires modifying agent code paths we don't own (Hermes itself). Adds Python dep. | The skill prompt instructs the agent to write markers directly. The agent is the instrumentation. |
-| `openinference-semantic-conventions` Python package | We're using ~10 string constants. Pulling the package for that is silly. | Hard-code the OpenInference span_kind strings in `SKILL.md` and `hermes-report.sh`. Add a comment noting the source so future maintainers can audit. |
-| `pydantic` or any schema-validation library for marker records | New dep. Validation can be done in 6 lines of stdlib Python in the cron path. | Validate in `hermes-report.sh`'s Python heredoc: check `ts` is float, `task_type` is str, `operation_type` is in the allow-list, skip line on failure with a warn. |
-| `jq` as a runtime dep | Not portable; macOS doesn't ship it. Already a pattern violation in the existing scripts (which use Python heredocs for JSON). | Continue the existing Python-heredoc pattern. |
-| `inotifywait` / `fswatch` for marker change detection | macOS doesn't ship `inotifywait`; cron-driven design already polls every 60s. Real-time is explicitly out of scope (PROJECT.md). | The 60s cron tick is the trigger. |
-| `flock(1)` CLI in scripts | Missing on default macOS install. Adds a portability landmine. | `fcntl.flock` inside Python heredocs (already a stdlib module on every Python we support). |
-| `os.O_APPEND` opened then buffered through Python's `open()` text mode | Default text mode buffering may batch multiple records into one write, defeating per-line atomicity. | `open(path, "ab", buffering=0)` then encode to UTF-8 bytes explicitly; **or** `open(path, "a")` + immediate `f.flush()` after every single `f.write(line + "\n")`. The first is stricter. |
-| Random UUIDs or trace IDs as marker IDs | Adds churn; markers are positional (filename + line offset). | Identify markers by `(session_id, line_index)` for ledger idempotency, or by `(session_id, ts)` if line index proves fragile under truncation/rotation. |
-| Compressing marker files (`.jsonl.gz`) | Premature. Marker files are tiny (one short JSON per turn). | Plain `.jsonl`. Rotate/archive after Hermes session ends if size becomes an issue (it won't). |
-| Storing the taxonomy in `state.db` or in `config.json` | Mixes mutation cadences. The taxonomy mutates per-agent-decision; `config.json` is human/setup-managed; `state.db` is Hermes-owned. | Separate `task-taxonomy.json` file declared in `common.sh`. |
+| `requests` / `httpx` / any pip HTTP client | Hard violation of the no-new-runtime-dependency constraint; the repo has deliberately never had an HTTP client. | `revenium` CLI subcommands. |
+| `curl` for job calls | Not a declared/preflighted dependency; bypasses the CLI's auth and error model; flagged as a deviation in the milestone brief. | `revenium jobs create` / `revenium jobs outcome`. |
+| `jq` for building/parsing job JSON | Not preflighted by `hermes-report.sh`; its presence on this host is incidental (Anaconda). Relying on it would add an undeclared dependency. | Python 3 stdlib `json` in a heredoc — the established pattern. |
+| `revenium schema` as the source of truth for `meter completion` flags | The schema dump on this host omits the `meter completion` subcommand entirely (stale). Trusting it would make you think `--task-id` does not exist. | `revenium meter completion --help` for `meter completion`; `revenium schema` for the `jobs *` tree. |
+| A Revenium SDK / language binding | None is in use; introducing one is a new dependency and a new failure surface. | The CLI is feature-complete for v1.1. |
+| Assuming `--task-id` / `jobs` exist on every install | The user *just patched* the CLI to add `--task-id`. Older installs will not have it. Silent failure would break metering. | A preflight capability probe that fails open (exit 0 + `warn`), matching `hermes-report.sh:13-32`. |
+| Branching cron logic on `$?` of a piped `revenium` call | A pipeline (e.g. `revenium jobs get ... | head`) masks the real process exit with the last pipe stage's exit. Observed: `jobs get <missing>` returned `0` through `| head` but `3` raw. | Capture exit without a pipe: `revenium jobs get ... >tmp 2>&1; rc=$?`. |
 
 ## Stack Patterns by Variant
 
-**If the agent process can reliably write its own per-turn token counts** (e.g. Hermes adds an env var or hook later):
-- Drop S2 equal-split in the cron; have the agent write `tokens_in/tokens_out` into each marker record
-- Cron then attributes per-marker exactly instead of splitting evenly
-- Wire shape unchanged; just additional optional fields on each marker line
-- Confidence: HIGH that this is a clean upgrade path; the marker schema reserves space for it.
+**If the host's `revenium` CLI is too old (no `jobs` subcommand or no `--task-id`):**
+- Skip all job-tracking logic; continue v1.0 metering unchanged.
+- Emit a `warn` via the `common.sh` logger and `exit 0` — never abort the cron
+  pipeline. This is the established fail-open preflight idiom.
 
-**If a second agent (or a non-Hermes agent) ever writes to the same session's marker file:**
-- The `fcntl.flock(LOCK_EX)` guard already handles this — multi-writer becomes safe at the cost of brief blocking
-- No schema change needed
-- Confidence: HIGH
+**If a session's markers carry no `agenticJobId` (older skill, job-less arc):**
+- Do not call `jobs create`, do not pass `--task-id`. The `meter completion`
+  call is byte-identical to v1.0 (`--task-type` / `--operation-type` only).
+- This is the backward-compatibility guarantee — verifiable by diffing the
+  emitted `cmd` array against the v1.0 zero-marker fallthrough at `:620-641`.
 
-**If marker files grow huge** (long Hermes sessions, hundreds of substantive turns):
-- Rotate per-cron-window: cron reads, processes, then renames `<sid>.jsonl` to `<sid>.<unix_ts>.jsonl.processed` and starts fresh
-- Or truncate-after-read with the same flock guarding the boundary
-- Confidence: MEDIUM — this is speculative; current expected scale is dozens of markers per session
-
-**If Revenium adds native task-type/operation-type validation server-side:**
-- The taxonomy can become advisory rather than load-bearing on this side
-- No client-side change needed; we already emit consistent labels
-- Confidence: LOW that this happens soon, but planning for it costs nothing
+**If the same job spans multiple cron ticks:**
+- `jobs create` must be guarded by a local "already created" record so the
+  second tick does not re-create. `jobs outcome` must be guarded the same way
+  (it is server-side immutable — a double call is a hard error, not a no-op).
+- Reuse the append-only-ledger discipline from v1.0; the idempotency key is the
+  `agenticJobId`.
 
 ## Version Compatibility
 
-| Package | Constraint | Notes |
-|---------|------------|-------|
-| Python `json` | stdlib, any 3.x | `json.dumps()` with default args has produced single-line output since Python 2.6. No version risk. |
-| Python `fcntl` | stdlib, any POSIX 3.x | macOS and Linux both have it. Windows does not — but `SKILL.md` already declares `platforms: [macos, linux]`. |
-| `revenium` CLI | Any version with `meter completion --task-type` and `--operation-type` flags | The CLI surface used here is the same that already exists in `hermes-report.sh:217-235`; we add `--task-type` and `--operation-type` to the same `cmd` array. Verify presence in the same `command -v revenium` precheck. |
-| OpenInference span_kind | Spec 1.x (stable) | The values we use are unlikely to change. If they ever do, it's a string-constant swap. |
-| OpenTelemetry GenAI semconv | Development | **Not** binding for us. Mentioned only as a future-migration reference. |
-| JSON Lines | jsonlines.org spec | No version. The format is stable and trivial. |
-
-## Cross-Reference to Existing Code
-
-| Existing file | What changes |
-|---------------|--------------|
-| `skills/revenium/scripts/common.sh` | Add `MARKERS_DIR="${STATE_DIR}/markers"` and `TAXONOMY_FILE="${STATE_DIR}/task-taxonomy.json"`. All new paths live here; the path-discipline test enforces this. |
-| `skills/revenium/scripts/hermes-report.sh` | Inside the existing `while IFS='\|' read` loop, before building the `cmd` array, read markers for `${sid}` written since `${last_report_ts}`. If none, set `task_type=unclassified`, no `--operation-type`, emit one call as today. If N markers, divide the delta by N, emit N calls each with that marker's `task_type`/`operation_type`. Ledger format extends to `HERMES:<sid>:<total_tokens>:<unix_ts>:<marker_count>` or similar — preserves backward-compat prefix-grep. |
-| `skills/revenium/SKILL.md` | Add the lookup-first classification protocol (verbatim text the agent reads on every turn) and the marker-write contract. Add `metadata.hermes.markers_path` advisory note if Hermes consumes it. |
-| `tests/test_repository.py` | New tests: marker file shape, taxonomy file shape, cron marker-split behavior under representative inputs (0 markers, 1 marker, N markers, mixed `GUARDRAIL`+`LLM`). |
+| Component | Requirement | Notes |
+|-----------|-------------|-------|
+| `revenium` CLI | Must expose `revenium jobs *` **and** `revenium meter completion --task-id`. The CLI has **no `--version` flag** (`revenium --version` errors with "unknown flag: --version"). | Detect by capability, not by version string: `revenium jobs --help` and `grep -- --task-id` on `revenium meter completion --help`. Both confirmed present on `/opt/homebrew/bin/revenium` on this host 2026-05-14. The user's recent `--task-id` patch means a meaningful population of installs will lack it — the probe is mandatory. |
+| `bash` | 3.2+ (must run on stock macOS bash 3.2). | The v1.1 hardening backlog includes a `clear-halt.sh` bash-3.2 fix (`${VAR@Q}` is bash 4.4+). New job code must avoid bash-4-only syntax for the same reason. |
+| Python 3 | No minimum pinned; stdlib only. `fcntl` is POSIX-only — fine, skill targets macOS/Linux only. | Same as v1.0. |
+| `sqlite3` | Any 3.x. | Unchanged; jobs add no DB usage. |
+| `revenium schema` JSON shape | Keys: `commands` / `global_flags` / `exit_codes`. Each command node: `path` / `description` / `subcommands` / `flags` (each flag: `name`/`type`/`required`/`default`/`usage`). | Useful for tests, but **not reliable for `meter completion`** (stale — that subcommand is absent). Pin tests for that one command to `--help` output. |
 
 ## Sources
 
-- [OpenTelemetry GenAI registry (`gen_ai.operation.name` enum)](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/) — verified enum values; status is "Development". HIGH confidence on values, MEDIUM on stability for external alignment.
-- [OpenTelemetry GenAI agent and framework spans](https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/) — confirms `create_agent`, `invoke_agent`, `invoke_workflow`, `execute_tool` as the agent-side enums.
-- [OpenTelemetry GenAI semantic conventions overview](https://opentelemetry.io/docs/specs/semconv/gen-ai/) — confirms Development status as of 2026; `OTEL_SEMCONV_STABILITY_OPT_IN` migration mechanism.
-- [OpenInference Semantic Conventions (Arize-AI)](https://github.com/Arize-ai/openinference/blob/main/spec/semantic_conventions.md) — STABLE 1.x. Defines `LLM`, `EMBEDDING`, `CHAIN`, `RETRIEVER`, `RERANKER`, `TOOL`, `AGENT`, `GUARDRAIL`, `EVALUATOR`, `PROMPT`. HIGH confidence.
-- [OpenLLMetry RFC #3460: AI Agent Observability semconv](https://github.com/traceloop/openllmetry/issues/3460) — draft; proposes `gen_ai.task.type` with seed values `research`, `analysis`, `generation`, `review`. HIGH confidence it's a draft, MEDIUM confidence on exact contents (the page is an issue, not a finalized spec).
-- [JSON Lines spec (jsonlines.org)](https://jsonlines.org/) — UTF-8, `\n` separator, no BOM, trailing newline recommended-not-required, `.jsonl` extension. HIGH confidence.
-- [POSIX write(3p) — atomic O_APPEND semantics](https://man.archlinux.org/man/write.3p) — file offset adjustment and write are atomic with O_APPEND. HIGH confidence on the POSIX guarantee.
-- [Are File Appends Really Atomic? (Not The Wizard, 2014, plus 2018 macOS comments)](https://www.notthewizard.com/2014/06/17/are-files-appends-really-atomic/) — practical evidence: 4096-byte atomicity on Linux/ext4 is common but not specified for files; macOS observed as low as 256 bytes in some tests. Drives the "keep records small + flock for belt-and-suspenders" recommendation. MEDIUM-HIGH confidence on the practical guidance.
-- [Appending to a File from Multiple Processes (Chris Wellons, nullprogram)](https://nullprogram.com/blog/2016/08/03/) — recommends atomic-record design and direct write(2)/O_APPEND for log appenders; warns against buffered I/O for cross-process appenders. HIGH confidence.
-- [flock(2) Linux manual page](https://man7.org/linux/man-pages/man2/flock.2.html) — advisory exclusive lock semantics used for the taxonomy mutation path. HIGH confidence.
-- [Python `json` module docs](https://docs.python.org/3/library/json.html) — `json.dumps` default produces single-line output; suitable for JSONL. HIGH confidence.
-- Existing repo: `/Users/johndemic/Development/projects/revenium/hermes-revenium/skills/revenium/scripts/hermes-report.sh` — current `cmd` array (lines 216–248) shows where `--task-type`/`--operation-type` will be inserted. HIGH confidence.
-- Existing repo: `/Users/johndemic/Development/projects/revenium/hermes-revenium/.planning/PROJECT.md` — confirms S2 split is decided; defines the GUARDRAIL-for-classification choice. HIGH confidence.
+- `revenium schema` (live, authenticated CLI on this host, 2026-05-14) — verified the full `jobs` subcommand tree (`create`, `outcome`, `get`, `list`, `transactions`, `types`, `update`, `delete`, `roi`, `conversion-funnel`), all `jobs` flags/types/required-markers, plus `global_flags` and `exit_codes`. HIGH.
+- `revenium jobs create --help`, `revenium jobs outcome --help` (live CLI, 2026-05-14) — cross-checked flag names, required markers, positional `<agenticJobId>` arg, and usage examples. HIGH.
+- `revenium meter completion --help` (live CLI, 2026-05-14) — confirmed `--task-id` exists with the exact "correlates the completion with an agentic job" usage text; captured the full 36-flag set. Flagged: `meter completion` is absent from the `schema` dump. HIGH.
+- `revenium jobs create --dry-run`, `revenium jobs outcome --dry-run`, `revenium jobs get <missing>` (live CLI, 2026-05-14) — confirmed request shapes (`POST /v2/api/jobs`, `POST /v2/api/jobs/<id>/outcome`, body field `executionStatus`), the `(immutable)` outcome semantics, and `not_found` → raw process exit `3`. HIGH.
+- `skills/revenium/scripts/common.sh`, `skills/revenium/scripts/hermes-report.sh` (repo, read directly) — confirmed integration points, the `cmd=( ... )` array idiom, the fail-open preflight pattern, and the no-HTTP-client status quo. HIGH.
+- `.planning/PROJECT.md` (repo) — v1.1 milestone scope, constraints, Key Decisions (`--task-id` is the wire link, outcomes one-shot). HIGH.
 
 ---
-
-*Stack research for: agent-driven task classification + JSONL agent ↔ cron contract on top of an existing zero-dep Bash/Python/sqlite3/revenium-CLI skill.*
-*Researched: 2026-05-12*
+*Stack research for: v1.1 agentic-job tracking on the `revenium` Hermes skill*
+*Researched: 2026-05-14*
