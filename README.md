@@ -163,6 +163,9 @@ bash ~/.hermes/skills/revenium/scripts/budget-check.sh
 # Clear an active halt
 bash ~/.hermes/skills/revenium/scripts/clear-halt.sh
 
+# Prune stale marker files (30+ days old by default; --dry-run to preview)
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh
+
 # (Re)install the per-minute cron entry
 bash ~/.hermes/skills/revenium/scripts/install-cron.sh
 
