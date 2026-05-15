@@ -50,7 +50,8 @@ Summary: [MILESTONES.md](./MILESTONES.md)
   2. The `kind:"job"` JSONL line schema is defined and documented as an additive extension of the existing `markers/<sid>.jsonl` contract — never a per-turn field, never a separate file — and a test pins its shape.
   3. The cron marker reader branches on `kind`: absent `kind` is parsed as `"task"` (v1.0 path), `kind:"job"` is collected as a job declaration, unknown `kind` is skipped — and `REQUIRED_KEYS` for task markers is unchanged so an un-modified v1.0 cron skips job lines rather than crashing.
   4. A regression test asserts a job-less / marker-less session produces byte-identical `revenium meter completion` argv to v1.0 — backward compatibility is verified, not assumed.
-**Plans**: TBD
+**Plans**: 1 plan
+- [ ] 07-01-PLAN.md — common.sh path scaffolding, kind-aware marker reader branch, TEST-01/TEST-02 invariant tests
 
 ### Phase 8: Job Declaration Prompt Block
 **Goal**: The Hermes agent reliably declares one well-formed, business-meaningful job per completed task arc — minting a specific `agenticJobId`, selecting a seed job type, and self-reporting a conservative outcome — including on the budget-halt path.
@@ -110,7 +111,7 @@ Phases execute in numeric order: 7 → 8 → 9 → 10 → 11. Phase 11 (Hardenin
 | 4. Wire Enrichment | v1.0 | 1/1 | Verified | 2026-05-14 |
 | 5. Housekeeping & Compat Hardening | v1.0 | 4/4 | Verified | 2026-05-15 |
 | 6. Mechanical Classification via agent:end Hook | v1.0 | 4/4 | Verified | 2026-05-14 |
-| 7. Job Marker Schema & State Scaffolding | v1.1 | 0/TBD | Not started | - |
+| 7. Job Marker Schema & State Scaffolding | v1.1 | 0/1 | Planned | - |
 | 8. Job Declaration Prompt Block | v1.1 | 0/TBD | Not started | - |
 | 9. Cron Job Creation & `--task-id` Linkage | v1.1 | 0/TBD | Not started | - |
 | 10. Cron Outcome Reporting & Idempotency | v1.1 | 0/TBD | Not started | - |
