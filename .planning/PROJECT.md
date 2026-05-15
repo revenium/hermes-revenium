@@ -173,12 +173,12 @@ necessary and why attribution is approximate, not exact.
 |----------|-----------|---------|
 | Granularity = per turn, not per session | Per-session loses the signal the user actually wants; one Hermes session can span many distinct activities | — Pending |
 | Agent self-classifies after each substantive turn | LLM-classify-after-the-fact and skill-name-derived approaches were rejected: the former duplicates the agent's own knowledge; the latter is too coarse | — Pending |
-| Controlled-vocabulary taxonomy with strict lookup-first reuse | Pure free-form labels fragment (`code_review` / `code-review` / `review_code`); a per-host taxonomy file keeps Revenium-side labels consistent | — Pending |
+| LLM mints specific labels; reuses only on exact match | Pure free-form labels fragment (`code_review` / `code-review` / `review_code`); a per-host taxonomy file keeps Revenium-side labels consistent. Lookup-first reuse pressure removed via quick task 260514-nfb — LLM now mints specific descriptive labels by default and reuses only when the same specific work recurs | Shipped (Phase 5) |
 | Marker file (JSONL per session) is the agent ↔ cron contract | Hermes state.db has no per-turn record; the agent can't call `revenium meter completion` itself reliably without per-turn token visibility. Markers let the cron remain the source of truth for token math | — Pending |
 | Equal split (S2) across markers in a cron window | Simplest defensible attribution given no per-turn token data; cleanly separates `CHAT` vs `GUARDRAIL` rows on the Revenium side; bias is bounded and roughly self-cancels at volume | — Pending |
 | `--operation-type GUARDRAIL` for the classification turn | Distinguishes overhead-from-self-classification from task work in Revenium analytics; lets us measure the cost of the feature itself | — Pending |
 | Default to `--task-type unclassified` on no-marker sessions | Preserves backward compat for older installs and gives Revenium a non-null bucket for unaccounted spend | — Pending |
-| Classify substantive turns only, not every turn | Trivial acks and one-word replies would pollute the taxonomy and burn guardrail tokens without analytic benefit | — Pending |
+| D-07 heuristic skip removed (was dead code) | The D-07 heuristic skip predicate (`tool_count == 0 AND len(response) < 200`) was always true because `response=None` is always passed from the plugin entrypoint, silently dropping ~94% of sessions. Removed via quick task 260514-n8e; the classifier now fires on every session end | Shipped (Phase 5) |
 | Taxonomy growth is agent-managed, no automatic merge pass | Initial scope; if drift becomes a problem in practice a periodic dedupe pass can be added later | — Pending |
 
 ## Evolution
@@ -198,5 +198,14 @@ This document evolves at phase transitions and milestone boundaries.
 3. Audit Out of Scope — reasons still valid?
 4. Update Context with current state
 
+## Evolution Notes
+
+Dated record of decisions that were rewritten after shipping. Each entry cites the originating quick task or phase that triggered the change.
+
+| Date | Decision | Quick Task | Change Summary |
+|------|----------|------------|----------------|
+| 2026-05-14 | D-3 (taxonomy reuse) | 260514-nfb | Lookup-first reuse pressure removed. LLM now mints specific descriptive labels by default and reuses only when the same specific work recurs. Live evidence: 12 of 16 markers landed on `generation` with old framing; mint-first prompt eliminated the collapse. |
+| 2026-05-14 | D-8 (trivial-skip) | 260514-n8e | D-07 heuristic skip was dead code — `response=None` always collapses the `len(response) < 200` predicate to `True`, silently dropping ~94% of sessions. Removed from `classifier.py`; classifier now fires on every `on_session_end` event. |
+
 ---
-*Last updated: 2026-05-12 after initialization*
+*Last updated: 2026-05-14 after Phase 5 housekeeping (D-3 / D-8 rewritten per quick tasks 260514-nfb / 260514-n8e)*

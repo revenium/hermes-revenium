@@ -62,3 +62,25 @@ This keeps mutable state out of the skill directory itself and matches Hermes-st
 
 - `~/.hermes/skills/` → skill content
 - `~/.hermes/state/` → runtime state and logs
+
+## Operational hygiene
+
+Over time, the skill accumulates JSONL marker files under `~/.hermes/state/revenium/markers/` — one per Hermes session. These files are the input to the cron's per-turn attribution split (see `references/setup.md` for the full attribution and marker/taxonomy contract). On long-running hosts they grow without bound unless periodically pruned.
+
+The skill ships an operator-invoked pruning script for this purpose:
+
+```bash
+# Preview what would be removed (no files deleted)
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh --dry-run
+
+# Remove stale marker files
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh
+```
+
+The script determines staleness by reading the latest ledger row for each session. Marker files whose most-recently-reported ledger timestamp is older than the retention threshold are removed. Orphan markers (no ledger entry) fall back to file modification time for the staleness check.
+
+- **Default retention:** 30 days.
+- **Override:** set `REVENIUM_MARKER_RETENTION_DAYS=<n>` in the environment before invoking the script to use a different threshold.
+- **Marker location:** `~/.hermes/state/revenium/markers/`
+
+The script is NOT wired into the per-minute cron — it is an operator-invoked maintenance action. Run it periodically (for example, monthly) to reclaim disk space. For the full operator runbook including the manual UAT triple-case (old / fresh / orphan fixture), see [`references/setup.md`](../skills/revenium/references/setup.md).

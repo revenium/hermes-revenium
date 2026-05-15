@@ -63,7 +63,7 @@ Requirements for the initial release. Each maps to roadmap phases. Drawn from PR
 - [x] **COMPAT-01**: Existing installs without markers continue to meter exactly as before, differing only in carrying `--task-type unclassified` on the wire (verified via byte-by-byte argv diff against current behavior)
 - [ ] **COMPAT-02**: A conservation test pins `sum(split_calls.numeric_fields) == input_delta.numeric_fields` for every supported split width
 - [ ] **COMPAT-03**: Re-running the cron after any partial failure never double-reports an `(sid, muid)` pair to Revenium (re-run audit test)
-- [ ] **COMPAT-04**: The existing skill frontmatter contract (`name: revenium`, `metadata.hermes`, `category: devops`) is preserved — `test_skill_frontmatter_has_hermes_metadata` continues to pass
+- [x] **COMPAT-04**: The existing skill frontmatter contract (`name: revenium`, `metadata.hermes`, `category: devops`) is preserved — `test_skill_frontmatter_has_hermes_metadata` continues to pass
 
 ### Test Coverage
 
@@ -71,7 +71,7 @@ Requirements for the initial release. Each maps to roadmap phases. Drawn from PR
 - [ ] **TEST-02**: Repo invariant tests cover the taxonomy file schema (allow-listed top-level keys, label regex, no forbidden labels)
 - [ ] **TEST-03**: A cron-behavior test fixture (synthetic state.db + synthetic marker file) verifies equal-split conservation, fallthrough on N==0, and idempotency under simulated partial failure
 - [ ] **TEST-04**: A synthetic-bias test pins the documented S2 attribution behavior (small classification turn + large work turn → 50/50) so the known bias direction is explicit, not hidden
-- [ ] **TEST-05**: `test_no_legacy_branding_left` continues to pass for any new content; the project does NOT scrub pre-existing offenders in `.planning/codebase/*.md` (those are tracked separately)
+- [x] **TEST-05**: `test_no_legacy_branding_left` continues to pass for any new content; the project does NOT scrub pre-existing offenders in `.planning/codebase/*.md` (those are tracked separately)
 
 ### Mechanical Classification Hook (Phase 6)
 
@@ -168,12 +168,12 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 | COMPAT-01 | Phase 4 | Verified (Phase 4) |
 | COMPAT-02 | Phase 3 | Pending |
 | COMPAT-03 | Phase 3 | Pending |
-| COMPAT-04 | Phase 5 | Pending |
+| COMPAT-04 | Phase 5 | Verified (Phase 5) |
 | TEST-01 | Phase 2 | Pending |
 | TEST-02 | Phase 2 | Pending |
 | TEST-03 | Phase 3 | Pending |
 | TEST-04 | Phase 3 | Pending |
-| TEST-05 | Phase 5 | Pending |
+| TEST-05 | Phase 5 | Verified (Phase 5) |
 | HOOK-01 | Phase 6 | Pending |
 | HOOK-02 | Phase 6 | Pending |
 | HOOK-03 | Phase 6 | Pending |
@@ -195,4 +195,4 @@ Populated during roadmap creation. Each v1 requirement maps to exactly one phase
 
 ---
 *Requirements defined: 2026-05-12*
-*Last updated: 2026-05-14 after Phase 4 wire enrichment (WIRE-01..04 + COMPAT-01 verified)*
+*Last updated: 2026-05-14 after Phase 5 housekeeping (COMPAT-04 + TEST-05 verified; prune-markers.sh shipped; classifier mint-back + recency sort shipped; Phase 4 review WRs closed)*
