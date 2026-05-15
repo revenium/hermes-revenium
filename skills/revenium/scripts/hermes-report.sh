@@ -32,6 +32,7 @@ if ! revenium config show >/dev/null 2>&1; then
 fi
 
 touch "${LEDGER_FILE}"
+touch "${JOBS_LEDGER_FILE}"
 
 ORG_NAME=""
 if [[ -f "${CONFIG_FILE}" ]]; then
@@ -375,6 +376,11 @@ except Exception as exc:
 # TAX-05 (D-14) trivial-label blocklist enforced cron-side as defense-in-depth.
 FORBIDDEN = {'ack', 'acknowledgment', 'greeting', 'confirmation', 'hello', 'thanks'}
 REQUIRED_KEYS = ('muid', 'ts', 'sid', 'task_type', 'operation_type')
+# Phase 7 (D-04): reader-required keys for a kind:"job" line to be accepted.
+JOB_REQUIRED = ("agentic_job_id", "job_type", "status")
+# Phase 7 (D-12): job collector — keyed by agentic_job_id, last line in file order wins.
+# Initialized before the is_file() check so JOBS_JSON= print is always safe (Pitfall 2).
+jobs_by_id = {}
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
 markers = []
@@ -396,6 +402,19 @@ if marker_path.is_file():
                     m = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                # Phase 7 (SCHEMA-03 / D-06): branch on kind BEFORE REQUIRED_KEYS check.
+                # This preserves v1.0 byte-identity: absent kind falls through to the
+                # existing REQUIRED_KEYS gate unchanged. A kind:"job" line must never
+                # reach markers.append() — that would generate spurious meter calls.
+                kind = m.get("kind")
+                if kind == "job":
+                    # D-04: validate reader-required keys; skip if any missing.
+                    if all(k in m for k in JOB_REQUIRED):
+                        jobs_by_id[m["agentic_job_id"]] = m  # D-12: last line wins
+                    continue  # never reaches task-marker collector
+                elif kind is not None:
+                    continue  # unknown kind — skip for forward compat (D-06)
+                # kind is None (absent) → v1.0 task marker path (byte-identical)
                 if not all(k in m for k in REQUIRED_KEYS):
                     continue
                 # Primary dedup: global muid set. parse_prior_state returns
@@ -443,6 +462,9 @@ if read_err:
 print(f"N_MARKERS={n}")
 print(f"PRIOR_MUIDS_COUNT={len(prior_muids)}")
 print(f"MARKERS_JSON={json.dumps(markers, separators=(',', ':'))}")
+# Phase 7 (SCHEMA-03): emit collected job declarations for Phase 9 consumption.
+# jobs_by_id is always defined (initialized before is_file() check — Pitfall 2).
+print(f"JOBS_JSON={json.dumps(list(jobs_by_id.values()), separators=(',', ':'))}")
 PY
     ) || marker_output=""
 
@@ -457,6 +479,9 @@ PY
       s2_warn_line=$(echo "${marker_output}" | sed -n 's/^S2_WARN=//p' | head -1)
       local read_err
       read_err=$(echo "${marker_output}" | sed -n 's/^READ_ERR=//p' | head -1)
+      # Phase 7: capture jobs_json for Phase 9 consumption — intentionally unused here.
+      local jobs_json
+      jobs_json=$(echo "${marker_output}" | sed -n 's/^JOBS_JSON=//p' | head -1)
       if [[ "${read_ok}" != "true" ]]; then
         warn "marker-read fall-through: session=${sid} reason=${read_err:-unknown}"
         n_markers=0
