@@ -62,7 +62,9 @@ Summary: [MILESTONES.md](./MILESTONES.md)
   2. The agent mints an `agenticJobId` as an LLM business label plus a short hex entropy suffix, with mint-first anti-collapse prompt framing (concrete good/bad examples) so labels stay specific, and selects each job's `type` from a closed seed vocabulary of coding-agent job types shipped with the skill.
   3. The prompt gives an operational arc-boundary definition so a multi-activity session produces multiple distinct jobs, and gives conservative `SUCCESS`/`FAILED`/`CANCELLED` criteria — `SUCCESS` only on a confirmed met goal, bias to `CANCELLED` under uncertainty.
   4. The budget-halt path writes a `CANCELLED` terminal job marker before emitting the verbatim halt string, so a budget-interrupted arc still gets an outcome — and the halt-survivability runbook still passes after the `SKILL.md` edit.
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 08-01-PLAN.md — ship the job-taxonomy.json seed, setup-local.sh seed->live copy, and test invariants
+- [ ] 08-02-PLAN.md — add the SKILL.md JOB DECLARATION section, reconcile the HALT CHECK block, amend halt-survivability.md
 **UI hint**: yes
 
 ### Phase 9: Cron Job Creation & `--task-id` Linkage
@@ -112,7 +114,7 @@ Phases execute in numeric order: 7 → 8 → 9 → 10 → 11. Phase 11 (Hardenin
 | 5. Housekeeping & Compat Hardening | v1.0 | 4/4 | Verified | 2026-05-15 |
 | 6. Mechanical Classification via agent:end Hook | v1.0 | 4/4 | Verified | 2026-05-14 |
 | 7. Job Marker Schema & State Scaffolding | v1.1 | 0/1 | Planned | - |
-| 8. Job Declaration Prompt Block | v1.1 | 0/TBD | Not started | - |
+| 8. Job Declaration Prompt Block | v1.1 | 0/2 | Planned | - |
 | 9. Cron Job Creation & `--task-id` Linkage | v1.1 | 0/TBD | Not started | - |
 | 10. Cron Outcome Reporting & Idempotency | v1.1 | 0/TBD | Not started | - |
 | 11. v1.0 Carry-Forward Hardening | v1.1 | 0/TBD | Not started | - |
