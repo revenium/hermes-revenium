@@ -108,3 +108,59 @@ test -f ~/.hermes/plugins/revenium-classifier/classifier.py
 **Do NOT** use `hermes hooks list` or `hermes hooks test` to verify — that CLI is for shell hooks declared in `~/.hermes/config.yaml::hooks` (a different subsystem). The `on_session_end` plugin and `hermes hooks` shell hooks share the word "hook" but are wired separately.
 
 _Migration note (from earlier 06-01 implementation):_ if you previously installed the `agent:end` gateway hook into `~/.hermes/hooks/revenium-classifier/`, you may delete that directory manually after running the new setup. The gateway will load it but it produces no markers (the `on_session_end` plugin supersedes it); it is harmless but stale.
+
+## Marker file pruning
+
+The skill accumulates one JSONL marker file per Hermes session under `~/.hermes/state/revenium/markers/`. On long-running hosts these files grow without bound. `prune-markers.sh` removes stale marker files using the ledger as the authoritative staleness source (D-26): the script reads the latest `HERMES:<sid>:…:<unix_ts>:…` ledger row per session and removes the marker file if that timestamp is older than the retention threshold. For orphan markers with no ledger entry, file modification time is used instead.
+
+Default retention is 30 days, configurable via `REVENIUM_MARKER_RETENTION_DAYS` (declared in `common.sh`, D-27). The script is **not** wired into the per-minute cron — it is an operator-invoked maintenance action (D-28). Every deletion (and dry-run candidate) is logged via `info` to `${LOG_FILE}` so the operator can audit (D-29).
+
+### How to run
+
+```bash
+# Preview candidates without deleting (dry-run)
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh --dry-run
+
+# Delete stale marker files
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh
+
+# Override the retention window (e.g., 60 days)
+REVENIUM_MARKER_RETENTION_DAYS=60 bash ~/.hermes/skills/revenium/scripts/prune-markers.sh
+```
+
+### Manual UAT triple-case
+
+To verify the script against a seeded fixture:
+
+```bash
+STATE_DIR=~/.hermes/state/revenium
+mkdir -p "${STATE_DIR}/markers"
+
+# 1. Create a stale session marker (31 days old)
+OLD_TS=$(python3 -c "import time; print(int(time.time()) - 31*86400)")
+echo '{"muid":"aaa","ts":'"${OLD_TS}"',"sid":"old-test","task_type":"research","operation_type":"CHAT"}' \
+  > "${STATE_DIR}/markers/old-test.jsonl"
+echo "HERMES:old-test:1000:${OLD_TS}:aaa" >> "${STATE_DIR}/revenium-hermes.ledger"
+
+# 2. Create a fresh session marker (today)
+FRESH_TS=$(python3 -c "import time; print(int(time.time()))")
+echo '{"muid":"bbb","ts":'"${FRESH_TS}"',"sid":"fresh-test","task_type":"generation","operation_type":"CHAT"}' \
+  > "${STATE_DIR}/markers/fresh-test.jsonl"
+echo "HERMES:fresh-test:500:${FRESH_TS}:bbb" >> "${STATE_DIR}/revenium-hermes.ledger"
+
+# 3. Create an orphan marker (no ledger entry, mtime 31 days ago)
+echo '{"muid":"ccc","ts":'"${OLD_TS}"',"sid":"orphan-test","task_type":"review","operation_type":"CHAT"}' \
+  > "${STATE_DIR}/markers/orphan-test.jsonl"
+touch -t "$(python3 -c "import datetime; dt=datetime.datetime.utcnow()-datetime.timedelta(days=31); print(dt.strftime('%Y%m%d%H%M.%S'))")" \
+  "${STATE_DIR}/markers/orphan-test.jsonl"
+
+# 4. Dry-run: expect old-test + orphan-test in output, fresh-test absent
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh --dry-run
+
+# 5. Live run: confirm old-test + orphan-test deleted, fresh-test kept
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh
+ls "${STATE_DIR}/markers/"
+
+# 6. Idempotent re-run: expect "prune: summary, scanned=1 kept=1 removed=0"
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh
+```
