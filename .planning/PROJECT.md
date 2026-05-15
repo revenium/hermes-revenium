@@ -28,64 +28,60 @@ protocol works.
 
 ### Validated
 
-<!-- Inferred from the existing skill — these are the load-bearing capabilities
-this project must not break. -->
+<!-- v1.0 shipped 2026-05-15. Load-bearing capabilities (existing + new). -->
+
+**Pre-existing (preserved through v1.0):**
 
 - ✓ Cron-driven metering pipeline reads `~/.hermes/state.db` and ships token
-  deltas to Revenium via `revenium meter completion` — existing
+  deltas to Revenium via `revenium meter completion` — preserved through v1.0
+  with marker-aware split path layered on top
   (`skills/revenium/scripts/hermes-report.sh`)
 - ✓ Append-only ledger keyed on `HERMES:<session_id>:<total_tokens>` guarantees
-  idempotent reporting across cron runs — existing
+  idempotent reporting across cron runs — extended in v1.0 to 5-field format
+  (`HERMES:<sid>:<total_tokens>:<unix_ts>:<muid>`) with per-marker idempotency
 - ✓ Per-session delta computation: scales `input/output/cache_read/cache_write/cost`
-  by `(curr - prev) / curr` against the previous ledger entry — existing
+  by `(curr - prev) / curr` against the previous ledger entry — preserved with
+  byte-exact field-sum conservation across N split calls (TEST-03/04)
 - ✓ Provider inference for `anthropic | openai | google | xai | deepseek | meta`
-  including OpenRouter and Bedrock special-casing — existing
+  including OpenRouter and Bedrock special-casing — pinned by Phase 4
+  WIRE-04 8-provider regression test
 - ✓ Mandatory in-session budget check via `budget-status.json`, with verbatim
-  halt-string contract in `SKILL.md` — existing
+  halt-string contract in `SKILL.md` — preserved (Phase 2 halt-anchor
+  byte-unchanged)
 - ✓ Halt-transition detection (new vs carried-forward) and Hermes messaging-
-  toolset notifications — existing (`budget-check.sh`)
+  toolset notifications — preserved (`budget-check.sh`)
 - ✓ State separation: skill content under `~/.hermes/skills/revenium/`, mutable
   state under `~/.hermes/state/revenium/`, single-source paths in
-  `scripts/common.sh` — existing, test-enforced
+  `scripts/common.sh` — preserved, test-enforced
   (`tests/test_repository.py::test_runtime_paths_are_hermes_native`)
+
+**Shipped in v1.0:**
+
+- ✓ **Agent-written turn markers** — `SKILL.md` `## FINAL ACTION — TASK CLASSIFICATION` block + classifier plugin write GUARDRAIL+CHAT marker pairs to `~/.hermes/state/revenium/markers/<sid>.jsonl` (Phase 2 + Phase 6)
+- ✓ **LLM-driven task classification** — `_classify_via_llm` mints specific descriptive labels from actual session content (3 quick tasks shipped 2026-05-14 closed the chain: coverage + prompt bias + content visibility)
+- ✓ **Taxonomy persistence and recency-ordered prompt** — `_persist_label_to_taxonomy` (D-32) + `_read_taxonomy_labels` recency-ordered (D-33) — newly-minted labels persist back so future turns see live vocabulary (Phase 5)
+- ✓ **GUARDRAIL accounting** — `--operation-type GUARDRAIL` for classification turns, `CHAT` for work turns; both flow per-marker from `markers/<sid>.jsonl` (Phase 2 + Phase 4)
+- ✓ **Cron splits deltas across markers (S2 equal split)** — `hermes-report.sh::split_strategies.py` divides session delta equally across N markers per cron window; one `revenium meter completion` per marker (Phase 3)
+- ✓ **Marker-aware idempotency** — per-`(sid, muid)` transaction ID + ledger row prevents double-reporting on partial-failure retry (Phase 3)
+- ✓ **Backward-compatible zero-marker fallthrough** — sessions with no markers emit a single call with `--task-type unclassified --operation-type CHAT` (Phase 4 WIRE-01, D-22 gate discharged: server-side default is `CHAT`; idempotent for existing dashboards/budgets)
+- ✓ **Adjacent flag passthrough** — `--operation-type` / `--agent` / `--trace-id` populated per-marker with colon-dash fallbacks to today's hardcoded values; cron is pure pass-through (D-23 — no upstream writer changes required) (Phase 4 WIRE-02/03)
+- ✓ **Mechanical classification** — `revenium-classifier` `hermes_cli` plugin on `on_session_end` writes markers for every `run_conversation()` exit — universal session coverage including gateway-internal cron tickers; subagent inheritance via `state.db.sessions.parent_session_id` (Phase 6 — surfaced by Phase 3 UAT)
+- ✓ **Marker file pruning** — operator-invoked `prune-markers.sh` (ledger-based staleness, 30-day default + `$REVENIUM_MARKER_RETENTION_DAYS` env override, dry-run, info-helper logging) keeps marker dirs bounded on long-running hosts (Phase 5)
+- ✓ **Test coverage** — 45 invariant tests covering marker shape, taxonomy shape, cron split behavior, 8-provider regression, pipe-safety sanitization, prune E2E, classifier dedupe / inheritance / budget-halt / fail-open
 
 ### Active
 
-<!-- New work this project will deliver. All are hypotheses until shipped. -->
+<!-- New work for v1.1. All v1.0 items moved to Validated below. -->
 
-- [ ] **Agent-written turn markers.** After each *substantive* turn (skill
-  prompt defines what counts), the agent appends a single JSONL line to
-  `~/.hermes/state/revenium/markers/<session_id>.jsonl` capturing
-  `{ts, task_type, operation_type, ...}`.
-- [ ] **Agent-managed task taxonomy.** The agent owns
-  `~/.hermes/state/revenium/task-taxonomy.json`, a controlled-vocabulary
-  dictionary of known task labels. The skill prompt enforces a strict
-  lookup-first discipline: read the taxonomy, reuse an existing label if any
-  fits, only mint a new label when no existing one is appropriate.
-- [ ] **GUARDRAIL accounting.** Tokens consumed by classification itself are
-  metered with `--operation-type GUARDRAIL`. The agent writes a distinct
-  marker for the classification turn so the cron emits a separate metering
-  call for it.
-- [ ] **Cron splits deltas across markers (S2 equal split).** When
-  `hermes-report.sh` computes a session delta, it reads markers for that
-  session written since the last ledger entry, divides the delta equally
-  across N markers, and emits one `revenium meter completion` per marker with
-  the marker's `--task-type` and `--operation-type`.
-- [ ] **Marker-aware idempotency.** Ledger format extends so that re-running
-  the cron after a partial failure does not double-report any (session,
-  marker) pair. Existing `HERMES:<sid>:<total_tokens>` semantics are
-  preserved where they still apply.
-- [ ] **Backward-compatible default.** Sessions with no markers in the current
-  window (older installs, agent didn't classify, marker file missing) emit a
-  single metering call with `--task-type unclassified` and no
-  `--operation-type` — never break existing behavior.
-- [ ] **Adjacent flag wins.** Populate `--operation-type` for non-guardrail
-  work turns from the marker (default to `CHAT` when omitted), and revisit
-  the currently hardcoded `--agent "Hermes"` and `--trace-id "${sid}"` so
-  they carry richer values where the agent or session metadata supports it.
-- [ ] **Test coverage for the new contract.** Repository invariant tests
-  cover marker-file shape, taxonomy-file shape, and the cron's split
-  behavior under representative marker configurations.
+(None yet — run `/gsd-new-milestone` to scope v1.1.)
+
+Likely candidates from v1.0 deferred items / tech debt (see STATE.md `## Deferred Items` and MILESTONES.md):
+
+- [ ] **Mint-back race window fix.** Add `fcntl.flock` to `_persist_label_to_taxonomy` (currently uses fixed `.tmp` filename without lock; two concurrent `on_session_end` events can race).
+- [ ] **`clear-halt.sh` bash 3.2 compat.** Same `${VAR@Q}` pattern that broke `prune-markers.sh` on Mac Studio is latent-broken in `clear-halt.sh:17`.
+- [ ] **Retention guard.** Validate `REVENIUM_MARKER_RETENTION_DAYS >= 1` in `prune-markers.sh` (currently 0 silently deletes everything).
+- [ ] **Dead helper cleanup.** Remove `_count_tools_in_current_turn` if no callers exist post-v1.0 (kept per D-37 deferred).
+- [ ] **Optional `install-prune-cron.sh`.** If operators report forgetting to run prune manually, ship an opt-in installer that adds a weekly crontab line.
 
 ### Out of Scope
 

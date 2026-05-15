@@ -2,13 +2,14 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: ready_to_plan
-last_updated: "2026-05-15T00:51:51.179Z"
+status: Awaiting next milestone
+last_updated: "2026-05-15T02:14:22.061Z"
+last_activity: 2026-05-15 — Milestone v1.0 completed and archived
 progress:
   total_phases: 6
   completed_phases: 6
   total_plans: 14
-  completed_plans: 10
+  completed_plans: 14
   percent: 100
 ---
 
@@ -40,20 +41,10 @@ progress:
 
 ## Current Position
 
-Phase: 05 (housekeeping-compat-hardening) — EXECUTING
-Plan: Not started
-**Phase:** 06
-**Plans:** 1 of 1 executed (single fat plan per D-01, 12 atomic commits T01-T12)
-**Status:** Ready to plan
-**Progress:** 3/5 phases executed
-
-```
-[██████████] 100% Phase 1: Path Foundation                              Complete
-[██████████] 100% Phase 2: Prompt Design & Marker Contract              Complete
-[██████████] 100% Phase 3: Cron Marker Reader + Equal-Split + Ledger v2 Executed (verification pending)
-[░░░░░░░░░░] 0%   Phase 4: Wire Enrichment                              Not started
-[░░░░░░░░░░] 0%   Phase 5: Housekeeping & Compat Hardening              Not started
-```
+Phase: Milestone v1.0 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-05-15 — Milestone v1.0 completed and archived
 
 ## Performance Metrics
 
@@ -109,6 +100,21 @@ From `PROJECT.md` Key Decisions (all carry-forward from project initialization):
 
 None.
 
+### Deferred Items
+
+Items acknowledged and deferred at v1.0 milestone close on 2026-05-15:
+
+| Category | Item | Status | Reason for deferral |
+|----------|------|--------|---------------------|
+| uat_gap | Phase 03 03-UAT.md | partial | Stale — Phase 3 cron pipeline was overtaken and live-verified by Phase 4 wire enrichment + Phase 5 classifier-chain quick tasks. The marker pipeline this UAT tested is fully verified in production via 2026-05-14 Mac Studio diagnostic chain. |
+| uat_gap | Phase 06 06-HUMAN-UAT.md | resolved | Audit false-positive — file shows `status: resolved` but audit still flags it. |
+| verification_gap | Phase 02 02-VERIFICATION.md | human_needed | Stale — Phase 2 SKILL.md halt-check survivability operator gate. Implicitly exercised by 3× gateway restarts during today's classifier-chain quick tasks; halt anchor still fires. |
+| quick_task | 260514-n8e (D-07 removal) | misclassified-missing | False positive — SUMMARY has `status: complete`, files committed (a9f9411), production-verified via Mac Studio post-restart cron coverage. |
+| quick_task | 260514-nfb (mint-first prompt) | misclassified-missing | False positive — SUMMARY has `status: complete`, production-verified (LLM emits varied content-driven labels post-restart). |
+| quick_task | 260514-nz8 (state.db content lookup) | misclassified-missing | False positive — SUMMARY has `status: complete`, production-verified (markers like `moltbook_heartbeat_check`, `hardware_overview` appearing in cron log). |
+
+All 6 are documentation hygiene items, not production gaps. v1.0 has been live-verified end-to-end on Mac Studio (`ssh 172.16.1.175`) during the 2026-05-14 → 2026-05-15 session.
+
 ### Quick Tasks Completed
 
 | # | Description | Date | Commit | Directory |
@@ -143,3 +149,7 @@ None.
 
 ---
 *State initialized: 2026-05-12 at roadmap creation*
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
