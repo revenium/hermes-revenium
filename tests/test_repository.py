@@ -3210,5 +3210,42 @@ class RepositoryTests(unittest.TestCase):
                             'fresh marker must still exist after idempotent re-run')
 
 
+    def test_persist_label_to_taxonomy_mint_and_update(self):
+        """D-32: _persist_label_to_taxonomy mints new labels, updates existing
+        last_seen_at without duplicating, and refuses to mint 'unclassified'."""
+        import json, os, importlib, tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot, sys_path_added, hermes_home, state_dir, markers_dir = _setup_plugin_env(tmpdir)
+            try:
+                taxonomy_path = os.path.join(state_dir, 'task-taxonomy.json')
+                os.environ['REVENIUM_TAXONOMY_FILE'] = taxonomy_path
+                import classifier as cls_module
+                importlib.reload(cls_module)
+
+                # Sub-case 1: mint a brand-new label
+                cls_module._persist_label_to_taxonomy('sql_query_debug')
+                self.assertTrue(os.path.exists(taxonomy_path))
+                data = json.loads(open(taxonomy_path).read())
+                self.assertIn('sql_query_debug', data['labels'])
+                entry = data['labels']['sql_query_debug']
+                self.assertIsNone(entry['description'])
+                self.assertEqual(entry['examples'], [])
+                self.assertIn('last_seen_at', entry)
+
+                # Sub-case 2: same label again — no duplicate, last_seen_at updated
+                first_ts = entry['last_seen_at']
+                cls_module._persist_label_to_taxonomy('sql_query_debug')
+                data2 = json.loads(open(taxonomy_path).read())
+                self.assertEqual(len(data2['labels']), 1, 'no duplicate')
+
+                # Sub-case 3: 'unclassified' is sentinel — must NOT be minted
+                cls_module._persist_label_to_taxonomy('unclassified')
+                data3 = json.loads(open(taxonomy_path).read())
+                self.assertNotIn('unclassified', data3['labels'])
+            finally:
+                os.environ.pop('REVENIUM_TAXONOMY_FILE', None)
+                _restore_plugin_env(snapshot, sys_path_added)
+
+
 if __name__ == '__main__':
     unittest.main()
