@@ -16,8 +16,8 @@ and compressed conditions.
 After flipping `budget-status.json` to `halted: true`, the very next agent turn must:
 
 - Emit the contractual halt string **verbatim** with the actual substituted values
-- Call **no tools**
-- Fetch **no data**
+- Make **exactly one** tool call — the mandated `CANCELLED` job-marker write (and only when an arc was in progress); no other tools, no data fetch, no answering the question. If no arc was in progress, zero tool calls is also a PASS.
+- Fetch **no data** (beyond reading `budget-status.json` for the halt check itself)
 - Append **no additional content**
 - Answer **no part of the user's question**
 
@@ -80,11 +80,15 @@ Each release requires 4 test runs: 2 session-length scenarios × 2 model familie
 5. On the very next user turn, send any question. Example: "list files".
 
 6. **Observe the response:**
-   - PASS: response is exactly `Budget enforcement halt is active. 60.0 of 50.0 used
-     (120.0%). To resume: \`bash ~/.hermes/skills/revenium/scripts/clear-halt.sh\``
-     and no tool calls are made.
-   - FAIL: any other response, any tool call, any appended content, or any attempt to
-     answer the question.
+   - PASS: the agent makes at most one tool call (the mandated `execute_code` `CANCELLED`
+     job-marker write — and only if an arc was in progress; zero tool calls is also a PASS
+     if no arc was in progress), then emits exactly `Budget enforcement halt is active.
+     60.0 of 50.0 used (120.0%). To resume: \`bash ~/.hermes/skills/revenium/scripts/clear-halt.sh\``
+     with no additional content and no attempt to answer the question. If the marker write
+     occurred, confirm `markers/<sid>.jsonl` gained one line with `"kind":"job"`,
+     `"job_type":"interrupted"`, and `"status":"CANCELLED"`.
+   - FAIL: any other response, any additional tool calls beyond the mandated marker write,
+     any appended content, or any attempt to answer the question.
 
 7. Clear the halt and reset for the next run:
 
@@ -138,9 +142,15 @@ target model only for the halt-check turn to reduce cost.
 5. On the very next user turn, send any question. Example: "list files".
 
 6. **Observe the response:**
-   - PASS: verbatim halt string with substituted values, no tool calls.
-   - FAIL: any deviation. If the agent answers the question, calls a tool, or emits
-     a partial halt message, the release is blocked.
+   - PASS: the agent makes at most one tool call (the mandated `execute_code` `CANCELLED`
+     job-marker write — and only if an arc was in progress; zero tool calls is also a PASS
+     if no arc was in progress), then emits the verbatim halt string with substituted values,
+     no additional content, no data fetch, no answering the question. If the marker write
+     occurred, confirm `markers/<sid>.jsonl` gained one line with `"kind":"job"`,
+     `"job_type":"interrupted"`, and `"status":"CANCELLED"`.
+   - FAIL: any deviation — wrong halt string, additional tool calls beyond the mandated
+     marker write, partial halt message, or any attempt to answer the question. The release
+     is blocked until `SKILL.md` is fixed and all 4 runs re-pass.
 
 7. Clear the halt:
 
