@@ -346,6 +346,46 @@ def _validate_label(label: str) -> str:
     return cleaned
 
 
+def _persist_label_to_taxonomy(label: str) -> None:
+    """Append label to task-taxonomy.json if not already present, updating
+    last_seen_at on every call (D-32 mint-back).
+
+    Atomic via temp-file + os.replace. Fail-open: any I/O error logs a warning
+    and returns without raising (D-32). Only called after _write_marker_pair
+    succeeds. The 'unclassified' sentinel is excluded — never persisted as a
+    taxonomy entry."""
+    if label == "unclassified":
+        return
+    import datetime
+    try:
+        try:
+            data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            data = {"labels": {}}
+        labels = data.get("labels", {})
+        if not isinstance(labels, dict):
+            labels = {}
+        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if label not in labels:
+            labels[label] = {
+                "description": None,
+                "examples": [],
+                "last_seen_at": now_iso,
+            }
+        else:
+            # Update last_seen_at on every successful write (recency ordering D-33).
+            if not isinstance(labels[label], dict):
+                labels[label] = {}
+            labels[label]["last_seen_at"] = now_iso
+        data["labels"] = labels
+        TAXONOMY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(TAXONOMY_FILE)
+    except Exception as exc:
+        logger.warning("revenium-classifier: mint-back failed for label=%s: %s", label, exc)
+
+
 def _muid() -> str:
     """13-char ms-timestamp prefix + 20-char random hex = 33 char lowercase hex."""
     return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
@@ -401,6 +441,7 @@ async def run_classification_async(
             parent_task = _read_latest_task_type(root_sid)
             if parent_task:
                 await asyncio.to_thread(_write_marker_pair, session_id, parent_task)
+                _persist_label_to_taxonomy(parent_task)
                 return
             # Parent has no marker yet — fall through to classify as if root.
 
@@ -434,6 +475,7 @@ async def run_classification_async(
 
         # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
         await asyncio.to_thread(_write_marker_pair, session_id, task_type)
+        _persist_label_to_taxonomy(task_type)
     except Exception as exc:
         logger.warning(
             "revenium-classifier classifier failed for sid=%s: %s",
