@@ -8,9 +8,11 @@ in `common.sh`; defaults to `~/.hermes/state/revenium/task-taxonomy.json`). The 
 `examples/setup-local.sh`. After installation, the live file at `${TAXONOMY_FILE}` is mutable:
 the agent adds new labels to it over time via the atomic write pattern documented below.
 
-Before classifying a substantive turn, the agent reads `${TAXONOMY_FILE}` and attempts to reuse
-an existing label. A new label is minted only when no existing label clearly fits the turn's
-semantics. Once created, a label is permanent for the lifetime of the installation.
+Before classifying a substantive turn, the classifier reads `${TAXONOMY_FILE}` as a
+recency-ordered reference list. The classifier mints a specific descriptive label by default;
+existing labels are reused only when they describe the SAME specific work (per the 2026-05-14
+prompt rewrite, quick task 260514-nfb). Newly-minted labels are persisted back via the atomic
+write pattern documented below.
 
 ## Schema
 
@@ -70,19 +72,19 @@ The blocklist is a closed set for v1. Adding entries requires a release.
 
 ## Mint policy
 
-The agent reads `${TAXONOMY_FILE}` before every substantive turn classification and reuses an
-existing label when any label clearly fits the turn's semantics. A new label is minted only when
-no existing label provides a good fit.
+The classifier reads `${TAXONOMY_FILE}` before every substantive turn and mints a SPECIFIC,
+DESCRIPTIVE label that captures what the agent actually did (2-4 words joined by underscores;
+examples: `weekly_pr_review`, `prod_log_triage`, `news_summary`). Existing labels are reused
+only when they describe the SAME specific work — "close enough" reuse caused taxonomy
+fragmentation in practice (quick task 260514-nfb).
 
-Bias toward reuse: fragmentation is permanent, but an oversized label bucket is recoverable by
-a later analysis pass. When in doubt between two labels, pick the more specific one if it exists
-(for example, prefer `code_review` over `review` when the turn is specifically about reviewing
-code). When genuinely uncertain whether to mint or reuse, default to the closest existing label
-rather than creating a new one.
+When uncertain whether to mint or reuse, mint a new specific label rather than collapsing to
+a bland catch-all. Catch-alls to avoid when a more specific label fits: `generation`, `analysis`,
+`review`, `task`.
 
-Minting process: choose a snake_case name matching the regex above, provide a short description
-and two examples, and commit the new entry to `${TAXONOMY_FILE}` using the atomic write pattern
-below before the marker is written.
+Minting process: choose a snake_case name matching the regex above; the classifier plugin
+persists the new entry to `${TAXONOMY_FILE}` automatically via the atomic write pattern below
+before the marker is written.
 
 ## Atomic write pattern
 
