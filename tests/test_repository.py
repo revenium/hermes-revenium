@@ -3711,6 +3711,16 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(len(invocations_a), 2,
                              f'Run A: expected 2 invocations (one per marker), got {len(invocations_a)}')
 
+            # SCHEMA-01 / D-15: revenium-jobs.ledger is touch-created by hermes-report.sh
+            # on every cron run. Assert it exists after Run A — the file may be empty,
+            # but it MUST be present on disk (Phase 9/10 readers depend on its existence).
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            self.assertTrue(
+                os.path.exists(jobs_ledger),
+                f'SCHEMA-01 / D-15: revenium-jobs.ledger must be touch-created on cron run '
+                f'(expected at {jobs_ledger})',
+            )
+
             # Run B: same task markers + job line appended.
             reset_state(include_job_line=True)
             rc_b, invocations_b, output_b = run_cron(base_env, invocations_log)
@@ -3794,6 +3804,71 @@ class RepositoryTests(unittest.TestCase):
                     f'skip only itself, leaving task-metering argv byte-identical to '
                     f'the clean run (got {invocations_c!r}, expected {invocations_a!r}, '
                     f'output={output_c})',
+                )
+
+            # =====================================================
+            # Sub-case D (SCHEMA-03 / D-06 forward-compat skip):
+            # A marker file that contains a line with an UNKNOWN kind value
+            # (neither "job" nor absent) must be silently skipped — the reader
+            # must not generate a spurious meter call for it, and the remaining
+            # valid task markers must be attributed exactly as in Run A.
+            #
+            # This exercises the `elif kind is not None: continue` branch.
+            # =====================================================
+            # The hard adversarial case for D-06 forward-compat skip: a line that has a
+            # non-null, non-"job" kind AND also happens to carry all 5 REQUIRED_KEYS.
+            # Without the `elif kind is not None: continue` branch, this line would fall
+            # through to the REQUIRED_KEYS check and pass it — generating a spurious extra
+            # meter call and causing the invocation count / argv assertion to fail.
+            unknown_kind_lines = [
+                json.dumps({
+                    "kind": "experiment",
+                    "ts": 1715515099.0,
+                    "sid": sid,
+                    "foo": "bar",
+                }, separators=(',', ':')),
+                json.dumps({
+                    "kind": "pipeline",
+                    "ts": 1715515098.0,
+                    "sid": sid,
+                    "stage": "build",
+                    "result": "pass",
+                }, separators=(',', ':')),
+                # This line has all 5 REQUIRED_KEYS plus a non-"job" kind.
+                # If the `elif kind is not None: continue` branch is absent, this line
+                # would pass the REQUIRED_KEYS gate and produce a 3rd spurious meter call.
+                json.dumps({
+                    "kind": "future_v2",
+                    "muid": "01893b8a3ffabcdef0123456789abcdef",
+                    "ts": 1715515097.0,
+                    "sid": sid,
+                    "task_type": "research",
+                    "operation_type": "CHAT",
+                }, separators=(',', ':')),
+            ]
+            for idx, unknown_line in enumerate(unknown_kind_lines):
+                reset_state(include_job_line=False)
+                marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+                with open(marker_file, 'a') as f:
+                    f.write(unknown_line + '\n')
+                rc_d, invocations_d, output_d = run_cron(base_env, invocations_log)
+                self.assertEqual(rc_d, 0, f'Sub-case D[{idx}] exit {rc_d}: {output_d}')
+                # Exactly 2 invocations — same count as Run A (the unknown-kind line
+                # must not add a spurious meter call).
+                self.assertEqual(
+                    len(invocations_d), 2,
+                    f'Sub-case D[{idx}] ({unknown_line!r}): unknown kind must be '
+                    f'silently skipped — expected 2 invocations (same as Run A), '
+                    f'got {len(invocations_d)}: {output_d}',
+                )
+                # argv lists must be byte-identical to Run A (unknown-kind skip changes
+                # nothing about task attribution).
+                self.assertEqual(
+                    invocations_d, invocations_a,
+                    f'Sub-case D[{idx}] ({unknown_line!r}): unknown-kind line must not '
+                    f'alter meter completion argv (SCHEMA-03 / D-06 forward-compat skip); '
+                    f'got {invocations_d!r}, expected {invocations_a!r}, '
+                    f'output={output_d}',
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
