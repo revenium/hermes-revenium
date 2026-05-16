@@ -540,7 +540,7 @@ taxonomy_path = os.path.expanduser("~/.hermes/state/revenium/job-taxonomy.json")
 # REPLACE these three values with your Step 1-3 decisions.
 agentic_job_id = "replace-with-step1-label-" + secrets.token_hex(2)
 job_name = "Replace with a short human-readable description of the arc"
-job_type = "replace_with_step2_type"   # from taxonomy or a newly minted snake_case label
+job_type = "research"                  # REPLACE with your Step 2 job_type (reuse a taxonomy label, or mint snake_case)
 status = "CANCELLED"                    # SUCCESS | FAILED | CANCELLED
 
 # Fail-open: if the taxonomy file is missing or unreadable, treat as empty taxonomy and mint freely.
@@ -552,33 +552,35 @@ if os.path.exists(taxonomy_path):
     except Exception:
         existing_types = {}
 
-# If job_type is newly minted (not in existing taxonomy), persist it atomically.
-if job_type not in existing_types:
-    # Normalize: hyphens/spaces -> underscore, lowercase, strip non-[a-z0-9_]
-    normalized = re.sub(r'[^a-z0-9_]', '', re.sub(r'[-\s]+', '_', job_type.lower()))
-    if re.match(r'^[a-z][a-z0-9_]{1,47}$', normalized):
-        job_type = normalized
-        try:
-            if os.path.exists(taxonomy_path):
-                with open(taxonomy_path, "r+") as f:
-                    fcntl.flock(f, fcntl.LOCK_EX)
-                    data = json.load(f)
-                    data.setdefault("labels", {})[job_type] = {
-                        "description": job_name,
-                        "examples": [],
-                    }
-                    d = os.path.dirname(taxonomy_path)
-                    with tempfile.NamedTemporaryFile("w", dir=d, delete=False, suffix=".tmp") as tmp:
-                        json.dump(data, tmp, indent=2, ensure_ascii=True)
-                        tmp.flush()
-                        os.fsync(tmp.fileno())
-                        tmpname = tmp.name
-                    os.rename(tmpname, taxonomy_path)
-            else:
-                # Taxonomy file missing — mint freely, no persist (fail-open: do not raise)
-                pass
-        except Exception:
-            pass  # fail-open: taxonomy write failure must not abort job declaration
+# Normalize FIRST (hyphens/spaces -> underscore, lowercase, strip non-[a-z0-9_])
+# so a casing/spelling variant of an already-seeded label ("Bug Fix" -> "bug_fix")
+# is recognized as a reuse — not a fresh mint that would clobber the curated seed.
+normalized = re.sub(r'[^a-z0-9_]', '', re.sub(r'[-\s]+', '_', job_type.lower()))
+if re.match(r'^[a-z][a-z0-9_]{1,47}$', normalized):
+    job_type = normalized
+
+# Persist only a genuinely new, well-formed job_type. setdefault on the inner
+# write guarantees a curated seed entry is never overwritten — even under a
+# normalization collision the membership check above did not catch.
+if job_type not in existing_types and re.match(r'^[a-z][a-z0-9_]{1,47}$', job_type):
+    try:
+        if os.path.exists(taxonomy_path):
+            with open(taxonomy_path, "r+") as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                data = json.load(f)
+                data.setdefault("labels", {}).setdefault(job_type, {
+                    "description": job_name,
+                    "examples": [],
+                })
+                d = os.path.dirname(taxonomy_path)
+                with tempfile.NamedTemporaryFile("w", dir=d, delete=False, suffix=".tmp") as tmp:
+                    json.dump(data, tmp, indent=2, ensure_ascii=True)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    tmpname = tmp.name
+                os.rename(tmpname, taxonomy_path)
+    except Exception:
+        pass  # fail-open: taxonomy write failure must not abort job declaration
 
 write_job_marker(agentic_job_id, job_name, job_type, status)
 print(f"job marker written: {marker_path}")

@@ -405,6 +405,71 @@ class RepositoryTests(unittest.TestCase):
                 'job-marker snippet must not rely on HERMES_SESSION_ID — '
                 'execute_code never receives that var')
 
+    def test_job_declaration_snippet_does_not_clobber_seeded_taxonomy(self):
+        """CR-01 regression: an agent supplying a casing/spelling variant of an
+        already-seeded job_type ("Bug Fix" for seeded "bug_fix") must be treated
+        as a reuse — it must NOT overwrite the curated seed entry."""
+        import json
+        import os
+        import tempfile
+        text = (SKILL / 'SKILL.md').read_text()
+        blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
+        snippet = next(b for b in blocks
+                       if 'def write_job_marker' in b and 'taxonomy_path' in b)
+        with tempfile.TemporaryDirectory() as home:
+            rev = os.path.join(home, '.hermes', 'state', 'revenium')
+            os.makedirs(rev)
+            os.makedirs(os.path.join(home, '.hermes', 'sessions'))
+            tax_path = os.path.join(rev, 'job-taxonomy.json')
+            curated = {'labels': {'bug_fix': {
+                'description': 'CURATED DESCRIPTION',
+                'examples': ['curated example one', 'curated example two'],
+            }}}
+            with open(tax_path, 'w') as f:
+                json.dump(curated, f)
+            src = snippet
+            src = re.sub(r'^agentic_job_id = .*$',
+                         'agentic_job_id = "fix-the-login-bug-1a2b"', src, flags=re.M)
+            src = re.sub(r'^job_name = .*$',
+                         'job_name = "Fixed the login bug"', src, flags=re.M)
+            src = re.sub(r'^job_type = .*$', 'job_type = "Bug Fix"', src, flags=re.M)
+            src = re.sub(r'^status = .*$', 'status = "SUCCESS"', src, flags=re.M)
+            old_home = os.environ.get('HOME')
+            os.environ['HOME'] = home
+            try:
+                exec(compile(src, 'job-declaration-snippet', 'exec'), {})
+            finally:
+                if old_home is not None:
+                    os.environ['HOME'] = old_home
+            with open(tax_path) as f:
+                after = json.load(f)
+        self.assertEqual(
+            after['labels']['bug_fix']['description'], 'CURATED DESCRIPTION',
+            'CR-01: variant spelling "Bug Fix" overwrote the curated bug_fix description')
+        self.assertEqual(
+            after['labels']['bug_fix']['examples'],
+            ['curated example one', 'curated example two'],
+            'CR-01: variant spelling "Bug Fix" wiped the curated bug_fix examples')
+
+    def test_job_declaration_placeholder_job_type_is_a_seeded_label(self):
+        """WR-02: the JOB DECLARATION snippet's placeholder job_type must be a
+        label already in job-taxonomy.json, so an un-substituted run reuses it
+        rather than polluting the live taxonomy with the placeholder string."""
+        import json
+        text = (SKILL / 'SKILL.md').read_text()
+        blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
+        snippet = next(b for b in blocks
+                       if 'def write_job_marker' in b and 'taxonomy_path' in b)
+        m = re.search(r'^job_type = "([^"]*)"', snippet, re.M)
+        self.assertIsNotNone(
+            m, 'JOB DECLARATION snippet must define a placeholder job_type')
+        placeholder = m.group(1)
+        seed = json.loads((SKILL / 'job-taxonomy.json').read_text())
+        self.assertIn(
+            placeholder, seed.get('labels', {}),
+            f'WR-02: placeholder job_type "{placeholder}" is not a seeded label — '
+            'an un-substituted run would pollute the live taxonomy')
+
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
         self.assertTrue(scripts, 'no shell scripts found')
