@@ -1014,6 +1014,85 @@ PY
     fi
   done <<< "${sessions}"
 
+  # Phase 10: post-loop outcome stage — report each terminated arc exactly once.
+  # Placement is load-bearing: every JOB:<id>:created: line that any session could
+  # write this tick has already been written by the time this stage runs (D-01).
+  # Mirrors the in-loop jobs create stage (D-06: API-first, ledger-on-exit-0).
+  if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${#job_outcome_queue[@]}" -gt 0 ]]; then
+    local outcome_id outcome_status_raw outcome_source outcome_marker_ts
+    local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
+    local outcome_now_ts _age_s _stale_threshold
+    for _entry in "${job_outcome_queue[@]}"; do
+      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts <<< "${_entry}"
+      [[ -z "${outcome_id}" ]] && continue
+
+      # OUTCOME-01 gate: skip if already reported (ledger-gated idempotency).
+      if grep -q "^JOB:${outcome_id}:outcome:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
+        continue
+      fi
+
+      # OUTCOME-04 gate: skip if create not yet confirmed; re-attempt next tick.
+      if ! grep -q "^JOB:${outcome_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
+        # D-07: stale warn if marker ts is older than threshold.
+        _stale_threshold="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+        _age_s=$(python3 -c "
+import time
+try:
+    ts = float('${outcome_marker_ts}')
+    print(int(time.time() - ts))
+except Exception:
+    print(0)
+" 2>/dev/null || echo "0")
+        if [[ "${_age_s}" -ge "${_stale_threshold}" ]]; then
+          warn "wedged job (no create confirmed after ${_age_s}s): id=${outcome_id}"
+        else
+          warn "outcome deferred: id=${outcome_id} — JOB:...:created not yet confirmed"
+        fi
+        continue
+      fi
+
+      # OUTCOME-05: uppercase and validate enum; invalid -> skip + warn, no ledger write.
+      outcome_status=$(python3 -c "print('${outcome_status_raw}'.upper())" 2>/dev/null \
+        || echo "${outcome_status_raw}")
+      case "${outcome_status}" in
+        SUCCESS|FAILED|CANCELLED) ;;
+        *)
+          warn "outcome skipped: id=${outcome_id} invalid status=${outcome_status}"
+          continue
+          ;;
+      esac
+
+      # D-06: API first — build command as array (bash 3.2 portability).
+      local outcome_cmd=(
+        revenium jobs outcome "${outcome_id}"
+        --result "${outcome_status}"
+        --quiet
+      )
+      outcome_cmd_output=$("${outcome_cmd[@]}" 2>&1) && outcome_cmd_exit=0 || outcome_cmd_exit=$?
+
+      # OUTCOME-03: 409 is success-equivalent (mirrors jobs create pattern).
+      outcome_success=false
+      if [[ "${outcome_cmd_exit}" -eq 0 ]]; then
+        outcome_success=true
+      elif echo "${outcome_cmd_output}" | grep -qi "409\|already.exist\|conflict"; then
+        outcome_success=true
+      fi
+
+      if [[ "${outcome_success}" == "true" ]]; then
+        # D-06: ledger write is the last statement of the success branch (OUTCOME-02).
+        # A crash between API call and ledger write re-attempts on next tick; the API
+        # absorbs the repeat as a 409 which OUTCOME-03 treats as success-equivalent.
+        outcome_now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" \
+          2>/dev/null || date +%s)
+        echo "JOB:${outcome_id}:outcome:${outcome_now_ts}:${outcome_status}" \
+          >> "${JOBS_LEDGER_FILE}"
+        info "Outcome reported: agentic_job_id=${outcome_id} result=${outcome_status}"
+      else
+        warn "outcome failed: id=${outcome_id} exit=${outcome_cmd_exit} — retries next tick"
+      fi
+    done
+  fi
+
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="
 }
 
