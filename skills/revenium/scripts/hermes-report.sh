@@ -553,6 +553,107 @@ PY
       warn "S2: ${s2_warn_line}"
     fi
 
+    # Phase 9 (D-08, D-09, D-10, CREATE-02, CREATE-04): idempotent best-effort jobs create.
+    # Runs in-loop, per-session, before the per-marker --task-id stamping so that the
+    # Revenium job record exists before any completion is linked to it (D-08 spirit).
+    # Gated on JOBS_CLI_CAPABLE — skip entirely when CLI doesn't support jobs/--task-id.
+    if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${jobs_json}" && "${jobs_json}" != "[]" ]]; then
+      local job_rows
+      job_rows=$(
+        JOBS_JSON="${jobs_json}" \
+        SOURCE="${source}" \
+        python3 - <<'PY' 2>/dev/null || true
+import json, os, sys
+
+jobs = []
+try:
+    jobs = json.loads(os.environ.get('JOBS_JSON', '[]'))
+    if not isinstance(jobs, list):
+        jobs = []
+except Exception:
+    jobs = []
+
+source = os.environ.get('SOURCE', '')
+
+_bad_chars = (':', ' ', '\t', '\n', '\r')
+for job in jobs:
+    if not isinstance(job, dict):
+        continue
+    raw_id = job.get('agentic_job_id', '')
+    if not isinstance(raw_id, str) or not raw_id:
+        continue
+    # D-16: sanitize agentic_job_id colon-safe (same replace(bad,'_') as reader D-16).
+    clean_id = raw_id
+    for _bad in _bad_chars:
+        clean_id = clean_id.replace(_bad, '_')
+    job_name = job.get('job_name', '') or ''
+    job_type = job.get('job_type', '') or ''
+    # Sanitize optional string fields so they are pipe-delimiter safe.
+    for _bad in ('|', '\n', '\r'):
+        job_name = job_name.replace(_bad, '_')
+        job_type = job_type.replace(_bad, '_')
+        source_clean = source.replace(_bad, '_') if source else ''
+    source_clean = source
+    for _bad in ('|', '\n', '\r'):
+        source_clean = source_clean.replace(_bad, '_')
+    print(f"{clean_id}|{job_name}|{job_type}|{source_clean}")
+PY
+      )
+
+      if [[ -n "${job_rows}" ]]; then
+        local clean_job_id job_name job_type job_env_source
+        while IFS='|' read -r clean_job_id job_name job_type job_env_source; do
+          [[ -z "${clean_job_id}" ]] && continue
+
+          # D-09: ledger-gated idempotency — skip if this job was already created.
+          if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
+            continue
+          fi
+
+          # Build the jobs create cmd array (D-03, D-04, Pattern 8).
+          local jobs_cmd=(
+            revenium jobs create
+            --agentic-job-id "${clean_job_id}"
+            --quiet
+          )
+          if [[ -n "${job_name}" ]]; then
+            jobs_cmd+=(--name "${job_name}")
+          fi
+          if [[ -n "${job_type}" ]]; then
+            jobs_cmd+=(--type "${job_type}")
+          fi
+          # Planner discretion (D-03): pass --environment from session source column.
+          if [[ -n "${job_env_source}" ]]; then
+            jobs_cmd+=(--environment "${job_env_source}")
+          fi
+
+          # D-10: best-effort invocation — capture output and exit code; never abort.
+          local jobs_cmd_output jobs_cmd_exit
+          jobs_cmd_output=$("${jobs_cmd[@]}" 2>&1) && jobs_cmd_exit=0 || jobs_cmd_exit=$?
+
+          # D-04 / D-09: treat exit 0 AND HTTP-409/already-exists as success-equivalent.
+          # The CLI exits non-zero for a 409, so check stdout/stderr for 409 indicators too.
+          local jobs_success=false
+          if [[ "${jobs_cmd_exit}" -eq 0 ]]; then
+            jobs_success=true
+          elif echo "${jobs_cmd_output}" | grep -qi "409\|already.exist\|conflict"; then
+            jobs_success=true
+          fi
+
+          if [[ "${jobs_success}" == "true" ]]; then
+            # D-15: write JOB:<id>:created:<unix_ts> to jobs ledger on success-or-409.
+            local now_ts
+            now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
+            echo "JOB:${clean_job_id}:created:${now_ts}" >> "${JOBS_LEDGER_FILE}"
+            info "Job created: agentic_job_id=${clean_job_id}"
+          else
+            # D-10: best-effort — warn once, never abort or continue the session loop.
+            warn "jobs create failed: id=${clean_job_id} exit=${jobs_cmd_exit} — metering continues"
+          fi
+        done <<< "${job_rows}"
+      fi
+    fi
+
     # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
     # per-marker Revenium calls with extended transaction-id and per-call v2
     # ledger writes. Else fall through to the legacy single-call path (T06
@@ -606,14 +707,18 @@ try:
     for marker, split in zip(markers, splits):
         m_agent = marker.get('agent', '')
         m_trace = marker.get('trace_id', '')
+        # Phase 9 (D-13): pass owning_job_id through the pipe row so the bash
+        # per-marker loop can append --task-id when non-empty.
+        m_owning_job_id = marker.get('owning_job_id') or ''
         # WR-01: sanitize pipe-delimiters and control chars so future upstream writers
         # cannot corrupt the bash while-read IFS='|' parsing (D-34).
         for _bad in ('|', '\n', '\r'):
             m_agent = m_agent.replace(_bad, '_')
             m_trace = m_trace.replace(_bad, '_')
+            m_owning_job_id = m_owning_job_id.replace(_bad, '_')
         print(f"{marker['muid']}|{marker['task_type']}|{marker['operation_type']}|"
               f"{split['input']}|{split['output']}|{split['cache_read']}|"
-              f"{split['cache_write']}|{split['total']}|{split['cost']}|{m_agent}|{m_trace}")
+              f"{split['cache_write']}|{split['total']}|{split['cost']}|{m_agent}|{m_trace}|{m_owning_job_id}")
 except Exception as exc:
     print(f"SPLIT_ERROR={exc}", file=sys.stderr)
     sys.exit(3)
@@ -629,8 +734,8 @@ PY
         continue
       fi
 
-      local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
-      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace; do
+      local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id
+      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id; do
         [[ -z "${muid}" ]] && continue
 
         local cmd=(
@@ -667,6 +772,12 @@ PY
         fi
         if [[ -n "${source}" ]]; then
           cmd+=(--environment "${source}")
+        fi
+        # Phase 9 (D-13): stamp --task-id when JOBS_CLI_CAPABLE and owning_job_id is non-empty.
+        # Gated on the marker attribute (owning_job_id), not on jobs create success — the
+        # Revenium server absorbs the create/meter race by correlating on task-id.
+        if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${m_owning_job_id}" ]]; then
+          cmd+=(--task-id "${m_owning_job_id}")
         fi
 
         local cmd_output cmd_exit
