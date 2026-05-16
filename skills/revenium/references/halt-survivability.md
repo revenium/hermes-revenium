@@ -1,10 +1,27 @@
 # Halt-Survivability E2E Test Plan
 
+## Release gate
+
+**Any change that INCREASES the byte size of `skills/revenium/SKILL.md` MUST re-run
+and re-pass the long-session cell of the matrix before that change can ship.**
+
+Current baseline byte size (post Phase 8 Plan 03 shrink): **22230 bytes**.
+Any future SKILL.md edit must compare against this number. An increase — even a
+single byte — triggers the gate. A decrease does not.
+
+There is NO retry budget: all 4 matrix cells must PASS on the first run. A single
+FAIL blocks the release and re-opens the gap. Fix SKILL.md and re-run from scratch.
+
+Phase 8's regression was caused precisely by SKILL.md growing from ~20,500 bytes to
+33,412 bytes (+63%) during Phase 8 Plans 01-02. The halt-check block fell from ~15%
+to ~10% of the file, while two large FINAL ACTION sections carrying competing
+"MANDATORY" imperatives grew to ~53% of the file — making the halt block lose the
+compression battle. This gate prevents that failure mode from recurring.
+
 ## When to run
 
 Run this test plan before every release that modifies `SKILL.md`, and specifically
-after any change that adds new content to the file — such as Phase 2's addition of
-the `## FINAL ACTION — TASK CLASSIFICATION` section. The load-bearing question is:
+after any change that adds new content to the file. The load-bearing question is:
 **does the halt-check anchor still fire under context dilution in long sessions?**
 Hermes delivers `SKILL.md` via a `skill_view()` tool-call result, not as a system
 prompt. In long sessions, that tool-call result may be summarized by context
