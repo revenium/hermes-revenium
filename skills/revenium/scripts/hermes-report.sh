@@ -177,6 +177,126 @@ PY
       continue
     fi
 
+    # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.
+    # Runs BEFORE the token pre-filter guards so that token-stable sessions
+    # (D-08 arc-close: job marker appended after the last LLM call) still reach
+    # the jobs-create stage even though their token total has not grown since
+    # the prior HERMES ledger row. The in-loop jobs-create stage below is NOT
+    # moved — this scan is additive only. Both share the single
+    # JOB:<id>:created gate; the synchronous-on-success ledger write prevents
+    # a double-create within one tick (D-09).
+    if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
+      local precheck_job_rows
+      precheck_job_rows=$(
+        MARKERS_DIR="${MARKERS_DIR}" \
+        SID="${sid}" \
+        python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+from pathlib import Path
+
+markers_dir = os.environ.get('MARKERS_DIR', '')
+sid = os.environ.get('SID', '')
+
+if not markers_dir or not sid:
+    raise SystemExit(0)
+
+marker_path = Path(markers_dir) / f"{sid}.jsonl"
+if not marker_path.is_file():
+    raise SystemExit(0)
+
+JOB_REQUIRED = ("agentic_job_id", "job_type", "status")
+_bad_chars = (':', ' ', '\t', '\n', '\r')
+
+try:
+    with marker_path.open() as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if not line:
+                continue
+            # 4 KB cap (T-03-04 defense, same as marker reader).
+            if len(line) > 4096:
+                continue
+            try:
+                m = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(m, dict):
+                continue
+            if m.get("kind") != "job":
+                continue
+            # D-04: validate reader-required keys; skip if any missing.
+            job_id = m.get("agentic_job_id")
+            if not isinstance(job_id, str) or not job_id:
+                continue
+            if not all(k in m for k in JOB_REQUIRED):
+                continue
+            # D-16: colon-safe sanitization (same replace(bad,'_') as marker reader).
+            clean_id = job_id
+            for _bad in _bad_chars:
+                clean_id = clean_id.replace(_bad, '_')
+            job_name = m.get('job_name', '') or ''
+            job_type = m.get('job_type', '') or ''
+            # Pipe-sanitize optional string fields for bash IFS='|' read.
+            for _bad in ('|', '\n', '\r'):
+                job_name = job_name.replace(_bad, '_')
+                job_type = job_type.replace(_bad, '_')
+            print(f"{clean_id}|{job_name}|{job_type}")
+except OSError:
+    pass
+PY
+      )
+
+      if [[ -n "${precheck_job_rows}" ]]; then
+        local precheck_clean_job_id precheck_job_name precheck_job_type
+        while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type; do
+          [[ -z "${precheck_clean_job_id}" ]] && continue
+
+          # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
+          if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
+            continue
+          fi
+
+          local precheck_jobs_cmd=(
+            revenium jobs create
+            --agentic-job-id "${precheck_clean_job_id}"
+            --quiet
+          )
+          if [[ -n "${precheck_job_name}" ]]; then
+            precheck_jobs_cmd+=(--name "${precheck_job_name}")
+          fi
+          if [[ -n "${precheck_job_type}" ]]; then
+            precheck_jobs_cmd+=(--type "${precheck_job_type}")
+          fi
+          if [[ -n "${source}" ]]; then
+            precheck_jobs_cmd+=(--environment "${source}")
+          fi
+
+          # D-10: best-effort — never abort or continue the session loop.
+          local precheck_cmd_output precheck_cmd_exit
+          precheck_cmd_output=$("${precheck_jobs_cmd[@]}" 2>&1) && precheck_cmd_exit=0 || precheck_cmd_exit=$?
+
+          # D-09: treat exit 0 AND HTTP-409/already-exists as success-equivalent.
+          local precheck_success=false
+          if [[ "${precheck_cmd_exit}" -eq 0 ]]; then
+            precheck_success=true
+          elif echo "${precheck_cmd_output}" | grep -qi "409\|already.exist\|conflict"; then
+            precheck_success=true
+          fi
+
+          if [[ "${precheck_success}" == "true" ]]; then
+            # D-15: synchronous-on-success ledger write — same JOB:<id>:created:<ts> pattern.
+            local precheck_now_ts
+            precheck_now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
+            echo "JOB:${precheck_clean_job_id}:created:${precheck_now_ts}" >> "${JOBS_LEDGER_FILE}"
+            info "Job created (pre-guard scan): agentic_job_id=${precheck_clean_job_id}"
+          else
+            warn "jobs create failed (pre-guard): id=${precheck_clean_job_id} exit=${precheck_cmd_exit} — metering continues"
+          fi
+        done <<< "${precheck_job_rows}"
+      fi
+    fi
+
     local ledger_key="HERMES:${sid}:${total_tokens}"
     if grep -q "^HERMES:${sid}:${total_tokens}:" "${LEDGER_FILE}" 2>/dev/null; then
       ((skipped_count++)) || true
