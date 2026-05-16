@@ -65,6 +65,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'job-taxonomy.json',          # Phase 8 — job-declaration seed
             SKILL / 'references' / 'task-taxonomy.md',
             SKILL / 'references' / 'halt-survivability.md',
+            SKILL / 'references' / 'task-classification.md',
+            SKILL / 'references' / 'job-declaration.md',
             SKILL / 'scripts' / 'common.sh',
             SKILL / 'scripts' / 'install-cron.sh',
             SKILL / 'scripts' / 'uninstall-cron.sh',
