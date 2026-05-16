@@ -31,6 +31,17 @@ if ! revenium config show >/dev/null 2>&1; then
   exit 0
 fi
 
+# Phase 9 (D-05): probe both CLI capabilities once at startup; cache result for
+# the whole cron tick. Both probes must pass for job work to proceed (D-06).
+# A negative probe fails open — metering continues byte-identical to v1.0 (D-07).
+JOBS_CLI_CAPABLE=false
+if revenium jobs --help >/dev/null 2>&1 && \
+   revenium meter completion --help 2>&1 | grep -q -- '--task-id'; then
+  JOBS_CLI_CAPABLE=true
+else
+  warn "revenium jobs/--task-id not available — job work skipped; metering continues as v1.0."
+fi
+
 touch "${LEDGER_FILE}"
 touch "${JOBS_LEDGER_FILE}"
 

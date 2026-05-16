@@ -603,6 +603,8 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    # Skip --help probes (Phase 9 CLI-capability preflight) — not real invocations.\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    # Emit each arg shell-escaped on one line per invocation.\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
@@ -946,6 +948,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -2163,6 +2166,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2266,6 +2270,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2369,6 +2374,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2494,6 +2500,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2889,6 +2896,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -3167,6 +3175,7 @@ class RepositoryTests(unittest.TestCase):
                             '  config) exit 0 ;;\n'
                             '  meter)\n'
                             '    shift; shift\n'
+                            '    [[ "$1" == "--help" ]] && exit 0\n'
                             '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                             '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                             '    exit 0\n'
@@ -3514,6 +3523,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -3754,6 +3764,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -3999,6 +4010,91 @@ class RepositoryTests(unittest.TestCase):
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_jobs_cli_capable_preflight(self):
+        """Phase 9 Task 1 (CREATE-01, D-05/D-06/D-07): JOBS_CLI_CAPABLE script-level variable
+        is declared in hermes-report.sh's startup block via two CLI-capability probes.
+        The variable is set once at script level (not local), defaults to false, and a
+        negative probe emits a warn without calling exit.
+        """
+        hermes_report = SKILL / 'scripts' / 'hermes-report.sh'
+        text = hermes_report.read_text()
+
+        # JOBS_CLI_CAPABLE must appear at least twice (declaration + read)
+        count = text.count('JOBS_CLI_CAPABLE')
+        self.assertGreaterEqual(
+            count, 2,
+            f'JOBS_CLI_CAPABLE must appear >= 2 times (declaration + at least one read); found {count}',
+        )
+
+        # The variable must NOT be declared with `local`
+        import re
+        local_decl = re.search(r'\blocal\s+JOBS_CLI_CAPABLE\b', text)
+        self.assertIsNone(
+            local_decl,
+            'JOBS_CLI_CAPABLE must be script-level (not declared with `local`)',
+        )
+
+        # Both probes must be present
+        self.assertIn(
+            'revenium jobs --help',
+            text,
+            'Probe (a): `revenium jobs --help` must appear in hermes-report.sh',
+        )
+        self.assertIn(
+            'revenium meter completion --help',
+            text,
+            'Probe (b): `revenium meter completion --help` must appear in hermes-report.sh',
+        )
+        self.assertIn(
+            '--task-id',
+            text,
+            'Probe (b) must grep for --task-id in meter completion --help output',
+        )
+
+        # The preflight probe block must contain no `exit` statement
+        # Find the block starting from `revenium jobs --help` and check the next few lines
+        lines = text.splitlines()
+        probe_a_line = None
+        for i, line in enumerate(lines):
+            if 'revenium jobs --help' in line:
+                probe_a_line = i
+                break
+        self.assertIsNotNone(probe_a_line, 'Could not find `revenium jobs --help` line')
+        # Check 10 lines surrounding the probe for `exit` (the warn path must not exit)
+        probe_window = lines[probe_a_line:probe_a_line + 10]
+        for win_line in probe_window:
+            stripped = win_line.strip()
+            # Standalone exit calls (with optional status code) are forbidden in this block
+            self.assertFalse(
+                re.match(r'\bexit\b', stripped),
+                f'Probe block must not call `exit`; found in: {stripped!r}',
+            )
+
+        # The probe block must appear before `touch "${LEDGER_FILE}"` (startup ordering)
+        touch_line = None
+        for i, line in enumerate(lines):
+            if 'touch "${LEDGER_FILE}"' in line or "touch \"${LEDGER_FILE}\"" in line:
+                touch_line = i
+                break
+        self.assertIsNotNone(touch_line, 'Could not find `touch "${LEDGER_FILE}"` line')
+        self.assertLess(
+            probe_a_line, touch_line,
+            f'JOBS_CLI_CAPABLE probe (line {probe_a_line}) must appear before '
+            f'`touch "${{LEDGER_FILE}}"` (line {touch_line})',
+        )
+
+    def test_jobs_cli_capable_preflight_bash_syntax(self):
+        """Phase 9 Task 1 sanity: bash -n must pass after JOBS_CLI_CAPABLE addition."""
+        hermes_report = SKILL / 'scripts' / 'hermes-report.sh'
+        result = subprocess.run(
+            ['bash', '-n', str(hermes_report)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f'bash -n failed after JOBS_CLI_CAPABLE addition: {result.stderr}',
+        )
 
 
 if __name__ == '__main__':
