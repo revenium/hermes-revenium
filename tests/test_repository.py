@@ -603,6 +603,8 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    # Skip --help probes (Phase 9 CLI-capability preflight) — not real invocations.\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    # Emit each arg shell-escaped on one line per invocation.\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
@@ -946,6 +948,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -2163,6 +2166,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2266,6 +2270,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2369,6 +2374,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2494,6 +2500,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     f'    printf "%q " "$@" >> "{invocations_log}"\n'
                     f'    printf "\\n" >> "{invocations_log}"\n'
                     '    exit 0 ;;\n'
@@ -2889,6 +2896,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -3167,6 +3175,7 @@ class RepositoryTests(unittest.TestCase):
                             '  config) exit 0 ;;\n'
                             '  meter)\n'
                             '    shift; shift\n'
+                            '    [[ "$1" == "--help" ]] && exit 0\n'
                             '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                             '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                             '    exit 0\n'
@@ -3514,6 +3523,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -3754,6 +3764,7 @@ class RepositoryTests(unittest.TestCase):
                     '  config) exit 0 ;;\n'
                     '  meter)\n'
                     '    shift; shift\n'
+                    '    [[ "$1" == "--help" ]] && exit 0\n'
                     '    printf "%q " "$@" >> "$INVOCATIONS_LOG"\n'
                     '    printf "\\n" >> "$INVOCATIONS_LOG"\n'
                     '    exit 0\n'
@@ -3997,6 +4008,667 @@ class RepositoryTests(unittest.TestCase):
                     f'got {invocations_d!r}, expected {invocations_a!r}, '
                     f'output={output_d}',
                 )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_jobs_cli_capable_preflight(self):
+        """Phase 9 Task 1 (CREATE-01, D-05/D-06/D-07): JOBS_CLI_CAPABLE script-level variable
+        is declared in hermes-report.sh's startup block via two CLI-capability probes.
+        The variable is set once at script level (not local), defaults to false, and a
+        negative probe emits a warn without calling exit.
+        """
+        hermes_report = SKILL / 'scripts' / 'hermes-report.sh'
+        text = hermes_report.read_text()
+
+        # JOBS_CLI_CAPABLE must appear at least twice (declaration + read)
+        count = text.count('JOBS_CLI_CAPABLE')
+        self.assertGreaterEqual(
+            count, 2,
+            f'JOBS_CLI_CAPABLE must appear >= 2 times (declaration + at least one read); found {count}',
+        )
+
+        # The variable must NOT be declared with `local`
+        import re
+        local_decl = re.search(r'\blocal\s+JOBS_CLI_CAPABLE\b', text)
+        self.assertIsNone(
+            local_decl,
+            'JOBS_CLI_CAPABLE must be script-level (not declared with `local`)',
+        )
+
+        # Both probes must be present
+        self.assertIn(
+            'revenium jobs --help',
+            text,
+            'Probe (a): `revenium jobs --help` must appear in hermes-report.sh',
+        )
+        self.assertIn(
+            'revenium meter completion --help',
+            text,
+            'Probe (b): `revenium meter completion --help` must appear in hermes-report.sh',
+        )
+        self.assertIn(
+            '--task-id',
+            text,
+            'Probe (b) must grep for --task-id in meter completion --help output',
+        )
+
+        # The preflight probe block must contain no `exit` statement
+        # Find the block starting from `revenium jobs --help` and check the next few lines
+        lines = text.splitlines()
+        probe_a_line = None
+        for i, line in enumerate(lines):
+            if 'revenium jobs --help' in line:
+                probe_a_line = i
+                break
+        self.assertIsNotNone(probe_a_line, 'Could not find `revenium jobs --help` line')
+        # Check 10 lines surrounding the probe for `exit` (the warn path must not exit)
+        probe_window = lines[probe_a_line:probe_a_line + 10]
+        for win_line in probe_window:
+            stripped = win_line.strip()
+            # Standalone exit calls (with optional status code) are forbidden in this block
+            self.assertFalse(
+                re.match(r'\bexit\b', stripped),
+                f'Probe block must not call `exit`; found in: {stripped!r}',
+            )
+
+        # The probe block must appear before `touch "${LEDGER_FILE}"` (startup ordering)
+        touch_line = None
+        for i, line in enumerate(lines):
+            if 'touch "${LEDGER_FILE}"' in line or "touch \"${LEDGER_FILE}\"" in line:
+                touch_line = i
+                break
+        self.assertIsNotNone(touch_line, 'Could not find `touch "${LEDGER_FILE}"` line')
+        self.assertLess(
+            probe_a_line, touch_line,
+            f'JOBS_CLI_CAPABLE probe (line {probe_a_line}) must appear before '
+            f'`touch "${{LEDGER_FILE}}"` (line {touch_line})',
+        )
+
+    def test_jobs_cli_capable_preflight_bash_syntax(self):
+        """Phase 9 Task 1 sanity: bash -n must pass after JOBS_CLI_CAPABLE addition."""
+        hermes_report = SKILL / 'scripts' / 'hermes-report.sh'
+        result = subprocess.run(
+            ['bash', '-n', str(hermes_report)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(
+            result.returncode, 0,
+            f'bash -n failed after JOBS_CLI_CAPABLE addition: {result.stderr}',
+        )
+
+    def test_owning_job_id_positional_attribution(self):
+        """Phase 9 Task 2 (D-11, D-12, D-14, D-16): owning_job_id positional attribution
+        is resolved in the marker-reader heredoc.
+
+        Static checks:
+        - owning_job_id appears in hermes-report.sh
+        - colon-sanitization (replace) is present
+        - kind == "job" branch still precedes REQUIRED_KEYS check
+
+        Behavioral checks:
+        - [task, task, job] in file order: both tasks' owning_job_id == job's sanitized id
+        - [task, job, task] in file order: first task gets job id, trailing task gets None
+        """
+        import json
+        import os
+        import sys
+        import tempfile
+        import shutil
+
+        hermes_report = SKILL / 'scripts' / 'hermes-report.sh'
+        text = hermes_report.read_text()
+
+        # --- Static checks ---
+
+        # owning_job_id must appear in the script
+        count = text.count('owning_job_id')
+        self.assertGreaterEqual(
+            count, 1,
+            f'owning_job_id must appear in hermes-report.sh; found {count}',
+        )
+
+        # Colon-sanitization must use replace() with a tuple including ':'
+        # Check for replace( near owning_job_id context
+        self.assertIn(
+            'replace(',
+            text,
+            'colon-sanitization via replace() must be present for owning_job_id (D-16)',
+        )
+
+        # kind == "job" branch must come before REQUIRED_KEYS check
+        lines = text.splitlines()
+        kind_job_line = None
+        required_keys_line = None
+        for i, line in enumerate(lines):
+            if 'kind == "job"' in line and kind_job_line is None:
+                kind_job_line = i
+            if 'REQUIRED_KEYS)' in line or 'REQUIRED_KEYS,' in line:
+                if required_keys_line is None:
+                    required_keys_line = i
+        self.assertIsNotNone(kind_job_line, 'kind == "job" branch not found in hermes-report.sh')
+        self.assertIsNotNone(required_keys_line, 'REQUIRED_KEYS check not found in hermes-report.sh')
+        self.assertLess(
+            kind_job_line, required_keys_line,
+            f'kind == "job" branch (line {kind_job_line}) must appear before '
+            f'REQUIRED_KEYS check (line {required_keys_line})',
+        )
+
+        # --- Behavioral checks via exercising the reader Python heredoc ---
+
+        # Extract the marker-reader Python heredoc from hermes-report.sh.
+        # The marker-reader is the heredoc that follows `marker_output=$(` and uses
+        # `python3 - <<'PY' 2>&1`. Identify it by finding the line index of
+        # `marker_output=$(` and then the next `<<'PY' 2>&1` line after it.
+        heredoc_lines = []
+        heredoc_start = None
+        for i, line in enumerate(lines):
+            if 'marker_output=$(' in line:
+                heredoc_start = i
+            if heredoc_start is not None and i > heredoc_start and "<<'PY' 2>&1" in line:
+                # Found the heredoc opening line — collect from next line until standalone PY
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip() == 'PY':
+                        break
+                    heredoc_lines.append(lines[j])
+                break
+
+        self.assertTrue(
+            len(heredoc_lines) > 0,
+            'Could not extract marker-reader Python heredoc from hermes-report.sh',
+        )
+        heredoc_code = '\n'.join(heredoc_lines)
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-owning-job-attr-')
+        try:
+            script_dir = str(SKILL / 'scripts')
+            markers_dir = os.path.join(tmpdir, 'markers')
+            os.makedirs(markers_dir)
+            ledger_path = os.path.join(tmpdir, 'ledger')
+            open(ledger_path, 'w').close()
+
+            sid = 'test-attribution-sid'
+
+            # We'll use subprocess to run just the Python code, setting env vars.
+            def run_heredoc_python(marker_lines_data, test_sid=sid):
+                marker_file = os.path.join(markers_dir, f'{test_sid}.jsonl')
+                with open(marker_file, 'w') as f:
+                    for ml in marker_lines_data:
+                        f.write(ml + '\n')
+
+                reader_env = {
+                    **os.environ,
+                    'MARKERS_DIR': markers_dir,
+                    'SID': test_sid,
+                    'TOTAL_TOKENS': '10000',
+                    'DELTA_TOTAL': '10000',
+                    'SCRIPT_DIR': script_dir,
+                    'LEDGER_PATH': ledger_path,
+                }
+                result = subprocess.run(
+                    ['python3', '-c', heredoc_code],
+                    env=reader_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                return result.stdout, result.returncode
+
+            # Build fixture marker lines
+            def task_marker(muid_suffix, ts, task_type='code_review'):
+                return json.dumps({
+                    'muid': f'01893b8a3{muid_suffix:02x}abcdef0123456789abcdef0',
+                    'ts': ts,
+                    'sid': sid,
+                    'task_type': task_type,
+                    'operation_type': 'CHAT',
+                }, separators=(',', ':'))
+
+            def job_marker(job_id, ts):
+                return json.dumps({
+                    'kind': 'job',
+                    'ts': ts,
+                    'sid': sid,
+                    'agentic_job_id': job_id,
+                    'job_name': 'Test Job',
+                    'job_type': 'feature_development',
+                    'status': 'IN_PROGRESS',
+                }, separators=(',', ':'))
+
+            job_id_plain = 'pr-review-fc7a'
+
+            # --- Fixture A: [task, task, job] ---
+            # Both tasks should get owning_job_id = sanitized(job_id_plain)
+            fixture_a = [
+                task_marker(0, 1715515001.0),
+                task_marker(1, 1715515002.0),
+                job_marker(job_id_plain, 1715515010.0),
+            ]
+            out_a, rc_a = run_heredoc_python(fixture_a)
+            self.assertEqual(rc_a, 0, f'Reader heredoc failed for fixture A: rc={rc_a}')
+            # Parse MARKERS_JSON
+            markers_json_a = None
+            for line in out_a.splitlines():
+                if line.startswith('MARKERS_JSON='):
+                    markers_json_a = json.loads(line[len('MARKERS_JSON='):])
+                    break
+            self.assertIsNotNone(markers_json_a, f'MARKERS_JSON not found in reader output: {out_a}')
+            self.assertEqual(len(markers_json_a), 2,
+                             f'Fixture A: expected 2 task markers, got {len(markers_json_a)}')
+            for m in markers_json_a:
+                self.assertIn('owning_job_id', m,
+                              f'Fixture A: marker missing owning_job_id: {m}')
+                self.assertEqual(
+                    m['owning_job_id'], job_id_plain,
+                    f'Fixture A: task marker owning_job_id should be {job_id_plain!r}, '
+                    f'got {m["owning_job_id"]!r}',
+                )
+
+            # --- Fixture B: [task, job, task] ---
+            # First task gets job id; trailing task (no job after it) gets null.
+            sid2 = 'test-attribution-sid2'
+            fixture_b = [
+                task_marker(0, 1715515001.0),
+                job_marker(job_id_plain, 1715515005.0),
+                task_marker(1, 1715515010.0),
+            ]
+            out_b, rc_b = run_heredoc_python(fixture_b, test_sid=sid2)
+            self.assertEqual(rc_b, 0, f'Reader heredoc failed for fixture B: rc={rc_b}')
+            markers_json_b = None
+            for line in out_b.splitlines():
+                if line.startswith('MARKERS_JSON='):
+                    markers_json_b = json.loads(line[len('MARKERS_JSON='):])
+                    break
+            self.assertIsNotNone(markers_json_b, f'MARKERS_JSON not found for fixture B: {out_b}')
+            self.assertEqual(len(markers_json_b), 2,
+                             f'Fixture B: expected 2 task markers, got {len(markers_json_b)}')
+            # First task marker should have the job's id
+            first_m = markers_json_b[0]
+            self.assertIn('owning_job_id', first_m,
+                          f'Fixture B: first marker missing owning_job_id: {first_m}')
+            self.assertEqual(
+                first_m['owning_job_id'], job_id_plain,
+                f'Fixture B: first task owning_job_id should be {job_id_plain!r}, '
+                f'got {first_m["owning_job_id"]!r}',
+            )
+            # Trailing task marker has no job after it → owning_job_id must be None/null
+            trailing_m = markers_json_b[1]
+            self.assertIn('owning_job_id', trailing_m,
+                          f'Fixture B: trailing marker missing owning_job_id: {trailing_m}')
+            self.assertIsNone(
+                trailing_m['owning_job_id'],
+                f'Fixture B: trailing task owning_job_id should be None (no job after it), '
+                f'got {trailing_m["owning_job_id"]!r}',
+            )
+
+            # --- Fixture C: colon-sanitization ---
+            # agentic_job_id with a colon should be sanitized before use
+            job_id_with_colon = 'job:with:colons'
+            expected_sanitized = 'job_with_colons'
+            fixture_c = [
+                task_marker(0, 1715515001.0),
+                json.dumps({
+                    'kind': 'job',
+                    'ts': 1715515010.0,
+                    'sid': sid,
+                    'agentic_job_id': job_id_with_colon,
+                    'job_name': 'Colon Job',
+                    'job_type': 'feature_development',
+                    'status': 'IN_PROGRESS',
+                }, separators=(',', ':')),
+            ]
+            sid3 = 'test-attribution-sid3'
+            out_c, rc_c = run_heredoc_python(fixture_c, test_sid=sid3)
+            self.assertEqual(rc_c, 0, f'Reader heredoc failed for fixture C: rc={rc_c}')
+            markers_json_c = None
+            for line in out_c.splitlines():
+                if line.startswith('MARKERS_JSON='):
+                    markers_json_c = json.loads(line[len('MARKERS_JSON='):])
+                    break
+            self.assertIsNotNone(markers_json_c, f'MARKERS_JSON not found for fixture C: {out_c}')
+            self.assertEqual(len(markers_json_c), 1)
+            m_c = markers_json_c[0]
+            self.assertIn('owning_job_id', m_c)
+            self.assertEqual(
+                m_c['owning_job_id'], expected_sanitized,
+                f'Fixture C: colon-sanitized owning_job_id should be {expected_sanitized!r}, '
+                f'got {m_c["owning_job_id"]!r}',
+            )
+
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_jobs_create_loop_static(self):
+        """Phase 9 Task 3 (CREATE-02, CREATE-04, D-09, D-10, D-15): static structure checks
+        for the idempotent best-effort jobs create loop in hermes-report.sh.
+        """
+        hermes_report = SKILL / 'scripts' / 'hermes-report.sh'
+        text = hermes_report.read_text()
+
+        # revenium jobs create must be present
+        self.assertIn(
+            'revenium jobs create',
+            text,
+            'revenium jobs create command must appear in hermes-report.sh',
+        )
+
+        # --agentic-job-id must be present in the jobs create command
+        self.assertIn(
+            '--agentic-job-id',
+            text,
+            '--agentic-job-id must appear in hermes-report.sh (jobs create arg)',
+        )
+
+        # --quiet must be present with jobs create (D-04)
+        import re
+        # Find the block containing jobs create and check it has --quiet
+        jobs_create_idx = text.index('revenium jobs create')
+        context_window = text[max(0, jobs_create_idx - 50):jobs_create_idx + 500]
+        self.assertIn(
+            '--quiet',
+            context_window,
+            'jobs create must include --quiet (D-04)',
+        )
+
+        # JOB:...:created: ledger write must be present (D-15)
+        self.assertRegex(
+            text,
+            r'JOB:.*:created:',
+            'JOB:<id>:created: ledger line must appear in hermes-report.sh (D-15)',
+        )
+
+        # JOBS_LEDGER_FILE must be used (no hardcoded path)
+        self.assertIn(
+            'JOBS_LEDGER_FILE',
+            text,
+            'JOBS_LEDGER_FILE variable must be referenced in hermes-report.sh',
+        )
+        self.assertNotIn(
+            'revenium-jobs.ledger"',
+            text,
+            'Hardcoded revenium-jobs.ledger path must not appear outside common.sh',
+        )
+
+        # Idempotency gate must be present: grep -q "^JOB:..."
+        self.assertIn(
+            '^JOB:',
+            text,
+            'Idempotency gate grep pattern "^JOB:" must appear in hermes-report.sh (D-09)',
+        )
+
+        # JOBS_CLI_CAPABLE guard must wrap the create stage.
+        # The guard appears on an outer `if` block that encloses the while loop
+        # containing `revenium jobs create`, so search 80 lines before the command.
+        lines = text.splitlines()
+        jobs_create_line = None
+        for i, line in enumerate(lines):
+            if 'revenium jobs create' in line:
+                jobs_create_line = i
+                break
+        self.assertIsNotNone(jobs_create_line, 'revenium jobs create not found in hermes-report.sh')
+        # Check up to 80 lines before jobs create for JOBS_CLI_CAPABLE
+        guard_window = '\n'.join(lines[max(0, jobs_create_line - 80):jobs_create_line])
+        self.assertIn(
+            'JOBS_CLI_CAPABLE',
+            guard_window,
+            'revenium jobs create must be guarded by JOBS_CLI_CAPABLE check',
+        )
+
+        # No JOB:...:outcome: write should exist (Phase 10 scope boundary)
+        outcome_count = len(re.findall(r'JOB:.*:outcome:', text))
+        self.assertEqual(
+            outcome_count, 0,
+            f'JOB:<id>:outcome: must not appear in hermes-report.sh (Phase 10 scope); '
+            f'found {outcome_count}',
+        )
+
+    def test_jobs_create_loop_e2e(self):
+        """Phase 9 Task 3 (CREATE-02, CREATE-04): end-to-end test for the jobs create loop.
+
+        Verifies:
+        - A session with a job marker triggers one `revenium jobs create` call
+        - A second cron run is idempotent (no second jobs create call)
+        - A jobs create failure does not abort metering (best-effort)
+        """
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import tempfile
+
+        HERMES_REPORT = SKILL / 'scripts' / 'hermes-report.sh'
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def run_cron(env, meter_log, jobs_log):
+            """Invoke hermes-report.sh, returning (exit_code, meter_invocations, jobs_invocations, output)."""
+            for log in (meter_log, jobs_log):
+                if os.path.exists(log):
+                    os.unlink(log)
+                open(log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            import shlex
+
+            def parse_log(path):
+                invocations = []
+                with open(path) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if line:
+                            invocations.append(shlex.split(line))
+                return invocations
+
+            return (
+                result.returncode,
+                parse_log(meter_log),
+                parse_log(jobs_log),
+                result.stdout + result.stderr,
+            )
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-jobs-e2e-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            ledger = os.path.join(state_dir, 'revenium-hermes.ledger')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            # Build a revenium shim that:
+            # - Handles `config` (exit 0)
+            # - Handles `jobs --help` (exit 0, so JOBS_CLI_CAPABLE probe (a) passes)
+            # - Handles `meter completion --help` (prints --task-id so probe (b) passes)
+            # - Handles `jobs create` (logs to jobs_log, exit 0)
+            # - Handles `meter completion` (logs to meter_log, exit 0)
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter-invocations.log')
+            jobs_log = os.path.join(tmpdir, 'jobs-invocations.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  jobs)\n'
+                    '    shift\n'
+                    '    case "$1" in\n'
+                    '      --help) exit 0 ;;\n'
+                    '      create)\n'
+                    '        shift\n'
+                    f'        printf "%q " "$@" >> "{jobs_log}"\n'
+                    f'        printf "\\n" >> "{jobs_log}"\n'
+                    '        exit 0\n'
+                    '        ;;\n'
+                    '      *) exit 0 ;;\n'
+                    '    esac\n'
+                    '    ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    if [[ "$1" == "--help" ]]; then\n'
+                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      exit 0\n'
+                    '    fi\n'
+                    f'    printf "%q " "$@" >> "{meter_log}"\n'
+                    f'    printf "\\n" >> "{meter_log}"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            sid = '20260516_test_jobs_e2e'
+            input_tokens = 10000
+            output_tokens = 4000
+            total_tokens = input_tokens + output_tokens
+            job_id = 'pr-review-abc123'
+
+            def reset_state():
+                for path in (state_db, ledger, jobs_ledger):
+                    if os.path.exists(path):
+                        os.unlink(path)
+                for fname in os.listdir(markers_dir):
+                    full = os.path.join(markers_dir, fname)
+                    if os.path.isdir(full):
+                        continue
+                    os.unlink(full)
+
+            def write_markers(task_count=2, include_job=True):
+                marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+                with open(marker_file, 'w') as f:
+                    for i in range(task_count):
+                        m = {
+                            'muid': f'01893b8a3{i:02x}abcdef0123456789abcde00',
+                            'ts': 1715515000.0 + i + 1,
+                            'sid': sid,
+                            'task_type': 'code_review',
+                            'operation_type': 'CHAT',
+                        }
+                        f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                    if include_job:
+                        job = {
+                            'kind': 'job',
+                            'ts': 1715515010.0,
+                            'sid': sid,
+                            'agentic_job_id': job_id,
+                            'job_name': 'PR Review',
+                            'job_type': 'code_review',
+                            'status': 'IN_PROGRESS',
+                        }
+                        f.write(json.dumps(job, separators=(',', ':')) + '\n')
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+            }
+
+            # =====================================================
+            # Sub-case 1: Session with job marker → jobs create called once
+            # =====================================================
+            reset_state()
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': input_tokens, 'output_tokens': output_tokens,
+                'cache_read': 200, 'cache_write': 100,
+                'reasoning': 0, 'estimated_cost': '0.01',
+                'api_calls': 2, 'started_at': 1715514000.0,
+                'ended_at': 1715515020.0,
+                'billing_provider': 'anthropic',
+            }])
+            write_markers(task_count=2, include_job=True)
+
+            rc1, meter_inv1, jobs_inv1, out1 = run_cron(base_env, meter_log, jobs_log)
+            self.assertEqual(rc1, 0, f'Run 1 exit {rc1}: {out1}')
+
+            # Should have made exactly one jobs create call
+            self.assertEqual(
+                len(jobs_inv1), 1,
+                f'Run 1: expected 1 jobs create call, got {len(jobs_inv1)}: {out1}',
+            )
+            # Check --agentic-job-id is in the jobs create call
+            jobs_argv1 = jobs_inv1[0]
+            self.assertIn(
+                '--agentic-job-id', jobs_argv1,
+                f'Run 1: --agentic-job-id not found in jobs create argv: {jobs_argv1}',
+            )
+            agentic_id_idx = jobs_argv1.index('--agentic-job-id') + 1
+            self.assertEqual(
+                jobs_argv1[agentic_id_idx], job_id,
+                f'Run 1: --agentic-job-id value mismatch: {jobs_argv1[agentic_id_idx]!r}',
+            )
+            self.assertIn(
+                '--quiet', jobs_argv1,
+                f'Run 1: --quiet not in jobs create argv: {jobs_argv1}',
+            )
+
+            # JOB ledger line must have been written
+            self.assertTrue(os.path.exists(jobs_ledger),
+                            f'Run 1: jobs ledger not created at {jobs_ledger}')
+            jobs_ledger_content = open(jobs_ledger).read()
+            self.assertRegex(
+                jobs_ledger_content,
+                rf'^JOB:{re.escape(job_id)}:created:',
+                f'Run 1: JOB ledger line not written: {jobs_ledger_content!r}',
+            )
+
+            # Task markers should have --task-id (JOBS_CLI_CAPABLE=true, owning_job_id set)
+            self.assertEqual(
+                len(meter_inv1), 2,
+                f'Run 1: expected 2 meter invocations, got {len(meter_inv1)}: {out1}',
+            )
+            for argv in meter_inv1:
+                self.assertIn(
+                    '--task-id', argv,
+                    f'Run 1: --task-id not found in meter argv: {argv}',
+                )
+                task_id_idx = argv.index('--task-id') + 1
+                self.assertEqual(
+                    argv[task_id_idx], job_id,
+                    f'Run 1: --task-id value mismatch: {argv[task_id_idx]!r}',
+                )
+
+            # =====================================================
+            # Sub-case 2: Second run is idempotent — no second jobs create
+            # =====================================================
+            rc2, meter_inv2, jobs_inv2, out2 = run_cron(base_env, meter_log, jobs_log)
+            self.assertEqual(rc2, 0, f'Run 2 exit {rc2}: {out2}')
+            # Session already ledger'd — meter invocations should be 0
+            self.assertEqual(
+                len(jobs_inv2), 0,
+                f'Run 2 (idempotent): expected 0 jobs create calls, got {len(jobs_inv2)}: {out2}',
+            )
+
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
