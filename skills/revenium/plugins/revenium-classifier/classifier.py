@@ -374,35 +374,59 @@ def _persist_label_to_taxonomy(label: str) -> None:
     Atomic via temp-file + os.replace. Fail-open: any I/O error logs a warning
     and returns without raising (D-32). Only called after _write_marker_pair
     succeeds. The 'unclassified' sentinel is excluded — never persisted as a
-    taxonomy entry."""
+    taxonomy entry.
+
+    Concurrency: a sidecar lock file (TAXONOMY_FILE + ".lock") is held with a
+    non-blocking LOCK_EX during the read-modify-write (HARDEN-01). On lock
+    contention (BlockingIOError) or any OSError from flock itself the persist is
+    skipped and the function returns without raising (D-01, D-02)."""
     if label == "unclassified":
         return
     import datetime
     try:
-        try:
-            data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {"labels": {}}
-        labels = data.get("labels", {})
-        if not isinstance(labels, dict):
-            labels = {}
-        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if label not in labels:
-            labels[label] = {
-                "description": None,
-                "examples": [],
-                "last_seen_at": now_iso,
-            }
-        else:
-            # Update last_seen_at on every successful write (recency ordering D-33).
-            if not isinstance(labels[label], dict):
-                labels[label] = {}
-            labels[label]["last_seen_at"] = now_iso
-        data["labels"] = labels
         TAXONOMY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(TAXONOMY_FILE)
+        lock_path = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".lock")
+        try:
+            with open(lock_path, "a") as lockfd:
+                try:
+                    fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    logger.warning(
+                        "revenium-classifier: taxonomy persist skipped, lock contention for label=%s: %s",
+                        label,
+                        exc,
+                    )
+                    return
+                try:
+                    data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {"labels": {}}
+                labels = data.get("labels", {})
+                if not isinstance(labels, dict):
+                    labels = {}
+                now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if label not in labels:
+                    labels[label] = {
+                        "description": None,
+                        "examples": [],
+                        "last_seen_at": now_iso,
+                    }
+                else:
+                    # Update last_seen_at on every successful write (recency ordering D-33).
+                    if not isinstance(labels[label], dict):
+                        labels[label] = {}
+                    labels[label]["last_seen_at"] = now_iso
+                data["labels"] = labels
+                tmp = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".tmp")
+                tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                tmp.replace(TAXONOMY_FILE)
+        except OSError as exc:
+            logger.warning(
+                "revenium-classifier: taxonomy persist skipped, lock contention for label=%s: %s",
+                label,
+                exc,
+            )
+            return
     except Exception as exc:
         logger.warning("revenium-classifier: mint-back failed for label=%s: %s", label, exc)
 
