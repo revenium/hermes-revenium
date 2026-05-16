@@ -5283,6 +5283,344 @@ class RepositoryTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_cron_jobs_create_after_arc_close_token_stable(self):
+        """WR-02 regression: a session metered in an earlier tick gets its arc-end
+        job marker created on a later tick even when the session's token total has
+        not grown (D-08 arc-close ordering). Also asserts same-tick idempotency:
+        a token-growing session with a fresh job marker produces exactly one
+        jobs create call, not two."""
+        import json
+        import os
+        import re
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+
+        HERMES_REPORT = SKILL / 'scripts' / 'hermes-report.sh'
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def make_markers(n, sid, ts_base=1715515000.0):
+            return [
+                {
+                    'muid': f'01893b8a4{i:02x}abcdef0123456789abcdef0',
+                    'ts': ts_base + i + 1,
+                    'sid': sid,
+                    'task_type': 'code_review',
+                    'operation_type': 'CHAT',
+                }
+                for i in range(n)
+            ]
+
+        def make_job_marker(sid, job_id, job_type='code_review', status='IN_PROGRESS'):
+            """Return a frozen Phase 7 D-03 job-marker dict."""
+            return {
+                'kind': 'job',
+                'ts': 1715516000.0,
+                'sid': sid,
+                'agentic_job_id': job_id,
+                'job_name': 'PR Review Arc Close',
+                'job_type': job_type,
+                'status': status,
+            }
+
+        def run_cron(env, meter_log, jobs_log):
+            for log in (meter_log, jobs_log):
+                if os.path.exists(log):
+                    os.unlink(log)
+                open(log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            import shlex
+
+            def parse_log(path):
+                invocations = []
+                with open(path) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if line:
+                            invocations.append(shlex.split(line))
+                return invocations
+
+            return (
+                result.returncode,
+                parse_log(meter_log),
+                parse_log(jobs_log),
+                result.stdout + result.stderr,
+            )
+
+        # --- Arc-close scenario (Run 1 → append job marker → Run 2 → Run 3) ---
+        n_tasks = 2
+        job_id = 'arc-close-job-def777'
+        sid = '20260516_test_arc_close'
+        total_tokens = 9000 + 3500  # must match state.db row below
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-arc-close-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            hermes_ledger = os.path.join(state_dir, 'revenium-hermes.ledger')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  jobs)\n'
+                    '    shift\n'
+                    '    case "$1" in\n'
+                    '      --help) exit 0 ;;\n'
+                    '      create)\n'
+                    '        shift\n'
+                    f'        printf "%q " "$@" >> "{jobs_log}"\n'
+                    f'        printf "\\n" >> "{jobs_log}"\n'
+                    '        exit 0\n'
+                    '        ;;\n'
+                    '      *) exit 0 ;;\n'
+                    '    esac\n'
+                    '    ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    if [[ "$1" == "--help" ]]; then\n'
+                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      exit 0\n'
+                    '    fi\n'
+                    f'    printf "%q " "$@" >> "{meter_log}"\n'
+                    f'    printf "\\n" >> "{meter_log}"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            # Build fixture: one session with task markers ONLY (no job marker yet).
+            # D-08: job marker is appended AFTER the last LLM call.
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 9000, 'output_tokens': 3500,
+                'cache_read': 250, 'cache_write': 120,
+                'reasoning': 0, 'estimated_cost': '0.04',
+                'api_calls': n_tasks, 'started_at': 1715514000.0,
+                'ended_at': 1715516200.0,
+                'billing_provider': 'anthropic',
+            }])
+            markers_file = os.path.join(markers_dir, f'{sid}.jsonl')
+            with open(markers_file, 'w') as f:
+                for m in make_markers(n_tasks, sid):
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+            # No job marker yet — D-08 arc-close ordering.
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+                # Make the settle-window deterministic — no wall-clock backdating needed.
+                'REVENIUM_CRON_SETTLE_SECONDS': '0',
+            }
+
+            # Run 1: meters the session; no job marker present — zero jobs create calls.
+            rc1, _meter1, jobs_inv1, out1 = run_cron(base_env, meter_log, jobs_log)
+            self.assertEqual(rc1, 0, f'Run 1 exit {rc1}: {out1}')
+            # Assert HERMES ledger row was written.
+            self.assertTrue(os.path.exists(hermes_ledger), f'WR-02: HERMES ledger not created after Run 1: {out1}')
+            hermes_text = open(hermes_ledger).read()
+            self.assertRegex(
+                hermes_text,
+                re.compile(r'^HERMES:' + re.escape(sid) + r':' + str(total_tokens) + r':', re.M),
+                f'WR-02: HERMES ledger row not written for sid={sid} total={total_tokens}',
+            )
+            self.assertEqual(
+                len(jobs_inv1), 0,
+                f'WR-02: Run 1 expected 0 jobs create calls (no job marker), got {len(jobs_inv1)}: {out1}',
+            )
+
+            # Between runs: append the job marker WITHOUT changing state.db token counts.
+            # This models D-08 arc-close: agent appends kind:"job" after last LLM call.
+            with open(markers_file, 'a') as f:
+                job = make_job_marker(sid, job_id)
+                f.write(json.dumps(job, separators=(',', ':')) + '\n')
+
+            # Run 2: token total is UNCHANGED (would hit the token pre-filter), but
+            # WR-02 fix must allow the cron to still reach the jobs-create stage.
+            rc2, _meter2, jobs_inv2, out2 = run_cron(base_env, meter_log, jobs_log)
+            self.assertEqual(rc2, 0, f'Run 2 exit {rc2}: {out2}')
+            self.assertEqual(
+                len(jobs_inv2), 1,
+                f'WR-02: Run 2 expected exactly 1 jobs create call for arc-end job '
+                f'(token-stable session), got {len(jobs_inv2)}: {out2}',
+            )
+            # Verify --agentic-job-id is present in the create args.
+            run2_argv = jobs_inv2[0]
+            self.assertIn(
+                '--agentic-job-id', run2_argv,
+                f'WR-02: --agentic-job-id missing from jobs create argv: {run2_argv}',
+            )
+            idx = run2_argv.index('--agentic-job-id')
+            self.assertEqual(
+                run2_argv[idx + 1], job_id,
+                f'WR-02: --agentic-job-id value mismatch: {run2_argv}',
+            )
+            # Assert JOB ledger line was written.
+            self.assertTrue(os.path.exists(jobs_ledger), f'WR-02: jobs ledger not created after Run 2')
+            jobs_text = open(jobs_ledger).read()
+            self.assertRegex(
+                jobs_text,
+                re.compile(r'^JOB:' + re.escape(job_id) + r':created:', re.M),
+                f'WR-02: JOB ledger line not written after Run 2',
+            )
+
+            # Run 3: idempotency — the JOB:<id>:created gate suppresses a second create.
+            rc3, _meter3, jobs_inv3, out3 = run_cron(base_env, meter_log, jobs_log)
+            self.assertEqual(rc3, 0, f'Run 3 exit {rc3}: {out3}')
+            self.assertEqual(
+                len(jobs_inv3), 0,
+                f'WR-02 idempotency: Run 3 should produce 0 jobs create calls '
+                f'(JOB ledger gate), got {len(jobs_inv3)}: {out3}',
+            )
+
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # --- Same-tick sub-assertion: a token-GROWING session with a fresh job marker
+        # in its marker file BEFORE any cron run produces exactly ONE jobs create call,
+        # not two (pre-guard scan + in-loop stage must share the single ledger gate). ---
+        sid2 = '20260516_test_same_tick'
+        job_id2 = 'same-tick-job-ghi888'
+
+        tmpdir2 = tempfile.mkdtemp(prefix='gsd-same-tick-')
+        try:
+            hermes_home2 = os.path.join(tmpdir2, 'hh')
+            state_dir2 = os.path.join(hermes_home2, 'state', 'revenium')
+            markers_dir2 = os.path.join(state_dir2, 'markers')
+            os.makedirs(markers_dir2, mode=0o700)
+            state_db2 = os.path.join(hermes_home2, 'state.db')
+            jobs_ledger2 = os.path.join(state_dir2, 'revenium-jobs.ledger')
+
+            shim_home2 = os.path.join(tmpdir2, 'home')
+            bin_dir2 = os.path.join(shim_home2, '.local', 'bin')
+            os.makedirs(bin_dir2)
+            meter_log2 = os.path.join(tmpdir2, 'meter.log')
+            jobs_log2 = os.path.join(tmpdir2, 'jobs.log')
+
+            shim2 = os.path.join(bin_dir2, 'revenium')
+            with open(shim2, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  jobs)\n'
+                    '    shift\n'
+                    '    case "$1" in\n'
+                    '      --help) exit 0 ;;\n'
+                    '      create)\n'
+                    '        shift\n'
+                    f'        printf "%q " "$@" >> "{jobs_log2}"\n'
+                    f'        printf "\\n" >> "{jobs_log2}"\n'
+                    '        exit 0\n'
+                    '        ;;\n'
+                    '      *) exit 0 ;;\n'
+                    '    esac\n'
+                    '    ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    if [[ "$1" == "--help" ]]; then\n'
+                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      exit 0\n'
+                    '    fi\n'
+                    f'    printf "%q " "$@" >> "{meter_log2}"\n'
+                    f'    printf "\\n" >> "{meter_log2}"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim2, 0o755)
+
+            # Build fixture: token-GROWING session (no prior HERMES ledger row) whose
+            # marker file ALREADY contains both task markers and a fresh job marker.
+            build_state_db(state_db2, [{
+                'id': sid2, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 8000, 'output_tokens': 2000,
+                'cache_read': 100, 'cache_write': 50,
+                'reasoning': 0, 'estimated_cost': '0.03',
+                'api_calls': 2, 'started_at': 1715514000.0,
+                'ended_at': 1715516200.0,
+                'billing_provider': 'anthropic',
+            }])
+            markers_file2 = os.path.join(markers_dir2, f'{sid2}.jsonl')
+            with open(markers_file2, 'w') as f:
+                for m in make_markers(2, sid2):
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                job2 = make_job_marker(sid2, job_id2)
+                f.write(json.dumps(job2, separators=(',', ':')) + '\n')
+
+            base_env2 = {
+                **os.environ,
+                'HOME': shim_home2,
+                'HERMES_HOME': hermes_home2,
+                'REVENIUM_STATE_DIR': state_dir2,
+                'PATH': bin_dir2 + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+                'REVENIUM_CRON_SETTLE_SECONDS': '0',
+            }
+
+            # Run once: the pre-guard scan and the in-loop stage must share the single
+            # JOB:<id>:created gate — exactly ONE jobs create call, not two.
+            _, _meter_st, jobs_inv_st, out_st = run_cron(base_env2, meter_log2, jobs_log2)
+            jobs_for_id2 = [
+                inv for inv in jobs_inv_st
+                if '--agentic-job-id' in inv
+                and inv[inv.index('--agentic-job-id') + 1] == job_id2
+            ]
+            self.assertEqual(
+                len(jobs_for_id2), 1,
+                f'WR-02 same-tick: expected exactly 1 jobs create for {job_id2} '
+                f'(pre-guard + in-loop must share single gate), '
+                f'got {len(jobs_for_id2)}: {out_st}',
+            )
+        finally:
+            shutil.rmtree(tmpdir2, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()
