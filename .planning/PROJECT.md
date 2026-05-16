@@ -243,4 +243,4 @@ Dated record of decisions that were rewritten after shipping. Each entry cites t
 | 2026-05-14 | D-8 (trivial-skip) | 260514-n8e | D-07 heuristic skip was dead code — `response=None` always collapses the `len(response) < 200` predicate to `True`, silently dropping ~94% of sessions. Removed from `classifier.py`; classifier now fires on every `on_session_end` event. |
 
 ---
-*Last updated: 2026-05-15 — Phase 7 complete (job-marker schema & state scaffolding: `kind:"job"` contract frozen, `revenium-jobs.ledger` declared, cron reader branches on `kind`)*
+*Last updated: 2026-05-16 — Phase 8 complete (job-declaration prompt block: `SKILL.md` JOB DECLARATION section, reconciled HALT CHECK with one mandated `CANCELLED` marker, seed `job-taxonomy.json`). Live-validated on the Mac Studio host; two defects found and fixed during execution — session-id mis-attribution (now resolves the active session from the newest non-cron `session_<id>.json` transcript) and a taxonomy seed-entry clobber on normalization collision. The agent-side job declaration is in place; the cron does not yet ship jobs to Revenium — that is Phase 9.)*
