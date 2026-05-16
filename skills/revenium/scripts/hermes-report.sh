@@ -42,6 +42,12 @@ else
   warn "revenium jobs/--task-id not available — job work skipped; metering continues as v1.0."
 fi
 
+# Phase 10: script-level accumulator for terminated job arcs needing outcome reporting.
+# Must be script-global (not local inside main) so it survives from the session loop
+# into the post-loop outcome stage within one main() invocation (CR-01 lesson, D-06).
+# Plain indexed array — bash 3.2 portability (Mac Studio host, no associative arrays).
+job_outcome_queue=()
+
 touch "${LEDGER_FILE}"
 touch "${JOBS_LEDGER_FILE}"
 
@@ -241,16 +247,27 @@ try:
             for _bad in ('|', '\n', '\r'):
                 job_name = job_name.replace(_bad, '_')
                 job_type = job_type.replace(_bad, '_')
-            print(f"{clean_id}|{job_name}|{job_type}")
+            # Phase 10: emit status and marker ts as 4th and 5th pipe fields
+            # for the outcome-queue accumulator (OUTCOME-05, D-07).
+            status = m.get('status', '') or ''
+            for _bad in ('|', '\n', '\r'):
+                status = status.replace(_bad, '_')
+            marker_ts = m.get('ts', 0) or 0
+            print(f"{clean_id}|{job_name}|{job_type}|{status}|{marker_ts}")
 except OSError:
     pass
 PY
       )
 
       if [[ -n "${precheck_job_rows}" ]]; then
-        local precheck_clean_job_id precheck_job_name precheck_job_type
-        while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type; do
+        local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts
+        while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts; do
           [[ -z "${precheck_clean_job_id}" ]] && continue
+
+          # Phase 10: push to outcome queue for every job row — regardless of create outcome.
+          # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
+          # Push before the create-gated continue so already-created jobs are also queued.
+          job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}")
 
           # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
           if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -716,14 +733,25 @@ for job in jobs:
     source_clean = source
     for _bad in ('|', '\n', '\r'):
         source_clean = source_clean.replace(_bad, '_')
-    print(f"{clean_id}|{job_name}|{job_type}|{source_clean}")
+    # Phase 10: emit status and marker ts as 5th and 6th pipe fields
+    # for the outcome-queue accumulator (OUTCOME-05, D-07).
+    status = job.get('status', '') or ''
+    for _bad in ('|', '\n', '\r'):
+        status = status.replace(_bad, '_')
+    marker_ts = job.get('ts', 0) or 0
+    print(f"{clean_id}|{job_name}|{job_type}|{source_clean}|{status}|{marker_ts}")
 PY
       )
 
       if [[ -n "${job_rows}" ]]; then
-        local clean_job_id job_name job_type job_env_source
-        while IFS='|' read -r clean_job_id job_name job_type job_env_source; do
+        local clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts
+        while IFS='|' read -r clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts; do
           [[ -z "${clean_job_id}" ]] && continue
+
+          # Phase 10: push to outcome queue for every job row — regardless of create outcome.
+          # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
+          # Push before the create-gated continue so already-created jobs are also queued.
+          job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}")
 
           # D-09: ledger-gated idempotency — skip if this job was already created.
           if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
