@@ -336,6 +336,8 @@ else:
     local s2_warn_line=""
     local read_ok="true"
     local marker_output=""
+    local jobs_json=""
+    local read_err=""
     marker_output=$(
       MARKERS_DIR="${MARKERS_DIR}" \
       SID="${sid}" \
@@ -532,10 +534,8 @@ PY
       prior_muids_count="${prior_muids_count:-0}"
       s2_info_line=$(echo "${marker_output}" | sed -n 's/^S2_INFO=//p' | head -1)
       s2_warn_line=$(echo "${marker_output}" | sed -n 's/^S2_WARN=//p' | head -1)
-      local read_err
       read_err=$(echo "${marker_output}" | sed -n 's/^READ_ERR=//p' | head -1)
       # Phase 9 (D-08): capture jobs_json — used by the jobs create stage below.
-      local jobs_json
       jobs_json=$(echo "${marker_output}" | sed -n 's/^JOBS_JSON=//p' | head -1)
       if [[ "${read_ok}" != "true" ]]; then
         warn "marker-read fall-through: session=${sid} reason=${read_err:-unknown}"
