@@ -4397,7 +4397,7 @@ class RepositoryTests(unittest.TestCase):
 
         # JOBS_CLI_CAPABLE guard must wrap the create stage.
         # The guard appears on an outer `if` block that encloses the while loop
-        # containing `revenium jobs create`, so search 80 lines before the command.
+        # containing `revenium jobs create`, so search 100 lines before the command.
         lines = text.splitlines()
         jobs_create_line = None
         for i, line in enumerate(lines):
@@ -4405,20 +4405,26 @@ class RepositoryTests(unittest.TestCase):
                 jobs_create_line = i
                 break
         self.assertIsNotNone(jobs_create_line, 'revenium jobs create not found in hermes-report.sh')
-        # Check up to 80 lines before jobs create for JOBS_CLI_CAPABLE
-        guard_window = '\n'.join(lines[max(0, jobs_create_line - 80):jobs_create_line])
+        # Check up to 100 lines before jobs create for JOBS_CLI_CAPABLE
+        guard_window = '\n'.join(lines[max(0, jobs_create_line - 100):jobs_create_line])
         self.assertIn(
             'JOBS_CLI_CAPABLE',
             guard_window,
             'revenium jobs create must be guarded by JOBS_CLI_CAPABLE check',
         )
 
-        # No JOB:...:outcome: write should exist (Phase 10 scope boundary)
+        # JOB:...:outcome: ledger write must now be present (Phase 10 — OUTCOME-01/D-06).
         outcome_count = len(re.findall(r'JOB:.*:outcome:', text))
-        self.assertEqual(
+        self.assertGreater(
             outcome_count, 0,
-            f'JOB:<id>:outcome: must not appear in hermes-report.sh (Phase 10 scope); '
-            f'found {outcome_count}',
+            'JOB:<id>:outcome: ledger line must appear in hermes-report.sh (Phase 10 OUTCOME-01)',
+        )
+
+        # revenium jobs outcome command must be present.
+        self.assertIn(
+            'revenium jobs outcome',
+            text,
+            'revenium jobs outcome command must appear in hermes-report.sh (OUTCOME-01)',
         )
 
     def test_jobs_create_loop_e2e(self):
@@ -5620,6 +5626,606 @@ class RepositoryTests(unittest.TestCase):
             )
         finally:
             shutil.rmtree(tmpdir2, ignore_errors=True)
+
+    def test_cron_outcome_is_idempotent(self):
+        """TEST-03 / OUTCOME-01..05: post-loop outcome stage reports each terminated
+        arc exactly once, defers gracefully when created line is absent, validates
+        status enum, and recovers from partial failure (OUTCOME-02)."""
+        import json
+        import os
+        import re as _re
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+
+        HERMES_REPORT = SKILL / 'scripts' / 'hermes-report.sh'
+
+        def build_state_db(path, sessions):
+            conn = sqlite3.connect(str(path))
+            conn.execute(
+                'CREATE TABLE sessions ('
+                'id TEXT, model TEXT, source TEXT, '
+                'input_tokens INTEGER, output_tokens INTEGER, '
+                'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+                'reasoning_tokens INTEGER, estimated_cost_usd TEXT, '
+                'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+                'billing_provider TEXT)'
+            )
+            for s in sessions:
+                conn.execute(
+                    'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (s['id'], s['model'], s['source'],
+                     s['input_tokens'], s['output_tokens'],
+                     s['cache_read'], s['cache_write'],
+                     s['reasoning'], s['estimated_cost'],
+                     s['api_calls'], s['started_at'], s['ended_at'],
+                     s['billing_provider']),
+                )
+            conn.commit()
+            conn.close()
+
+        def make_markers(n, sid, ts_base=1715515000.0):
+            return [
+                {
+                    'muid': f'01893b8a3{i:02x}abcdef0123456789abcdef0',
+                    'ts': ts_base + i + 1,
+                    'sid': sid,
+                    'task_type': 'code_review',
+                    'operation_type': 'CHAT',
+                }
+                for i in range(n)
+            ]
+
+        def make_job_marker(sid, job_id, job_type='code_review', status='SUCCESS'):
+            """Return a Phase 7 D-03 job-marker dict with configurable status."""
+            return {
+                'kind': 'job',
+                'ts': 1715516000.0,
+                'sid': sid,
+                'agentic_job_id': job_id,
+                'job_name': 'PR Review Outcome Test',
+                'job_type': job_type,
+                'status': status,
+            }
+
+        def make_shim(bin_dir, meter_log, jobs_log, outcome_log):
+            """Write a revenium shim that logs invocations to separate log files."""
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  jobs)\n'
+                    '    shift\n'
+                    '    case "$1" in\n'
+                    '      --help) exit 0 ;;\n'
+                    '      create)\n'
+                    '        shift\n'
+                    f'        printf "%q " "$@" >> "{jobs_log}"\n'
+                    f'        printf "\\n" >> "{jobs_log}"\n'
+                    '        exit 0\n'
+                    '        ;;\n'
+                    '      outcome)\n'
+                    '        shift\n'
+                    f'        printf "%q " "$@" >> "{outcome_log}"\n'
+                    f'        printf "\\n" >> "{outcome_log}"\n'
+                    '        exit ${OUTCOME_EXIT_CODE:-0}\n'
+                    '        ;;\n'
+                    '      *) exit 0 ;;\n'
+                    '    esac\n'
+                    '    ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    if [[ "$1" == "--help" ]]; then\n'
+                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      exit 0\n'
+                    '    fi\n'
+                    f'    printf "%q " "$@" >> "{meter_log}"\n'
+                    f'    printf "\\n" >> "{meter_log}"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+            return shim
+
+        def run_cron(env, meter_log, jobs_log, outcome_log):
+            for log in (meter_log, jobs_log, outcome_log):
+                if os.path.exists(log):
+                    os.unlink(log)
+                open(log, 'w').close()
+            result = subprocess.run(
+                ['bash', str(HERMES_REPORT)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            import shlex
+
+            def parse_log(path):
+                invocations = []
+                with open(path) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if line:
+                            invocations.append(shlex.split(line))
+                return invocations
+
+            return (
+                result.returncode,
+                parse_log(meter_log),
+                parse_log(jobs_log),
+                parse_log(outcome_log),
+                result.stdout + result.stderr,
+            )
+
+        sid = '20260516_test_outcome_idempotent'
+        job_id = 'outcome-idempotent-job-abc123'
+
+        # ---------------------------------------------------------------
+        # Scenario 1: Double-outcome idempotency (core OUTCOME-01)
+        # ---------------------------------------------------------------
+        tmpdir1 = tempfile.mkdtemp(prefix='gsd-outcome-s1-')
+        try:
+            hermes_home = os.path.join(tmpdir1, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir1, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir1, 'meter.log')
+            jobs_log = os.path.join(tmpdir1, 'jobs.log')
+            outcome_log = os.path.join(tmpdir1, 'outcome.log')
+
+            make_shim(bin_dir, meter_log, jobs_log, outcome_log)
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 9000, 'output_tokens': 3500,
+                'cache_read': 250, 'cache_write': 120,
+                'reasoning': 0, 'estimated_cost': '0.04',
+                'api_calls': 2, 'started_at': 1715514000.0,
+                'ended_at': 1715516200.0,
+                'billing_provider': 'anthropic',
+            }])
+            markers_file = os.path.join(markers_dir, f'{sid}.jsonl')
+            with open(markers_file, 'w') as f:
+                for m in make_markers(2, sid):
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                job = make_job_marker(sid, job_id, status='SUCCESS')
+                f.write(json.dumps(job, separators=(',', ':')) + '\n')
+
+            # Pre-seed created line so outcome stage can run immediately.
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+            }
+
+            # Run 1: outcome must be called exactly once.
+            rc1, _m1, _j1, out_inv1, out1 = run_cron(base_env, meter_log, jobs_log, outcome_log)
+            self.assertEqual(rc1, 0, f'S1 Run 1 exit {rc1}: {out1}')
+            self.assertEqual(
+                len(out_inv1), 1,
+                f'OUTCOME-01 S1: Run 1 expected 1 outcome call, got {len(out_inv1)}: {out1}',
+            )
+
+            # Verify the ledger outcome line was written.
+            ledger_text = open(jobs_ledger).read()
+            self.assertTrue(
+                any(_re.match(rf'^JOB:{_re.escape(job_id)}:outcome:', l)
+                    for l in ledger_text.splitlines()),
+                f'OUTCOME-01 S1: JOB outcome ledger line not written after Run 1',
+            )
+
+            # Run 2: ledger gate must suppress second outcome call.
+            rc2, _m2, _j2, out_inv2, out2 = run_cron(base_env, meter_log, jobs_log, outcome_log)
+            self.assertEqual(rc2, 0, f'S1 Run 2 exit {rc2}: {out2}')
+            self.assertEqual(
+                len(out_inv2), 0,
+                f'OUTCOME-01 idempotency violated: Run 2 should produce 0 outcome calls '
+                f'(ledger-gated), got {len(out_inv2)}: {out2}',
+            )
+
+            # Total outcome calls across both runs == 1.
+            total_outcome = len(out_inv1) + len(out_inv2)
+            self.assertEqual(
+                total_outcome, 1,
+                f'TEST-03: expected exactly 1 total outcome call across 2 runs, '
+                f'got {total_outcome}',
+            )
+
+            # Exactly one outcome ledger line.
+            ledger_text2 = open(jobs_ledger).read()
+            outcome_lines = [l for l in ledger_text2.splitlines()
+                             if _re.match(rf'^JOB:{_re.escape(job_id)}:outcome:', l)]
+            self.assertEqual(
+                len(outcome_lines), 1,
+                f'OUTCOME-01: expected exactly 1 outcome ledger line, got {len(outcome_lines)}',
+            )
+        finally:
+            shutil.rmtree(tmpdir1, ignore_errors=True)
+
+        # ---------------------------------------------------------------
+        # Scenario 2: OUTCOME-04 next-tick deferral (no created line)
+        # ---------------------------------------------------------------
+        tmpdir2 = tempfile.mkdtemp(prefix='gsd-outcome-s2-')
+        try:
+            hermes_home = os.path.join(tmpdir2, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir2, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir2, 'meter.log')
+            jobs_log = os.path.join(tmpdir2, 'jobs.log')
+            outcome_log = os.path.join(tmpdir2, 'outcome.log')
+
+            make_shim(bin_dir, meter_log, jobs_log, outcome_log)
+
+            sid2 = '20260516_test_outcome_deferred'
+            job_id2 = 'outcome-deferred-job-def456'
+
+            build_state_db(state_db, [{
+                'id': sid2, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 5000, 'output_tokens': 2000,
+                'cache_read': 0, 'cache_write': 0,
+                'reasoning': 0, 'estimated_cost': '0.02',
+                'api_calls': 1, 'started_at': 1715514000.0,
+                'ended_at': 1715516200.0,
+                'billing_provider': 'anthropic',
+            }])
+            markers_file = os.path.join(markers_dir, f'{sid2}.jsonl')
+            with open(markers_file, 'w') as f:
+                for m in make_markers(1, sid2):
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                job = make_job_marker(sid2, job_id2, status='SUCCESS')
+                f.write(json.dumps(job, separators=(',', ':')) + '\n')
+
+            # NO pre-seeded created line; shim exits non-zero for jobs create to simulate
+            # a failed create; leave ledger empty so outcome is deferred.
+            # Actually: just don't pre-seed the ledger — the pre-guard scan will
+            # attempt jobs create (shim exits 0) which writes the created line.
+            # To truly test deferral we need the create to fail. Use OUTCOME_EXIT_CODE
+            # to make the shim's create exit non-zero as well.
+            # Simpler: start with empty ledger but override the shim to fail jobs create.
+            shim_path = os.path.join(bin_dir, 'revenium')
+            with open(shim_path, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  jobs)\n'
+                    '    shift\n'
+                    '    case "$1" in\n'
+                    '      --help) exit 0 ;;\n'
+                    '      create) exit 1 ;;\n'
+                    '      outcome)\n'
+                    '        shift\n'
+                    f'        printf "%q " "$@" >> "{outcome_log}"\n'
+                    f'        printf "\\n" >> "{outcome_log}"\n'
+                    '        exit 0\n'
+                    '        ;;\n'
+                    '      *) exit 0 ;;\n'
+                    '    esac\n'
+                    '    ;;\n'
+                    '  meter)\n'
+                    '    shift; shift\n'
+                    '    if [[ "$1" == "--help" ]]; then\n'
+                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      exit 0\n'
+                    '    fi\n'
+                    f'    printf "%q " "$@" >> "{meter_log}"\n'
+                    f'    printf "\\n" >> "{meter_log}"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim_path, 0o755)
+
+            base_env2 = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+            }
+
+            rc2, _m2, _j2, out_inv2, out2 = run_cron(base_env2, meter_log, jobs_log, outcome_log)
+            self.assertEqual(rc2, 0, f'S2 exit {rc2}: {out2}')
+
+            # OUTCOME-04: zero outcome calls because no created line.
+            self.assertEqual(
+                len(out_inv2), 0,
+                f'OUTCOME-04 deferral: expected 0 outcome calls when no created line, '
+                f'got {len(out_inv2)}: {out2}',
+            )
+
+            # Deferred or wedged-job warn must appear in output (both indicate OUTCOME-04
+            # deferral — "wedged job" fires when marker ts is older than stale threshold).
+            self.assertTrue(
+                'outcome deferred' in out2 or 'wedged job' in out2,
+                f'OUTCOME-04: expected "outcome deferred" or "wedged job" warn in output: {out2}',
+            )
+
+            # No outcome ledger line should exist.
+            if os.path.exists(jobs_ledger):
+                ledger_text = open(jobs_ledger).read()
+                outcome_lines = [l for l in ledger_text.splitlines()
+                                 if ':outcome:' in l and job_id2 in l]
+                self.assertEqual(
+                    len(outcome_lines), 0,
+                    f'OUTCOME-04: no outcome ledger line expected, got: {outcome_lines}',
+                )
+        finally:
+            shutil.rmtree(tmpdir2, ignore_errors=True)
+
+        # ---------------------------------------------------------------
+        # Scenario 3: Same-tick create + outcome (D-01)
+        # ---------------------------------------------------------------
+        tmpdir3 = tempfile.mkdtemp(prefix='gsd-outcome-s3-')
+        try:
+            hermes_home = os.path.join(tmpdir3, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir3, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir3, 'meter.log')
+            jobs_log = os.path.join(tmpdir3, 'jobs.log')
+            outcome_log = os.path.join(tmpdir3, 'outcome.log')
+
+            make_shim(bin_dir, meter_log, jobs_log, outcome_log)
+
+            sid3 = '20260516_test_outcome_sametick'
+            job_id3 = 'outcome-sametick-job-ghi789'
+
+            build_state_db(state_db, [{
+                'id': sid3, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 7000, 'output_tokens': 2500,
+                'cache_read': 100, 'cache_write': 50,
+                'reasoning': 0, 'estimated_cost': '0.03',
+                'api_calls': 2, 'started_at': 1715514000.0,
+                'ended_at': 1715516200.0,
+                'billing_provider': 'anthropic',
+            }])
+            markers_file = os.path.join(markers_dir, f'{sid3}.jsonl')
+            with open(markers_file, 'w') as f:
+                for m in make_markers(2, sid3):
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                job = make_job_marker(sid3, job_id3, status='SUCCESS')
+                f.write(json.dumps(job, separators=(',', ':')) + '\n')
+
+            # Start with empty jobs ledger — no pre-seeded created line.
+            base_env3 = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+            }
+
+            rc3, _m3, _j3, out_inv3, out3 = run_cron(base_env3, meter_log, jobs_log, outcome_log)
+            self.assertEqual(rc3, 0, f'S3 exit {rc3}: {out3}')
+
+            # After one run: both created and outcome ledger lines must exist.
+            self.assertTrue(
+                os.path.exists(jobs_ledger),
+                f'D-01 same-tick: jobs ledger not created: {out3}',
+            )
+            ledger_text3 = open(jobs_ledger).read()
+            self.assertTrue(
+                any(_re.match(rf'^JOB:{_re.escape(job_id3)}:created:', l)
+                    for l in ledger_text3.splitlines()),
+                f'D-01 same-tick: no created line after single run: {ledger_text3}',
+            )
+            self.assertTrue(
+                any(_re.match(rf'^JOB:{_re.escape(job_id3)}:outcome:', l)
+                    for l in ledger_text3.splitlines()),
+                f'D-01 same-tick: no outcome line after single run: {ledger_text3}',
+            )
+        finally:
+            shutil.rmtree(tmpdir3, ignore_errors=True)
+
+        # ---------------------------------------------------------------
+        # Scenario 4: Invalid-status skip (D-03/D-04 OUTCOME-05)
+        # ---------------------------------------------------------------
+        tmpdir4 = tempfile.mkdtemp(prefix='gsd-outcome-s4-')
+        try:
+            hermes_home = os.path.join(tmpdir4, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir4, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir4, 'meter.log')
+            jobs_log = os.path.join(tmpdir4, 'jobs.log')
+            outcome_log = os.path.join(tmpdir4, 'outcome.log')
+
+            make_shim(bin_dir, meter_log, jobs_log, outcome_log)
+
+            sid4 = '20260516_test_outcome_invalid'
+            job_id4 = 'outcome-invalid-status-jkl012'
+
+            build_state_db(state_db, [{
+                'id': sid4, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 4000, 'output_tokens': 1500,
+                'cache_read': 0, 'cache_write': 0,
+                'reasoning': 0, 'estimated_cost': '0.01',
+                'api_calls': 1, 'started_at': 1715514000.0,
+                'ended_at': 1715516200.0,
+                'billing_provider': 'anthropic',
+            }])
+            markers_file = os.path.join(markers_dir, f'{sid4}.jsonl')
+            with open(markers_file, 'w') as f:
+                for m in make_markers(1, sid4):
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                # Invalid status: IN_PROGRESS is not in {SUCCESS, FAILED, CANCELLED}
+                job = make_job_marker(sid4, job_id4, status='IN_PROGRESS')
+                f.write(json.dumps(job, separators=(',', ':')) + '\n')
+
+            # Pre-seed created line so the outcome stage reaches the enum check.
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id4}:created:1715516001.000\n')
+
+            base_env4 = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+            }
+
+            rc4, _m4, _j4, out_inv4, out4 = run_cron(base_env4, meter_log, jobs_log, outcome_log)
+            self.assertEqual(rc4, 0, f'S4 exit {rc4}: {out4}')
+
+            # OUTCOME-05: zero outcome calls for invalid status.
+            self.assertEqual(
+                len(out_inv4), 0,
+                f'OUTCOME-05: expected 0 outcome calls for IN_PROGRESS status, '
+                f'got {len(out_inv4)}: {out4}',
+            )
+
+            # Warn must appear in output.
+            self.assertTrue(
+                'outcome skipped' in out4 or 'invalid status' in out4,
+                f'OUTCOME-05: expected invalid-status warn in output: {out4}',
+            )
+
+            # No outcome ledger line (the :outcome: verb must not appear).
+            ledger_text4 = open(jobs_ledger).read()
+            outcome_lines4 = [l for l in ledger_text4.splitlines()
+                               if ':outcome:' in l and job_id4 in l]
+            self.assertEqual(
+                len(outcome_lines4), 0,
+                f'OUTCOME-05: no outcome ledger line expected for invalid status, '
+                f'got: {outcome_lines4}',
+            )
+        finally:
+            shutil.rmtree(tmpdir4, ignore_errors=True)
+
+        # ---------------------------------------------------------------
+        # Scenario 5: Partial-failure re-attempt (OUTCOME-02)
+        # ---------------------------------------------------------------
+        tmpdir5 = tempfile.mkdtemp(prefix='gsd-outcome-s5-')
+        try:
+            hermes_home = os.path.join(tmpdir5, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir5, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir5, 'meter.log')
+            jobs_log = os.path.join(tmpdir5, 'jobs.log')
+            outcome_log = os.path.join(tmpdir5, 'outcome.log')
+
+            make_shim(bin_dir, meter_log, jobs_log, outcome_log)
+
+            sid5 = '20260516_test_outcome_partialfail'
+            job_id5 = 'outcome-partial-fail-mno345'
+
+            build_state_db(state_db, [{
+                'id': sid5, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 6000, 'output_tokens': 2000,
+                'cache_read': 50, 'cache_write': 25,
+                'reasoning': 0, 'estimated_cost': '0.02',
+                'api_calls': 1, 'started_at': 1715514000.0,
+                'ended_at': 1715516200.0,
+                'billing_provider': 'anthropic',
+            }])
+            markers_file = os.path.join(markers_dir, f'{sid5}.jsonl')
+            with open(markers_file, 'w') as f:
+                for m in make_markers(1, sid5):
+                    f.write(json.dumps(m, separators=(',', ':')) + '\n')
+                job = make_job_marker(sid5, job_id5, status='SUCCESS')
+                f.write(json.dumps(job, separators=(',', ':')) + '\n')
+
+            # Pre-seed created line.
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id5}:created:1715516001.000\n')
+
+            base_env5_fail = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'TZ': 'UTC',
+                'OUTCOME_EXIT_CODE': '1',  # Shim exits non-zero (no 409 in output)
+            }
+
+            # Failing run: shim exits 1, no 409 indicator in output.
+            rc5a, _m5a, _j5a, out_inv5a, out5a = run_cron(
+                base_env5_fail, meter_log, jobs_log, outcome_log
+            )
+            self.assertEqual(rc5a, 0, f'S5 failing run exit {rc5a}: {out5a}')
+
+            # No outcome ledger line after failing run (the :outcome: verb must be absent).
+            ledger_text5 = open(jobs_ledger).read()
+            outcome_lines5 = [l for l in ledger_text5.splitlines()
+                               if ':outcome:' in l and job_id5 in l]
+            self.assertEqual(
+                len(outcome_lines5), 0,
+                f'OUTCOME-02: no outcome ledger line expected after failing run, '
+                f'got: {outcome_lines5}',
+            )
+
+            # Recovering run: shim exits 0.
+            base_env5_ok = {**base_env5_fail}
+            base_env5_ok['OUTCOME_EXIT_CODE'] = '0'
+
+            rc5b, _m5b, _j5b, out_inv5b, out5b = run_cron(
+                base_env5_ok, meter_log, jobs_log, outcome_log
+            )
+            self.assertEqual(rc5b, 0, f'S5 recovering run exit {rc5b}: {out5b}')
+
+            # Exactly one outcome call in the recovering run.
+            self.assertEqual(
+                len(out_inv5b), 1,
+                f'OUTCOME-02: expected 1 outcome call in recovering run, '
+                f'got {len(out_inv5b)}: {out5b}',
+            )
+
+            # Outcome ledger line now present.
+            ledger_text5b = open(jobs_ledger).read()
+            self.assertTrue(
+                any(_re.match(rf'^JOB:{_re.escape(job_id5)}:outcome:', l)
+                    for l in ledger_text5b.splitlines()),
+                f'OUTCOME-02: outcome ledger line must exist after recovering run: {ledger_text5b}',
+            )
+        finally:
+            shutil.rmtree(tmpdir5, ignore_errors=True)
 
 
 if __name__ == '__main__':
