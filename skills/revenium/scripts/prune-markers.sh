@@ -58,21 +58,26 @@ then
 fi
 
 # ---------------------------------------------------------------------------
-# Main pruning logic: run Python, pipe each output line through info() so
-# every log event lands in ${LOG_FILE} with the standard timestamp format.
+# Main pruning logic: run Python, capture its stdout to a temp file so the
+# child's exit code is observable, then feed each output line through info()
+# so every log event lands in ${LOG_FILE} with the standard timestamp format.
 # Per CLAUDE.md: never use bare echo for logged events.
+#
+# Previously used a process-substitution form which discards the child's exit
+# code (pipefail does not apply to that form); a temp-file + prune_rc=$?
+# pattern is used instead so a failed os.unlink propagates as a non-zero exit.
 # ---------------------------------------------------------------------------
-while IFS= read -r log_line; do
-  info "${log_line}"
-done < <(
-  # Pass paths via env (bash 3.2 compatible — `${VAR@Q}` requires bash 4.4+;
-  # CLAUDE.md mandates bash 3.2 compat for macOS stock /bin/bash). Single-
-  # quoted heredoc keeps the Python source verbatim.
-  MARKERS_DIR_PY="${MARKERS_DIR}" \
-  LEDGER_FILE_PY="${LEDGER_FILE}" \
-  MARKER_RETENTION_DAYS_PY="${MARKER_RETENTION_DAYS}" \
-  DRY_RUN_PY="${DRY_RUN}" \
-  python3 - <<'PY'
+prune_out="$(mktemp)"
+# Pass paths via env (bash 3.2 compatible — `${VAR@Q}` requires bash 4.4+;
+# CLAUDE.md mandates bash 3.2 compat for macOS stock /bin/bash). Single-
+# quoted heredoc keeps the Python source verbatim.
+# set +e so set -euo pipefail does not abort before prune_rc=$? is captured.
+set +e
+MARKERS_DIR_PY="${MARKERS_DIR}" \
+LEDGER_FILE_PY="${LEDGER_FILE}" \
+MARKER_RETENTION_DAYS_PY="${MARKER_RETENTION_DAYS}" \
+DRY_RUN_PY="${DRY_RUN}" \
+python3 - <<'PY' >"${prune_out}"
 import os
 import sys
 import time
@@ -184,4 +189,13 @@ print(
     flush=True,
 )
 PY
-)
+prune_rc=$?
+set -e
+while IFS= read -r log_line; do
+  info "${log_line}"
+done < "${prune_out}"
+rm -f "${prune_out}"
+if [[ "${prune_rc}" -ne 0 ]]; then
+  warn "prune-markers: pruning failed (python exit ${prune_rc}); some stale markers may remain"
+  exit "${prune_rc}"
+fi

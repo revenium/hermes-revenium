@@ -41,7 +41,6 @@ MARKERS_READY_DIR = Path(os.environ.get("REVENIUM_MARKERS_READY_DIR", str(MARKER
 TAXONOMY_FILE = Path(os.environ.get("REVENIUM_TAXONOMY_FILE", str(STATE_DIR / "task-taxonomy.json")))
 BUDGET_STATUS_FILE = STATE_DIR / "budget-status.json"
 STATE_DB = HERMES_HOME / "state.db"
-SESSIONS_DIR = HERMES_HOME / "sessions"
 
 # Label validation: lowercase snake_case, length 2..48 (regex enforces a
 # leading lowercase letter, then 1..47 more chars from [a-z0-9_]).
