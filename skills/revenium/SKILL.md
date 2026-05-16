@@ -97,7 +97,7 @@ print(f"halt job marker written: {marker_path}")
 
 **If `halted` is `false`, proceed to the Budget Check Procedure below.**
 
-This is not optional. This is not guidance. If you output ANYTHING other than the halt message when `halted: true`, you are violating this skill's requirements.
+This is not optional. If you output ANYTHING other than the halt message when `halted: true`, you are violating this skill's requirements.
 
 ## Budget Check Procedure
 
@@ -332,167 +332,21 @@ When the user invokes `/revenium`:
 
 ## FINAL ACTION — TASK CLASSIFICATION
 
-**MANDATORY — NON-NEGOTIABLE. Execute before EVERY yield back to the user on a substantive turn.** This is closing discipline; it mirrors the HALT CHECK at the top of this file (opening discipline). Skipping this step when it is required is a protocol violation — it leaves the cron pipeline blind to what you actually did and pollutes attribution with `unclassified` rows.
+**MANDATORY — NON-NEGOTIABLE. Execute before EVERY yield back to the user on a substantive turn.** Skipping leaves the cron pipeline blind and pollutes attribution with `unclassified` rows.
 
-### Trigger (binary — no judgment calls)
+Classify the turn if you called any non-read-only tool, produced > 200 words, or answered a multi-step reasoning question. Skip only when your entire response is ≤ 2 sentences AND you called zero tools.
 
-You **MUST** classify the turn if ANY of these are true:
-- You called any tool other than read-only file inspection. `read_file` alone does not count. `terminal`, `execute_code`, `write_file`, `patch`, `browser_*`, `memory`, `delegate_task`, `search_files`, `process`, `vision_analyze`, etc. ALL count.
-- You produced > 200 words of new content in your response.
-- The user asked a question that required multi-step reasoning to answer.
-
-You **MUST** skip the marker write ONLY when ALL of these are true:
-- Your entire response is ≤ 2 sentences.
-- You called zero tools.
-
-There is no "borderline / when in doubt skip" path. If you can argue either side, you have already triggered rule (a), (b), or (c) — classify.
-
-### Required action sequence
-
-Before your final response yields back to the user, you **MUST** call `execute_code` with the snippet below. **DO NOT skip it. DO NOT defer it to "next turn". DO NOT respond to the user without performing it.** The success print line (`markers written: <path>`) is your confirmation that the action completed.
-
-**Step 1 — pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent harm; minting a slightly-too-broad label is recoverable.
-
-The cron REJECTS markers carrying any of these `task_type` values — using them is a protocol violation:
-
-- `ack`
-- `acknowledgment`
-- `greeting`
-- `confirmation`
-- `hello`
-- `thanks`
-
-For the full schema, normalization rules, and the atomic mint pattern, see `references/task-taxonomy.md`. The seed file ships at `skills/revenium/task-taxonomy.json`; the live mutable copy is at `~/.hermes/state/revenium/task-taxonomy.json`.
-
-**Step 2 — call `execute_code` with this snippet.** Replace `"code_review"` with the label you picked in Step 1. Both calls happen in the same `execute_code` invocation — one with `operation_type="GUARDRAIL"` (the classification span), one with `operation_type="CHAT"` (the work span). Two records per substantive turn is the load-bearing invariant — exactly one is a protocol violation, zero on a substantive turn is a protocol violation.
-
-```python
-import fcntl, json, os, secrets, time
-
-# Resolve the active Hermes session id. Hermes writes each session transcript
-# as ~/.hermes/sessions/session_<id>.json; the newest non-cron one is the
-# active session. execute_code receives no HERMES_SESSION_ID env var and the
-# legacy *.jsonl files are stale — both are deliberately ignored.
-session_id = ""
-sessions_dir = os.path.expanduser("~/.hermes/sessions")
-try:
-    candidates = [
-        f for f in os.listdir(sessions_dir)
-        if f.startswith("session_") and f.endswith(".json")
-        and not f.startswith("session_cron_")
-    ]
-    if candidates:
-        newest = max(
-            candidates,
-            key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
-        )
-        session_id = newest[len("session_"):-len(".json")]
-except OSError:
-    pass
-if not session_id:
-    session_id = f"pseudo-{int(time.time())}"
-
-markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
-os.makedirs(markers_dir, mode=0o700, exist_ok=True)
-marker_path = os.path.join(markers_dir, f"{session_id}.jsonl")
-
-def muid():
-    # 13-char millisecond hex timestamp prefix (sortable) + 20-char random hex suffix
-    # = 33 chars total, collision-safe on a single machine, no pip dependency (MARK-03)
-    return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
-
-def write_marker(task_type, operation_type):
-    record = {"muid": muid(), "ts": time.time(), "sid": session_id,
-              "task_type": task_type, "operation_type": operation_type}
-    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
-    with open(marker_path, "ab", buffering=0) as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(line.encode("utf-8"))
-
-# REPLACE "code_review" with your Step 1 label.
-write_marker("code_review", "GUARDRAIL")  # classification span
-write_marker("code_review", "CHAT")       # work span
-print(f"markers written: {marker_path}")
-```
-
-### Self-check before yielding
-
-Immediately before yielding your final response, answer these three questions to yourself. If markers were required and you have not written them, fix it NOW — call `execute_code` with the snippet above before sending your response. Do not promise to do it next turn. There is no next turn for this protocol.
-
-1. Did I call any tool other than `read_file` in this turn? → if yes, markers REQUIRED.
-2. Did I produce > 200 words of new content? → if yes, markers REQUIRED.
-3. Did I just call `execute_code` with the `write_marker` snippet above? → if markers were REQUIRED, YES is the only acceptable answer.
-
-### Examples
-
-**Example 1 — Clear substantive (CLASSIFY):**
-User asked for a code review. You called `read_file` twice and `terminal` once (for grep). You wrote 12 sentences with suggested changes.
-- Rule (a) triggered: `terminal` is a non-read-only tool.
-- Required action: `write_marker("code_review", "GUARDRAIL")` then `write_marker("code_review", "CHAT")`.
-
-**Example 2 — Clear trivial (SKIP):**
-User typed "what is 2+2?" You replied "4." in one sentence. No tools called.
-- All skip conditions met: ≤ 2 sentences AND zero tools.
-- Required action: NONE. No marker written.
-
-**Example 3 — Borderline classify (CLASSIFY):**
-User asked you to explain POSIX O_APPEND atomicity. You wrote a five-paragraph response covering the kernel guarantee, macOS vs Linux behavior, and the belt-and-suspenders flock recommendation. No tools were called.
-- Rule (b) triggered: > 200 words of new content.
-- Required action: `write_marker("analysis", "GUARDRAIL")` then `write_marker("analysis", "CHAT")`.
-
-**Example 4 — Borderline skip (SKIP):**
-User said "good morning, can you confirm you're ready?" You replied "Good morning — ready when you are." over two short lines. No tools called.
-- All skip conditions met: ≤ 2 sentences AND zero tools.
-- Required action: NONE.
-
-Writing a marker on a clear-skip turn pollutes the taxonomy. Skipping a marker on a clear-classify turn breaks attribution. The rule is binary by design — there is no middle ground.
+See `references/task-classification.md` for the trigger rules, the `write_marker` snippet, the blocklist, and worked examples.
 
 ## FINAL ACTION — JOB DECLARATION
 
-**MANDATORY — NON-NEGOTIABLE. Execute once, retrospectively, at the end of every completed task arc.** This is arc-closing discipline; it mirrors the TASK CLASSIFICATION section above (per-turn closing discipline) but operates at the level of a coherent unit of business work. Skipping this step leaves spend data with no business context — the cron will attribute those task markers to an undifferentiated session with no `--task-id`.
+**MANDATORY — NON-NEGOTIABLE. Execute once, retrospectively, at the end of every completed task arc.** Skipping leaves spend data with no business context — those markers will have no `--task-id`.
 
-### Arc definition (goal-continuity rule)
+Declare a job marker when you complete, fail, or abandon the goal the arc was working toward. Skip only on a trivial turn (≤ 2 sentences, zero tools) with no arc in progress.
 
-**Same arc:** the same goal, including follow-up fixes, refinements, and corrections of that goal. Example: "the tests fail" sent after "implement X" is still arc X — X is not done until it works. Do NOT declare the job at "implement X" if you know verification is still needed.
+Step 1 — mint a specific `agentic_job_id` (business label + `secrets.token_hex(2)` suffix). Step 2 — select or mint a `job_type` from `~/.hermes/state/revenium/job-taxonomy.json`. Step 3 — determine `status`: `SUCCESS` (self-verified), `FAILED` (definitively unachievable), or `CANCELLED` (catch-all — when in doubt, use `CANCELLED`). Step 4 — call `execute_code` with the snippet below.
 
-**New arc:** a goal that is NOT a continuation of the current one — a genuine topic pivot, a new unrelated request.
-
-**On a genuine pivot before the current arc was declared:** first write a `CANCELLED` job marker for the abandoned arc (prevents attribution leakage into the next job), then treat the new request as a fresh arc.
-
-**Granularity floor:** at minimum, one job per session. A single-goal session produces one job; a multi-goal session produces multiple.
-
-### Trigger (binary — no judgment calls)
-
-Declare a job marker if ANY of these are true:
-- You have just completed the goal the arc was working toward and you have self-verified the result (see SUCCESS bar below).
-- The arc has definitively failed (the fix didn't fix, the build cannot pass, the goal is unachievable).
-- The user has pivoted to a new goal before this arc was declared — write `CANCELLED` for the abandoned arc first.
-
-**Skip the job marker ONLY when ALL of these are true:**
-- Your entire turn was a trivial response (≤ 2 sentences, zero tools called).
-- No arc was in progress at the start of this turn.
-
-### Required action sequence
-
-Before your final response yields back to the user:
-
-**Step 1 — mint an `agentic_job_id`.** Compose a specific business-readable label describing what the arc actually did, then append `secrets.token_hex(2)` (4 hex chars) as an entropy suffix. Example: `pr-review-fc7a`, `fix-auth-race-3b1e`, `weekly-dep-upgrade-9a2c`.
-
-**Anti-collapse rule (critical):** the label MUST be specific enough to be meaningful in a Revenium analytics dashboard. Bad: `task-a12f`, `work-b3c4`, `coding-9d1a`, `generation-4e5f`. Good: `refactor-db-pool-7c2a`, `add-pagination-endpoint-1f3b`. If you find yourself writing a generic label, stop and pick a more specific one. Fragmentation between `code_review` and `code-review` is permanent harm; a generic label is also permanent attribution loss.
-
-**Step 2 — select a `job_type`.** Read the live taxonomy at `~/.hermes/state/revenium/job-taxonomy.json`. Reuse the closest-fitting existing `job_type`. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label ONLY if none fits well.
-
-**Anti-collapse rule (critical):** same pressure as `agentic_job_id`. Bad `job_type` values: `generation`, `task`, `work`, `coding`, `general`. Good: `weekly_dependency_upgrade`, `database_schema_migration`, `pull_request_review`. Mint a specific type when nothing fits — fragmentation is recoverable, a bland label is permanent attribution loss.
-
-If you mint a new `job_type`, persist it back to the live taxonomy atomically (flock + tmp file in same dir + fsync + rename) before writing the job marker.
-
-**Step 3 — determine `status`.** Exactly one of: `SUCCESS`, `FAILED`, `CANCELLED` (uppercase).
-
-- `SUCCESS` requires positive, checkable evidence YOU established in THIS turn: tests run and passed, build green, diff demonstrably correct, question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. No user sign-off required — self-verification is the bar.
-- `FAILED` is narrow: a definitive negative terminal state — the fix didn't fix, the build cannot pass, the goal is objectively unachievable.
-- `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded, or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
-
-**Step 4 — call `execute_code` with the snippet below.**
+See `references/job-declaration.md` for arc-boundary rules, the SUCCESS/FAILED/CANCELLED criteria, the anti-collapse label examples, and worked examples.
 
 ```python
 import fcntl, json, os, re, secrets, tempfile, time
@@ -586,35 +440,8 @@ write_job_marker(agentic_job_id, job_name, job_type, status)
 print(f"job marker written: {marker_path}")
 ```
 
-### Self-check before yielding
+## LAST WORD — IF HALTED, STOP
 
-Immediately before yielding your final response, answer these three questions. If a job marker was required and you have not written it, call `execute_code` with the snippet above before sending your response.
+**If `~/.hermes/state/revenium/budget-status.json` has `halted: true`, re-read that file NOW before responding.** Do not trust a compressed or summarized earlier read — re-read it fresh on every turn.
 
-1. Did I just complete, fail, or abandon the goal this arc was working toward? → if yes, a job marker is REQUIRED.
-2. Did I self-verify the outcome (tests ran, build green, answer complete) before setting `status = "SUCCESS"`? → "I made the change but couldn't verify it" means `status = "CANCELLED"`.
-3. Did I just call `execute_code` with `write_job_marker`? → if a marker was REQUIRED, YES is the only acceptable answer.
-
-### Examples
-
-**Example 1 — Arc complete, self-verified (SUCCESS):**
-User asked you to add a pagination endpoint. You wrote the code, ran the test suite (all green), and the diff does what was asked.
-- `agentic_job_id`: `add-pagination-endpoint-3b1e`
-- `job_name`: "Add pagination to /api/users endpoint"
-- `job_type`: `feature_development` (or mint `api_endpoint_development` if more specific)
-- `status`: `SUCCESS` (tests ran and passed — self-verified)
-
-**Example 2 — Arc complete but NOT verified (CANCELLED, not SUCCESS):**
-User asked you to fix a bug. You wrote the fix but did not run the tests (no terminal access, or deferred to user).
-- `status`: `CANCELLED` — you made the change but could not verify it. Do NOT set `SUCCESS` here. The user will verify; if they confirm it works, that is a separate arc.
-
-**Example 3 — Arc definitively failed (FAILED):**
-User asked you to make the CI pipeline green. After 3 attempts the underlying library has a known unresolved upstream bug that makes the goal objectively unachievable today.
-- `agentic_job_id`: `fix-ci-upstream-blocker-9f2a`
-- `job_type`: `debugging`
-- `status`: `FAILED` (definitive negative terminal state — goal is unachievable)
-
-**Example 4 — User pivot before arc declared (CANCELLED for abandoned arc):**
-User asked you to refactor the auth module (arc in progress, not yet declared). Mid-arc, user says "actually forget that — help me write a release announcement."
-- First: write a `CANCELLED` job marker for the abandoned refactor arc (`job_type`: `refactoring`, `status`: `CANCELLED`).
-- Then: begin the new arc (release announcement writing).
-- Reason: prevents the refactor's task markers from leaking attribution into the announcement arc.
+When `halted: true`, the `## ABSOLUTE FIRST — HALT CHECK (NON-NEGOTIABLE)` section at the top of this file overrides EVERYTHING below it — including both `## FINAL ACTION — TASK CLASSIFICATION` and `## FINAL ACTION — JOB DECLARATION`. Their "MANDATORY" imperatives do NOT apply while halted: do not classify the task, do not declare a job, do not write a SUCCESS/FAILED job marker. The only permitted action is the mandated CANCELLED marker write (if an arc was in progress) followed by the verbatim halt string from the HALT CHECK block. Nothing else.
