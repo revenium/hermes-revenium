@@ -76,68 +76,6 @@ def _walk_to_root_session(sid: str, max_depth: int = 10) -> str:
         return sid  # belt: D-04 invariant
 
 
-def _count_tools_in_current_turn(sid: str) -> int:
-    """Return the count of tool calls in the just-completed turn for session `sid`.
-    Primary source: `state.db.sessions.tool_call_count` (universal — populated for
-    every session source: gateway-served, CLI one-shot, interactive, ACP, cron).
-    Fallback source: `~/.hermes/sessions/<sid>.jsonl` (scan backward for the last
-    role:user line, count role:tool entries after it). Returns 0 if neither source
-    has the signal. Used by D-07 heuristic skip.
-
-    D-04 invariant: never raises. All sqlite errors fall through to JSONL; all
-    OSError/JSONDecodeError in JSONL fall through to 0. D-20 closes G-02: the
-    gateway-style JSONL is absent for CLI one-shot sessions (`hermes_cli/oneshot.py::_create_session_db_for_oneshot`
-    writes only state.db), so JSONL alone caused every CLI substantive turn to be
-    mis-classified as trivial."""
-    # PRIMARY PATH — state.db.sessions.tool_call_count. Mirrors the same read-only
-    # URI pattern used by _walk_to_root_session above. On any sqlite error, on a
-    # missing row, or on a NULL value, fall through to the JSONL fallback.
-    try:
-        uri = f"file:{STATE_DB}?mode=ro"
-        with sqlite3.connect(uri, uri=True) as conn:
-            row = conn.execute(
-                "SELECT tool_call_count FROM sessions WHERE id = ?", (sid,)
-            ).fetchone()
-            if row is not None and row[0] is not None:
-                # int() coercion is defensive — sqlite columns are INTEGER affinity
-                # but guard against schema drift where the column might be stored as TEXT.
-                return int(row[0])
-            # row missing or value NULL → fall through to JSONL fallback
-    except sqlite3.OperationalError:
-        pass  # db locked, missing, or schema mismatch → JSONL fallback
-    except Exception:
-        pass  # belt: D-04 invariant — never raise from this helper
-
-    # FALLBACK PATH — read JSONL (preserved verbatim from prior implementation).
-    path = SESSIONS_DIR / f"{sid}.jsonl"
-    if not path.is_file():
-        return 0
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0
-    last_user_idx = None
-    for i in range(len(lines) - 1, -1, -1):
-        try:
-            obj = json.loads(lines[i])
-        except json.JSONDecodeError:
-            continue
-        if obj.get("role") == "user":
-            last_user_idx = i
-            break
-    if last_user_idx is None:
-        return 0
-    tool_count = 0
-    for line in lines[last_user_idx + 1:]:
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("role") == "tool":
-            tool_count += 1
-    return tool_count
-
-
 def _read_session_messages(sid: str) -> "tuple[str, str]":
     """Return (last_user_content, last_assistant_content) for `sid` from state.db.messages.
 
@@ -149,7 +87,7 @@ def _read_session_messages(sid: str) -> "tuple[str, str]":
     are already provided.
 
     Read-only URI mode (`file:...?mode=ro`) prevents WAL lock contention with the Hermes
-    writer, matching the pattern used by _walk_to_root_session and _count_tools_in_current_turn.
+    writer, matching the pattern used by _walk_to_root_session.
     A try/finally with conn.close() is used rather than a with-block so that the
     enclosing except can catch and swallow any error at any point in the helper body,
     preserving the D-04 fail-open invariant: this helper MUST NEVER raise.
@@ -374,35 +312,59 @@ def _persist_label_to_taxonomy(label: str) -> None:
     Atomic via temp-file + os.replace. Fail-open: any I/O error logs a warning
     and returns without raising (D-32). Only called after _write_marker_pair
     succeeds. The 'unclassified' sentinel is excluded — never persisted as a
-    taxonomy entry."""
+    taxonomy entry.
+
+    Concurrency: a sidecar lock file (TAXONOMY_FILE + ".lock") is held with a
+    non-blocking LOCK_EX during the read-modify-write (HARDEN-01). On lock
+    contention (BlockingIOError) or any OSError from flock itself the persist is
+    skipped and the function returns without raising (D-01, D-02)."""
     if label == "unclassified":
         return
     import datetime
     try:
-        try:
-            data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            data = {"labels": {}}
-        labels = data.get("labels", {})
-        if not isinstance(labels, dict):
-            labels = {}
-        now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        if label not in labels:
-            labels[label] = {
-                "description": None,
-                "examples": [],
-                "last_seen_at": now_iso,
-            }
-        else:
-            # Update last_seen_at on every successful write (recency ordering D-33).
-            if not isinstance(labels[label], dict):
-                labels[label] = {}
-            labels[label]["last_seen_at"] = now_iso
-        data["labels"] = labels
         TAXONOMY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        tmp.replace(TAXONOMY_FILE)
+        lock_path = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".lock")
+        try:
+            with open(lock_path, "a") as lockfd:
+                try:
+                    fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    logger.warning(
+                        "revenium-classifier: taxonomy persist skipped, lock contention for label=%s: %s",
+                        label,
+                        exc,
+                    )
+                    return
+                try:
+                    data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {"labels": {}}
+                labels = data.get("labels", {})
+                if not isinstance(labels, dict):
+                    labels = {}
+                now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if label not in labels:
+                    labels[label] = {
+                        "description": None,
+                        "examples": [],
+                        "last_seen_at": now_iso,
+                    }
+                else:
+                    # Update last_seen_at on every successful write (recency ordering D-33).
+                    if not isinstance(labels[label], dict):
+                        labels[label] = {}
+                    labels[label]["last_seen_at"] = now_iso
+                data["labels"] = labels
+                tmp = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".tmp")
+                tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                tmp.replace(TAXONOMY_FILE)
+        except OSError as exc:
+            logger.warning(
+                "revenium-classifier: taxonomy persist skipped, lock contention for label=%s: %s",
+                label,
+                exc,
+            )
+            return
     except Exception as exc:
         logger.warning("revenium-classifier: mint-back failed for label=%s: %s", label, exc)
 
