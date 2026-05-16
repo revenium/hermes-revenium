@@ -10,10 +10,13 @@ files_reviewed_list:
   - skills/revenium/SKILL.md
   - tests/test_repository.py
 findings:
-  critical: 1
-  warning: 5
+  critical: 0
+  warning: 4
   info: 4
-  total: 10
+  total: 8
+resolved:
+  - CR-01
+  - WR-02
 status: issues_found
 ---
 
@@ -94,6 +97,14 @@ if job_type not in existing_types:
 Using `setdefault` on the inner write is also a cheap belt-and-suspenders guard
 against the same overwrite if `existing_types` was stale.
 
+**RESOLVED (2026-05-15):** The persist block now normalizes `job_type` *before* the
+`not in existing_types` membership check, and the inner write uses
+`data.setdefault("labels", {}).setdefault(job_type, {...})` so a curated seed entry
+can never be overwritten. Behavioral regression test
+`test_job_declaration_snippet_does_not_clobber_seeded_taxonomy` executes the snippet
+with `job_type="Bug Fix"` against a seeded `bug_fix` entry and asserts the curated
+description and examples survive.
+
 ## Warnings
 
 ### WR-01: TASK CLASSIFICATION still points at `task-taxonomy.json` while JOB DECLARATION points at `job-taxonomy.json` — two taxonomies, no cross-reference
@@ -138,6 +149,12 @@ fails safe), the placeholder here fails dirty.
 `job_type = "interrupted"` (already seeded, terminal, harmless) and an
 `agentic_job_id` example value, mirroring how the TASK CLASSIFICATION snippet uses
 `"code_review"`. Alternatively add a guard: `if job_type.startswith("replace"): raise SystemExit("job_type not set")`.
+
+**RESOLVED (2026-05-15):** The placeholder is now `job_type = "research"` — a label
+already present in the seed `job-taxonomy.json`. Combined with the CR-01 fix, an
+un-substituted run resolves to an existing label and does not pollute the live
+taxonomy. Pinned by `test_job_declaration_placeholder_job_type_is_a_seeded_label`,
+which asserts the snippet's placeholder is always a seeded label.
 
 ### WR-03: HALT CHECK permits a tool call while the section claims "make ZERO/ONE tool call" — contract ambiguity with the survivability test
 
