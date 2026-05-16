@@ -4096,6 +4096,247 @@ class RepositoryTests(unittest.TestCase):
             f'bash -n failed after JOBS_CLI_CAPABLE addition: {result.stderr}',
         )
 
+    def test_owning_job_id_positional_attribution(self):
+        """Phase 9 Task 2 (D-11, D-12, D-14, D-16): owning_job_id positional attribution
+        is resolved in the marker-reader heredoc.
+
+        Static checks:
+        - owning_job_id appears in hermes-report.sh
+        - colon-sanitization (replace) is present
+        - kind == "job" branch still precedes REQUIRED_KEYS check
+
+        Behavioral checks:
+        - [task, task, job] in file order: both tasks' owning_job_id == job's sanitized id
+        - [task, job, task] in file order: first task gets job id, trailing task gets None
+        """
+        import json
+        import os
+        import sys
+        import tempfile
+        import shutil
+
+        hermes_report = SKILL / 'scripts' / 'hermes-report.sh'
+        text = hermes_report.read_text()
+
+        # --- Static checks ---
+
+        # owning_job_id must appear in the script
+        count = text.count('owning_job_id')
+        self.assertGreaterEqual(
+            count, 1,
+            f'owning_job_id must appear in hermes-report.sh; found {count}',
+        )
+
+        # Colon-sanitization must use replace() with a tuple including ':'
+        # Check for replace( near owning_job_id context
+        self.assertIn(
+            'replace(',
+            text,
+            'colon-sanitization via replace() must be present for owning_job_id (D-16)',
+        )
+
+        # kind == "job" branch must come before REQUIRED_KEYS check
+        lines = text.splitlines()
+        kind_job_line = None
+        required_keys_line = None
+        for i, line in enumerate(lines):
+            if 'kind == "job"' in line and kind_job_line is None:
+                kind_job_line = i
+            if 'REQUIRED_KEYS)' in line or 'REQUIRED_KEYS,' in line:
+                if required_keys_line is None:
+                    required_keys_line = i
+        self.assertIsNotNone(kind_job_line, 'kind == "job" branch not found in hermes-report.sh')
+        self.assertIsNotNone(required_keys_line, 'REQUIRED_KEYS check not found in hermes-report.sh')
+        self.assertLess(
+            kind_job_line, required_keys_line,
+            f'kind == "job" branch (line {kind_job_line}) must appear before '
+            f'REQUIRED_KEYS check (line {required_keys_line})',
+        )
+
+        # --- Behavioral checks via exercising the reader Python heredoc ---
+
+        # Extract the marker-reader Python heredoc from hermes-report.sh.
+        # The marker-reader is the heredoc that follows `marker_output=$(` and uses
+        # `python3 - <<'PY' 2>&1`. Identify it by finding the line index of
+        # `marker_output=$(` and then the next `<<'PY' 2>&1` line after it.
+        heredoc_lines = []
+        heredoc_start = None
+        for i, line in enumerate(lines):
+            if 'marker_output=$(' in line:
+                heredoc_start = i
+            if heredoc_start is not None and i > heredoc_start and "<<'PY' 2>&1" in line:
+                # Found the heredoc opening line — collect from next line until standalone PY
+                for j in range(i + 1, len(lines)):
+                    if lines[j].strip() == 'PY':
+                        break
+                    heredoc_lines.append(lines[j])
+                break
+
+        self.assertTrue(
+            len(heredoc_lines) > 0,
+            'Could not extract marker-reader Python heredoc from hermes-report.sh',
+        )
+        heredoc_code = '\n'.join(heredoc_lines)
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-owning-job-attr-')
+        try:
+            script_dir = str(SKILL / 'scripts')
+            markers_dir = os.path.join(tmpdir, 'markers')
+            os.makedirs(markers_dir)
+            ledger_path = os.path.join(tmpdir, 'ledger')
+            open(ledger_path, 'w').close()
+
+            sid = 'test-attribution-sid'
+
+            # We'll use subprocess to run just the Python code, setting env vars.
+            def run_heredoc_python(marker_lines_data, test_sid=sid):
+                marker_file = os.path.join(markers_dir, f'{test_sid}.jsonl')
+                with open(marker_file, 'w') as f:
+                    for ml in marker_lines_data:
+                        f.write(ml + '\n')
+
+                reader_env = {
+                    **os.environ,
+                    'MARKERS_DIR': markers_dir,
+                    'SID': test_sid,
+                    'TOTAL_TOKENS': '10000',
+                    'DELTA_TOTAL': '10000',
+                    'SCRIPT_DIR': script_dir,
+                    'LEDGER_PATH': ledger_path,
+                }
+                result = subprocess.run(
+                    ['python3', '-c', heredoc_code],
+                    env=reader_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                return result.stdout, result.returncode
+
+            # Build fixture marker lines
+            def task_marker(muid_suffix, ts, task_type='code_review'):
+                return json.dumps({
+                    'muid': f'01893b8a3{muid_suffix:02x}abcdef0123456789abcdef0',
+                    'ts': ts,
+                    'sid': sid,
+                    'task_type': task_type,
+                    'operation_type': 'CHAT',
+                }, separators=(',', ':'))
+
+            def job_marker(job_id, ts):
+                return json.dumps({
+                    'kind': 'job',
+                    'ts': ts,
+                    'sid': sid,
+                    'agentic_job_id': job_id,
+                    'job_name': 'Test Job',
+                    'job_type': 'feature_development',
+                    'status': 'IN_PROGRESS',
+                }, separators=(',', ':'))
+
+            job_id_plain = 'pr-review-fc7a'
+
+            # --- Fixture A: [task, task, job] ---
+            # Both tasks should get owning_job_id = sanitized(job_id_plain)
+            fixture_a = [
+                task_marker(0, 1715515001.0),
+                task_marker(1, 1715515002.0),
+                job_marker(job_id_plain, 1715515010.0),
+            ]
+            out_a, rc_a = run_heredoc_python(fixture_a)
+            self.assertEqual(rc_a, 0, f'Reader heredoc failed for fixture A: rc={rc_a}')
+            # Parse MARKERS_JSON
+            markers_json_a = None
+            for line in out_a.splitlines():
+                if line.startswith('MARKERS_JSON='):
+                    markers_json_a = json.loads(line[len('MARKERS_JSON='):])
+                    break
+            self.assertIsNotNone(markers_json_a, f'MARKERS_JSON not found in reader output: {out_a}')
+            self.assertEqual(len(markers_json_a), 2,
+                             f'Fixture A: expected 2 task markers, got {len(markers_json_a)}')
+            for m in markers_json_a:
+                self.assertIn('owning_job_id', m,
+                              f'Fixture A: marker missing owning_job_id: {m}')
+                self.assertEqual(
+                    m['owning_job_id'], job_id_plain,
+                    f'Fixture A: task marker owning_job_id should be {job_id_plain!r}, '
+                    f'got {m["owning_job_id"]!r}',
+                )
+
+            # --- Fixture B: [task, job, task] ---
+            # First task gets job id; trailing task (no job after it) gets null.
+            sid2 = 'test-attribution-sid2'
+            fixture_b = [
+                task_marker(0, 1715515001.0),
+                job_marker(job_id_plain, 1715515005.0),
+                task_marker(1, 1715515010.0),
+            ]
+            out_b, rc_b = run_heredoc_python(fixture_b, test_sid=sid2)
+            self.assertEqual(rc_b, 0, f'Reader heredoc failed for fixture B: rc={rc_b}')
+            markers_json_b = None
+            for line in out_b.splitlines():
+                if line.startswith('MARKERS_JSON='):
+                    markers_json_b = json.loads(line[len('MARKERS_JSON='):])
+                    break
+            self.assertIsNotNone(markers_json_b, f'MARKERS_JSON not found for fixture B: {out_b}')
+            self.assertEqual(len(markers_json_b), 2,
+                             f'Fixture B: expected 2 task markers, got {len(markers_json_b)}')
+            # First task marker should have the job's id
+            first_m = markers_json_b[0]
+            self.assertIn('owning_job_id', first_m,
+                          f'Fixture B: first marker missing owning_job_id: {first_m}')
+            self.assertEqual(
+                first_m['owning_job_id'], job_id_plain,
+                f'Fixture B: first task owning_job_id should be {job_id_plain!r}, '
+                f'got {first_m["owning_job_id"]!r}',
+            )
+            # Trailing task marker has no job after it → owning_job_id must be None/null
+            trailing_m = markers_json_b[1]
+            self.assertIn('owning_job_id', trailing_m,
+                          f'Fixture B: trailing marker missing owning_job_id: {trailing_m}')
+            self.assertIsNone(
+                trailing_m['owning_job_id'],
+                f'Fixture B: trailing task owning_job_id should be None (no job after it), '
+                f'got {trailing_m["owning_job_id"]!r}',
+            )
+
+            # --- Fixture C: colon-sanitization ---
+            # agentic_job_id with a colon should be sanitized before use
+            job_id_with_colon = 'job:with:colons'
+            expected_sanitized = 'job_with_colons'
+            fixture_c = [
+                task_marker(0, 1715515001.0),
+                json.dumps({
+                    'kind': 'job',
+                    'ts': 1715515010.0,
+                    'sid': sid,
+                    'agentic_job_id': job_id_with_colon,
+                    'job_name': 'Colon Job',
+                    'job_type': 'feature_development',
+                    'status': 'IN_PROGRESS',
+                }, separators=(',', ':')),
+            ]
+            sid3 = 'test-attribution-sid3'
+            out_c, rc_c = run_heredoc_python(fixture_c, test_sid=sid3)
+            self.assertEqual(rc_c, 0, f'Reader heredoc failed for fixture C: rc={rc_c}')
+            markers_json_c = None
+            for line in out_c.splitlines():
+                if line.startswith('MARKERS_JSON='):
+                    markers_json_c = json.loads(line[len('MARKERS_JSON='):])
+                    break
+            self.assertIsNotNone(markers_json_c, f'MARKERS_JSON not found for fixture C: {out_c}')
+            self.assertEqual(len(markers_json_c), 1)
+            m_c = markers_json_c[0]
+            self.assertIn('owning_job_id', m_c)
+            self.assertEqual(
+                m_c['owning_job_id'], expected_sanitized,
+                f'Fixture C: colon-sanitized owning_job_id should be {expected_sanitized!r}, '
+                f'got {m_c["owning_job_id"]!r}',
+            )
+
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()

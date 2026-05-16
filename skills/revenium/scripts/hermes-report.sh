@@ -392,11 +392,18 @@ JOB_REQUIRED = ("agentic_job_id", "job_type", "status")
 # Phase 7 (D-12): job collector — keyed by agentic_job_id, last line in file order wins.
 # Initialized before the is_file() check so JOBS_JSON= print is always safe (Pitfall 2).
 jobs_by_id = {}
+# Phase 9 (D-11, D-12): list of (file_position, sanitized_agentic_job_id) for ALL
+# valid job markers seen in the file, used for deferred owning_job_id resolution.
+# Resolved over the full file regardless of the prior-ledger emission cutoff (D-12).
+job_positions = []
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
 markers = []
 read_ok = True
 read_err = ""
+# Phase 9 (D-11): file-order position counter — incremented for every valid parsed
+# dict line (both job and task markers) so positions reflect true file order.
+_file_pos = 0
 if marker_path.is_file():
     try:
         with marker_path.open() as f:
@@ -418,6 +425,7 @@ if marker_path.is_file():
                 # the whole session's attribution (v1.0 'k in m' tolerated this).
                 if not isinstance(m, dict):
                     continue
+                _file_pos += 1
                 # Phase 7 (SCHEMA-03 / D-06): branch on kind BEFORE REQUIRED_KEYS check.
                 # This preserves v1.0 byte-identity: absent kind falls through to the
                 # existing REQUIRED_KEYS gate unchanged. A kind:"job" line must never
@@ -429,6 +437,16 @@ if marker_path.is_file():
                     # would raise unhashable TypeError when used as a dict key.
                     job_id = m.get("agentic_job_id")
                     if isinstance(job_id, str) and job_id and all(k in m for k in JOB_REQUIRED):
+                        # Phase 9 (D-16): sanitize agentic_job_id colon-safe before
+                        # any ledger write or CLI argument — replace bad chars with '_'.
+                        # Same replace(bad,'_') approach as WR-01 pipe sanitization.
+                        _bad_chars = (':', ' ', '\t', '\n', '\r')
+                        clean_id = job_id
+                        for _bad in _bad_chars:
+                            clean_id = clean_id.replace(_bad, '_')
+                        # Phase 9 (D-11/D-12): track (file_position, sanitized_id)
+                        # for ALL valid job markers — full file order (D-12).
+                        job_positions.append((_file_pos, clean_id))
                         jobs_by_id[job_id] = m  # D-12: last line wins
                     continue  # never reaches task-marker collector
                 elif kind is not None:
@@ -459,11 +477,29 @@ if marker_path.is_file():
                         continue
                 if m.get('task_type') in FORBIDDEN:
                     continue
+                # Phase 9 (D-11): store file position in the marker dict for the
+                # deferred owning_job_id resolution pass below.
+                m['_file_pos'] = _file_pos
                 markers.append(m)
     except OSError as exc:
         # D-14 / D-15: any other file-read OSError falls through.
         read_ok = False
         read_err = f"oserror: {exc}"
+
+# Phase 9 (D-11, D-12): deferred owning_job_id resolution pass.
+# For each emitted task marker, find the first job marker whose file position
+# is GREATER than the task marker's position (D-08: job markers appear at arc
+# end, claiming all task markers above them in file order). A task marker with
+# no later job marker gets owning_job_id = None (undeclared arc, D-11).
+# Resolution uses ALL job markers in file order regardless of emission cutoff (D-12).
+for marker in markers:
+    task_pos = marker.pop('_file_pos', 0)
+    owner = None
+    for job_pos, clean_job_id in job_positions:
+        if job_pos > task_pos:
+            owner = clean_job_id
+            break
+    marker['owning_job_id'] = owner
 
 n = len(markers)
 # D-18 telemetry log lines — locked text, do NOT paraphrase. mean_per_marker
@@ -498,7 +534,7 @@ PY
       s2_warn_line=$(echo "${marker_output}" | sed -n 's/^S2_WARN=//p' | head -1)
       local read_err
       read_err=$(echo "${marker_output}" | sed -n 's/^READ_ERR=//p' | head -1)
-      # Phase 7: capture jobs_json for Phase 9 consumption — intentionally unused here.
+      # Phase 9 (D-08): capture jobs_json — used by the jobs create stage below.
       local jobs_json
       jobs_json=$(echo "${marker_output}" | sed -n 's/^JOBS_JSON=//p' | head -1)
       if [[ "${read_ok}" != "true" ]]; then
