@@ -25,6 +25,21 @@ for arg in "$@"; do
 done
 
 # ---------------------------------------------------------------------------
+# Preflight: validate MARKER_RETENTION_DAYS is an integer >= 1 (HARDEN-03).
+# A value of 0 (or non-integer) would make every marker stale and trigger a
+# mass-delete.  Warn loudly and exit 0 (no error mail from cron) instead of
+# deleting anything.  Mirrors the lock-contention exit-0 branch below.
+# ---------------------------------------------------------------------------
+if ! [[ "${MARKER_RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
+  warn "prune-markers: REVENIUM_MARKER_RETENTION_DAYS=${MARKER_RETENTION_DAYS} is invalid (must be an integer >= 1); refusing to prune"
+  exit 0
+fi
+if [[ "${MARKER_RETENTION_DAYS}" -lt 1 ]]; then
+  warn "prune-markers: REVENIUM_MARKER_RETENTION_DAYS=${MARKER_RETENTION_DAYS} is invalid (must be an integer >= 1); refusing to prune"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Acquire prune.lock (non-blocking) so two concurrent operator invocations
 # cannot race on the same file set (D-29 / T-05-01).  Uses the same
 # exec-fd + Python fcntl pattern as cron.sh (CRON-08 / D-12).
