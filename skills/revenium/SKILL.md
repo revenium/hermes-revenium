@@ -229,7 +229,13 @@ Follow these steps in order. If any step fails, STOP. Do NOT write an `alertId` 
     ```
     This adds a per-minute cron entry that ships token deltas from `~/.hermes/state.db` to Revenium and refreshes `budget-status.json`.
 
-If any step from 1–12 fails, stop and explain the failure. Do NOT leave a partial `config.json` with an `alertId` for an alert that does not exist.
+13. **Install the budget-halt hooks.** Run:
+    ```
+    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+    ```
+    This registers the `pre_llm_call` and `pre_tool_call` revenium shell hooks in `~/.hermes/config.yaml` for structural budget-halt enforcement. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
+
+If any step from 1–13 fails, stop and explain the failure. Do NOT leave a partial `config.json` with an `alertId` for an alert that does not exist.
 
 ## `/revenium` Command Behavior
 
@@ -248,6 +254,10 @@ When the user invokes `/revenium`:
   ```
   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
   ```
+- Install hooks:
+  ```
+  bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+  ```
 - Run metering once:
   ```
   bash ~/.hermes/skills/revenium/scripts/cron.sh
@@ -265,6 +275,7 @@ When the user invokes `/revenium`:
 ## Verification
 
 - `bash ~/.hermes/skills/revenium/scripts/install-cron.sh` succeeds and `crontab -l | grep hermes-revenium-metering` returns one entry.
+- `bash ~/.hermes/skills/revenium/scripts/install-hooks.sh` succeeds and the revenium hook commands are registered in `~/.hermes/config.yaml` — verifiable with `grep hermes-revenium-hooks ~/.hermes/config.yaml` returning the hook tag.
 - `bash ~/.hermes/skills/revenium/scripts/cron.sh` updates `~/.hermes/state/revenium/budget-status.json`.
 - Revenium receives transactions from `~/.hermes/state.db` (visible in the Revenium UI under metering).
 - When over budget with autonomous mode on, `budget-status.json` flips to `halted: true` and Hermes sends the halt notification through the configured messaging channel.
