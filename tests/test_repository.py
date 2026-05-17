@@ -75,6 +75,10 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'hermes-report.sh',
             SKILL / 'scripts' / 'clear-halt.sh',
             SKILL / 'scripts' / 'prune-markers.sh',
+            SKILL / 'scripts' / 'pre_llm_call.sh',      # Phase 12 — pre-LLM-call halt hook
+            SKILL / 'scripts' / 'pre_tool_call.sh',     # Phase 12 — pre-tool-call block + CANCELLED marker
+            SKILL / 'scripts' / 'install-hooks.sh',     # Phase 12 — idempotent config.yaml hook installer
+            SKILL / 'scripts' / 'uninstall-hooks.sh',   # Phase 12 — hook uninstaller
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
@@ -138,6 +142,9 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('revenium-jobs.ledger', text)
         self.assertIn('JOB_TAXONOMY_FILE=', text)
         self.assertIn('job-taxonomy.json', text)
+        # Phase 12: hooks config path declared only in common.sh.
+        self.assertIn('HOOKS_CONFIG_FILE=', text)
+        self.assertIn('config.yaml', text)
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
