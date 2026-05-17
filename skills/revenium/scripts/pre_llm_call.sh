@@ -13,7 +13,8 @@ ensure_path
 # MUST be the first executable statement after ensure_path — Hermes pipes the JSON
 # payload and waits for stdin to be consumed before reading stdout. An early exit
 # without reading stdin hangs the hook (RESEARCH.md Pitfall 1).
-payload="$(cat -)"
+# The pre_llm_call hook does not parse the payload — drain and discard it.
+cat - >/dev/null
 
 # Read budget status — fail open to false if missing or corrupt (V5 Input Validation).
 halted="$(BUDGET_STATUS_FILE="${BUDGET_STATUS_FILE}" python3 -c "

@@ -35,18 +35,24 @@ content = config_path.read_text(encoding="utf-8")
 content = re.sub(r"^" + re.escape(hook_tag) + r"\s*\n?", "", content, flags=re.MULTILINE)
 
 # Remove revenium hook entries under pre_llm_call: and pre_tool_call:.
-# Strategy: remove any list item (  - command: ...) whose command contains 'revenium',
-# and then remove any hook event key (pre_llm_call:, pre_tool_call:) that ends up empty.
+# Strategy: remove any list item (  - command: ...) whose command path is one
+# of the revenium hook scripts (pre_llm_call.sh / pre_tool_call.sh), and then
+# remove any hook event key (pre_llm_call:, pre_tool_call:) that ends up empty.
+# WR-01: anchor on the hook SCRIPT PATH, not the bare substring 'revenium' — an
+# unrelated command containing 'revenium' (e.g. /usr/bin/revenium-other-hook)
+# must NOT be removed.
 def remove_revenium_list_items(text):
     # Match a hook event key line (e.g., "  pre_llm_call:") followed by list items.
-    # Remove list item blocks whose command line contains 'revenium'.
+    # Remove list item blocks whose command path is a revenium hook script.
     lines = text.split("\n")
     result = []
     i = 0
     while i < len(lines):
         line = lines[i]
-        # Check if this is a list item opener "    - command: ...<revenium>..."
-        if re.match(r"^\s+-\s+command:.*revenium", line):
+        # Check if this is a revenium hook list item opener:
+        # "    - command: .../scripts/pre_llm_call.sh" (or pre_tool_call.sh).
+        if (re.match(r"^\s+-\s+command:", line)
+                and re.search(r"scripts/(pre_llm_call|pre_tool_call)\.sh\b", line)):
             # Skip this item: consume all continuation lines (deeper indented or empty).
             base_indent = len(line) - len(line.lstrip())
             i += 1
