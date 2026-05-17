@@ -6099,6 +6099,376 @@ class RepositoryTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir5, ignore_errors=True)
 
+    # ------------------------------------------------------------------
+    # Phase 12 — behavioral coverage for the hook scripts (CR-02 closure).
+    # The CI suite previously only checked file existence and `bash -n`.
+    # These tests invoke the real scripts with HERMES_HOME /
+    # REVENIUM_HOOKS_CONFIG_FILE / BUDGET_STATUS_FILE / MARKERS_DIR env
+    # overrides pointed at a tempdir — no test touches the real ~/.hermes.
+    # ------------------------------------------------------------------
+
+    def test_install_hooks_foreign_key(self):
+        """CR-01 regression: install-hooks.sh against a config.yaml that already
+        has a foreign pre_llm_call: hook must register BOTH revenium commands
+        without destroying the foreign entry. This is the test that would have
+        caught the pre-12-04 installer silently skipping registration."""
+        import os
+        import subprocess
+        import tempfile
+
+        install_hooks = str(SKILL / 'scripts' / 'install-hooks.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-install-foreign-') as tmp:
+            config_path = os.path.join(tmp, 'config.yaml')
+            with open(config_path, 'w', encoding='utf-8') as fh:
+                fh.write(
+                    'hooks:\n'
+                    '  pre_llm_call:\n'
+                    '    - command: /opt/other/foreign-hook.sh\n'
+                    '      timeout: 3\n'
+                )
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_HOOKS_CONFIG_FILE'] = config_path
+
+            result = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'install-hooks.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            with open(config_path, encoding='utf-8') as fh:
+                config = fh.read()
+            self.assertIn(
+                'pre_llm_call.sh', config,
+                f'pre_llm_call.sh revenium command missing from config:\n{config}',
+            )
+            self.assertIn(
+                'pre_tool_call.sh', config,
+                f'pre_tool_call.sh revenium command missing from config:\n{config}',
+            )
+            self.assertIn(
+                '/opt/other/foreign-hook.sh', config,
+                f'foreign hook destroyed by install:\n{config}',
+            )
+
+    def test_install_hooks_happy_path(self):
+        """install-hooks.sh with no pre-existing config.yaml creates one carrying
+        both revenium command entries and the # hermes-revenium-hooks tag."""
+        import os
+        import subprocess
+        import tempfile
+
+        install_hooks = str(SKILL / 'scripts' / 'install-hooks.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-install-happy-') as tmp:
+            config_path = os.path.join(tmp, 'config.yaml')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_HOOKS_CONFIG_FILE'] = config_path
+
+            result = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'install-hooks.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertTrue(
+                os.path.exists(config_path),
+                'install-hooks.sh did not create config.yaml',
+            )
+            with open(config_path, encoding='utf-8') as fh:
+                config = fh.read()
+            self.assertIn(
+                'pre_llm_call.sh', config,
+                f'pre_llm_call.sh command missing from created config:\n{config}',
+            )
+            self.assertIn(
+                'pre_tool_call.sh', config,
+                f'pre_tool_call.sh command missing from created config:\n{config}',
+            )
+            self.assertIn(
+                '# hermes-revenium-hooks', config,
+                f'hook tag missing from created config:\n{config}',
+            )
+
+    def test_install_hooks_idempotent(self):
+        """install-hooks.sh run twice over the same HERMES_HOME leaves config.yaml
+        byte-identical after the second run — no double-registration (D-01)."""
+        import os
+        import subprocess
+        import tempfile
+
+        install_hooks = str(SKILL / 'scripts' / 'install-hooks.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-install-idem-') as tmp:
+            config_path = os.path.join(tmp, 'config.yaml')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_HOOKS_CONFIG_FILE'] = config_path
+
+            first = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                first.returncode, 0,
+                f'first install exit {first.returncode}: '
+                f'stdout={first.stdout!r} stderr={first.stderr!r}',
+            )
+            with open(config_path, encoding='utf-8') as fh:
+                after_first = fh.read()
+
+            second = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                second.returncode, 0,
+                f'second install exit {second.returncode}: '
+                f'stdout={second.stdout!r} stderr={second.stderr!r}',
+            )
+            with open(config_path, encoding='utf-8') as fh:
+                after_second = fh.read()
+
+            self.assertEqual(
+                after_first, after_second,
+                'second install run mutated config.yaml — not idempotent.\n'
+                f'after first run:\n{after_first}\n'
+                f'after second run:\n{after_second}',
+            )
+
+    def test_install_uninstall_round_trip(self):
+        """install-hooks.sh then uninstall-hooks.sh against a config.yaml with a
+        foreign pre_llm_call: hook leaves config without revenium entries while
+        keeping the foreign hook intact (WR-01 coverage)."""
+        import os
+        import subprocess
+        import tempfile
+
+        install_hooks = str(SKILL / 'scripts' / 'install-hooks.sh')
+        uninstall_hooks = str(SKILL / 'scripts' / 'uninstall-hooks.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-roundtrip-') as tmp:
+            config_path = os.path.join(tmp, 'config.yaml')
+            with open(config_path, 'w', encoding='utf-8') as fh:
+                fh.write(
+                    'hooks:\n'
+                    '  pre_llm_call:\n'
+                    '    - command: /opt/other/foreign-hook.sh\n'
+                    '      timeout: 3\n'
+                )
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_HOOKS_CONFIG_FILE'] = config_path
+
+            install = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                install.returncode, 0,
+                f'install exit {install.returncode}: '
+                f'stdout={install.stdout!r} stderr={install.stderr!r}',
+            )
+
+            uninstall = subprocess.run(
+                ['bash', uninstall_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                uninstall.returncode, 0,
+                f'uninstall exit {uninstall.returncode}: '
+                f'stdout={uninstall.stdout!r} stderr={uninstall.stderr!r}',
+            )
+
+            with open(config_path, encoding='utf-8') as fh:
+                config = fh.read()
+            self.assertNotIn(
+                'pre_llm_call.sh', config,
+                f'pre_llm_call.sh revenium command survived uninstall:\n{config}',
+            )
+            self.assertNotIn(
+                'pre_tool_call.sh', config,
+                f'pre_tool_call.sh revenium command survived uninstall:\n{config}',
+            )
+            self.assertIn(
+                '/opt/other/foreign-hook.sh', config,
+                f'foreign hook destroyed by uninstall:\n{config}',
+            )
+
+    # ------------------------------------------------------------------
+    # Phase 12 — pre_llm_call.sh / pre_tool_call.sh stdout-contract tests.
+    # Each pipes a JSON payload to the real hook and parses stdout. All env
+    # overrides point at a tempdir — no test touches the real ~/.hermes.
+    # ------------------------------------------------------------------
+
+    def test_pre_llm_call_fail_open(self):
+        """pre_llm_call.sh prints exactly {} when budget-status.json is missing
+        AND when it is corrupt non-JSON (V5 fail-open input validation)."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_llm = str(SKILL / 'scripts' / 'pre_llm_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-llm-failopen-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'budget-status.json')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['BUDGET_STATUS_FILE'] = status_path
+
+            # Case 1: budget-status.json missing.
+            missing = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                missing.returncode, 0,
+                f'pre_llm_call.sh exit {missing.returncode} (missing status): '
+                f'stdout={missing.stdout!r} stderr={missing.stderr!r}',
+            )
+            self.assertEqual(
+                json.loads(missing.stdout), {},
+                f'expected {{}} fail-open on missing status, got: {missing.stdout!r}',
+            )
+
+            # Case 2: corrupt (non-JSON) budget-status.json.
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                fh.write('this is not json {{{')
+            corrupt = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                corrupt.returncode, 0,
+                f'pre_llm_call.sh exit {corrupt.returncode} (corrupt status): '
+                f'stdout={corrupt.stdout!r} stderr={corrupt.stderr!r}',
+            )
+            self.assertEqual(
+                json.loads(corrupt.stdout), {},
+                f'expected {{}} fail-open on corrupt status, got: {corrupt.stdout!r}',
+            )
+
+    def test_pre_llm_call_halted_emits_halt_string(self):
+        """pre_llm_call.sh with halted budget-status.json emits a JSON object
+        whose context carries the verbatim halt string and substituted values."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_llm = str(SKILL / 'scripts' / 'pre_llm_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-llm-halted-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'budget-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': True,
+                    'currentValue': 95,
+                    'threshold': 100,
+                    'percentUsed': 95,
+                }, fh)
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['BUDGET_STATUS_FILE'] = status_path
+
+            result = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'pre_llm_call.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            payload = json.loads(result.stdout)
+            self.assertIn(
+                'context', payload,
+                f'halted output missing context key: {result.stdout!r}',
+            )
+            context = payload['context']
+            self.assertIn(
+                'Budget enforcement halt is active.', context,
+                f'verbatim halt string fragment missing from context: {context!r}',
+            )
+            self.assertIn(
+                '95 of 100 used (95%)', context,
+                f'substituted budget values missing from context: {context!r}',
+            )
+            self.assertIn(
+                'clear-halt.sh', context,
+                f'clear-halt.sh resume instruction missing from context: {context!r}',
+            )
+
+    def test_pre_tool_call_halted_blocks(self):
+        """pre_tool_call.sh with halted budget-status.json emits a JSON object
+        with action == "block" and a non-empty message."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_tool = str(SKILL / 'scripts' / 'pre_tool_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-tool-halted-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'budget-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': True,
+                    'currentValue': 95,
+                    'threshold': 100,
+                    'percentUsed': 95,
+                }, fh)
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['BUDGET_STATUS_FILE'] = status_path
+            env['MARKERS_DIR'] = markers_dir
+
+            result = subprocess.run(
+                ['bash', pre_tool],
+                input=json.dumps({
+                    'hook_event_name': 'pre_tool_call',
+                    'tool_name': 'shell',
+                    'session_id': 'sess-pre-tool-test',
+                }),
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'pre_tool_call.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(
+                payload.get('action'), 'block',
+                f'expected action == "block", got: {result.stdout!r}',
+            )
+            self.assertTrue(
+                payload.get('message'),
+                f'block directive missing a non-empty message: {result.stdout!r}',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()
