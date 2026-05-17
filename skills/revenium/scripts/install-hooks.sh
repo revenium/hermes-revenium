@@ -14,8 +14,12 @@ HOOK_TAG="# hermes-revenium-hooks"
 PRE_LLM_SCRIPT="${SKILL_DIR}/scripts/pre_llm_call.sh"
 PRE_TOOL_SCRIPT="${SKILL_DIR}/scripts/pre_tool_call.sh"
 
-# Idempotency check — re-run is a no-op (D-01).
-if grep -q "${HOOK_TAG}" "${HOOKS_CONFIG_FILE}" 2>/dev/null; then
+# Idempotency check — re-run is a no-op (D-01, CR-01).
+# Key the fast-path on whether BOTH revenium command paths are already present,
+# NOT on a bare HOOK_TAG grep — a stale HOOK_TAG without the commands must NOT
+# short-circuit the install.
+if grep -qF "${PRE_LLM_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null \
+   && grep -qF "${PRE_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null; then
   echo "Revenium hooks already registered in ${HOOKS_CONFIG_FILE}"
   exit 0
 fi
@@ -65,10 +69,52 @@ if not config_path.exists():
 
 content = config_path.read_text(encoding="utf-8")
 
-# Detect whether a hooks: block is already present.
-hooks_match = re.search(r"^hooks:\s*$", content, re.MULTILINE)
-if not hooks_match:
-    # No hooks: key present — append the entire block at end of file (format-preserving).
+
+def hooks_block_extent(text):
+    """Locate the hooks: block. Returns (match, start, end) or None."""
+    m = re.search(r"^hooks:\s*$", text, re.MULTILINE)
+    if not m:
+        return None
+    after = text[m.end():]
+    next_top = re.search(r"^[^\s#]", after, re.MULTILINE)
+    end = (m.end() + next_top.start()) if next_top else len(text)
+    return (m, m.end(), end)
+
+
+def insert_command_under_key(hooks_text, event_key, command_path):
+    """Insert a revenium `- command:` list item under an existing event key.
+
+    Indentation: list-item indent = key indent + 2 spaces; command:/timeout:
+    nested another 2 spaces. The foreign hook's existing entries are left
+    untouched — we insert immediately after the event-key line, never replace.
+    Returns the modified hooks_text, or None if the event key is absent.
+    """
+    km = re.search(r"^(\s*)" + re.escape(event_key) + r":\s*$",
+                   hooks_text, re.MULTILINE)
+    if not km:
+        return None
+    key_indent = km.group(1)
+    item_indent = key_indent + "  "
+    entry = (
+        item_indent + "- command: " + command_path + "\n"
+        + item_indent + "  timeout: 5\n"
+    )
+    insert_at = km.end() + 1  # just past the event-key line's newline
+    return hooks_text[:insert_at] + entry + hooks_text[insert_at:]
+
+
+def full_event_key(event_key, command_path):
+    """A complete `  pre_*_call:` key plus its revenium command entry."""
+    return (
+        "  " + event_key + ":\n"
+        "    - command: " + command_path + "\n"
+        "      timeout: 5\n"
+    )
+
+
+extent = hooks_block_extent(content)
+if extent is None:
+    # No hooks: key present — append the entire block at end of file.
     if not content.endswith("\n"):
         content += "\n"
     content += "\n" + hooks_block
@@ -76,54 +122,58 @@ if not hooks_match:
     print("Appended hooks block to " + str(config_path))
     raise SystemExit(0)
 
-# hooks: key is present — find its extent (until next top-level key or EOF).
-after_hooks = content[hooks_match.end():]
-next_top_match = re.search(r"^[^\s#]", after_hooks, re.MULTILINE)
-hooks_block_end = (hooks_match.end() + next_top_match.start()) if next_top_match else len(content)
-existing_hooks = content[hooks_match.end():hooks_block_end]
+# hooks: key is present — patch revenium commands into the existing block.
+_, hooks_start, hooks_end = extent
+existing_hooks = content[hooks_start:hooks_end]
 
-# Check if pre_llm_call already present under hooks.
-if re.search(r"^\s*pre_llm_call:", existing_hooks, re.MULTILINE):
-    # pre_llm_call already present — append pre_tool_call only if absent.
-    if not re.search(r"^\s*pre_tool_call:", existing_hooks, re.MULTILINE):
-        insert = (
-            "  pre_tool_call:\n"
-            "    - command: " + pre_tool + "\n"
-            "      timeout: 5\n"
-        )
-        new_content = content[:hooks_block_end] + insert + content[hooks_block_end:]
-        if not new_content.endswith("\n"):
-            new_content += "\n"
-        new_content += hook_tag + "\n"
-        config_path.write_text(new_content, encoding="utf-8")
-        print("Added pre_tool_call hook to existing hooks block in " + str(config_path))
+# Determine presence of each revenium command INDEPENDENTLY by command path,
+# never by branching on the pre_llm_call: / pre_tool_call: event-key names.
+pre_llm_present = bool(re.search(re.escape(pre_llm), existing_hooks))
+pre_tool_present = bool(re.search(re.escape(pre_tool), existing_hooks))
+
+new_hooks = existing_hooks
+status = []
+
+if not pre_llm_present:
+    patched = insert_command_under_key(new_hooks, "pre_llm_call", pre_llm)
+    if patched is not None:
+        new_hooks = patched
+        status.append("Added pre_llm_call revenium command under existing pre_llm_call key")
     else:
-        # Both present — just append the tag.
-        if not content.endswith("\n"):
-            content += "\n"
-        content += hook_tag + "\n"
-        config_path.write_text(content, encoding="utf-8")
-        print("Annotated existing hooks block in " + str(config_path))
-    raise SystemExit(0)
+        new_hooks = new_hooks + full_event_key("pre_llm_call", pre_llm)
+        status.append("Added pre_llm_call key and revenium command to hooks block")
 
-# hooks: present but no pre_llm_call — insert our two entries into the hooks block.
-pre_llm_entry = (
-    "  pre_llm_call:\n"
-    "    - command: " + pre_llm + "\n"
-    "      timeout: 5\n"
+if not pre_tool_present:
+    patched = insert_command_under_key(new_hooks, "pre_tool_call", pre_tool)
+    if patched is not None:
+        new_hooks = patched
+        status.append("Added pre_tool_call revenium command under existing pre_tool_call key")
+    else:
+        new_hooks = new_hooks + full_event_key("pre_tool_call", pre_tool)
+        status.append("Added pre_tool_call key and revenium command to hooks block")
+
+new_content = content[:hooks_start] + new_hooks + content[hooks_end:]
+
+# Write the HOOK_TAG ONLY when both revenium commands are now present in the
+# resulting hooks block, and never a second copy if one already exists.
+final_extent = hooks_block_extent(new_content)
+final_hooks = new_content[final_extent[1]:final_extent[2]]
+both_present = (
+    bool(re.search(re.escape(pre_llm), final_hooks))
+    and bool(re.search(re.escape(pre_tool), final_hooks))
 )
-pre_tool_entry = (
-    "  pre_tool_call:\n"
-    "    - command: " + pre_tool + "\n"
-    "      timeout: 5\n"
-)
-insert = pre_llm_entry + pre_tool_entry
-new_content = content[:hooks_block_end] + insert + content[hooks_block_end:]
-if not new_content.endswith("\n"):
-    new_content += "\n"
-new_content += hook_tag + "\n"
+if both_present and not re.search(
+        r"^" + re.escape(hook_tag) + r"\s*$", new_content, re.MULTILINE):
+    if not new_content.endswith("\n"):
+        new_content += "\n"
+    new_content += hook_tag + "\n"
+
 config_path.write_text(new_content, encoding="utf-8")
-print("Added pre_llm_call and pre_tool_call hooks to " + str(config_path))
+if status:
+    for line in status:
+        print(line)
+else:
+    print("Revenium hooks already present in " + str(config_path))
 PYEOF
 
 chmod +x "${PRE_LLM_SCRIPT}" "${PRE_TOOL_SCRIPT}"
