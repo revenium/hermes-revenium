@@ -6303,6 +6303,172 @@ class RepositoryTests(unittest.TestCase):
                 f'foreign hook destroyed by uninstall:\n{config}',
             )
 
+    # ------------------------------------------------------------------
+    # Phase 12 — pre_llm_call.sh / pre_tool_call.sh stdout-contract tests.
+    # Each pipes a JSON payload to the real hook and parses stdout. All env
+    # overrides point at a tempdir — no test touches the real ~/.hermes.
+    # ------------------------------------------------------------------
+
+    def test_pre_llm_call_fail_open(self):
+        """pre_llm_call.sh prints exactly {} when budget-status.json is missing
+        AND when it is corrupt non-JSON (V5 fail-open input validation)."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_llm = str(SKILL / 'scripts' / 'pre_llm_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-llm-failopen-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'budget-status.json')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['BUDGET_STATUS_FILE'] = status_path
+
+            # Case 1: budget-status.json missing.
+            missing = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                missing.returncode, 0,
+                f'pre_llm_call.sh exit {missing.returncode} (missing status): '
+                f'stdout={missing.stdout!r} stderr={missing.stderr!r}',
+            )
+            self.assertEqual(
+                json.loads(missing.stdout), {},
+                f'expected {{}} fail-open on missing status, got: {missing.stdout!r}',
+            )
+
+            # Case 2: corrupt (non-JSON) budget-status.json.
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                fh.write('this is not json {{{')
+            corrupt = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                corrupt.returncode, 0,
+                f'pre_llm_call.sh exit {corrupt.returncode} (corrupt status): '
+                f'stdout={corrupt.stdout!r} stderr={corrupt.stderr!r}',
+            )
+            self.assertEqual(
+                json.loads(corrupt.stdout), {},
+                f'expected {{}} fail-open on corrupt status, got: {corrupt.stdout!r}',
+            )
+
+    def test_pre_llm_call_halted_emits_halt_string(self):
+        """pre_llm_call.sh with halted budget-status.json emits a JSON object
+        whose context carries the verbatim halt string and substituted values."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_llm = str(SKILL / 'scripts' / 'pre_llm_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-llm-halted-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'budget-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': True,
+                    'currentValue': 95,
+                    'threshold': 100,
+                    'percentUsed': 95,
+                }, fh)
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['BUDGET_STATUS_FILE'] = status_path
+
+            result = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'pre_llm_call.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            payload = json.loads(result.stdout)
+            self.assertIn(
+                'context', payload,
+                f'halted output missing context key: {result.stdout!r}',
+            )
+            context = payload['context']
+            self.assertIn(
+                'Budget enforcement halt is active.', context,
+                f'verbatim halt string fragment missing from context: {context!r}',
+            )
+            self.assertIn(
+                '95 of 100 used (95%)', context,
+                f'substituted budget values missing from context: {context!r}',
+            )
+            self.assertIn(
+                'clear-halt.sh', context,
+                f'clear-halt.sh resume instruction missing from context: {context!r}',
+            )
+
+    def test_pre_tool_call_halted_blocks(self):
+        """pre_tool_call.sh with halted budget-status.json emits a JSON object
+        with action == "block" and a non-empty message."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_tool = str(SKILL / 'scripts' / 'pre_tool_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-tool-halted-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'budget-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': True,
+                    'currentValue': 95,
+                    'threshold': 100,
+                    'percentUsed': 95,
+                }, fh)
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['BUDGET_STATUS_FILE'] = status_path
+            env['MARKERS_DIR'] = markers_dir
+
+            result = subprocess.run(
+                ['bash', pre_tool],
+                input=json.dumps({
+                    'hook_event_name': 'pre_tool_call',
+                    'tool_name': 'shell',
+                    'session_id': 'sess-pre-tool-test',
+                }),
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'pre_tool_call.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(
+                payload.get('action'), 'block',
+                f'expected action == "block", got: {result.stdout!r}',
+            )
+            self.assertTrue(
+                payload.get('message'),
+                f'block directive missing a non-empty message: {result.stdout!r}',
+            )
+
 
 if __name__ == '__main__':
     unittest.main()
