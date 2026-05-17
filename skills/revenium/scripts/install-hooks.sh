@@ -89,7 +89,13 @@ def insert_command_under_key(hooks_text, event_key, command_path):
     untouched — we insert immediately after the event-key line, never replace.
     Returns the modified hooks_text, or None if the event key is absent.
     """
-    km = re.search(r"^(\s*)" + re.escape(event_key) + r":\s*$",
+    # Anchor the indent capture to horizontal whitespace only ([^\S\n] =
+    # whitespace except newline) so group(1) cannot swallow the leading
+    # newline of the hooks-block slice. With a bare \s*, the MULTILINE ^
+    # at offset 0 of `existing_hooks` (which always starts with the \n
+    # after `hooks:`) would capture "\n  " and inject stray blank lines
+    # into the rewritten YAML (CR-01).
+    km = re.search(r"^([^\S\n]*)" + re.escape(event_key) + r":[^\S\n]*$",
                    hooks_text, re.MULTILINE)
     if not km:
         return None
