@@ -229,7 +229,13 @@ Follow these steps in order. If any step fails, STOP. Do NOT write an `alertId` 
     ```
     This adds a per-minute cron entry that ships token deltas from `~/.hermes/state.db` to Revenium and refreshes `budget-status.json`.
 
-If any step from 1–12 fails, stop and explain the failure. Do NOT leave a partial `config.json` with an `alertId` for an alert that does not exist.
+13. **Install the budget-halt hooks.** Run:
+    ```
+    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+    ```
+    This registers the `pre_llm_call` and `pre_tool_call` revenium shell hooks in `~/.hermes/config.yaml` for structural budget-halt enforcement. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
+
+If any step from 1–13 fails, stop and explain the failure. Do NOT leave a partial `config.json` with an `alertId` for an alert that does not exist.
 
 ## `/revenium` Command Behavior
 
