@@ -118,10 +118,15 @@ path.write_text(new_content, encoding="utf-8")
 print(f"Added {plugin_name} to plugins.enabled in {path}")
 PY
 
+# Phase 12 (D-02): register pre_llm_call / pre_tool_call shell hooks in config.yaml.
+# Guard with || true so a hooks-install hiccup does not abort the whole local setup.
+bash "${TARGET_DIR}/scripts/install-hooks.sh" || true
+
 echo "Installed skill to ${TARGET_DIR}"
 echo ""
 echo "Next steps:"
 echo "  1. Verify Revenium CLI: revenium config show"
 echo "  2. Install cron: bash ~/.hermes/skills/revenium/scripts/install-cron.sh"
 echo "  3. Restart Hermes gateway to load the classifier plugin: hermes gateway restart"
-echo "  4. Start Hermes and load /revenium"
+echo "  4. Start Hermes ('hermes chat') and approve the revenium hooks when prompted."
+echo "     The hooks are registered but inert until you approve them on first use (D-03)."
