@@ -363,7 +363,7 @@ class RepositoryTests(unittest.TestCase):
         """Halt-check anchor appears before the classification anchor in SKILL.md,
         and the job-declaration anchor appears after the classification anchor."""
         text = (SKILL / 'SKILL.md').read_text()
-        halt_anchor = 'ABSOLUTE FIRST — HALT CHECK (NON-NEGOTIABLE)'
+        halt_anchor = 'HALT CHECK'
         classify_anchor = 'FINAL ACTION — TASK CLASSIFICATION'
         job_anchor = 'FINAL ACTION — JOB DECLARATION'
         self.assertIn(halt_anchor, text,
@@ -384,17 +384,21 @@ class RepositoryTests(unittest.TestCase):
         )
 
     def test_job_marker_snippets_resolve_session_id_from_session_files(self):
-        """Both job-marker execute_code snippets must resolve the session id from
+        """The job-declaration execute_code snippet must resolve the session id from
         the current-format ~/.hermes/sessions/session_<id>.json transcripts
         (newest non-cron), not the broken legacy *.jsonl glob or a HERMES_SESSION_ID
-        env var that execute_code never receives."""
+        env var that execute_code never receives.
+        Phase 12 D-05: the HALT CHECK agent-side marker write was removed (the
+        pre_tool_call hook now writes the CANCELLED marker); only the JOB DECLARATION
+        snippet remains."""
         text = (SKILL / 'SKILL.md').read_text()
         blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
         job_blocks = [b for b in blocks if 'def write_job_marker' in b]
         self.assertEqual(
-            len(job_blocks), 2,
-            'expected exactly 2 job-marker snippets in SKILL.md (HALT CHECK + '
-            f'JOB DECLARATION), found {len(job_blocks)}')
+            len(job_blocks), 1,
+            'expected exactly 1 job-marker snippet in SKILL.md (JOB DECLARATION only — '
+            'Phase 12 D-05 removed the HALT CHECK agent-side marker write), '
+            f'found {len(job_blocks)}')
         for b in job_blocks:
             self.assertIn(
                 'f.startswith("session_")', b,

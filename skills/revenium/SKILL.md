@@ -21,83 +21,22 @@ metadata:
 
 # Revenium
 
-## ABSOLUTE FIRST — HALT CHECK (NON-NEGOTIABLE)
+## HALT CHECK — DEFENSE-IN-DEPTH BACKSTOP
 
-Before you write ANY response, before you make ANY tool call, on EVERY turn of this session — not just the first:
+Budget-halt enforcement is now handled structurally by Hermes shell hooks: `pre_llm_call`
+injects the halt directive into every turn before the LLM generates a response, and
+`pre_tool_call` blocks all tool calls when a halt is active. This section is a
+defense-in-depth fallback only — it applies if the hooks have not yet been consented
+or are temporarily unavailable.
 
-1. Read `~/.hermes/state/revenium/budget-status.json`.
-2. Check the `halted` field.
-
-**If `halted` is `true`:**
-
-YOUR ENTIRE RESPONSE MUST BE EXACTLY THIS AND NOTHING ELSE:
+**If you read `budget-status.json` and `halted` is `true`:** your entire response must
+be exactly the following and nothing else:
 
 > Budget enforcement halt is active. $[currentValue] of $[threshold] used ([percentUsed]%). To resume: `bash ~/.hermes/skills/revenium/scripts/clear-halt.sh`
 
-- Make exactly ONE tool call: the mandated `CANCELLED` job-marker write below (and only if an arc was in progress) — then nothing else
-- Do NOT fetch any data
-- Do NOT append any content
-- Do NOT continue reading this skill file
-- Do NOT answer the user's question
-- ONLY output the halt message above after the marker write
-
-**Mandated single first step — CANCELLED job marker (arc-in-progress only):**
-
-Before emitting the halt string, check whether you were mid-arc (you had been doing substantive work in this session and had not yet declared a job marker for the current arc). If yes, call `execute_code` ONCE with this snippet. If no arc was in progress (session idle, or the last arc was already declared), skip this step and go directly to emitting the halt string.
-
-```python
-import fcntl, json, os, secrets, time
-
-# Resolve the active Hermes session id. Hermes writes each session transcript
-# as ~/.hermes/sessions/session_<id>.json; the newest non-cron one is the
-# active session. execute_code receives no HERMES_SESSION_ID env var and the
-# legacy *.jsonl files are stale — both are deliberately ignored.
-session_id = ""
-sessions_dir = os.path.expanduser("~/.hermes/sessions")
-try:
-    candidates = [
-        f for f in os.listdir(sessions_dir)
-        if f.startswith("session_") and f.endswith(".json")
-        and not f.startswith("session_cron_")
-    ]
-    if candidates:
-        newest = max(
-            candidates,
-            key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
-        )
-        session_id = newest[len("session_"):-len(".json")]
-except OSError:
-    pass
-if not session_id:
-    session_id = f"pseudo-{int(time.time())}"
-
-markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
-os.makedirs(markers_dir, mode=0o700, exist_ok=True)
-marker_path = os.path.join(markers_dir, f"{session_id}.jsonl")
-
-def write_job_marker(agentic_job_id, job_name, job_type, status):
-    record = {"kind": "job", "ts": time.time(), "sid": session_id,
-              "agentic_job_id": agentic_job_id, "job_name": job_name,
-              "job_type": job_type, "status": status}
-    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
-    with open(marker_path, "ab", buffering=0) as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(line.encode("utf-8"))
-
-# Degraded-deterministic halt marker (D-15): fixed shape, no taxonomy read.
-# job_type "interrupted" is seeded in job-taxonomy.json — no mint needed.
-write_job_marker(
-    agentic_job_id="budget-halt-" + secrets.token_hex(2),
-    job_name="Arc interrupted by budget halt",
-    job_type="interrupted",
-    status="CANCELLED",
-)
-print(f"halt job marker written: {marker_path}")
-```
+Substitute the actual values from `budget-status.json`. Do not add any other content.
 
 **If `halted` is `false`, proceed to the Budget Check Procedure below.**
-
-This is not optional. If you output ANYTHING other than the halt message when `halted: true`, you are violating this skill's requirements.
 
 ## Budget Check Procedure
 
@@ -117,7 +56,7 @@ The budget status is maintained by a background cron job that checks Revenium ev
 
 3. **Evaluate the result:**
 
-   **If `halted` is true:** Follow the HALT CHECK instructions above — output ONLY the halt message and stop.
+   **If `halted` is true:** Follow the HALT CHECK backstop above — output ONLY the halt message and stop.
 
    **If `exceeded` is false (budget OK):** Proceed silently. Do NOT mention the budget to the user.
 
@@ -440,12 +379,3 @@ write_job_marker(agentic_job_id, job_name, job_type, status)
 print(f"job marker written: {marker_path}")
 ```
 
-## LAST WORD — PRE-RESPONSE CHECKLIST (EVERY TURN)
-
-Before you yield any response, answer these three questions. If any answer is NO, take the corrective action before sending.
-
-1. **Have I read `~/.hermes/state/revenium/budget-status.json` during THIS turn?** If NO — read it now, before responding. Every turn requires a fresh read; a prior turn's read does not count. Do not trust memory, context, or a summarized earlier result.
-
-2. **Is `halted` true in the file I just read?** If YES — the HALT CHECK section at the top of this file overrides EVERYTHING below it including both FINAL ACTION sections (TASK CLASSIFICATION and JOB DECLARATION). Their "MANDATORY" imperatives do NOT apply while halted. The only permitted action is the mandated CANCELLED marker write (if an arc was in progress) followed by the verbatim halt string from the HALT CHECK block. Nothing else.
-
-3. **Did I complete all required FINAL ACTIONs (task marker + job marker if triggered)?** If NO — do not send the response yet; write the missing markers first.
