@@ -28,7 +28,7 @@ if [[ -f "${HOOKS_CONFIG_FILE}" ]]; then
   cp "${HOOKS_CONFIG_FILE}" "${HOOKS_CONFIG_FILE}.bak.$(date +%s)"
 fi
 
-# Patch config.yaml with a stdlib-only re-based Python heredoc — do NOT import yaml.
+# Patch config.yaml with a stdlib-only re-based Python heredoc (no PyYAML).
 # Mirrors the proven approach in setup-local.sh lines 49-119.
 # Receives config path, pre_llm script path, pre_tool script path, and HOOK_TAG via argv.
 HOOKS_CONFIG_FILE="${HOOKS_CONFIG_FILE}" \
