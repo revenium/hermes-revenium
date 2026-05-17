@@ -71,14 +71,34 @@ content = config_path.read_text(encoding="utf-8")
 
 
 def hooks_block_extent(text):
-    """Locate the hooks: block. Returns (match, start, end) or None."""
-    m = re.search(r"^hooks:\s*$", text, re.MULTILINE)
+    """Locate the hooks: block. Returns (match, start, end) or None.
+
+    Matches three forms of a present-but-empty or block-style hooks key:
+      hooks:            (bare — already-block-style or empty)
+      hooks: {}         (empty flow map — the real host case)
+      hooks: []         (empty flow seq — handled for completeness)
+    A non-empty inline map/seq is NOT matched (out of scope).
+    """
+    m = re.search(
+        r"^hooks:[^\S\n]*(?:\{[^\S\n]*\}|\[[^\S\n]*\])?[^\S\n]*$",
+        text, re.MULTILINE,
+    )
     if not m:
         return None
+    # For inline-empty forms (hooks: {} / hooks: []) the matched span covers
+    # the entire `hooks: {}` token on that line.  We normalise the start
+    # pointer so that `content[:hooks_start]` always ends just BEFORE the
+    # `hooks:` keyword (i.e. at the beginning of that line) and the caller
+    # rewrites the whole `hooks:` line as a clean bare `hooks:\n`.
+    line_start = text.rfind("\n", 0, m.start()) + 1  # start of the matched line
     after = text[m.end():]
-    next_top = re.search(r"^[^\s#]", after, re.MULTILINE)
-    end = (m.end() + next_top.start()) if next_top else len(text)
-    return (m, m.end(), end)
+    # Skip any trailing \r or \n that ends the hooks: line so existing_hooks
+    # starts cleanly at the first indented line of the block (or is empty).
+    eol_skip = len(after) - len(after.lstrip("\r\n"))
+    hooks_content_start = m.end() + eol_skip
+    next_top = re.search(r"^[^\s#]", after[eol_skip:], re.MULTILINE)
+    end = (hooks_content_start + next_top.start()) if next_top else len(text)
+    return (m, hooks_content_start, end, line_start)
 
 
 def insert_command_under_key(hooks_text, event_key, command_path):
@@ -129,7 +149,7 @@ if extent is None:
     raise SystemExit(0)
 
 # hooks: key is present — patch revenium commands into the existing block.
-_, hooks_start, hooks_end = extent
+_, hooks_start, hooks_end, line_start = extent
 existing_hooks = content[hooks_start:hooks_end]
 
 # Determine presence of each revenium command INDEPENDENTLY by command path,
@@ -158,7 +178,9 @@ if not pre_tool_present:
         new_hooks = new_hooks + full_event_key("pre_tool_call", pre_tool)
         status.append("Added pre_tool_call key and revenium command to hooks block")
 
-new_content = content[:hooks_start] + new_hooks + content[hooks_end:]
+# Rebuild: replace from the beginning of the `hooks:` line through hooks_end
+# so that an inline-empty `hooks: {}` line is rewritten as a bare `hooks:`.
+new_content = content[:line_start] + "hooks:\n" + new_hooks + content[hooks_end:]
 
 # Write the HOOK_TAG ONLY when both revenium commands are now present in the
 # resulting hooks block, and never a second copy if one already exists.

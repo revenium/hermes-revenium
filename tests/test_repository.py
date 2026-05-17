@@ -6220,6 +6220,122 @@ class RepositoryTests(unittest.TestCase):
                 f'stray blank line inside hooks block:\n{config}',
             )
 
+    def test_install_hooks_inline_empty_map(self):
+        """Regression: install-hooks.sh against a config.yaml whose only hooks
+        declaration is the empty inline flow map `hooks: {}` must produce exactly
+        ONE top-level block-style `hooks:` key carrying both revenium command
+        entries, the timeout: 5 attribute, and the # hermes-revenium-hooks tag.
+        Surrounding YAML keys must be untouched."""
+        import os
+        import re
+        import subprocess
+        import tempfile
+
+        install_hooks = str(SKILL / 'scripts' / 'install-hooks.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-install-inline-empty-') as tmp:
+            config_path = os.path.join(tmp, 'config.yaml')
+            with open(config_path, 'w', encoding='utf-8') as fh:
+                fh.write(
+                    'agent_name: test\n'
+                    'hooks: {}\n'
+                    'model: claude\n'
+                )
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_HOOKS_CONFIG_FILE'] = config_path
+
+            result = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'install-hooks.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            with open(config_path, encoding='utf-8') as fh:
+                config = fh.read()
+
+            # Both revenium command paths must be present.
+            self.assertIn(
+                'pre_llm_call.sh', config,
+                f'pre_llm_call.sh revenium command missing from config:\n{config}',
+            )
+            self.assertIn(
+                'pre_tool_call.sh', config,
+                f'pre_tool_call.sh revenium command missing from config:\n{config}',
+            )
+
+            # The hook tag must be present.
+            self.assertIn(
+                '# hermes-revenium-hooks', config,
+                f'hook tag missing from config:\n{config}',
+            )
+
+            # timeout: 5 must be present (must_haves truth 2).
+            self.assertIn(
+                'timeout: 5', config,
+                f'timeout: 5 missing from config:\n{config}',
+            )
+
+            # EXACTLY ONE top-level hooks: key — count lines that start with
+            # `hooks:` at column 0.
+            hooks_lines = [
+                line for line in config.split('\n')
+                if re.match(r'^hooks:', line)
+            ]
+            self.assertEqual(
+                len(hooks_lines), 1,
+                f'Expected exactly 1 top-level hooks: line, '
+                f'got {len(hooks_lines)}: {hooks_lines!r}\n{config}',
+            )
+
+            # The surviving hooks: line must be bare (no inline {} or []).
+            self.assertEqual(
+                hooks_lines[0].rstrip(), 'hooks:',
+                f'hooks: line is not bare block-style: {hooks_lines[0]!r}\n{config}',
+            )
+
+            # The inline empty form must be gone.
+            self.assertNotIn(
+                'hooks: {}', config,
+                f'hooks: {{}} literal survived install:\n{config}',
+            )
+
+            # Surrounding keys must still be present.
+            self.assertIn(
+                'agent_name: test', config,
+                f'agent_name key missing — surrounding YAML mutated:\n{config}',
+            )
+            self.assertIn(
+                'model: claude', config,
+                f'model key missing — surrounding YAML mutated:\n{config}',
+            )
+
+            # Idempotency leg: run again and assert the file is byte-identical.
+            with open(config_path, encoding='utf-8') as fh:
+                after_first = fh.read()
+
+            second = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                second.returncode, 0,
+                f'second install exit {second.returncode}: '
+                f'stdout={second.stdout!r} stderr={second.stderr!r}',
+            )
+            with open(config_path, encoding='utf-8') as fh:
+                after_second = fh.read()
+
+            self.assertEqual(
+                after_first, after_second,
+                'second install run mutated config.yaml — not idempotent.\n'
+                f'after first run:\n{after_first}\n'
+                f'after second run:\n{after_second}',
+            )
+
     def test_install_hooks_happy_path(self):
         """install-hooks.sh with no pre-existing config.yaml creates one carrying
         both revenium command entries and the # hermes-revenium-hooks tag."""
