@@ -6155,6 +6155,71 @@ class RepositoryTests(unittest.TestCase):
                 f'foreign hook destroyed by install:\n{config}',
             )
 
+            # CR-01 structural assertions: substring presence alone is
+            # satisfied by malformed YAML. The buggy installer captured a
+            # newline into the indent group and injected stray blank lines
+            # inside the hooks block. Assert real structure here.
+            lines = config.split('\n')
+
+            # No blank line may appear between an event key and its first
+            # list item, nor between a `- command:` line and its `timeout:`.
+            for idx, line in enumerate(lines[:-1]):
+                stripped = line.strip()
+                if stripped.endswith('call:') and stripped.startswith('pre_'):
+                    self.assertNotEqual(
+                        lines[idx + 1].strip(), '',
+                        'blank line injected between event key and first '
+                        f'list item:\n{config}',
+                    )
+                if stripped.startswith('- command:'):
+                    self.assertNotEqual(
+                        lines[idx + 1].strip(), '',
+                        'blank line injected between - command: and its '
+                        f'continuation:\n{config}',
+                    )
+
+            # Every `- command:` list item must share a single consistent
+            # indentation within the hooks block (the buggy indent string
+            # carried an embedded newline, breaking alignment).
+            command_indents = {
+                len(line) - len(line.lstrip(' '))
+                for line in lines
+                if line.lstrip(' ').startswith('- command:')
+            }
+            self.assertEqual(
+                len(command_indents), 1,
+                'inconsistent indentation across - command: lines '
+                f'(indents={sorted(command_indents)}):\n{config}',
+            )
+
+            # The hooks block (the indented YAML under `hooks:`) must contain
+            # no blank lines — the buggy installer injected them. Collect the
+            # block as the run of indented lines immediately after `hooks:`,
+            # stopping at the first non-indented line (e.g. the
+            # `# hermes-revenium-hooks` tag or end of file). Trailing blank
+            # lines after that tag are outside the block and irrelevant.
+            hooks_idx = next(
+                i for i, ln in enumerate(lines) if ln.rstrip() == 'hooks:'
+            )
+            block = []
+            for ln in lines[hooks_idx + 1:]:
+                if ln.startswith((' ', '\t')):
+                    block.append(ln)
+                elif ln.strip() == '':
+                    # A blank line interrupting indented content is a defect;
+                    # a blank line after the block has ended is harmless. Peek
+                    # ahead: if more indented content follows, it is inside.
+                    block.append(ln)
+                else:
+                    break
+            # Trim trailing blank lines that sit past the last indented line.
+            while block and block[-1].strip() == '':
+                block.pop()
+            self.assertTrue(
+                all(ln.strip() != '' for ln in block),
+                f'stray blank line inside hooks block:\n{config}',
+            )
+
     def test_install_hooks_happy_path(self):
         """install-hooks.sh with no pre-existing config.yaml creates one carrying
         both revenium command entries and the # hermes-revenium-hooks tag."""
