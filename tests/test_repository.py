@@ -7429,5 +7429,97 @@ class RepositoryTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+    def test_revenium_classifier_job_runs_after_self_classify(self):
+        """CR-01 regression: Step 7 job-inference must run even when Step 3 fires.
+
+        When a fresh GUARDRAIL+CHAT pair (ts within 30s) already exists because the
+        agent self-classified, run_classification_async must still produce a kind:"job"
+        marker — Step 3 must gate only task re-writing (Steps 4-6), not job inference.
+
+        This test fails against the pre-fix (CR-01) code where Step 3 returns early
+        before Step 7, and passes after the Task 1 fix that captures agent_self_classified
+        and wraps Steps 4-6 in 'if not agent_self_classified:'.
+        """
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import time
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-after-self-classify-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260518_120000_selfclassify"
+
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Pre-write a fresh GUARDRAIL+CHAT pair (ts within 30s) — simulates the
+            # agent's FINAL ACTION TASK CLASSIFICATION having just run.
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            now = time.time()
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                rec1 = {"muid": "a" * 33, "ts": now - 1.0, "sid": sid,
+                        "task_type": "code_review", "operation_type": "GUARDRAIL"}
+                rec2 = dict(rec1, muid="b" * 33, ts=now - 0.5, operation_type="CHAT")
+                f.write(json.dumps(rec1, separators=(",", ":")) + "\n")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+
+            # Confirm Step 3 gate would fire on this session.
+            self.assertTrue(
+                handler._recent_marker_pair_exists(sid, within_seconds=30.0),
+                "_recent_marker_pair_exists must return True for the fresh pair"
+            )
+
+            # Mock call_llm so the job-inference call returns a valid one-job array.
+            job_resp = unittest.mock.MagicMock()
+            job_resp.choices = [unittest.mock.MagicMock()]
+            job_resp.choices[0].message.content = json.dumps([
+                {"agentic_job_id": "fix_auth_b1c2", "job_name": "Fix auth bug",
+                 "job_type": "bug_fix", "status": "SUCCESS"}
+            ])
+
+            fake_transcript = (
+                "user: Please fix the authentication bug in the login flow\n"
+                "assistant: I've fixed the authentication bug by updating the token validation."
+            )
+
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=job_resp), \
+                 unittest.mock.patch.object(handler, '_read_session_transcript',
+                                            return_value=fake_transcript):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message="Please fix the authentication bug in the login flow",
+                    response="I've fixed the authentication bug by updating the token validation.",
+                ))
+
+            # After the fix: the marker file must have at least one kind:"job" record.
+            # (Before the fix: Step 3 returns early and no job marker is written.)
+            lines = marker_path.read_text().splitlines()
+            recs = [json.loads(l) for l in lines]
+            job_recs = [r for r in recs if r.get("kind") == "job"]
+            self.assertGreaterEqual(
+                len(job_recs), 1,
+                f"Expected at least one kind:'job' record after self-classified turn; "
+                f"got {len(job_recs)} job recs. Full records: {recs}"
+            )
+
+            # The original 2 task lines must still be there (no double-write of task pair).
+            task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertEqual(
+                len(task_recs), 2,
+                f"Task lines must still be exactly 2 (no double-write); got {len(task_recs)}"
+            )
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
