@@ -1,6 +1,10 @@
-# Job Declaration — Operational Detail
+# Job Declaration — Inference Criteria
 
-This file holds the full operational detail for the `## FINAL ACTION — JOB DECLARATION` step in `SKILL.md`. Refer here for arc-boundary rules, the SUCCESS/FAILED/CANCELLED criteria, the anti-collapse label examples, and worked examples. The `write_job_marker` snippet itself remains in `SKILL.md`.
+As of Phase 13, job markers (`kind:"job"`) are written automatically by the
+`revenium-classifier` plugin at session end — it infers the job arc(s) from
+session data without agent involvement. This document describes the criteria
+the plugin's inference uses. Refer here only in the rare backstop case where
+the SKILL.md `## FINAL ACTION — JOB DECLARATION` section applies.
 
 ## Arc definition (goal-continuity rule)
 
@@ -23,35 +27,13 @@ Declare a job marker if ANY of these are true:
 - Your entire turn was a trivial response (≤ 2 sentences, zero tools called).
 - No arc was in progress at the start of this turn.
 
-## Required action sequence
+## Status criteria
 
-Before your final response yields back to the user:
+Exactly one of: `SUCCESS`, `FAILED`, `CANCELLED` (uppercase).
 
-**Step 1 — mint an `agentic_job_id`.** Compose a specific business-readable label describing what the arc actually did, then append `secrets.token_hex(2)` (4 hex chars) as an entropy suffix. Example: `pr-review-fc7a`, `fix-auth-race-3b1e`, `weekly-dep-upgrade-9a2c`.
-
-**Anti-collapse rule (critical):** the label MUST be specific enough to be meaningful in a Revenium analytics dashboard. Bad: `task-a12f`, `work-b3c4`, `coding-9d1a`, `generation-4e5f`. Good: `refactor-db-pool-7c2a`, `add-pagination-endpoint-1f3b`. If you find yourself writing a generic label, stop and pick a more specific one. Fragmentation between `code_review` and `code-review` is permanent harm; a generic label is also permanent attribution loss.
-
-**Step 2 — select a `job_type`.** Read the live taxonomy at `~/.hermes/state/revenium/job-taxonomy.json`. Reuse the closest-fitting existing `job_type`. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label ONLY if none fits well.
-
-**Anti-collapse rule (critical):** same pressure as `agentic_job_id`. Bad `job_type` values: `generation`, `task`, `work`, `coding`, `general`. Good: `weekly_dependency_upgrade`, `database_schema_migration`, `pull_request_review`. Mint a specific type when nothing fits — fragmentation is recoverable, a bland label is permanent attribution loss.
-
-If you mint a new `job_type`, persist it back to the live taxonomy atomically (flock + tmp file in same dir + fsync + rename) before writing the job marker.
-
-**Step 3 — determine `status`.** Exactly one of: `SUCCESS`, `FAILED`, `CANCELLED` (uppercase).
-
-- `SUCCESS` requires positive, checkable evidence YOU established in THIS turn: tests run and passed, build green, diff demonstrably correct, question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. No user sign-off required — self-verification is the bar.
+- `SUCCESS` requires positive, checkable evidence established in the session: tests run and passed, build green, diff demonstrably correct, question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. No user sign-off required — self-verification is the bar.
 - `FAILED` is narrow: a definitive negative terminal state — the fix didn't fix, the build cannot pass, the goal is objectively unachievable.
 - `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded, or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
-
-**Step 4 — call `execute_code` with the `write_job_marker` snippet in `SKILL.md`.**
-
-## Self-check before yielding
-
-Immediately before yielding your final response, answer these three questions. If a job marker was required and you have not written it, call `execute_code` with the snippet in `SKILL.md` before sending your response.
-
-1. Did I just complete, fail, or abandon the goal this arc was working toward? → if yes, a job marker is REQUIRED.
-2. Did I self-verify the outcome (tests ran, build green, answer complete) before setting `status = "SUCCESS"`? → "I made the change but couldn't verify it" means `status = "CANCELLED"`.
-3. Did I just call `execute_code` with `write_job_marker`? → if a marker was REQUIRED, YES is the only acceptable answer.
 
 ## Examples
 
