@@ -281,6 +281,210 @@ async def _infer_jobs_via_llm(transcript: str, job_labels: list) -> list:
         return []
 
 
+def _validate_job(job: dict) -> "dict | None":
+    """Validate and normalize a job dict from the LLM response.
+
+    Mirror of _validate_label but for a dict (D-03 reader-required keys).
+    Required keys: agentic_job_id (non-empty str), job_type (LABEL_RE match),
+    status (in {SUCCESS, FAILED, CANCELLED}). job_name is optional.
+
+    Reuses LABEL_RE for job_type — same snake_case grammar as task labels;
+    defense-in-depth against pipe/colon/newline injection that would corrupt
+    the cron's IFS='|' parse and JOB:<id>: ledger grammar (T-13-01).
+
+    Returns the normalized dict on success, None for any invalid job (caller skips).
+    """
+    if not isinstance(job, dict):
+        return None
+    agentic_job_id = job.get("agentic_job_id", "")
+    if not isinstance(agentic_job_id, str) or not agentic_job_id.strip():
+        return None
+    job_type = job.get("job_type", "")
+    if not isinstance(job_type, str):
+        return None
+    job_type = job_type.strip().lower()
+    if not LABEL_RE.match(job_type):
+        return None
+    status_raw = job.get("status", "")
+    if not isinstance(status_raw, str):
+        return None
+    status = status_raw.strip().upper()
+    if status not in {"SUCCESS", "FAILED", "CANCELLED"}:
+        return None
+    # DECLARE-02 contract: if agentic_job_id lacks a hex entropy suffix (the
+    # 4-char token_hex(2) suffix e.g. "-a1b2"), append one deterministically.
+    # Pattern: id ends with _XXXX (4 lowercase hex chars). Relaxed check:
+    # if the id doesn't end in an underscore + exactly 4 hex chars, append.
+    aid = agentic_job_id.strip()
+    import re as _re
+    if not _re.search(r"_[0-9a-f]{4}$", aid):
+        aid = aid + "_" + secrets.token_hex(2)
+    return {
+        "agentic_job_id": aid,
+        "job_name": (job.get("job_name") or ""),
+        "job_type": job_type,
+        "status": status,
+    }
+
+
+def _write_job_marker(sid: str, job: dict) -> Path:
+    """Atomic O_APPEND + fcntl.LOCK_EX write of a single kind:"job" marker line.
+
+    Mirror of _write_marker_pair but writes ONE line using the frozen Phase 7 D-03
+    record shape. Reader-required keys: kind, agentic_job_id, job_type, status.
+    Same compact serialization, same markers/<sid>.jsonl file.
+    """
+    MARKERS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    record = {
+        "kind": "job",
+        "ts": time.time(),
+        "sid": sid,
+        "agentic_job_id": job["agentic_job_id"],
+        "job_name": job.get("job_name", ""),
+        "job_type": job["job_type"],
+        "status": job["status"],
+    }
+    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
+    with open(marker_path, "ab", buffering=0) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line.encode("utf-8"))
+    return marker_path
+
+
+def _read_job_taxonomy_labels() -> list:
+    """Read JOB_TAXONOMY_FILE and return job_type labels sorted recent-first, alpha within ties.
+
+    Copy of _read_taxonomy_labels with TAXONOMY_FILE → JOB_TAXONOMY_FILE.
+    Seed entries with no last_seen_at fall into the 'older' alpha bucket — handled
+    by the analog without special-casing. Returns [] on any failure (D-04 fail-open).
+    """
+    try:
+        data = json.loads(JOB_TAXONOMY_FILE.read_text(encoding="utf-8"))
+        labels = data.get("labels", {})
+        if not isinstance(labels, dict):
+            return []
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        recent_cutoff = now - datetime.timedelta(days=7)
+        recent, older = [], []
+        for key, meta in sorted(labels.items()):  # alpha pre-sort for stable tie-break
+            raw_ts = meta.get("last_seen_at") if isinstance(meta, dict) else None
+            if raw_ts:
+                try:
+                    ts = datetime.datetime.fromisoformat(raw_ts.rstrip("Z")).replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                    if ts >= recent_cutoff:
+                        recent.append((ts, key))
+                        continue
+                except Exception:
+                    pass
+            older.append(key)
+        recent.sort(key=lambda x: x[0], reverse=True)
+        return [k for _, k in recent] + older
+    except Exception:
+        pass
+    return []
+
+
+def _persist_job_type_to_taxonomy(job_type: str) -> None:
+    """Append job_type to job-taxonomy.json if not already present, updating
+    last_seen_at on every call (D-32 mint-back pattern).
+
+    Copy of _persist_label_to_taxonomy with TAXONOMY_FILE → JOB_TAXONOMY_FILE.
+    Keeps the sidecar .lock + non-blocking LOCK_EX|LOCK_NB + temp-file .replace()
+    + last_seen_at mint-back; same concurrent on_session_end race resolution as
+    HARDEN-01 (T-13-04). Skips empty/invalid job_type instead of "unclassified".
+    """
+    if not job_type:
+        return
+    import datetime
+    try:
+        JOB_TAXONOMY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = JOB_TAXONOMY_FILE.parent / (JOB_TAXONOMY_FILE.name + ".lock")
+        try:
+            with open(lock_path, "a") as lockfd:
+                try:
+                    fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    logger.warning(
+                        "revenium-classifier: job taxonomy persist skipped, lock contention "
+                        "for job_type=%s: %s",
+                        job_type,
+                        exc,
+                    )
+                    return
+                try:
+                    data = json.loads(JOB_TAXONOMY_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {"labels": {}}
+                labels = data.get("labels", {})
+                if not isinstance(labels, dict):
+                    labels = {}
+                now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                if job_type not in labels:
+                    labels[job_type] = {
+                        "description": None,
+                        "examples": [],
+                        "last_seen_at": now_iso,
+                    }
+                else:
+                    # Update last_seen_at on every successful write (recency ordering D-33).
+                    if not isinstance(labels[job_type], dict):
+                        labels[job_type] = {}
+                    labels[job_type]["last_seen_at"] = now_iso
+                data["labels"] = labels
+                tmp = JOB_TAXONOMY_FILE.parent / (JOB_TAXONOMY_FILE.name + ".tmp")
+                tmp.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                tmp.replace(JOB_TAXONOMY_FILE)
+        except OSError as exc:
+            logger.warning(
+                "revenium-classifier: job taxonomy persist skipped, lock contention "
+                "for job_type=%s: %s",
+                job_type,
+                exc,
+            )
+            return
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier: job taxonomy mint-back failed for job_type=%s: %s",
+            job_type,
+            exc,
+        )
+
+
+def _job_marker_exists(sid: str) -> bool:
+    """Return True if a kind:"job" marker line already exists for sid, False otherwise.
+
+    Mirror of _read_latest_task_type line-by-line tolerant parse, but scans for
+    any rec.get("kind") == "job" line and returns True on first hit. Fail-open
+    returns False (proceed to write) — the cron's JOB:<id>:created ledger gate is
+    the ultimate idempotency backstop (D-08). Do NOT mirror _recent_marker_pair_exists;
+    D-08 chose presence-scan over wall-clock proximity (PATTERNS.md §_job_marker_exists).
+    """
+    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    if not marker_path.is_file():
+        return False
+    try:
+        lines = marker_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("kind") == "job":
+            return True
+    return False
+
+
 def _read_latest_task_type(sid: str) -> "str | None":
     """Return the task_type of the most recent valid marker record for `sid`, or None
     if the file is missing or has no valid records. Used by D-05 subagent inheritance."""
