@@ -2602,11 +2602,12 @@ class RepositoryTests(unittest.TestCase):
                     message=None,
                     response=None,
                 ))
-                mock_llm.assert_called_once()
-                # The user-role message in the LLM call carries the full prompt;
-                # the prompt is built by _build_classification_prompt and passed as
-                # the user-role content in call_llm's messages list.
-                call_messages = mock_llm.call_args.kwargs['messages']
+                # Step 7 (Phase 13) may make a second call_llm call for job inference.
+                # Verify at least one call was made (task classification).
+                self.assertGreaterEqual(mock_llm.call_count, 1,
+                    "call_llm must be called at least once for task classification")
+                # The first call is always the task classification; inspect its messages.
+                call_messages = mock_llm.call_args_list[0].kwargs['messages']
                 full_prompt = " ".join(m['content'] for m in call_messages)
                 self.assertIn(
                     "Summarize today news headlines",
@@ -7068,8 +7069,13 @@ class RepositoryTests(unittest.TestCase):
             call_llm_responses = [task_resp, job_array_resp]
 
             # Test 1: single-goal session → one kind:"job" marker after the task pair
+            # Patch _read_session_transcript to return a non-empty transcript so the
+            # job block proceeds (production path reads from state.db; test env has none).
+            fake_transcript = "user: Please fix the auth bug\nassistant: Fixed the auth token validation."
             with unittest.mock.patch.object(handler, 'call_llm',
-                                             side_effect=call_llm_responses) as mock_llm:
+                                             side_effect=call_llm_responses), \
+                 unittest.mock.patch.object(handler, '_read_session_transcript',
+                                            return_value=fake_transcript):
                 asyncio.run(handler.run_classification_async(
                     session_id=sid,
                     message="Please fix the authentication bug in the login flow",
@@ -7087,9 +7093,14 @@ class RepositoryTests(unittest.TestCase):
             # Job marker must appear AFTER the task pair (positional attribution D-03)
             task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
             self.assertEqual(len(task_recs), 2, "must have GUARDRAIL and CHAT records")
-            job_idx = lines.index(json.dumps(job_recs[0], separators=(",", ":")))
-            guardrail_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "GUARDRAIL")
-            chat_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "CHAT")
+            # Find indices by scanning recs (records already parsed from lines)
+            job_indices = [i for i, r in enumerate(recs) if r.get("kind") == "job"]
+            guardrail_indices = [i for i, r in enumerate(recs) if r.get("operation_type") == "GUARDRAIL"]
+            chat_indices = [i for i, r in enumerate(recs) if r.get("operation_type") == "CHAT"]
+            self.assertEqual(len(job_indices), 1, "exactly one job record index")
+            job_idx = job_indices[0]
+            guardrail_idx = guardrail_indices[0]
+            chat_idx = chat_indices[0]
             self.assertGreater(job_idx, guardrail_idx, "job marker must come after GUARDRAIL")
             self.assertGreater(job_idx, chat_idx, "job marker must come after CHAT")
             # Verify job record fields

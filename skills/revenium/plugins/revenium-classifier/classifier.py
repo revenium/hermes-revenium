@@ -819,6 +819,39 @@ async def run_classification_async(
         # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
         await asyncio.to_thread(_write_marker_pair, session_id, task_type)
         _persist_label_to_taxonomy(task_type)
+
+        # Step 7 — code-side job-inference (D-01 / Phase 13).
+        # Three early skip gates: root-session only, not budget-halted, no existing job marker.
+        # Wrapped in its own try/except so a job-path failure never disturbs the task marker
+        # already written above (D-04 never-raise invariant, T-13-08).
+        try:
+            if (
+                root_sid == session_id  # skip subagent sessions (T-13-06)
+                and not _budget_halted()  # skip when halted (T-13-09)
+                and not _job_marker_exists(session_id)  # skip if job already written (T-13-07 / D-08)
+            ):
+                transcript = _read_session_transcript(session_id)
+                if transcript:
+                    job_labels = _read_job_taxonomy_labels()
+                    jobs = await _infer_jobs_via_llm(transcript, job_labels)
+                    for job in jobs:
+                        try:
+                            valid = _validate_job(job)
+                            if valid:
+                                await asyncio.to_thread(_write_job_marker, session_id, valid)
+                                _persist_job_type_to_taxonomy(valid["job_type"])
+                        except Exception as exc:
+                            logger.warning(
+                                "revenium-classifier: dropping one job for sid=%s: %s",
+                                session_id,
+                                exc,
+                            )
+        except Exception as exc:
+            logger.warning(
+                "revenium-classifier job inference failed for sid=%s: %s",
+                session_id,
+                exc,
+            )
     except Exception as exc:
         logger.warning(
             "revenium-classifier classifier failed for sid=%s: %s",
