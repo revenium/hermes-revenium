@@ -6651,5 +6651,43 @@ class RepositoryTests(unittest.TestCase):
             )
 
 
+    def test_revenium_classifier_job_taxonomy_file_env_override(self):
+        """Task 1 (Phase 13-01): JOB_TAXONOMY_FILE constant is env-overridable via
+        REVENIUM_JOB_TAXONOMY_FILE + importlib.reload. Default resolves under STATE_DIR."""
+        import importlib
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-taxonomy-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        # Also snapshot/set REVENIUM_JOB_TAXONOMY_FILE for job-taxonomy isolation.
+        snap['REVENIUM_JOB_TAXONOMY_FILE'] = os.environ.get('REVENIUM_JOB_TAXONOMY_FILE')
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Test 1: default JOB_TAXONOMY_FILE resolves under STATE_DIR as job-taxonomy.json.
+            from pathlib import Path
+            expected_default = Path(sd) / 'job-taxonomy.json'
+            self.assertEqual(handler.JOB_TAXONOMY_FILE, expected_default)
+
+            # Test 2: override via REVENIUM_JOB_TAXONOMY_FILE + reload.
+            override_path = os.path.join(tmpdir, 'custom-job-taxonomy.json')
+            os.environ['REVENIUM_JOB_TAXONOMY_FILE'] = override_path
+            importlib.reload(sys.modules['classifier'])
+            import classifier as handler2  # noqa: F811
+            self.assertEqual(str(handler2.JOB_TAXONOMY_FILE), override_path)
+        finally:
+            if snap.get('REVENIUM_JOB_TAXONOMY_FILE') is None:
+                os.environ.pop('REVENIUM_JOB_TAXONOMY_FILE', None)
+            else:
+                os.environ['REVENIUM_JOB_TAXONOMY_FILE'] = snap.pop('REVENIUM_JOB_TAXONOMY_FILE')
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
