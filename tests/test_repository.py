@@ -1317,9 +1317,13 @@ class RepositoryTests(unittest.TestCase):
 
             self.assertTrue(handler._recent_marker_pair_exists(sid, within_seconds=30.0))
 
-            # Patch call_llm so we can prove it was NOT called
-            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
-                mock_llm.side_effect = AssertionError("LLM must NOT be called when agent already wrote markers")
+            # Patch call_llm so LLM task classification (Steps 4-6) is NOT called;
+            # Step 7 now legitimately may call the LLM for job inference, so we patch
+            # _infer_jobs_via_llm to [] to keep this test focused on the task no-double-write
+            # invariant rather than asserting the LLM is never called at all.
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm, \
+                 unittest.mock.patch.object(handler, '_infer_jobs_via_llm', return_value=[]):
+                mock_llm.side_effect = AssertionError("LLM task classification must NOT be called when agent already wrote markers")
                 fixture = PLUGIN_DIR / 'test-payloads' / 'substantive-turn.json'
                 context = json.loads(fixture.read_text())
                 asyncio.run(handler.run_classification_async(
@@ -1331,9 +1335,14 @@ class RepositoryTests(unittest.TestCase):
                 ))
                 mock_llm.assert_not_called()
 
-            # Marker file should still have exactly 2 lines (no hook-added lines)
+            # Marker file must have no task double-write: count GUARDRAIL/CHAT lines only.
+            # A kind:"job" line from Step 7 is now permitted (not required). The invariant
+            # is that the task pair is not doubled (exactly 2 GUARDRAIL/CHAT records).
             lines = marker_path.read_text().splitlines()
-            self.assertEqual(len(lines), 2, f"hook double-wrote; got {len(lines)} lines")
+            recs = [json.loads(l) for l in lines]
+            task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertGreaterEqual(len(lines), 2, f"marker file has too few lines; got {len(lines)}")
+            self.assertEqual(len(task_recs), 2, f"hook double-wrote task pair; got {len(task_recs)} task lines")
 
             # Now age the markers beyond 30s and try again — hook should write
             with open(marker_path, 'w', encoding='utf-8') as f:
@@ -1345,7 +1354,8 @@ class RepositoryTests(unittest.TestCase):
             mock_resp = unittest.mock.MagicMock()
             mock_resp.choices = [unittest.mock.MagicMock()]
             mock_resp.choices[0].message.content = "research"
-            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp), \
+                 unittest.mock.patch.object(handler, '_infer_jobs_via_llm', return_value=[]):
                 asyncio.run(handler.run_classification_async(
                     session_id=context['session_id'],
                     message=context.get('message'),
@@ -1353,9 +1363,13 @@ class RepositoryTests(unittest.TestCase):
                     model=context.get('model'),
                     platform=context.get('platform'),
                 ))
-            # Now marker file has 4 lines (2 stale + 2 new from hook)
+            # Now marker file has 2 stale + 2 new task lines = 4 GUARDRAIL/CHAT lines
+            # (Step 7 may add a job line too, so assert task-line count not total lines).
             lines = marker_path.read_text().splitlines()
-            self.assertEqual(len(lines), 4)
+            recs_aged = [json.loads(l) for l in lines]
+            task_recs_aged = [r for r in recs_aged if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertEqual(len(task_recs_aged), 4,
+                             f"expected 4 task lines (2 stale + 2 new); got {len(task_recs_aged)}")
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
