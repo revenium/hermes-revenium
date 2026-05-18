@@ -138,9 +138,14 @@ def _read_session_transcript(
 
     Mirrors _read_session_messages with two deliberate deviations:
     - ORDER BY timestamp ASC (arc progression for the LLM, not latest-pair-first)
-    - No early break; collect full history, but cap per-message to `per_msg_cap`
-      chars and stop appending once the total would exceed `max_chars` — a full
-      500K–725K-token session dump would blow the LLM context window.
+    - Per-message content capped to `per_msg_cap` chars.
+
+    When the full transcript fits within `max_chars` it is returned whole. When it
+    exceeds the budget, return a HEAD + TAIL sample joined by an explicit elision
+    marker — NOT a head-only prefix. The opening request lives at the head and the
+    completed-arc evidence (final result / summary) lives at the tail; a head-only
+    window silently drops the conclusion, so job inference on a long session sees an
+    unfinished arc and mis-infers CANCELLED or nothing.
 
     Returns "" on any failure (D-04 fail-open).
     """
@@ -157,19 +162,40 @@ def _read_session_transcript(
                 " ORDER BY timestamp ASC",
                 (sid,),
             )
-            parts = []
-            total = 0
-            for row in cursor:
-                role, content = row[0], row[1]
-                snippet = (content or "")[:per_msg_cap]
-                line = f"{role}: {snippet}"
-                if total + len(line) > max_chars:
-                    break
-                parts.append(line)
-                total += len(line)
+            lines = [f"{row[0]}: {(row[1] or '')[:per_msg_cap]}" for row in cursor]
         finally:
             conn.close()
-        return "\n".join(parts)
+        if not lines:
+            return ""
+        full = "\n".join(lines)
+        if len(full) <= max_chars:
+            return full
+        # Over budget: keep the head (opening request/context) AND the tail
+        # (closing outcome) so the job-inference LLM sees the completed arc.
+        marker = "\n... [transcript truncated — middle omitted] ...\n"
+        budget = max(0, max_chars - len(marker))
+        head_budget = budget // 2
+        head_parts = []
+        head_len = 0
+        head_idx = 0
+        for i, line in enumerate(lines):
+            if head_len + len(line) + 1 > head_budget:
+                break
+            head_parts.append(line)
+            head_len += len(line) + 1
+            head_idx = i + 1
+        tail_parts = []
+        tail_len = 0
+        for i in range(len(lines) - 1, head_idx - 1, -1):
+            line = lines[i]
+            if tail_len + len(line) + 1 > budget - head_len:
+                break
+            tail_parts.append(line)
+            tail_len += len(line) + 1
+        tail_parts.reverse()
+        if not tail_parts:
+            return "\n".join(head_parts)
+        return "\n".join(head_parts) + marker + "\n".join(tail_parts)
     except Exception:
         return ""
 

@@ -36,10 +36,10 @@ fi
 # A negative probe fails open — metering continues byte-identical to v1.0 (D-07).
 JOBS_CLI_CAPABLE=false
 if revenium jobs --help >/dev/null 2>&1 && \
-   revenium meter completion --help 2>&1 | grep -q -- '--task-id'; then
+   revenium meter completion --help 2>&1 | grep -q -- '--agentic-job-id'; then
   JOBS_CLI_CAPABLE=true
 else
-  warn "revenium jobs/--task-id not available — job work skipped; metering continues as v1.0."
+  warn "revenium jobs/--agentic-job-id not available — job work skipped; metering continues as v1.0."
 fi
 
 # Phase 10: script-level accumulator for terminated job arcs needing outcome reporting.
@@ -583,9 +583,17 @@ if marker_path.is_file():
                         clean_id = job_id
                         for _bad in _bad_chars:
                             clean_id = clean_id.replace(_bad, '_')
-                        # Phase 9 (D-11/D-12): track (file_position, sanitized_id)
-                        # for ALL valid job markers — full file order (D-12).
-                        job_positions.append((_file_pos, clean_id))
+                        # Phase 9 (D-11/D-12): track (file_position, sanitized_id,
+                        # job_name, job_type) for ALL valid job markers — full file
+                        # order (D-12). job_name/job_type ride along so the deferred
+                        # resolution pass can stamp --agentic-job-name / --agentic-job-type
+                        # onto each owned task marker's meter completion call.
+                        job_positions.append((
+                            _file_pos,
+                            clean_id,
+                            m.get('job_name', '') or '',
+                            m.get('job_type', '') or '',
+                        ))
                         jobs_by_id[job_id] = m  # D-12: last line wins
                     continue  # never reaches task-marker collector
                 elif kind is not None:
@@ -634,11 +642,17 @@ if marker_path.is_file():
 for marker in markers:
     task_pos = marker.pop('_file_pos', 0)
     owner = None
-    for job_pos, clean_job_id in job_positions:
+    owner_name = ''
+    owner_type = ''
+    for job_pos, clean_job_id, job_name, job_type in job_positions:
         if job_pos > task_pos:
             owner = clean_job_id
+            owner_name = job_name
+            owner_type = job_type
             break
     marker['owning_job_id'] = owner
+    marker['owning_job_name'] = owner_name
+    marker['owning_job_type'] = owner_type
 
 n = len(markers)
 # D-18 telemetry log lines — locked text, do NOT paraphrase. mean_per_marker
@@ -691,9 +705,9 @@ PY
     fi
 
     # Phase 9 (D-08, D-09, D-10, CREATE-02, CREATE-04): idempotent best-effort jobs create.
-    # Runs in-loop, per-session, before the per-marker --task-id stamping so that the
+    # Runs in-loop, per-session, before the per-marker --agentic-job-id stamping so the
     # Revenium job record exists before any completion is linked to it (D-08 spirit).
-    # Gated on JOBS_CLI_CAPABLE — skip entirely when CLI doesn't support jobs/--task-id.
+    # Gated on JOBS_CLI_CAPABLE — skip entirely when CLI lacks jobs/--agentic-job-id.
     if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${jobs_json}" && "${jobs_json}" != "[]" ]]; then
       local job_rows
       job_rows=$(
@@ -855,18 +869,24 @@ try:
     for marker, split in zip(markers, splits):
         m_agent = marker.get('agent', '')
         m_trace = marker.get('trace_id', '')
-        # Phase 9 (D-13): pass owning_job_id through the pipe row so the bash
-        # per-marker loop can append --task-id when non-empty.
+        # Phase 9 (D-13): pass owning_job_id (+ name/type) through the pipe row so the
+        # bash per-marker loop can append --agentic-job-id / --agentic-job-name /
+        # --agentic-job-type when non-empty.
         m_owning_job_id = marker.get('owning_job_id') or ''
+        m_owning_job_name = marker.get('owning_job_name') or ''
+        m_owning_job_type = marker.get('owning_job_type') or ''
         # WR-01: sanitize pipe-delimiters and control chars so future upstream writers
         # cannot corrupt the bash while-read IFS='|' parsing (D-34).
         for _bad in ('|', '\n', '\r'):
             m_agent = m_agent.replace(_bad, '_')
             m_trace = m_trace.replace(_bad, '_')
             m_owning_job_id = m_owning_job_id.replace(_bad, '_')
+            m_owning_job_name = m_owning_job_name.replace(_bad, '_')
+            m_owning_job_type = m_owning_job_type.replace(_bad, '_')
         print(f"{marker['muid']}|{marker['task_type']}|{marker['operation_type']}|"
               f"{split['input']}|{split['output']}|{split['cache_read']}|"
-              f"{split['cache_write']}|{split['total']}|{split['cost']}|{m_agent}|{m_trace}|{m_owning_job_id}")
+              f"{split['cache_write']}|{split['total']}|{split['cost']}|{m_agent}|{m_trace}|"
+              f"{m_owning_job_id}|{m_owning_job_name}|{m_owning_job_type}")
 except Exception as exc:
     print(f"SPLIT_ERROR={exc}", file=sys.stderr)
     sys.exit(3)
@@ -882,8 +902,9 @@ PY
         continue
       fi
 
-      local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id
-      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id; do
+      local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
+      local m_owning_job_id m_owning_job_name m_owning_job_type
+      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id m_owning_job_name m_owning_job_type; do
         [[ -z "${muid}" ]] && continue
 
         local cmd=(
@@ -921,11 +942,19 @@ PY
         if [[ -n "${source}" ]]; then
           cmd+=(--environment "${source}")
         fi
-        # Phase 9 (D-13): stamp --task-id when JOBS_CLI_CAPABLE and owning_job_id is non-empty.
-        # Gated on the marker attribute (owning_job_id), not on jobs create success — the
-        # Revenium server absorbs the create/meter race by correlating on task-id.
+        # Phase 9 (D-13): stamp the agentic-job fields when JOBS_CLI_CAPABLE and the
+        # marker has an owning job. Gated on the marker attribute (owning_job_id), not
+        # on jobs create success — the Revenium server absorbs the create/meter race by
+        # correlating on agentic-job-id. --agentic-job-name / --agentic-job-type are
+        # appended only when present so a job marker missing them never emits an empty flag.
         if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${m_owning_job_id}" ]]; then
-          cmd+=(--task-id "${m_owning_job_id}")
+          cmd+=(--agentic-job-id "${m_owning_job_id}")
+          if [[ -n "${m_owning_job_name}" ]]; then
+            cmd+=(--agentic-job-name "${m_owning_job_name}")
+          fi
+          if [[ -n "${m_owning_job_type}" ]]; then
+            cmd+=(--agentic-job-type "${m_owning_job_type}")
+          fi
         fi
 
         local cmd_output cmd_exit
@@ -1068,6 +1097,13 @@ except Exception:
         --result "${outcome_status}"
         --quiet
       )
+      # --result is the execution result; --outcome-type is the separate business
+      # outcome. A SUCCESS arc maps to a CONVERTED business outcome so Revenium does
+      # not leave the job's Outcome Type at its PENDING default. FAILED / CANCELLED
+      # carry no --outcome-type (Revenium default applies).
+      if [[ "${outcome_status}" == "SUCCESS" ]]; then
+        outcome_cmd+=(--outcome-type CONVERTED)
+      fi
       outcome_cmd_output=$("${outcome_cmd[@]}" 2>&1) && outcome_cmd_exit=0 || outcome_cmd_exit=$?
 
       # OUTCOME-03: 409 is success-equivalent (mirrors jobs create pattern).

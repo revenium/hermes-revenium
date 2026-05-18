@@ -39,6 +39,38 @@ cp -R skills/revenium ~/.hermes/skills/
 bash ~/.hermes/skills/revenium/scripts/install-cron.sh
 ```
 
+## Classifier plugin install (required for job tracking)
+
+**None of the three install methods above install the bundled `revenium-classifier`
+plugin** — `hermes skills install`, `external_dirs`, and a plain `cp -R` of the skill
+all place content under `~/.hermes/skills/`, but Hermes loads `on_session_end` plugins
+from a separate root: `~/.hermes/plugins/<name>/`. Without this step the classifier
+never runs and no `kind:"job"` markers are written, so job usage never reaches Revenium.
+
+The simplest correct install is the local-setup helper, which installs the skill **and**
+the plugin, enables the plugin in `config.yaml`, removes stray shadowing copies, and
+seeds the taxonomies:
+
+```bash
+bash examples/setup-local.sh
+hermes gateway restart   # restart so the agent loads the updated plugin
+```
+
+If you installed the skill by one of the other methods, install the plugin manually:
+
+```bash
+mkdir -p ~/.hermes/plugins
+rm -rf ~/.hermes/plugins/revenium-classifier
+cp -R skills/revenium/plugins/revenium-classifier ~/.hermes/plugins/revenium-classifier
+find ~/.hermes/plugins/revenium-classifier -name __pycache__ -type d -exec rm -rf {} +
+hermes gateway restart
+```
+
+Re-run this step on **every upgrade** — updating only `~/.hermes/skills/` leaves the
+active plugin stale. Never leave backup copies of the skill (e.g. `revenium.bak.*`)
+inside `~/.hermes/skills/`: plugin discovery scans their bundled `plugins/` dirs and a
+stale duplicate can shadow the real one.
+
 ## Revenium CLI setup
 
 The skill expects `revenium config show` to succeed. If it does not, configure the CLI first:

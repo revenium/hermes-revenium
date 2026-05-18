@@ -3913,9 +3913,9 @@ class RepositoryTests(unittest.TestCase):
             'Probe (b): `revenium meter completion --help` must appear in hermes-report.sh',
         )
         self.assertIn(
-            '--task-id',
+            '--agentic-job-id',
             text,
-            'Probe (b) must grep for --task-id in meter completion --help output',
+            'Probe (b) must grep for --agentic-job-id in meter completion --help output',
         )
 
         # The preflight probe block must contain no `exit` statement
@@ -4404,7 +4404,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log}"\n'
@@ -4514,20 +4514,20 @@ class RepositoryTests(unittest.TestCase):
                 f'Run 1: JOB ledger line not written: {jobs_ledger_content!r}',
             )
 
-            # Task markers should have --task-id (JOBS_CLI_CAPABLE=true, owning_job_id set)
+            # Task markers should have --agentic-job-id (JOBS_CLI_CAPABLE=true, owning_job_id set)
             self.assertEqual(
                 len(meter_inv1), 2,
                 f'Run 1: expected 2 meter invocations, got {len(meter_inv1)}: {out1}',
             )
             for argv in meter_inv1:
                 self.assertIn(
-                    '--task-id', argv,
-                    f'Run 1: --task-id not found in meter argv: {argv}',
+                    '--agentic-job-id', argv,
+                    f'Run 1: --agentic-job-id not found in meter argv: {argv}',
                 )
-                task_id_idx = argv.index('--task-id') + 1
+                job_id_idx = argv.index('--agentic-job-id') + 1
                 self.assertEqual(
-                    argv[task_id_idx], job_id,
-                    f'Run 1: --task-id value mismatch: {argv[task_id_idx]!r}',
+                    argv[job_id_idx], job_id,
+                    f'Run 1: --agentic-job-id value mismatch: {argv[job_id_idx]!r}',
                 )
 
             # =====================================================
@@ -4548,9 +4548,9 @@ class RepositoryTests(unittest.TestCase):
     # Phase 9 Plan 02 — CREATE-03 / D-13 regression and idempotency suite
     # ------------------------------------------------------------------
 
-    def test_job_marker_stamps_task_id(self):
+    def test_job_marker_stamps_agentic_job_id(self):
         """CREATE-03 / D-13 linkage: task markers followed by a job marker produce
-        meter completion calls each carrying --task-id equal to the job's
+        meter completion calls each carrying --agentic-job-id equal to the job's
         agentic_job_id."""
         import json
         import os
@@ -4692,7 +4692,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log}"\n'
@@ -4741,13 +4741,23 @@ class RepositoryTests(unittest.TestCase):
             for argv in meter_inv:
                 flags = argv_to_flags(argv)
                 self.assertIn(
-                    '--task-id', flags,
-                    f'CREATE-03/D-13: --task-id missing from meter completion argv: {argv}',
+                    '--agentic-job-id', flags,
+                    f'CREATE-03/D-13: --agentic-job-id missing from meter completion argv: {argv}',
                 )
                 self.assertEqual(
-                    flags['--task-id'], job_id,
-                    f'CREATE-03/D-13: --task-id value mismatch '
-                    f'got={flags["--task-id"]!r} want={job_id!r}',
+                    flags['--agentic-job-id'], job_id,
+                    f'CREATE-03/D-13: --agentic-job-id value mismatch '
+                    f'got={flags["--agentic-job-id"]!r} want={job_id!r}',
+                )
+                # The job's name and type ride along so Revenium can group/display
+                # spend by job without a second lookup.
+                self.assertEqual(
+                    flags.get('--agentic-job-name'), 'Test Job',
+                    f'CREATE-03/D-13: --agentic-job-name missing/wrong in argv: {argv}',
+                )
+                self.assertEqual(
+                    flags.get('--agentic-job-type'), 'code_review',
+                    f'CREATE-03/D-13: --agentic-job-type missing/wrong in argv: {argv}',
                 )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -4883,7 +4893,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log}"\n'
@@ -5074,7 +5084,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log}"\n'
@@ -5290,7 +5300,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log}"\n'
@@ -5436,7 +5446,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log2}"\n'
@@ -5585,7 +5595,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log}"\n'
@@ -5793,7 +5803,7 @@ class RepositoryTests(unittest.TestCase):
                     '  meter)\n'
                     '    shift; shift\n'
                     '    if [[ "$1" == "--help" ]]; then\n'
-                    '      echo "--task-id  Use the same value as agenticJobId"\n'
+                    '      echo "--agentic-job-id  Agentic job instance identifier"\n'
                     '      exit 0\n'
                     '    fi\n'
                     f'    printf "%q " "$@" >> "{meter_log}"\n'
@@ -6747,6 +6757,63 @@ class RepositoryTests(unittest.TestCase):
             import classifier as handler3  # noqa: F811
             result_big = handler3._read_session_transcript("sess-big", max_chars=8000)
             self.assertLessEqual(len(result_big), 8000)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_transcript_includes_tail(self):
+        """Phase 13 gap fix: an over-budget transcript keeps BOTH the head (opening
+        request) and the tail (closing outcome). A head-only window dropped the
+        session conclusion, so job inference on long sessions mis-inferred the arc."""
+        import importlib
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-transcript-tail-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+                "role TEXT, content TEXT, timestamp REAL)"
+            )
+            # First message carries the opening-request marker.
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                "('sess-long', 'user', 'OPENING_REQUEST_MARKER please do the work', 0.0)"
+            )
+            # Bulk filler that pushes the transcript well past max_chars.
+            for i in range(1, 41):
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                    "(?, ?, ?, ?)",
+                    ("sess-long", "assistant" if i % 2 else "user", "x" * 500, float(i)),
+                )
+            # Last message carries the closing-outcome marker.
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                "('sess-long', 'assistant', 'CLOSING_OUTCOME_MARKER all done', 999.0)"
+            )
+            conn.commit()
+            conn.close()
+
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler  # noqa: F811
+
+            result = handler._read_session_transcript("sess-long", max_chars=8000)
+            self.assertLessEqual(len(result), 8000)
+            # Head preserved: the opening request must survive truncation.
+            self.assertIn("OPENING_REQUEST_MARKER", result)
+            # Tail preserved: the closing outcome must survive truncation — this is
+            # the regression. A head-only window dropped it.
+            self.assertIn("CLOSING_OUTCOME_MARKER", result)
+            # The middle was elided with an explicit marker.
+            self.assertIn("truncated", result)
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)

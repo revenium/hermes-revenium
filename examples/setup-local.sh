@@ -5,10 +5,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${HOME}/.hermes/skills/revenium"
 
 mkdir -p "${HOME}/.hermes/skills"
+
+# Remove stray duplicate skill dirs (e.g. revenium.bak.*, revenium.predeploy.bak.*).
+# Hermes plugin discovery scans every skill's bundled plugins/ subdir, so a leftover
+# copy registers a duplicate revenium-classifier and can shadow the fresh install.
+# The `revenium.*` glob (note the dot) matches backups but never `revenium` itself.
+find "${HOME}/.hermes/skills" -maxdepth 1 -type d -name 'revenium.*' -print -exec rm -rf {} + 2>/dev/null || true
+
 rm -rf "${TARGET_DIR}"
 cp -R "${REPO_ROOT}/skills/revenium" "${TARGET_DIR}"
 # Prune the stale hooks/ tree from the bulk skill copy — superseded by plugins/ (06-02 / G-01 closure).
 rm -rf "${TARGET_DIR}/hooks"
+# Drop any __pycache__ carried in by cp -R — stale .pyc can shadow updated source.
+find "${TARGET_DIR}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 chmod +x "${TARGET_DIR}/scripts/"*.sh
 
 STATE_DIR_DEFAULT="${REVENIUM_STATE_DIR:-${HOME}/.hermes/state/revenium}"
@@ -37,6 +46,9 @@ PLUGIN_TARGET="${PLUGINS_DIR}/revenium-classifier"
 mkdir -p "${PLUGINS_DIR}"
 rm -rf "${PLUGIN_TARGET}"
 cp -R "${REPO_ROOT}/skills/revenium/plugins/revenium-classifier" "${PLUGIN_TARGET}"
+# Drop any __pycache__ carried in by cp -R — Hermes loads the plugin from here, and
+# stale .pyc would shadow the updated classifier.py on the next agent start.
+find "${PLUGIN_TARGET}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 echo "Installed plugin to ${PLUGIN_TARGET}"
 
 # Idempotently enable the plugin in ~/.hermes/config.yaml using a stdlib-only Python
@@ -122,11 +134,22 @@ PY
 # Guard with || true so a hooks-install hiccup does not abort the whole local setup.
 bash "${TARGET_DIR}/scripts/install-hooks.sh" || true
 
+# Restart the Hermes gateway so the long-lived gateway process reloads the updated
+# classifier plugin. A stale gateway keeps running the pre-update plugin and silently
+# stops writing job markers for gateway-served (Telegram / Slack) sessions — fresh CLI
+# processes pick up the new plugin on their own, but the gateway does not.
+if command -v hermes >/dev/null 2>&1; then
+  if hermes gateway restart >/dev/null 2>&1; then
+    echo "Restarted Hermes gateway (reloaded classifier plugin)"
+  else
+    echo "NOTE: could not restart Hermes gateway — run 'hermes gateway restart' manually"
+  fi
+fi
+
 echo "Installed skill to ${TARGET_DIR}"
 echo ""
 echo "Next steps:"
 echo "  1. Verify Revenium CLI: revenium config show"
 echo "  2. Install cron: bash ~/.hermes/skills/revenium/scripts/install-cron.sh"
-echo "  3. Restart Hermes gateway to load the classifier plugin: hermes gateway restart"
-echo "  4. Start Hermes ('hermes chat') and approve the revenium hooks when prompted."
+echo "  3. Start Hermes ('hermes chat') and approve the revenium hooks when prompted."
 echo "     The hooks are registered but inert until you approve them on first use (D-03)."
