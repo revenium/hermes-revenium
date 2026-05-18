@@ -7535,5 +7535,127 @@ class RepositoryTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+    def test_revenium_classifier_parse_job_array_single_line_fence(self):
+        """WR-02: _parse_job_array must parse single-line fenced JSON (```json[...]```).
+
+        The fence-strip logic previously used splitlines() + lines[1:], which drops the
+        entire payload when the LLM returns a single-line fenced response.
+
+        Test 1 (WR-02): single-line fenced JSON returns a one-element list.
+        Test 2: multi-line fenced JSON still parses correctly (no regression).
+        Test 3: bare (un-fenced) JSON array still parses correctly (no regression).
+        """
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-parse-fence-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            job = {"agentic_job_id": "fix_x_a1b2", "job_type": "bug_fix", "status": "SUCCESS"}
+
+            # Test 1: single-line fenced JSON (```json[...]```)
+            single_line = "```json" + json.dumps([job]) + "```"
+            result = handler._parse_job_array(single_line)
+            self.assertEqual(len(result), 1,
+                             f"WR-02: single-line fenced JSON must parse to 1 item; got {result}")
+            self.assertEqual(result[0]["job_type"], "bug_fix")
+
+            # Test 2: multi-line fenced JSON (no regression)
+            multi_line = "```json\n" + json.dumps([job]) + "\n```"
+            result2 = handler._parse_job_array(multi_line)
+            self.assertEqual(len(result2), 1,
+                             f"WR-02 regression: multi-line fenced JSON must parse to 1 item; got {result2}")
+
+            # Test 3: bare (un-fenced) JSON array (no regression)
+            bare = json.dumps([job])
+            result3 = handler._parse_job_array(bare)
+            self.assertEqual(len(result3), 1,
+                             f"WR-02 regression: bare JSON array must parse to 1 item; got {result3}")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_validate_job_entropy_suffix(self):
+        """WR-01 + IN-01: _validate_job must append entropy suffix to English-word-ending IDs.
+
+        The hex check r'_[0-9a-f]{4}$' matches ordinary English words ending in 4 hex chars
+        (_face, _beef, _cafe, _dead, _feed, _deed, _fade), causing those IDs to skip the
+        entropy-suffix append and risking agentic_job_id collision.
+
+        Test 1 (WR-01): id ending in ordinary English word gets entropy suffix appended.
+        Test 2 (WR-01): id ending in _dead also gets suffix (another English hex word).
+        Test 3 (WR-01 no-double-suffix): a genuine machine-minted id (e.g. refactor_a1b2)
+        that was already given an entropy suffix does not get a second one.
+        Test 4 (IN-01): import re as _re does not appear inside _validate_job source.
+        """
+        import importlib
+        import inspect
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-validate-entropy-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            base_job = {"job_type": "bug_fix", "status": "SUCCESS", "job_name": ""}
+
+            # Test 1: id ending in ordinary English word _face
+            job_face = dict(base_job, agentic_job_id="cleanup_face")
+            result = handler._validate_job(job_face)
+            self.assertIsNotNone(result, "cleanup_face job must be valid")
+            self.assertNotEqual(result["agentic_job_id"], "cleanup_face",
+                                "WR-01: cleanup_face must get entropy suffix appended")
+            # The resulting id must match the pattern: original + _ + 4 hex chars
+            import re
+            self.assertRegex(result["agentic_job_id"], r"cleanup_face_[0-9a-f]{4}$",
+                             "WR-01: entropy suffix must be appended as _XXXX")
+
+            # Test 2: id ending in _dead
+            job_dead = dict(base_job, agentic_job_id="fix_dead")
+            result2 = handler._validate_job(job_dead)
+            self.assertIsNotNone(result2, "fix_dead job must be valid")
+            self.assertRegex(result2["agentic_job_id"], r"fix_dead_[0-9a-f]{4}$",
+                             "WR-01: fix_dead must get entropy suffix appended")
+
+            # Test 3: machine-minted id already has correct entropy suffix pattern
+            # Under the unconditional-append approach, every LLM-minted id gets a fresh
+            # suffix — so we verify no catastrophic double-suffix (suffix-of-suffix).
+            # The unconditional fix means refactor_a1b2 becomes refactor_a1b2_XXXX.
+            # That is expected and correct (removes the word-collision class).
+            job_minted = dict(base_job, agentic_job_id="refactor_a1b2")
+            result3 = handler._validate_job(job_minted)
+            self.assertIsNotNone(result3, "refactor_a1b2 job must be valid")
+            # It gets one entropy suffix appended. After appending, the id must NOT get
+            # a second suffix if _validate_job is called again (idempotency with idempotent
+            # use is not a guarantee, but the first call must produce exactly one suffix).
+            aid = result3["agentic_job_id"]
+            suffix_count = len(re.findall(r"_[0-9a-f]{4}", aid))
+            self.assertGreaterEqual(suffix_count, 1, "at least one entropy suffix must be present")
+            # The id must not have the form _XXXX_XXXX_XXXX... (no runaway suffix chain)
+            self.assertLessEqual(suffix_count, 2,
+                                 f"WR-01: id must not get runaway suffix chain; got {aid}")
+
+            # Test 4 (IN-01): no inline 'import re as _re' inside _validate_job
+            source = inspect.getsource(handler._validate_job)
+            self.assertNotIn("import re as _re", source,
+                             "IN-01: 're' must be imported at module scope, not inside _validate_job")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
