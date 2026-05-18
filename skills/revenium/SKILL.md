@@ -390,3 +390,12 @@ write_job_marker(agentic_job_id, job_name, job_type, status)
 print(f"job marker written: {marker_path}")
 ```
 
+## LAST WORD — PRE-RESPONSE CHECKLIST (EVERY TURN)
+
+Before you yield any response, answer these three questions. If any answer is NO, take the corrective action before sending.
+
+1. **Have I read `~/.hermes/state/revenium/budget-status.json` during THIS turn?** If NO — read it now, before responding. Every turn requires a fresh read; a prior turn's read does not count. Do not trust memory, context, or a summarized earlier result.
+
+2. **Is `halted` true in the file I just read?** If YES — the HALT CHECK section at the top of this file overrides EVERYTHING below it including both FINAL ACTION sections (TASK CLASSIFICATION and JOB DECLARATION). Their "MANDATORY" imperatives do NOT apply while halted. The only permitted action is the mandated CANCELLED marker write (if an arc was in progress) followed by the verbatim halt string from the HALT CHECK block. Nothing else.
+
+3. **Did I complete all required FINAL ACTIONs — task marker + job marker if triggered? If NO — write the missing markers first before sending the response.**
