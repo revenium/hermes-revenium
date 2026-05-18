@@ -7024,5 +7024,141 @@ class RepositoryTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+    def test_revenium_classifier_job_step7_single_goal(self):
+        """Task 1 RED: Step 7 wiring — single-goal session writes one kind:"job" marker.
+
+        Test 1: a single-goal session with call_llm patched to return a one-job array
+        writes exactly one kind:"job" marker after the GUARDRAIL+CHAT task pair.
+        Test 2: a subagent session (root_sid != session_id) writes NO kind:"job" marker.
+        Test 3: a session with halted:true in budget-status.json writes NO kind:"job"
+        marker via the job block (budget gate).
+        """
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-step7-single-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260518_120000_jobstep7single"
+
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Build side_effect for call_llm: first call (task) returns task label,
+            # second call (job inference) returns one-job JSON array.
+            task_resp = unittest.mock.MagicMock()
+            task_resp.choices = [unittest.mock.MagicMock()]
+            task_resp.choices[0].message.content = "code_review"
+
+            job_array_resp = unittest.mock.MagicMock()
+            job_array_resp.choices = [unittest.mock.MagicMock()]
+            job_array_resp.choices[0].message.content = json.dumps([
+                {"agentic_job_id": "fix_auth_a1b2", "job_name": "Fix auth bug",
+                 "job_type": "bug_fix", "status": "SUCCESS"}
+            ])
+
+            call_llm_responses = [task_resp, job_array_resp]
+
+            # Test 1: single-goal session → one kind:"job" marker after the task pair
+            with unittest.mock.patch.object(handler, 'call_llm',
+                                             side_effect=call_llm_responses) as mock_llm:
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message="Please fix the authentication bug in the login flow",
+                    response="I've fixed the authentication bug by updating the token validation.",
+                ))
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            self.assertTrue(marker_path.is_file(), "marker file must exist")
+            lines = marker_path.read_text().splitlines()
+            recs = [json.loads(l) for l in lines]
+            # Must have at least 3 records: GUARDRAIL, CHAT, job
+            self.assertGreaterEqual(len(recs), 3, f"expected >=3 records, got {len(recs)}: {lines}")
+            job_recs = [r for r in recs if r.get("kind") == "job"]
+            self.assertEqual(len(job_recs), 1, f"expected exactly 1 job record, got {len(job_recs)}")
+            # Job marker must appear AFTER the task pair (positional attribution D-03)
+            task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertEqual(len(task_recs), 2, "must have GUARDRAIL and CHAT records")
+            job_idx = lines.index(json.dumps(job_recs[0], separators=(",", ":")))
+            guardrail_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "GUARDRAIL")
+            chat_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "CHAT")
+            self.assertGreater(job_idx, guardrail_idx, "job marker must come after GUARDRAIL")
+            self.assertGreater(job_idx, chat_idx, "job marker must come after CHAT")
+            # Verify job record fields
+            jr = job_recs[0]
+            self.assertEqual(jr.get("kind"), "job")
+            self.assertIn("agentic_job_id", jr)
+            self.assertIn("job_type", jr)
+            self.assertIn("status", jr)
+
+            # Test 2: subagent session (root_sid != session_id) → no job marker
+            # Reset marker dir
+            shutil.rmtree(md, ignore_errors=True)
+            os.makedirs(md, mode=0o700)
+
+            sub_sid = "20260518_130000_subagent"
+            root_sid_value = "20260518_120000_rootsession"
+            # Pre-create root session marker (so subagent can inherit task type)
+            root_marker = handler.MARKERS_DIR / f"{root_sid_value}.jsonl"
+            root_marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            root_rec = json.dumps({"muid": "a" * 33, "ts": 1.0, "sid": root_sid_value,
+                                   "task_type": "code_review", "operation_type": "CHAT"},
+                                  separators=(",", ":"))
+            root_marker.write_text(root_rec + "\n")
+
+            with unittest.mock.patch.object(handler, '_walk_to_root_session',
+                                             return_value=root_sid_value):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sub_sid,
+                    message="sub-task",
+                    response="done",
+                ))
+
+            sub_marker = handler.MARKERS_DIR / f"{sub_sid}.jsonl"
+            if sub_marker.is_file():
+                sub_lines = sub_marker.read_text().splitlines()
+                sub_recs = [json.loads(l) for l in sub_lines]
+                sub_job_recs = [r for r in sub_recs if r.get("kind") == "job"]
+                self.assertEqual(len(sub_job_recs), 0,
+                                 "subagent session must NOT produce a job marker")
+
+            # Test 3: halted budget → no job marker written via job block
+            shutil.rmtree(md, ignore_errors=True)
+            os.makedirs(md, mode=0o700)
+
+            halted_sid = "20260518_140000_haltedtest"
+            budget_status_path = handler.BUDGET_STATUS_FILE
+            budget_status_path.parent.mkdir(parents=True, exist_ok=True)
+            budget_status_path.write_text(json.dumps({"halted": True, "exceeded": True}))
+
+            try:
+                asyncio.run(handler.run_classification_async(
+                    session_id=halted_sid,
+                    message="do something",
+                    response="done",
+                ))
+            except Exception as exc:
+                self.fail(f"run_classification_async must not raise when halted: {exc}")
+
+            halted_marker = handler.MARKERS_DIR / f"{halted_sid}.jsonl"
+            if halted_marker.is_file():
+                halted_lines = halted_marker.read_text().splitlines()
+                halted_recs = [json.loads(l) for l in halted_lines]
+                halted_job_recs = [r for r in halted_recs if r.get("kind") == "job"]
+                self.assertEqual(len(halted_job_recs), 0,
+                                 "halted session must NOT produce a job marker via job block")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
