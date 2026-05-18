@@ -290,105 +290,22 @@ See `references/task-classification.md` for the trigger rules, the `write_marker
 
 ## FINAL ACTION — JOB DECLARATION
 
-**MANDATORY — NON-NEGOTIABLE. Execute once, retrospectively, at the end of every completed task arc.** Skipping leaves spend data with no business context — those markers will have no `--task-id`.
+Job markers are now written automatically by the `revenium-classifier` plugin at
+session end — it infers the job arc(s) from session data and writes the
+`kind:"job"` marker to `markers/<sid>.jsonl` without agent involvement. This
+section is a defense-in-depth backstop only.
 
-Declare a job marker when you complete, fail, or abandon the goal the arc was working toward. Skip only on a trivial turn (≤ 2 sentences, zero tools) with no arc in progress.
+**Write a job marker yourself only if you have explicit, specific reason to
+believe the automatic path failed** (e.g., you can see that `markers/<sid>.jsonl`
+exists and contains task markers but no `kind:"job"` line for an arc you know
+completed). Do not write a job marker as a routine end-of-turn action.
 
-Step 1 — mint a specific `agentic_job_id` (business label + `secrets.token_hex(2)` suffix). Step 2 — select or mint a `job_type` from `~/.hermes/state/revenium/job-taxonomy.json`. Step 3 — determine `status`: `SUCCESS` (self-verified), `FAILED` (definitively unachievable), or `CANCELLED` (catch-all — when in doubt, use `CANCELLED`). Step 4 — call `execute_code` with the snippet below.
+The frozen Phase 7 D-03 marker shape (for reference if you need the backstop):
+`{"kind":"job","ts":<unix_float>,"sid":<session_id>,"agentic_job_id":<str>,`
+`"job_name":<str>,"job_type":<str>,"status":"SUCCESS"|"FAILED"|"CANCELLED"}`
 
-See `references/job-declaration.md` for arc-boundary rules, the SUCCESS/FAILED/CANCELLED criteria, the anti-collapse label examples, and worked examples.
-
-```python
-import fcntl, json, os, re, secrets, tempfile, time
-
-# Resolve the active Hermes session id. Hermes writes each session transcript
-# as ~/.hermes/sessions/session_<id>.json; the newest non-cron one is the
-# active session. execute_code receives no HERMES_SESSION_ID env var and the
-# legacy *.jsonl files are stale — both are deliberately ignored.
-session_id = ""
-sessions_dir = os.path.expanduser("~/.hermes/sessions")
-try:
-    candidates = [
-        f for f in os.listdir(sessions_dir)
-        if f.startswith("session_") and f.endswith(".json")
-        and not f.startswith("session_cron_")
-    ]
-    if candidates:
-        newest = max(
-            candidates,
-            key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)),
-        )
-        session_id = newest[len("session_"):-len(".json")]
-except OSError:
-    pass
-if not session_id:
-    session_id = f"pseudo-{int(time.time())}"
-
-markers_dir = os.path.expanduser("~/.hermes/state/revenium/markers")
-os.makedirs(markers_dir, mode=0o700, exist_ok=True)
-marker_path = os.path.join(markers_dir, f"{session_id}.jsonl")
-
-def write_job_marker(agentic_job_id, job_name, job_type, status):
-    # Phase 7 D-03 frozen shape — reader-required: kind, agentic_job_id, job_type, status
-    record = {"kind": "job", "ts": time.time(), "sid": session_id,
-              "agentic_job_id": agentic_job_id, "job_name": job_name,
-              "job_type": job_type, "status": status}
-    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
-    with open(marker_path, "ab", buffering=0) as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        f.write(line.encode("utf-8"))
-
-# --- Taxonomy: reuse or mint job_type ---
-taxonomy_path = os.path.expanduser("~/.hermes/state/revenium/job-taxonomy.json")
-
-# REPLACE these three values with your Step 1-3 decisions.
-agentic_job_id = "replace-with-step1-label-" + secrets.token_hex(2)
-job_name = "Replace with a short human-readable description of the arc"
-job_type = "research"                  # REPLACE with your Step 2 job_type (reuse a taxonomy label, or mint snake_case)
-status = "CANCELLED"                    # SUCCESS | FAILED | CANCELLED
-
-# Fail-open: if the taxonomy file is missing or unreadable, treat as empty taxonomy and mint freely.
-existing_types = {}
-if os.path.exists(taxonomy_path):
-    try:
-        with open(taxonomy_path) as f:
-            existing_types = json.load(f).get("labels", {})
-    except Exception:
-        existing_types = {}
-
-# Normalize FIRST (hyphens/spaces -> underscore, lowercase, strip non-[a-z0-9_])
-# so a casing/spelling variant of an already-seeded label ("Bug Fix" -> "bug_fix")
-# is recognized as a reuse — not a fresh mint that would clobber the curated seed.
-normalized = re.sub(r'[^a-z0-9_]', '', re.sub(r'[-\s]+', '_', job_type.lower()))
-if re.match(r'^[a-z][a-z0-9_]{1,47}$', normalized):
-    job_type = normalized
-
-# Persist only a genuinely new, well-formed job_type. setdefault on the inner
-# write guarantees a curated seed entry is never overwritten — even under a
-# normalization collision the membership check above did not catch.
-if job_type not in existing_types and re.match(r'^[a-z][a-z0-9_]{1,47}$', job_type):
-    try:
-        if os.path.exists(taxonomy_path):
-            with open(taxonomy_path, "r+") as f:
-                fcntl.flock(f, fcntl.LOCK_EX)
-                data = json.load(f)
-                data.setdefault("labels", {}).setdefault(job_type, {
-                    "description": job_name,
-                    "examples": [],
-                })
-                d = os.path.dirname(taxonomy_path)
-                with tempfile.NamedTemporaryFile("w", dir=d, delete=False, suffix=".tmp") as tmp:
-                    json.dump(data, tmp, indent=2, ensure_ascii=True)
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                    tmpname = tmp.name
-                os.rename(tmpname, taxonomy_path)
-    except Exception:
-        pass  # fail-open: taxonomy write failure must not abort job declaration
-
-write_job_marker(agentic_job_id, job_name, job_type, status)
-print(f"job marker written: {marker_path}")
-```
+See `references/job-declaration.md` for the arc-boundary and SUCCESS/FAILED/CANCELLED
+criteria the classifier uses (and the rare backstop case).
 
 ## LAST WORD — PRE-RESPONSE CHECKLIST (EVERY TURN)
 
@@ -398,4 +315,4 @@ Before you yield any response, answer these three questions. If any answer is NO
 
 2. **Is `halted` true in the file I just read?** If YES — the HALT CHECK section at the top of this file overrides EVERYTHING below it including both FINAL ACTION sections (TASK CLASSIFICATION and JOB DECLARATION). Their "MANDATORY" imperatives do NOT apply while halted. The only permitted action is the mandated CANCELLED marker write (if an arc was in progress) followed by the verbatim halt string from the HALT CHECK block. Nothing else.
 
-3. **Did I complete all required FINAL ACTIONs — task marker + job marker if triggered? If NO — write the missing markers first before sending the response.**
+3. **Did I complete the TASK CLASSIFICATION FINAL ACTION (and a job marker backstop if I had explicit reason to believe the automatic classifier path failed)? If NO — write the missing task marker first before sending the response.**
