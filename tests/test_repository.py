@@ -6684,5 +6684,197 @@ class RepositoryTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+    def test_revenium_classifier_read_session_transcript(self):
+        """Task 2 (Phase 13-01): _read_session_transcript returns "" for empty/missing
+        session and chronologically-ordered transcript capped at max_chars."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-transcript-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Test 1a: missing STATE_DB → returns "".
+            result = handler._read_session_transcript("sid-missing")
+            self.assertEqual(result, "")
+
+            # Create a minimal state.db with messages table.
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+                "role TEXT, content TEXT, timestamp REAL)"
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                "('sess-t1', 'user', 'hello there', 1.0)"
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                "('sess-t1', 'assistant', 'hi back', 2.0)"
+            )
+            conn.commit()
+            conn.close()
+
+            # Reload so STATE_DB points to our db_path.
+            importlib.reload(sys.modules['classifier'])
+            import classifier as handler2  # noqa: F811
+
+            # Test 1b: empty session (no matching rows) → returns "".
+            result_empty = handler2._read_session_transcript("no-such-session")
+            self.assertEqual(result_empty, "")
+
+            # Test 2: populated session → ordered ASC, joined as "role: snippet" lines.
+            result_ok = handler2._read_session_transcript("sess-t1")
+            self.assertIn("user:", result_ok)
+            self.assertIn("assistant:", result_ok)
+            # ASC ordering: user line (ts=1.0) before assistant line (ts=2.0)
+            self.assertLess(result_ok.index("user:"), result_ok.index("assistant:"))
+
+            # Test 3: max_chars cap — insert many messages and verify total length ≤ max_chars.
+            conn2 = sqlite3.connect(db_path)
+            for i in range(50):
+                conn2.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                    "(?, ?, ?, ?)",
+                    ("sess-big", "user" if i % 2 == 0 else "assistant", "x" * 1000, float(i)),
+                )
+            conn2.commit()
+            conn2.close()
+            importlib.reload(sys.modules['classifier'])
+            import classifier as handler3  # noqa: F811
+            result_big = handler3._read_session_transcript("sess-big", max_chars=8000)
+            self.assertLessEqual(len(result_big), 8000)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_parse_job_array(self):
+        """Task 2 (Phase 13-01): _parse_job_array handles fenced JSON, bare dict,
+        invalid elements, and JSON errors."""
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-parse-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            job_obj = {"agentic_job_id": "fix_bug_a1b2", "job_name": "fix bug",
+                       "job_type": "bug_fix", "status": "SUCCESS"}
+
+            # Test 1: plain JSON array.
+            raw_array = json.dumps([job_obj])
+            result = handler._parse_job_array(raw_array)
+            self.assertEqual(result, [job_obj])
+
+            # Test 2: fenced ```json ... ``` block.
+            fenced = f"```json\n{json.dumps([job_obj])}\n```"
+            result_fenced = handler._parse_job_array(fenced)
+            self.assertEqual(result_fenced, [job_obj])
+
+            # Test 3: bare dict (lone object) → coerced to [dict].
+            raw_dict = json.dumps(job_obj)
+            result_dict = handler._parse_job_array(raw_dict)
+            self.assertEqual(result_dict, [job_obj])
+
+            # Test 4: JSONDecodeError → [].
+            result_bad = handler._parse_job_array("not json at all {{{")
+            self.assertEqual(result_bad, [])
+
+            # Test 5: array with non-dict element → element dropped.
+            mixed = json.dumps([job_obj, "a string", 42])
+            result_mixed = handler._parse_job_array(mixed)
+            self.assertEqual(result_mixed, [job_obj])
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_infer_jobs_via_llm(self):
+        """Task 2 (Phase 13-01): _infer_jobs_via_llm returns [] when call_llm is None;
+        when patched it calls call_llm WITHOUT task= kwarg and returns parsed list."""
+        import asyncio
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-infer-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Test 1: call_llm is None → [].
+            original_call_llm = handler.call_llm
+            handler.call_llm = None
+            result_none = asyncio.run(handler._infer_jobs_via_llm("some transcript", []))
+            self.assertEqual(result_none, [])
+            handler.call_llm = original_call_llm
+
+            # Test 2: patched call_llm returns a job array.
+            job_obj = {"agentic_job_id": "fix_bug_a1b2", "job_name": "fix bug",
+                       "job_type": "bug_fix", "status": "SUCCESS"}
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = json.dumps([job_obj])
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp) as mock_llm:
+                result_ok = asyncio.run(handler._infer_jobs_via_llm("some transcript", ["bug_fix"]))
+                mock_llm.assert_called_once()
+                kwargs = mock_llm.call_args.kwargs
+                # CRITICAL: NO task= kwarg — pinned by design (Pitfall 8).
+                self.assertNotIn('task', kwargs)
+                self.assertEqual(kwargs.get('temperature'), 0.0)
+                self.assertEqual(kwargs.get('max_tokens'), 512)
+            self.assertEqual(result_ok, [job_obj])
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_build_job_inference_prompt(self):
+        """Task 2 (Phase 13-01): _build_job_inference_prompt returns a non-empty string
+        with JSON array instruction and labels block."""
+        import importlib
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-prompt-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            prompt = handler._build_job_inference_prompt("user did some work", ["bug_fix", "research"])
+            self.assertIsInstance(prompt, str)
+            self.assertTrue(len(prompt) > 0)
+            # Must instruct JSON array output with the required keys.
+            self.assertIn("agentic_job_id", prompt)
+            self.assertIn("job_type", prompt)
+            self.assertIn("status", prompt)
+            # Labels block present.
+            self.assertIn("bug_fix", prompt)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
