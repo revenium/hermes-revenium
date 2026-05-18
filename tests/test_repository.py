@@ -1236,6 +1236,43 @@ class RepositoryTests(unittest.TestCase):
                     model=context.get('model'),
                     platform=context.get('platform'),
                 ))
+
+            # Case F — a job-path helper raises; run_classification_async must still
+            # return normally and the task pair must already be written (D-04 / T-13-08).
+            # Patch _infer_jobs_via_llm to raise and verify no exception escapes.
+            shutil.rmtree(handler.MARKERS_DIR, ignore_errors=True)
+            handler.MARKERS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with unittest.mock.patch.object(handler, '_infer_jobs_via_llm',
+                                             side_effect=RuntimeError("job-path boom")):
+                # Also patch _read_session_transcript to return a non-empty transcript
+                # so the job block actually enters _infer_jobs_via_llm.
+                with unittest.mock.patch.object(handler, '_read_session_transcript',
+                                                 return_value="user: test\nassistant: ok"):
+                    # Patch call_llm for task classification
+                    mock_task_resp = unittest.mock.MagicMock()
+                    mock_task_resp.choices = [unittest.mock.MagicMock()]
+                    mock_task_resp.choices[0].message.content = "code_review"
+                    with unittest.mock.patch.object(handler, 'call_llm',
+                                                     return_value=mock_task_resp):
+                        try:
+                            asyncio.run(handler.run_classification_async(
+                                session_id=context['session_id'],
+                                message=context.get('message'),
+                                response=context.get('response'),
+                            ))
+                        except Exception as exc:
+                            self.fail(
+                                f"Case F: run_classification_async must not raise when "
+                                f"a job-path helper raises; got {exc!r}"
+                            )
+            # The task pair must still have been written (job failure must not destroy it)
+            marker_path_f = handler.MARKERS_DIR / f"{context['session_id']}.jsonl"
+            self.assertTrue(marker_path_f.is_file(),
+                            "Case F: task marker file must exist even when job-path raises")
+            task_recs_f = [json.loads(l) for l in marker_path_f.read_text().splitlines()]
+            ops_f = {r.get("operation_type") for r in task_recs_f if "operation_type" in r}
+            self.assertIn("GUARDRAIL", ops_f, "Case F: GUARDRAIL record must be present")
+            self.assertIn("CHAT", ops_f, "Case F: CHAT record must be present")
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2602,11 +2639,12 @@ class RepositoryTests(unittest.TestCase):
                     message=None,
                     response=None,
                 ))
-                mock_llm.assert_called_once()
-                # The user-role message in the LLM call carries the full prompt;
-                # the prompt is built by _build_classification_prompt and passed as
-                # the user-role content in call_llm's messages list.
-                call_messages = mock_llm.call_args.kwargs['messages']
+                # Step 7 (Phase 13) may make a second call_llm call for job inference.
+                # Verify at least one call was made (task classification).
+                self.assertGreaterEqual(mock_llm.call_count, 1,
+                    "call_llm must be called at least once for task classification")
+                # The first call is always the task classification; inspect its messages.
+                call_messages = mock_llm.call_args_list[0].kwargs['messages']
                 full_prompt = " ".join(m['content'] for m in call_messages)
                 self.assertIn(
                     "Summarize today news headlines",
@@ -7019,6 +7057,373 @@ class RepositoryTests(unittest.TestCase):
 
             # Test 3: missing file → False (fail-open).
             self.assertFalse(handler._job_marker_exists("no-such-session-ever"))
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_revenium_classifier_job_step7_single_goal(self):
+        """Task 1 RED: Step 7 wiring — single-goal session writes one kind:"job" marker.
+
+        Test 1: a single-goal session with call_llm patched to return a one-job array
+        writes exactly one kind:"job" marker after the GUARDRAIL+CHAT task pair.
+        Test 2: a subagent session (root_sid != session_id) writes NO kind:"job" marker.
+        Test 3: a session with halted:true in budget-status.json writes NO kind:"job"
+        marker via the job block (budget gate).
+        """
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-step7-single-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260518_120000_jobstep7single"
+
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Build side_effect for call_llm: first call (task) returns task label,
+            # second call (job inference) returns one-job JSON array.
+            task_resp = unittest.mock.MagicMock()
+            task_resp.choices = [unittest.mock.MagicMock()]
+            task_resp.choices[0].message.content = "code_review"
+
+            job_array_resp = unittest.mock.MagicMock()
+            job_array_resp.choices = [unittest.mock.MagicMock()]
+            job_array_resp.choices[0].message.content = json.dumps([
+                {"agentic_job_id": "fix_auth_a1b2", "job_name": "Fix auth bug",
+                 "job_type": "bug_fix", "status": "SUCCESS"}
+            ])
+
+            call_llm_responses = [task_resp, job_array_resp]
+
+            # Test 1: single-goal session → one kind:"job" marker after the task pair
+            # Patch _read_session_transcript to return a non-empty transcript so the
+            # job block proceeds (production path reads from state.db; test env has none).
+            fake_transcript = "user: Please fix the auth bug\nassistant: Fixed the auth token validation."
+            with unittest.mock.patch.object(handler, 'call_llm',
+                                             side_effect=call_llm_responses), \
+                 unittest.mock.patch.object(handler, '_read_session_transcript',
+                                            return_value=fake_transcript):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message="Please fix the authentication bug in the login flow",
+                    response="I've fixed the authentication bug by updating the token validation.",
+                ))
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            self.assertTrue(marker_path.is_file(), "marker file must exist")
+            lines = marker_path.read_text().splitlines()
+            recs = [json.loads(l) for l in lines]
+            # Must have at least 3 records: GUARDRAIL, CHAT, job
+            self.assertGreaterEqual(len(recs), 3, f"expected >=3 records, got {len(recs)}: {lines}")
+            job_recs = [r for r in recs if r.get("kind") == "job"]
+            self.assertEqual(len(job_recs), 1, f"expected exactly 1 job record, got {len(job_recs)}")
+            # Job marker must appear AFTER the task pair (positional attribution D-03)
+            task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertEqual(len(task_recs), 2, "must have GUARDRAIL and CHAT records")
+            # Find indices by scanning recs (records already parsed from lines)
+            job_indices = [i for i, r in enumerate(recs) if r.get("kind") == "job"]
+            guardrail_indices = [i for i, r in enumerate(recs) if r.get("operation_type") == "GUARDRAIL"]
+            chat_indices = [i for i, r in enumerate(recs) if r.get("operation_type") == "CHAT"]
+            self.assertEqual(len(job_indices), 1, "exactly one job record index")
+            job_idx = job_indices[0]
+            guardrail_idx = guardrail_indices[0]
+            chat_idx = chat_indices[0]
+            self.assertGreater(job_idx, guardrail_idx, "job marker must come after GUARDRAIL")
+            self.assertGreater(job_idx, chat_idx, "job marker must come after CHAT")
+            # Verify job record fields
+            jr = job_recs[0]
+            self.assertEqual(jr.get("kind"), "job")
+            self.assertIn("agentic_job_id", jr)
+            self.assertIn("job_type", jr)
+            self.assertIn("status", jr)
+
+            # Test 2: subagent session (root_sid != session_id) → no job marker
+            # Reset marker dir
+            shutil.rmtree(md, ignore_errors=True)
+            os.makedirs(md, mode=0o700)
+
+            sub_sid = "20260518_130000_subagent"
+            root_sid_value = "20260518_120000_rootsession"
+            # Pre-create root session marker (so subagent can inherit task type)
+            root_marker = handler.MARKERS_DIR / f"{root_sid_value}.jsonl"
+            root_marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            root_rec = json.dumps({"muid": "a" * 33, "ts": 1.0, "sid": root_sid_value,
+                                   "task_type": "code_review", "operation_type": "CHAT"},
+                                  separators=(",", ":"))
+            root_marker.write_text(root_rec + "\n")
+
+            with unittest.mock.patch.object(handler, '_walk_to_root_session',
+                                             return_value=root_sid_value):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sub_sid,
+                    message="sub-task",
+                    response="done",
+                ))
+
+            sub_marker = handler.MARKERS_DIR / f"{sub_sid}.jsonl"
+            if sub_marker.is_file():
+                sub_lines = sub_marker.read_text().splitlines()
+                sub_recs = [json.loads(l) for l in sub_lines]
+                sub_job_recs = [r for r in sub_recs if r.get("kind") == "job"]
+                self.assertEqual(len(sub_job_recs), 0,
+                                 "subagent session must NOT produce a job marker")
+
+            # Test 3: halted budget → no job marker written via job block
+            shutil.rmtree(md, ignore_errors=True)
+            os.makedirs(md, mode=0o700)
+
+            halted_sid = "20260518_140000_haltedtest"
+            budget_status_path = handler.BUDGET_STATUS_FILE
+            budget_status_path.parent.mkdir(parents=True, exist_ok=True)
+            budget_status_path.write_text(json.dumps({"halted": True, "exceeded": True}))
+
+            try:
+                asyncio.run(handler.run_classification_async(
+                    session_id=halted_sid,
+                    message="do something",
+                    response="done",
+                ))
+            except Exception as exc:
+                self.fail(f"run_classification_async must not raise when halted: {exc}")
+
+            halted_marker = handler.MARKERS_DIR / f"{halted_sid}.jsonl"
+            if halted_marker.is_file():
+                halted_lines = halted_marker.read_text().splitlines()
+                halted_recs = [json.loads(l) for l in halted_lines]
+                halted_job_recs = [r for r in halted_recs if r.get("kind") == "job"]
+                self.assertEqual(len(halted_job_recs), 0,
+                                 "halted session must NOT produce a job marker via job block")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_revenium_classifier_job_multi_arc(self):
+        """Task 2 RED: multi-arc session produces N kind:"job" markers, all after the task pair.
+
+        Test 1: a multi-goal transcript with call_llm returning a 2-job array writes
+        exactly 2 kind:"job" markers, both positioned after the single GUARDRAIL+CHAT pair.
+        """
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-multi-arc-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            sid = "20260518_150000_multiarc"
+
+            # Task classification response
+            task_resp = unittest.mock.MagicMock()
+            task_resp.choices = [unittest.mock.MagicMock()]
+            task_resp.choices[0].message.content = "code_review"
+
+            # Job inference response — 2-job array
+            job_array_resp = unittest.mock.MagicMock()
+            job_array_resp.choices = [unittest.mock.MagicMock()]
+            job_array_resp.choices[0].message.content = json.dumps([
+                {"agentic_job_id": "fix_auth_a1b2", "job_name": "Fix auth bug",
+                 "job_type": "bug_fix", "status": "SUCCESS"},
+                {"agentic_job_id": "refactor_db_c3d4", "job_name": "Refactor DB layer",
+                 "job_type": "refactoring", "status": "SUCCESS"},
+            ])
+
+            fake_transcript = "user: Fix auth and refactor DB\nassistant: Done both tasks."
+            with unittest.mock.patch.object(handler, 'call_llm',
+                                             side_effect=[task_resp, job_array_resp]), \
+                 unittest.mock.patch.object(handler, '_read_session_transcript',
+                                            return_value=fake_transcript):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message="Fix auth and refactor DB layer",
+                    response="I've fixed auth and refactored the DB.",
+                ))
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            self.assertTrue(marker_path.is_file(), "marker file must exist")
+            lines = marker_path.read_text().splitlines()
+            recs = [json.loads(l) for l in lines]
+
+            # Must have exactly 2 task records + 2 job records = 4 total
+            job_recs = [r for r in recs if r.get("kind") == "job"]
+            task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertEqual(len(job_recs), 2, f"expected 2 job records, got {len(job_recs)}")
+            self.assertEqual(len(task_recs), 2, f"expected 2 task records, got {len(task_recs)}")
+
+            # Both job markers must appear AFTER the GUARDRAIL and CHAT records
+            guardrail_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "GUARDRAIL")
+            chat_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "CHAT")
+            job_indices = [i for i, r in enumerate(recs) if r.get("kind") == "job"]
+            for ji in job_indices:
+                self.assertGreater(ji, guardrail_idx, "job marker must come after GUARDRAIL")
+                self.assertGreater(ji, chat_idx, "job marker must come after CHAT")
+
+            # The two job records must have distinct agentic_job_ids
+            job_ids = [r.get("agentic_job_id") for r in job_recs]
+            self.assertEqual(len(set(job_ids)), 2, f"job IDs must be distinct: {job_ids}")
+
+            # assertNotIn('task', kwargs) for the job inference call
+            # (Step 7 call_llm must not use task= kwarg per Pitfall 8 / A3)
+            # This is implicitly covered since _infer_jobs_via_llm does not pass task=
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_job_dedup_skips_existing(self):
+        """Task 2 RED: D-08 dedup — when markers/<sid>.jsonl already contains a kind:"job"
+        line, the job block writes no additional job marker.
+        """
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-dedup-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            sid = "20260518_160000_dedupsid"
+
+            # Pre-write a kind:"job" line into the marker file before invoking
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            marker_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            existing_job = json.dumps(
+                {"kind": "job", "ts": 1.0, "sid": sid,
+                 "agentic_job_id": "existing_job_aa11", "job_name": "Existing job",
+                 "job_type": "bug_fix", "status": "SUCCESS"},
+                separators=(",", ":"),
+            )
+            marker_path.write_text(existing_job + "\n")
+
+            # task classification response
+            task_resp = unittest.mock.MagicMock()
+            task_resp.choices = [unittest.mock.MagicMock()]
+            task_resp.choices[0].message.content = "code_review"
+
+            # job inference would return a new job, but the gate should block it
+            job_resp = unittest.mock.MagicMock()
+            job_resp.choices = [unittest.mock.MagicMock()]
+            job_resp.choices[0].message.content = json.dumps([
+                {"agentic_job_id": "new_job_bb22", "job_name": "New job",
+                 "job_type": "refactoring", "status": "SUCCESS"},
+            ])
+
+            fake_transcript = "user: do something\nassistant: done."
+            with unittest.mock.patch.object(handler, 'call_llm',
+                                             side_effect=[task_resp, job_resp]) as mock_llm, \
+                 unittest.mock.patch.object(handler, '_read_session_transcript',
+                                            return_value=fake_transcript):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message="do something",
+                    response="done",
+                ))
+
+            # Marker file must still contain only the pre-existing job (no extra job appended)
+            lines = marker_path.read_text().splitlines()
+            recs = [json.loads(l) for l in lines]
+            job_recs = [r for r in recs if r.get("kind") == "job"]
+            # Should still be exactly 1 job record (the pre-existing one)
+            self.assertEqual(len(job_recs), 1,
+                             f"dedup must prevent additional job write; got {len(job_recs)}: {job_recs}")
+            self.assertEqual(job_recs[0].get("agentic_job_id"), "existing_job_aa11",
+                             "original job ID must be preserved")
+            # call_llm for job inference must NOT have been called (dedup gate skips the block)
+            # The task classification call IS expected; job inference call is NOT
+            call_count = mock_llm.call_count
+            # We expect exactly 1 call (task classification only), not 2
+            self.assertEqual(call_count, 1,
+                             f"job inference must be skipped when job marker exists; got {call_count} calls")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_job_backward_compat(self):
+        """Task 2 RED: job-less / call_llm-returns-[] session produces only the
+        GUARDRAIL+CHAT task pair — byte-identical-to-v1.0 task path.
+        """
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-backcompat-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            sid = "20260518_170000_backcompat"
+
+            # Task classification response
+            task_resp = unittest.mock.MagicMock()
+            task_resp.choices = [unittest.mock.MagicMock()]
+            task_resp.choices[0].message.content = "code_review"
+
+            # Job inference returns empty array — no jobs inferred
+            job_empty_resp = unittest.mock.MagicMock()
+            job_empty_resp.choices = [unittest.mock.MagicMock()]
+            job_empty_resp.choices[0].message.content = "[]"
+
+            fake_transcript = "user: quick question\nassistant: here is the answer."
+            with unittest.mock.patch.object(handler, 'call_llm',
+                                             side_effect=[task_resp, job_empty_resp]), \
+                 unittest.mock.patch.object(handler, '_read_session_transcript',
+                                            return_value=fake_transcript):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message="quick question",
+                    response="here is the answer",
+                ))
+
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            self.assertTrue(marker_path.is_file(), "marker file must exist")
+            lines = marker_path.read_text().splitlines()
+            recs = [json.loads(l) for l in lines]
+
+            # Must have exactly 2 records: GUARDRAIL and CHAT — no job records
+            self.assertEqual(len(recs), 2, f"expected exactly 2 records (task pair), got {len(recs)}: {lines}")
+            operations = {r.get("operation_type") for r in recs}
+            self.assertEqual(operations, {"GUARDRAIL", "CHAT"},
+                             "only GUARDRAIL and CHAT records expected")
+            job_recs = [r for r in recs if r.get("kind") == "job"]
+            self.assertEqual(len(job_recs), 0,
+                             f"no job records expected when LLM returns []; got {job_recs}")
+            # Verify task_type is the one from classification (not a job field)
+            for r in recs:
+                self.assertNotIn("kind", r, "task records must not have a 'kind' field")
+                self.assertNotIn("agentic_job_id", r, "task records must not have 'agentic_job_id'")
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
