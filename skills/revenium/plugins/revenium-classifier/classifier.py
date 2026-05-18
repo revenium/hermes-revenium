@@ -39,6 +39,7 @@ STATE_DIR = Path(os.environ.get("REVENIUM_STATE_DIR", str(HERMES_HOME / "state" 
 MARKERS_DIR = Path(os.environ.get("REVENIUM_MARKERS_DIR", str(STATE_DIR / "markers")))
 MARKERS_READY_DIR = Path(os.environ.get("REVENIUM_MARKERS_READY_DIR", str(MARKERS_DIR / ".ready")))
 TAXONOMY_FILE = Path(os.environ.get("REVENIUM_TAXONOMY_FILE", str(STATE_DIR / "task-taxonomy.json")))
+JOB_TAXONOMY_FILE = Path(os.environ.get("REVENIUM_JOB_TAXONOMY_FILE", str(STATE_DIR / "job-taxonomy.json")))
 BUDGET_STATUS_FILE = STATE_DIR / "budget-status.json"
 STATE_DB = HERMES_HOME / "state.db"
 
@@ -122,6 +123,366 @@ def _read_session_messages(sid: str) -> "tuple[str, str]":
         return (user_msg, asst_msg)
     except Exception:
         return ("", "")
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 job-path helpers — mirror the task-path above, don't merge (D-01).
+# ---------------------------------------------------------------------------
+
+def _read_session_transcript(
+    sid: str,
+    max_chars: int = 8000,
+    per_msg_cap: int = 500,
+) -> str:
+    """Return a chronologically-ordered (timestamp ASC) transcript for `sid`.
+
+    Mirrors _read_session_messages with two deliberate deviations:
+    - ORDER BY timestamp ASC (arc progression for the LLM, not latest-pair-first)
+    - No early break; collect full history, but cap per-message to `per_msg_cap`
+      chars and stop appending once the total would exceed `max_chars` — a full
+      500K–725K-token session dump would blow the LLM context window.
+
+    Returns "" on any failure (D-04 fail-open).
+    """
+    if not sid:
+        return ""
+    if not STATE_DB.exists():
+        return ""
+    try:
+        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=2.0)
+        try:
+            cursor = conn.execute(
+                "SELECT role, content FROM messages"
+                " WHERE session_id = ? AND content IS NOT NULL AND content != ''"
+                " ORDER BY timestamp ASC",
+                (sid,),
+            )
+            parts = []
+            total = 0
+            for row in cursor:
+                role, content = row[0], row[1]
+                snippet = (content or "")[:per_msg_cap]
+                line = f"{role}: {snippet}"
+                if total + len(line) > max_chars:
+                    break
+                parts.append(line)
+                total += len(line)
+        finally:
+            conn.close()
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
+    """Build the job-inference prompt — mirror of _build_classification_prompt.
+
+    Deviations from the task-path analog:
+    - Output is a JSON array of job objects (agentic_job_id, job_name, job_type, status).
+    - Includes arc-boundary guidance (same goal incl. follow-up fixes = one arc).
+    - Conservative status criteria (SUCCESS only on checkable evidence, CANCELLED
+      is the uncertainty-bias catch-all per Phase 8 DECLARE-05).
+    - LLM emits the business label; code appends secrets.token_hex(2) suffix in
+      Plan 02's _validate_job step (documented here; not applied in this helper).
+    """
+    labels_block = ", ".join(job_labels) if job_labels else "(no existing labels yet)"
+    if len(labels_block) > 1024:
+        labels_block = labels_block[:1024] + " ... [truncated]"
+    transcript_preview = (transcript or "")[:6000]
+    return (
+        "You are analyzing a Hermes AI agent session to identify the discrete task arcs "
+        "completed by the agent. A task arc is a goal-directed sequence of turns with a "
+        "single objective; follow-up fixes to the same goal are part of the same arc.\n\n"
+        "Output ONLY a JSON array of job objects. Each object must have:\n"
+        "  - agentic_job_id: a SPECIFIC, DESCRIPTIVE snake_case business label "
+        "(e.g. fix_auth_regression, prod_log_triage, weekly_pr_review)\n"
+        "  - job_name: a short human-readable name (sentence case, max 60 chars)\n"
+        "  - job_type: a snake_case category label matching ^[a-z][a-z0-9_]{1,47}$\n"
+        "  - status: one of SUCCESS, FAILED, or CANCELLED\n\n"
+        "Status guidance:\n"
+        "  SUCCESS: only when there is clear evidence the goal was achieved.\n"
+        "  FAILED: only when there is explicit evidence of failure.\n"
+        "  CANCELLED: use when uncertain — this is the uncertainty-bias catch-all.\n\n"
+        "Mint a SPECIFIC agentic_job_id. "
+        "You MAY reuse one of the existing job_type labels, but only if it is an exact match. "
+        "If no existing label fits, mint a new one.\n\n"
+        f"Existing job_type labels (for reference): {labels_block}\n\n"
+        f"Session transcript:\n{transcript_preview}\n\n"
+        "JSON array:"
+    )
+
+
+def _parse_job_array(raw: str) -> list:
+    """Parse an LLM response into a list of job dicts. Fail-open: returns [] on any error.
+
+    - Strips leading/trailing ```json ... ``` markdown fences.
+    - json.loads the result; on JSONDecodeError returns [].
+    - Coerces a lone dict (single-job session) to [dict].
+    - Drops any non-dict elements (defensive against LLM adding strings/ints).
+    - Returns [] on any error.
+    """
+    try:
+        text = (raw or "").strip()
+        # Strip markdown fence: ```json ... ``` or ``` ... ```
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Drop first line (```json or ```) and last ``` if present.
+            inner_lines = lines[1:]
+            if inner_lines and inner_lines[-1].strip() == "```":
+                inner_lines = inner_lines[:-1]
+            text = "\n".join(inner_lines).strip()
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if not isinstance(parsed, list):
+            return []
+        return [item for item in parsed if isinstance(item, dict)]
+    except Exception:
+        return []
+
+
+async def _infer_jobs_via_llm(transcript: str, job_labels: list) -> list:
+    """Invoke the user's main LLM to infer jobs from the session transcript.
+
+    Mirror of _classify_via_llm with deviations:
+    - Returns [] (not "unclassified") when call_llm is None.
+    - max_tokens=512, timeout=20.0 (larger: array output, bigger prompt).
+    - Passes raw response through _parse_job_array instead of .strip().
+    - CRITICALLY: NO `task=` kwarg (uses user's main provider+model from config.yaml).
+    """
+    if call_llm is None:
+        return []
+    prompt = _build_job_inference_prompt(transcript, job_labels)
+    try:
+        response = await asyncio.to_thread(
+            call_llm,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You analyze Hermes agent session transcripts to identify "
+                        "completed task arcs. Output only a JSON array."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=512,
+            timeout=20.0,
+        )
+        # Extract content; tolerate openai SDK response shape variations.
+        try:
+            raw = response.choices[0].message.content
+        except AttributeError:
+            raw = response["choices"][0]["message"]["content"]
+        return _parse_job_array(raw or "")
+    except Exception as exc:
+        logger.warning("revenium-classifier job inference LLM call failed: %s", exc)
+        return []
+
+
+def _validate_job(job: dict) -> "dict | None":
+    """Validate and normalize a job dict from the LLM response.
+
+    Mirror of _validate_label but for a dict (D-03 reader-required keys).
+    Required keys: agentic_job_id (non-empty str), job_type (LABEL_RE match),
+    status (in {SUCCESS, FAILED, CANCELLED}). job_name is optional.
+
+    Reuses LABEL_RE for job_type — same snake_case grammar as task labels;
+    defense-in-depth against pipe/colon/newline injection that would corrupt
+    the cron's IFS='|' parse and JOB:<id>: ledger grammar (T-13-01).
+
+    Returns the normalized dict on success, None for any invalid job (caller skips).
+    """
+    if not isinstance(job, dict):
+        return None
+    agentic_job_id = job.get("agentic_job_id", "")
+    if not isinstance(agentic_job_id, str) or not agentic_job_id.strip():
+        return None
+    job_type = job.get("job_type", "")
+    if not isinstance(job_type, str):
+        return None
+    job_type = job_type.strip().lower()
+    if not LABEL_RE.match(job_type):
+        return None
+    status_raw = job.get("status", "")
+    if not isinstance(status_raw, str):
+        return None
+    status = status_raw.strip().upper()
+    if status not in {"SUCCESS", "FAILED", "CANCELLED"}:
+        return None
+    # DECLARE-02 contract: if agentic_job_id lacks a hex entropy suffix (the
+    # 4-char token_hex(2) suffix e.g. "-a1b2"), append one deterministically.
+    # Pattern: id ends with _XXXX (4 lowercase hex chars). Relaxed check:
+    # if the id doesn't end in an underscore + exactly 4 hex chars, append.
+    aid = agentic_job_id.strip()
+    import re as _re
+    if not _re.search(r"_[0-9a-f]{4}$", aid):
+        aid = aid + "_" + secrets.token_hex(2)
+    return {
+        "agentic_job_id": aid,
+        "job_name": (job.get("job_name") or ""),
+        "job_type": job_type,
+        "status": status,
+    }
+
+
+def _write_job_marker(sid: str, job: dict) -> Path:
+    """Atomic O_APPEND + fcntl.LOCK_EX write of a single kind:"job" marker line.
+
+    Mirror of _write_marker_pair but writes ONE line using the frozen Phase 7 D-03
+    record shape. Reader-required keys: kind, agentic_job_id, job_type, status.
+    Same compact serialization, same markers/<sid>.jsonl file.
+    """
+    MARKERS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    record = {
+        "kind": "job",
+        "ts": time.time(),
+        "sid": sid,
+        "agentic_job_id": job["agentic_job_id"],
+        "job_name": job.get("job_name", ""),
+        "job_type": job["job_type"],
+        "status": job["status"],
+    }
+    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
+    with open(marker_path, "ab", buffering=0) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line.encode("utf-8"))
+    return marker_path
+
+
+def _read_job_taxonomy_labels() -> list:
+    """Read JOB_TAXONOMY_FILE and return job_type labels sorted recent-first, alpha within ties.
+
+    Copy of _read_taxonomy_labels with TAXONOMY_FILE → JOB_TAXONOMY_FILE.
+    Seed entries with no last_seen_at fall into the 'older' alpha bucket — handled
+    by the analog without special-casing. Returns [] on any failure (D-04 fail-open).
+    """
+    try:
+        data = json.loads(JOB_TAXONOMY_FILE.read_text(encoding="utf-8"))
+        labels = data.get("labels", {})
+        if not isinstance(labels, dict):
+            return []
+        import datetime
+        now = datetime.datetime.now(datetime.timezone.utc)
+        recent_cutoff = now - datetime.timedelta(days=7)
+        recent, older = [], []
+        for key, meta in sorted(labels.items()):  # alpha pre-sort for stable tie-break
+            raw_ts = meta.get("last_seen_at") if isinstance(meta, dict) else None
+            if raw_ts:
+                try:
+                    ts = datetime.datetime.fromisoformat(raw_ts.rstrip("Z")).replace(
+                        tzinfo=datetime.timezone.utc
+                    )
+                    if ts >= recent_cutoff:
+                        recent.append((ts, key))
+                        continue
+                except Exception:
+                    pass
+            older.append(key)
+        recent.sort(key=lambda x: x[0], reverse=True)
+        return [k for _, k in recent] + older
+    except Exception:
+        pass
+    return []
+
+
+def _persist_job_type_to_taxonomy(job_type: str) -> None:
+    """Append job_type to job-taxonomy.json if not already present, updating
+    last_seen_at on every call (D-32 mint-back pattern).
+
+    Copy of _persist_label_to_taxonomy with TAXONOMY_FILE → JOB_TAXONOMY_FILE.
+    Keeps the sidecar .lock + non-blocking LOCK_EX|LOCK_NB + temp-file .replace()
+    + last_seen_at mint-back; same concurrent on_session_end race resolution as
+    HARDEN-01 (T-13-04). Skips empty/invalid job_type instead of "unclassified".
+    """
+    if not job_type:
+        return
+    import datetime
+    try:
+        JOB_TAXONOMY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = JOB_TAXONOMY_FILE.parent / (JOB_TAXONOMY_FILE.name + ".lock")
+        try:
+            with open(lock_path, "a") as lockfd:
+                try:
+                    fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    logger.warning(
+                        "revenium-classifier: job taxonomy persist skipped, lock contention "
+                        "for job_type=%s: %s",
+                        job_type,
+                        exc,
+                    )
+                    return
+                try:
+                    data = json.loads(JOB_TAXONOMY_FILE.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {"labels": {}}
+                labels = data.get("labels", {})
+                if not isinstance(labels, dict):
+                    labels = {}
+                now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"
+                )
+                if job_type not in labels:
+                    labels[job_type] = {
+                        "description": None,
+                        "examples": [],
+                        "last_seen_at": now_iso,
+                    }
+                else:
+                    # Update last_seen_at on every successful write (recency ordering D-33).
+                    if not isinstance(labels[job_type], dict):
+                        labels[job_type] = {}
+                    labels[job_type]["last_seen_at"] = now_iso
+                data["labels"] = labels
+                tmp = JOB_TAXONOMY_FILE.parent / (JOB_TAXONOMY_FILE.name + ".tmp")
+                tmp.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+                tmp.replace(JOB_TAXONOMY_FILE)
+        except OSError as exc:
+            logger.warning(
+                "revenium-classifier: job taxonomy persist skipped, lock contention "
+                "for job_type=%s: %s",
+                job_type,
+                exc,
+            )
+            return
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier: job taxonomy mint-back failed for job_type=%s: %s",
+            job_type,
+            exc,
+        )
+
+
+def _job_marker_exists(sid: str) -> bool:
+    """Return True if a kind:"job" marker line already exists for sid, False otherwise.
+
+    Mirror of _read_latest_task_type line-by-line tolerant parse, but scans for
+    any rec.get("kind") == "job" line and returns True on first hit. Fail-open
+    returns False (proceed to write) — the cron's JOB:<id>:created ledger gate is
+    the ultimate idempotency backstop (D-08). Do NOT mirror _recent_marker_pair_exists;
+    D-08 chose presence-scan over wall-clock proximity (PATTERNS.md §_job_marker_exists).
+    """
+    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    if not marker_path.is_file():
+        return False
+    try:
+        lines = marker_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("kind") == "job":
+            return True
+    return False
 
 
 def _read_latest_task_type(sid: str) -> "str | None":

@@ -29,7 +29,7 @@ def _setup_plugin_env(tmpdir):
     os.makedirs(markers_dir, mode=0o700)
     snapshot = {k: os.environ.get(k) for k in (
         'HERMES_HOME', 'REVENIUM_STATE_DIR', 'REVENIUM_MARKERS_DIR',
-        'REVENIUM_TAXONOMY_FILE',
+        'REVENIUM_TAXONOMY_FILE', 'REVENIUM_JOB_TAXONOMY_FILE',
     )}
     os.environ['HERMES_HOME'] = hermes_home
     os.environ['REVENIUM_STATE_DIR'] = state_dir
@@ -6649,6 +6649,437 @@ class RepositoryTests(unittest.TestCase):
                 payload.get('message'),
                 f'block directive missing a non-empty message: {result.stdout!r}',
             )
+
+
+    def test_revenium_classifier_job_taxonomy_file_env_override(self):
+        """Task 1 (Phase 13-01): JOB_TAXONOMY_FILE constant is env-overridable via
+        REVENIUM_JOB_TAXONOMY_FILE + importlib.reload. Default resolves under STATE_DIR."""
+        import importlib
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-taxonomy-')
+        # _setup_plugin_env now snapshots REVENIUM_JOB_TAXONOMY_FILE too (Task 1).
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Test 1: default JOB_TAXONOMY_FILE resolves under STATE_DIR as job-taxonomy.json.
+            from pathlib import Path
+            expected_default = Path(sd) / 'job-taxonomy.json'
+            self.assertEqual(handler.JOB_TAXONOMY_FILE, expected_default)
+
+            # Test 2: override via REVENIUM_JOB_TAXONOMY_FILE + reload.
+            override_path = os.path.join(tmpdir, 'custom-job-taxonomy.json')
+            os.environ['REVENIUM_JOB_TAXONOMY_FILE'] = override_path
+            importlib.reload(sys.modules['classifier'])
+            import classifier as handler2  # noqa: F811
+            self.assertEqual(str(handler2.JOB_TAXONOMY_FILE), override_path)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_revenium_classifier_read_session_transcript(self):
+        """Task 2 (Phase 13-01): _read_session_transcript returns "" for empty/missing
+        session and chronologically-ordered transcript capped at max_chars."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-transcript-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Test 1a: missing STATE_DB → returns "".
+            result = handler._read_session_transcript("sid-missing")
+            self.assertEqual(result, "")
+
+            # Create a minimal state.db with messages table.
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, "
+                "role TEXT, content TEXT, timestamp REAL)"
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                "('sess-t1', 'user', 'hello there', 1.0)"
+            )
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                "('sess-t1', 'assistant', 'hi back', 2.0)"
+            )
+            conn.commit()
+            conn.close()
+
+            # Reload so STATE_DB points to our db_path.
+            importlib.reload(sys.modules['classifier'])
+            import classifier as handler2  # noqa: F811
+
+            # Test 1b: empty session (no matching rows) → returns "".
+            result_empty = handler2._read_session_transcript("no-such-session")
+            self.assertEqual(result_empty, "")
+
+            # Test 2: populated session → ordered ASC, joined as "role: snippet" lines.
+            result_ok = handler2._read_session_transcript("sess-t1")
+            self.assertIn("user:", result_ok)
+            self.assertIn("assistant:", result_ok)
+            # ASC ordering: user line (ts=1.0) before assistant line (ts=2.0)
+            self.assertLess(result_ok.index("user:"), result_ok.index("assistant:"))
+
+            # Test 3: max_chars cap — insert many messages and verify total length ≤ max_chars.
+            conn2 = sqlite3.connect(db_path)
+            for i in range(50):
+                conn2.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp) VALUES "
+                    "(?, ?, ?, ?)",
+                    ("sess-big", "user" if i % 2 == 0 else "assistant", "x" * 1000, float(i)),
+                )
+            conn2.commit()
+            conn2.close()
+            importlib.reload(sys.modules['classifier'])
+            import classifier as handler3  # noqa: F811
+            result_big = handler3._read_session_transcript("sess-big", max_chars=8000)
+            self.assertLessEqual(len(result_big), 8000)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_parse_job_array(self):
+        """Task 2 (Phase 13-01): _parse_job_array handles fenced JSON, bare dict,
+        invalid elements, and JSON errors."""
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-parse-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            job_obj = {"agentic_job_id": "fix_bug_a1b2", "job_name": "fix bug",
+                       "job_type": "bug_fix", "status": "SUCCESS"}
+
+            # Test 1: plain JSON array.
+            raw_array = json.dumps([job_obj])
+            result = handler._parse_job_array(raw_array)
+            self.assertEqual(result, [job_obj])
+
+            # Test 2: fenced ```json ... ``` block.
+            fenced = f"```json\n{json.dumps([job_obj])}\n```"
+            result_fenced = handler._parse_job_array(fenced)
+            self.assertEqual(result_fenced, [job_obj])
+
+            # Test 3: bare dict (lone object) → coerced to [dict].
+            raw_dict = json.dumps(job_obj)
+            result_dict = handler._parse_job_array(raw_dict)
+            self.assertEqual(result_dict, [job_obj])
+
+            # Test 4: JSONDecodeError → [].
+            result_bad = handler._parse_job_array("not json at all {{{")
+            self.assertEqual(result_bad, [])
+
+            # Test 5: array with non-dict element → element dropped.
+            mixed = json.dumps([job_obj, "a string", 42])
+            result_mixed = handler._parse_job_array(mixed)
+            self.assertEqual(result_mixed, [job_obj])
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_infer_jobs_via_llm(self):
+        """Task 2 (Phase 13-01): _infer_jobs_via_llm returns [] when call_llm is None;
+        when patched it calls call_llm WITHOUT task= kwarg and returns parsed list."""
+        import asyncio
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-infer-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Test 1: call_llm is None → [].
+            original_call_llm = handler.call_llm
+            handler.call_llm = None
+            result_none = asyncio.run(handler._infer_jobs_via_llm("some transcript", []))
+            self.assertEqual(result_none, [])
+            handler.call_llm = original_call_llm
+
+            # Test 2: patched call_llm returns a job array.
+            job_obj = {"agentic_job_id": "fix_bug_a1b2", "job_name": "fix bug",
+                       "job_type": "bug_fix", "status": "SUCCESS"}
+            mock_resp = unittest.mock.MagicMock()
+            mock_resp.choices = [unittest.mock.MagicMock()]
+            mock_resp.choices[0].message.content = json.dumps([job_obj])
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp) as mock_llm:
+                result_ok = asyncio.run(handler._infer_jobs_via_llm("some transcript", ["bug_fix"]))
+                mock_llm.assert_called_once()
+                kwargs = mock_llm.call_args.kwargs
+                # CRITICAL: NO task= kwarg — pinned by design (Pitfall 8).
+                self.assertNotIn('task', kwargs)
+                self.assertEqual(kwargs.get('temperature'), 0.0)
+                self.assertEqual(kwargs.get('max_tokens'), 512)
+            self.assertEqual(result_ok, [job_obj])
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_build_job_inference_prompt(self):
+        """Task 2 (Phase 13-01): _build_job_inference_prompt returns a non-empty string
+        with JSON array instruction and labels block."""
+        import importlib
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-prompt-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            prompt = handler._build_job_inference_prompt("user did some work", ["bug_fix", "research"])
+            self.assertIsInstance(prompt, str)
+            self.assertTrue(len(prompt) > 0)
+            # Must instruct JSON array output with the required keys.
+            self.assertIn("agentic_job_id", prompt)
+            self.assertIn("job_type", prompt)
+            self.assertIn("status", prompt)
+            # Labels block present.
+            self.assertIn("bug_fix", prompt)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_revenium_classifier_validate_job(self):
+        """Task 3 (Phase 13-01): _validate_job normalizes valid dicts and returns None
+        for missing keys, bad job_type, or status outside {SUCCESS,FAILED,CANCELLED}."""
+        import importlib
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-validate-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            good = {
+                "agentic_job_id": "fix_auth_a1b2",
+                "job_name": "Fix auth regression",
+                "job_type": "bug_fix",
+                "status": "SUCCESS",
+            }
+
+            # Test 1: valid job → returns normalized dict.
+            result = handler._validate_job(good.copy())
+            self.assertIsNotNone(result)
+            self.assertEqual(result["job_type"], "bug_fix")
+            self.assertEqual(result["status"], "SUCCESS")
+
+            # Test 2: status normalization — lowercase → uppercase.
+            mixed_status = dict(good, status="success")
+            result2 = handler._validate_job(mixed_status)
+            self.assertIsNotNone(result2)
+            self.assertEqual(result2["status"], "SUCCESS")
+
+            # Test 3: status outside enum → None.
+            bad_status = dict(good, status="PENDING")
+            result3 = handler._validate_job(bad_status)
+            self.assertFalsy(result3)
+
+            # Test 4: job_type fails LABEL_RE (contains hyphen) → None.
+            bad_type = dict(good, job_type="bug-fix")
+            result4 = handler._validate_job(bad_type)
+            self.assertFalsy(result4)
+
+            # Test 5: missing required key (agentic_job_id) → None.
+            missing_key = {k: v for k, v in good.items() if k != "agentic_job_id"}
+            result5 = handler._validate_job(missing_key)
+            self.assertFalsy(result5)
+
+            # Test 6: empty agentic_job_id → None.
+            empty_id = dict(good, agentic_job_id="")
+            result6 = handler._validate_job(empty_id)
+            self.assertFalsy(result6)
+
+            # Test 7: CANCELLED and FAILED are valid statuses.
+            cancelled = dict(good, status="CANCELLED")
+            self.assertIsNotNone(handler._validate_job(cancelled))
+            failed = dict(good, status="FAILED")
+            self.assertIsNotNone(handler._validate_job(failed))
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def assertFalsy(self, value, msg=None):
+        """Helper: assert value is falsy (None, False, {}, [], "")."""
+        if value:
+            raise AssertionError(
+                msg or f"Expected falsy value, got {value!r}"
+            )
+
+    def test_revenium_classifier_write_job_marker(self):
+        """Task 3 (Phase 13-01): _write_job_marker appends exactly one compact JSON
+        line with kind:"job" and all four reader-required keys."""
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-write-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            sid = "test-write-job-sid"
+            job = {
+                "agentic_job_id": "fix_auth_a1b2",
+                "job_name": "Fix auth regression",
+                "job_type": "bug_fix",
+                "status": "SUCCESS",
+            }
+            path = handler._write_job_marker(sid, job)
+
+            # Verify file written.
+            self.assertTrue(path.exists())
+            lines = path.read_text().splitlines()
+
+            # Test 1: exactly one line written.
+            self.assertEqual(len(lines), 1)
+
+            # Test 2: line is valid JSON with kind:"job" and all required keys.
+            rec = json.loads(lines[0])
+            self.assertEqual(rec.get("kind"), "job")
+            self.assertIn("agentic_job_id", rec)
+            self.assertIn("job_type", rec)
+            self.assertIn("status", rec)
+            self.assertEqual(rec["agentic_job_id"], "fix_auth_a1b2")
+            self.assertEqual(rec["job_type"], "bug_fix")
+            self.assertEqual(rec["status"], "SUCCESS")
+
+            # Test 3: re-reading parses back correctly.
+            import json as json2
+            rec2 = json2.loads(lines[0])
+            self.assertEqual(rec2["kind"], "job")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_job_taxonomy_roundtrip(self):
+        """Task 3 (Phase 13-01): _read_job_taxonomy_labels / _persist_job_type_to_taxonomy
+        round-trip a job_type into JOB_TAXONOMY_FILE under flock without raising on a
+        missing file."""
+        import importlib
+        import json
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-tax-rt-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Test 1: _read_job_taxonomy_labels on missing file → [].
+            labels_empty = handler._read_job_taxonomy_labels()
+            self.assertEqual(labels_empty, [])
+
+            # Test 2: _persist_job_type_to_taxonomy creates file and writes label.
+            handler._persist_job_type_to_taxonomy("bug_fix")
+            self.assertTrue(handler.JOB_TAXONOMY_FILE.exists())
+            data = json.loads(handler.JOB_TAXONOMY_FILE.read_text())
+            self.assertIn("bug_fix", data.get("labels", {}))
+
+            # Test 3: _read_job_taxonomy_labels now returns the persisted label.
+            labels_after = handler._read_job_taxonomy_labels()
+            self.assertIn("bug_fix", labels_after)
+
+            # Test 4: persist does not raise on a second call (idempotent).
+            handler._persist_job_type_to_taxonomy("bug_fix")
+            labels_after2 = handler._read_job_taxonomy_labels()
+            self.assertIn("bug_fix", labels_after2)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_job_marker_exists(self):
+        """Task 3 (Phase 13-01): _job_marker_exists returns True when kind:"job" present,
+        False for task-only file, and False (fail-open) for unreadable file."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-dedup-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            sid_with_job = "job-dedup-sid-with-job"
+            sid_task_only = "job-dedup-sid-task-only"
+
+            # Write a task-only marker file (no kind:"job" line).
+            task_path = handler.MARKERS_DIR / f"{sid_task_only}.jsonl"
+            task_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            task_record = json.dumps({"muid": "x", "ts": 1.0, "sid": sid_task_only,
+                                      "task_type": "bug_fix", "operation_type": "CHAT"})
+            task_path.write_text(task_record + "\n")
+
+            # Test 1: task-only file → False.
+            self.assertFalse(handler._job_marker_exists(sid_task_only))
+
+            # Write a marker file that has a kind:"job" line.
+            job_path = handler.MARKERS_DIR / f"{sid_with_job}.jsonl"
+            job_record = json.dumps({"kind": "job", "ts": 2.0, "sid": sid_with_job,
+                                     "agentic_job_id": "fix_auth_a1b2", "job_type": "bug_fix",
+                                     "status": "SUCCESS"})
+            job_path.write_text(task_record + "\n" + job_record + "\n")
+
+            # Test 2: file with kind:"job" line → True.
+            self.assertTrue(handler._job_marker_exists(sid_with_job))
+
+            # Test 3: missing file → False (fail-open).
+            self.assertFalse(handler._job_marker_exists("no-such-session-ever"))
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == '__main__':
