@@ -215,22 +215,23 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
 def _parse_job_array(raw: str) -> list:
     """Parse an LLM response into a list of job dicts. Fail-open: returns [] on any error.
 
-    - Strips leading/trailing ```json ... ``` markdown fences.
+    - Strips leading/trailing ```json ... ``` markdown fences (single-line or multi-line).
     - json.loads the result; on JSONDecodeError returns [].
     - Coerces a lone dict (single-job session) to [dict].
     - Drops any non-dict elements (defensive against LLM adding strings/ints).
     - Returns [] on any error.
+
+    Uses a regex strip to handle both single-line (```json[...]```) and multi-line
+    (```json\\n[...]\\n```) fenced responses without splitting into lines first.
     """
     try:
         text = (raw or "").strip()
-        # Strip markdown fence: ```json ... ``` or ``` ... ```
-        if text.startswith("```"):
-            lines = text.splitlines()
-            # Drop first line (```json or ```) and last ``` if present.
-            inner_lines = lines[1:]
-            if inner_lines and inner_lines[-1].strip() == "```":
-                inner_lines = inner_lines[:-1]
-            text = "\n".join(inner_lines).strip()
+        # Strip markdown fence: ``` optionally followed by a language tag, then
+        # the JSON payload, then a closing ```. Works for both single-line and
+        # multi-line fenced output. re is already imported at module scope.
+        text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             parsed = [parsed]
@@ -311,14 +312,16 @@ def _validate_job(job: dict) -> "dict | None":
     status = status_raw.strip().upper()
     if status not in {"SUCCESS", "FAILED", "CANCELLED"}:
         return None
-    # DECLARE-02 contract: if agentic_job_id lacks a hex entropy suffix (the
-    # 4-char token_hex(2) suffix e.g. "-a1b2"), append one deterministically.
-    # Pattern: id ends with _XXXX (4 lowercase hex chars). Relaxed check:
-    # if the id doesn't end in an underscore + exactly 4 hex chars, append.
-    aid = agentic_job_id.strip()
-    import re as _re
-    if not _re.search(r"_[0-9a-f]{4}$", aid):
-        aid = aid + "_" + secrets.token_hex(2)
+    # DECLARE-02 contract: always append a secrets.token_hex(2) entropy suffix to
+    # the LLM-supplied agentic_job_id. The LLM is instructed to emit a business
+    # label (e.g. fix_auth_regression) and this step deterministically appends the
+    # 4-hex token to ensure uniqueness. Unconditional append is correct here because:
+    #  1. The LLM prompt never instructs the LLM to mint the suffix itself.
+    #  2. A conditional suffix check (r"_[0-9a-f]{4}$") falsely matches ordinary
+    #     English words ending in 4 hex chars (_face, _beef, _cafe, _dead, _feed,
+    #     _deed, _fade), allowing colliding ids to slip through. (WR-01)
+    #  3. Using re at module scope removes the redundant inline import. (IN-01)
+    aid = agentic_job_id.strip() + "_" + secrets.token_hex(2)
     return {
         "agentic_job_id": aid,
         "job_name": (job.get("job_name") or ""),
