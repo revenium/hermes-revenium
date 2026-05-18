@@ -215,22 +215,23 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
 def _parse_job_array(raw: str) -> list:
     """Parse an LLM response into a list of job dicts. Fail-open: returns [] on any error.
 
-    - Strips leading/trailing ```json ... ``` markdown fences.
+    - Strips leading/trailing ```json ... ``` markdown fences (single-line or multi-line).
     - json.loads the result; on JSONDecodeError returns [].
     - Coerces a lone dict (single-job session) to [dict].
     - Drops any non-dict elements (defensive against LLM adding strings/ints).
     - Returns [] on any error.
+
+    Uses a regex strip to handle both single-line (```json[...]```) and multi-line
+    (```json\\n[...]\\n```) fenced responses without splitting into lines first.
     """
     try:
         text = (raw or "").strip()
-        # Strip markdown fence: ```json ... ``` or ``` ... ```
-        if text.startswith("```"):
-            lines = text.splitlines()
-            # Drop first line (```json or ```) and last ``` if present.
-            inner_lines = lines[1:]
-            if inner_lines and inner_lines[-1].strip() == "```":
-                inner_lines = inner_lines[:-1]
-            text = "\n".join(inner_lines).strip()
+        # Strip markdown fence: ``` optionally followed by a language tag, then
+        # the JSON payload, then a closing ```. Works for both single-line and
+        # multi-line fenced output. re is already imported at module scope.
+        text = re.sub(r"^```[a-zA-Z0-9]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             parsed = [parsed]
@@ -311,14 +312,16 @@ def _validate_job(job: dict) -> "dict | None":
     status = status_raw.strip().upper()
     if status not in {"SUCCESS", "FAILED", "CANCELLED"}:
         return None
-    # DECLARE-02 contract: if agentic_job_id lacks a hex entropy suffix (the
-    # 4-char token_hex(2) suffix e.g. "-a1b2"), append one deterministically.
-    # Pattern: id ends with _XXXX (4 lowercase hex chars). Relaxed check:
-    # if the id doesn't end in an underscore + exactly 4 hex chars, append.
-    aid = agentic_job_id.strip()
-    import re as _re
-    if not _re.search(r"_[0-9a-f]{4}$", aid):
-        aid = aid + "_" + secrets.token_hex(2)
+    # DECLARE-02 contract: always append a secrets.token_hex(2) entropy suffix to
+    # the LLM-supplied agentic_job_id. The LLM is instructed to emit a business
+    # label (e.g. fix_auth_regression) and this step deterministically appends the
+    # 4-hex token to ensure uniqueness. Unconditional append is correct here because:
+    #  1. The LLM prompt never instructs the LLM to mint the suffix itself.
+    #  2. A conditional suffix check (r"_[0-9a-f]{4}$") falsely matches ordinary
+    #     English words ending in 4 hex chars (_face, _beef, _cafe, _dead, _feed,
+    #     _deed, _fade), allowing colliding ids to slip through. (WR-01)
+    #  3. Using re at module scope removes the redundant inline import. (IN-01)
+    aid = agentic_job_id.strip() + "_" + secrets.token_hex(2)
     return {
         "agentic_job_id": aid,
         "job_name": (job.get("job_name") or ""),
@@ -771,9 +774,16 @@ async def run_classification_async(
     """Async classifier entry point. D-04: never raises out of this function.
 
     Drives the D-04..D-14 pipeline: subagent inheritance →
-    D-13 dedupe → budget gate → LLM classification → validated label →
-    atomic marker pair write. Invoked from the plugin entrypoint's sync
+    D-13 dedupe (gates task re-write only, not job inference) → budget gate →
+    LLM classification → validated label → atomic marker pair write →
+    code-side job inference. Invoked from the plugin entrypoint's sync
     wrapper run_classification() via asyncio.run().
+
+    Step 3 (D-13 dedupe) captures agent_self_classified and gates only Steps
+    4-6 (task write path) behind 'if not agent_self_classified:'. Step 7
+    (job inference) runs unconditionally afterward so that job markers are
+    produced on the dominant self-classify code path. Step 7 carries its own
+    three idempotency gates (root_sid, _budget_halted, _job_marker_exists).
     """
     if not session_id:
         return
@@ -789,38 +799,42 @@ async def run_classification_async(
             # Parent has no marker yet — fall through to classify as if root.
 
         # Step 3 — D-13 belt: did the agent already self-classify? (HOOK-07)
-        if _recent_marker_pair_exists(session_id, within_seconds=30.0):
-            return  # agent's FINAL ACTION wrote markers in the last 30s; don't double-write
+        # Capture as a boolean instead of returning early so Step 7 still runs.
+        # Steps 4-6 (task write path) are skipped when the agent already wrote
+        # markers; Step 7 (job inference) is always attempted afterward.
+        agent_self_classified = _recent_marker_pair_exists(session_id, within_seconds=30.0)
 
-        # Step 4 — budget gate (D-08 / HOOK-04).
-        if _budget_halted():
-            await asyncio.to_thread(_write_marker_pair, session_id, "unclassified")
-            logger.warning(
-                "revenium-classifier: budget halted, wrote unclassified for sid=%s", session_id
+        if not agent_self_classified:
+            # Step 4 — budget gate (D-08 / HOOK-04).
+            if _budget_halted():
+                await asyncio.to_thread(_write_marker_pair, session_id, "unclassified")
+                logger.warning(
+                    "revenium-classifier: budget halted, wrote unclassified for sid=%s", session_id
+                )
+                return
+
+            # Step 5 — LLM classification (D-06 / HOOK-05).
+            # Resolve message + response from state.db when caller passed None (the
+            # production path: __init__.py:_on_session_end always passes None). Tests
+            # that pass content explicitly bypass this lookup via the else branch.
+            if not message or not response:
+                db_user, db_asst = _read_session_messages(session_id)
+                user_msg = message or db_user
+                asst_resp = response or db_asst
+            else:
+                user_msg, asst_resp = message, response
+            raw_label = await _classify_via_llm(
+                {"message": user_msg},
+                asst_resp or "",
             )
-            return
+            task_type = _validate_label(raw_label)
 
-        # Step 5 — LLM classification (D-06 / HOOK-05).
-        # Resolve message + response from state.db when caller passed None (the
-        # production path: __init__.py:_on_session_end always passes None). Tests
-        # that pass content explicitly bypass this lookup via the else branch.
-        if not message or not response:
-            db_user, db_asst = _read_session_messages(session_id)
-            user_msg = message or db_user
-            asst_resp = response or db_asst
-        else:
-            user_msg, asst_resp = message, response
-        raw_label = await _classify_via_llm(
-            {"message": user_msg},
-            asst_resp or "",
-        )
-        task_type = _validate_label(raw_label)
-
-        # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
-        await asyncio.to_thread(_write_marker_pair, session_id, task_type)
-        _persist_label_to_taxonomy(task_type)
+            # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
+            await asyncio.to_thread(_write_marker_pair, session_id, task_type)
+            _persist_label_to_taxonomy(task_type)
 
         # Step 7 — code-side job-inference (D-01 / Phase 13).
+        # Runs unconditionally on every reachable path (self-classified or not).
         # Three early skip gates: root-session only, not budget-halted, no existing job marker.
         # Wrapped in its own try/except so a job-path failure never disturbs the task marker
         # already written above (D-04 never-raise invariant, T-13-08).

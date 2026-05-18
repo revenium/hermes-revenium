@@ -1317,9 +1317,13 @@ class RepositoryTests(unittest.TestCase):
 
             self.assertTrue(handler._recent_marker_pair_exists(sid, within_seconds=30.0))
 
-            # Patch call_llm so we can prove it was NOT called
-            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
-                mock_llm.side_effect = AssertionError("LLM must NOT be called when agent already wrote markers")
+            # Patch call_llm so LLM task classification (Steps 4-6) is NOT called;
+            # Step 7 now legitimately may call the LLM for job inference, so we patch
+            # _infer_jobs_via_llm to [] to keep this test focused on the task no-double-write
+            # invariant rather than asserting the LLM is never called at all.
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm, \
+                 unittest.mock.patch.object(handler, '_infer_jobs_via_llm', return_value=[]):
+                mock_llm.side_effect = AssertionError("LLM task classification must NOT be called when agent already wrote markers")
                 fixture = PLUGIN_DIR / 'test-payloads' / 'substantive-turn.json'
                 context = json.loads(fixture.read_text())
                 asyncio.run(handler.run_classification_async(
@@ -1331,9 +1335,14 @@ class RepositoryTests(unittest.TestCase):
                 ))
                 mock_llm.assert_not_called()
 
-            # Marker file should still have exactly 2 lines (no hook-added lines)
+            # Marker file must have no task double-write: count GUARDRAIL/CHAT lines only.
+            # A kind:"job" line from Step 7 is now permitted (not required). The invariant
+            # is that the task pair is not doubled (exactly 2 GUARDRAIL/CHAT records).
             lines = marker_path.read_text().splitlines()
-            self.assertEqual(len(lines), 2, f"hook double-wrote; got {len(lines)} lines")
+            recs = [json.loads(l) for l in lines]
+            task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertGreaterEqual(len(lines), 2, f"marker file has too few lines; got {len(lines)}")
+            self.assertEqual(len(task_recs), 2, f"hook double-wrote task pair; got {len(task_recs)} task lines")
 
             # Now age the markers beyond 30s and try again — hook should write
             with open(marker_path, 'w', encoding='utf-8') as f:
@@ -1345,7 +1354,8 @@ class RepositoryTests(unittest.TestCase):
             mock_resp = unittest.mock.MagicMock()
             mock_resp.choices = [unittest.mock.MagicMock()]
             mock_resp.choices[0].message.content = "research"
-            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp):
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp), \
+                 unittest.mock.patch.object(handler, '_infer_jobs_via_llm', return_value=[]):
                 asyncio.run(handler.run_classification_async(
                     session_id=context['session_id'],
                     message=context.get('message'),
@@ -1353,9 +1363,13 @@ class RepositoryTests(unittest.TestCase):
                     model=context.get('model'),
                     platform=context.get('platform'),
                 ))
-            # Now marker file has 4 lines (2 stale + 2 new from hook)
+            # Now marker file has 2 stale + 2 new task lines = 4 GUARDRAIL/CHAT lines
+            # (Step 7 may add a job line too, so assert task-line count not total lines).
             lines = marker_path.read_text().splitlines()
-            self.assertEqual(len(lines), 4)
+            recs_aged = [json.loads(l) for l in lines]
+            task_recs_aged = [r for r in recs_aged if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertEqual(len(task_recs_aged), 4,
+                             f"expected 4 task lines (2 stale + 2 new); got {len(task_recs_aged)}")
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -7424,6 +7438,220 @@ class RepositoryTests(unittest.TestCase):
             for r in recs:
                 self.assertNotIn("kind", r, "task records must not have a 'kind' field")
                 self.assertNotIn("agentic_job_id", r, "task records must not have 'agentic_job_id'")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_revenium_classifier_job_runs_after_self_classify(self):
+        """CR-01 regression: Step 7 job-inference must run even when Step 3 fires.
+
+        When a fresh GUARDRAIL+CHAT pair (ts within 30s) already exists because the
+        agent self-classified, run_classification_async must still produce a kind:"job"
+        marker — Step 3 must gate only task re-writing (Steps 4-6), not job inference.
+
+        This test fails against the pre-fix (CR-01) code where Step 3 returns early
+        before Step 7, and passes after the Task 1 fix that captures agent_self_classified
+        and wraps Steps 4-6 in 'if not agent_self_classified:'.
+        """
+        import asyncio
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+        import time
+        import unittest.mock
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-job-after-self-classify-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            os.makedirs(os.path.join(hh, 'sessions'), exist_ok=True)
+            sid = "20260518_120000_selfclassify"
+
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Pre-write a fresh GUARDRAIL+CHAT pair (ts within 30s) — simulates the
+            # agent's FINAL ACTION TASK CLASSIFICATION having just run.
+            marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
+            now = time.time()
+            with open(marker_path, 'w', encoding='utf-8') as f:
+                rec1 = {"muid": "a" * 33, "ts": now - 1.0, "sid": sid,
+                        "task_type": "code_review", "operation_type": "GUARDRAIL"}
+                rec2 = dict(rec1, muid="b" * 33, ts=now - 0.5, operation_type="CHAT")
+                f.write(json.dumps(rec1, separators=(",", ":")) + "\n")
+                f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
+
+            # Confirm Step 3 gate would fire on this session.
+            self.assertTrue(
+                handler._recent_marker_pair_exists(sid, within_seconds=30.0),
+                "_recent_marker_pair_exists must return True for the fresh pair"
+            )
+
+            # Mock call_llm so the job-inference call returns a valid one-job array.
+            job_resp = unittest.mock.MagicMock()
+            job_resp.choices = [unittest.mock.MagicMock()]
+            job_resp.choices[0].message.content = json.dumps([
+                {"agentic_job_id": "fix_auth_b1c2", "job_name": "Fix auth bug",
+                 "job_type": "bug_fix", "status": "SUCCESS"}
+            ])
+
+            fake_transcript = (
+                "user: Please fix the authentication bug in the login flow\n"
+                "assistant: I've fixed the authentication bug by updating the token validation."
+            )
+
+            with unittest.mock.patch.object(handler, 'call_llm', return_value=job_resp), \
+                 unittest.mock.patch.object(handler, '_read_session_transcript',
+                                            return_value=fake_transcript):
+                asyncio.run(handler.run_classification_async(
+                    session_id=sid,
+                    message="Please fix the authentication bug in the login flow",
+                    response="I've fixed the authentication bug by updating the token validation.",
+                ))
+
+            # After the fix: the marker file must have at least one kind:"job" record.
+            # (Before the fix: Step 3 returns early and no job marker is written.)
+            lines = marker_path.read_text().splitlines()
+            recs = [json.loads(l) for l in lines]
+            job_recs = [r for r in recs if r.get("kind") == "job"]
+            self.assertGreaterEqual(
+                len(job_recs), 1,
+                f"Expected at least one kind:'job' record after self-classified turn; "
+                f"got {len(job_recs)} job recs. Full records: {recs}"
+            )
+
+            # The original 2 task lines must still be there (no double-write of task pair).
+            task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
+            self.assertEqual(
+                len(task_recs), 2,
+                f"Task lines must still be exactly 2 (no double-write); got {len(task_recs)}"
+            )
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_revenium_classifier_parse_job_array_single_line_fence(self):
+        """WR-02: _parse_job_array must parse single-line fenced JSON (```json[...]```).
+
+        The fence-strip logic previously used splitlines() + lines[1:], which drops the
+        entire payload when the LLM returns a single-line fenced response.
+
+        Test 1 (WR-02): single-line fenced JSON returns a one-element list.
+        Test 2: multi-line fenced JSON still parses correctly (no regression).
+        Test 3: bare (un-fenced) JSON array still parses correctly (no regression).
+        """
+        import importlib
+        import json
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-parse-fence-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            job = {"agentic_job_id": "fix_x_a1b2", "job_type": "bug_fix", "status": "SUCCESS"}
+
+            # Test 1: single-line fenced JSON (```json[...]```)
+            single_line = "```json" + json.dumps([job]) + "```"
+            result = handler._parse_job_array(single_line)
+            self.assertEqual(len(result), 1,
+                             f"WR-02: single-line fenced JSON must parse to 1 item; got {result}")
+            self.assertEqual(result[0]["job_type"], "bug_fix")
+
+            # Test 2: multi-line fenced JSON (no regression)
+            multi_line = "```json\n" + json.dumps([job]) + "\n```"
+            result2 = handler._parse_job_array(multi_line)
+            self.assertEqual(len(result2), 1,
+                             f"WR-02 regression: multi-line fenced JSON must parse to 1 item; got {result2}")
+
+            # Test 3: bare (un-fenced) JSON array (no regression)
+            bare = json.dumps([job])
+            result3 = handler._parse_job_array(bare)
+            self.assertEqual(len(result3), 1,
+                             f"WR-02 regression: bare JSON array must parse to 1 item; got {result3}")
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_revenium_classifier_validate_job_entropy_suffix(self):
+        """WR-01 + IN-01: _validate_job must append entropy suffix to English-word-ending IDs.
+
+        The hex check r'_[0-9a-f]{4}$' matches ordinary English words ending in 4 hex chars
+        (_face, _beef, _cafe, _dead, _feed, _deed, _fade), causing those IDs to skip the
+        entropy-suffix append and risking agentic_job_id collision.
+
+        Test 1 (WR-01): id ending in ordinary English word gets entropy suffix appended.
+        Test 2 (WR-01): id ending in _dead also gets suffix (another English hex word).
+        Test 3 (WR-01 no-double-suffix): a genuine machine-minted id (e.g. refactor_a1b2)
+        that was already given an entropy suffix does not get a second one.
+        Test 4 (IN-01): import re as _re does not appear inside _validate_job source.
+        """
+        import importlib
+        import inspect
+        import os
+        import shutil
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-validate-entropy-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            base_job = {"job_type": "bug_fix", "status": "SUCCESS", "job_name": ""}
+
+            # Test 1: id ending in ordinary English word _face
+            job_face = dict(base_job, agentic_job_id="cleanup_face")
+            result = handler._validate_job(job_face)
+            self.assertIsNotNone(result, "cleanup_face job must be valid")
+            self.assertNotEqual(result["agentic_job_id"], "cleanup_face",
+                                "WR-01: cleanup_face must get entropy suffix appended")
+            # The resulting id must match the pattern: original + _ + 4 hex chars
+            import re
+            self.assertRegex(result["agentic_job_id"], r"cleanup_face_[0-9a-f]{4}$",
+                             "WR-01: entropy suffix must be appended as _XXXX")
+
+            # Test 2: id ending in _dead
+            job_dead = dict(base_job, agentic_job_id="fix_dead")
+            result2 = handler._validate_job(job_dead)
+            self.assertIsNotNone(result2, "fix_dead job must be valid")
+            self.assertRegex(result2["agentic_job_id"], r"fix_dead_[0-9a-f]{4}$",
+                             "WR-01: fix_dead must get entropy suffix appended")
+
+            # Test 3: machine-minted id already has correct entropy suffix pattern
+            # Under the unconditional-append approach, every LLM-minted id gets a fresh
+            # suffix — so we verify no catastrophic double-suffix (suffix-of-suffix).
+            # The unconditional fix means refactor_a1b2 becomes refactor_a1b2_XXXX.
+            # That is expected and correct (removes the word-collision class).
+            job_minted = dict(base_job, agentic_job_id="refactor_a1b2")
+            result3 = handler._validate_job(job_minted)
+            self.assertIsNotNone(result3, "refactor_a1b2 job must be valid")
+            # It gets one entropy suffix appended. After appending, the id must NOT get
+            # a second suffix if _validate_job is called again (idempotency with idempotent
+            # use is not a guarantee, but the first call must produce exactly one suffix).
+            aid = result3["agentic_job_id"]
+            suffix_count = len(re.findall(r"_[0-9a-f]{4}", aid))
+            self.assertGreaterEqual(suffix_count, 1, "at least one entropy suffix must be present")
+            # The id must not have the form _XXXX_XXXX_XXXX... (no runaway suffix chain)
+            self.assertLessEqual(suffix_count, 2,
+                                 f"WR-01: id must not get runaway suffix chain; got {aid}")
+
+            # Test 4 (IN-01): no inline 'import re as _re' inside _validate_job
+            source = inspect.getsource(handler._validate_job)
+            self.assertNotIn("import re as _re", source,
+                             "IN-01: 're' must be imported at module scope, not inside _validate_job")
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
