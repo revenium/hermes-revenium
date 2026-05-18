@@ -384,104 +384,46 @@ class RepositoryTests(unittest.TestCase):
         )
 
     def test_job_marker_snippets_resolve_session_id_from_session_files(self):
-        """The job-declaration execute_code snippet must resolve the session id from
-        the current-format ~/.hermes/sessions/session_<id>.json transcripts
-        (newest non-cron), not the broken legacy *.jsonl glob or a HERMES_SESSION_ID
-        env var that execute_code never receives.
-        Phase 12 D-05: the HALT CHECK agent-side marker write was removed (the
-        pre_tool_call hook now writes the CANCELLED marker); only the JOB DECLARATION
-        snippet remains."""
+        """Phase 13 D-07: the JOB DECLARATION block was demoted to a defense-in-depth
+        backstop — the agent-side execute_code snippet was removed because the
+        revenium-classifier plugin is now the primary job-marker author (on_session_end).
+        Assert the snippet is absent from SKILL.md so the demoted state is enforced.
+        Phase 12 D-05: the HALT CHECK agent-side marker write was also removed
+        (the pre_tool_call hook writes the CANCELLED marker)."""
         text = (SKILL / 'SKILL.md').read_text()
         blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
         job_blocks = [b for b in blocks if 'def write_job_marker' in b]
         self.assertEqual(
-            len(job_blocks), 1,
-            'expected exactly 1 job-marker snippet in SKILL.md (JOB DECLARATION only — '
-            'Phase 12 D-05 removed the HALT CHECK agent-side marker write), '
-            f'found {len(job_blocks)}')
-        for b in job_blocks:
-            self.assertIn(
-                'f.startswith("session_")', b,
-                'job-marker snippet must select session_<id>.json transcript files')
-            self.assertIn(
-                'f.endswith(".json")', b,
-                'job-marker snippet must select .json transcripts, not legacy .jsonl')
-            self.assertIn(
-                'not f.startswith("session_cron_")', b,
-                'job-marker snippet must exclude cron sessions from id resolution')
-            self.assertNotIn(
-                'endswith(".jsonl")', b,
-                'job-marker snippet must not use the stale legacy *.jsonl glob — '
-                'it matches old session files and mis-attributes markers')
-            self.assertNotIn(
-                'os.environ.get("HERMES_SESSION_ID")', b,
-                'job-marker snippet must not rely on HERMES_SESSION_ID — '
-                'execute_code never receives that var')
+            len(job_blocks), 0,
+            'Phase 13 D-07: the execute_code write_job_marker snippet must be absent from '
+            'SKILL.md — the revenium-classifier plugin is now the primary job-marker author; '
+            f'found {len(job_blocks)} snippet(s)')
 
     def test_job_declaration_snippet_does_not_clobber_seeded_taxonomy(self):
-        """CR-01 regression: an agent supplying a casing/spelling variant of an
-        already-seeded job_type ("Bug Fix" for seeded "bug_fix") must be treated
-        as a reuse — it must NOT overwrite the curated seed entry."""
-        import json
-        import os
-        import tempfile
+        """CR-01 / Phase 13 D-07: the JOB DECLARATION execute_code snippet was removed
+        from SKILL.md (demoted to a backstop). The CR-01 taxonomy-clobber invariant is
+        now enforced in the revenium-classifier plugin (classifier.py), not in an
+        agent-side snippet. Assert the snippet is absent so the demoted state holds."""
         text = (SKILL / 'SKILL.md').read_text()
         blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
-        snippet = next(b for b in blocks
-                       if 'def write_job_marker' in b and 'taxonomy_path' in b)
-        with tempfile.TemporaryDirectory() as home:
-            rev = os.path.join(home, '.hermes', 'state', 'revenium')
-            os.makedirs(rev)
-            os.makedirs(os.path.join(home, '.hermes', 'sessions'))
-            tax_path = os.path.join(rev, 'job-taxonomy.json')
-            curated = {'labels': {'bug_fix': {
-                'description': 'CURATED DESCRIPTION',
-                'examples': ['curated example one', 'curated example two'],
-            }}}
-            with open(tax_path, 'w') as f:
-                json.dump(curated, f)
-            src = snippet
-            src = re.sub(r'^agentic_job_id = .*$',
-                         'agentic_job_id = "fix-the-login-bug-1a2b"', src, flags=re.M)
-            src = re.sub(r'^job_name = .*$',
-                         'job_name = "Fixed the login bug"', src, flags=re.M)
-            src = re.sub(r'^job_type = .*$', 'job_type = "Bug Fix"', src, flags=re.M)
-            src = re.sub(r'^status = .*$', 'status = "SUCCESS"', src, flags=re.M)
-            old_home = os.environ.get('HOME')
-            os.environ['HOME'] = home
-            try:
-                exec(compile(src, 'job-declaration-snippet', 'exec'), {})
-            finally:
-                if old_home is not None:
-                    os.environ['HOME'] = old_home
-            with open(tax_path) as f:
-                after = json.load(f)
+        snippet_blocks = [b for b in blocks if 'def write_job_marker' in b and 'taxonomy_path' in b]
         self.assertEqual(
-            after['labels']['bug_fix']['description'], 'CURATED DESCRIPTION',
-            'CR-01: variant spelling "Bug Fix" overwrote the curated bug_fix description')
-        self.assertEqual(
-            after['labels']['bug_fix']['examples'],
-            ['curated example one', 'curated example two'],
-            'CR-01: variant spelling "Bug Fix" wiped the curated bug_fix examples')
+            len(snippet_blocks), 0,
+            'Phase 13 D-07: write_job_marker+taxonomy snippet must be absent from SKILL.md; '
+            f'found {len(snippet_blocks)} — the classifier plugin is now the taxonomy author')
 
     def test_job_declaration_placeholder_job_type_is_a_seeded_label(self):
-        """WR-02: the JOB DECLARATION snippet's placeholder job_type must be a
-        label already in job-taxonomy.json, so an un-substituted run reuses it
-        rather than polluting the live taxonomy with the placeholder string."""
-        import json
+        """WR-02 / Phase 13 D-07: the JOB DECLARATION execute_code snippet was removed
+        from SKILL.md (demoted to a backstop). The WR-02 placeholder-job_type invariant
+        no longer applies to an agent-side snippet; the revenium-classifier plugin owns
+        job_type minting now. Assert the snippet is absent so the demoted state holds."""
         text = (SKILL / 'SKILL.md').read_text()
         blocks = re.findall(r'```python\n(.*?)\n```', text, re.DOTALL)
-        snippet = next(b for b in blocks
-                       if 'def write_job_marker' in b and 'taxonomy_path' in b)
-        m = re.search(r'^job_type = "([^"]*)"', snippet, re.M)
-        self.assertIsNotNone(
-            m, 'JOB DECLARATION snippet must define a placeholder job_type')
-        placeholder = m.group(1)
-        seed = json.loads((SKILL / 'job-taxonomy.json').read_text())
-        self.assertIn(
-            placeholder, seed.get('labels', {}),
-            f'WR-02: placeholder job_type "{placeholder}" is not a seeded label — '
-            'an un-substituted run would pollute the live taxonomy')
+        snippet_blocks = [b for b in blocks if 'def write_job_marker' in b and 'taxonomy_path' in b]
+        self.assertEqual(
+            len(snippet_blocks), 0,
+            'Phase 13 D-07: write_job_marker+taxonomy snippet must be absent from SKILL.md; '
+            f'found {len(snippet_blocks)} — the classifier plugin owns job_type minting now')
 
     def test_shell_scripts_have_valid_syntax(self):
         scripts = sorted((SKILL / 'scripts').glob('*.sh'))
