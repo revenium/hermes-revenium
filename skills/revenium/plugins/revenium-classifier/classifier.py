@@ -125,6 +125,162 @@ def _read_session_messages(sid: str) -> "tuple[str, str]":
         return ("", "")
 
 
+# ---------------------------------------------------------------------------
+# Phase 13 job-path helpers — mirror the task-path above, don't merge (D-01).
+# ---------------------------------------------------------------------------
+
+def _read_session_transcript(
+    sid: str,
+    max_chars: int = 8000,
+    per_msg_cap: int = 500,
+) -> str:
+    """Return a chronologically-ordered (timestamp ASC) transcript for `sid`.
+
+    Mirrors _read_session_messages with two deliberate deviations:
+    - ORDER BY timestamp ASC (arc progression for the LLM, not latest-pair-first)
+    - No early break; collect full history, but cap per-message to `per_msg_cap`
+      chars and stop appending once the total would exceed `max_chars` — a full
+      500K–725K-token session dump would blow the LLM context window.
+
+    Returns "" on any failure (D-04 fail-open).
+    """
+    if not sid:
+        return ""
+    if not STATE_DB.exists():
+        return ""
+    try:
+        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=2.0)
+        try:
+            cursor = conn.execute(
+                "SELECT role, content FROM messages"
+                " WHERE session_id = ? AND content IS NOT NULL AND content != ''"
+                " ORDER BY timestamp ASC",
+                (sid,),
+            )
+            parts = []
+            total = 0
+            for row in cursor:
+                role, content = row[0], row[1]
+                snippet = (content or "")[:per_msg_cap]
+                line = f"{role}: {snippet}"
+                if total + len(line) > max_chars:
+                    break
+                parts.append(line)
+                total += len(line)
+        finally:
+            conn.close()
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
+    """Build the job-inference prompt — mirror of _build_classification_prompt.
+
+    Deviations from the task-path analog:
+    - Output is a JSON array of job objects (agentic_job_id, job_name, job_type, status).
+    - Includes arc-boundary guidance (same goal incl. follow-up fixes = one arc).
+    - Conservative status criteria (SUCCESS only on checkable evidence, CANCELLED
+      is the uncertainty-bias catch-all per Phase 8 DECLARE-05).
+    - LLM emits the business label; code appends secrets.token_hex(2) suffix in
+      Plan 02's _validate_job step (documented here; not applied in this helper).
+    """
+    labels_block = ", ".join(job_labels) if job_labels else "(no existing labels yet)"
+    if len(labels_block) > 1024:
+        labels_block = labels_block[:1024] + " ... [truncated]"
+    transcript_preview = (transcript or "")[:6000]
+    return (
+        "You are analyzing a Hermes AI agent session to identify the discrete task arcs "
+        "completed by the agent. A task arc is a goal-directed sequence of turns with a "
+        "single objective; follow-up fixes to the same goal are part of the same arc.\n\n"
+        "Output ONLY a JSON array of job objects. Each object must have:\n"
+        "  - agentic_job_id: a SPECIFIC, DESCRIPTIVE snake_case business label "
+        "(e.g. fix_auth_regression, prod_log_triage, weekly_pr_review)\n"
+        "  - job_name: a short human-readable name (sentence case, max 60 chars)\n"
+        "  - job_type: a snake_case category label matching ^[a-z][a-z0-9_]{1,47}$\n"
+        "  - status: one of SUCCESS, FAILED, or CANCELLED\n\n"
+        "Status guidance:\n"
+        "  SUCCESS: only when there is clear evidence the goal was achieved.\n"
+        "  FAILED: only when there is explicit evidence of failure.\n"
+        "  CANCELLED: use when uncertain — this is the uncertainty-bias catch-all.\n\n"
+        "Mint a SPECIFIC agentic_job_id. "
+        "You MAY reuse one of the existing job_type labels, but only if it is an exact match. "
+        "If no existing label fits, mint a new one.\n\n"
+        f"Existing job_type labels (for reference): {labels_block}\n\n"
+        f"Session transcript:\n{transcript_preview}\n\n"
+        "JSON array:"
+    )
+
+
+def _parse_job_array(raw: str) -> list:
+    """Parse an LLM response into a list of job dicts. Fail-open: returns [] on any error.
+
+    - Strips leading/trailing ```json ... ``` markdown fences.
+    - json.loads the result; on JSONDecodeError returns [].
+    - Coerces a lone dict (single-job session) to [dict].
+    - Drops any non-dict elements (defensive against LLM adding strings/ints).
+    - Returns [] on any error.
+    """
+    try:
+        text = (raw or "").strip()
+        # Strip markdown fence: ```json ... ``` or ``` ... ```
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Drop first line (```json or ```) and last ``` if present.
+            inner_lines = lines[1:]
+            if inner_lines and inner_lines[-1].strip() == "```":
+                inner_lines = inner_lines[:-1]
+            text = "\n".join(inner_lines).strip()
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if not isinstance(parsed, list):
+            return []
+        return [item for item in parsed if isinstance(item, dict)]
+    except Exception:
+        return []
+
+
+async def _infer_jobs_via_llm(transcript: str, job_labels: list) -> list:
+    """Invoke the user's main LLM to infer jobs from the session transcript.
+
+    Mirror of _classify_via_llm with deviations:
+    - Returns [] (not "unclassified") when call_llm is None.
+    - max_tokens=512, timeout=20.0 (larger: array output, bigger prompt).
+    - Passes raw response through _parse_job_array instead of .strip().
+    - CRITICALLY: NO `task=` kwarg (uses user's main provider+model from config.yaml).
+    """
+    if call_llm is None:
+        return []
+    prompt = _build_job_inference_prompt(transcript, job_labels)
+    try:
+        response = await asyncio.to_thread(
+            call_llm,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You analyze Hermes agent session transcripts to identify "
+                        "completed task arcs. Output only a JSON array."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=512,
+            timeout=20.0,
+        )
+        # Extract content; tolerate openai SDK response shape variations.
+        try:
+            raw = response.choices[0].message.content
+        except AttributeError:
+            raw = response["choices"][0]["message"]["content"]
+        return _parse_job_array(raw or "")
+    except Exception as exc:
+        logger.warning("revenium-classifier job inference LLM call failed: %s", exc)
+        return []
+
+
 def _read_latest_task_type(sid: str) -> "str | None":
     """Return the task_type of the most recent valid marker record for `sid`, or None
     if the file is missing or has no valid records. Used by D-05 subagent inheritance."""
