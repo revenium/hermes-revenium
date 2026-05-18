@@ -39,6 +39,7 @@ STATE_DIR = Path(os.environ.get("REVENIUM_STATE_DIR", str(HERMES_HOME / "state" 
 MARKERS_DIR = Path(os.environ.get("REVENIUM_MARKERS_DIR", str(STATE_DIR / "markers")))
 MARKERS_READY_DIR = Path(os.environ.get("REVENIUM_MARKERS_READY_DIR", str(MARKERS_DIR / ".ready")))
 TAXONOMY_FILE = Path(os.environ.get("REVENIUM_TAXONOMY_FILE", str(STATE_DIR / "task-taxonomy.json")))
+JOB_TAXONOMY_FILE = Path(os.environ.get("REVENIUM_JOB_TAXONOMY_FILE", str(STATE_DIR / "job-taxonomy.json")))
 BUDGET_STATUS_FILE = STATE_DIR / "budget-status.json"
 STATE_DB = HERMES_HOME / "state.db"
 

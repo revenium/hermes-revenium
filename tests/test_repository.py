@@ -29,7 +29,7 @@ def _setup_plugin_env(tmpdir):
     os.makedirs(markers_dir, mode=0o700)
     snapshot = {k: os.environ.get(k) for k in (
         'HERMES_HOME', 'REVENIUM_STATE_DIR', 'REVENIUM_MARKERS_DIR',
-        'REVENIUM_TAXONOMY_FILE',
+        'REVENIUM_TAXONOMY_FILE', 'REVENIUM_JOB_TAXONOMY_FILE',
     )}
     os.environ['HERMES_HOME'] = hermes_home
     os.environ['REVENIUM_STATE_DIR'] = state_dir
@@ -6661,9 +6661,8 @@ class RepositoryTests(unittest.TestCase):
         import tempfile
 
         tmpdir = tempfile.mkdtemp(prefix='gsd-job-taxonomy-')
+        # _setup_plugin_env now snapshots REVENIUM_JOB_TAXONOMY_FILE too (Task 1).
         snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
-        # Also snapshot/set REVENIUM_JOB_TAXONOMY_FILE for job-taxonomy isolation.
-        snap['REVENIUM_JOB_TAXONOMY_FILE'] = os.environ.get('REVENIUM_JOB_TAXONOMY_FILE')
         try:
             if 'classifier' in sys.modules:
                 importlib.reload(sys.modules['classifier'])
@@ -6681,10 +6680,6 @@ class RepositoryTests(unittest.TestCase):
             import classifier as handler2  # noqa: F811
             self.assertEqual(str(handler2.JOB_TAXONOMY_FILE), override_path)
         finally:
-            if snap.get('REVENIUM_JOB_TAXONOMY_FILE') is None:
-                os.environ.pop('REVENIUM_JOB_TAXONOMY_FILE', None)
-            else:
-                os.environ['REVENIUM_JOB_TAXONOMY_FILE'] = snap.pop('REVENIUM_JOB_TAXONOMY_FILE')
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
