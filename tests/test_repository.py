@@ -79,6 +79,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'pre_tool_call.sh',     # Phase 12 — pre-tool-call block + CANCELLED marker
             SKILL / 'scripts' / 'install-hooks.sh',     # Phase 12 — idempotent config.yaml hook installer
             SKILL / 'scripts' / 'uninstall-hooks.sh',   # Phase 12 — hook uninstaller
+            SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
