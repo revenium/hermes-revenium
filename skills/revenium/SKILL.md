@@ -233,7 +233,7 @@ Follow these steps in order. If any step fails, STOP. Do NOT write an `alertId` 
     ```
     bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
     ```
-    This registers the `pre_llm_call` and `pre_tool_call` revenium shell hooks in `~/.hermes/config.yaml` for structural budget-halt enforcement. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
+    This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` revenium shell hooks in `~/.hermes/config.yaml`. The `pre_llm_call` and `pre_tool_call` hooks enforce structural budget-halt; the `post_tool_call` hook captures per-tool-call usage data to `~/.hermes/state/revenium/tool-events/<sid>.jsonl` for Revenium analytics (no network call in the agent hot path). The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
 
 If any step from 1–13 fails, stop and explain the failure. Do NOT leave a partial `config.json` with an `alertId` for an alert that does not exist.
 
@@ -275,7 +275,7 @@ When the user invokes `/revenium`:
 ## Verification
 
 - `bash ~/.hermes/skills/revenium/scripts/install-cron.sh` succeeds and `crontab -l | grep hermes-revenium-metering` returns one entry.
-- `bash ~/.hermes/skills/revenium/scripts/install-hooks.sh` succeeds and the revenium hook commands are registered in `~/.hermes/config.yaml` — verifiable with `grep hermes-revenium-hooks ~/.hermes/config.yaml` returning the hook tag.
+- `bash ~/.hermes/skills/revenium/scripts/install-hooks.sh` succeeds and all three hook commands (`pre_llm_call`, `pre_tool_call`, `post_tool_call`) are registered in `~/.hermes/config.yaml` — verifiable with `grep hermes-revenium-hooks ~/.hermes/config.yaml` returning the hook tag and `grep post_tool_call ~/.hermes/config.yaml` returning the hook entry.
 - `bash ~/.hermes/skills/revenium/scripts/cron.sh` updates `~/.hermes/state/revenium/budget-status.json`.
 - Revenium receives transactions from `~/.hermes/state.db` (visible in the Revenium UI under metering).
 - When over budget with autonomous mode on, `budget-status.json` flips to `halted: true` and Hermes sends the halt notification through the configured messaging channel.
