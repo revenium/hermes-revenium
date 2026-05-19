@@ -2,6 +2,33 @@
 
 Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event metering for [Hermes Agent](https://hermes-agent.nousresearch.com) using the [Revenium](https://www.revenium.ai) platform. Every metered completion carries a meaningful `--task-type` drawn from a controlled vocabulary so Revenium analytics show *what the agent was doing* — not just an undifferentiated session total. Discrete task arcs are reported as Revenium agentic jobs with immutable once-only outcomes, and every Hermes tool call is metered via `revenium meter tool-event` — all while budget guardrails halt the agent structurally before it can overspend.
 
+## Quick Start
+
+Four steps to get up and running:
+
+1. **Install the skill** — the recommended path is the GitHub tap (see [Installation](#installation) below):
+
+   ```bash
+   hermes skills tap add revenium/hermes-revenium
+   hermes skills install revenium/hermes-revenium/skills/revenium --force
+   ```
+
+2. **Install the per-minute metering cron:**
+
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
+   ```
+
+3. **Install the Hermes shell hooks:**
+
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+   ```
+
+4. **Start the guided Setup Flow** — open a Hermes session and invoke `/revenium`. On a fresh install (no `config.json` or no `alertId`), the skill detects the missing configuration and automatically walks you through the one-time setup. Once configured, `/revenium` instead shows status and reconfigure options.
+
+Each step is detailed in full below.
+
 ## Prerequisites
 
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) installed and running
@@ -95,7 +122,7 @@ tail -f ~/.hermes/state/revenium/revenium-metering.log
 
 ## First-time setup
 
-Once the cron and hooks are in place, setup runs the first time you use the skill — Hermes walks you through it. The skill will:
+Once the cron and hooks are in place, start a Hermes session and invoke `/revenium` to kick off the guided Setup Flow. The skill detects that no `config.json` or `alertId` exists and automatically begins setup — you can also simply start using the skill and setup runs on your first interaction. Once configured, invoking `/revenium` instead offers status, reset, and reconfigure options. The skill will:
 
 1. Verify the `revenium` CLI is configured (asks for API key, Team ID, Tenant ID, User ID if not).
 2. Optionally ask for an organization name (for Revenium reporting attribution).
