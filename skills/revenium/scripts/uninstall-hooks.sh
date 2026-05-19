@@ -34,10 +34,11 @@ content = config_path.read_text(encoding="utf-8")
 # Remove the HOOK_TAG comment line.
 content = re.sub(r"^" + re.escape(hook_tag) + r"\s*\n?", "", content, flags=re.MULTILINE)
 
-# Remove revenium hook entries under pre_llm_call: and pre_tool_call:.
+# Remove revenium hook entries under pre_llm_call:, pre_tool_call:, post_tool_call:.
 # Strategy: remove any list item (  - command: ...) whose command path is one
-# of the revenium hook scripts (pre_llm_call.sh / pre_tool_call.sh), and then
-# remove any hook event key (pre_llm_call:, pre_tool_call:) that ends up empty.
+# of the revenium hook scripts (pre_llm_call.sh / pre_tool_call.sh /
+# post_tool_call.sh), and then remove any hook event key (pre_llm_call:,
+# pre_tool_call:, post_tool_call:) that ends up empty.
 # WR-01: anchor on the hook SCRIPT PATH, not the bare substring 'revenium' — an
 # unrelated command containing 'revenium' (e.g. /usr/bin/revenium-other-hook)
 # must NOT be removed.
@@ -52,7 +53,7 @@ def remove_revenium_list_items(text):
         # Check if this is a revenium hook list item opener:
         # "    - command: .../scripts/pre_llm_call.sh" (or pre_tool_call.sh).
         if (re.match(r"^\s+-\s+command:", line)
-                and re.search(r"scripts/(pre_llm_call|pre_tool_call)\.sh\b", line)):
+                and re.search(r"scripts/(pre_llm_call|pre_tool_call|post_tool_call)\.sh\b", line)):
             # Skip this item: consume all continuation lines (deeper indented or empty).
             base_indent = len(line) - len(line.lstrip())
             i += 1
@@ -81,7 +82,7 @@ def remove_empty_hook_keys(text):
     while i < len(lines):
         line = lines[i]
         # Detect a hook event key like "  pre_llm_call:" or "  pre_tool_call:"
-        m = re.match(r"^(\s+)(pre_llm_call|pre_tool_call):\s*$", line)
+        m = re.match(r"^(\s+)(pre_llm_call|pre_tool_call|post_tool_call):\s*$", line)
         if m:
             # Look ahead: if the next non-blank line has the same or less indentation,
             # this key has no children — skip it.

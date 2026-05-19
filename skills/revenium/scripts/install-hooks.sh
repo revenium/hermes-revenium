@@ -13,13 +13,15 @@ ensure_path
 HOOK_TAG="# hermes-revenium-hooks"
 PRE_LLM_SCRIPT="${SKILL_DIR}/scripts/pre_llm_call.sh"
 PRE_TOOL_SCRIPT="${SKILL_DIR}/scripts/pre_tool_call.sh"
+POST_TOOL_SCRIPT="${SKILL_DIR}/scripts/post_tool_call.sh"
 
 # Idempotency check — re-run is a no-op (D-01, CR-01).
-# Key the fast-path on whether BOTH revenium command paths are already present,
+# Key the fast-path on whether ALL revenium command paths are already present,
 # NOT on a bare HOOK_TAG grep — a stale HOOK_TAG without the commands must NOT
 # short-circuit the install.
 if grep -qF "${PRE_LLM_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null \
-   && grep -qF "${PRE_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null; then
+   && grep -qF "${PRE_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null \
+   && grep -qF "${POST_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null; then
   echo "Revenium hooks already registered in ${HOOKS_CONFIG_FILE}"
   exit 0
 fi
@@ -34,10 +36,11 @@ fi
 
 # Patch config.yaml with a stdlib-only re-based Python heredoc (no PyYAML).
 # Mirrors the proven approach in setup-local.sh lines 49-119.
-# Receives config path, pre_llm script path, pre_tool script path, and HOOK_TAG via argv.
+# Receives config path, hook script paths, and HOOK_TAG via argv.
 HOOKS_CONFIG_FILE="${HOOKS_CONFIG_FILE}" \
 PRE_LLM_SCRIPT="${PRE_LLM_SCRIPT}" \
 PRE_TOOL_SCRIPT="${PRE_TOOL_SCRIPT}" \
+POST_TOOL_SCRIPT="${POST_TOOL_SCRIPT}" \
 HOOK_TAG="${HOOK_TAG}" \
 python3 - <<'PYEOF'
 import os
@@ -47,9 +50,10 @@ from pathlib import Path
 config_path = Path(os.environ['HOOKS_CONFIG_FILE'])
 pre_llm = os.environ['PRE_LLM_SCRIPT']
 pre_tool = os.environ['PRE_TOOL_SCRIPT']
+post_tool = os.environ['POST_TOOL_SCRIPT']
 hook_tag = os.environ['HOOK_TAG']
 
-# The hooks block to insert — two entries, no matcher: field (fires for ALL tools).
+# The hooks block to insert — three entries, no matcher: field (fires for ALL tools).
 hooks_block = (
     "hooks:\n"
     "  pre_llm_call:\n"
@@ -57,6 +61,9 @@ hooks_block = (
     "      timeout: 5\n"
     "  pre_tool_call:\n"
     "    - command: " + pre_tool + "\n"
+    "      timeout: 5\n"
+    "  post_tool_call:\n"
+    "    - command: " + post_tool + "\n"
     "      timeout: 5\n"
     + hook_tag + "\n"
 )
@@ -156,6 +163,7 @@ existing_hooks = content[hooks_start:hooks_end]
 # never by branching on the pre_llm_call: / pre_tool_call: event-key names.
 pre_llm_present = bool(re.search(re.escape(pre_llm), existing_hooks))
 pre_tool_present = bool(re.search(re.escape(pre_tool), existing_hooks))
+post_tool_present = bool(re.search(re.escape(post_tool), existing_hooks))
 
 new_hooks = existing_hooks
 status = []
@@ -178,6 +186,15 @@ if not pre_tool_present:
         new_hooks = new_hooks + full_event_key("pre_tool_call", pre_tool)
         status.append("Added pre_tool_call key and revenium command to hooks block")
 
+if not post_tool_present:
+    patched = insert_command_under_key(new_hooks, "post_tool_call", post_tool)
+    if patched is not None:
+        new_hooks = patched
+        status.append("Added post_tool_call revenium command under existing post_tool_call key")
+    else:
+        new_hooks = new_hooks + full_event_key("post_tool_call", post_tool)
+        status.append("Added post_tool_call key and revenium command to hooks block")
+
 # Rebuild: replace from the beginning of the `hooks:` line through hooks_end
 # so that an inline-empty `hooks: {}` line is rewritten as a bare `hooks:`.
 new_content = content[:line_start] + "hooks:\n" + new_hooks + content[hooks_end:]
@@ -189,6 +206,7 @@ final_hooks = new_content[final_extent[1]:final_extent[2]]
 both_present = (
     bool(re.search(re.escape(pre_llm), final_hooks))
     and bool(re.search(re.escape(pre_tool), final_hooks))
+    and bool(re.search(re.escape(post_tool), final_hooks))
 )
 if both_present and not re.search(
         r"^" + re.escape(hook_tag) + r"\s*$", new_content, re.MULTILINE):
@@ -204,11 +222,12 @@ else:
     print("Revenium hooks already present in " + str(config_path))
 PYEOF
 
-chmod +x "${PRE_LLM_SCRIPT}" "${PRE_TOOL_SCRIPT}"
+chmod +x "${PRE_LLM_SCRIPT}" "${PRE_TOOL_SCRIPT}" "${POST_TOOL_SCRIPT}"
 
 echo "Revenium hooks installed in ${HOOKS_CONFIG_FILE}"
-echo "   pre_llm_call:  ${PRE_LLM_SCRIPT}"
-echo "   pre_tool_call: ${PRE_TOOL_SCRIPT}"
+echo "   pre_llm_call:   ${PRE_LLM_SCRIPT}"
+echo "   pre_tool_call:  ${PRE_TOOL_SCRIPT}"
+echo "   post_tool_call: ${POST_TOOL_SCRIPT}"
 echo ""
 echo "Next step: run 'hermes chat' and approve the revenium hooks when prompted (D-03)."
 echo "   Hooks are registered but inert until the user approves them on first use."
