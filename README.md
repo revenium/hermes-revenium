@@ -1,6 +1,6 @@
 # Hermes Revenium Skill
 
-Budget enforcement and token metering for [Hermes Agent](https://hermes-agent.nousresearch.com) using the [Revenium](https://www.revenium.ai) platform. Tracks AI spend, enforces configurable budget guardrails, and reports usage automatically — so agents never silently blow through your token budget.
+Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event metering for [Hermes Agent](https://hermes-agent.nousresearch.com) using the [Revenium](https://www.revenium.ai) platform. Every metered completion carries a meaningful `--task-type` drawn from a controlled vocabulary so Revenium analytics show *what the agent was doing* — not just an undifferentiated session total. Discrete task arcs are reported as Revenium agentic jobs with immutable once-only outcomes, and every Hermes tool call is metered via `revenium meter tool-event` — all while budget guardrails halt the agent structurally before it can overspend.
 
 ## Prerequisites
 
@@ -66,9 +66,11 @@ To make this skill discoverable through Hermes' skill index:
 hermes skills publish skills/revenium --to github --repo revenium/hermes-revenium
 ```
 
-## Required: install the metering cron
+## Required: install the cron and hooks
 
-After installing the skill (any of the options above), run this once to install the per-minute crontab entry:
+After installing the skill (any of the options above), run these two commands once.
+
+**Install the per-minute metering cron:**
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/install-cron.sh
@@ -76,7 +78,15 @@ bash ~/.hermes/skills/revenium/scripts/install-cron.sh
 
 The cron meters `~/.hermes/state.db` into Revenium and refreshes `~/.hermes/state/revenium/budget-status.json`. Hermes can't add crontab entries itself, so this step is manual. **Without it, the agent will tell you "Budget status not yet available" before every operation** — that's the skill correctly detecting the missing cron.
 
-To confirm:
+**Install the Hermes shell hooks:**
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+```
+
+The shell hooks register `pre_llm_call`, `pre_tool_call`, and `post_tool_call` handlers in `~/.hermes/config.yaml`. They are inert until you approve them on first `hermes chat`. Without the hooks, structural budget enforcement and tool-event capture are inactive.
+
+To confirm the cron is running:
 
 ```bash
 crontab -l | grep hermes-revenium-metering   # one entry
@@ -85,7 +95,7 @@ tail -f ~/.hermes/state/revenium/revenium-metering.log
 
 ## First-time setup
 
-Once the cron is in place, setup runs the first time you use the skill — Hermes walks you through it. The skill will:
+Once the cron and hooks are in place, setup runs the first time you use the skill — Hermes walks you through it. The skill will:
 
 1. Verify the `revenium` CLI is configured (asks for API key, Team ID, Tenant ID, User ID if not).
 2. Optionally ask for an organization name (for Revenium reporting attribution).
@@ -98,21 +108,32 @@ Setup is atomic — if any step fails, no partial config is written. The full st
 
 ## How it works
 
-### Token metering
+### Token metering with task-type classification
 
-A background cron runs every minute and:
+A background cron runs every minute and reports token usage (`hermes-report.sh`): it reads token deltas from `~/.hermes/state.db`, then ships one `revenium meter completion` per marker. Each completion carries `--task-type` and `--operation-type` drawn from the task taxonomy, and job-owning markers also receive `--agentic-job-id`. The idempotency ledger key is `HERMES:<session_id>:<total_tokens>` so re-running the cron never double-reports.
 
-1. **Reports usage** (`hermes-report.sh`) — reads token usage from `~/.hermes/state.db`, computes deltas against an idempotency ledger, and ships each delta to Revenium via `revenium meter completion` with the model, provider, token counts, request/response timestamps, and an optional organization name. The ledger key is `HERMES:<session_id>:<total_tokens>` so re-running the cron never double-reports.
-2. **Refreshes budget** (`budget-check.sh`) — fetches the configured budget alert from Revenium, computes whether spend exceeds the threshold, and writes the result to `~/.hermes/state/revenium/budget-status.json`. This is the local file the agent reads on every turn — no Revenium API round-trip needed in-session.
+Task-type and agentic-job inference is performed by the deterministic `revenium-classifier` plugin (`skills/revenium/plugins/revenium-classifier/`) at `on_session_end`. It reads session data directly — it does not rely on the agent voluntarily classifying its own turns. Sessions with no markers fall back to `--task-type unclassified`.
+
+### Agentic job tracking
+
+Discrete task arcs are reported as Revenium agentic jobs (`revenium jobs create` / `revenium jobs outcome`). Each arc's business outcome is recorded exactly once — outcomes are immutable and never re-sent. Idempotency is maintained in `~/.hermes/state/revenium/revenium-jobs.ledger`. AI transactions belonging to a job are linked in Revenium via `--agentic-job-id`.
+
+### Tool-event metering
+
+The `post_tool_call` hook captures each Hermes tool call (tool name, duration in milliseconds, success/failure, `tool_call_id`, session ID, error message) to a per-session file at `~/.hermes/state/revenium/tool-events/<sid>.jsonl`. The hook makes no network call — it is a pure local observer that exits 0 on any internal failure so it never blocks the agent. The cron's `tool-event-report.sh` stage then reads these files and ships each unledgered record via `revenium meter tool-event`, keyed on `<sid>:<tool_call_id>` in `revenium-tool-events.ledger`.
 
 ### Budget enforcement
 
-Before every operation (response, tool call, exploration) the agent reads `~/.hermes/state/revenium/budget-status.json`:
+Budget enforcement is now **structural**: the `pre_llm_call` and `pre_tool_call` Hermes shell hooks check `budget-status.json` on every turn and block the agent deterministically regardless of session length. The `SKILL.md` halt block is now a backstop rather than the primary mechanism.
+
+Before every operation the agent's state resolves to one of:
 
 - **Within budget** → proceed silently.
 - **Exceeded, interactive mode** → warn the user with current spend vs. threshold and ask permission to continue.
-- **Exceeded, autonomous mode** → halt all operations and send a notification through the configured Hermes messaging channel.
+- **Exceeded, autonomous mode** → the `pre_tool_call` hook blocks all tool calls and emits an `action: block` response; `pre_llm_call` injects a halt directive into the turn. A notification is sent through the configured Hermes messaging channel.
 - **Status file missing** → proceed with caution (fail-open).
+
+The three shell hooks are registered by `install-hooks.sh` and removed by `uninstall-hooks.sh`. They are inert until the user approves them on first `hermes chat`. `budget-check.sh` (the second cron stage) refreshes `budget-status.json` and detects new halt transitions.
 
 The full halt/exceed contract — including the exact halt response string the agent must emit verbatim — is specified in [`skills/revenium/SKILL.md`](skills/revenium/SKILL.md).
 
@@ -151,14 +172,17 @@ Your Revenium credentials (API key, Team ID, Tenant ID, Owner ID) live separatel
 ## Manual commands
 
 ```bash
-# Run metering + budget check once
+# Run metering + budget check + tool-event reporting once
 bash ~/.hermes/skills/revenium/scripts/cron.sh
 
-# Run only the SQLite reporter
+# Run only the SQLite reporter (completion metering with task-type)
 bash ~/.hermes/skills/revenium/scripts/hermes-report.sh
 
 # Run only the budget check
 bash ~/.hermes/skills/revenium/scripts/budget-check.sh
+
+# Run only the tool-event reporter
+bash ~/.hermes/skills/revenium/scripts/tool-event-report.sh
 
 # Clear an active halt
 bash ~/.hermes/skills/revenium/scripts/clear-halt.sh
@@ -171,6 +195,12 @@ bash ~/.hermes/skills/revenium/scripts/install-cron.sh
 
 # Remove the cron entry
 bash ~/.hermes/skills/revenium/scripts/uninstall-cron.sh
+
+# Register the pre_llm_call / pre_tool_call / post_tool_call hooks
+bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+
+# Remove the shell hooks
+bash ~/.hermes/skills/revenium/scripts/uninstall-hooks.sh
 ```
 
 ## Status & diagnostics
@@ -185,8 +215,17 @@ cat ~/.hermes/state/revenium/budget-status.json
 # Confirm the cron is installed
 crontab -l | grep hermes-revenium-metering
 
-# Inspect the idempotency ledger
+# Inspect the completion idempotency ledger
 tail -n 20 ~/.hermes/state/revenium/revenium-hermes.ledger
+
+# Inspect the agentic-job idempotency ledger
+tail -n 20 ~/.hermes/state/revenium/revenium-jobs.ledger
+
+# Inspect the tool-event idempotency ledger
+tail -n 20 ~/.hermes/state/revenium/revenium-tool-events.ledger
+
+# Inspect captured tool-event records for a session
+cat ~/.hermes/state/revenium/tool-events/<sid>.jsonl
 ```
 
 If `budget-status.json` does not exist, the cron has not run yet — run `cron.sh` once manually to seed it. More failure modes are documented in [`skills/revenium/references/troubleshooting.md`](skills/revenium/references/troubleshooting.md).
@@ -195,6 +234,7 @@ If `budget-status.json` does not exist, the cron has not run yet — run `cron.s
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/uninstall-cron.sh
+bash ~/.hermes/skills/revenium/scripts/uninstall-hooks.sh
 rm -rf ~/.hermes/skills/revenium ~/.hermes/state/revenium
 ```
 
