@@ -147,6 +147,11 @@ class RepositoryTests(unittest.TestCase):
         # Phase 12: hooks config path declared only in common.sh.
         self.assertIn('HOOKS_CONFIG_FILE=', text)
         self.assertIn('config.yaml', text)
+        # Phase 14/16: tool-event state paths declared only in common.sh (SC3).
+        self.assertIn('TOOL_EVENTS_DIR=', text)
+        self.assertIn('TOOL_EVENTS_LEDGER_FILE=', text)
+        self.assertIn('tool-events', text)
+        self.assertIn('revenium-tool-events.ledger', text)
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
@@ -8025,6 +8030,172 @@ class RepositoryTests(unittest.TestCase):
             for call in meter_calls:
                 self.assertNotIn('--cost-usd', call,
                                  f'--cost-usd must not appear in tool-event calls: {call}')
+
+
+    # ------------------------------------------------------------------
+    # Phase 16 — integration-hardening behavioral tests (TOOLINT-02, 04).
+    # ------------------------------------------------------------------
+
+    def test_install_hooks_registers_post_tool_call(self):
+        """TOOLINT-02: install-hooks.sh against a fresh tmpdir creates a config.yaml
+        with a post_tool_call: key and a command entry ending in post_tool_call.sh.
+        uninstall-hooks.sh then removes the post_tool_call entry entirely."""
+        import os
+        import subprocess
+        import tempfile
+
+        install_hooks = str(SKILL / 'scripts' / 'install-hooks.sh')
+        uninstall_hooks = str(SKILL / 'scripts' / 'uninstall-hooks.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-p16-post-tool-') as tmp:
+            config_path = os.path.join(tmp, 'config.yaml')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_HOOKS_CONFIG_FILE'] = config_path
+
+            # Install
+            result = subprocess.run(
+                ['bash', install_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'install-hooks.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertTrue(os.path.exists(config_path),
+                            'install-hooks.sh did not create config.yaml')
+
+            with open(config_path, encoding='utf-8') as fh:
+                config_after_install = fh.read()
+
+            # Assert post_tool_call key and command entry are present
+            self.assertIn(
+                'post_tool_call:', config_after_install,
+                f'post_tool_call: key missing from config after install:\n{config_after_install}',
+            )
+            self.assertIn(
+                'post_tool_call.sh', config_after_install,
+                f'post_tool_call.sh command missing from config after install:\n{config_after_install}',
+            )
+            # Confirm the command line ends in scripts/post_tool_call.sh
+            import re
+            self.assertTrue(
+                re.search(r'command:.*scripts/post_tool_call\.sh', config_after_install),
+                f'no command: ...scripts/post_tool_call.sh line found:\n{config_after_install}',
+            )
+
+            # Uninstall
+            uninstall = subprocess.run(
+                ['bash', uninstall_hooks],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                uninstall.returncode, 0,
+                f'uninstall-hooks.sh exit {uninstall.returncode}: '
+                f'stdout={uninstall.stdout!r} stderr={uninstall.stderr!r}',
+            )
+
+            with open(config_path, encoding='utf-8') as fh:
+                config_after_uninstall = fh.read()
+
+            self.assertNotIn(
+                'post_tool_call.sh', config_after_uninstall,
+                f'post_tool_call.sh entry survived uninstall:\n{config_after_uninstall}',
+            )
+
+    def test_tool_event_jsonl_round_trips_ledger_shape(self):
+        """TOOLINT-04: a single valid 7-key JSONL record written to tool-events/<sid>.jsonl
+        is shipped by tool-event-report.sh and produces a ledger line matching
+        TOOL:<sid>:<tool_call_id>:<ts> with the correct field count and values."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        REPORTER = SKILL / 'scripts' / 'tool-event-report.sh'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = os.path.join(tmpdir, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, mode=0o700)
+
+            sid = 'sess_p16_shape'
+            tool_call_id = 'toolu_p16_01'
+            ts = 1747800000.0
+
+            record = {
+                'sid': sid,
+                'ts': ts,
+                'tool': 'read_file',
+                'tool_call_id': tool_call_id,
+                'duration_ms': 75,
+                'success': True,
+                'error': None,
+            }
+            jsonl_path = os.path.join(tool_events_dir, f'{sid}.jsonl')
+            with open(jsonl_path, 'w') as f:
+                f.write(json.dumps(record) + '\n')
+
+            # Build stub revenium that handles config show and records meter calls
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            capture_log = os.path.join(tmpdir, 'capture.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    printf "%s\\n" "$*" >> "$CAPTURE_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            ledger_path = os.path.join(state_dir, 'revenium-tool-events.ledger')
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': os.path.join(tmpdir, 'hh'),
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'CAPTURE_LOG': capture_log,
+            }
+
+            result = subprocess.run(
+                ['bash', str(REPORTER)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f'reporter exited non-zero: {result.stdout}{result.stderr}')
+
+            # Assert ledger file was created and has exactly one line
+            self.assertTrue(os.path.exists(ledger_path),
+                            f'ledger file not created at {ledger_path}')
+            with open(ledger_path) as f:
+                ledger_lines = [l.strip() for l in f if l.strip()]
+            self.assertEqual(len(ledger_lines), 1,
+                             f'expected exactly 1 ledger line, got {len(ledger_lines)}: {ledger_lines}')
+
+            # Assert ledger line shape: TOOL:<sid>:<tool_call_id>:<ts>
+            line = ledger_lines[0]
+            self.assertTrue(line.startswith('TOOL:'),
+                            f'ledger line must start with "TOOL:": {line!r}')
+            parts = line.split(':')
+            self.assertGreaterEqual(len(parts), 4,
+                                    f'ledger line must have at least 4 colon-delimited fields: {line!r}')
+            self.assertEqual(parts[0], 'TOOL',
+                             f'field 0 must be "TOOL": {line!r}')
+            self.assertEqual(parts[1], sid,
+                             f'field 1 must be the session id ({sid!r}): {line!r}')
+            self.assertEqual(parts[2], tool_call_id,
+                             f'field 2 must be the tool_call_id ({tool_call_id!r}): {line!r}')
 
 
 if __name__ == '__main__':
