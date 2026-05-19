@@ -128,7 +128,6 @@ PY
         --duration-ms "${dur}"
         --timestamp "${ts_iso}"
         --trace-id "${sid}"
-        --transaction-id "${sid}:${tcid}"
         --quiet
       )
 

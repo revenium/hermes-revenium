@@ -7816,10 +7816,11 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(len(meter_calls), 2,
                              f'expected 2 meter tool-event calls, got {len(meter_calls)}: {meter_calls}')
 
-            # The success record (toolu_01) should NOT contain --error-message
-            toolu_01_calls = [c for c in meter_calls if 'toolu_01' in c]
+            # The success record (tool=terminal / toolu_01) should NOT contain --error-message
+            # Matched by --tool-id (tool_call_id no longer appears after --transaction-id removal)
+            toolu_01_calls = [c for c in meter_calls if '--tool-id terminal' in c]
             self.assertEqual(len(toolu_01_calls), 1,
-                             f'expected 1 call for toolu_01, got {toolu_01_calls}')
+                             f'expected 1 call for terminal (toolu_01), got {toolu_01_calls}')
             self.assertNotIn('--error-message', toolu_01_calls[0],
                              'success record must not carry --error-message')
 
@@ -7997,15 +7998,15 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(len(meter_calls), 3,
                              f'expected 3 meter tool-event calls, got {len(meter_calls)}: {meter_calls}')
 
-            # Find each call by tool_call_id
-            def find_call(tcid):
-                matches = [c for c in meter_calls if tcid in c]
-                self.assertEqual(len(matches), 1, f'expected exactly 1 call for {tcid}, got {matches}')
+            # Find each call by --tool-id (tool_call_id no longer appears after --transaction-id removal)
+            def find_call(tool_name):
+                matches = [c for c in meter_calls if f'--tool-id {tool_name}' in c]
+                self.assertEqual(len(matches), 1, f'expected exactly 1 call for --tool-id {tool_name}, got {matches}')
                 return matches[0]
 
-            call_10 = find_call('toolu_10')
-            call_11 = find_call('toolu_11')
-            call_12 = find_call('toolu_12')
+            call_10 = find_call('tool_a')
+            call_11 = find_call('tool_b')
+            call_12 = find_call('tool_c')
 
             # TOOLMTR-02: success flag logic
             self.assertIn('--success', call_10,
@@ -8031,6 +8032,90 @@ class RepositoryTests(unittest.TestCase):
                 self.assertNotIn('--cost-usd', call,
                                  f'--cost-usd must not appear in tool-event calls: {call}')
 
+    def test_tool_event_reporter_omits_transaction_id(self):
+        """Regression guard (TOOLMTR-03 / TOOLMTR-04): the meter tool-event invocation
+        must NOT carry --transaction-id because the Revenium tool-event endpoint silently
+        drops events that carry it (files them as transaction sub-line-items instead).
+        --trace-id must still be present for session correlation."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        REPORTER = SCRIPTS_DIR / 'tool-event-report.sh'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = os.path.join(tmpdir, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, mode=0o700)
+
+            record = {
+                'sid': 'sess_regression',
+                'ts': 1747700100.0,
+                'tool': 'bash',
+                'tool_call_id': 'toolu_reg01',
+                'duration_ms': 42,
+                'success': True,
+                'error': None,
+            }
+            jsonl_path = os.path.join(tool_events_dir, 'sess_regression.jsonl')
+            with open(jsonl_path, 'w') as f:
+                f.write(json.dumps(record) + '\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            capture_log = os.path.join(tmpdir, 'capture.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    printf "%s\\n" "$*" >> "$CAPTURE_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': os.path.join(tmpdir, 'hh'),
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'CAPTURE_LOG': capture_log,
+            }
+
+            result = subprocess.run(
+                ['bash', str(REPORTER)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f'reporter exited non-zero: {result.stdout}{result.stderr}')
+
+            invocations = []
+            if os.path.exists(capture_log):
+                with open(capture_log) as f:
+                    invocations = [l.strip() for l in f if l.strip()]
+
+            meter_calls = [i for i in invocations if 'meter tool-event' in i]
+            self.assertEqual(len(meter_calls), 1,
+                             f'expected exactly 1 meter tool-event call, got {len(meter_calls)}: {meter_calls}')
+
+            call = meter_calls[0]
+            # Regression guard: --transaction-id must be absent — its presence causes the
+            # Revenium endpoint to file the event as a transaction sub-line-item, silently
+            # excluding it from `revenium metrics tool-events`.
+            self.assertNotIn('--transaction-id', call,
+                             f'--transaction-id must NOT appear in meter tool-event call: {call!r}')
+            # Session correlation must still be present via --trace-id.
+            self.assertIn('--trace-id sess_regression', call,
+                          f'--trace-id with session id must be present in: {call!r}')
 
     # ------------------------------------------------------------------
     # Phase 16 — integration-hardening behavioral tests (TOOLINT-02, 03, 04).
