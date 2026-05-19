@@ -112,8 +112,11 @@ PY
     while IFS='|' read -r sid tcid tool ts_iso dur success_flag error_msg; do
       [[ -z "${sid}" || -z "${tcid}" ]] && continue
 
-      # Idempotency guard: skip if this (sid, tool_call_id) pair is already ledgered
-      if grep -q "^TOOL:${sid}:${tcid}:" "${TOOL_EVENTS_LEDGER_FILE}" 2>/dev/null; then
+      # Idempotency guard: skip if this (sid, tool_call_id) pair is already ledgered.
+      # Fixed-string match (-F): sid/tcid are untrusted and may carry regex
+      # metacharacters; the heredoc strips ':' from both, so the "TOOL:<sid>:<tcid>:"
+      # substring can only occur at the start of a ledger line.
+      if grep -qF "TOOL:${sid}:${tcid}:" "${TOOL_EVENTS_LEDGER_FILE}" 2>/dev/null; then
         ((skipped_count++)) || true
         continue
       fi
