@@ -27,8 +27,11 @@ JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}
 REVENIUM_JOBS_STALE_SECONDS="${REVENIUM_JOBS_STALE_SECONDS:-600}"
 # Phase 12: target file for install-hooks.sh (registers pre_llm_call/pre_tool_call hooks).
 HOOKS_CONFIG_FILE="${REVENIUM_HOOKS_CONFIG_FILE:-${HERMES_HOME}/config.yaml}"
+# Phase 14: tool-event capture state paths.
+TOOL_EVENTS_DIR="${REVENIUM_TOOL_EVENTS_DIR:-${STATE_DIR}/tool-events}"
+TOOL_EVENTS_LEDGER_FILE="${REVENIUM_TOOL_EVENTS_LEDGER_FILE:-${STATE_DIR}/revenium-tool-events.ledger}"
 
-mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}"
+mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
 ensure_path() {
   local brew_prefix=""
