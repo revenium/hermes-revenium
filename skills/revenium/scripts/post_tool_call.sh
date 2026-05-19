@@ -21,7 +21,10 @@ payload="$(cat -)"
 # exits 0 and never blocks the agent (TOOLCAP-03, TOOLCAP-04).
 TOOL_EVENTS_DIR="${TOOL_EVENTS_DIR}" HERMES_HOME="${HERMES_HOME}" \
   python3 - "${payload}" <<'PYEOF' || true
-import fcntl, json, os, sys, time
+import fcntl, json, os, re, sys, time
+
+# CR-01: only alphanumeric, underscore, hyphen; max 128 chars.
+_SID_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
 
 payload_str = sys.argv[1] if len(sys.argv) > 1 else "{}"
 try:
@@ -38,7 +41,10 @@ extra = payload.get("extra") or {}
 
 # Resolve session_id: three-tier fallback (mirror of pre_tool_call.sh lines 49-65).
 # Tier 1: top-level payload field (may be empty string per Hermes source — Pitfall 2).
+# CR-01: validate against _SID_RE — any traversal sequence falls through to Tier 2/3.
 session_id = payload.get("session_id", "") or ""
+if session_id and not _SID_RE.match(session_id):
+    session_id = ""
 if not session_id:
     # Tier 2: scan ~/.hermes/sessions/ for the newest non-cron session file.
     sessions_dir = os.path.join(
@@ -54,7 +60,10 @@ if not session_id:
         if candidates:
             newest = max(candidates,
                 key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)))
-            session_id = newest[len("session_"):-len(".json")]
+            raw = newest[len("session_"):-len(".json")]
+            # Tier-2 result must also pass the regex (belt-and-suspenders).
+            if _SID_RE.match(raw):
+                session_id = raw
     except OSError:
         pass
 if not session_id:
@@ -92,6 +101,10 @@ try:
         elif parsed.get("exit_code") not in (None, 0):
             success = False
             error_msg = ("exit_code=" + str(parsed.get("exit_code")))[:500]
+        elif parsed.get("success") is False:
+            # TOOLCAP-05 / SC4: explicit {success: false} shape.
+            success = False
+            error_msg = "success=false"
 except (json.JSONDecodeError, TypeError, ValueError):
     # D-03: unparseable result treated as success; no error to extract.
     pass
@@ -117,6 +130,8 @@ try:
 except OSError:
     pass
 event_file = os.path.join(tool_events_dir, session_id + ".jsonl")
+# CR-01: path-confinement assertion — event_file must resolve inside tool_events_dir.
+assert os.path.commonpath([os.path.realpath(event_file), os.path.realpath(tool_events_dir)]) == os.path.realpath(tool_events_dir)
 with open(event_file, "ab", buffering=0) as fh:
     fcntl.flock(fh, fcntl.LOCK_EX)
     fh.write(line.encode("utf-8"))
