@@ -80,6 +80,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'install-hooks.sh',     # Phase 12 — idempotent config.yaml hook installer
             SKILL / 'scripts' / 'uninstall-hooks.sh',   # Phase 12 — hook uninstaller
             SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
+            SKILL / 'scripts' / 'tool-event-report.sh', # Phase 15 — tool-event reporter
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
@@ -7723,6 +7724,307 @@ class RepositoryTests(unittest.TestCase):
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+    def test_tool_event_reporter_reads_jsonl(self):
+        """TOOLMTR-01: valid records are emitted; malformed/incomplete lines are skipped;
+        null error produces no --error-message flag."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        REPORTER = SCRIPTS_DIR / 'tool-event-report.sh'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Build a minimal state dir
+            state_dir = os.path.join(tmpdir, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, mode=0o700)
+
+            # Write the JSONL fixture: two valid records, one missing required fields,
+            # one malformed JSON line.
+            jsonl_path = os.path.join(tool_events_dir, 'sess_abc.jsonl')
+            records = [
+                # valid success record (null error)
+                {"sid": "sess_abc", "ts": 1747700000.35, "tool": "terminal",
+                 "tool_call_id": "toolu_01", "duration_ms": 1250, "success": True, "error": None},
+                # missing required fields (no sid, no tool_call_id)
+                {"not": "valid"},
+                # malformed JSON
+                "not-json{{",
+                # valid failure record with non-null error
+                {"sid": "sess_abc", "ts": 1747700001.0, "tool": "read_file",
+                 "tool_call_id": "toolu_02", "duration_ms": 50, "success": False,
+                 "error": "permission denied"},
+            ]
+            with open(jsonl_path, 'w') as f:
+                for r in records:
+                    f.write((json.dumps(r) if isinstance(r, dict) else r) + '\n')
+
+            # Build stub revenium that echoes argv to a capture file.
+            # The stub also handles `revenium config show` so the preflight passes.
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            capture_log = os.path.join(tmpdir, 'capture.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    printf "%s\\n" "$*" >> "$CAPTURE_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': os.path.join(tmpdir, 'hh'),
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'CAPTURE_LOG': capture_log,
+            }
+
+            result = subprocess.run(
+                ['bash', str(REPORTER)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f'reporter exited non-zero: {result.stdout}{result.stderr}')
+
+            # Read capture log
+            invocations = []
+            if os.path.exists(capture_log):
+                with open(capture_log) as f:
+                    invocations = [l.strip() for l in f if l.strip()]
+
+            # Exactly two valid records should have produced meter tool-event calls
+            meter_calls = [i for i in invocations if 'meter tool-event' in i]
+            self.assertEqual(len(meter_calls), 2,
+                             f'expected 2 meter tool-event calls, got {len(meter_calls)}: {meter_calls}')
+
+            # The success record (toolu_01) should NOT contain --error-message
+            toolu_01_calls = [c for c in meter_calls if 'toolu_01' in c]
+            self.assertEqual(len(toolu_01_calls), 1,
+                             f'expected 1 call for toolu_01, got {toolu_01_calls}')
+            self.assertNotIn('--error-message', toolu_01_calls[0],
+                             'success record must not carry --error-message')
+
+    def test_tool_event_reporter_idempotency(self):
+        """TOOLMTR-03: a pre-seeded ledger line prevents re-shipping; second run adds no
+        new ledger lines and no new invocations."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        REPORTER = SCRIPTS_DIR / 'tool-event-report.sh'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = os.path.join(tmpdir, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, mode=0o700)
+
+            # Write a JSONL with one valid record
+            jsonl_path = os.path.join(tool_events_dir, 'sess_abc.jsonl')
+            record = {"sid": "sess_abc", "ts": 1747700000.0, "tool": "terminal",
+                      "tool_call_id": "toolu_01", "duration_ms": 100, "success": True, "error": None}
+            with open(jsonl_path, 'w') as f:
+                f.write(json.dumps(record) + '\n')
+
+            # Pre-seed the ledger with the exact key for this record
+            ledger_path = os.path.join(state_dir, 'revenium-tool-events.ledger')
+            with open(ledger_path, 'w') as f:
+                f.write('TOOL:sess_abc:toolu_01:1747700000.0\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            capture_log = os.path.join(tmpdir, 'capture.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    printf "%s\\n" "$*" >> "$CAPTURE_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': os.path.join(tmpdir, 'hh'),
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'CAPTURE_LOG': capture_log,
+            }
+
+            # Run 1: the record is already ledgered — should produce zero API calls
+            result1 = subprocess.run(
+                ['bash', str(REPORTER)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result1.returncode, 0,
+                             f'run1 exited non-zero: {result1.stdout}{result1.stderr}')
+
+            invocations1 = []
+            if os.path.exists(capture_log):
+                with open(capture_log) as f:
+                    invocations1 = [l.strip() for l in f if l.strip()]
+            toolu_01_calls = [i for i in invocations1 if 'toolu_01' in i and 'meter tool-event' in i]
+            self.assertEqual(len(toolu_01_calls), 0,
+                             f'pre-seeded record must be skipped; got calls: {toolu_01_calls}')
+
+            # Record ledger line count before run 2
+            with open(ledger_path) as f:
+                ledger_before = f.readlines()
+
+            # Run 2: identical state — still zero calls, no new ledger lines
+            if os.path.exists(capture_log):
+                os.unlink(capture_log)
+            result2 = subprocess.run(
+                ['bash', str(REPORTER)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result2.returncode, 0,
+                             f'run2 exited non-zero: {result2.stdout}{result2.stderr}')
+
+            invocations2 = []
+            if os.path.exists(capture_log):
+                with open(capture_log) as f:
+                    invocations2 = [l.strip() for l in f if l.strip()]
+            self.assertEqual(len([i for i in invocations2 if 'meter tool-event' in i]), 0,
+                             f'run2 must produce no new meter calls: {invocations2}')
+
+            with open(ledger_path) as f:
+                ledger_after = f.readlines()
+            self.assertEqual(ledger_before, ledger_after,
+                             'no new ledger lines should appear on run 2')
+
+    def test_tool_event_reporter_success_flag(self):
+        """TOOLMTR-02 / TOOLMTR-04: success:true → bare --success; success:false →
+        --success=false; success:false+error → --error-message; --trace-id == sid;
+        --cost-usd absent."""
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        SCRIPTS_DIR = SKILL / 'scripts'
+        REPORTER = SCRIPTS_DIR / 'tool-event-report.sh'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = os.path.join(tmpdir, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, mode=0o700)
+
+            # Three records: success, failure (no error text), failure (with error text)
+            records = [
+                {"sid": "sess_abc", "ts": 1747700010.0, "tool": "tool_a",
+                 "tool_call_id": "toolu_10", "duration_ms": 100, "success": True, "error": None},
+                {"sid": "sess_abc", "ts": 1747700011.0, "tool": "tool_b",
+                 "tool_call_id": "toolu_11", "duration_ms": 200, "success": False, "error": None},
+                {"sid": "sess_abc", "ts": 1747700012.0, "tool": "tool_c",
+                 "tool_call_id": "toolu_12", "duration_ms": 300, "success": False,
+                 "error": "disk full"},
+            ]
+            jsonl_path = os.path.join(tool_events_dir, 'sess_abc.jsonl')
+            with open(jsonl_path, 'w') as f:
+                for r in records:
+                    f.write(json.dumps(r) + '\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            capture_log = os.path.join(tmpdir, 'capture.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    printf "%s\\n" "$*" >> "$CAPTURE_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': os.path.join(tmpdir, 'hh'),
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'CAPTURE_LOG': capture_log,
+            }
+
+            result = subprocess.run(
+                ['bash', str(REPORTER)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f'reporter exited non-zero: {result.stdout}{result.stderr}')
+
+            invocations = []
+            if os.path.exists(capture_log):
+                with open(capture_log) as f:
+                    invocations = [l.strip() for l in f if l.strip()]
+
+            meter_calls = [i for i in invocations if 'meter tool-event' in i]
+            self.assertEqual(len(meter_calls), 3,
+                             f'expected 3 meter tool-event calls, got {len(meter_calls)}: {meter_calls}')
+
+            # Find each call by tool_call_id
+            def find_call(tcid):
+                matches = [c for c in meter_calls if tcid in c]
+                self.assertEqual(len(matches), 1, f'expected exactly 1 call for {tcid}, got {matches}')
+                return matches[0]
+
+            call_10 = find_call('toolu_10')
+            call_11 = find_call('toolu_11')
+            call_12 = find_call('toolu_12')
+
+            # TOOLMTR-02: success flag logic
+            self.assertIn('--success', call_10,
+                          'success:true must carry bare --success token')
+            self.assertNotIn('--success=false', call_10,
+                             'success:true must NOT carry --success=false')
+            self.assertIn('--success=false', call_11,
+                          'success:false must carry --success=false')
+            self.assertNotIn('--error-message', call_11,
+                             'success:false with null error must not carry --error-message')
+            self.assertIn('--success=false', call_12,
+                          'success:false+error must carry --success=false')
+            self.assertIn('--error-message', call_12,
+                          'success:false with error text must carry --error-message')
+
+            # TOOLMTR-04: --trace-id must be the session id
+            for call in meter_calls:
+                self.assertIn('--trace-id sess_abc', call,
+                              f'--trace-id must be sess_abc in: {call}')
+
+            # --cost-usd must not appear
+            for call in meter_calls:
+                self.assertNotIn('--cost-usd', call,
+                                 f'--cost-usd must not appear in tool-event calls: {call}')
 
 
 if __name__ == '__main__':
