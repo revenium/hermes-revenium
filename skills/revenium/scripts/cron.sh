@@ -38,3 +38,4 @@ fi
 
 bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
 bash "${SKILL_DIR}/scripts/budget-check.sh" "$@" || true
+bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
