@@ -7,3 +7,4 @@ venv/
 *.log
 .cache/
 CLAUDE.md
+.planning/
