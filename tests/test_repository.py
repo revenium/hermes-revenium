@@ -8033,7 +8033,7 @@ class RepositoryTests(unittest.TestCase):
 
 
     # ------------------------------------------------------------------
-    # Phase 16 — integration-hardening behavioral tests (TOOLINT-02, 04).
+    # Phase 16 — integration-hardening behavioral tests (TOOLINT-02, 03, 04).
     # ------------------------------------------------------------------
 
     def test_install_hooks_registers_post_tool_call(self):
@@ -8196,6 +8196,83 @@ class RepositoryTests(unittest.TestCase):
                              f'field 1 must be the session id ({sid!r}): {line!r}')
             self.assertEqual(parts[2], tool_call_id,
                              f'field 2 must be the tool_call_id ({tool_call_id!r}): {line!r}')
+
+
+    def test_tool_event_stage_noop_on_empty_state(self):
+        """TOOLINT-03: tool-event-report.sh with an empty tool-events directory exits 0,
+        produces zero `meter tool-event` invocations, and adds no ERROR-level lines to
+        the metering log — proving backward compatibility with pre-v1.2 installs."""
+        import os
+        import subprocess
+        import tempfile
+
+        REPORTER = SKILL / 'scripts' / 'tool-event-report.sh'
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_dir = os.path.join(tmpdir, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            # Create an EMPTY tool-events directory — no JSONL files.
+            os.makedirs(tool_events_dir, mode=0o700)
+
+            # Build stub revenium that handles config show and records meter calls.
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            capture_log = os.path.join(tmpdir, 'capture.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            with open(shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1" in\n'
+                    '  config) exit 0 ;;\n'
+                    '  meter)\n'
+                    '    printf "%s\\n" "$*" >> "$CAPTURE_LOG"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *) exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(shim, 0o755)
+
+            metering_log = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': os.path.join(tmpdir, 'hh'),
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'CAPTURE_LOG': capture_log,
+            }
+
+            result = subprocess.run(
+                ['bash', str(REPORTER)],
+                env=env, capture_output=True, text=True, timeout=60,
+            )
+
+            # (1) Script must exit 0.
+            self.assertEqual(result.returncode, 0,
+                             f'tool-event-report.sh exited non-zero on empty state: '
+                             f'{result.stdout}{result.stderr}')
+
+            # (2) Capture log must contain zero `meter tool-event` invocations.
+            invocations = []
+            if os.path.exists(capture_log):
+                with open(capture_log) as f:
+                    invocations = [l.strip() for l in f if l.strip()]
+            meter_calls = [i for i in invocations if 'meter tool-event' in i]
+            self.assertEqual(len(meter_calls), 0,
+                             f'empty-state run must produce zero meter tool-event calls, '
+                             f'got {len(meter_calls)}: {meter_calls}')
+
+            # (3) Metering log must have no ERROR-level lines from this run.
+            if os.path.exists(metering_log):
+                with open(metering_log) as f:
+                    error_lines = [l.strip() for l in f
+                                   if '[ERROR]' in l and 'revenium' in l]
+                self.assertEqual(len(error_lines), 0,
+                                 f'empty-state run must not add ERROR lines to metering log, '
+                                 f'got: {error_lines}')
 
 
 if __name__ == '__main__':
