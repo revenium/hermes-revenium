@@ -44,9 +44,23 @@ ensure_path() {
 }
 
 log() {
+  # Single-source log writer. Always appends ONE line to LOG_FILE; mirrors to
+  # stderr only when the caller is interactive (TTY).
+  #
+  # Why not `tee -a "${LOG_FILE}" >&2`? Cron invokes the pipeline with
+  # `>> ${LOG_FILE} 2>&1`, which captures stderr back into LOG_FILE. The prior
+  # tee+stderr combo therefore wrote every line to LOG_FILE *twice* under cron
+  # (once via tee's append, once via the cron redirect catching tee's stdout
+  # that we'd routed to stderr). The TTY guard preserves the interactive UX —
+  # an operator running `bash hermes-report.sh` still sees log lines on stderr —
+  # while keeping cron's log clean.
   local level="$1"; shift
+  local line="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${level}] [revenium] $*"
   mkdir -p "${STATE_DIR}"
-  echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [${level}] [revenium] $*" | tee -a "${LOG_FILE}" >&2
+  printf '%s\n' "${line}" >> "${LOG_FILE}"
+  if [[ -t 2 ]]; then
+    printf '%s\n' "${line}" >&2
+  fi
 }
 
 info()  { log "INFO " "$@"; }

@@ -36,6 +36,33 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +o allexport
 fi
 
-bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
-bash "${SKILL_DIR}/scripts/budget-check.sh" "$@" || true
-bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
+# Optional sub-minute looping. Default REVENIUM_CRON_LOOP_COUNT=1 preserves
+# the historical "fire once per cron tick" behavior; demos / dashboards that
+# want metrics in Revenium faster than 60s set both knobs (install-cron.sh
+# `--interval-seconds N` does this for them). The cron.lock acquired above
+# is held for the full loop, so the next minute's cron tick warns + skips
+# if this loop overruns — the lock-skip path is the safety net.
+loop_count="${REVENIUM_CRON_LOOP_COUNT:-1}"
+loop_sleep="${REVENIUM_CRON_LOOP_SLEEP_SECONDS:-0}"
+
+# Validate: positive integers; clamp invalid input to safe defaults rather
+# than aborting the tick (matches the rest of the cron's fail-open posture).
+if ! [[ "${loop_count}" =~ ^[0-9]+$ ]] || (( loop_count < 1 )); then
+  warn "invalid REVENIUM_CRON_LOOP_COUNT=${loop_count}, using 1"
+  loop_count=1
+fi
+if ! [[ "${loop_sleep}" =~ ^[0-9]+$ ]]; then
+  warn "invalid REVENIUM_CRON_LOOP_SLEEP_SECONDS=${loop_sleep}, using 0"
+  loop_sleep=0
+fi
+
+for ((i=1; i<=loop_count; i++)); do
+  bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
+  bash "${SKILL_DIR}/scripts/budget-check.sh" "$@" || true
+  bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
+  # Sleep between iterations only; never after the last one (the next cron
+  # tick lands within ~60s anyway, so a trailing sleep is wasted).
+  if (( i < loop_count && loop_sleep > 0 )); then
+    sleep "${loop_sleep}"
+  fi
+done

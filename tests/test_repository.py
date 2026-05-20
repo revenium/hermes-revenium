@@ -81,6 +81,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'uninstall-hooks.sh',   # Phase 12 — hook uninstaller
             SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
             SKILL / 'scripts' / 'tool-event-report.sh', # Phase 15 — tool-event reporter
+            SKILL / 'scripts' / 'install-plugin.sh',    # Closes tap-install plugin-discovery gap
+            SKILL / 'scripts' / 'hooks-status.sh',      # Diagnose hooks-registered-but-inert footgun
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
@@ -446,6 +448,503 @@ class RepositoryTests(unittest.TestCase):
                 0,
                 f'syntax error in {script.name}: {result.stderr}',
             )
+
+    def test_hooks_status_sh_three_verdicts(self):
+        """hooks-status.sh emits stable exit codes for scripting:
+          1 = hooks NOT registered (run install-hooks.sh)
+          2 = hooks registered but no recent capture activity
+          0 = hooks registered AND firing in the last hour
+
+        The verdict text changes over time; the exit code is the contract.
+        Tests all three branches by manipulating tool-events/, state.db, and
+        config.yaml in a tempdir.
+        """
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        def setup_skill_tree(hermes_home):
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'hooks-status.sh',
+                         'pre_llm_call.sh', 'pre_tool_call.sh', 'post_tool_call.sh'):
+                shutil.copy(SKILL / 'scripts' / name, scripts_dir)
+            return scripts_dir
+
+        # ---- Branch 1: hooks NOT registered → exit 1 ----
+        tmp = tempfile.mkdtemp(prefix='gsd-hstatus-1-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hooks-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 1,
+                f'expected exit 1 on no-registration, got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}')
+            self.assertIn('NOT registered', result.stdout)
+            self.assertIn('install-hooks.sh', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Branch 2: hooks registered, no capture activity, no agent  ----
+        #     activity in last hour → exit 2 ("registered but quiet")
+        tmp = tempfile.mkdtemp(prefix='gsd-hstatus-2-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            # Write a config.yaml that references each hook script path.
+            pre_llm = os.path.join(scripts_dir, 'pre_llm_call.sh')
+            pre_tool = os.path.join(scripts_dir, 'pre_tool_call.sh')
+            post_tool = os.path.join(scripts_dir, 'post_tool_call.sh')
+            with open(os.path.join(hermes_home, 'config.yaml'), 'w') as f:
+                f.write(
+                    f'hooks:\n'
+                    f'  pre_llm_call:\n'
+                    f'    - command: {pre_llm}\n      timeout: 5\n'
+                    f'  pre_tool_call:\n'
+                    f'    - command: {pre_tool}\n      timeout: 5\n'
+                    f'  post_tool_call:\n'
+                    f'    - command: {post_tool}\n      timeout: 5\n'
+                )
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hooks-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 2,
+                f'expected exit 2 (registered+quiet), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}')
+            self.assertIn('no tool activity has occurred yet', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Branch 3: hooks registered + recent JSONL → exit 0 ("firing") ----
+        tmp = tempfile.mkdtemp(prefix='gsd-hstatus-3-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, exist_ok=True)
+            # A recent JSONL file proves the hook fired in the last 60 min.
+            jsonl = os.path.join(tool_events_dir, 'diag.jsonl')
+            with open(jsonl, 'w') as f:
+                f.write('{"sid":"diag","tool":"shell","duration_ms":1,"success":true}\n')
+            # mtime = now ensures find -mmin -60 picks it up.
+            now = time.time()
+            os.utime(jsonl, (now, now))
+
+            pre_llm = os.path.join(scripts_dir, 'pre_llm_call.sh')
+            pre_tool = os.path.join(scripts_dir, 'pre_tool_call.sh')
+            post_tool = os.path.join(scripts_dir, 'post_tool_call.sh')
+            with open(os.path.join(hermes_home, 'config.yaml'), 'w') as f:
+                f.write(
+                    f'hooks:\n'
+                    f'  pre_llm_call:\n    - command: {pre_llm}\n      timeout: 5\n'
+                    f'  pre_tool_call:\n    - command: {pre_tool}\n      timeout: 5\n'
+                    f'  post_tool_call:\n    - command: {post_tool}\n      timeout: 5\n'
+                )
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': state_dir}
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hooks-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0,
+                f'expected exit 0 (firing), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}')
+            self.assertIn('Hooks are firing', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_hooks_sh_prints_approval_banner(self):
+        """install-hooks.sh prints the loud manual-approval banner on BOTH
+        the slow-path (first run) and the fast-path (no-op re-run). The
+        Ubuntu sandbox bug was operators running install-hooks.sh once,
+        seeing 'Revenium hooks already registered' on the second run, and
+        missing the approval-requirement reminder buried at the bottom of
+        the first-run output.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        def setup_skill_tree(hermes_home):
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'install-hooks.sh',
+                         'pre_llm_call.sh', 'pre_tool_call.sh', 'post_tool_call.sh'):
+                shutil.copy(SKILL / 'scripts' / name, scripts_dir)
+            return scripts_dir
+
+        tmp = tempfile.mkdtemp(prefix='gsd-installhooks-banner-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+
+            # Slow-path: first run from scratch.
+            result1 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'install-hooks.sh')],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result1.returncode, 0,
+                f'slow-path failed: {result1.stdout}\n{result1.stderr}')
+            self.assertIn('INERT until you approve them', result1.stdout)
+            self.assertIn('hooks_auto_accept: true', result1.stdout)
+
+            # Fast-path: re-run is a no-op for registration but MUST still
+            # surface the approval banner.
+            result2 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'install-hooks.sh')],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result2.returncode, 0,
+                f'fast-path failed: {result2.stdout}\n{result2.stderr}')
+            self.assertIn('already registered', result2.stdout)
+            self.assertIn('INERT until you approve them', result2.stdout,
+                'fast-path must STILL print the approval banner (regression: '
+                'silent fast-path was how the Ubuntu sandbox missed it)')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_plugin_sh_dry_run(self):
+        """install-plugin.sh --dry-run prints every operation it would perform
+        and touches no filesystem state. Pins the dry-run contract used by the
+        test below and by operators previewing the install."""
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-dryrun-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            plugins_src = os.path.join(hermes_home, 'skills', 'revenium', 'plugins',
+                                       'revenium-classifier')
+            os.makedirs(scripts_dir, exist_ok=True)
+            os.makedirs(plugins_src, exist_ok=True)
+            # Plugin source must exist for the script to reach the dry-run output.
+            shutil.copy(SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
+                        plugins_src)
+            shutil.copy(SKILL / 'scripts' / 'common.sh', scripts_dir)
+            shutil.copy(SKILL / 'scripts' / 'install-plugin.sh', scripts_dir)
+
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium'),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'install-plugin.sh'), '--dry-run'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            out = result.stdout
+            self.assertIn('[dry-run]', out)
+            self.assertIn(f'{hermes_home}/plugins/revenium-classifier', out)
+            self.assertIn(f'{hermes_home}/config.yaml', out)
+            self.assertIn('dry-run — nothing was changed', out)
+
+            # Confirm nothing was actually created.
+            self.assertFalse(os.path.exists(os.path.join(hermes_home, 'plugins')),
+                             'dry-run must not create plugin dest dir')
+            self.assertFalse(os.path.exists(os.path.join(hermes_home, 'config.yaml')),
+                             'dry-run must not create config.yaml')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_plugin_sh_happy_path(self):
+        """install-plugin.sh creates ~/.hermes/plugins/revenium-classifier and
+        enables it in ~/.hermes/config.yaml. Tests three config.yaml scenarios:
+        absent, present-without-plugins-block, present-with-plugins-block.
+        Idempotent: a second run is a no-op against the config.yaml.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        def setup_skill_tree(hermes_home):
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            plugins_src = os.path.join(hermes_home, 'skills', 'revenium', 'plugins',
+                                       'revenium-classifier')
+            os.makedirs(scripts_dir, exist_ok=True)
+            os.makedirs(plugins_src, exist_ok=True)
+            # Real plugin contents matter for the cp -R to succeed.
+            for name in ('plugin.yaml', '__init__.py', 'classifier.py'):
+                shutil.copy(SKILL / 'plugins' / 'revenium-classifier' / name,
+                            plugins_src)
+            shutil.copy(SKILL / 'scripts' / 'common.sh', scripts_dir)
+            shutil.copy(SKILL / 'scripts' / 'install-plugin.sh', scripts_dir)
+            return scripts_dir
+
+        def run_install(env):
+            return subprocess.run(
+                ['bash', os.path.join(env['HERMES_HOME'], 'skills', 'revenium',
+                                       'scripts', 'install-plugin.sh'),
+                 '--no-restart'],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+
+        # ---- Scenario A: no config.yaml present ----
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-a-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            setup_skill_tree(hermes_home)
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = run_install(env)
+            self.assertEqual(result.returncode, 0,
+                f'scenario A failed: {result.stdout}\n{result.stderr}')
+            # Plugin copied.
+            dest = os.path.join(hermes_home, 'plugins', 'revenium-classifier')
+            self.assertTrue(os.path.isfile(os.path.join(dest, 'plugin.yaml')))
+            self.assertTrue(os.path.isfile(os.path.join(dest, 'classifier.py')))
+            # config.yaml created with plugins.enabled containing the plugin.
+            config = os.path.join(hermes_home, 'config.yaml')
+            self.assertTrue(os.path.exists(config))
+            content = open(config).read()
+            self.assertIn('plugins:', content)
+            self.assertIn('- revenium-classifier', content)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Scenario B: existing config.yaml with no plugins: block ----
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-b-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            setup_skill_tree(hermes_home)
+            config = os.path.join(hermes_home, 'config.yaml')
+            with open(config, 'w') as f:
+                f.write('approvals:\n  mode: manual\n\nhooks: {}\n')
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = run_install(env)
+            self.assertEqual(result.returncode, 0,
+                f'scenario B failed: {result.stdout}\n{result.stderr}')
+            content = open(config).read()
+            self.assertIn('plugins:', content)
+            self.assertIn('- revenium-classifier', content)
+            # Pre-existing keys untouched.
+            self.assertIn('approvals:', content)
+            self.assertIn('hooks: {}', content)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Scenario C: existing config.yaml WITH plugins.enabled block ----
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-c-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            setup_skill_tree(hermes_home)
+            config = os.path.join(hermes_home, 'config.yaml')
+            with open(config, 'w') as f:
+                f.write('plugins:\n  enabled:\n    - some-other-plugin\n')
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = run_install(env)
+            self.assertEqual(result.returncode, 0,
+                f'scenario C failed: {result.stdout}\n{result.stderr}')
+            content = open(config).read()
+            self.assertIn('- some-other-plugin', content)
+            self.assertIn('- revenium-classifier', content)
+            # Idempotency: run again, content must not change.
+            result2 = run_install(env)
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            content2 = open(config).read()
+            self.assertEqual(
+                content.count('- revenium-classifier'),
+                content2.count('- revenium-classifier'),
+                'second install run duplicated the plugin entry',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_cron_sh_loops_per_REVENIUM_CRON_LOOP_COUNT(self):
+        """cron.sh runs the inner pipeline (hermes-report → budget-check →
+        tool-event-report) once per cron tick by default, but loops N times
+        when REVENIUM_CRON_LOOP_COUNT=N is set. Pins the sub-minute demo
+        cadence knob; broken loop logic would silently revert to once/minute.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-cron-loop-')
+        try:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(state_dir, exist_ok=True)
+            os.makedirs(scripts_dir, exist_ok=True)
+
+            # Copy common.sh + cron.sh into a scratch skill tree so we can
+            # stub the three inner scripts without touching the repo.
+            shutil.copy(SKILL / 'scripts' / 'common.sh', scripts_dir)
+            shutil.copy(SKILL / 'scripts' / 'cron.sh', scripts_dir)
+
+            counter_file = os.path.join(tmp, 'invocations.count')
+            open(counter_file, 'w').close()
+            for name in ('hermes-report.sh', 'budget-check.sh', 'tool-event-report.sh'):
+                stub = os.path.join(scripts_dir, name)
+                with open(stub, 'w') as f:
+                    f.write(
+                        '#!/usr/bin/env bash\n'
+                        f'echo "{name}" >> "{counter_file}"\n'
+                    )
+                os.chmod(stub, 0o755)
+
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_CRON_LOOP_COUNT': '3',
+                'REVENIUM_CRON_LOOP_SLEEP_SECONDS': '0',  # 0s keeps the test fast
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'cron.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'cron.sh exit {result.returncode}; stderr={result.stderr}',
+            )
+
+            with open(counter_file) as f:
+                invocations = [ln for ln in f.read().splitlines() if ln.strip()]
+
+            # 3 loop iterations × 3 inner scripts = 9 invocations, in order
+            # per iteration.
+            self.assertEqual(
+                len(invocations), 9,
+                f'expected 9 inner-script invocations (3 loops × 3 scripts), '
+                f'got {len(invocations)}:\n' + '\n'.join(invocations),
+            )
+            self.assertEqual(invocations[:3], [
+                'hermes-report.sh', 'budget-check.sh', 'tool-event-report.sh',
+            ], f'per-iteration ordering broken: {invocations[:3]}')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_cron_sh_dry_run_interval_seconds(self):
+        """install-cron.sh --interval-seconds N --dry-run emits a crontab
+        line carrying the correct loop env (REVENIUM_CRON_LOOP_COUNT,
+        REVENIUM_CRON_LOOP_SLEEP_SECONDS) translated from N. Default
+        (no flag) emits NO loop env to preserve historical behavior.
+        Rejects N outside 1..60 with a non-zero exit code.
+        """
+        import os
+        import subprocess
+
+        install_cron = str(SKILL / 'scripts' / 'install-cron.sh')
+
+        # Default (no flag) — no loop env in the crontab line.
+        result = subprocess.run(
+            ['bash', install_cron, '--dry-run'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('hermes-revenium-metering', result.stdout)
+        self.assertNotIn('REVENIUM_CRON_LOOP_COUNT', result.stdout,
+                         'default install must not emit loop env')
+
+        # --interval-seconds 15 — 4x per minute, 15s sleep.
+        result = subprocess.run(
+            ['bash', install_cron, '--interval-seconds', '15', '--dry-run'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('REVENIUM_CRON_LOOP_COUNT=4', result.stdout)
+        self.assertIn('REVENIUM_CRON_LOOP_SLEEP_SECONDS=15', result.stdout)
+
+        # --interval-seconds 60 — equivalent to default; no loop env.
+        result = subprocess.run(
+            ['bash', install_cron, '--interval-seconds', '60', '--dry-run'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('REVENIUM_CRON_LOOP_COUNT', result.stdout)
+
+        # Out-of-range values must fail loudly.
+        for bad in ('0', '61', '-5', 'abc'):
+            result = subprocess.run(
+                ['bash', install_cron, '--interval-seconds', bad, '--dry-run'],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(
+                result.returncode, 0,
+                f'expected non-zero exit for --interval-seconds {bad}, got 0',
+            )
+
+    def test_log_helper_no_double_write_under_cron_redirect(self):
+        """Regression: under cron's `>> LOG_FILE 2>&1` invocation shape,
+        common.sh log() must write exactly ONE line per call to LOG_FILE.
+
+        The prior implementation (`echo … | tee -a "${LOG_FILE}" >&2`) doubled
+        every entry — once via tee's append-write, once via the cron stderr
+        redirect catching tee's stdout that we'd routed to stderr.
+        Confirmed live on Ubuntu sandbox 2026-05-19: every metering log line
+        appeared twice with identical timestamps.
+        """
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = os.path.join(tmp, '.hermes')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+
+            common = SKILL / 'scripts' / 'common.sh'
+            script = (
+                f'export HERMES_HOME={hermes_home!r}\n'
+                f'export REVENIUM_STATE_DIR={state_dir!r}\n'
+                f'source {str(common)!r}\n'
+                'info "alpha"\n'
+                'warn "bravo"\n'
+                'error "charlie"\n'
+            )
+
+            # Mirror cron's exact invocation shape: stdout → LOG_FILE, stderr
+            # merged into stdout (== cron's `>> LOG_FILE 2>&1`). Under this
+            # combination the OLD helper writes 6 lines (2 per call); the
+            # fixed helper writes exactly 3.
+            with open(log_file, 'a') as out:
+                result = subprocess.run(
+                    ['bash', '-c', script],
+                    stdout=out,
+                    stderr=subprocess.STDOUT,
+                )
+            self.assertEqual(
+                result.returncode, 0,
+                f'bash exited {result.returncode}',
+            )
+
+            with open(log_file) as f:
+                lines = [ln for ln in f.read().splitlines() if ln.strip()]
+
+            self.assertEqual(
+                len(lines), 3,
+                'expected 3 log lines under cron-style redirect, got '
+                f'{len(lines)}:\n' + '\n'.join(lines),
+            )
+            self.assertIn('alpha', lines[0])
+            self.assertIn('bravo', lines[1])
+            self.assertIn('charlie', lines[2])
 
     def test_cron_marker_split_end_to_end(self):
         """TEST-03 / COMPAT-02 / COMPAT-03: synthetic state.db + marker fixture ->
@@ -978,7 +1477,12 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0,
                              f'cron exit {result.returncode}: {result.stderr}')
 
-            combined = result.stdout + result.stderr
+            # log() writes to LOG_FILE (canonical sink) and mirrors to stderr
+            # only on TTY. Subprocess captures non-TTY stderr, so the D-18
+            # telemetry lives in the log file under tests.
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+            log_content = open(log_file).read() if os.path.exists(log_file) else ''
+            combined = result.stdout + result.stderr + log_content
             self.assertIn('S2: window=2, mean_per_marker=4150', combined,
                           f'D-18 INFO line not emitted (W1: locked exact value '
                           f'delta_total=8300 // n=2 == 4150). Got:\n{combined}')
@@ -5620,6 +6124,10 @@ class RepositoryTests(unittest.TestCase):
                 if os.path.exists(log):
                     os.unlink(log)
                 open(log, 'w').close()
+            # Truncate the metering log so its content is bounded to this run.
+            metering_log = os.path.join(env['REVENIUM_STATE_DIR'], 'revenium-metering.log')
+            if os.path.exists(metering_log):
+                os.unlink(metering_log)
             result = subprocess.run(
                 ['bash', str(HERMES_REPORT)],
                 env=env, capture_output=True, text=True, timeout=60,
@@ -5635,12 +6143,18 @@ class RepositoryTests(unittest.TestCase):
                             invocations.append(shlex.split(line))
                 return invocations
 
+            # log() writes to revenium-metering.log (canonical sink) and only
+            # mirrors to stderr on TTY. Under subprocess capture there is no
+            # TTY, so OUTCOME-04 / OUTCOME-05 warn lines live in the log file.
+            metering_content = (
+                open(metering_log).read() if os.path.exists(metering_log) else ''
+            )
             return (
                 result.returncode,
                 parse_log(meter_log),
                 parse_log(jobs_log),
                 parse_log(outcome_log),
-                result.stdout + result.stderr,
+                result.stdout + result.stderr + metering_content,
             )
 
         sid = '20260516_test_outcome_idempotent'

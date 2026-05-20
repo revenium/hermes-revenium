@@ -56,15 +56,17 @@ bash examples/setup-local.sh
 hermes gateway restart   # restart so the agent loads the updated plugin
 ```
 
-If you installed the skill by one of the other methods, install the plugin manually:
+If you installed the skill by the GitHub tap, `hermes skills install`, or `external_dirs`,
+run the bundled installer:
 
 ```bash
-mkdir -p ~/.hermes/plugins
-rm -rf ~/.hermes/plugins/revenium-classifier
-cp -R skills/revenium/plugins/revenium-classifier ~/.hermes/plugins/revenium-classifier
-find ~/.hermes/plugins/revenium-classifier -name __pycache__ -type d -exec rm -rf {} +
-hermes gateway restart
+bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 ```
+
+This copies the plugin into `~/.hermes/plugins/`, adds it to `plugins.enabled` in
+`~/.hermes/config.yaml`, and runs `hermes gateway restart` so the change takes effect.
+Idempotent — re-run safely. Pass `--dry-run` to preview, `--no-restart` to skip the
+gateway restart (useful in CI / containers where the gateway isn't running).
 
 Re-run this step on **every upgrade** — updating only `~/.hermes/skills/` leaves the
 active plugin stale. Never leave backup copies of the skill (e.g. `revenium.bak.*`)

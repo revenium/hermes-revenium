@@ -15,6 +15,38 @@ PRE_LLM_SCRIPT="${SKILL_DIR}/scripts/pre_llm_call.sh"
 PRE_TOOL_SCRIPT="${SKILL_DIR}/scripts/pre_tool_call.sh"
 POST_TOOL_SCRIPT="${SKILL_DIR}/scripts/post_tool_call.sh"
 
+# Loud, always-printed approval banner. Registered hooks are inert until the
+# user accepts them on first `hermes chat` — that footgun has bitten more than
+# one operator (Ubuntu sandbox 2026-05-19 had every hook registered but never
+# fired, silently zeroing tool-event capture for the entire session). We
+# print this on every run (fast-path and slow-path) so the requirement is
+# impossible to miss.
+print_approval_banner() {
+  cat <<'BANNER'
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  IMPORTANT — hooks are INERT until you approve them in a Hermes chat session
+
+  Hermes' default `approvals.mode: manual` + `hooks_auto_accept: false` means
+  the three revenium hooks registered here (pre_llm_call, pre_tool_call,
+  post_tool_call) are written to config.yaml but DO NOT fire until you start
+  `hermes chat` and accept the approval prompt for each one.
+
+  Until that happens:
+    • the budget halt is NOT structurally enforced (SKILL.md backstop only)
+    • tool-events/ stays empty, so the tool-event ledger never fills, so
+      tool-usage analytics never reach Revenium even with the cron running.
+
+  Diagnose anytime with:
+    bash SCRIPT_DIR/hooks-status.sh
+
+  If you want to skip the per-install approval prompt entirely, set
+  `hooks_auto_accept: true` at the top level of ~/.hermes/config.yaml.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+BANNER
+}
+
 # Idempotency check — re-run is a no-op (D-01, CR-01).
 # Key the fast-path on whether ALL revenium command paths are already present,
 # NOT on a bare HOOK_TAG grep — a stale HOOK_TAG without the commands must NOT
@@ -23,6 +55,10 @@ if grep -qF "${PRE_LLM_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null \
    && grep -qF "${PRE_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null \
    && grep -qF "${POST_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null; then
   echo "Revenium hooks already registered in ${HOOKS_CONFIG_FILE}"
+  # Print the banner even on the no-op fast-path. Most operators run
+  # install-hooks.sh expecting the loud reminder; suppressing it because
+  # the registration is already done was misleading.
+  sed -e "s|SCRIPT_DIR|${SCRIPT_DIR}|g" < <(print_approval_banner)
   exit 0
 fi
 
@@ -228,8 +264,8 @@ echo "Revenium hooks installed in ${HOOKS_CONFIG_FILE}"
 echo "   pre_llm_call:   ${PRE_LLM_SCRIPT}"
 echo "   pre_tool_call:  ${PRE_TOOL_SCRIPT}"
 echo "   post_tool_call: ${POST_TOOL_SCRIPT}"
-echo ""
-echo "Next step: run 'hermes chat' and approve the revenium hooks when prompted (D-03)."
-echo "   Hooks are registered but inert until the user approves them on first use."
-echo ""
+
+# Same banner as the fast-path. Always loud, always last so it stays on screen.
+sed -e "s|SCRIPT_DIR|${SCRIPT_DIR}|g" < <(print_approval_banner)
+
 echo "To uninstall: bash ${SKILL_DIR}/scripts/uninstall-hooks.sh"

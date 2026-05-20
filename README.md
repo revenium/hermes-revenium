@@ -2,6 +2,41 @@
 
 Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event metering for [Hermes Agent](https://hermes-agent.nousresearch.com) using the [Revenium](https://www.revenium.ai) platform. Every metered completion carries a meaningful `--task-type` drawn from a controlled vocabulary so Revenium analytics show *what the agent was doing* — not just an undifferentiated session total. Discrete task arcs are reported as Revenium agentic jobs with immutable once-only outcomes, and every Hermes tool call is metered via `revenium meter tool-event` — all while budget guardrails halt the agent structurally before it can overspend.
 
+## Quick Start
+
+Four steps to get up and running:
+
+1. **Install the skill** — the recommended path is the GitHub tap (see [Installation](#installation) below):
+
+   ```bash
+   hermes skills tap add revenium/hermes-revenium
+   hermes skills install revenium/hermes-revenium/skills/revenium --force
+   ```
+
+2. **Install the per-minute metering cron:**
+
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
+   ```
+
+3. **Install the Hermes shell hooks:**
+
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+   ```
+
+4. **Install the on_session_end classifier plugin:**
+
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
+   ```
+
+   This copies the `revenium-classifier` plugin into `~/.hermes/plugins/` and enables it in `~/.hermes/config.yaml`. Without this step, `on_session_end` never fires and no `kind:"job"` markers are written — so agentic-job usage never reaches Revenium even though completion metering still works.
+
+5. **Start the guided Setup Flow** — open a Hermes session and invoke `/revenium`. On a fresh install (no `config.json` or no `alertId`), the skill detects the missing configuration and automatically walks you through the one-time setup. Once configured, `/revenium` instead shows status and reconfigure options.
+
+Each step is detailed in full below.
+
 ## Prerequisites
 
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) installed and running
@@ -78,6 +113,18 @@ bash ~/.hermes/skills/revenium/scripts/install-cron.sh
 
 The cron meters `~/.hermes/state.db` into Revenium and refreshes `~/.hermes/state/revenium/budget-status.json`. Hermes can't add crontab entries itself, so this step is manual. **Without it, the agent will tell you "Budget status not yet available" before every operation** — that's the skill correctly detecting the missing cron.
 
+For demos or dashboards where the default 60-second cadence is too slow, install with a sub-minute interval. The cron still fires once per minute, but the pipeline loops inside each tick:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install-cron.sh --interval-seconds 15
+# 4× per minute (every 15s). Trade-off: 4× more revenium-CLI calls.
+
+bash ~/.hermes/skills/revenium/scripts/install-cron.sh --interval-seconds 15 --force
+# Replace an existing entry to change interval on a host that already has the cron.
+```
+
+Valid values: `1..60`. Use `--dry-run` to print the crontab line without installing.
+
 **Install the Hermes shell hooks:**
 
 ```bash
@@ -85,6 +132,14 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 ```
 
 The shell hooks register `pre_llm_call`, `pre_tool_call`, and `post_tool_call` handlers in `~/.hermes/config.yaml`. They are inert until you approve them on first `hermes chat`. Without the hooks, structural budget enforcement and tool-event capture are inactive.
+
+**Install the on_session_end classifier plugin:**
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
+```
+
+The script copies `revenium-classifier` into `~/.hermes/plugins/` and adds it to `plugins.enabled` in `~/.hermes/config.yaml`, then restarts the Hermes gateway so the change takes effect. Idempotent — re-run it safely after upgrading the skill. `hermes skills install` and `external_dirs` don't relocate the bundled `plugins/` subdirectory, so this step is what wires the classifier into Hermes' plugin discovery path. Without it, no `kind:"job"` markers are written — agentic-job usage never reaches Revenium even though completion metering still works. Pass `--dry-run` to preview, or `--no-restart` to skip the gateway restart.
 
 To confirm the cron is running:
 
@@ -95,7 +150,7 @@ tail -f ~/.hermes/state/revenium/revenium-metering.log
 
 ## First-time setup
 
-Once the cron and hooks are in place, setup runs the first time you use the skill — Hermes walks you through it. The skill will:
+Once the cron and hooks are in place, start a Hermes session and invoke `/revenium` to kick off the guided Setup Flow. The skill detects that no `config.json` or `alertId` exists and automatically begins setup — you can also simply start using the skill and setup runs on your first interaction. Once configured, invoking `/revenium` instead offers status, reset, and reconfigure options. The skill will:
 
 1. Verify the `revenium` CLI is configured (asks for API key, Team ID, Tenant ID, User ID if not).
 2. Optionally ask for an organization name (for Revenium reporting attribution).
@@ -201,6 +256,12 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 
 # Remove the shell hooks
 bash ~/.hermes/skills/revenium/scripts/uninstall-hooks.sh
+
+# Install the revenium-classifier on_session_end plugin into ~/.hermes/plugins/
+bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
+
+# Diagnose whether the hooks are registered AND firing
+bash ~/.hermes/skills/revenium/scripts/hooks-status.sh
 ```
 
 ## Status & diagnostics
@@ -226,9 +287,14 @@ tail -n 20 ~/.hermes/state/revenium/revenium-tool-events.ledger
 
 # Inspect captured tool-event records for a session
 cat ~/.hermes/state/revenium/tool-events/<sid>.jsonl
+
+# Run the end-to-end hooks diagnostic — registration + approval mode + recent
+# capture activity + state.db cross-check. Stable exit codes for scripting:
+# 0 = hooks firing, 1 = not registered, 2 = registered but inert.
+bash ~/.hermes/skills/revenium/scripts/hooks-status.sh
 ```
 
-If `budget-status.json` does not exist, the cron has not run yet — run `cron.sh` once manually to seed it. More failure modes are documented in [`skills/revenium/references/troubleshooting.md`](skills/revenium/references/troubleshooting.md).
+If `budget-status.json` does not exist, the cron has not run yet — run `cron.sh` once manually to seed it. If `tool-events/` stays empty even though Hermes is running tools, run `hooks-status.sh` first — the most common cause is the hooks being registered but not yet approved on `hermes chat`. More failure modes are documented in [`skills/revenium/references/troubleshooting.md`](skills/revenium/references/troubleshooting.md).
 
 ## Uninstalling
 
