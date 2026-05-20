@@ -447,6 +447,123 @@ class RepositoryTests(unittest.TestCase):
                 f'syntax error in {script.name}: {result.stderr}',
             )
 
+    def test_cron_sh_loops_per_REVENIUM_CRON_LOOP_COUNT(self):
+        """cron.sh runs the inner pipeline (hermes-report → budget-check →
+        tool-event-report) once per cron tick by default, but loops N times
+        when REVENIUM_CRON_LOOP_COUNT=N is set. Pins the sub-minute demo
+        cadence knob; broken loop logic would silently revert to once/minute.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-cron-loop-')
+        try:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(state_dir, exist_ok=True)
+            os.makedirs(scripts_dir, exist_ok=True)
+
+            # Copy common.sh + cron.sh into a scratch skill tree so we can
+            # stub the three inner scripts without touching the repo.
+            shutil.copy(SKILL / 'scripts' / 'common.sh', scripts_dir)
+            shutil.copy(SKILL / 'scripts' / 'cron.sh', scripts_dir)
+
+            counter_file = os.path.join(tmp, 'invocations.count')
+            open(counter_file, 'w').close()
+            for name in ('hermes-report.sh', 'budget-check.sh', 'tool-event-report.sh'):
+                stub = os.path.join(scripts_dir, name)
+                with open(stub, 'w') as f:
+                    f.write(
+                        '#!/usr/bin/env bash\n'
+                        f'echo "{name}" >> "{counter_file}"\n'
+                    )
+                os.chmod(stub, 0o755)
+
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_CRON_LOOP_COUNT': '3',
+                'REVENIUM_CRON_LOOP_SLEEP_SECONDS': '0',  # 0s keeps the test fast
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'cron.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'cron.sh exit {result.returncode}; stderr={result.stderr}',
+            )
+
+            with open(counter_file) as f:
+                invocations = [ln for ln in f.read().splitlines() if ln.strip()]
+
+            # 3 loop iterations × 3 inner scripts = 9 invocations, in order
+            # per iteration.
+            self.assertEqual(
+                len(invocations), 9,
+                f'expected 9 inner-script invocations (3 loops × 3 scripts), '
+                f'got {len(invocations)}:\n' + '\n'.join(invocations),
+            )
+            self.assertEqual(invocations[:3], [
+                'hermes-report.sh', 'budget-check.sh', 'tool-event-report.sh',
+            ], f'per-iteration ordering broken: {invocations[:3]}')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_cron_sh_dry_run_interval_seconds(self):
+        """install-cron.sh --interval-seconds N --dry-run emits a crontab
+        line carrying the correct loop env (REVENIUM_CRON_LOOP_COUNT,
+        REVENIUM_CRON_LOOP_SLEEP_SECONDS) translated from N. Default
+        (no flag) emits NO loop env to preserve historical behavior.
+        Rejects N outside 1..60 with a non-zero exit code.
+        """
+        import os
+        import subprocess
+
+        install_cron = str(SKILL / 'scripts' / 'install-cron.sh')
+
+        # Default (no flag) — no loop env in the crontab line.
+        result = subprocess.run(
+            ['bash', install_cron, '--dry-run'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('hermes-revenium-metering', result.stdout)
+        self.assertNotIn('REVENIUM_CRON_LOOP_COUNT', result.stdout,
+                         'default install must not emit loop env')
+
+        # --interval-seconds 15 — 4x per minute, 15s sleep.
+        result = subprocess.run(
+            ['bash', install_cron, '--interval-seconds', '15', '--dry-run'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('REVENIUM_CRON_LOOP_COUNT=4', result.stdout)
+        self.assertIn('REVENIUM_CRON_LOOP_SLEEP_SECONDS=15', result.stdout)
+
+        # --interval-seconds 60 — equivalent to default; no loop env.
+        result = subprocess.run(
+            ['bash', install_cron, '--interval-seconds', '60', '--dry-run'],
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('REVENIUM_CRON_LOOP_COUNT', result.stdout)
+
+        # Out-of-range values must fail loudly.
+        for bad in ('0', '61', '-5', 'abc'):
+            result = subprocess.run(
+                ['bash', install_cron, '--interval-seconds', bad, '--dry-run'],
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(
+                result.returncode, 0,
+                f'expected non-zero exit for --interval-seconds {bad}, got 0',
+            )
+
     def test_log_helper_no_double_write_under_cron_redirect(self):
         """Regression: under cron's `>> LOG_FILE 2>&1` invocation shape,
         common.sh log() must write exactly ONE line per call to LOG_FILE.

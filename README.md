@@ -105,6 +105,18 @@ bash ~/.hermes/skills/revenium/scripts/install-cron.sh
 
 The cron meters `~/.hermes/state.db` into Revenium and refreshes `~/.hermes/state/revenium/budget-status.json`. Hermes can't add crontab entries itself, so this step is manual. **Without it, the agent will tell you "Budget status not yet available" before every operation** — that's the skill correctly detecting the missing cron.
 
+For demos or dashboards where the default 60-second cadence is too slow, install with a sub-minute interval. The cron still fires once per minute, but the pipeline loops inside each tick:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install-cron.sh --interval-seconds 15
+# 4× per minute (every 15s). Trade-off: 4× more revenium-CLI calls.
+
+bash ~/.hermes/skills/revenium/scripts/install-cron.sh --interval-seconds 15 --force
+# Replace an existing entry to change interval on a host that already has the cron.
+```
+
+Valid values: `1..60`. Use `--dry-run` to print the crontab line without installing.
+
 **Install the Hermes shell hooks:**
 
 ```bash
