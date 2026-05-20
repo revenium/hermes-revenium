@@ -81,6 +81,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'uninstall-hooks.sh',   # Phase 12 — hook uninstaller
             SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
             SKILL / 'scripts' / 'tool-event-report.sh', # Phase 15 — tool-event reporter
+            SKILL / 'scripts' / 'install-plugin.sh',    # Closes tap-install plugin-discovery gap
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
@@ -446,6 +447,160 @@ class RepositoryTests(unittest.TestCase):
                 0,
                 f'syntax error in {script.name}: {result.stderr}',
             )
+
+    def test_install_plugin_sh_dry_run(self):
+        """install-plugin.sh --dry-run prints every operation it would perform
+        and touches no filesystem state. Pins the dry-run contract used by the
+        test below and by operators previewing the install."""
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-dryrun-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            plugins_src = os.path.join(hermes_home, 'skills', 'revenium', 'plugins',
+                                       'revenium-classifier')
+            os.makedirs(scripts_dir, exist_ok=True)
+            os.makedirs(plugins_src, exist_ok=True)
+            # Plugin source must exist for the script to reach the dry-run output.
+            shutil.copy(SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
+                        plugins_src)
+            shutil.copy(SKILL / 'scripts' / 'common.sh', scripts_dir)
+            shutil.copy(SKILL / 'scripts' / 'install-plugin.sh', scripts_dir)
+
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium'),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'install-plugin.sh'), '--dry-run'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            out = result.stdout
+            self.assertIn('[dry-run]', out)
+            self.assertIn(f'{hermes_home}/plugins/revenium-classifier', out)
+            self.assertIn(f'{hermes_home}/config.yaml', out)
+            self.assertIn('dry-run — nothing was changed', out)
+
+            # Confirm nothing was actually created.
+            self.assertFalse(os.path.exists(os.path.join(hermes_home, 'plugins')),
+                             'dry-run must not create plugin dest dir')
+            self.assertFalse(os.path.exists(os.path.join(hermes_home, 'config.yaml')),
+                             'dry-run must not create config.yaml')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_plugin_sh_happy_path(self):
+        """install-plugin.sh creates ~/.hermes/plugins/revenium-classifier and
+        enables it in ~/.hermes/config.yaml. Tests three config.yaml scenarios:
+        absent, present-without-plugins-block, present-with-plugins-block.
+        Idempotent: a second run is a no-op against the config.yaml.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        def setup_skill_tree(hermes_home):
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            plugins_src = os.path.join(hermes_home, 'skills', 'revenium', 'plugins',
+                                       'revenium-classifier')
+            os.makedirs(scripts_dir, exist_ok=True)
+            os.makedirs(plugins_src, exist_ok=True)
+            # Real plugin contents matter for the cp -R to succeed.
+            for name in ('plugin.yaml', '__init__.py', 'classifier.py'):
+                shutil.copy(SKILL / 'plugins' / 'revenium-classifier' / name,
+                            plugins_src)
+            shutil.copy(SKILL / 'scripts' / 'common.sh', scripts_dir)
+            shutil.copy(SKILL / 'scripts' / 'install-plugin.sh', scripts_dir)
+            return scripts_dir
+
+        def run_install(env):
+            return subprocess.run(
+                ['bash', os.path.join(env['HERMES_HOME'], 'skills', 'revenium',
+                                       'scripts', 'install-plugin.sh'),
+                 '--no-restart'],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+
+        # ---- Scenario A: no config.yaml present ----
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-a-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            setup_skill_tree(hermes_home)
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = run_install(env)
+            self.assertEqual(result.returncode, 0,
+                f'scenario A failed: {result.stdout}\n{result.stderr}')
+            # Plugin copied.
+            dest = os.path.join(hermes_home, 'plugins', 'revenium-classifier')
+            self.assertTrue(os.path.isfile(os.path.join(dest, 'plugin.yaml')))
+            self.assertTrue(os.path.isfile(os.path.join(dest, 'classifier.py')))
+            # config.yaml created with plugins.enabled containing the plugin.
+            config = os.path.join(hermes_home, 'config.yaml')
+            self.assertTrue(os.path.exists(config))
+            content = open(config).read()
+            self.assertIn('plugins:', content)
+            self.assertIn('- revenium-classifier', content)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Scenario B: existing config.yaml with no plugins: block ----
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-b-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            setup_skill_tree(hermes_home)
+            config = os.path.join(hermes_home, 'config.yaml')
+            with open(config, 'w') as f:
+                f.write('approvals:\n  mode: manual\n\nhooks: {}\n')
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = run_install(env)
+            self.assertEqual(result.returncode, 0,
+                f'scenario B failed: {result.stdout}\n{result.stderr}')
+            content = open(config).read()
+            self.assertIn('plugins:', content)
+            self.assertIn('- revenium-classifier', content)
+            # Pre-existing keys untouched.
+            self.assertIn('approvals:', content)
+            self.assertIn('hooks: {}', content)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Scenario C: existing config.yaml WITH plugins.enabled block ----
+        tmp = tempfile.mkdtemp(prefix='gsd-plugin-c-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            setup_skill_tree(hermes_home)
+            config = os.path.join(hermes_home, 'config.yaml')
+            with open(config, 'w') as f:
+                f.write('plugins:\n  enabled:\n    - some-other-plugin\n')
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = run_install(env)
+            self.assertEqual(result.returncode, 0,
+                f'scenario C failed: {result.stdout}\n{result.stderr}')
+            content = open(config).read()
+            self.assertIn('- some-other-plugin', content)
+            self.assertIn('- revenium-classifier', content)
+            # Idempotency: run again, content must not change.
+            result2 = run_install(env)
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            content2 = open(config).read()
+            self.assertEqual(
+                content.count('- revenium-classifier'),
+                content2.count('- revenium-classifier'),
+                'second install run duplicated the plugin entry',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_cron_sh_loops_per_REVENIUM_CRON_LOOP_COUNT(self):
         """cron.sh runs the inner pipeline (hermes-report → budget-check →

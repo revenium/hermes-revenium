@@ -25,7 +25,15 @@ Four steps to get up and running:
    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
    ```
 
-4. **Start the guided Setup Flow** — open a Hermes session and invoke `/revenium`. On a fresh install (no `config.json` or no `alertId`), the skill detects the missing configuration and automatically walks you through the one-time setup. Once configured, `/revenium` instead shows status and reconfigure options.
+4. **Install the on_session_end classifier plugin:**
+
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
+   ```
+
+   This copies the `revenium-classifier` plugin into `~/.hermes/plugins/` and enables it in `~/.hermes/config.yaml`. Without this step, `on_session_end` never fires and no `kind:"job"` markers are written — so agentic-job usage never reaches Revenium even though completion metering still works.
+
+5. **Start the guided Setup Flow** — open a Hermes session and invoke `/revenium`. On a fresh install (no `config.json` or no `alertId`), the skill detects the missing configuration and automatically walks you through the one-time setup. Once configured, `/revenium` instead shows status and reconfigure options.
 
 Each step is detailed in full below.
 
@@ -124,6 +132,14 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 ```
 
 The shell hooks register `pre_llm_call`, `pre_tool_call`, and `post_tool_call` handlers in `~/.hermes/config.yaml`. They are inert until you approve them on first `hermes chat`. Without the hooks, structural budget enforcement and tool-event capture are inactive.
+
+**Install the on_session_end classifier plugin:**
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
+```
+
+The script copies `revenium-classifier` into `~/.hermes/plugins/` and adds it to `plugins.enabled` in `~/.hermes/config.yaml`, then restarts the Hermes gateway so the change takes effect. Idempotent — re-run it safely after upgrading the skill. `hermes skills install` and `external_dirs` don't relocate the bundled `plugins/` subdirectory, so this step is what wires the classifier into Hermes' plugin discovery path. Without it, no `kind:"job"` markers are written — agentic-job usage never reaches Revenium even though completion metering still works. Pass `--dry-run` to preview, or `--no-restart` to skip the gateway restart.
 
 To confirm the cron is running:
 
