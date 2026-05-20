@@ -447,6 +447,63 @@ class RepositoryTests(unittest.TestCase):
                 f'syntax error in {script.name}: {result.stderr}',
             )
 
+    def test_log_helper_no_double_write_under_cron_redirect(self):
+        """Regression: under cron's `>> LOG_FILE 2>&1` invocation shape,
+        common.sh log() must write exactly ONE line per call to LOG_FILE.
+
+        The prior implementation (`echo … | tee -a "${LOG_FILE}" >&2`) doubled
+        every entry — once via tee's append-write, once via the cron stderr
+        redirect catching tee's stdout that we'd routed to stderr.
+        Confirmed live on Ubuntu sandbox 2026-05-19: every metering log line
+        appeared twice with identical timestamps.
+        """
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes_home = os.path.join(tmp, '.hermes')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+
+            common = SKILL / 'scripts' / 'common.sh'
+            script = (
+                f'export HERMES_HOME={hermes_home!r}\n'
+                f'export REVENIUM_STATE_DIR={state_dir!r}\n'
+                f'source {str(common)!r}\n'
+                'info "alpha"\n'
+                'warn "bravo"\n'
+                'error "charlie"\n'
+            )
+
+            # Mirror cron's exact invocation shape: stdout → LOG_FILE, stderr
+            # merged into stdout (== cron's `>> LOG_FILE 2>&1`). Under this
+            # combination the OLD helper writes 6 lines (2 per call); the
+            # fixed helper writes exactly 3.
+            with open(log_file, 'a') as out:
+                result = subprocess.run(
+                    ['bash', '-c', script],
+                    stdout=out,
+                    stderr=subprocess.STDOUT,
+                )
+            self.assertEqual(
+                result.returncode, 0,
+                f'bash exited {result.returncode}',
+            )
+
+            with open(log_file) as f:
+                lines = [ln for ln in f.read().splitlines() if ln.strip()]
+
+            self.assertEqual(
+                len(lines), 3,
+                'expected 3 log lines under cron-style redirect, got '
+                f'{len(lines)}:\n' + '\n'.join(lines),
+            )
+            self.assertIn('alpha', lines[0])
+            self.assertIn('bravo', lines[1])
+            self.assertIn('charlie', lines[2])
+
     def test_cron_marker_split_end_to_end(self):
         """TEST-03 / COMPAT-02 / COMPAT-03: synthetic state.db + marker fixture ->
         exactly N Revenium invocations with byte-exact conservation, idempotent
@@ -978,7 +1035,12 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0,
                              f'cron exit {result.returncode}: {result.stderr}')
 
-            combined = result.stdout + result.stderr
+            # log() writes to LOG_FILE (canonical sink) and mirrors to stderr
+            # only on TTY. Subprocess captures non-TTY stderr, so the D-18
+            # telemetry lives in the log file under tests.
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+            log_content = open(log_file).read() if os.path.exists(log_file) else ''
+            combined = result.stdout + result.stderr + log_content
             self.assertIn('S2: window=2, mean_per_marker=4150', combined,
                           f'D-18 INFO line not emitted (W1: locked exact value '
                           f'delta_total=8300 // n=2 == 4150). Got:\n{combined}')
@@ -5620,6 +5682,10 @@ class RepositoryTests(unittest.TestCase):
                 if os.path.exists(log):
                     os.unlink(log)
                 open(log, 'w').close()
+            # Truncate the metering log so its content is bounded to this run.
+            metering_log = os.path.join(env['REVENIUM_STATE_DIR'], 'revenium-metering.log')
+            if os.path.exists(metering_log):
+                os.unlink(metering_log)
             result = subprocess.run(
                 ['bash', str(HERMES_REPORT)],
                 env=env, capture_output=True, text=True, timeout=60,
@@ -5635,12 +5701,18 @@ class RepositoryTests(unittest.TestCase):
                             invocations.append(shlex.split(line))
                 return invocations
 
+            # log() writes to revenium-metering.log (canonical sink) and only
+            # mirrors to stderr on TTY. Under subprocess capture there is no
+            # TTY, so OUTCOME-04 / OUTCOME-05 warn lines live in the log file.
+            metering_content = (
+                open(metering_log).read() if os.path.exists(metering_log) else ''
+            )
             return (
                 result.returncode,
                 parse_log(meter_log),
                 parse_log(jobs_log),
                 parse_log(outcome_log),
-                result.stdout + result.stderr,
+                result.stdout + result.stderr + metering_content,
             )
 
         sid = '20260516_test_outcome_idempotent'
