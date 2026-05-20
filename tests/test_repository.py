@@ -82,6 +82,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
             SKILL / 'scripts' / 'tool-event-report.sh', # Phase 15 — tool-event reporter
             SKILL / 'scripts' / 'install-plugin.sh',    # Closes tap-install plugin-discovery gap
+            SKILL / 'scripts' / 'hooks-status.sh',      # Diagnose hooks-registered-but-inert footgun
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
@@ -447,6 +448,175 @@ class RepositoryTests(unittest.TestCase):
                 0,
                 f'syntax error in {script.name}: {result.stderr}',
             )
+
+    def test_hooks_status_sh_three_verdicts(self):
+        """hooks-status.sh emits stable exit codes for scripting:
+          1 = hooks NOT registered (run install-hooks.sh)
+          2 = hooks registered but no recent capture activity
+          0 = hooks registered AND firing in the last hour
+
+        The verdict text changes over time; the exit code is the contract.
+        Tests all three branches by manipulating tool-events/, state.db, and
+        config.yaml in a tempdir.
+        """
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        def setup_skill_tree(hermes_home):
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'hooks-status.sh',
+                         'pre_llm_call.sh', 'pre_tool_call.sh', 'post_tool_call.sh'):
+                shutil.copy(SKILL / 'scripts' / name, scripts_dir)
+            return scripts_dir
+
+        # ---- Branch 1: hooks NOT registered → exit 1 ----
+        tmp = tempfile.mkdtemp(prefix='gsd-hstatus-1-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hooks-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 1,
+                f'expected exit 1 on no-registration, got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}')
+            self.assertIn('NOT registered', result.stdout)
+            self.assertIn('install-hooks.sh', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Branch 2: hooks registered, no capture activity, no agent  ----
+        #     activity in last hour → exit 2 ("registered but quiet")
+        tmp = tempfile.mkdtemp(prefix='gsd-hstatus-2-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            # Write a config.yaml that references each hook script path.
+            pre_llm = os.path.join(scripts_dir, 'pre_llm_call.sh')
+            pre_tool = os.path.join(scripts_dir, 'pre_tool_call.sh')
+            post_tool = os.path.join(scripts_dir, 'post_tool_call.sh')
+            with open(os.path.join(hermes_home, 'config.yaml'), 'w') as f:
+                f.write(
+                    f'hooks:\n'
+                    f'  pre_llm_call:\n'
+                    f'    - command: {pre_llm}\n      timeout: 5\n'
+                    f'  pre_tool_call:\n'
+                    f'    - command: {pre_tool}\n      timeout: 5\n'
+                    f'  post_tool_call:\n'
+                    f'    - command: {post_tool}\n      timeout: 5\n'
+                )
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hooks-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 2,
+                f'expected exit 2 (registered+quiet), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}')
+            self.assertIn('no tool activity has occurred yet', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        # ---- Branch 3: hooks registered + recent JSONL → exit 0 ("firing") ----
+        tmp = tempfile.mkdtemp(prefix='gsd-hstatus-3-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, exist_ok=True)
+            # A recent JSONL file proves the hook fired in the last 60 min.
+            jsonl = os.path.join(tool_events_dir, 'diag.jsonl')
+            with open(jsonl, 'w') as f:
+                f.write('{"sid":"diag","tool":"shell","duration_ms":1,"success":true}\n')
+            # mtime = now ensures find -mmin -60 picks it up.
+            now = time.time()
+            os.utime(jsonl, (now, now))
+
+            pre_llm = os.path.join(scripts_dir, 'pre_llm_call.sh')
+            pre_tool = os.path.join(scripts_dir, 'pre_tool_call.sh')
+            post_tool = os.path.join(scripts_dir, 'post_tool_call.sh')
+            with open(os.path.join(hermes_home, 'config.yaml'), 'w') as f:
+                f.write(
+                    f'hooks:\n'
+                    f'  pre_llm_call:\n    - command: {pre_llm}\n      timeout: 5\n'
+                    f'  pre_tool_call:\n    - command: {pre_tool}\n      timeout: 5\n'
+                    f'  post_tool_call:\n    - command: {post_tool}\n      timeout: 5\n'
+                )
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': state_dir}
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hooks-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0,
+                f'expected exit 0 (firing), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}')
+            self.assertIn('Hooks are firing', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_install_hooks_sh_prints_approval_banner(self):
+        """install-hooks.sh prints the loud manual-approval banner on BOTH
+        the slow-path (first run) and the fast-path (no-op re-run). The
+        Ubuntu sandbox bug was operators running install-hooks.sh once,
+        seeing 'Revenium hooks already registered' on the second run, and
+        missing the approval-requirement reminder buried at the bottom of
+        the first-run output.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        def setup_skill_tree(hermes_home):
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'install-hooks.sh',
+                         'pre_llm_call.sh', 'pre_tool_call.sh', 'post_tool_call.sh'):
+                shutil.copy(SKILL / 'scripts' / name, scripts_dir)
+            return scripts_dir
+
+        tmp = tempfile.mkdtemp(prefix='gsd-installhooks-banner-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            env = {**os.environ, 'HERMES_HOME': hermes_home,
+                   'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium')}
+
+            # Slow-path: first run from scratch.
+            result1 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'install-hooks.sh')],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result1.returncode, 0,
+                f'slow-path failed: {result1.stdout}\n{result1.stderr}')
+            self.assertIn('INERT until you approve them', result1.stdout)
+            self.assertIn('hooks_auto_accept: true', result1.stdout)
+
+            # Fast-path: re-run is a no-op for registration but MUST still
+            # surface the approval banner.
+            result2 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'install-hooks.sh')],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result2.returncode, 0,
+                f'fast-path failed: {result2.stdout}\n{result2.stderr}')
+            self.assertIn('already registered', result2.stdout)
+            self.assertIn('INERT until you approve them', result2.stdout,
+                'fast-path must STILL print the approval banner (regression: '
+                'silent fast-path was how the Ubuntu sandbox missed it)')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_install_plugin_sh_dry_run(self):
         """install-plugin.sh --dry-run prints every operation it would perform

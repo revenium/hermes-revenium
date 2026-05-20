@@ -256,6 +256,12 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 
 # Remove the shell hooks
 bash ~/.hermes/skills/revenium/scripts/uninstall-hooks.sh
+
+# Install the revenium-classifier on_session_end plugin into ~/.hermes/plugins/
+bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
+
+# Diagnose whether the hooks are registered AND firing
+bash ~/.hermes/skills/revenium/scripts/hooks-status.sh
 ```
 
 ## Status & diagnostics
@@ -281,9 +287,14 @@ tail -n 20 ~/.hermes/state/revenium/revenium-tool-events.ledger
 
 # Inspect captured tool-event records for a session
 cat ~/.hermes/state/revenium/tool-events/<sid>.jsonl
+
+# Run the end-to-end hooks diagnostic — registration + approval mode + recent
+# capture activity + state.db cross-check. Stable exit codes for scripting:
+# 0 = hooks firing, 1 = not registered, 2 = registered but inert.
+bash ~/.hermes/skills/revenium/scripts/hooks-status.sh
 ```
 
-If `budget-status.json` does not exist, the cron has not run yet — run `cron.sh` once manually to seed it. More failure modes are documented in [`skills/revenium/references/troubleshooting.md`](skills/revenium/references/troubleshooting.md).
+If `budget-status.json` does not exist, the cron has not run yet — run `cron.sh` once manually to seed it. If `tool-events/` stays empty even though Hermes is running tools, run `hooks-status.sh` first — the most common cause is the hooks being registered but not yet approved on `hermes chat`. More failure modes are documented in [`skills/revenium/references/troubleshooting.md`](skills/revenium/references/troubleshooting.md).
 
 ## Uninstalling
 
