@@ -245,6 +245,14 @@ PY
 # retained in HALT_OUTPUT for sed-based extraction below.
 echo "${HALT_OUTPUT}"
 
+# (I-pre) Phase 19 clean-break: remove stale legacy status file on first successful write.
+# Runs AFTER guardrail-status.json is durably on disk, BEFORE halt notification.
+# Idempotent: guard prevents log spam on ticks where the file is already gone.
+if [[ -f "${STATE_DIR}/budget-status.json" ]]; then
+  rm -f "${STATE_DIR}/budget-status.json"
+  info "Cleaned up legacy budget-status.json (Phase 19 clean break)"
+fi
+
 # (I) Parse halt output from Python heredoc.
 if echo "${HALT_OUTPUT}" | grep -q '^HALT_TRANSITION=true$'; then
   HALTED_RULE_NAME=$(echo "${HALT_OUTPUT}" | sed -n 's/^HALTED_RULE_NAME=//p')

@@ -145,7 +145,7 @@ if ! has_guardrails_cli; then
 fi
 
 # ---------------------------------------------------------------------------
-# Helpers: read_config_field (verbatim from budget-check.sh, with list branch)
+# Helpers: read_config_field (shared helper, with list branch)
 # ---------------------------------------------------------------------------
 read_config_field() {
   CONFIG_FILE="${CONFIG_FILE}" KEY="$1" python3 - <<'PY'

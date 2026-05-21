@@ -135,11 +135,17 @@ class RepositoryTests(unittest.TestCase):
         # Phase 19 SC-7 gate: scans code-bearing files only (.sh/.py/.yml/.yaml/.json).
         # .md is intentionally excluded — halt-survivability.md prose is rewritten by
         # Phase 20 DOCS-03 (see 19-CONTEXT.md D-16; 19-11 ratifies this scope).
+        # guardrail-check.sh is intentionally excluded — it contains a one-time rm -f
+        # cleanup of the legacy budget-status.json file (Phase 19 clean-break, plan 19-11).
+        # That reference is the cleanup mechanism itself, not a consumer of the old file.
+        excluded_names = {'guardrail-check.sh'}
         offenders = []
         for path in (SKILL.parent.parent / 'skills').rglob('*'):
             if not path.is_file():
                 continue
             if path.suffix not in {'.sh', '.py', '.yml', '.yaml', '.json'}:
+                continue
+            if path.name in excluded_names:
                 continue
             text = path.read_text(errors='ignore')
             if re.search(r'budget-check|budget-status', text):
