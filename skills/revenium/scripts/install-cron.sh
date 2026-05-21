@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
 Usage: install-cron.sh [--interval-seconds N] [--force] [--dry-run]
 
 Installs the per-minute Revenium metering cron entry that drains markers,
-ships token usage / tool-events to Revenium, and refreshes budget-status.json.
+ships token usage / tool-events to Revenium, and refreshes guardrail-status.json.
 
   --interval-seconds N   Run the metering pipeline every N seconds within
                          each cron tick (1..60). Defaults to 60. Set to 15
