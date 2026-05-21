@@ -154,6 +154,12 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('TOOL_EVENTS_LEDGER_FILE=', text)
         self.assertIn('tool-events', text)
         self.assertIn('revenium-tool-events.ledger', text)
+        # Phase 17: v1.3 guardrails-native paths and CLI capability helper.
+        self.assertIn('GUARDRAIL_STATUS_FILE=', text)
+        self.assertIn('guardrail-status.json', text)
+        self.assertIn('RULES_LOCK_FILE=', text)
+        self.assertIn('rules.lock', text)
+        self.assertIn('has_guardrails_cli()', text)
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
