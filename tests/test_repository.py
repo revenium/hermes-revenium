@@ -71,7 +71,6 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'install-cron.sh',
             SKILL / 'scripts' / 'uninstall-cron.sh',
             SKILL / 'scripts' / 'cron.sh',
-            SKILL / 'scripts' / 'budget-check.sh',
             SKILL / 'scripts' / 'hermes-report.sh',
             SKILL / 'scripts' / 'clear-halt.sh',
             SKILL / 'scripts' / 'prune-markers.sh',
@@ -85,6 +84,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'hooks-status.sh',      # Diagnose hooks-registered-but-inert footgun
             # Phase 18 — single rule-creation entry point (D-01)
             SKILL / 'scripts' / 'setup-guardrails.sh',
+            # Phase 19 — guardrail cron stage (replaces budget-check.sh)
+            SKILL / 'scripts' / 'guardrail-check.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
@@ -130,6 +131,22 @@ class RepositoryTests(unittest.TestCase):
                 offenders.append(str(rel))
         self.assertEqual(offenders, [], f'found legacy branding in: {offenders}')
 
+    def test_no_legacy_budget_status_references(self):
+        # Phase 19 SC-7 gate: scans code-bearing files only (.sh/.py/.yml/.yaml/.json).
+        # .md is intentionally excluded — halt-survivability.md prose is rewritten by
+        # Phase 20 DOCS-03 (see 19-CONTEXT.md D-16; 19-11 ratifies this scope).
+        offenders = []
+        for path in (SKILL.parent.parent / 'skills').rglob('*'):
+            if not path.is_file():
+                continue
+            if path.suffix not in {'.sh', '.py', '.yml', '.yaml', '.json'}:
+                continue
+            text = path.read_text(errors='ignore')
+            if re.search(r'budget-check|budget-status', text):
+                offenders.append(str(path.relative_to(ROOT)))
+        self.assertEqual(offenders, [],
+                         f'SC-7: legacy budget-check/budget-status references found in: {offenders}')
+
     def test_runtime_paths_are_hermes_native(self):
         text = (SKILL / 'scripts' / 'common.sh').read_text()
         self.assertIn('.hermes', text)
@@ -168,6 +185,13 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('MIGRATION_NOTIFY_FILE=', text)
         self.assertIn('migration-notify-state', text)
         self.assertRegex(text, r'MIGRATION_NOTIFY_FILE="\$\{REVENIUM_MIGRATION_NOTIFY_FILE:-\$\{STATE_DIR\}/migration-notify-state\}"')
+        # Phase 19: WARN_FLAGS_DIR for warn-band rate-limit markers (D-06)
+        self.assertIn('WARN_FLAGS_DIR=', text)
+        self.assertIn('markers/.warn', text)
+        self.assertRegex(text, r'WARN_FLAGS_DIR="\$\{REVENIUM_WARN_FLAGS_DIR:-\$\{MARKERS_DIR\}/\.warn\}"')
+        # Phase 19: BUDGET_STATUS_FILE removed (clean break — D-12, ENF-03)
+        self.assertNotIn('BUDGET_STATUS_FILE=', text)
+        self.assertNotIn('budget-status.json', text)
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
@@ -843,7 +867,7 @@ class RepositoryTests(unittest.TestCase):
 
             counter_file = os.path.join(tmp, 'invocations.count')
             open(counter_file, 'w').close()
-            for name in ('hermes-report.sh', 'budget-check.sh', 'tool-event-report.sh'):
+            for name in ('hermes-report.sh', 'guardrail-check.sh', 'tool-event-report.sh'):
                 stub = os.path.join(scripts_dir, name)
                 with open(stub, 'w') as f:
                     f.write(
@@ -879,7 +903,7 @@ class RepositoryTests(unittest.TestCase):
                 f'got {len(invocations)}:\n' + '\n'.join(invocations),
             )
             self.assertEqual(invocations[:3], [
-                'hermes-report.sh', 'budget-check.sh', 'tool-event-report.sh',
+                'hermes-report.sh', 'guardrail-check.sh', 'tool-event-report.sh',
             ], f'per-iteration ordering broken: {invocations[:3]}')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -2130,8 +2154,9 @@ class RepositoryTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_halt_unclassified(self):
-        """HOOK-04 / D-08: when budget-status.json::halted is True, the LLM is NOT called
-        and a marker pair with task_type=unclassified is written."""
+        """HOOK-04 / D-08: when guardrail-status.json::halted is True, the LLM is NOT called
+        and a marker pair with task_type=unclassified is written.
+        Phase 19: classifier.py now reads guardrail-status.json (SC-7)."""
         import asyncio
         import importlib
         import json
@@ -2148,15 +2173,16 @@ class RepositoryTests(unittest.TestCase):
                 importlib.reload(sys.modules['classifier'])
             import classifier as handler
 
-            # Seed a halted budget-status.json
+            # Seed a halted guardrail-status.json (Phase 19: replaces budget-status.json)
             os.makedirs(sd, exist_ok=True)
-            with open(os.path.join(sd, 'budget-status.json'), 'w', encoding='utf-8') as f:
-                json.dump({"halted": True, "exceeded": True, "currentValue": 99,
-                           "threshold": 50, "percentUsed": 198,
+            with open(os.path.join(sd, 'guardrail-status.json'), 'w', encoding='utf-8') as f:
+                json.dump({"halted": True, "autonomousMode": True,
                            "haltedAt": "2026-05-13T00:00:00Z",
-                           "lastChecked": "2026-05-13T00:00:00Z"}, f)
+                           "lastChecked": "2026-05-13T00:00:00Z",
+                           "rules": []}, f)
 
-            self.assertTrue(handler._budget_halted())
+            # Phase 19: _budget_halted renamed to _guardrail_halted (SC-7)
+            self.assertTrue(handler._guardrail_halted())
 
             # Patch call_llm so we can prove it was NOT called
             with unittest.mock.patch.object(handler, 'call_llm') as mock_llm:
@@ -2184,8 +2210,10 @@ class RepositoryTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_halt_failopen_on_missing_file(self):
-        """HOOK-04 / D-08: missing budget-status.json returns False from _budget_halted
-        (fail-open). The handler must NOT crash and must NOT short-circuit to unclassified."""
+        """HOOK-04 / D-08: missing guardrail-status.json returns False from _guardrail_halted
+        (fail-open). The handler must NOT crash and must NOT short-circuit to unclassified.
+        Phase 19: repointed from BUDGET_STATUS_FILE/_budget_halted to
+        GUARDRAIL_STATUS_FILE/_guardrail_halted (SC-7)."""
         import importlib
         import shutil
         import sys
@@ -2198,9 +2226,9 @@ class RepositoryTests(unittest.TestCase):
                 importlib.reload(sys.modules['classifier'])
             import classifier as handler
 
-            # No budget-status.json in tmpdir → fail-open
-            self.assertFalse(handler.BUDGET_STATUS_FILE.exists())
-            self.assertFalse(handler._budget_halted())
+            # No guardrail-status.json in tmpdir → fail-open (Phase 19: GUARDRAIL_STATUS_FILE)
+            self.assertFalse(handler.GUARDRAIL_STATUS_FILE.exists())
+            self.assertFalse(handler._guardrail_halted())
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -2362,12 +2390,12 @@ class RepositoryTests(unittest.TestCase):
             # JSONL absence is the load-bearing premise — this is what produced G-02 in production.
             self.assertFalse(os.path.exists(os.path.join(hh, 'sessions', 'cli-sid.jsonl')))
 
-            # Seed an empty taxonomy and a NOT-halted budget-status so the LLM-classification
-            # branch is reachable.
+            # Seed an empty taxonomy and a NOT-halted guardrail-status so the LLM-classification
+            # branch is reachable. Phase 19: repointed from budget-status.json (SC-7).
             os.makedirs(sd, exist_ok=True)
             with open(os.path.join(sd, 'task-taxonomy.json'), 'w', encoding='utf-8') as f:
                 json.dump({"labels": {"code_review": {"description": "Code review work"}}}, f)
-            with open(os.path.join(sd, 'budget-status.json'), 'w', encoding='utf-8') as f:
+            with open(os.path.join(sd, 'guardrail-status.json'), 'w', encoding='utf-8') as f:
                 json.dump({"halted": False}, f)
 
             # Patch call_llm to return content 'code_review'. Same stub shape as
@@ -7061,8 +7089,9 @@ class RepositoryTests(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_pre_llm_call_fail_open(self):
-        """pre_llm_call.sh prints exactly {} when budget-status.json is missing
-        AND when it is corrupt non-JSON (V5 fail-open input validation)."""
+        """pre_llm_call.sh prints exactly {} when guardrail-status.json is missing
+        AND when it is corrupt non-JSON (V5 fail-open input validation).
+        Phase 19: repointed from budget-status.json to guardrail-status.json (HOOK-04)."""
         import json
         import os
         import subprocess
@@ -7073,13 +7102,14 @@ class RepositoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='gsd-llm-failopen-') as tmp:
             state_dir = os.path.join(tmp, 'state', 'revenium')
             os.makedirs(state_dir, mode=0o700, exist_ok=True)
-            status_path = os.path.join(state_dir, 'budget-status.json')
+            # Phase 19: repointed from budget-status.json to guardrail-status.json
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
             env = dict(os.environ)
             env['HERMES_HOME'] = tmp
             env['REVENIUM_STATE_DIR'] = state_dir
-            env['BUDGET_STATUS_FILE'] = status_path
+            env['GUARDRAIL_STATUS_FILE'] = status_path
 
-            # Case 1: budget-status.json missing.
+            # Case 1: guardrail-status.json missing.
             missing = subprocess.run(
                 ['bash', pre_llm],
                 input='{"hook_event_name":"pre_llm_call"}',
@@ -7095,7 +7125,7 @@ class RepositoryTests(unittest.TestCase):
                 f'expected {{}} fail-open on missing status, got: {missing.stdout!r}',
             )
 
-            # Case 2: corrupt (non-JSON) budget-status.json.
+            # Case 2: corrupt (non-JSON) guardrail-status.json.
             with open(status_path, 'w', encoding='utf-8') as fh:
                 fh.write('this is not json {{{')
             corrupt = subprocess.run(
@@ -7114,8 +7144,9 @@ class RepositoryTests(unittest.TestCase):
             )
 
     def test_pre_llm_call_halted_emits_halt_string(self):
-        """pre_llm_call.sh with halted budget-status.json emits a JSON object
-        whose context carries the verbatim halt string and substituted values."""
+        """pre_llm_call.sh with halted guardrail-status.json emits a JSON object
+        whose context carries the D-01 verbatim halt string and substituted values.
+        Phase 19: repointed from budget-status.json to guardrail-status.json (HOOK-01, HOOK-04)."""
         import json
         import os
         import subprocess
@@ -7126,18 +7157,28 @@ class RepositoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='gsd-llm-halted-') as tmp:
             state_dir = os.path.join(tmp, 'state', 'revenium')
             os.makedirs(state_dir, mode=0o700, exist_ok=True)
-            status_path = os.path.join(state_dir, 'budget-status.json')
+            # Phase 19: repointed from budget-status.json to guardrail-status.json
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
             with open(status_path, 'w', encoding='utf-8') as fh:
                 json.dump({
                     'halted': True,
-                    'currentValue': 95,
-                    'threshold': 100,
-                    'percentUsed': 95,
+                    'haltedAt': '2026-05-22T14:03:38.478Z',
+                    'haltedRule': {
+                        'ruleId': 'test-rule-id',
+                        'name': 'Engineering Budget',
+                        'metricType': 'TOTAL_COST',
+                        'windowType': 'MONTHLY',
+                        'currentValue': 102.5,
+                        'hardLimit': 100.0,
+                    },
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [],
                 }, fh)
             env = dict(os.environ)
             env['HERMES_HOME'] = tmp
             env['REVENIUM_STATE_DIR'] = state_dir
-            env['BUDGET_STATUS_FILE'] = status_path
+            env['GUARDRAIL_STATUS_FILE'] = status_path
 
             result = subprocess.run(
                 ['bash', pre_llm],
@@ -7155,22 +7196,28 @@ class RepositoryTests(unittest.TestCase):
                 f'halted output missing context key: {result.stdout!r}',
             )
             context = payload['context']
+            # Phase 19: D-01 halt string assertions (replaces legacy budget-status fields)
             self.assertIn(
-                'Budget enforcement halt is active.', context,
-                f'verbatim halt string fragment missing from context: {context!r}',
+                "Guardrail halt active — rule 'Engineering Budget'", context,
+                f'D-01 halt string prefix missing from context: {context!r}',
             )
-            self.assertIn(
-                '95 of 100 used (95%)', context,
-                f'substituted budget values missing from context: {context!r}',
-            )
+            self.assertIn('TOTAL_COST', context,
+                          f'metricType missing from halt context: {context!r}')
+            self.assertIn('MONTHLY', context,
+                          f'windowType missing from halt context: {context!r}')
+            self.assertIn('102.5', context,
+                          f'currentValue missing from halt context: {context!r}')
+            self.assertIn('100.0', context,
+                          f'hardLimit missing from halt context: {context!r}')
             self.assertIn(
                 'clear-halt.sh', context,
                 f'clear-halt.sh resume instruction missing from context: {context!r}',
             )
 
     def test_pre_tool_call_halted_blocks(self):
-        """pre_tool_call.sh with halted budget-status.json emits a JSON object
-        with action == "block" and a non-empty message."""
+        """pre_tool_call.sh with halted guardrail-status.json emits a JSON object
+        with action == "block" and a non-empty message.
+        Phase 19: repointed from budget-status.json to guardrail-status.json (HOOK-01, HOOK-04)."""
         import json
         import os
         import subprocess
@@ -7182,18 +7229,28 @@ class RepositoryTests(unittest.TestCase):
             state_dir = os.path.join(tmp, 'state', 'revenium')
             markers_dir = os.path.join(state_dir, 'markers')
             os.makedirs(markers_dir, mode=0o700, exist_ok=True)
-            status_path = os.path.join(state_dir, 'budget-status.json')
+            # Phase 19: repointed from budget-status.json to guardrail-status.json
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
             with open(status_path, 'w', encoding='utf-8') as fh:
                 json.dump({
                     'halted': True,
-                    'currentValue': 95,
-                    'threshold': 100,
-                    'percentUsed': 95,
+                    'haltedAt': '2026-05-22T14:03:38.478Z',
+                    'haltedRule': {
+                        'ruleId': 'test-rule-id',
+                        'name': 'Test Rule',
+                        'metricType': 'TOTAL_COST',
+                        'windowType': 'MONTHLY',
+                        'currentValue': 102.5,
+                        'hardLimit': 100.0,
+                    },
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [],
                 }, fh)
             env = dict(os.environ)
             env['HERMES_HOME'] = tmp
             env['REVENIUM_STATE_DIR'] = state_dir
-            env['BUDGET_STATUS_FILE'] = status_path
+            env['GUARDRAIL_STATUS_FILE'] = status_path
             env['MARKERS_DIR'] = markers_dir
 
             result = subprocess.run(
@@ -7215,9 +7272,12 @@ class RepositoryTests(unittest.TestCase):
                 payload.get('action'), 'block',
                 f'expected action == "block", got: {result.stdout!r}',
             )
-            self.assertTrue(
-                payload.get('message'),
-                f'block directive missing a non-empty message: {result.stdout!r}',
+            msg = payload.get('message', '')
+            self.assertTrue(msg, f'block directive missing a non-empty message: {result.stdout!r}')
+            # Phase 19: D-01 halt string in block message
+            self.assertIn(
+                "Guardrail halt active — rule 'Test Rule'", msg,
+                f'D-01 halt string missing from block message: {msg!r}',
             )
 
     # ------------------------------------------------------------------
@@ -8794,9 +8854,10 @@ class RepositoryTests(unittest.TestCase):
             os.makedirs(md, mode=0o700)
 
             halted_sid = "20260518_140000_haltedtest"
-            budget_status_path = handler.BUDGET_STATUS_FILE
+            # Phase 19: repoint from BUDGET_STATUS_FILE to GUARDRAIL_STATUS_FILE (SC-7)
+            budget_status_path = handler.GUARDRAIL_STATUS_FILE
             budget_status_path.parent.mkdir(parents=True, exist_ok=True)
-            budget_status_path.write_text(json.dumps({"halted": True, "exceeded": True}))
+            budget_status_path.write_text(json.dumps({"halted": True, "autonomousMode": True}))
 
             try:
                 asyncio.run(handler.run_classification_async(
