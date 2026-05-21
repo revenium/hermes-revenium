@@ -205,6 +205,37 @@ class RepositoryTests(unittest.TestCase):
             self.assertIsInstance(schema['description'], str, f'label "{label}" description must be str')
             self.assertIsInstance(schema['examples'], list, f'label "{label}" examples must be list')
 
+    def test_config_schema_doc_lists_rule_ids(self):
+        """Phase 17 D-15: config-schema.md documents ruleIds as active field
+        and marks alertId with a Deprecated/Legacy notice."""
+        import re
+        schema_doc = SKILL / 'references' / 'config-schema.md'
+        self.assertTrue(schema_doc.exists(), 'config-schema.md missing from skill references/')
+        text = schema_doc.read_text()
+        self.assertIn('ruleIds', text, 'config-schema.md must document the ruleIds field')
+        # alertId must be accompanied by a deprecation marker within the file
+        self.assertTrue(
+            re.search(r'(?:Deprecated|Legacy)', text),
+            'config-schema.md must contain a Deprecated or Legacy marker for alertId',
+        )
+        # The deprecation marker must be near alertId (within 10 lines)
+        lines = text.splitlines()
+        alert_id_lines = [i for i, ln in enumerate(lines) if 'alertId' in ln]
+        self.assertTrue(alert_id_lines, 'config-schema.md must contain alertId')
+        deprecated_lines = [i for i, ln in enumerate(lines)
+                            if re.search(r'(?:Deprecated|Legacy)', ln)]
+        self.assertTrue(deprecated_lines, 'config-schema.md must contain Deprecated/Legacy marker')
+        # At least one deprecation marker must be within 10 lines of an alertId reference
+        close_enough = any(
+            abs(a - d) <= 10
+            for a in alert_id_lines
+            for d in deprecated_lines
+        )
+        self.assertTrue(
+            close_enough,
+            'Deprecated/Legacy marker must appear within 10 lines of alertId in config-schema.md',
+        )
+
     # Single-writer round-trip per Phase 2 SC5; concurrent multi-writer fixture deferred to Phase 3 (RESEARCH.md note: v1 has single-writer-per-session).
     def test_taxonomy_atomic_write_pattern(self):
         """Atomic write pattern (flock + write-to-tmp + os.rename) never produces partial reads (Phase 2 SC5)."""
