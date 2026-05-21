@@ -7308,11 +7308,18 @@ class RepositoryTests(unittest.TestCase):
         events_body = f"exit 1" if events_fail else f"echo '{ev_escaped}'"
         stub_content = (
             '#!/usr/bin/env bash\n'
+            # Match on "$1 $2 $3"; when fewer than 3 args are passed (e.g. "config show"),
+            # bash expands the empty $3 to "", producing a trailing space in the string.
+            # The 'config show'|'config show ' pattern handles both.
+            # The 'guardrails budget-rules --help' and 'guardrails enforcement-events --help'
+            # cases satisfy has_guardrails_cli() probes in guardrail-check.sh.
             'case "$1 $2 $3" in\n'
-            f"  'config show') echo 'Team ID: 12802' ;;\n"
+            f"  'config show'|'config show ') echo 'Team ID: 12802' ;;\n"
             f"  'guardrails enforcement-rules get') echo '{enf_escaped}' ;;\n"
             f"  'guardrails budget-rules list') echo '{br_escaped}' ;;\n"
+            f"  'guardrails budget-rules --help') exit 0 ;;\n"
             f"  'guardrails enforcement-events list') {events_body} ;;\n"
+            f"  'guardrails enforcement-events --help') exit 0 ;;\n"
             '  *) echo "unknown: $*" >&2; exit 1 ;;\n'
             'esac\n'
         )
