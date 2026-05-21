@@ -1,74 +1,37 @@
 # Revenium Skill Setup
 
+Fresh-install and reconfigure flows are driven by `setup-guardrails.sh --interactive`. The script collects all operator input, calls `revenium guardrails budget-rules create`, and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Pass `--shadow-mode` to create rules in shadow mode (evaluate without blocking real traffic); the default is enforcing.
+
 ## Initial setup
 
-### 1. Verify prerequisites
+1. **Verify prerequisites:**
+   ```bash
+   revenium config show
+   sqlite3 --version
+   python3 --version
+   ```
 
-```bash
-revenium config show
-sqlite3 --version
-python3 --version
-```
+2. **Configure CLI credentials** if `revenium config show` reports an empty API Key. See the SKILL.md Setup Flow step 2 for the four `revenium config set` calls.
 
-### 2. Create the budget alert
+3. **Run the setup script:**
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
+   ```
+   The script prompts for budget hard-limit, period, organization name, autonomous mode and notification channel/target, and optionally per-task-type rules from the live `task-taxonomy.json`. On success it writes `ruleIds` into `~/.hermes/state/revenium/config.json`.
 
-Ask the user for:
-
-- budget threshold
-- budget period (`DAILY`, `WEEKLY`, `MONTHLY`, `QUARTERLY`)
-- optional organization name
-- optional autonomous notification channel + target
-
-Before creating a new alert, remove any prior Revenium/Hermes budget alerts you own that would cause duplicates.
-
-Create the alert:
-
-```bash
-revenium alerts budget create --name "Hermes Monthly Budget" --threshold 50 --period MONTHLY --json
-```
-
-Extract the `id` field from the JSON response.
-
-### 3. Write state config
-
-Write:
-
-```json
-{
-  "alertId": "<alert-id>",
-  "organizationName": "<optional>",
-  "autonomousMode": true,
-  "notifyChannel": "telegram",
-  "notifyTarget": "123456789"
-}
-```
-
-into:
-
-```text
-~/.hermes/state/revenium/config.json
-```
-
-### 4. Install cron
-
-```bash
-bash ~/.hermes/skills/revenium/scripts/install-cron.sh
-```
-
-## Reset flow
-
-1. Read the current config.
-2. Fetch the existing alert settings.
-3. Delete the old alert.
-4. Create a new alert with the same settings.
-5. Replace `alertId` in `config.json`.
-6. Reset `budget-status.json` to a non-halted zeroed state.
+4. **Install the metering cron AND budget-halt hooks:**
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
+   bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+   ```
 
 ## Reconfigure flow
 
-1. Read and remove the existing config.
-2. Delete the old alert.
-3. Run the initial setup flow again.
+Re-run `setup-guardrails.sh --interactive`. The script detects existing `ruleIds`, prints the current rules via `revenium guardrails budget-rules list`, and prompts `[r]ecreate / [c]ancel`. The recreate path deletes every listed rule via `revenium guardrails budget-rules delete <id> --yes` and runs the fresh-install prompts. The cancel path exits 0 without changes. Note that hard-limit and period cannot be updated in place (the Revenium CLI's `budget-rules update` only supports `--name`); the recreate flow is the supported path for changing limits or periods.
+
+## Auto-migration (legacy alertId installs)
+
+Hosts upgrading from a v1.2 install that has only `alertId` in `config.json` and no `ruleIds` are auto-migrated on the next cron tick — no operator action required for the common case. Full contract in `docs/migration-guardrails.md` (what changes, what happens automatically, enforcement-posture preservation, loud-on-failure behavior, manual recovery, contributor appendix).
 
 ## How attribution works
 
