@@ -53,3 +53,55 @@ format (e.g., `channel:C0123456789`, `user:<id>`, `@username`).
 A human-readable label for the Revenium organization. When present, it is passed as
 `--organization-name` on every metered transaction. It is optional; omitting it
 skips the flag entirely on the `revenium meter completion` call.
+
+---
+
+# guardrail-status.json Schema
+
+## Overview
+
+`guardrail-status.json` is the runtime enforcement-status file written by `guardrail-check.sh`
+on every cron tick. Location: `~/.hermes/state/revenium/guardrail-status.json` (declared as
+`GUARDRAIL_STATUS_FILE` in `common.sh`). It is the coupling point between the cron pipeline
+(writer) and the shell hooks (`pre_llm_call.sh`, `pre_tool_call.sh`) and the SKILL.md backstop
+(readers). The cron pipeline writes this file; the hooks and the SKILL.md procedural block read
+it on every Hermes turn.
+
+## Top-Level Fields
+
+| Field | Type | Present when | Description |
+|-------|------|--------------|-------------|
+| `halted` | boolean | Always | `true` when `autonomousMode` is on and at least one rule is in `block` state. |
+| `haltedAt` | string (ISO-8601) | `halted: true` only | Timestamp of the first halt transition for the current halt epoch. Carried forward on subsequent cron ticks while halt persists; removed on clear. |
+| `haltedRule` | object | `halted: true` only | Pre-computed tiebreaker rule (first blocked rule in `ruleIds[]` declaration order, D-04). See haltedRule Extension below. |
+| `autonomousMode` | boolean | Always | Mirrors `config.json::autonomousMode` at time of last cron tick. |
+| `lastChecked` | string (ISO-8601) | Always | Timestamp of the most recent `guardrail-check.sh` run. |
+| `rules` | array | Always | Per-rule state array; see `rules[]` Fields below. |
+
+## `rules[]` Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ruleId` | string | Revenium-hashed rule ID; same format as `config.json::ruleIds`. |
+| `name` | string | Rule name as declared in Revenium. |
+| `metricType` | string | Metric being enforced (e.g., `TOTAL_COST`). |
+| `windowType` | string | Billing window (e.g., `MONTHLY`). Mapped from API `periodType`. |
+| `groupBy` | string | Grouping dimension (e.g., `ORGANIZATION`). |
+| `currentValue` | number | Current value of the metric. |
+| `warnThreshold` | number | Warn-band threshold. |
+| `hardLimit` | number | Hard-limit threshold. Mapped from API `threshold`. |
+| `state` | string | Derived state: `ok`, `warn`, or `block`. `block`: metric has breached the hard limit. `warn`: metric has breached the warn threshold but not the hard limit. `ok`: neither threshold breached. |
+| `lastChecked` | string (ISO-8601) | Timestamp of this rule's last update. |
+
+## `haltedRule` Extension (D-04)
+
+When `halted` is `true`, the top-level `haltedRule` block is pre-computed by
+`guardrail-check.sh` from the first blocked rule in `config.json::ruleIds` declaration
+order. This eliminates tiebreaker logic from hook scripts and the SKILL.md backstop —
+all three become trivial readers of one pre-resolved block. When `halted` is `false`,
+`haltedRule` is absent entirely.
+
+The `haltedRule` block contains a subset of `rules[]` fields: `ruleId`, `name`,
+`metricType`, `windowType`, `currentValue`, and `hardLimit`. The fields `groupBy`,
+`warnThreshold`, `state`, and `lastChecked` are intentionally omitted — hooks only
+need the static rule identity and current breach values to render the halt message.
