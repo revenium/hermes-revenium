@@ -415,6 +415,449 @@ migration_notify_reset() {
 }
 
 # ---------------------------------------------------------------------------
-# Placeholder for mode entry points (Task 3 fills in the bodies)
+# Helper: compute warn threshold = 80% of hard limit (env-passing, bash 3.2)
 # ---------------------------------------------------------------------------
-# Task 3 adds: run_default(), run_interactive(), run_migration(), case dispatch
+compute_warn_threshold() {
+  local hard_limit="$1"
+  HARD_LIMIT_ENV="${hard_limit}" python3 - <<'PY'
+import os
+hard = float(os.environ['HARD_LIMIT_ENV'])
+warn = hard * 0.8
+# Print with up to 2 decimal places, strip trailing zeros
+result = f"{warn:.2f}".rstrip('0').rstrip('.')
+print(result if result else '0')
+PY
+}
+
+# Helper: title-case a period string (MONTHLY -> Monthly, etc.)
+period_titled() {
+  local period="$1"
+  case "${period}" in
+    DAILY) echo "Daily" ;;
+    WEEKLY) echo "Weekly" ;;
+    MONTHLY) echo "Monthly" ;;
+    QUARTERLY) echo "Quarterly" ;;
+    *) echo "${period}" ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Mode A: run_default — all args from CLI flags
+# ---------------------------------------------------------------------------
+run_default() {
+  # Validate args (mode resolution already confirmed they're present)
+  if ! validate_hard_limit "${HARD_LIMIT}"; then
+    error "--hard-limit '${HARD_LIMIT}' must be a positive number"
+    exit 2
+  fi
+  if ! validate_period "${PERIOD}"; then
+    error "--period '${PERIOD}' must be DAILY, WEEKLY, MONTHLY, or QUARTERLY"
+    exit 2
+  fi
+
+  local warn_threshold
+  warn_threshold=$(compute_warn_threshold "${HARD_LIMIT}")
+
+  local period_title
+  period_title=$(period_titled "${PERIOD}")
+  local rule_name="Hermes ${period_title} Budget"
+
+  create_rule "${rule_name}" "${HARD_LIMIT}" "${warn_threshold}" "${PERIOD}"
+
+  if [[ "${RULE_EXIT}" -ne 0 || -z "${RULE_ID}" ]]; then
+    migration_notify_once "default_create_failed" "Revenium rule creation failed for ${rule_name}. Check ${LOG_FILE} for details."
+    exit 1
+  fi
+
+  local new_rule_ids_json
+  new_rule_ids_json="[\"${RULE_ID}\"]"
+  write_rule_ids_to_config "${new_rule_ids_json}"
+
+  info "config.json now contains ruleIds=[${RULE_ID}]"
+  migration_notify_reset
+  echo "Created rule ${RULE_ID}. config.json updated."
+}
+
+# ---------------------------------------------------------------------------
+# Mode B: run_interactive — operator prompts (used by SKILL.md Setup Flow)
+# ---------------------------------------------------------------------------
+run_interactive() {
+  echo ""
+  echo "Setting up Revenium guardrails budget rules..."
+  echo ""
+
+  # Re-run gate (SETUP-05 + D-15): if ruleIds already populated, offer [r]ecreate / [c]ancel
+  if [[ "${RULE_IDS}" == "nonempty" ]]; then
+    echo "Existing budget rules found:"
+
+    # List current rules from Revenium and display them
+    local rules_json
+    rules_json=$(revenium guardrails budget-rules list --output json 2>/dev/null) || rules_json="[]"
+
+    # Read current ruleIds from config.json and display matching rules
+    CONFIG_FILE="${CONFIG_FILE}" RULES_JSON="${rules_json}" python3 - <<'PY'
+import json, os
+config = json.loads(open(os.environ['CONFIG_FILE']).read())
+rule_ids = config.get('ruleIds', [])
+try:
+    rules = json.loads(os.environ['RULES_JSON'])
+except Exception:
+    rules = []
+rules_by_id = {r['id']: r for r in rules}
+for rid in rule_ids:
+    r = rules_by_id.get(rid)
+    if r:
+        print(f"  {rid}  {r.get('name', '?')}  hard={r.get('hardLimit', '?')}  warn={r.get('warnThreshold', '?')}  window={r.get('windowType', '?')}")
+    else:
+        print(f"  {rid}  (not found in Revenium)")
+PY
+
+    echo ""
+    echo "Note: hard-limit cannot be updated in place; choose [r] to delete and recreate."
+
+    local rerun_action=""
+    local attempt=0
+    while [[ ${attempt} -lt 3 ]]; do
+      read -r -p "Action? [r]ecreate / [c]ancel: " rerun_action
+      case "${rerun_action}" in
+        r|recreate)
+          # Delete all existing rules then fall through to fresh-install path
+          local cur_rule_ids_raw
+          cur_rule_ids_raw=$(CONFIG_FILE="${CONFIG_FILE}" python3 - <<'PY'
+import json, os
+config = json.loads(open(os.environ['CONFIG_FILE']).read())
+for rid in config.get('ruleIds', []):
+    print(rid)
+PY
+          )
+          while IFS= read -r rid; do
+            if [[ -n "${rid}" ]]; then
+              revenium guardrails budget-rules delete "${rid}" --yes >/dev/null 2>&1 || true
+              info "Deleted existing rule ${rid}"
+            fi
+          done <<< "${cur_rule_ids_raw}"
+          RULE_IDS=""
+          break
+          ;;
+        c|cancel|"")
+          echo "Cancelled."
+          exit 0
+          ;;
+        *)
+          echo "Invalid choice. Please enter r or c."
+          attempt=$((attempt + 1))
+          ;;
+      esac
+    done
+
+    if [[ ${attempt} -ge 3 ]]; then
+      error "Too many invalid responses."
+      exit 1
+    fi
+  fi
+
+  # Operator prompts — fresh-install path
+  local hard_limit="" period="" org_name="" autonomous="" notify_channel="" notify_target=""
+
+  # Prompt for hard limit
+  local hl_attempt=0
+  while [[ ${hl_attempt} -lt 3 ]]; do
+    read -r -p "Budget hard limit (numeric, e.g. 50.00): " hard_limit
+    if validate_hard_limit "${hard_limit}"; then
+      break
+    fi
+    echo "Invalid input. Must be a positive number (e.g. 50 or 100.00)."
+    hl_attempt=$((hl_attempt + 1))
+  done
+  if ! validate_hard_limit "${hard_limit}"; then
+    error "Too many invalid inputs for hard-limit."
+    exit 1
+  fi
+
+  # Prompt for period
+  local period_attempt=0
+  while [[ ${period_attempt} -lt 3 ]]; do
+    read -r -p "Budget period (DAILY/WEEKLY/MONTHLY/QUARTERLY): " period
+    if validate_period "${period}"; then
+      break
+    fi
+    echo "Invalid period. Must be DAILY, WEEKLY, MONTHLY, or QUARTERLY."
+    period_attempt=$((period_attempt + 1))
+  done
+  if ! validate_period "${period}"; then
+    error "Too many invalid inputs for period."
+    exit 1
+  fi
+
+  # Optional org name
+  read -r -p "Organization name (optional, press Enter to skip): " org_name || org_name=""
+
+  # Autonomous mode
+  local auto_response=""
+  read -r -p "Run autonomously (budget halt enforced + notifications fire)? (yes/no, default no): " auto_response || auto_response=""
+  case "${auto_response}" in
+    yes|y|YES|Y)
+      autonomous="true"
+      read -r -p "Notify channel (e.g. slack, discord): " notify_channel || notify_channel=""
+      read -r -p "Notify target (e.g. channel:C123, @username): " notify_target || notify_target=""
+      ;;
+    *)
+      autonomous="false"
+      ;;
+  esac
+
+  local warn_threshold
+  warn_threshold=$(compute_warn_threshold "${hard_limit}")
+
+  local period_title
+  period_title=$(period_titled "${period}")
+  local base_rule_name="Hermes ${period_title} Budget"
+
+  # Create base rule
+  create_rule "${base_rule_name}" "${hard_limit}" "${warn_threshold}" "${period}"
+
+  if [[ "${RULE_EXIT}" -ne 0 || -z "${RULE_ID}" ]]; then
+    error "Failed to create base budget rule."
+    exit 1
+  fi
+
+  local base_rule_id="${RULE_ID}"
+  local rule_ids_list="${base_rule_id}"
+
+  # Task-type picker (SETUP-02 + D-12, D-13, D-14)
+  if [[ -f "${TAXONOMY_FILE}" ]]; then
+    local labels_json
+    labels_json=$(TAXONOMY_FILE="${TAXONOMY_FILE}" python3 - <<'PY'
+import json, os, sys
+try:
+    d = json.load(open(os.environ['TAXONOMY_FILE']))
+    labels = list(d.get('labels', {}).keys())
+    print(json.dumps(labels))
+except Exception:
+    print('[]')
+PY
+    )
+
+    local label_count
+    label_count=$(echo "${labels_json}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
+    if [[ "${label_count}" -gt 0 ]]; then
+      echo ""
+      echo "Available task types (optional per-task budget rules):"
+      LABELS_JSON="${labels_json}" python3 - <<'PY'
+import json, os
+labels = json.loads(os.environ['LABELS_JSON'])
+for i, label in enumerate(labels, 1):
+    print(f"  {i}) {label}")
+PY
+
+      local task_selection=""
+      read -r -p 'Which to enforce? (comma-separated indices, or "none"): ' task_selection || task_selection=""
+
+      # Parse selection and create per-task rules
+      local selected_labels
+      selected_labels=$(LABELS_JSON="${labels_json}" TASK_TYPE_SELECTION="${task_selection}" python3 - <<'PY'
+import json, os
+labels = json.loads(os.environ['LABELS_JSON'])
+sel = os.environ['TASK_TYPE_SELECTION'].strip().lower()
+if sel == 'none' or not sel:
+    print('[]')
+else:
+    try:
+        indices = [int(x.strip()) for x in sel.split(',') if x.strip().isdigit()]
+        selected = [labels[i-1] for i in indices if 1 <= i <= len(labels)]
+        print(json.dumps(selected))
+    except Exception:
+        print('[]')
+PY
+      )
+
+      local num_selected
+      num_selected=$(echo "${selected_labels}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+
+      if [[ "${num_selected}" -gt 0 ]]; then
+        # Iterate selected labels and create per-task rules
+        local label_index=0
+        while [[ ${label_index} -lt ${num_selected} ]]; do
+          local label
+          label=$(LABELS_JSON="${selected_labels}" IDX="${label_index}" python3 - <<'PY'
+import json, os
+labels = json.loads(os.environ['LABELS_JSON'])
+print(labels[int(os.environ['IDX'])])
+PY
+          )
+
+          local task_hard_limit="" task_hl_attempt=0
+          while [[ ${task_hl_attempt} -lt 3 ]]; do
+            read -r -p "Hard limit for ${label} (numeric): " task_hard_limit
+            if validate_hard_limit "${task_hard_limit}"; then
+              break
+            fi
+            echo "Invalid input. Must be a positive number."
+            task_hl_attempt=$((task_hl_attempt + 1))
+          done
+          if ! validate_hard_limit "${task_hard_limit}"; then
+            warn "Skipping task-type rule for ${label} (invalid hard-limit after 3 attempts)."
+            label_index=$((label_index + 1))
+            continue
+          fi
+
+          local task_warn
+          task_warn=$(compute_warn_threshold "${task_hard_limit}")
+
+          local label_title
+          label_title=$(echo "${label}" | python3 -c "import sys; s=sys.stdin.read().strip(); print(s.replace('_',' ').title().replace(' ','_'))" 2>/dev/null || echo "${label}")
+          local task_rule_name="Hermes ${label_title} Budget"
+
+          create_rule "${task_rule_name}" "${task_hard_limit}" "${task_warn}" "${period}"
+
+          if [[ "${RULE_EXIT}" -eq 0 && -n "${RULE_ID}" ]]; then
+            rule_ids_list="${rule_ids_list}
+${RULE_ID}"
+          else
+            warn "Failed to create rule for task type ${label} — skipping."
+          fi
+
+          label_index=$((label_index + 1))
+        done
+      fi
+    fi
+  fi
+
+  # Build JSON array from newline-separated rule IDs
+  local new_rule_ids_json
+  new_rule_ids_json=$(RULE_IDS_NL="${rule_ids_list}" python3 - <<'PY'
+import json, os
+lines = [x.strip() for x in os.environ['RULE_IDS_NL'].strip().split('\n') if x.strip()]
+print(json.dumps(lines))
+PY
+  )
+
+  write_rule_ids_and_config "${new_rule_ids_json}" "${org_name}" "${autonomous}" "${notify_channel}" "${notify_target}"
+
+  migration_notify_reset
+
+  local rule_count
+  rule_count=$(echo "${new_rule_ids_json}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
+  echo "Created ${rule_count} rule(s). config.json updated. ruleIds=${new_rule_ids_json}"
+}
+
+# ---------------------------------------------------------------------------
+# Mode C: run_migration — cron auto-migration from legacy alertId (--from-alert --auto)
+# ---------------------------------------------------------------------------
+run_migration() {
+  # D-11: operator-controllable shadow-mode override via cron env
+  if [[ "${REVENIUM_MIGRATE_SHADOW_MODE:-false}" == "true" ]]; then
+    SHADOW_MODE="true"
+  fi
+
+  # Cross-check: --from-alert value must match stored alertId
+  if [[ "${FROM_ALERT}" != "${EXISTING_ALERT_ID}" ]]; then
+    error "alertId mismatch: --from-alert=${FROM_ALERT} vs config.json alertId=${EXISTING_ALERT_ID}"
+    exit 1
+  fi
+
+  # Fetch alert list (Pitfall 1: must use list, not get — list has cumulativePeriod + name)
+  local alert_list
+  alert_list=$(revenium alerts budget list --output json 2>/dev/null) || alert_list="[]"
+
+  # Filter by alertId, emit KEY=value lines
+  local alert_data
+  alert_data=$(
+    FROM_ALERT_ID="${FROM_ALERT}" ALERT_LIST="${alert_list}" python3 - <<'PY'
+import json, os
+alert_id = os.environ['FROM_ALERT_ID']
+try:
+    alerts = json.loads(os.environ['ALERT_LIST'])
+except Exception:
+    alerts = []
+match = next((a for a in alerts if a.get('alertId') == alert_id), None)
+if match:
+    # T-18-LOG-INJECT mitigation: truncate name to 64 chars before logging
+    name = (match.get('name') or '')[:64]
+    print(f"THRESHOLD={match.get('threshold', '')}")
+    print(f"PERIOD={match.get('cumulativePeriod', '')}")
+    print(f"NAME={name}")
+    print("FOUND=true")
+else:
+    print("FOUND=false")
+PY
+  )
+
+  local found
+  found=$(echo "${alert_data}" | sed -n 's/^FOUND=//p')
+
+  # D-09: deleted-alert edge case
+  if [[ "${found}" != "true" ]]; then
+    error "Legacy alertId ${FROM_ALERT} not found in Revenium alerts budget list — it was deleted upstream."
+    migration_notify_once "deleted_upstream_alert" "Legacy alertId ${FROM_ALERT} not found in Revenium — it was deleted upstream. Run /revenium setup to create fresh ruleIds."
+    exit 0
+  fi
+
+  local threshold period mig_name
+  threshold=$(echo "${alert_data}" | sed -n 's/^THRESHOLD=//p')
+  period=$(echo "${alert_data}" | sed -n 's/^PERIOD=//p')
+  mig_name=$(echo "${alert_data}" | sed -n 's/^NAME=//p')
+
+  # Validate threshold
+  if ! validate_hard_limit "${threshold}"; then
+    error "alert threshold '${threshold}' is not a valid positive number"
+    migration_notify_once "bad_threshold" "Legacy alertId ${FROM_ALERT} has non-numeric threshold '${threshold}'. Manual investigation required."
+    exit 0
+  fi
+
+  # Validate period
+  if ! validate_period "${period}"; then
+    error "alert period '${period}' is not one of DAILY/WEEKLY/MONTHLY/QUARTERLY"
+    migration_notify_once "bad_period" "Legacy alertId ${FROM_ALERT} has unrecognized period '${period}'. Manual investigation required."
+    exit 0
+  fi
+
+  local warn_threshold
+  warn_threshold=$(compute_warn_threshold "${threshold}")
+
+  # Pick rule name: use alert name if available, else derive from period
+  local rule_name
+  if [[ -n "${mig_name}" ]]; then
+    rule_name="${mig_name}"
+  else
+    local period_title
+    period_title=$(period_titled "${period}")
+    rule_name="Hermes ${period_title} Budget"
+  fi
+
+  # TOCTOU re-check after flock (concurrent process may have completed migration)
+  RULE_IDS=$(read_config_field ruleIds)
+  if [[ "${RULE_IDS}" == "nonempty" ]]; then
+    info "ruleIds populated by concurrent migration — exiting cleanly"
+    exit 0
+  fi
+
+  create_rule "${rule_name}" "${threshold}" "${warn_threshold}" "${period}"
+
+  if [[ "${RULE_EXIT}" -ne 0 || -z "${RULE_ID}" ]]; then
+    local truncated_msg="${rule_name:0:64}"
+    error "Migration from legacy alertId ${FROM_ALERT} to guardrails rule failed. Cron will retry next tick."
+    migration_notify_once "create_failed" "Migration from legacy alertId ${FROM_ALERT} failed for rule '${truncated_msg}'. Cron will retry next tick. Check logs for details."
+    exit 0
+  fi
+
+  local new_rule_ids_json="[\"${RULE_ID}\"]"
+  write_rule_ids_to_config "${new_rule_ids_json}"
+
+  # MIGR-03: one-time deprecation log line
+  info "deprecation: legacy alertId ${FROM_ALERT} orphaned, migrated to ruleId ${RULE_ID}"
+
+  migration_notify_reset
+  exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Top-level mode dispatch
+# ---------------------------------------------------------------------------
+case "${MODE}" in
+  interactive) run_interactive ;;
+  from-alert)  run_migration ;;
+  default)     run_default ;;
+  *)           error "unknown mode ${MODE}"; exit 2 ;;
+esac
