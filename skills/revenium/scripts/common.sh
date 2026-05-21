@@ -33,6 +33,8 @@ TOOL_EVENTS_LEDGER_FILE="${REVENIUM_TOOL_EVENTS_LEDGER_FILE:-${STATE_DIR}/reveni
 # Phase 17: v1.3 guardrails-native paths.
 GUARDRAIL_STATUS_FILE="${REVENIUM_GUARDRAIL_STATUS_FILE:-${STATE_DIR}/guardrail-status.json}"
 RULES_LOCK_FILE="${REVENIUM_RULES_LOCK_FILE:-${STATE_DIR}/rules.lock}"
+# Phase 18: notify-once gate for setup-guardrails.sh migration failures (D-10).
+MIGRATION_NOTIFY_FILE="${REVENIUM_MIGRATION_NOTIFY_FILE:-${STATE_DIR}/migration-notify-state}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
