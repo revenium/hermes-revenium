@@ -174,13 +174,20 @@ validate_period() {
 # ---------------------------------------------------------------------------
 # Config.json existence check (mode-agnostic)
 # ---------------------------------------------------------------------------
+# --auto (cron) keeps its fail-open posture: a missing config.json on the
+# cron path means "no install yet" — exit 0 so cron doesn't email errors.
+# Interactive / default modes self-bootstrap: create STATE_DIR + seed an
+# empty config.json so the operator can run setup-guardrails.sh on a
+# fresh host without manually preparing state first (closes SC-1 fresh-
+# host gap; supersedes Pitfall 6's exit-1 guard for power-user invocations).
 if [[ ! -f "${CONFIG_FILE}" ]]; then
   if [[ "${AUTO}" == "true" ]]; then
     warn "no config.json — skipping migration; run /revenium setup"
     exit 0
   else
-    error "config.json not found at ${CONFIG_FILE}"
-    exit 1
+    info "no config.json at ${CONFIG_FILE} — bootstrapping fresh state"
+    mkdir -p "${STATE_DIR}" || { error "could not create ${STATE_DIR}"; exit 1; }
+    printf '{}\n' > "${CONFIG_FILE}" || { error "could not seed ${CONFIG_FILE}"; exit 1; }
   fi
 fi
 

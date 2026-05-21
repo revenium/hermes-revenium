@@ -9321,6 +9321,133 @@ class RepositoryTests(unittest.TestCase):
             self.assertEqual(create_lines2, 0,
                              f'second run: expected 0 create calls total, got {create_lines2}')
 
+    def test_setup_guardrails_bootstraps_missing_config_in_interactive_mode(self):
+        """SC-1 fresh-host edge case. On a truly empty host with no state dir and no config.json,
+        the script in interactive/default mode self-bootstraps STATE_DIR and seeds {} into
+        config.json instead of erroring out. The --auto (cron) path keeps its fail-open exit-0
+        posture and does NOT bootstrap (cron must not silently create state on a fresh host)."""
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing')
+
+        # --- Interactive/default path: must bootstrap ---
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            # NO state dir, NO config.json — truly empty host
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            config_path = os.path.join(state_dir, 'config.json')
+            self.assertFalse(os.path.exists(state_dir),
+                             'precondition: state dir must not exist')
+            self.assertFalse(os.path.exists(config_path),
+                             'precondition: config.json must not exist')
+
+            # Fake revenium that satisfies has_guardrails_cli probe
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "guardrails budget-rules --help") exit 0 ;;\n'
+                    '  "guardrails enforcement-events --help") exit 0 ;;\n'
+                    '  "config show "* | "config show") echo "api_key: mock"; exit 0 ;;\n'
+                    '  *) exit 1 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            # Run --interactive with stdin closed — bootstrap happens before any prompt;
+            # the script will exit non-zero when prompts hit EOF, but config.json must exist.
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'), '--interactive'],
+                env=env, capture_output=True, text=True, timeout=15,
+                stdin=subprocess.DEVNULL,
+            )
+
+            # Bootstrap must have run regardless of how interactive prompts ended
+            self.assertTrue(os.path.isdir(state_dir),
+                            f'state dir must exist after bootstrap; stdout={result.stdout!r} stderr={result.stderr!r}')
+            self.assertTrue(os.path.isfile(config_path),
+                            f'config.json must be seeded after bootstrap; stderr={result.stderr!r}')
+            with open(config_path) as f:
+                seeded = f.read().strip()
+            # Seed format is `{}\n` written via `printf '{}\n'`
+            self.assertEqual(seeded, '{}',
+                             f'seeded config.json must be exactly an empty JSON object, got {seeded!r}')
+            # The `info` helper writes to LOG_FILE always, to stderr only on TTY.
+            # subprocess captures stderr (not a TTY), so check the log file instead.
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+            self.assertTrue(os.path.exists(log_file),
+                            'log file must exist after bootstrap')
+            with open(log_file) as f:
+                log_text = f.read()
+            self.assertIn('bootstrapping fresh state', log_text,
+                          f'bootstrap info line must be logged; log={log_text!r}')
+
+        # --- --auto (cron) path: must NOT bootstrap, must exit 0 cleanly ---
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            config_path = os.path.join(state_dir, 'config.json')
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "guardrails budget-rules --help") exit 0 ;;\n'
+                    '  "guardrails enforcement-events --help") exit 0 ;;\n'
+                    '  *) exit 1 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                 '--from-alert', 'NEVER', '--auto'],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+
+            # Auto path: exit 0 (cron-safe), state dir must NOT have been created,
+            # config.json must NOT have been seeded.
+            self.assertEqual(result.returncode, 0,
+                             f'--auto with missing config must exit 0; stderr={result.stderr!r}')
+            self.assertFalse(os.path.isfile(config_path),
+                             '--auto path must NOT create config.json on a missing-install host')
+
 
 if __name__ == '__main__':
     unittest.main()
