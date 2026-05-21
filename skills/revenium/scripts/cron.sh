@@ -8,7 +8,7 @@ source "${SCRIPT_DIR}/common.sh"
 ensure_path
 
 # Acquire cron.lock non-blocking. Held for the rest of this script's lifetime via fd 9,
-# so the lock spans BOTH hermes-report.sh and budget-check.sh invocations below (CRON-08, D-12).
+# so the lock spans all inner-pipeline invocations below (CRON-08, D-12).
 # `exec 9>"${LOCK_FILE}"` opens fd 9 in this bash process; the python3 subprocess inherits
 # fd 9 automatically and calls fcntl.flock(9, ...) on it. No stdin redirection is used so
 # the heredoc script body remains the Python program (NOT the empty lock file).
@@ -58,9 +58,9 @@ fi
 
 for ((i=1; i<=loop_count; i++)); do
   # Phase 18 (D-06, MIGR-01..04): auto-migration from legacy alertId to ruleIds.
-  # Reads alertId inline (Pitfall 5 — no dependency on read_config_field from
-  # budget-check.sh; that function will follow budget-check.sh into deletion in
-  # Phase 19). Empty alertId, missing config.json, or already-populated ruleIds
+  # Reads alertId inline (Pitfall 5 — no dependency on read_config_field from the
+  # second-stage checker; the legacy alert checker was removed in Phase 19). Empty alertId,
+  # missing config.json, or already-populated ruleIds
   # all make the migration stage a no-op (exit 0). The `|| true` matches the
   # rest of the cron pipeline so a migration failure NEVER blocks metering.
   ALERT_ID_FOR_MIGRATION=$(CONFIG_FILE="${CONFIG_FILE}" python3 - <<'PY' 2>/dev/null || true
@@ -73,7 +73,7 @@ PY
 )
   bash "${SKILL_DIR}/scripts/setup-guardrails.sh" --from-alert "${ALERT_ID_FOR_MIGRATION}" --auto 2>/dev/null || true
   bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
-  bash "${SKILL_DIR}/scripts/budget-check.sh" "$@" || true
+  bash "${SKILL_DIR}/scripts/guardrail-check.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
   # Sleep between iterations only; never after the last one (the next cron
   # tick lands within ~60s anyway, so a trailing sleep is wasted).
