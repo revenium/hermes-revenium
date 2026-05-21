@@ -9057,19 +9057,126 @@ class RepositoryTests(unittest.TestCase):
                              'migration-notify-state should be absent after a successful migration')
 
     def test_setup_guardrails_idempotency(self):
-        """Wave 0 gate for MIGR-04. Plan 18-06 fills in the full behavioral test body.
-
-        Full behavioral contract (to be implemented in 18-06):
-        Seed config.json with populated ruleIds, run setup-guardrails.sh in --auto mode
-        with a fake revenium that records argv, assert the fake CLI received ZERO
-        guardrails budget-rules create invocations and the script exit code is 0. Today
-        the stub asserts only that the script file exists.
-        """
+        """MIGR-04 + SETUP-05 idempotency. Pre-seeded config.json with ruleIds -> --auto mode is
+        silent exit-0 no-op; zero create calls; second run is also a no-op
+        (concurrent-cron-retry safety)."""
+        import json
         import os
+        import shutil
         import subprocess
         import tempfile
+
         script = SKILL / 'scripts' / 'setup-guardrails.sh'
         self.assertTrue(script.exists(), 'setup-guardrails.sh missing — plan 18-02 must land first')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Build skill tree
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            # Build state directory — seed config.json WITH ruleIds already populated
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            config_seed = {'alertId': 'LEGACY01', 'ruleIds': ['EXISTING01'], 'autonomousMode': False}
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump(config_seed, f)
+            open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+            # Fake revenium in shim_home/.local/bin (highest priority after ensure_path)
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock-api-key-12345"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules --help")\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails enforcement-events --help")\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules create")\n'
+                    '    printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    '    echo \'{"id":"SHOULDNOTBECALLED","name":"Should Not Be Called"}\'\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "alerts budget list")\n'
+                    '    echo \'[{"alertId":"LEGACY01","cumulativePeriod":"MONTHLY","threshold":50,"name":"Hermes Monthly Budget","currentValue":0,"groups":[],"metricType":"TOTAL_COST"}]\'\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *)\n'
+                    '    echo "fake revenium: unhandled: $*" >&2\n'
+                    '    exit 1\n'
+                    '    ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+            run_args = ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                        '--from-alert', 'LEGACY01', '--auto']
+
+            # ---- First invocation ----
+            result = subprocess.run(run_args, env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0,
+                             f'first run: stdout={result.stdout}\nstderr={result.stderr}')
+
+            with open(os.path.join(state_dir, 'config.json')) as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg.get('ruleIds'), ['EXISTING01'],
+                             'ruleIds must be UNCHANGED after idempotent no-op')
+            self.assertEqual(cfg.get('alertId'), 'LEGACY01',
+                             'alertId must be UNCHANGED')
+
+            # Assert ZERO create calls
+            if os.path.exists(argv_log):
+                with open(argv_log) as f:
+                    create_lines = sum(1 for l in f if 'budget-rules create' in l)
+            else:
+                create_lines = 0
+            self.assertEqual(create_lines, 0,
+                             f'first run: expected 0 create calls, got {create_lines}')
+
+            # Assert NO deprecation lines in log
+            with open(os.path.join(state_dir, 'revenium-metering.log')) as f:
+                log_text = f.read()
+            self.assertNotIn('deprecation:', log_text,
+                             'no migration happened — no deprecation line expected')
+
+            # ---- Second invocation (idempotency: still no-op) ----
+            result2 = subprocess.run(run_args, env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result2.returncode, 0,
+                             f'second run: stdout={result2.stdout}\nstderr={result2.stderr}')
+
+            with open(os.path.join(state_dir, 'config.json')) as f:
+                cfg2 = json.load(f)
+            self.assertEqual(cfg2.get('ruleIds'), ['EXISTING01'],
+                             'ruleIds must still be UNCHANGED after second run')
+            self.assertEqual(cfg2.get('alertId'), 'LEGACY01',
+                             'alertId must still be UNCHANGED after second run')
+
+            if os.path.exists(argv_log):
+                with open(argv_log) as f:
+                    create_lines2 = sum(1 for l in f if 'budget-rules create' in l)
+            else:
+                create_lines2 = 0
+            self.assertEqual(create_lines2, 0,
+                             f'second run: expected 0 create calls total, got {create_lines2}')
 
     def test_setup_guardrails_missing_alert_edge_case(self):
         """Wave 0 gate for MIGR-05..06 / D-09 / D-10. Plan 18-06 fills in the full behavioral
