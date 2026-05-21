@@ -7220,6 +7220,970 @@ class RepositoryTests(unittest.TestCase):
                 f'block directive missing a non-empty message: {result.stdout!r}',
             )
 
+    # ------------------------------------------------------------------
+    # Phase 19 Wave 0 — Nyquist test scaffolding.
+    # These tests are RED until the corresponding implementation waves land.
+    # Each test has a complete body (no pass, no assert True).
+    # ------------------------------------------------------------------
+
+    def _make_revenium_stub(self, scripts_dir, enforcement_json, budget_rules_json,
+                             events_json=None, events_fail=False):
+        """Write a fake `revenium` binary into scripts_dir that handles the Phase 19 subcommands.
+
+        - `revenium config show` → emits 'Team ID: 12802'
+        - `revenium guardrails enforcement-rules get <teamId> --output json` → enforcement_json
+        - `revenium guardrails budget-rules list --output json` → budget_rules_json
+        - `revenium guardrails enforcement-events list --rule-id <id> --page-size 1 --output json`
+            → events_json if not events_fail, else exit 1
+        """
+        import os
+        import json
+        stub_path = os.path.join(scripts_dir, 'revenium')
+        # Escape the JSON strings for embedding in bash heredoc
+        enf_escaped = enforcement_json.replace("'", "'\\''")
+        br_escaped = budget_rules_json.replace("'", "'\\''")
+        if events_json is None:
+            events_json = '[]'
+        ev_escaped = events_json.replace("'", "'\\''")
+        events_body = f"exit 1" if events_fail else f"echo '{ev_escaped}'"
+        stub_content = (
+            '#!/usr/bin/env bash\n'
+            'case "$1 $2 $3" in\n'
+            f"  'config show') echo 'Team ID: 12802' ;;\n"
+            f"  'guardrails enforcement-rules get') echo '{enf_escaped}' ;;\n"
+            f"  'guardrails budget-rules list') echo '{br_escaped}' ;;\n"
+            f"  'guardrails enforcement-events list') {events_body} ;;\n"
+            '  *) echo "unknown: $*" >&2; exit 1 ;;\n'
+            'esac\n'
+        )
+        with open(stub_path, 'w') as f:
+            f.write(stub_content)
+        os.chmod(stub_path, 0o755)
+        return stub_path
+
+    def test_guardrail_check_writes_status_file(self):
+        """guardrail-check.sh with mock enforcement-rules output writes guardrail-status.json
+        with correct schema (ENF-04): rules array with 10 keys per rule, top-level
+        halted/autonomousMode/lastChecked; haltedRule absent when halted:false.
+        REQ: ENF-02, ENF-03, ENF-04.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 99,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 45.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'timestamp': '2026-05-22T14:03:38Z', 'summary': 'rule within limits'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-writes-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({
+                    'ruleIds': ['d5jng5'],
+                    'autonomousMode': True,
+                    'organizationName': 'TestOrg',
+                }, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertTrue(
+                os.path.isfile(status_path),
+                f'guardrail-status.json not written; stderr={result.stderr!r}',
+            )
+            with open(status_path) as f:
+                data = json.load(f)
+
+            # Top-level keys (ENF-04)
+            self.assertIn('halted', data)
+            self.assertFalse(data['halted'], 'halted must be false when no rule is breached')
+            self.assertIn('autonomousMode', data)
+            self.assertIn('lastChecked', data)
+            self.assertNotIn('haltedRule', data, 'haltedRule must be absent when halted:false')
+
+            # rules array (ENF-04 schema)
+            rules = data.get('rules', [])
+            self.assertIsInstance(rules, list, 'rules must be an array')
+            self.assertGreater(len(rules), 0, 'rules must be non-empty for non-empty ruleIds')
+
+            required_keys = {
+                'ruleId', 'name', 'metricType', 'windowType', 'groupBy',
+                'currentValue', 'warnThreshold', 'hardLimit', 'state', 'lastChecked',
+            }
+            for rule in rules:
+                missing = required_keys - set(rule.keys())
+                self.assertEqual(
+                    missing, set(),
+                    f'rule missing ENF-04 keys: {missing}; got keys: {set(rule.keys())}',
+                )
+            self.assertEqual(rules[0]['ruleId'], 'd5jng5',
+                             'ruleId must be the string-hash from budget-rules list, not an integer')
+
+    def test_guardrail_check_halt_transition(self):
+        """New halt transition sets halted:true, haltedRule block; stdout contains
+        HALT_TRANSITION=true and enforcement-event embedding (AUDIT-01).
+        REQ: ENF-05, AUDIT-01.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'timestamp': '2026-05-22T14:03:38Z', 'summary': 'rule exceeded hard-limit'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-halt-trans-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({
+                    'ruleIds': ['d5jng5'],
+                    'autonomousMode': True,
+                }, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            # Status file assertions
+            self.assertTrue(os.path.isfile(status_path), 'guardrail-status.json not written')
+            with open(status_path) as f:
+                data = json.load(f)
+
+            self.assertTrue(data.get('halted'), 'halted must be true when rule is breached')
+            self.assertIn('haltedAt', data, 'haltedAt must be present on halt transition')
+            self.assertIn('haltedRule', data, 'haltedRule must be present when halted:true')
+            hr = data['haltedRule']
+            for key in ('name', 'metricType', 'windowType', 'currentValue', 'hardLimit', 'ruleId'):
+                self.assertIn(key, hr, f'haltedRule missing key: {key}')
+            rules = data.get('rules', [])
+            self.assertTrue(len(rules) > 0, 'rules must not be empty')
+            self.assertEqual(rules[0].get('state'), 'block', 'breached rule must have state=block')
+
+            # ruleId must be the string-hash from budget-rules list (19-05 revision)
+            self.assertEqual(hr['ruleId'], 'd5jng5',
+                             'haltedRule.ruleId must be the string-hash ID, not the integer API ID')
+
+            # Stdout must contain HALT_TRANSITION=true (ENF-05)
+            self.assertIn(
+                'HALT_TRANSITION=true', result.stdout,
+                f'stdout must contain HALT_TRANSITION=true on new halt; got: {result.stdout!r}',
+            )
+
+            # Audit event embedding in stdout (AUDIT-01 — revised 19-05 stdout contract)
+            self.assertIn(
+                'EVENT_TS=2026-05-22T14:03:38Z', result.stdout,
+                f'stdout must contain EVENT_TS from enforcement-events list; got: {result.stdout!r}',
+            )
+            self.assertIn(
+                'EVENT_SUMMARY=rule exceeded hard-limit', result.stdout,
+                f'stdout must contain EVENT_SUMMARY from enforcement-events list; got: {result.stdout!r}',
+            )
+
+    def test_guardrail_check_halt_carry_forward(self):
+        """Already-halted state carries forward haltedAt byte-identically;
+        stdout does NOT contain HALT_TRANSITION=true.
+        REQ: ENF-05.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'timestamp': '2026-05-22T14:03:38Z', 'summary': 'rule exceeded hard-limit'}
+        ])
+
+        seeded_halted_at = '2026-05-22T10:00:00.000Z'
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-carry-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            # Pre-seed an already-halted status with a known haltedAt
+            with open(status_path, 'w') as f:
+                json.dump({
+                    'halted': True,
+                    'haltedAt': seeded_halted_at,
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T10:00:00.000Z',
+                    'rules': [],
+                }, f)
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            with open(status_path) as f:
+                data = json.load(f)
+
+            # haltedAt must be byte-identical to the seeded value (carry-forward)
+            self.assertEqual(
+                data.get('haltedAt'), seeded_halted_at,
+                f'haltedAt must be carried forward; got: {data.get("haltedAt")!r}',
+            )
+
+            # stdout must NOT contain HALT_TRANSITION=true (carry-forward, not new transition)
+            self.assertNotIn(
+                'HALT_TRANSITION=true', result.stdout,
+                f'carry-forward must NOT emit HALT_TRANSITION=true; got: {result.stdout!r}',
+            )
+
+    def test_guardrail_check_no_rules_empty(self):
+        """Empty ruleIds produces rules:[], halted:false. Script exits 0.
+        REQ: ENF-02.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({'rules': []})
+        budget_rules_json = json.dumps([])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-norules-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({'ruleIds': [], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            if os.path.isfile(status_path):
+                with open(status_path) as f:
+                    data = json.load(f)
+                self.assertEqual(data.get('rules', []), [], 'rules must be [] for empty ruleIds')
+                self.assertFalse(data.get('halted', False), 'halted must be false for empty ruleIds')
+
+    def test_guardrail_check_audit_api_fallback(self):
+        """When enforcement-events list exits non-zero (API failure), guardrail-check.sh
+        still writes guardrail-status.json with halted:true, and stdout contains
+        EVENT_TS=(unavailable) / EVENT_SUMMARY=(unavailable) (AUDIT-02 graceful degradation).
+        Script exits 0.
+        REQ: AUDIT-02.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+            }]
+        })
+        # budget-rules list succeeds (name→string-id join works)
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-audit-fallback-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            # events_fail=True: stub exits 1 on enforcement-events list
+            self._make_revenium_stub(
+                scripts_dir, enforcement_json, budget_rules_json,
+                events_json=None, events_fail=True,
+            )
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            # Script must exit 0 even when events API fails (graceful degradation)
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh must exit 0 on events API failure; '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            # Status file must still be written with halted:true
+            self.assertTrue(os.path.isfile(status_path), 'guardrail-status.json must be written')
+            with open(status_path) as f:
+                data = json.load(f)
+            self.assertTrue(data.get('halted'), 'halted must be true even when events API fails')
+            self.assertIn('haltedRule', data, 'haltedRule must be present despite events API failure')
+
+            # AUDIT-02 fallback stdout contract: EVENT_TS=(unavailable), EVENT_SUMMARY=(unavailable)
+            self.assertIn(
+                'EVENT_TS=(unavailable)', result.stdout,
+                f'AUDIT-02: stdout must contain EVENT_TS=(unavailable) on API failure; '
+                f'got: {result.stdout!r}',
+            )
+            self.assertIn(
+                'EVENT_SUMMARY=(unavailable)', result.stdout,
+                f'AUDIT-02: stdout must contain EVENT_SUMMARY=(unavailable) on API failure; '
+                f'got: {result.stdout!r}',
+            )
+
+    def test_pre_llm_call_halted_emits_guardrail_halt_string(self):
+        """pre_llm_call.sh with halted guardrail-status.json containing haltedRule
+        emits a JSON object whose context carries the D-01 halt string with substituted values.
+        REQ: HOOK-01, HOOK-03.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_llm = str(SKILL / 'scripts' / 'pre_llm_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-llm-guardrail-halted-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': True,
+                    'haltedAt': '2026-05-22T14:03:38.478Z',
+                    'haltedRule': {
+                        'ruleId': 'test-rule-id',
+                        'name': 'Engineering Budget',
+                        'metricType': 'TOTAL_COST',
+                        'windowType': 'MONTHLY',
+                        'currentValue': 102.5,
+                        'hardLimit': 100.0,
+                    },
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [],
+                }, fh)
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+
+            result = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'pre_llm_call.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            payload = json.loads(result.stdout)
+            self.assertIn('context', payload,
+                          f'halted output missing context key: {result.stdout!r}')
+            context = payload['context']
+            self.assertIn(
+                "Guardrail halt active — rule 'Engineering Budget'", context,
+                f'D-01 halt string prefix missing from context: {context!r}',
+            )
+            self.assertIn('TOTAL_COST', context,
+                          f'metricType missing from halt context: {context!r}')
+            self.assertIn('MONTHLY', context,
+                          f'windowType missing from halt context: {context!r}')
+            self.assertIn('102.5', context,
+                          f'currentValue missing from halt context: {context!r}')
+            self.assertIn('100.0', context,
+                          f'hardLimit missing from halt context: {context!r}')
+            self.assertIn('clear-halt.sh', context,
+                          f'clear-halt.sh resume instruction missing from context: {context!r}')
+
+    def test_pre_tool_call_halted_blocks_guardrail(self):
+        """pre_tool_call.sh with halted guardrail-status.json emits action=='block'
+        and a message containing the D-01 guardrail halt string.
+        REQ: HOOK-01.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_tool = str(SKILL / 'scripts' / 'pre_tool_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-tool-guardrail-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': True,
+                    'haltedAt': '2026-05-22T14:03:38.478Z',
+                    'haltedRule': {
+                        'ruleId': 'test-rule-id',
+                        'name': 'Engineering Budget',
+                        'metricType': 'TOTAL_COST',
+                        'windowType': 'MONTHLY',
+                        'currentValue': 102.5,
+                        'hardLimit': 100.0,
+                    },
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [],
+                }, fh)
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['MARKERS_DIR'] = markers_dir
+
+            result = subprocess.run(
+                ['bash', pre_tool],
+                input=json.dumps({
+                    'hook_event_name': 'pre_tool_call',
+                    'tool_name': 'shell',
+                    'session_id': 'sess-guardrail-test',
+                }),
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'pre_tool_call.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            payload = json.loads(result.stdout)
+            self.assertEqual(
+                payload.get('action'), 'block',
+                f'expected action == "block", got: {result.stdout!r}',
+            )
+            msg = payload.get('message', '')
+            self.assertIn(
+                "Guardrail halt active — rule 'Engineering Budget'", msg,
+                f'D-01 halt string missing from block message: {msg!r}',
+            )
+
+    def test_pre_llm_call_warn_band_emits_stderr(self):
+        """pre_llm_call.sh with a rule in state:'warn' emits a Guardrail warn: line to stderr,
+        returns {} on stdout, and creates a warn-flag file at WARN_FLAGS_DIR/<sid>__<ruleId>.flag.
+        REQ: HOOK-02.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_llm = str(SKILL / 'scripts' / 'pre_llm_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-llm-warn-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            sessions_dir = os.path.join(tmp, 'sessions')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            os.makedirs(sessions_dir, exist_ok=True)
+
+            # Create a fake session file so session-scan resolves a session_id
+            sid = 'test-warn-session'
+            session_file = os.path.join(sessions_dir, f'session_{sid}.json')
+            with open(session_file, 'w') as f:
+                json.dump({'session_id': sid}, f)
+
+            rule_id = 'warn-rule-01'
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': False,
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [{
+                        'ruleId': rule_id,
+                        'name': 'Test Rule',
+                        'metricType': 'TOTAL_COST',
+                        'windowType': 'MONTHLY',
+                        'currentValue': 85.0,
+                        'warnThreshold': 80.0,
+                        'hardLimit': 100.0,
+                        'state': 'warn',
+                        'lastChecked': '2026-05-22T14:00:00.000Z',
+                    }],
+                }, fh)
+
+            warn_flags_dir = os.path.join(tmp, 'warn-flags')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['REVENIUM_WARN_FLAGS_DIR'] = warn_flags_dir
+
+            result = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'pre_llm_call.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            # stdout must be {} (no-op for Hermes hook dispatcher)
+            self.assertEqual(
+                json.loads(result.stdout), {},
+                f'warn-band must return {{}} on stdout; got: {result.stdout!r}',
+            )
+            # stderr must contain warn line
+            self.assertIn(
+                'Guardrail warn:', result.stderr,
+                f'stderr must contain "Guardrail warn:"; got: {result.stderr!r}',
+            )
+            self.assertIn(
+                'Test Rule', result.stderr,
+                f'stderr warn line must name the rule; got: {result.stderr!r}',
+            )
+            # warn-flag file must be created
+            flag_files = []
+            if os.path.isdir(warn_flags_dir):
+                for fname in os.listdir(warn_flags_dir):
+                    if fname.endswith('.flag'):
+                        flag_files.append(fname)
+            self.assertTrue(
+                any(rule_id in f for f in flag_files),
+                f'warn-flag file for rule {rule_id!r} not found in {warn_flags_dir!r}; '
+                f'found: {flag_files}',
+            )
+
+    def test_pre_llm_call_warn_rate_limit(self):
+        """Second call to pre_llm_call.sh with same session+rule does NOT emit duplicate warn line
+        (sentinel flag suppresses it). Both runs return {} on stdout.
+        REQ: HOOK-02.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        pre_llm = str(SKILL / 'scripts' / 'pre_llm_call.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-llm-warn-ratelimit-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            sessions_dir = os.path.join(tmp, 'sessions')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            os.makedirs(sessions_dir, exist_ok=True)
+
+            sid = 'test-ratelimit-session'
+            session_file = os.path.join(sessions_dir, f'session_{sid}.json')
+            with open(session_file, 'w') as f:
+                json.dump({'session_id': sid}, f)
+
+            rule_id = 'rl-rule-01'
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            with open(status_path, 'w', encoding='utf-8') as fh:
+                json.dump({
+                    'halted': False,
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [{
+                        'ruleId': rule_id,
+                        'name': 'Rate Limit Test Rule',
+                        'metricType': 'TOTAL_COST',
+                        'windowType': 'MONTHLY',
+                        'currentValue': 85.0,
+                        'warnThreshold': 80.0,
+                        'hardLimit': 100.0,
+                        'state': 'warn',
+                        'lastChecked': '2026-05-22T14:00:00.000Z',
+                    }],
+                }, fh)
+
+            warn_flags_dir = os.path.join(tmp, 'warn-flags')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['REVENIUM_WARN_FLAGS_DIR'] = warn_flags_dir
+
+            # First run — warn line expected
+            result1 = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result1.returncode, 0,
+                             f'first run failed: {result1.stderr!r}')
+            self.assertEqual(json.loads(result1.stdout), {},
+                             f'first run must return {{}}; got: {result1.stdout!r}')
+            self.assertIn('Guardrail warn:', result1.stderr,
+                          f'first run must emit warn line; got: {result1.stderr!r}')
+
+            # Second run — warn line must NOT appear (sentinel suppresses)
+            result2 = subprocess.run(
+                ['bash', pre_llm],
+                input='{"hook_event_name":"pre_llm_call"}',
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result2.returncode, 0,
+                             f'second run failed: {result2.stderr!r}')
+            self.assertEqual(json.loads(result2.stdout), {},
+                             f'second run must return {{}}; got: {result2.stdout!r}')
+            self.assertNotIn(
+                'Guardrail warn:', result2.stderr,
+                f'second run must NOT emit duplicate warn line (sentinel suppression); '
+                f'got: {result2.stderr!r}',
+            )
+
+    def test_clear_halt_bare(self):
+        """Bare clear-halt.sh on halted guardrail-status.json clears all block-state rules,
+        sets halted:false, removes haltedAt and haltedRule.
+        REQ: ENF-06.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        clear_halt = str(SKILL / 'scripts' / 'clear-halt.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-clear-halt-bare-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            with open(status_path, 'w') as fh:
+                json.dump({
+                    'halted': True,
+                    'haltedAt': '2026-05-22T14:03:38.478Z',
+                    'haltedRule': {'ruleId': 'rule-A', 'name': 'Rule A',
+                                   'metricType': 'TOTAL_COST', 'windowType': 'MONTHLY',
+                                   'currentValue': 102.5, 'hardLimit': 100.0},
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [
+                        {'ruleId': 'rule-A', 'name': 'Rule A', 'metricType': 'TOTAL_COST',
+                         'windowType': 'MONTHLY', 'groupBy': 'ORG', 'currentValue': 102.5,
+                         'warnThreshold': 80.0, 'hardLimit': 100.0, 'state': 'block',
+                         'lastChecked': '2026-05-22T14:00:00.000Z'},
+                        {'ruleId': 'rule-B', 'name': 'Rule B', 'metricType': 'TOTAL_COST',
+                         'windowType': 'MONTHLY', 'groupBy': 'ORG', 'currentValue': 105.0,
+                         'warnThreshold': 80.0, 'hardLimit': 100.0, 'state': 'block',
+                         'lastChecked': '2026-05-22T14:00:00.000Z'},
+                    ],
+                }, fh)
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+
+            result = subprocess.run(
+                ['bash', clear_halt],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'clear-halt.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            # stdout must mention "Cleared" with some count indication
+            self.assertIn('Cleared', result.stdout,
+                          f'stdout must contain "Cleared"; got: {result.stdout!r}')
+
+            with open(status_path) as f:
+                data = json.load(f)
+
+            self.assertFalse(data.get('halted'), 'halted must be false after bare clear-halt.sh')
+            self.assertNotIn('haltedAt', data, 'haltedAt must be removed after clear')
+            self.assertNotIn('haltedRule', data, 'haltedRule must be removed after clear')
+            for rule in data.get('rules', []):
+                self.assertNotEqual(rule.get('state'), 'block',
+                                    f'all rules must be cleared; {rule["ruleId"]} still block')
+
+    def test_clear_halt_rule_id(self):
+        """clear-halt.sh --rule-id X clears only rule X; other blocked rules remain;
+        top-level halted is recomputed; haltedRule points to the next blocked rule.
+        REQ: ENF-06.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        clear_halt = str(SKILL / 'scripts' / 'clear-halt.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-clear-halt-ruleid-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            with open(status_path, 'w') as fh:
+                json.dump({
+                    'halted': True,
+                    'haltedAt': '2026-05-22T14:03:38.478Z',
+                    'haltedRule': {'ruleId': 'ruleId-A', 'name': 'Rule A',
+                                   'metricType': 'TOTAL_COST', 'windowType': 'MONTHLY',
+                                   'currentValue': 102.5, 'hardLimit': 100.0},
+                    'autonomousMode': True,
+                    'lastChecked': '2026-05-22T14:00:00.000Z',
+                    'rules': [
+                        {'ruleId': 'ruleId-A', 'name': 'Rule A', 'metricType': 'TOTAL_COST',
+                         'windowType': 'MONTHLY', 'groupBy': 'ORG', 'currentValue': 102.5,
+                         'warnThreshold': 80.0, 'hardLimit': 100.0, 'state': 'block',
+                         'lastChecked': '2026-05-22T14:00:00.000Z'},
+                        {'ruleId': 'ruleId-B', 'name': 'Rule B', 'metricType': 'TOTAL_COST',
+                         'windowType': 'MONTHLY', 'groupBy': 'ORG', 'currentValue': 105.0,
+                         'warnThreshold': 80.0, 'hardLimit': 100.0, 'state': 'block',
+                         'lastChecked': '2026-05-22T14:00:00.000Z'},
+                    ],
+                }, fh)
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+
+            result = subprocess.run(
+                ['bash', clear_halt, '--rule-id', 'ruleId-A'],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'clear-halt.sh --rule-id ruleId-A exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            with open(status_path) as f:
+                data = json.load(f)
+
+            rules_by_id = {r['ruleId']: r for r in data.get('rules', [])}
+            self.assertEqual(rules_by_id.get('ruleId-A', {}).get('state'), 'ok',
+                             'ruleId-A must be cleared to ok')
+            self.assertEqual(rules_by_id.get('ruleId-B', {}).get('state'), 'block',
+                             'ruleId-B must remain block (not cleared)')
+
+            # Top-level halted must remain true (ruleId-B still blocked)
+            self.assertTrue(data.get('halted'), 'halted must remain true while ruleId-B is blocked')
+
+            # haltedRule must now point to ruleId-B (next blocker, D-02 tiebreaker)
+            hr = data.get('haltedRule', {})
+            self.assertEqual(hr.get('ruleId'), 'ruleId-B',
+                             'haltedRule.ruleId must repoint to ruleId-B after clearing ruleId-A')
+
+    def test_clear_halt_rule_id_not_blocked(self):
+        """clear-halt.sh --rule-id X when X is not in block state exits 0 with an info message;
+        file is unchanged.
+        REQ: ENF-06.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        clear_halt = str(SKILL / 'scripts' / 'clear-halt.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-clear-halt-notblocked-') as tmp:
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            original = {
+                'halted': False,
+                'autonomousMode': True,
+                'lastChecked': '2026-05-22T14:00:00.000Z',
+                'rules': [
+                    {'ruleId': 'ruleId-A', 'name': 'Rule A', 'metricType': 'TOTAL_COST',
+                     'windowType': 'MONTHLY', 'groupBy': 'ORG', 'currentValue': 45.0,
+                     'warnThreshold': 80.0, 'hardLimit': 100.0, 'state': 'ok',
+                     'lastChecked': '2026-05-22T14:00:00.000Z'},
+                ],
+            }
+            with open(status_path, 'w') as fh:
+                json.dump(original, fh)
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+
+            result = subprocess.run(
+                ['bash', clear_halt, '--rule-id', 'ruleId-A'],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'clear-halt.sh on non-blocked rule must exit 0; '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            # stdout must contain informational message
+            combined = result.stdout + result.stderr
+            self.assertTrue(
+                'not in block' in combined or 'no change' in combined.lower() or 'No change' in combined,
+                f'output must indicate rule is not blocked; got: {combined!r}',
+            )
+
+            # File must be unchanged
+            with open(status_path) as f:
+                data = json.load(f)
+            self.assertFalse(data.get('halted'), 'halted must remain false')
+            self.assertEqual(data.get('rules', [{}])[0].get('state'), 'ok',
+                             'rule state must remain ok')
 
     def test_revenium_classifier_job_taxonomy_file_env_override(self):
         """Task 1 (Phase 13-01): JOB_TAXONOMY_FILE constant is env-overridable via
