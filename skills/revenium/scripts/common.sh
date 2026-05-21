@@ -30,6 +30,9 @@ HOOKS_CONFIG_FILE="${REVENIUM_HOOKS_CONFIG_FILE:-${HERMES_HOME}/config.yaml}"
 # Phase 14: tool-event capture state paths.
 TOOL_EVENTS_DIR="${REVENIUM_TOOL_EVENTS_DIR:-${STATE_DIR}/tool-events}"
 TOOL_EVENTS_LEDGER_FILE="${REVENIUM_TOOL_EVENTS_LEDGER_FILE:-${STATE_DIR}/revenium-tool-events.ledger}"
+# Phase 17: v1.3 guardrails-native paths.
+GUARDRAIL_STATUS_FILE="${REVENIUM_GUARDRAIL_STATUS_FILE:-${STATE_DIR}/guardrail-status.json}"
+RULES_LOCK_FILE="${REVENIUM_RULES_LOCK_FILE:-${STATE_DIR}/rules.lock}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
