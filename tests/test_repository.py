@@ -83,6 +83,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'tool-event-report.sh', # Phase 15 — tool-event reporter
             SKILL / 'scripts' / 'install-plugin.sh',    # Closes tap-install plugin-discovery gap
             SKILL / 'scripts' / 'hooks-status.sh',      # Diagnose hooks-registered-but-inert footgun
+            # Phase 18 — single rule-creation entry point (D-01)
+            SKILL / 'scripts' / 'setup-guardrails.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
@@ -92,6 +94,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
+            # Phase 18 — operator-facing migration doc (MIGR-06, D-16)
+            ROOT / 'docs' / 'migration-guardrails.md',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -160,6 +164,10 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('RULES_LOCK_FILE=', text)
         self.assertIn('rules.lock', text)
         self.assertIn('has_guardrails_cli()', text)
+        # Phase 18: notify-once gate for setup-guardrails.sh migration failures (D-10).
+        self.assertIn('MIGRATION_NOTIFY_FILE=', text)
+        self.assertIn('migration-notify-state', text)
+        self.assertRegex(text, r'MIGRATION_NOTIFY_FILE="\$\{REVENIUM_MIGRATION_NOTIFY_FILE:-\$\{STATE_DIR\}/migration-notify-state\}"')
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
