@@ -9179,21 +9179,147 @@ class RepositoryTests(unittest.TestCase):
                              f'second run: expected 0 create calls total, got {create_lines2}')
 
     def test_setup_guardrails_missing_alert_edge_case(self):
-        """Wave 0 gate for MIGR-05..06 / D-09 / D-10. Plan 18-06 fills in the full behavioral
-        test body.
-
-        Full behavioral contract (to be implemented in 18-06):
-        Seed config.json with alertId pointing at an ID NOT in the fake alerts budget list JSON,
-        run setup-guardrails.sh in --auto mode, assert config.json was NOT mutated (still has
-        original alertId only, no ruleIds) AND the MIGRATION_NOTIFY_FILE is written exactly
-        once after two consecutive runs (notify-once gate per D-10). Today the stub asserts
-        only that the script file exists.
-        """
+        """D-09 deleted-upstream-alert + D-10 notify-once gate + MIGR-05 loud-on-failure.
+        Two identical invocations produce: config.json untouched both times, error logged,
+        notify-once gate file written exactly once (hash-stable across runs)."""
+        import json
         import os
+        import shutil
         import subprocess
         import tempfile
+
         script = SKILL / 'scripts' / 'setup-guardrails.sh'
         self.assertTrue(script.exists(), 'setup-guardrails.sh missing — plan 18-02 must land first')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Build skill tree
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            # Build state directory — alertId points at MISSING01 (not in fake list)
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            config_seed = {'alertId': 'MISSING01', 'autonomousMode': False}
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump(config_seed, f)
+            open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+            # Fake revenium in shim_home/.local/bin (highest priority after ensure_path)
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock-api-key-12345"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules --help")\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails enforcement-events --help")\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules create")\n'
+                    '    printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    '    echo \'{"id":"SHOULDNOTBECALLED","name":"Should Not Be Called"}\'\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "alerts budget list")\n'
+                    # NOTE: returns OTHERONE — MISSING01 is NOT in this list (D-09 test)
+                    '    echo \'[{"alertId":"OTHERONE","cumulativePeriod":"MONTHLY","threshold":99,"name":"Some Other Budget","metricType":"TOTAL_COST"}]\'\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *)\n'
+                    '    echo "fake revenium: unhandled: $*" >&2\n'
+                    '    exit 1\n'
+                    '    ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+            run_args = ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                        '--from-alert', 'MISSING01', '--auto']
+            notify_file = os.path.join(state_dir, 'migration-notify-state')
+
+            # ---- First invocation ----
+            result = subprocess.run(run_args, env=env, capture_output=True, text=True, timeout=15)
+            # D-09: script must exit 0 (log + notify-once + exit 0 so cron continues)
+            self.assertEqual(result.returncode, 0,
+                             f'first run: stdout={result.stdout}\nstderr={result.stderr}')
+
+            # D-09: config.json must be UNCHANGED (no ruleIds written)
+            with open(os.path.join(state_dir, 'config.json')) as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg, config_seed,
+                             f'config.json must be untouched on deleted-alert path: {cfg}')
+            self.assertNotIn('ruleIds', cfg,
+                             'ruleIds must NOT be added on the deleted-alert path')
+
+            # D-10: notify-once gate file must be written
+            self.assertTrue(os.path.exists(notify_file),
+                            'migration-notify-state gate file must be written on first failure')
+            with open(notify_file) as f:
+                first_hash = f.read().strip()
+            self.assertGreaterEqual(len(first_hash), 16,
+                                    f'gate file must contain a hex hash of at least 16 chars, got {first_hash!r}')
+
+            # MIGR-05: error line must appear in metering log
+            with open(os.path.join(state_dir, 'revenium-metering.log')) as f:
+                log_text = f.read()
+            self.assertRegex(log_text, r'Legacy alertId MISSING01 not found in Revenium',
+                             'error log must reference the missing alertId')
+
+            # No create calls
+            if os.path.exists(argv_log):
+                with open(argv_log) as f:
+                    create_lines = sum(1 for l in f if 'budget-rules create' in l)
+            else:
+                create_lines = 0
+            self.assertEqual(create_lines, 0,
+                             f'first run: expected 0 create calls, got {create_lines}')
+
+            # ---- Second invocation (D-10: gate file written exactly once) ----
+            result2 = subprocess.run(run_args, env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(result2.returncode, 0,
+                             f'second run: stdout={result2.stdout}\nstderr={result2.stderr}')
+
+            # config.json must still be unchanged
+            with open(os.path.join(state_dir, 'config.json')) as f:
+                cfg2 = json.load(f)
+            self.assertEqual(cfg2, config_seed,
+                             f'config.json must remain untouched on second run: {cfg2}')
+
+            # D-10 KEY assertion: gate file content must be BYTE-IDENTICAL across runs
+            self.assertTrue(os.path.exists(notify_file),
+                            'migration-notify-state gate file must still exist after second run')
+            with open(notify_file) as f:
+                second_hash = f.read().strip()
+            self.assertEqual(second_hash, first_hash,
+                             f'D-10: gate file must not be rewritten for same error class. '
+                             f'first={first_hash!r} second={second_hash!r}')
+
+            # Still zero create calls
+            if os.path.exists(argv_log):
+                with open(argv_log) as f:
+                    create_lines2 = sum(1 for l in f if 'budget-rules create' in l)
+            else:
+                create_lines2 = 0
+            self.assertEqual(create_lines2, 0,
+                             f'second run: expected 0 create calls total, got {create_lines2}')
 
 
 if __name__ == '__main__':
