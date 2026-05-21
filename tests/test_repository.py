@@ -8918,6 +8918,54 @@ class RepositoryTests(unittest.TestCase):
                                  f'empty-state run must not add ERROR lines to metering log, '
                                  f'got: {error_lines}')
 
+    def test_setup_guardrails_migration_happy_path(self):
+        """Wave 0 gate for MIGR-01..03. Plan 18-06 fills in the full behavioral test body.
+
+        Full behavioral contract (to be implemented in 18-06):
+        Seed a tempdir HERMES_HOME with config.json containing alertId only, place a fake
+        revenium script on PATH that returns canned alerts budget list JSON, run
+        setup-guardrails.sh --from-alert <id> --auto, then assert config.json now contains
+        non-empty ruleIds and the fake CLI received guardrails budget-rules create with the
+        correct flags. Today the stub asserts only that the script file exists.
+        """
+        import os
+        import subprocess
+        import tempfile
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing — plan 18-02 must land first')
+
+    def test_setup_guardrails_idempotency(self):
+        """Wave 0 gate for MIGR-04. Plan 18-06 fills in the full behavioral test body.
+
+        Full behavioral contract (to be implemented in 18-06):
+        Seed config.json with populated ruleIds, run setup-guardrails.sh in --auto mode
+        with a fake revenium that records argv, assert the fake CLI received ZERO
+        guardrails budget-rules create invocations and the script exit code is 0. Today
+        the stub asserts only that the script file exists.
+        """
+        import os
+        import subprocess
+        import tempfile
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing — plan 18-02 must land first')
+
+    def test_setup_guardrails_missing_alert_edge_case(self):
+        """Wave 0 gate for MIGR-05..06 / D-09 / D-10. Plan 18-06 fills in the full behavioral
+        test body.
+
+        Full behavioral contract (to be implemented in 18-06):
+        Seed config.json with alertId pointing at an ID NOT in the fake alerts budget list JSON,
+        run setup-guardrails.sh in --auto mode, assert config.json was NOT mutated (still has
+        original alertId only, no ruleIds) AND the MIGRATION_NOTIFY_FILE is written exactly
+        once after two consecutive runs (notify-once gate per D-10). Today the stub asserts
+        only that the script file exists.
+        """
+        import os
+        import subprocess
+        import tempfile
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing — plan 18-02 must land first')
+
 
 if __name__ == '__main__':
     unittest.main()
