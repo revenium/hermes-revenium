@@ -69,3 +69,11 @@ log() {
 info()  { log "INFO " "$@"; }
 warn()  { log "WARN " "$@"; }
 error() { log "ERROR" "$@"; }
+
+# Phase 17 (D-10..D-13): two-subcommand probe for v1.3 guardrails CLI capability.
+# Returns 0 if both subcommand families exist, non-zero otherwise (fail-open).
+# Callers must warn + exit 0 on failure; this helper never logs or exits itself.
+has_guardrails_cli() {
+  revenium guardrails budget-rules --help >/dev/null 2>&1 && \
+  revenium guardrails enforcement-events --help >/dev/null 2>&1
+}
