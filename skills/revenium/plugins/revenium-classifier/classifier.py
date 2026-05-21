@@ -40,7 +40,7 @@ MARKERS_DIR = Path(os.environ.get("REVENIUM_MARKERS_DIR", str(STATE_DIR / "marke
 MARKERS_READY_DIR = Path(os.environ.get("REVENIUM_MARKERS_READY_DIR", str(MARKERS_DIR / ".ready")))
 TAXONOMY_FILE = Path(os.environ.get("REVENIUM_TAXONOMY_FILE", str(STATE_DIR / "task-taxonomy.json")))
 JOB_TAXONOMY_FILE = Path(os.environ.get("REVENIUM_JOB_TAXONOMY_FILE", str(STATE_DIR / "job-taxonomy.json")))
-BUDGET_STATUS_FILE = STATE_DIR / "budget-status.json"
+GUARDRAIL_STATUS_FILE = STATE_DIR / "guardrail-status.json"  # Phase 19 (ENF-03): renamed from BUDGET_STATUS_FILE, repointed to guardrail-status.json
 STATE_DB = HERMES_HOME / "state.db"
 
 # Label validation: lowercase snake_case, length 2..48 (regex enforces a
@@ -568,11 +568,11 @@ def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0) -> bool:
     return False
 
 
-def _budget_halted() -> bool:
-    """Read budget-status.json and return True if halted. Fail-open on any
+def _guardrail_halted() -> bool:
+    """Read guardrail-status.json and return True if halted. Fail-open on any
     filesystem or JSON error per D-08."""
     try:
-        data = json.loads(BUDGET_STATUS_FILE.read_text(encoding="utf-8"))
+        data = json.loads(GUARDRAIL_STATUS_FILE.read_text(encoding="utf-8"))
         return bool(data.get("halted", False))
     except Exception:
         return False
@@ -809,7 +809,7 @@ async def run_classification_async(
     4-6 (task write path) behind 'if not agent_self_classified:'. Step 7
     (job inference) runs unconditionally afterward so that job markers are
     produced on the dominant self-classify code path. Step 7 carries its own
-    three idempotency gates (root_sid, _budget_halted, _job_marker_exists).
+    three idempotency gates (root_sid, _guardrail_halted, _job_marker_exists).
     """
     if not session_id:
         return
@@ -832,7 +832,7 @@ async def run_classification_async(
 
         if not agent_self_classified:
             # Step 4 — budget gate (D-08 / HOOK-04).
-            if _budget_halted():
+            if _guardrail_halted():
                 await asyncio.to_thread(_write_marker_pair, session_id, "unclassified")
                 logger.warning(
                     "revenium-classifier: budget halted, wrote unclassified for sid=%s", session_id
@@ -861,13 +861,13 @@ async def run_classification_async(
 
         # Step 7 — code-side job-inference (D-01 / Phase 13).
         # Runs unconditionally on every reachable path (self-classified or not).
-        # Three early skip gates: root-session only, not budget-halted, no existing job marker.
+        # Three early skip gates: root-session only, not guardrail-halted, no existing job marker.
         # Wrapped in its own try/except so a job-path failure never disturbs the task marker
         # already written above (D-04 never-raise invariant, T-13-08).
         try:
             if (
                 root_sid == session_id  # skip subagent sessions (T-13-06)
-                and not _budget_halted()  # skip when halted (T-13-09)
+                and not _guardrail_halted()  # skip when halted (T-13-09)
                 and not _job_marker_exists(session_id)  # skip if job already written (T-13-07 / D-08)
             ):
                 transcript = _read_session_transcript(session_id)
