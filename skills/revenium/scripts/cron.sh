@@ -57,6 +57,21 @@ if ! [[ "${loop_sleep}" =~ ^[0-9]+$ ]]; then
 fi
 
 for ((i=1; i<=loop_count; i++)); do
+  # Phase 18 (D-06, MIGR-01..04): auto-migration from legacy alertId to ruleIds.
+  # Reads alertId inline (Pitfall 5 — no dependency on read_config_field from
+  # budget-check.sh; that function will follow budget-check.sh into deletion in
+  # Phase 19). Empty alertId, missing config.json, or already-populated ruleIds
+  # all make the migration stage a no-op (exit 0). The `|| true` matches the
+  # rest of the cron pipeline so a migration failure NEVER blocks metering.
+  ALERT_ID_FOR_MIGRATION=$(CONFIG_FILE="${CONFIG_FILE}" python3 - <<'PY' 2>/dev/null || true
+import json, os
+try:
+    print(json.load(open(os.environ['CONFIG_FILE'])).get('alertId', ''))
+except Exception:
+    print('')
+PY
+)
+  bash "${SKILL_DIR}/scripts/setup-guardrails.sh" --from-alert "${ALERT_ID_FOR_MIGRATION}" --auto 2>/dev/null || true
   bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/budget-check.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
