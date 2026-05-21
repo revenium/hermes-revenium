@@ -8919,20 +8919,142 @@ class RepositoryTests(unittest.TestCase):
                                  f'got: {error_lines}')
 
     def test_setup_guardrails_migration_happy_path(self):
-        """Wave 0 gate for MIGR-01..03. Plan 18-06 fills in the full behavioral test body.
-
-        Full behavioral contract (to be implemented in 18-06):
-        Seed a tempdir HERMES_HOME with config.json containing alertId only, place a fake
-        revenium script on PATH that returns canned alerts budget list JSON, run
-        setup-guardrails.sh --from-alert <id> --auto, then assert config.json now contains
-        non-empty ruleIds and the fake CLI received guardrails budget-rules create with the
-        correct flags. Today the stub asserts only that the script file exists.
-        """
+        """MIGR-01..04 + MIGR-05 happy path. Seeds config.json with alertId only, fake revenium
+        returns matching alert via `list`, script runs in --auto mode, writes ruleIds and emits
+        one deprecation log line. alertId is preserved per D-09."""
+        import json
         import os
+        import shutil
         import subprocess
         import tempfile
+
         script = SKILL / 'scripts' / 'setup-guardrails.sh'
         self.assertTrue(script.exists(), 'setup-guardrails.sh missing — plan 18-02 must land first')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Build skill tree
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            # Build state directory with seeded config.json
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            config_seed = {'alertId': 'LEGACY01', 'autonomousMode': False}
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump(config_seed, f)
+            # Create empty metering log
+            open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+            # Build fake revenium dispatcher in ~/.local/bin (shim_home) so that
+            # common.sh's ensure_path prepends it last (highest priority), overriding
+            # any real revenium installed at /opt/homebrew/bin.
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    '# Dispatch on up to 3 args to distinguish probe vs create\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock-api-key-12345"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules --help")\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules create")\n'
+                    '    printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    '    echo \'{"id":"TESTRULE001","name":"Hermes Monthly Budget","metricType":"TOTAL_COST","windowType":"MONTHLY","action":"BLOCK","groupBy":"ORGANIZATION","hardLimit":50,"warnThreshold":40,"shadowMode":false}\'\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules list")\n'
+                    '    echo "[]"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails enforcement-events --help")\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "alerts budget list")\n'
+                    '    echo \'[{"alertId":"LEGACY01","cumulativePeriod":"MONTHLY","threshold":50,"name":"Hermes Monthly Budget","currentValue":0,"groups":[],"metricType":"TOTAL_COST","percentUsed":0,"remaining":50,"risk":"low","window":"MONTHLY"}]\'\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  *)\n'
+                    '    echo "fake revenium: unhandled: $*" >&2\n'
+                    '    exit 1\n'
+                    '    ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                 '--from-alert', 'LEGACY01', '--auto'],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+
+            self.assertEqual(result.returncode, 0,
+                             f'stdout={result.stdout}\nstderr={result.stderr}')
+
+            # Assert config.json was updated correctly
+            with open(os.path.join(state_dir, 'config.json')) as f:
+                cfg = json.load(f)
+            self.assertEqual(cfg.get('ruleIds'), ['TESTRULE001'],
+                             f'ruleIds mismatch: {cfg}')
+            self.assertEqual(cfg.get('alertId'), 'LEGACY01',
+                             'D-09: alertId must be preserved as orphan')
+            self.assertIs(cfg.get('autonomousMode'), False,
+                          'other config fields must be preserved')
+
+            # Assert the create call was made with correct flags
+            self.assertTrue(os.path.exists(argv_log),
+                            'fake revenium.argv.log not created — create call was never made')
+            with open(argv_log) as f:
+                argv_content = f.read()
+            create_lines = [l for l in argv_content.splitlines() if 'budget-rules create' in l]
+            self.assertEqual(len(create_lines), 1,
+                             f'expected exactly 1 create call, got {len(create_lines)}: {create_lines}')
+            create_argv = create_lines[0]
+            self.assertIn('--metric-type TOTAL_COST', create_argv,
+                          f'--metric-type TOTAL_COST missing from create argv: {create_argv!r}')
+            self.assertIn('--window-type MONTHLY', create_argv,
+                          f'--window-type MONTHLY missing from create argv: {create_argv!r}')
+            self.assertIn('--action BLOCK', create_argv,
+                          f'--action BLOCK missing from create argv: {create_argv!r}')
+            self.assertIn('--group-by ORGANIZATION', create_argv,
+                          f'--group-by ORGANIZATION missing from create argv: {create_argv!r}')
+            self.assertIn('--warn-threshold 40', create_argv,
+                          f'--warn-threshold 40 (80% of 50) missing from create argv: {create_argv!r}')
+            self.assertIn('--hard-limit 50', create_argv,
+                          f'--hard-limit 50 missing from create argv: {create_argv!r}')
+            self.assertNotIn('--shadow-mode', create_argv,
+                             'D-08: --shadow-mode must NOT be present when REVENIUM_MIGRATE_SHADOW_MODE is unset')
+
+            # Assert exactly one deprecation log line in revenium-metering.log
+            with open(os.path.join(state_dir, 'revenium-metering.log')) as f:
+                log_lines = f.readlines()
+            deprecation_lines = [l for l in log_lines if 'deprecation:' in l]
+            self.assertEqual(len(deprecation_lines), 1,
+                             f'expected exactly 1 deprecation line, got {len(deprecation_lines)}: {deprecation_lines}')
+            self.assertRegex(deprecation_lines[0],
+                             r'deprecation: legacy alertId LEGACY01 orphaned, migrated to ruleId TESTRULE001')
+
+            # Assert migration-notify-state gate file is absent on success path
+            notify_file = os.path.join(state_dir, 'migration-notify-state')
+            self.assertFalse(os.path.exists(notify_file),
+                             'migration-notify-state should be absent after a successful migration')
 
     def test_setup_guardrails_idempotency(self):
         """Wave 0 gate for MIGR-04. Plan 18-06 fills in the full behavioral test body.
