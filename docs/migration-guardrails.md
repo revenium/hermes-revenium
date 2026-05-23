@@ -116,6 +116,53 @@ After migration completes, the legacy `alertId` line remains in `config.json` �
    ```
    The `setup-guardrails.sh` script intentionally does not auto-remove `alertId` — orphan keys are an operator-driven cleanup (Phase 18 D-09: "alertId is orphaned, never auto-deleted").
 
+## What you'll see after a successful migration
+
+On the first cron tick after upgrading, the metering log records the migration:
+
+```
+[2026-05-22T14:00:01Z] [INFO ] [revenium] === Hermes Metering Reporter starting ===
+[2026-05-22T14:00:03Z] [INFO ] [revenium] Reported: session=20260522_140000_abc muid=01893b8a3... task_type=research op_type=CHAT in=120 out=80
+[2026-05-22T14:00:03Z] [INFO ] [revenium] === Done. Reported 1, skipped 0. ===
+HALT_TRANSITION=false
+[2026-05-22T14:00:04Z] [INFO ] [revenium] Cleaned up legacy status file (Phase 19 clean break)
+deprecation: legacy alertId 5jpaPv orphaned, migrated to ruleId d5jng5
+```
+
+The new `~/.hermes/state/revenium/guardrail-status.json` looks like this:
+
+```json
+{
+  "halted": false,
+  "autonomousMode": true,
+  "lastChecked": "2026-05-22T14:00:03.512847+00:00",
+  "rules": [
+    {
+      "ruleId": "d5jng5",
+      "name": "Engineering Budget",
+      "metricType": "TOTAL_COST",
+      "windowType": "MONTHLY",
+      "groupBy": "ORGANIZATION",
+      "currentValue": 47.32,
+      "warnThreshold": 80.0,
+      "hardLimit": 100.0,
+      "state": "ok",
+      "lastChecked": "2026-05-22T14:00:03.512847+00:00"
+    }
+  ]
+}
+```
+
+(`haltedRule` and `haltedAt` are absent when `halted: false`.)
+
+When a rule actually breaches its hard-limit under autonomous mode, the Hermes notification contains the embedded enforcement event:
+
+```
+Guardrail halt active — rule 'Engineering Budget' (TOTAL_COST, MONTHLY) at 102.5 of 100.0 hard-limit. To resume: bash ~/.hermes/skills/revenium/scripts/clear-halt.sh | Event: [2026-05-22T14:03:38.478Z] Rule 'Engineering Budget' blocked 1 request: TOTAL_COST $102.50 exceeded hard limit $100.00
+```
+
+The text after the `|` separator is the most recent `revenium guardrails enforcement-events list` entry. If the events list API is unavailable or returns empty, the suffix degrades to `Event: [(unavailable)] (unavailable)` — the halt still fires; only the audit detail is missing.
+
 ## Loud-on-failure behavior
 
 Migration failures are loud, not silent. The cron pipeline continues metering
