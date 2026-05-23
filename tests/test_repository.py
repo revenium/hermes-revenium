@@ -97,6 +97,11 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
             # Phase 18 — operator-facing migration doc (MIGR-06, D-16)
             ROOT / 'docs' / 'migration-guardrails.md',
+            # Phase 20 — COMPAT-01 golden-argv wire-shape fixtures (D-01..D-04)
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion.golden.json',
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome.golden.json',
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-tool-event.golden.json',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
