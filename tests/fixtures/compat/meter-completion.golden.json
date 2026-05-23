@@ -1,0 +1,32 @@
+{
+  "verb": ["meter", "completion"],
+  "exact_match_fields": {
+    "__verb": "meter",
+    "__subcommand": "completion",
+    "--model": "claude-sonnet-4-6",
+    "--provider": "anthropic",
+    "--input-tokens": "100",
+    "--output-tokens": "50",
+    "--cache-read-tokens": "0",
+    "--cache-creation-tokens": "0",
+    "--total-tokens": "150",
+    "--stop-reason": "END",
+    "--request-duration": "0",
+    "--agent": "Hermes",
+    "--transaction-id": "compat-sid-001-150-compat-muid-001",
+    "--trace-id": "compat-sid-001",
+    "--is-streamed": true,
+    "--quiet": true,
+    "--task-type": "code_review",
+    "--operation-type": "CHAT",
+    "--model-source": "anthropic",
+    "--environment": "test",
+    "--agentic-job-id": "compat-job-001"
+  },
+  "pattern_fields": {
+    "--request-time": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+    "--completion-start-time": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+    "--response-time": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+  },
+  "forbidden_fields": ["--budget-id", "--alert-id"]
+}
