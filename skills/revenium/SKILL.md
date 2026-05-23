@@ -141,7 +141,7 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
 
    If the user asks to set up in shadow mode, run `setup-guardrails.sh --interactive --shadow-mode` instead. By default, rules created via `--interactive` are enforcing.
 
-4. **Install the metering cron AND budget-halt hooks** (in order):
+4. **Install the metering cron AND guardrail-halt hooks** (in order):
    ```
    bash ~/.hermes/skills/revenium/scripts/install-cron.sh
    ```
@@ -150,6 +150,10 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
    ```
    This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` revenium shell hooks in `~/.hermes/config.yaml`. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
+
+5. **Approve hooks on first `hermes chat`** — Hermes shows an approval prompt the first time each hook fires. The hooks are inert until approved.
+
+Legacy `alertId` installs auto-migrate on the first cron tick — see `docs/migration-guardrails.md` for the schema-change and manual recovery procedure.
 
 ## `/revenium` Command Behavior
 
@@ -190,6 +194,21 @@ When the user invokes `/revenium`:
 - `references/troubleshooting.md` — failure modes and operator fixes
 
 ## Verification
+
+Run these in order:
+
+```bash
+crontab -l | grep hermes-revenium-metering         # one entry
+grep hermes-revenium-hooks ~/.hermes/config.yaml   # 3 hook commands registered
+grep post_tool_call ~/.hermes/config.yaml          # post_tool_call hook present
+jq '.ruleIds' ~/.hermes/state/revenium/config.json # non-empty array
+```
+
+Wait one cron tick (≤60s), then:
+
+```bash
+cat ~/.hermes/state/revenium/guardrail-status.json  # expect rules[] populated
+```
 
 - `bash ~/.hermes/skills/revenium/scripts/install-cron.sh` succeeds and `crontab -l | grep hermes-revenium-metering` returns one entry.
 - `bash ~/.hermes/skills/revenium/scripts/install-hooks.sh` succeeds and all three hook commands (`pre_llm_call`, `pre_tool_call`, `post_tool_call`) are registered in `~/.hermes/config.yaml` — verifiable with `grep hermes-revenium-hooks ~/.hermes/config.yaml` returning the hook tag and `grep post_tool_call ~/.hermes/config.yaml` returning the hook entry.
