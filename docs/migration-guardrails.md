@@ -95,6 +95,27 @@ hard-limit of an existing rule. Changing a rule's threshold always requires a
 delete-and-recreate, which `--interactive` handles for you via the
 `[r]ecreate / [c]ancel` prompt.
 
+## Orphan Cleanup (Optional)
+
+After migration completes, the legacy `alertId` line remains in `config.json` — it is inert (no code path reads it) but cosmetically orphaned. To clean up:
+
+1. **Verify the new ruleId is enforcing.** Tail the log and inspect the status file:
+   ```bash
+   tail -n 5 ~/.hermes/state/revenium/revenium-metering.log
+   cat ~/.hermes/state/revenium/guardrail-status.json
+   ```
+   The status file's `rules[]` array should be non-empty and the newest cron-log line should show `HALT_TRANSITION=false` (or `=true` if a budget is already over).
+
+2. **Confirm enforcement is live.** Either trigger a known warn or block scenario, or wait until the next real budget event. This step is optional but recommended before deleting the legacy alert.
+
+3. **Delete the legacy alert in the Revenium UI.** Alerts → Budget → find the alert whose id matches `config.json::alertId` → delete.
+
+4. **Optionally remove the orphan `alertId` key from `config.json`.** No shipping script exists for this — run the one-liner manually:
+   ```bash
+   python3 -c "import json, pathlib; p = pathlib.Path('~/.hermes/state/revenium/config.json').expanduser(); d = json.loads(p.read_text()); d.pop('alertId', None); p.write_text(json.dumps(d, indent=2) + '\n')"
+   ```
+   The `setup-guardrails.sh` script intentionally does not auto-remove `alertId` — orphan keys are an operator-driven cleanup (Phase 18 D-09: "alertId is orphaned, never auto-deleted").
+
 ## Loud-on-failure behavior
 
 Migration failures are loud, not silent. The cron pipeline continues metering
