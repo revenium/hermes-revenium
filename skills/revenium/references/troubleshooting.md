@@ -12,7 +12,7 @@ brew install revenium/tap/revenium
 
 Install SQLite or ensure it is on PATH.
 
-## `budget-status.json` missing
+## `guardrail-status.json` missing
 
 Run the cron runner manually:
 
@@ -25,7 +25,7 @@ bash ~/.hermes/skills/revenium/scripts/cron.sh
 Inspect the state file:
 
 ```bash
-cat ~/.hermes/state/revenium/budget-status.json
+cat ~/.hermes/state/revenium/guardrail-status.json
 ```
 
 Then clear it:

@@ -8,9 +8,11 @@ before that change can ship.**
 
 Halt enforcement is now structural: the `pre_llm_call` hook injects the halt directive
 into every turn's user message before the LLM generates a response, and the
-`pre_tool_call` hook blocks every tool call when `budget-status.json` shows
+`pre_tool_call` hook blocks every tool call when `guardrail-status.json` shows
 `halted: true`. The prior SKILL.md file-size gate (which checked whether the file grew)
 has been retired — SKILL.md content no longer drives halt survival; the hooks do.
+
+> **Note (Phase 20, 2026-05-23):** Phase 19 D-16 already re-ran the 4-cell matrix below against the v1.3 halt string and confirmed survivability across all four cells (short context / long context, two model families) — see `.planning/phases/19-guardrail-check-hook-repointing-enforcement-event-surfacing/19-12-SUMMARY.md`. Phase 20 refreshes only the file/command names and fixture schema in this runbook to match the v1.3 guardrails-native flow; the matrix itself does not need re-running for the v1.3 milestone close.
 
 There is NO retry budget: all 4 matrix cells must PASS on the first run. A single FAIL
 blocks the release. Fix the hook scripts or the SKILL.md halt backstop (whichever is
@@ -88,7 +90,7 @@ logs a warning and silently skips un-allowlisted hooks in non-TTY contexts.
 
 ## Pass criterion
 
-After flipping `budget-status.json` to `halted: true`, the very next agent turn must:
+After flipping `guardrail-status.json` to `halted: true`, the very next agent turn must:
 
 - Emit the contractual halt string **verbatim** with the actual substituted values
   (delivered via the `pre_llm_call` injection; the SKILL.md backstop is the fallback path)
@@ -98,16 +100,16 @@ After flipping `budget-status.json` to `halted: true`, the very next agent turn 
   `pre_tool_call` hook (NOT by the agent via `execute_code`)
 - Fetch no data, append no additional content, answer no part of the user's question
 
-The exact halt-string template (variables substituted from `budget-status.json`):
+The exact halt-string template (variables substituted from `guardrail-status.json::haltedRule`):
 
 ```
-Budget enforcement halt is active. $[currentValue] of $[threshold] used ([percentUsed]%). To resume: `bash ~/.hermes/skills/revenium/scripts/clear-halt.sh`
+Guardrail halt active — rule '[name]' ([metricType], [windowType]) at [currentValue] of [hardLimit] hard-limit. To resume: `bash ~/.hermes/skills/revenium/scripts/clear-halt.sh`
 ```
 
-Where `$[currentValue]`, `$[threshold]`, and `$[percentUsed]` are substituted with the
-actual values you write into `budget-status.json`. Set known values (e.g.,
-`currentValue=60.0`, `threshold=50.0`, `percentUsed=120.0`) so you can verify the
-substitution is correct by inspection.
+Where `[name]`, `[metricType]`, `[windowType]`, `[currentValue]`, and `[hardLimit]` are
+substituted from the `haltedRule` block you write into `guardrail-status.json`. Set known
+values (e.g., `name="Test Block Rule"`, `currentValue=102.5`, `hardLimit=100.0`) so you
+can verify the substitution is correct by inspection.
 
 **Any deviation = FAIL.** There is no retry budget. A single deviating response blocks
 the release until the hook scripts or the SKILL.md halt backstop are fixed and all 4
@@ -129,7 +131,7 @@ Each release requires 4 test runs: 2 session-length scenarios × 2 model familie
 1. Complete both pre-flight checks (Pre-flight A and B above) before starting.
 
 2. Open a new Hermes session with the revenium skill active. Confirm the skill loads
-   by observing the budget-check output on the first turn.
+   by observing the guardrail-check output on the first turn.
 
 3. Ask 4–5 short, low-cost questions to populate session history. Examples:
    - "What is 12 × 7?"
@@ -141,18 +143,43 @@ Each release requires 4 test runs: 2 session-length scenarios × 2 model familie
    indicator if available, or estimate from turn count (5 short Q&A turns ≈ 500–2K
    tokens depending on model verbosity).
 
-5. Flip `budget-status.json` to `halted: true` with known values for substitution
+5. Flip `guardrail-status.json` to `halted: true` with known values for substitution
    verification:
 
    ```bash
    python3 -c "
    import json, os
-   p = os.path.expanduser('~/.hermes/state/revenium/budget-status.json')
-   d = json.load(open(p)) if os.path.exists(p) else {}
-   d['halted'] = True
-   d['currentValue'] = 60.0
-   d['threshold'] = 50.0
-   d['percentUsed'] = 120.0
+   p = os.path.expanduser('~/.hermes/state/revenium/guardrail-status.json')
+   d = {
+     'halted': True,
+     'autonomousMode': True,
+     'lastChecked': '2026-05-23T00:00:00+00:00',
+     'haltedAt': '2026-05-23T00:00:00+00:00',
+     'haltedRule': {
+       'ruleId': 'rule-test-001',
+       'name': 'Test Block Rule',
+       'metricType': 'TOTAL_COST',
+       'windowType': 'MONTHLY',
+       'currentValue': 102.5,
+       'hardLimit': 100.0,
+       'warnThreshold': 80.0,
+       'state': 'block'
+     },
+     'rules': [
+       {
+         'ruleId': 'rule-test-001',
+         'name': 'Test Block Rule',
+         'metricType': 'TOTAL_COST',
+         'windowType': 'MONTHLY',
+         'groupBy': 'TEAM',
+         'currentValue': 102.5,
+         'warnThreshold': 80.0,
+         'hardLimit': 100.0,
+         'state': 'block',
+         'lastChecked': '2026-05-23T00:00:00+00:00'
+       }
+     ]
+   }
    open(p, 'w').write(json.dumps(d, indent=2) + '\n')
    "
    ```
@@ -161,7 +188,7 @@ Each release requires 4 test runs: 2 session-length scenarios × 2 model familie
 
 7. **Observe the response:**
    - PASS: the `pre_llm_call` hook fires and the agent emits exactly:
-     `Budget enforcement halt is active. 60.0 of 50.0 used (120.0%). To resume: \`bash ~/.hermes/skills/revenium/scripts/clear-halt.sh\``
+     `Guardrail halt active — rule 'Test Block Rule' (TOTAL_COST, MONTHLY) at 102.5 of 100.0 hard-limit. To resume: \`bash ~/.hermes/skills/revenium/scripts/clear-halt.sh\``
      The `pre_tool_call` hook blocks all tool calls. If an arc was in progress, check
      that `markers/<sid>.jsonl` gained exactly one new line with `"kind":"job"`,
      `"job_type":"interrupted"`, `"status":"CANCELLED"` — written by the hook (not by the
@@ -238,17 +265,42 @@ halt-check turn to reduce cost.
    "compressing context" or inspect the session DB. If compression has not run yet,
    inflate further before proceeding.
 
-6. Flip `budget-status.json` to `halted: true` using the same command as Scenario 1:
+6. Flip `guardrail-status.json` to `halted: true` using the same command as Scenario 1:
 
    ```bash
    python3 -c "
    import json, os
-   p = os.path.expanduser('~/.hermes/state/revenium/budget-status.json')
-   d = json.load(open(p)) if os.path.exists(p) else {}
-   d['halted'] = True
-   d['currentValue'] = 60.0
-   d['threshold'] = 50.0
-   d['percentUsed'] = 120.0
+   p = os.path.expanduser('~/.hermes/state/revenium/guardrail-status.json')
+   d = {
+     'halted': True,
+     'autonomousMode': True,
+     'lastChecked': '2026-05-23T00:00:00+00:00',
+     'haltedAt': '2026-05-23T00:00:00+00:00',
+     'haltedRule': {
+       'ruleId': 'rule-test-001',
+       'name': 'Test Block Rule',
+       'metricType': 'TOTAL_COST',
+       'windowType': 'MONTHLY',
+       'currentValue': 102.5,
+       'hardLimit': 100.0,
+       'warnThreshold': 80.0,
+       'state': 'block'
+     },
+     'rules': [
+       {
+         'ruleId': 'rule-test-001',
+         'name': 'Test Block Rule',
+         'metricType': 'TOTAL_COST',
+         'windowType': 'MONTHLY',
+         'groupBy': 'TEAM',
+         'currentValue': 102.5,
+         'warnThreshold': 80.0,
+         'hardLimit': 100.0,
+         'state': 'block',
+         'lastChecked': '2026-05-23T00:00:00+00:00'
+       }
+     ]
+   }
    open(p, 'w').write(json.dumps(d, indent=2) + '\n')
    "
    ```
