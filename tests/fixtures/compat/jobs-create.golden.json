@@ -1,0 +1,14 @@
+{
+  "verb": ["jobs", "create"],
+  "exact_match_fields": {
+    "__verb": "jobs",
+    "__subcommand": "create",
+    "--agentic-job-id": "compat-job-001",
+    "--quiet": true,
+    "--name": "COMPAT Test Job",
+    "--type": "code_review",
+    "--environment": "test"
+  },
+  "pattern_fields": {},
+  "forbidden_fields": ["--budget-id", "--alert-id"]
+}
