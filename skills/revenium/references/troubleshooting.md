@@ -52,9 +52,9 @@ Then verify:
 
 **Symptom.** The Revenium dashboard for your rule shows `currentValue: 0` and "Total evaluations 0," but `revenium-metering.log` is full of successful `Reported: session=...` lines and the ledger (`revenium-hermes.ledger`) is growing every minute. The cron is doing its job; the rule just is not seeing any of the events.
 
-**Root cause.** The rule was created without an explicit `--filter`, so the Revenium engine groups spend by ORGANIZATION but sees nothing in your team's child-org buckets because metered events fall through to the auto-discovery `UNCLASSIFIED` subscription. This is the failure mode quick-task 260524-lpu fixed by defaulting freshly-created rules to `--filter AGENT:IS:Hermes`.
+**Root cause.** The rule was created with `--group-by ORGANIZATION` and no explicit `--filter`, so the Revenium engine groups spend by ORGANIZATION but sees nothing in your team's child-org buckets because metered events fall through to the auto-discovery `UNCLASSIFIED` subscription. This is the failure mode quick-task 260524-lpu fixed by defaulting freshly-created rules to `--group-by AGENT --filter AGENT:IS:Hermes` — a self-contained scope that doesn't depend on org/subscription resolution.
 
-**Fix.** Delete the existing rule and re-run `setup-guardrails.sh` after upgrading to the hotfix; the new rule will be scoped to `AGENT:IS:Hermes` automatically and will start matching incoming traffic on the next cron tick.
+**Fix.** Delete the existing rule and re-run `setup-guardrails.sh` after upgrading to the hotfix; the new rule will use `--group-by AGENT --filter AGENT:IS:Hermes` automatically and will start matching incoming traffic on the next cron tick.
 
 ```bash
 # 1. List rules to find the id with currentValue: 0

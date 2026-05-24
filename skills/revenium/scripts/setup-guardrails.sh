@@ -304,7 +304,7 @@ create_rule() {
     --metric-type TOTAL_COST
     --window-type "${period}"
     --action BLOCK
-    --group-by ORGANIZATION
+    --group-by AGENT
     --warn-threshold "${warn_threshold}"
     --hard-limit "${hard_limit}"
   )
@@ -312,10 +312,13 @@ create_rule() {
   # v1.3 hotfix (quick-task 260524-lpu): default-scope created rules to the
   # current install's agent name so the rule actually evaluates against the
   # meter completions we ship (which all carry --agent "${REVENIUM_AGENT_NAME}").
-  # Without this, an ORGANIZATION-grouped rule on a team whose orgs have no
-  # subscriptions would see currentValue: 0 forever (events fall through to
-  # the auto-discovery UNCLASSIFIED subscription). Operator can override by
-  # passing --filter (one or more) or --filters-json.
+  # Pairs with --group-by AGENT above: filter narrows to agent=Hermes events,
+  # group-by AGENT puts all matching spend in one self-contained bucket keyed
+  # on the agent name (no dependency on org/subscription resolution).
+  # ORGANIZATION grouping was the original default but produced currentValue: 0
+  # on tenants whose orgs have no subscriptions (events fall through to the
+  # auto-discovery UNCLASSIFIED subscription). Operator can override the
+  # filter via --filter (one or more) or --filters-json.
   if [[ -n "${FILTERS_JSON}" ]]; then
     cmd+=(--filters-json "${FILTERS_JSON}")
   elif [[ ${#FILTERS[@]} -gt 0 ]]; then

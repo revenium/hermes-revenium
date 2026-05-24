@@ -10076,8 +10076,8 @@ class RepositoryTests(unittest.TestCase):
                           f'--window-type MONTHLY missing from create argv: {create_argv!r}')
             self.assertIn('--action BLOCK', create_argv,
                           f'--action BLOCK missing from create argv: {create_argv!r}')
-            self.assertIn('--group-by ORGANIZATION', create_argv,
-                          f'--group-by ORGANIZATION missing from create argv: {create_argv!r}')
+            self.assertIn('--group-by AGENT', create_argv,
+                          f'--group-by AGENT missing from create argv: {create_argv!r}')
             self.assertIn('--warn-threshold 40', create_argv,
                           f'--warn-threshold 40 (80% of 50) missing from create argv: {create_argv!r}')
             self.assertIn('--hard-limit 50', create_argv,

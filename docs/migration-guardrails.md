@@ -99,17 +99,19 @@ delete-and-recreate, which `--interactive` handles for you via the
 
 Starting with the v1.3 hotfix on top of the guardrails migration, every rule
 created by `setup-guardrails.sh` is automatically scoped with
-`--filter AGENT:IS:Hermes`. This makes the rule evaluate against the meter
-completions this skill ships (every `revenium meter completion` call carries
-`--agent "Hermes"`), regardless of whether your Revenium team has any
-subscriptions created in the UI.
+`--group-by AGENT --filter AGENT:IS:Hermes`. This makes the rule evaluate
+against the meter completions this skill ships (every
+`revenium meter completion` call carries `--agent "Hermes"`), with all
+matching spend rolled into a single self-contained bucket — no dependency on
+org/subscription resolution.
 
-**Why this matters:** without an explicit filter, an `ORGANIZATION`-grouped
-rule on a team whose organizations have no subscriptions will see
-`currentValue: 0` forever — every metered event falls through to Revenium's
-auto-discovery `UNCLASSIFIED` subscription, and the rule's group buckets stay
-empty. With `--filter AGENT:IS:Hermes`, the rule matches incoming traffic by
-agent name and evaluates correctly out of the box.
+**Why this matters:** the original v1.3 default was `--group-by ORGANIZATION`
+with no filter, which made the Revenium engine group spend by organization but
+see nothing in the team's child-org buckets because metered events fall
+through to the auto-discovery `UNCLASSIFIED` subscription. With
+`--group-by AGENT --filter AGENT:IS:Hermes`, the rule matches incoming traffic
+by agent name and accumulates into a stable per-agent bucket that evaluates
+correctly out of the box.
 
 **The agent name is `Hermes` by default and centralized in
 `scripts/common.sh::REVENIUM_AGENT_NAME`.** Override it via environment when

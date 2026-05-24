@@ -27,7 +27,7 @@ Fresh-install and reconfigure flows are driven by `setup-guardrails.sh --interac
 
 ## Default rule filter scope
 
-Rules created by `setup-guardrails.sh` are automatically scoped with `--filter AGENT:IS:Hermes` so they evaluate against the meter completions this skill ships (every call carries `--agent "Hermes"`). Without this default, an `ORGANIZATION`-grouped rule on a team whose orgs have no subscriptions would see `currentValue: 0` forever — events fall through to Revenium's auto-discovery `UNCLASSIFIED` subscription. The agent name is centralized in `scripts/common.sh::REVENIUM_AGENT_NAME` (default `Hermes`, env-overridable) so the rule filter and the per-call `--agent` argv stay in sync.
+Rules created by `setup-guardrails.sh` are automatically scoped with `--group-by AGENT --filter AGENT:IS:Hermes` so they evaluate against the meter completions this skill ships (every call carries `--agent "Hermes"`). Grouping by AGENT puts all matching spend in one self-contained bucket keyed on the agent name — no dependency on org/subscription resolution. Without this default, an `ORGANIZATION`-grouped rule on a team whose orgs have no subscriptions would see `currentValue: 0` forever (events fall through to Revenium's auto-discovery `UNCLASSIFIED` subscription). The agent name is centralized in `scripts/common.sh::REVENIUM_AGENT_NAME` (default `Hermes`, env-overridable) so the rule filter and the per-call `--agent` argv stay in sync.
 
 To override the default filter — for example, scoping a rule to a specific model or provider — pass `--filter dim:op:val` (repeatable) or `--filters-json '<json>'` (single expression, mutually exclusive with `--filter`):
 
