@@ -21,6 +21,12 @@ WARN_FLAGS_DIR="${REVENIUM_WARN_FLAGS_DIR:-${MARKERS_DIR}/.warn}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 MARKER_RETENTION_DAYS="${REVENIUM_MARKER_RETENTION_DAYS:-30}"
 PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
+# v1.3 hotfix (quick-task 260524-lpu): single source of truth for the agent name
+# that ships on every meter completion (--agent argv) AND scopes default
+# guardrails rule filters (--filter AGENT:IS:${REVENIUM_AGENT_NAME}). Override
+# via env when running multiple distinct Hermes installs against one Revenium
+# tenant that share an API key but need separate rule scoping.
+REVENIUM_AGENT_NAME="${REVENIUM_AGENT_NAME:-Hermes}"
 # v1.1 job-tracking scaffolding (D-13): separate ledger for agentic jobs and forward-compat taxonomy path.
 JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger}"
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"

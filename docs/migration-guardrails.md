@@ -95,6 +95,65 @@ hard-limit of an existing rule. Changing a rule's threshold always requires a
 delete-and-recreate, which `--interactive` handles for you via the
 `[r]ecreate / [c]ancel` prompt.
 
+## Rules are scoped to `AGENT:IS:Hermes` by default
+
+Starting with the v1.3 hotfix on top of the guardrails migration, every rule
+created by `setup-guardrails.sh` is automatically scoped with
+`--filter AGENT:IS:Hermes`. This makes the rule evaluate against the meter
+completions this skill ships (every `revenium meter completion` call carries
+`--agent "Hermes"`), regardless of whether your Revenium team has any
+subscriptions created in the UI.
+
+**Why this matters:** without an explicit filter, an `ORGANIZATION`-grouped
+rule on a team whose organizations have no subscriptions will see
+`currentValue: 0` forever — every metered event falls through to Revenium's
+auto-discovery `UNCLASSIFIED` subscription, and the rule's group buckets stay
+empty. With `--filter AGENT:IS:Hermes`, the rule matches incoming traffic by
+agent name and evaluates correctly out of the box.
+
+**The agent name is `Hermes` by default and centralized in
+`scripts/common.sh::REVENIUM_AGENT_NAME`.** Override it via environment when
+running multiple distinct Hermes installs against one Revenium tenant:
+
+```bash
+echo 'REVENIUM_AGENT_NAME=HermesProd' >> ~/.hermes/state/revenium/env
+```
+
+The same variable is read by `hermes-report.sh` when shipping `--agent`, so
+the rule filter and the per-call agent argv always agree.
+
+**To override the default filter scope** (e.g. scope a rule to a specific
+model instead of agent), pass `--filter` or `--filters-json` to
+`setup-guardrails.sh`:
+
+```bash
+# Per-model scope (overrides the AGENT default):
+bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh \
+  --hard-limit 50 --period MONTHLY \
+  --filter MODEL:IS:claude-3-opus
+
+# Multiple --filter values are ANDed:
+bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh \
+  --hard-limit 50 --period MONTHLY \
+  --filter AGENT:IS:Hermes --filter PROVIDER:IS:anthropic
+
+# Or pass a full JSON expression (advanced):
+bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh \
+  --hard-limit 50 --period MONTHLY \
+  --filters-json '{"...": "..."}'
+```
+
+`--filter` and `--filters-json` are mutually exclusive. Supported dimensions
+are AGENT, MODEL, PROVIDER, ORGANIZATION, CREDENTIAL, PRODUCT, SUBSCRIBER,
+TASK_TYPE; supported operators are IS and IS_NOT (per the upstream Revenium
+CLI contract).
+
+If you upgraded from an earlier v1.3 install whose rule was created without
+the AGENT filter (so the dashboard shows `$0.00 / Total evaluations 0`
+despite a successful cron-ship history), delete the existing rule and
+re-run `setup-guardrails.sh` to regenerate it with the new default scope.
+See `references/troubleshooting.md` for the recipe.
+
 ## Orphan Cleanup (Optional)
 
 After migration completes, the legacy `alertId` line remains in `config.json` — it is inert (no code path reads it) but cosmetically orphaned. To clean up:

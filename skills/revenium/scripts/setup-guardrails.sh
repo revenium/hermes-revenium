@@ -36,17 +36,34 @@ OPTIONS:
   --hard-limit <N>       Budget hard limit (numeric, e.g. 50.00). Required in default mode.
   --period <P>           Budget period: DAILY | WEEKLY | MONTHLY | QUARTERLY. Required in default mode.
   --shadow-mode          All created rules run in shadow mode (observe only, do not block).
+  --filter <dim:op:val>  Scope the rule's evaluation to traffic matching this filter.
+                         Repeatable. Dims: AGENT, MODEL, PROVIDER, ORGANIZATION,
+                         CREDENTIAL, PRODUCT, SUBSCRIBER, TASK_TYPE. Ops: IS, IS_NOT.
+                         Mutually exclusive with --filters-json.
+  --filters-json <json>  Inline JSON filter expression (advanced; passed through verbatim).
+                         Mutually exclusive with --filter.
   --interactive          Collect all args from operator prompts.
   --from-alert <id>      Source the limit and period from a legacy alertId.
   --auto                 Suppress interactive prompts (required with --from-alert).
   --help                 Show this usage block and exit.
 
+DEFAULT FILTER SCOPING:
+  When neither --filter nor --filters-json is supplied, freshly-created rules
+  default-scope to `--filter AGENT:IS:${REVENIUM_AGENT_NAME:-Hermes}` so the
+  rule evaluates against the meter completions this skill ships (which all
+  carry --agent "${REVENIUM_AGENT_NAME:-Hermes}"). Override by passing one or
+  more --filter args (e.g. --filter MODEL:IS:claude-3-opus) or by passing
+  --filters-json with a full filter expression.
+
 EXAMPLES:
-  # Fresh install — default mode:
+  # Fresh install — default mode (rule scoped to AGENT:IS:Hermes):
   setup-guardrails.sh --hard-limit 100 --period MONTHLY
 
   # Fresh install — interactive mode:
   setup-guardrails.sh --interactive
+
+  # Default mode with an explicit per-model filter (overrides AGENT default):
+  setup-guardrails.sh --hard-limit 50 --period MONTHLY --filter MODEL:IS:claude-3-opus
 
   # Auto-migration from legacy alertId (called by cron.sh):
   setup-guardrails.sh --from-alert abc123 --auto
@@ -62,6 +79,13 @@ FROM_ALERT=""
 HARD_LIMIT=""
 PERIOD=""
 SHADOW_MODE="false"
+# v1.3 hotfix (quick-task 260524-lpu): operator-overridable filter scoping for
+# the created rule. FILTERS is a repeatable list of `dim:op:val` triples;
+# FILTERS_JSON is a single inline JSON expression. They are mutually exclusive
+# (enforced after the parse loop). When both are empty, create_rule defaults
+# to `--filter AGENT:IS:${REVENIUM_AGENT_NAME}` (see create_rule helper).
+FILTERS=()
+FILTERS_JSON=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -99,6 +123,20 @@ while [[ $# -gt 0 ]]; do
       SHADOW_MODE="true"
       shift
       ;;
+    --filter)
+      if [[ -z "${2:-}" ]]; then
+        error "--filter requires a dim:op:val argument"; exit 2
+      fi
+      FILTERS+=("$2")
+      shift 2
+      ;;
+    --filters-json)
+      if [[ -z "${2:-}" ]]; then
+        error "--filters-json requires a JSON argument"; exit 2
+      fi
+      FILTERS_JSON="$2"
+      shift 2
+      ;;
     --help)
       usage
       exit 0
@@ -109,6 +147,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Mutex: --filter and --filters-json cannot both be set.
+if [[ -n "${FILTERS_JSON}" && ${#FILTERS[@]} -gt 0 ]]; then
+  error "--filter and --filters-json are mutually exclusive"
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Mode resolution rules
@@ -264,6 +308,24 @@ create_rule() {
     --warn-threshold "${warn_threshold}"
     --hard-limit "${hard_limit}"
   )
+
+  # v1.3 hotfix (quick-task 260524-lpu): default-scope created rules to the
+  # current install's agent name so the rule actually evaluates against the
+  # meter completions we ship (which all carry --agent "${REVENIUM_AGENT_NAME}").
+  # Without this, an ORGANIZATION-grouped rule on a team whose orgs have no
+  # subscriptions would see currentValue: 0 forever (events fall through to
+  # the auto-discovery UNCLASSIFIED subscription). Operator can override by
+  # passing --filter (one or more) or --filters-json.
+  if [[ -n "${FILTERS_JSON}" ]]; then
+    cmd+=(--filters-json "${FILTERS_JSON}")
+  elif [[ ${#FILTERS[@]} -gt 0 ]]; then
+    local f
+    for f in "${FILTERS[@]}"; do
+      cmd+=(--filter "${f}")
+    done
+  else
+    cmd+=(--filter "AGENT:IS:${REVENIUM_AGENT_NAME}")
+  fi
 
   if [[ "${SHADOW_MODE}" == "true" ]]; then
     cmd+=(--shadow-mode)

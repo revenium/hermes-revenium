@@ -25,6 +25,20 @@ Fresh-install and reconfigure flows are driven by `setup-guardrails.sh --interac
    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
    ```
 
+## Default rule filter scope
+
+Rules created by `setup-guardrails.sh` are automatically scoped with `--filter AGENT:IS:Hermes` so they evaluate against the meter completions this skill ships (every call carries `--agent "Hermes"`). Without this default, an `ORGANIZATION`-grouped rule on a team whose orgs have no subscriptions would see `currentValue: 0` forever — events fall through to Revenium's auto-discovery `UNCLASSIFIED` subscription. The agent name is centralized in `scripts/common.sh::REVENIUM_AGENT_NAME` (default `Hermes`, env-overridable) so the rule filter and the per-call `--agent` argv stay in sync.
+
+To override the default filter — for example, scoping a rule to a specific model or provider — pass `--filter dim:op:val` (repeatable) or `--filters-json '<json>'` (single expression, mutually exclusive with `--filter`):
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh \
+  --hard-limit 50 --period MONTHLY \
+  --filter MODEL:IS:claude-3-opus
+```
+
+Supported dimensions: AGENT, MODEL, PROVIDER, ORGANIZATION, CREDENTIAL, PRODUCT, SUBSCRIBER, TASK_TYPE. Operators: IS, IS_NOT. See `docs/migration-guardrails.md` for the full discussion and the upgrade-time recovery path for installs whose existing rule was created without the filter.
+
 ## Reconfigure flow
 
 Re-run `setup-guardrails.sh --interactive`. The script detects existing `ruleIds`, prints the current rules via `revenium guardrails budget-rules list`, and prompts `[r]ecreate / [c]ancel`. The recreate path deletes every listed rule via `revenium guardrails budget-rules delete <id> --yes` and runs the fresh-install prompts. The cancel path exits 0 without changes. Note that hard-limit and period cannot be updated in place (the Revenium CLI's `budget-rules update` only supports `--name`); the recreate flow is the supported path for changing limits or periods.

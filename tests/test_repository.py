@@ -10084,6 +10084,10 @@ class RepositoryTests(unittest.TestCase):
                           f'--hard-limit 50 missing from create argv: {create_argv!r}')
             self.assertNotIn('--shadow-mode', create_argv,
                              'D-08: --shadow-mode must NOT be present when REVENIUM_MIGRATE_SHADOW_MODE is unset')
+            # quick-task 260524-lpu: default-scope created rules to AGENT:IS:Hermes so
+            # the rule actually evaluates against the meter completions this skill ships.
+            self.assertIn('--filter AGENT:IS:Hermes', create_argv,
+                          f'default filter --filter AGENT:IS:Hermes missing from create argv: {create_argv!r}')
 
             # Assert exactly one deprecation log line in revenium-metering.log
             with open(os.path.join(state_dir, 'revenium-metering.log')) as f:
@@ -10490,6 +10494,92 @@ class RepositoryTests(unittest.TestCase):
                              f'--auto with missing config must exit 0; stderr={result.stderr!r}')
             self.assertFalse(os.path.isfile(config_path),
                              '--auto path must NOT create config.json on a missing-install host')
+
+    def test_setup_guardrails_filter_override(self):
+        """quick-task 260524-lpu: when --filter is passed explicitly, the create argv
+        uses the operator's filter and does NOT include the default AGENT:IS:Hermes scope.
+        Mirrors the fake-revenium harness pattern from test_setup_guardrails_migration_happy_path."""
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            # Default mode requires a non-empty config.json with no pre-existing ruleIds
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'autonomousMode': False}, f)
+            open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock-api-key-12345"\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules --help") exit 0 ;;\n'
+                    '  "guardrails enforcement-events --help") exit 0 ;;\n'
+                    '  "guardrails budget-rules create")\n'
+                    '    printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    '    echo \'{"id":"OVERRIDERULE","name":"Hermes Monthly Budget"}\'\n'
+                    '    exit 0\n'
+                    '    ;;\n'
+                    '  "guardrails budget-rules list") echo "[]"; exit 0 ;;\n'
+                    '  *)\n'
+                    '    echo "fake revenium: unhandled: $*" >&2\n'
+                    '    exit 1\n'
+                    '    ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                 '--hard-limit', '50', '--period', 'MONTHLY',
+                 '--filter', 'MODEL:IS:claude-3-opus'],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+
+            self.assertEqual(result.returncode, 0,
+                             f'stdout={result.stdout}\nstderr={result.stderr}')
+
+            self.assertTrue(os.path.exists(argv_log),
+                            'fake revenium.argv.log not created — create call was never made')
+            with open(argv_log) as f:
+                argv_content = f.read()
+            create_lines = [l for l in argv_content.splitlines() if 'budget-rules create' in l]
+            self.assertEqual(len(create_lines), 1,
+                             f'expected exactly 1 create call, got {len(create_lines)}: {create_lines}')
+            create_argv = create_lines[0]
+            self.assertIn('--filter MODEL:IS:claude-3-opus', create_argv,
+                          f'operator filter --filter MODEL:IS:claude-3-opus missing from create argv: {create_argv!r}')
+            self.assertNotIn('--filter AGENT:IS:Hermes', create_argv,
+                             f'default AGENT filter must NOT appear when operator passes --filter: {create_argv!r}')
 
 
 if __name__ == '__main__':
