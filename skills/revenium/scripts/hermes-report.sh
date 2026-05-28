@@ -921,7 +921,7 @@ PY
           --completion-start-time "${request_time}"
           --response-time "${response_time}"
           --request-duration "${duration_ms}"
-          --agent "${m_agent:-Hermes}"
+          --agent "${m_agent:-${REVENIUM_AGENT_NAME}}"
           --transaction-id "${sid}-${total_tokens}-${muid}"
           --trace-id "${m_trace:-${sid}}"
           --is-streamed
@@ -999,7 +999,7 @@ PY
         --completion-start-time "${request_time}"
         --response-time "${response_time}"
         --request-duration "${duration_ms}"
-        --agent "Hermes"
+        --agent "${REVENIUM_AGENT_NAME}"
         --transaction-id "${sid}-${total_tokens}"
         --trace-id "${sid}"
         --is-streamed

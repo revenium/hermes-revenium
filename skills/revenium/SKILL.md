@@ -1,6 +1,6 @@
 ---
 name: revenium
-description: "MANDATORY budget check BEFORE EVERY OPERATION — read ~/.hermes/state/revenium/budget-status.json first, always, no exceptions. Enforces token spend limits, warns on threshold exceedance, halts autonomous Hermes agents on budget overrun, and meters usage from ~/.hermes/state.db into Revenium."
+description: "MANDATORY guardrail check BEFORE EVERY OPERATION — read ~/.hermes/state/revenium/guardrail-status.json first, always, no exceptions. Enforces Revenium guardrails-native budget rules, warns on threshold exceedance, halts autonomous Hermes agents on guardrail block, and meters usage from ~/.hermes/state.db into Revenium."
 version: 1.0.0
 author: Revenium
 license: MIT
@@ -23,61 +23,50 @@ metadata:
 
 ## HALT CHECK — DEFENSE-IN-DEPTH BACKSTOP
 
-Budget-halt enforcement is now handled structurally by Hermes shell hooks: `pre_llm_call`
+Guardrail enforcement is handled structurally by Hermes shell hooks: `pre_llm_call`
 injects the halt directive into every turn before the LLM generates a response, and
 `pre_tool_call` blocks all tool calls when a halt is active. This section is a
 defense-in-depth fallback only — it applies if the hooks have not yet been consented
 or are temporarily unavailable.
 
-**If you read `budget-status.json` and `halted` is `true`:** your entire response must
-be exactly the following and nothing else:
+**If you read `guardrail-status.json` and `halted` is `true`:** read the `haltedRule`
+block for the offending rule's details. Your entire response must be exactly the
+following and nothing else:
 
-> Budget enforcement halt is active. $[currentValue] of $[threshold] used ([percentUsed]%). To resume: `bash ~/.hermes/skills/revenium/scripts/clear-halt.sh`
+> Guardrail halt active — rule '[haltedRule.name]' ([haltedRule.metricType],
+> [haltedRule.windowType]) at [haltedRule.currentValue] of [haltedRule.hardLimit]
+> hard-limit. To resume: `bash ~/.hermes/skills/revenium/scripts/clear-halt.sh`
 
-Substitute the actual values from `budget-status.json`. Do not add any other content.
+Substitute the actual values from `guardrail-status.json::haltedRule`. Do not add
+any other content.
 
-**If `halted` is `false`, proceed to the Budget Check Procedure below.**
+**If `halted` is `false`, proceed to the Guardrail Check Procedure below.**
 
-## Budget Check Procedure
+## Guardrail Check Procedure
 
-**MANDATORY — execute before EVERY response, EVERY tool call, EVERY operation.** This applies to ALL tasks — not just Revenium-related ones. Answering a question, writing code, listing files, naming a rock band — ALL of it requires a budget check first.
+**MANDATORY — execute before EVERY response, EVERY tool call, EVERY operation.**
 
-The budget status is maintained by a background cron job that checks Revenium every minute and writes the result to `~/.hermes/state/revenium/budget-status.json`. You read this local file — do NOT call the Revenium API directly.
+The guardrail status is maintained by a background cron job that checks Revenium
+every minute and writes the result to `~/.hermes/state/revenium/guardrail-status.json`.
+You read this local file — do NOT call the Revenium API directly.
 
-1. **Read budget status.** Read `~/.hermes/state/revenium/budget-status.json`. If it does not exist, the cron has not run yet — tell the user "Budget status not yet available. The metering cron may not be installed. Run `bash ~/.hermes/skills/revenium/scripts/install-cron.sh` to set it up." Then proceed with the operation.
+1. **Read guardrail status.** Read `~/.hermes/state/revenium/guardrail-status.json`.
+   If it does not exist, tell the user "Guardrail status not yet available. The metering
+   cron may not be installed. Run `bash ~/.hermes/skills/revenium/scripts/install-cron.sh`
+   to set it up." Then proceed with the operation.
 
-2. **Parse the status.** Extract these fields from the JSON:
-   - `currentValue` — current spend in the budget period
-   - `threshold` — the budget limit
-   - `percentUsed` — percentage of budget consumed
-   - `exceeded` — boolean, whether the budget has been exceeded
-   - `halted` — boolean, whether the agent has been halted by budget enforcement
-   - `lastChecked` — when the cron last updated this file
+2. **Parse the status.** Extract `halted` from the JSON.
 
-3. **Evaluate the result:**
+3. **Evaluate:**
 
-   **If `halted` is true:** Follow the HALT CHECK backstop above — output ONLY the halt message and stop.
+   **If `halted` is `true`:** Follow the HALT CHECK backstop above — output ONLY the
+   halt message using `haltedRule` fields, and stop.
 
-   **If `exceeded` is false (budget OK):** Proceed silently. Do NOT mention the budget to the user.
+   **If `halted` is `false`:** Proceed. Do NOT mention the guardrail status to the user.
 
-   **If `exceeded` is true (budget blown):** Read `autonomousMode` from `~/.hermes/state/revenium/config.json`.
+### If guardrail-status.json is missing or unreadable
 
-   **If `autonomousMode` is `false` or absent (default — interactive mode):**
-
-   You MUST STOP. Do NOT execute any operation, do NOT generate a response. Tell the user:
-
-   > "Your Revenium budget has been exceeded. You have spent $CURRENT_VALUE of your $THRESHOLD budget (PERCENT_USED%). Last checked: LAST_CHECKED. Would you like to continue anyway?"
-
-   Replace the values with the actual numbers from the file.
-
-   - **If the user says yes / continue / approved:** Proceed with the operation.
-   - **If the user says no / stop / cancel:** STOP. Do NOT execute the operation. Tell the user: "Operation cancelled. Run `/revenium` to adjust your budget."
-
-   **If `autonomousMode` is `true` and `halted` is `false` but `exceeded` is `true`:** The user has explicitly cleared the halt — this is an approval to proceed. Continue with the operation.
-
-### If budget-status.json is missing or unreadable
-
-- Tell the user: "Budget status unavailable. Proceeding with caution."
+- Tell the user: "Guardrail status unavailable. Proceeding with caution."
 - Proceed with the operation — fail open, do not block the user.
 
 ## Path Resolution
@@ -99,7 +88,7 @@ Use this skill when you want Hermes to:
 This skill stores mutable runtime state in:
 
 - `~/.hermes/state/revenium/config.json` — alert ID, organization, autonomous flag, notification target
-- `~/.hermes/state/revenium/budget-status.json` — last cron snapshot of Revenium budget state
+- `~/.hermes/state/revenium/guardrail-status.json` — last cron snapshot of Revenium guardrail rule state
 - `~/.hermes/state/revenium/revenium-hermes.ledger` — idempotency ledger for metered transactions
 - `~/.hermes/state/revenium/revenium-metering.log` — cron log
 
@@ -107,14 +96,16 @@ Skill content (scripts, references) lives at `~/.hermes/skills/revenium/`. Bundl
 
 ## Setup
 
-At the start of any operation, check: does `~/.hermes/state/revenium/config.json` exist AND contain a non-empty `alertId` field?
+At the start of any operation, check: does `~/.hermes/state/revenium/config.json` exist AND contain a non-empty `ruleIds` array?
 
 - **If YES** and the user has NOT requested reconfiguration: setup is complete. Proceed to the budget check. Do NOT re-run setup.
-- **If NO** (file missing, or file exists but `alertId` is absent/empty): you MUST run the Setup Flow below before proceeding. Do NOT execute any operations until setup is complete.
+- **If NO** (file missing, or file exists but `ruleIds` is absent or an empty array): you MUST run the Setup Flow below before proceeding. Do NOT execute any operations until setup is complete.
+
+Note: `config.json` may carry a legacy `alertId` field from a v1.2 install — that field is deprecated and orphaned by auto-migration; ignore it for the setup-detection gate. The cron pipeline auto-migrates legacy installs on the next tick. See `docs/migration-guardrails.md` for the migration contract.
 
 ### Setup Flow
 
-Follow these steps in order. If any step fails, STOP. Do NOT write an `alertId` into `config.json`. Do NOT proceed with operations.
+Follow these steps in order. If any step fails, STOP and explain the failure. Do NOT prompt the user for budget details yourself, and do NOT write any IDs into `config.json` yourself.
 
 1. **Verify the Revenium CLI is configured.** Run:
    ```
@@ -135,121 +126,51 @@ Follow these steps in order. If any step fails, STOP. Do NOT write an `alertId` 
    revenium config set tenant-id TENANT_ID
    revenium config set owner-id USER_ID
    ```
-   Then re-run `revenium config show` and confirm the API Key is non-empty. If it is still empty, STOP and tell the user to run `/revenium` when ready. Do NOT write an `alertId` into `config.json`.
+   Then re-run `revenium config show` and confirm the API Key is non-empty. If it is still empty, STOP and tell the user to run `/revenium` when ready.
 
-3. **Prompt for organization name (optional).** Ask: "What is your organization name for Revenium reporting? (optional — press Enter to skip)" If the user provides a value, call it `ORG_NAME`. If they skip, leave it empty.
-
-4. **Prompt for budget amount.** Ask: "What budget threshold would you like to set? (numeric amount, e.g., 50.00)" Call this value `AMOUNT`.
-
-5. **Prompt for budget period.** Ask: "Which budget period would you like?" and present these four options:
-   - DAILY
-   - WEEKLY
-   - MONTHLY
-   - QUARTERLY
-
-   Call the user's selection `PERIOD`.
-
-6. **Prompt for autonomous mode.** Ask: "Will this agent run autonomously (without a user present)? If yes, budget exceedance will halt all operations and notify you. (yes/no, default: no)"
-
-   - **If yes:** Set `AUTONOMOUS_MODE` to `true`. Then:
-     - Ask: "Which Hermes messaging channel should receive budget alerts?" — Hermes' messaging toolset supports channels such as Slack, Discord, Telegram, and others depending on what the user has configured.
-     - Call this value `NOTIFY_CHANNEL`.
-     - Ask: "What is the notification target on that channel?" The format varies by channel — typical examples:
-       - Slack: `user:<id>` or `channel:<id>`
-       - Discord: `user:<id>` or `channel:<id>`
-       - Telegram: chat id or `@username`
-     - Call this value `NOTIFY_TARGET`.
-   - **If no (default):** Set `AUTONOMOUS_MODE` to `false`. Skip notification prompts.
-
-7. **Generate the alert name.** Set `ALERT_NAME` to `"Hermes {Period} Budget"` where `{Period}` is the title-cased period:
-   - DAILY → "Hermes Daily Budget"
-   - WEEKLY → "Hermes Weekly Budget"
-   - MONTHLY → "Hermes Monthly Budget"
-   - QUARTERLY → "Hermes Quarterly Budget"
-
-   Do NOT ask the user for a name. This is automatic.
-
-8. **Delete any existing Hermes budget alerts.** Before creating a new alert, you MUST check for and remove pre-existing Hermes budget alerts to prevent duplicates. Run:
+3. **Run the setup script:**
    ```
-   revenium alerts budget list --json
+   bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
    ```
-   Parse the JSON output and look for any alerts whose name starts with `"Hermes "`. For EACH matching alert, delete it:
+   The script prompts the operator for budget hard-limit, period, organization name, autonomous mode + notification channel/target, and (optionally) per-task-type rules drawn from the live `task-taxonomy.json`. On success, it creates the Revenium guardrails budget rules via `revenium guardrails budget-rules create` and writes the resulting `ruleIds` array into `~/.hermes/state/revenium/config.json`. You do NOT prompt the user for budget details yourself, and you do NOT write any IDs into `config.json` yourself — the script owns the entire interaction and the entire write.
+
+   Capture the exit code and act on it:
+   - **Exit 0, final output line `Created N rule(s). config.json updated. ruleIds=[...]`**: succeeded. Proceed to step 4.
+   - **Exit 0, final output line `Cancelled.`**: operator cancelled. STOP without proceeding to step 4.
+   - **Non-zero exit**: failure. Tell the user the failure message verbatim, instruct them to address it and re-run `/revenium`. STOP. Do NOT proceed to step 4.
+
+   If the user asks to set up in shadow mode, run `setup-guardrails.sh --interactive --shadow-mode` instead. By default, rules created via `--interactive` are enforcing.
+
+4. **Install the metering cron AND guardrail-halt hooks** (in order):
    ```
-   revenium alerts budget delete EXISTING_ALERT_ID --yes
+   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
    ```
-   If the list command fails or returns no results, proceed. If a delete fails, log a warning but continue.
-
-9. **Create the budget alert.** Run:
+   This adds a per-minute cron entry that ships token deltas from `~/.hermes/state.db` to Revenium and refreshes `guardrail-status.json`.
    ```
-   revenium alerts budget create --name "ALERT_NAME" --threshold AMOUNT --period PERIOD --json
+   bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
    ```
-   If the exit code is non-zero: tell the user what went wrong, tell them to run `/revenium` when ready, and STOP. Do NOT write `config.json`.
+   This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` revenium shell hooks in `~/.hermes/config.yaml`. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
 
-10. **Extract the alert ID.** From the JSON response, extract the `"id"` field. This is a short alphanumeric string (e.g., `"75BjG5"`). Call this value `ALERT_ID`.
+5. **Approve hooks on first `hermes chat`** — Hermes shows an approval prompt the first time each hook fires. The hooks are inert until approved.
 
-    **CRITICAL:** Do NOT use `anomalyId` from `budget get` responses — that is an integer and will cause HTTP 400 errors when passed to `budget get`. The correct value is the string `"id"` from the `budget create` response.
-
-    To extract reliably:
-    ```
-    python3 -c "import json,sys; d=json.load(sys.stdin); print(d['id'])"
-    ```
-
-11. **Write `config.json`.** This MUST be the FINAL step — only write after ALL previous steps have succeeded. Load any existing config first so unknown keys are preserved, then merge in the values collected above:
-    ```
-    python3 -c "
-    import json, os
-    path = os.path.expanduser('~/.hermes/state/revenium/config.json')
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    try:
-        with open(path) as f:
-            config = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        config = {}
-    config['alertId'] = 'ALERT_ID'
-    org = 'ORG_NAME'
-    if org:
-        config['organizationName'] = org
-    autonomous = AUTONOMOUS_MODE  # True or False
-    config['autonomousMode'] = autonomous
-    if autonomous:
-        config['notifyChannel'] = 'NOTIFY_CHANNEL'
-        config['notifyTarget'] = 'NOTIFY_TARGET'
-    else:
-        config.pop('notifyChannel', None)
-        config.pop('notifyTarget', None)
-    with open(path, 'w') as f:
-        json.dump(config, f, indent=2)
-        f.write('\n')
-    "
-    ```
-
-12. **Install the metering cron.** Run:
-    ```
-    bash ~/.hermes/skills/revenium/scripts/install-cron.sh
-    ```
-    This adds a per-minute cron entry that ships token deltas from `~/.hermes/state.db` to Revenium and refreshes `budget-status.json`.
-
-13. **Install the budget-halt hooks.** Run:
-    ```
-    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
-    ```
-    This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` revenium shell hooks in `~/.hermes/config.yaml`. The `pre_llm_call` and `pre_tool_call` hooks enforce structural budget-halt; the `post_tool_call` hook captures per-tool-call usage data to `~/.hermes/state/revenium/tool-events/<sid>.jsonl` for Revenium analytics (no network call in the agent hot path). The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
-
-If any step from 1–13 fails, stop and explain the failure. Do NOT leave a partial `config.json` with an `alertId` for an alert that does not exist.
+Legacy `alertId` installs auto-migrate on the first cron tick — see `docs/migration-guardrails.md` for the schema-change and manual recovery procedure.
 
 ## `/revenium` Command Behavior
 
 When the user invokes `/revenium`:
 
-1. Show the current budget status from Revenium using the configured `alertId`.
-2. Show autonomous mode and current halt state.
+1. Show the configured `ruleIds` from `~/.hermes/state/revenium/config.json` and a one-line summary of each rule's current state (read from `guardrail-status.json`).
+2. Show autonomous mode and current halt state from the available status file.
 3. Offer:
-   - `reset` → recreate the alert with the same settings (zeroes current spend)
-   - `reconfigure` → delete and recreate with new settings
-   - `done` → exit
+   - `reconfigure` → run `bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive` (the script's re-run UX handles delete-and-recreate).
+   - `done` → exit.
 
 ## Script Entry Points
 
+- Set up guardrails budget rules (fresh install or reconfigure):
+  ```
+  bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
+  ```
 - Install cron:
   ```
   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
@@ -274,11 +195,26 @@ When the user invokes `/revenium`:
 
 ## Verification
 
+Run these in order:
+
+```bash
+crontab -l | grep hermes-revenium-metering         # one entry
+grep hermes-revenium-hooks ~/.hermes/config.yaml   # 3 hook commands registered
+grep post_tool_call ~/.hermes/config.yaml          # post_tool_call hook present
+jq '.ruleIds' ~/.hermes/state/revenium/config.json # non-empty array
+```
+
+Wait one cron tick (≤60s), then:
+
+```bash
+cat ~/.hermes/state/revenium/guardrail-status.json  # expect rules[] populated
+```
+
 - `bash ~/.hermes/skills/revenium/scripts/install-cron.sh` succeeds and `crontab -l | grep hermes-revenium-metering` returns one entry.
 - `bash ~/.hermes/skills/revenium/scripts/install-hooks.sh` succeeds and all three hook commands (`pre_llm_call`, `pre_tool_call`, `post_tool_call`) are registered in `~/.hermes/config.yaml` — verifiable with `grep hermes-revenium-hooks ~/.hermes/config.yaml` returning the hook tag and `grep post_tool_call ~/.hermes/config.yaml` returning the hook entry.
-- `bash ~/.hermes/skills/revenium/scripts/cron.sh` updates `~/.hermes/state/revenium/budget-status.json`.
+- `bash ~/.hermes/skills/revenium/scripts/cron.sh` updates `~/.hermes/state/revenium/guardrail-status.json`.
 - Revenium receives transactions from `~/.hermes/state.db` (visible in the Revenium UI under metering).
-- When over budget with autonomous mode on, `budget-status.json` flips to `halted: true` and Hermes sends the halt notification through the configured messaging channel.
+- When a guardrail rule is blocked with autonomous mode on, `guardrail-status.json` flips to `halted: true` and Hermes sends the halt notification (including the most recent enforcement-events list entry) through the configured messaging channel.
 
 ## FINAL ACTION — TASK CLASSIFICATION
 
@@ -311,7 +247,7 @@ criteria the classifier uses (and the rare backstop case).
 
 Before you yield any response, answer these three questions. If any answer is NO, take the corrective action before sending.
 
-1. **Have I read `~/.hermes/state/revenium/budget-status.json` during THIS turn?** If NO — read it now, before responding. Every turn requires a fresh read; a prior turn's read does not count. Do not trust memory, context, or a summarized earlier result.
+1. **Have I read `~/.hermes/state/revenium/guardrail-status.json` during THIS turn?** If NO — read it now, before responding. Every turn requires a fresh read; a prior turn's read does not count. Do not trust memory, context, or a summarized earlier result.
 
 2. **Is `halted` true in the file I just read?** If YES — the HALT CHECK section at the top of this file overrides EVERYTHING below it including both FINAL ACTION sections (TASK CLASSIFICATION and JOB DECLARATION). Their "MANDATORY" imperatives do NOT apply while halted. The only permitted action is the mandated CANCELLED marker write (if an arc was in progress) followed by the verbatim halt string from the HALT CHECK block. Nothing else.
 

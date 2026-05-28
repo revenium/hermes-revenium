@@ -1,74 +1,51 @@
 # Revenium Skill Setup
 
+Fresh-install and reconfigure flows are driven by `setup-guardrails.sh --interactive`. The script collects all operator input, calls `revenium guardrails budget-rules create`, and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Pass `--shadow-mode` to create rules in shadow mode (evaluate without blocking real traffic); the default is enforcing.
+
 ## Initial setup
 
-### 1. Verify prerequisites
+1. **Verify prerequisites:**
+   ```bash
+   revenium config show
+   sqlite3 --version
+   python3 --version
+   ```
+
+2. **Configure CLI credentials** if `revenium config show` reports an empty API Key. See the SKILL.md Setup Flow step 2 for the four `revenium config set` calls.
+
+3. **Run the setup script:**
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
+   ```
+   The script prompts for budget hard-limit, period, organization name, autonomous mode and notification channel/target, and optionally per-task-type rules from the live `task-taxonomy.json`. On success it writes `ruleIds` into `~/.hermes/state/revenium/config.json`.
+
+4. **Install the metering cron AND budget-halt hooks:**
+   ```bash
+   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
+   bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
+   ```
+
+## Default rule filter scope
+
+Rules created by `setup-guardrails.sh` are automatically scoped with `--group-by AGENT --filter AGENT:IS:Hermes` so they evaluate against the meter completions this skill ships (every call carries `--agent "Hermes"`). Grouping by AGENT puts all matching spend in one self-contained bucket keyed on the agent name — no dependency on org/subscription resolution. Without this default, an `ORGANIZATION`-grouped rule on a team whose orgs have no subscriptions would see `currentValue: 0` forever (events fall through to Revenium's auto-discovery `UNCLASSIFIED` subscription). The agent name is centralized in `scripts/common.sh::REVENIUM_AGENT_NAME` (default `Hermes`, env-overridable) so the rule filter and the per-call `--agent` argv stay in sync.
+
+To override the default filter — for example, scoping a rule to a specific model or provider — pass `--filter dim:op:val` (repeatable) or `--filters-json '<json>'` (single expression, mutually exclusive with `--filter`):
 
 ```bash
-revenium config show
-sqlite3 --version
-python3 --version
+bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh \
+  --hard-limit 50 --period MONTHLY \
+  --filter MODEL:IS:claude-3-opus
 ```
 
-### 2. Create the budget alert
-
-Ask the user for:
-
-- budget threshold
-- budget period (`DAILY`, `WEEKLY`, `MONTHLY`, `QUARTERLY`)
-- optional organization name
-- optional autonomous notification channel + target
-
-Before creating a new alert, remove any prior Revenium/Hermes budget alerts you own that would cause duplicates.
-
-Create the alert:
-
-```bash
-revenium alerts budget create --name "Hermes Monthly Budget" --threshold 50 --period MONTHLY --json
-```
-
-Extract the `id` field from the JSON response.
-
-### 3. Write state config
-
-Write:
-
-```json
-{
-  "alertId": "<alert-id>",
-  "organizationName": "<optional>",
-  "autonomousMode": true,
-  "notifyChannel": "telegram",
-  "notifyTarget": "123456789"
-}
-```
-
-into:
-
-```text
-~/.hermes/state/revenium/config.json
-```
-
-### 4. Install cron
-
-```bash
-bash ~/.hermes/skills/revenium/scripts/install-cron.sh
-```
-
-## Reset flow
-
-1. Read the current config.
-2. Fetch the existing alert settings.
-3. Delete the old alert.
-4. Create a new alert with the same settings.
-5. Replace `alertId` in `config.json`.
-6. Reset `budget-status.json` to a non-halted zeroed state.
+Supported dimensions: AGENT, MODEL, PROVIDER, ORGANIZATION, CREDENTIAL, PRODUCT, SUBSCRIBER, TASK_TYPE. Operators: IS, IS_NOT. See `docs/migration-guardrails.md` for the full discussion and the upgrade-time recovery path for installs whose existing rule was created without the filter.
 
 ## Reconfigure flow
 
-1. Read and remove the existing config.
-2. Delete the old alert.
-3. Run the initial setup flow again.
+Re-run `setup-guardrails.sh --interactive`. The script detects existing `ruleIds`, prints the current rules via `revenium guardrails budget-rules list`, and prompts `[r]ecreate / [c]ancel`. The recreate path deletes every listed rule via `revenium guardrails budget-rules delete <id> --yes` and runs the fresh-install prompts. The cancel path exits 0 without changes. Note that hard-limit and period cannot be updated in place (the Revenium CLI's `budget-rules update` only supports `--name`); the recreate flow is the supported path for changing limits or periods.
+
+## Auto-migration (legacy alertId installs)
+
+Hosts upgrading from a v1.2 install that has only `alertId` in `config.json` and no `ruleIds` are auto-migrated on the next cron tick — no operator action required for the common case. Full contract in `docs/migration-guardrails.md` (what changes, what happens automatically, enforcement-posture preservation, loud-on-failure behavior, manual recovery, contributor appendix).
 
 ## How attribution works
 
@@ -89,7 +66,7 @@ When markers carry different `agent` or `trace_id` values across a session, each
 
 Phase 6 ships an in-process Hermes lifecycle plugin at `~/.hermes/plugins/revenium-classifier/` that classifies every `run_conversation()` session end and writes the GUARDRAIL + CHAT marker pair the cron consumes. The plugin registers itself for the `on_session_end` event from the `hermes_cli` plugin bus, which fires for **every** session source — gateway-served (Telegram/Discord/Slack/WhatsApp/Webhook), CLI one-shot (`hermes chat -q`), interactive `hermes chat`, ACP integrations, and gateway-internal cron-ticker sessions. This is the mechanical floor — it fires regardless of whether the agent self-classifies via the FINAL ACTION block in `SKILL.md`. Both pathways write to the same `~/.hermes/state/revenium/markers/<sid>.jsonl`; the plugin tail-checks for a recent agent-written pair (within 30 seconds) before writing to avoid duplicates.
 
-Subagent sessions (where `state.db.sessions.parent_session_id` is non-null) inherit the root user-facing session's `task_type` — one classification per user-request lineage, no per-subagent LLM call. The plugin also gates its LLM call on `budget-status.json::halted`; if the budget is halted, the plugin writes `task_type: unclassified` and emits a `WARN` log line instead of spending against the halted budget.
+Subagent sessions (where `state.db.sessions.parent_session_id` is non-null) inherit the root user-facing session's `task_type` — one classification per user-request lineage, no per-subagent LLM call. The plugin also gates its LLM call on `guardrail-status.json::halted`; if the budget is halted, the plugin writes `task_type: unclassified` and emits a `WARN` log line instead of spending against the halted budget.
 
 The plugin is installed by `examples/setup-local.sh` into `~/.hermes/plugins/revenium-classifier/`, and the same script idempotently adds `revenium-classifier` to `plugins.enabled` in `~/.hermes/config.yaml`. **`hermes skills install` does NOT relocate the `plugins/` subdirectory** — operators installing via that path must additionally copy `~/.hermes/skills/revenium/plugins/revenium-classifier/` to `~/.hermes/plugins/revenium-classifier/` themselves AND add `revenium-classifier` to `plugins.enabled` in `~/.hermes/config.yaml`.
 

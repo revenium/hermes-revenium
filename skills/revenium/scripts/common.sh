@@ -9,7 +9,6 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 STATE_DIR="${REVENIUM_STATE_DIR}"
 CONFIG_FILE="${STATE_DIR}/config.json"
-BUDGET_STATUS_FILE="${STATE_DIR}/budget-status.json"
 LEDGER_FILE="${STATE_DIR}/revenium-hermes.ledger"
 LOG_FILE="${STATE_DIR}/revenium-metering.log"
 ENV_FILE="${STATE_DIR}/env"
@@ -17,9 +16,17 @@ STATE_DB="${HERMES_HOME}/state.db"
 TAXONOMY_FILE="${REVENIUM_TAXONOMY_FILE:-${STATE_DIR}/task-taxonomy.json}"
 MARKERS_DIR="${REVENIUM_MARKERS_DIR:-${STATE_DIR}/markers}"
 MARKERS_READY_DIR="${REVENIUM_MARKERS_READY_DIR:-${STATE_DIR}/markers/.ready}"
+# Phase 19 (D-06): warn-band rate-limit sentinel directory (markers/.warn); zero-byte flag files per (session, ruleId).
+WARN_FLAGS_DIR="${REVENIUM_WARN_FLAGS_DIR:-${MARKERS_DIR}/.warn}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 MARKER_RETENTION_DAYS="${REVENIUM_MARKER_RETENTION_DAYS:-30}"
 PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
+# v1.3 hotfix (quick-task 260524-lpu): single source of truth for the agent name
+# that ships on every meter completion (--agent argv) AND scopes default
+# guardrails rule filters (--filter AGENT:IS:${REVENIUM_AGENT_NAME}). Override
+# via env when running multiple distinct Hermes installs against one Revenium
+# tenant that share an API key but need separate rule scoping.
+REVENIUM_AGENT_NAME="${REVENIUM_AGENT_NAME:-Hermes}"
 # v1.1 job-tracking scaffolding (D-13): separate ledger for agentic jobs and forward-compat taxonomy path.
 JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger}"
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"
@@ -30,6 +37,11 @@ HOOKS_CONFIG_FILE="${REVENIUM_HOOKS_CONFIG_FILE:-${HERMES_HOME}/config.yaml}"
 # Phase 14: tool-event capture state paths.
 TOOL_EVENTS_DIR="${REVENIUM_TOOL_EVENTS_DIR:-${STATE_DIR}/tool-events}"
 TOOL_EVENTS_LEDGER_FILE="${REVENIUM_TOOL_EVENTS_LEDGER_FILE:-${STATE_DIR}/revenium-tool-events.ledger}"
+# Phase 17: v1.3 guardrails-native paths.
+GUARDRAIL_STATUS_FILE="${REVENIUM_GUARDRAIL_STATUS_FILE:-${STATE_DIR}/guardrail-status.json}"
+RULES_LOCK_FILE="${REVENIUM_RULES_LOCK_FILE:-${STATE_DIR}/rules.lock}"
+# Phase 18: notify-once gate for setup-guardrails.sh migration failures (D-10).
+MIGRATION_NOTIFY_FILE="${REVENIUM_MIGRATION_NOTIFY_FILE:-${STATE_DIR}/migration-notify-state}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
@@ -66,3 +78,11 @@ log() {
 info()  { log "INFO " "$@"; }
 warn()  { log "WARN " "$@"; }
 error() { log "ERROR" "$@"; }
+
+# Phase 17 (D-10..D-13): two-subcommand probe for v1.3 guardrails CLI capability.
+# Returns 0 if both subcommand families exist, non-zero otherwise (fail-open).
+# Callers must warn + exit 0 on failure; this helper never logs or exits itself.
+has_guardrails_cli() {
+  revenium guardrails budget-rules --help >/dev/null 2>&1 && \
+  revenium guardrails enforcement-events --help >/dev/null 2>&1
+}

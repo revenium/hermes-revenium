@@ -1,0 +1,13 @@
+{
+  "verb": ["jobs", "outcome"],
+  "exact_match_fields": {
+    "__verb": "jobs",
+    "__subcommand": "outcome",
+    "__positional_args": ["compat-job-001"],
+    "--result": "SUCCESS",
+    "--outcome-type": "CONVERTED",
+    "--quiet": true
+  },
+  "pattern_fields": {},
+  "forbidden_fields": ["--budget-id", "--alert-id"]
+}

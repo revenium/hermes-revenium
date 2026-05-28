@@ -1,0 +1,16 @@
+{
+  "verb": ["meter", "tool-event"],
+  "exact_match_fields": {
+    "__verb": "meter",
+    "__subcommand": "tool-event",
+    "--tool-id": "compat-tool",
+    "--duration-ms": "42",
+    "--trace-id": "compat-sid-001",
+    "--success": true,
+    "--quiet": true
+  },
+  "pattern_fields": {
+    "--timestamp": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+  },
+  "forbidden_fields": ["--error-message", "--budget-id", "--alert-id"]
+}
