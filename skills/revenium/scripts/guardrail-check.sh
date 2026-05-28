@@ -277,7 +277,7 @@ if echo "${HALT_OUTPUT}" | grep -q '^HALT_TRANSITION=true$'; then
 import json, os
 try:
     events = json.loads(os.environ['EVENT_JSON'])
-    print(events[0].get('timestamp', '(unavailable)') if events else '(no events)')
+    print(events[0].get('created', '(unavailable)') if events else '(no events)')
 except Exception:
     print('(unavailable)')
 " 2>/dev/null || echo '(unavailable)')
@@ -285,7 +285,7 @@ except Exception:
 import json, os
 try:
     events = json.loads(os.environ['EVENT_JSON'])
-    print(events[0].get('summary', '(unavailable)') if events else '(no events)')
+    print(events[0].get('rawDetails', '(unavailable)') if events else '(no events)')
 except Exception:
     print('(unavailable)')
 " 2>/dev/null || echo '(unavailable)')

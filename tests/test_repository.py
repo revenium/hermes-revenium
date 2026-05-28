@@ -7370,7 +7370,7 @@ class RepositoryTests(unittest.TestCase):
             {'id': 'd5jng5', 'name': 'Engineering Budget'}
         ])
         events_json = json.dumps([
-            {'timestamp': '2026-05-22T14:03:38Z', 'summary': 'rule within limits'}
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule within limits'}
         ])
 
         with tempfile.TemporaryDirectory(prefix='gsd-gc-writes-') as tmp:
@@ -7469,7 +7469,7 @@ class RepositoryTests(unittest.TestCase):
             {'id': 'd5jng5', 'name': 'Engineering Budget'}
         ])
         events_json = json.dumps([
-            {'timestamp': '2026-05-22T14:03:38Z', 'summary': 'rule exceeded hard-limit'}
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
         ])
 
         with tempfile.TemporaryDirectory(prefix='gsd-gc-halt-trans-') as tmp:
@@ -7571,7 +7571,7 @@ class RepositoryTests(unittest.TestCase):
             {'id': 'd5jng5', 'name': 'Engineering Budget'}
         ])
         events_json = json.dumps([
-            {'timestamp': '2026-05-22T14:03:38Z', 'summary': 'rule exceeded hard-limit'}
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
         ])
 
         seeded_halted_at = '2026-05-22T10:00:00.000Z'
