@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# uninstall-hooks.sh — remove revenium shell hook entries from ~/.hermes/config.yaml.
+# uninstall-hooks.sh — remove revenium shell hook entries from ${HOOKS_CONFIG_FILE}.
 # Mirrors uninstall-cron.sh: no-op when hooks are absent, backs up before modifying.
 # Sources common.sh (unlike uninstall-cron.sh) because it needs HERMES_HOME / HOOKS_CONFIG_FILE.
 

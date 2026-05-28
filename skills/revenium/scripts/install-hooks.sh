@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# install-hooks.sh — idempotently register revenium shell hooks in ~/.hermes/config.yaml.
+# install-hooks.sh — idempotently register revenium shell hooks in ${HOOKS_CONFIG_FILE}.
 # Mirrors install-cron.sh: backs up config first, patches with a stdlib-only Python
 # re-based heredoc (no PyYAML), and is a no-op on re-run (D-01, D-02).
 
@@ -41,7 +41,7 @@ print_approval_banner() {
     bash SCRIPT_DIR/hooks-status.sh
 
   If you want to skip the per-install approval prompt entirely, set
-  `hooks_auto_accept: true` at the top level of ~/.hermes/config.yaml.
+  `hooks_auto_accept: true` at the top level of the Hermes hook configuration.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 BANNER

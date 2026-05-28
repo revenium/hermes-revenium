@@ -61,7 +61,7 @@ fi
 # Main pruning logic: run Python, capture its stdout to a temp file so the
 # child's exit code is observable, then feed each output line through info()
 # so every log event lands in ${LOG_FILE} with the standard timestamp format.
-# Per CLAUDE.md: never use bare echo for logged events.
+# Never use bare echo for logged events.
 #
 # Previously used a process-substitution form which discards the child's exit
 # code (pipefail does not apply to that form); a temp-file + prune_rc=$?
@@ -69,7 +69,7 @@ fi
 # ---------------------------------------------------------------------------
 prune_out="$(mktemp)"
 # Pass paths via env (bash 3.2 compatible — `${VAR@Q}` requires bash 4.4+;
-# CLAUDE.md mandates bash 3.2 compat for macOS stock /bin/bash). Single-
+# per project bash 3.2 convention for macOS stock /bin/bash). Single-
 # quoted heredoc keeps the Python source verbatim.
 # set +e so set -euo pipefail does not abort before prune_rc=$? is captured.
 set +e

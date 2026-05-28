@@ -9,7 +9,7 @@ source "${SCRIPT_DIR}/common.sh"
 # is not needed here.
 
 # Pass paths via env (bash 3.2 compatible — `${VAR@Q}` requires bash 4.4+;
-# CLAUDE.md mandates bash 3.2 compat for macOS stock /bin/bash). Single-
+# per project bash 3.2 convention for macOS stock /bin/bash). Single-
 # quoted heredoc keeps the Python source verbatim.
 
 RULE_ID=""

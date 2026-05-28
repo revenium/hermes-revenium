@@ -149,7 +149,7 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    ```
    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
    ```
-   This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` revenium shell hooks in `~/.hermes/config.yaml`. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
+   This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` revenium shell hooks in the Hermes hook configuration. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
 
 5. **Approve hooks on first `hermes chat`** — Hermes shows an approval prompt the first time each hook fires. The hooks are inert until approved.
 
@@ -199,8 +199,7 @@ Run these in order:
 
 ```bash
 crontab -l | grep hermes-revenium-metering         # one entry
-grep hermes-revenium-hooks ~/.hermes/config.yaml   # 3 hook commands registered
-grep post_tool_call ~/.hermes/config.yaml          # post_tool_call hook present
+bash ~/.hermes/skills/revenium/scripts/hooks-status.sh   # exit 0 = registered + firing
 jq '.ruleIds' ~/.hermes/state/revenium/config.json # non-empty array
 ```
 
@@ -211,7 +210,7 @@ cat ~/.hermes/state/revenium/guardrail-status.json  # expect rules[] populated
 ```
 
 - `bash ~/.hermes/skills/revenium/scripts/install-cron.sh` succeeds and `crontab -l | grep hermes-revenium-metering` returns one entry.
-- `bash ~/.hermes/skills/revenium/scripts/install-hooks.sh` succeeds and all three hook commands (`pre_llm_call`, `pre_tool_call`, `post_tool_call`) are registered in `~/.hermes/config.yaml` — verifiable with `grep hermes-revenium-hooks ~/.hermes/config.yaml` returning the hook tag and `grep post_tool_call ~/.hermes/config.yaml` returning the hook entry.
+- `bash ~/.hermes/skills/revenium/scripts/install-hooks.sh` succeeds; then `bash ~/.hermes/skills/revenium/scripts/hooks-status.sh` confirms all three hook commands (`pre_llm_call`, `pre_tool_call`, `post_tool_call`) are registered and firing.
 - `bash ~/.hermes/skills/revenium/scripts/cron.sh` updates `~/.hermes/state/revenium/guardrail-status.json`.
 - Revenium receives transactions from `~/.hermes/state.db` (visible in the Revenium UI under metering).
 - When a guardrail rule is blocked with autonomous mode on, `guardrail-status.json` flips to `halted: true` and Hermes sends the halt notification (including the most recent enforcement-events list entry) through the configured messaging channel.

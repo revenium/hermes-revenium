@@ -225,7 +225,7 @@ exercise compression at all.
 - This is realistic but expensive. Estimate cost before committing to this approach.
 
 **Option B — Temporarily lower the compression threshold (recommended for testing):**
-- In `~/.hermes/config.yaml`, temporarily set `compression.threshold: 0.05` (triggers
+- In your Hermes config, temporarily set `compression.threshold: 0.05` (triggers
   compression at 5% of the context window — easily reachable in a short test session).
 - Run the test, then restore the original value (usually `0.5`).
 - Hermes' logs should confirm compression actually ran (look for "compressing context"
@@ -243,7 +243,7 @@ halt-check turn to reduce cost.
 
 1. Complete both pre-flight checks (Pre-flight A and B above) before starting.
 
-2. If using Option B, edit `~/.hermes/config.yaml` to set `compression.threshold: 0.05`.
+2. If using Option B, edit your Hermes config to set `compression.threshold: 0.05`.
    Note the original value to restore it after the run.
 
 3. Open a new Hermes session with the revenium skill active.
@@ -323,7 +323,7 @@ halt-check turn to reduce cost.
    ```
 
 10. If you used Option B, restore `compression.threshold` to its original value in
-    `~/.hermes/config.yaml`.
+    your Hermes config.
 
 ## Recording results
 

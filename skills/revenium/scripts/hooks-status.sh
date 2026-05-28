@@ -3,7 +3,7 @@ set -uo pipefail
 # hooks-status.sh — diagnose whether the revenium hooks are registered AND firing.
 #
 # Two-stage check:
-#   1. Static: are the three hook commands listed in ~/.hermes/config.yaml?
+#   1. Static: are the three hook commands listed in ${HOOKS_CONFIG_FILE}?
 #   2. Runtime: is tool-events/<sid>.jsonl actually growing? Cross-check
 #      against state.db's recent tool messages — if Hermes has been running
 #      tools but tool-events/ stays empty, the hooks are registered but
