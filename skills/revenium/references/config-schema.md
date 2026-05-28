@@ -91,7 +91,23 @@ it on every Hermes turn.
 | `warnThreshold` | number | Warn-band threshold. |
 | `hardLimit` | number | Hard-limit threshold. Mapped from API `threshold`. |
 | `state` | string | Derived state: `ok`, `warn`, or `block`. `block`: metric has breached the hard limit. `warn`: metric has breached the warn threshold but not the hard limit. `ok`: neither threshold breached. |
+| `shadowMode` | boolean | `true` when the rule is in shadow mode — its breaches are recorded (`state: "block"`) but excluded from the top-level `halted` decision, so agent traffic flows unimpeded. Defaults to `false`. |
 | `lastChecked` | string (ISO-8601) | Timestamp of this rule's last update. |
+
+### shadowMode
+
+When `shadowMode` is `true`, the rule's evaluations are recorded but it cannot cause
+the top-level `halted` flag to flip to `true`; agent traffic flows unimpeded. A
+shadow-mode rule that breaches its `hardLimit` still shows `state: "block"` in this
+file so dashboards and analytics see the would-be-block — only the agent-halt
+decision is suppressed. Useful for validating a new rule's enforcement signal
+against real traffic before flipping the server-side `shadowMode` flag off
+(`revenium guardrails budget-rules update <id> --shadow-mode=false`).
+
+When a shadow-mode rule transitions from `state: "ok"` or `state: "warn"` into
+`state: "block"`, `guardrail-check.sh` emits a one-shot `[shadow]`-prefixed
+operator notification via the same Hermes messaging path used for hard halts.
+Re-runs while the rule remains in shadow-block state are silent.
 
 ## `haltedRule` Extension (D-04)
 

@@ -7364,6 +7364,7 @@ class RepositoryTests(unittest.TestCase):
                 'threshold': 100.0,
                 'breached': False,
                 'warnBreached': False,
+                'shadowMode': False,
             }]
         })
         budget_rules_json = json.dumps([
@@ -7463,6 +7464,7 @@ class RepositoryTests(unittest.TestCase):
                 'threshold': 100.0,
                 'breached': True,
                 'warnBreached': True,
+                'shadowMode': False,
             }]
         })
         budget_rules_json = json.dumps([
@@ -7565,6 +7567,7 @@ class RepositoryTests(unittest.TestCase):
                 'threshold': 100.0,
                 'breached': True,
                 'warnBreached': True,
+                'shadowMode': False,
             }]
         })
         budget_rules_json = json.dumps([
@@ -7709,6 +7712,7 @@ class RepositoryTests(unittest.TestCase):
                 'threshold': 100.0,
                 'breached': True,
                 'warnBreached': True,
+                'shadowMode': False,
             }]
         })
         # budget-rules list succeeds (name→string-id join works)
@@ -7769,6 +7773,207 @@ class RepositoryTests(unittest.TestCase):
                 'EVENT_SUMMARY=(unavailable)', result.stdout,
                 f'AUDIT-02: stdout must contain EVENT_SUMMARY=(unavailable) on API failure; '
                 f'got: {result.stdout!r}',
+            )
+
+    def test_guardrail_check_shadow_mode_does_not_halt(self):
+        """A breached shadow-mode rule must NOT cause halted:true (quick-260528-gve).
+        The per-rule entry still records state:'block' AND shadowMode:true so the
+        signal stays visible to dashboards. No haltedRule key is emitted because
+        no non-shadow rule is in block state.
+        """
+        import json
+        import os
+        import re
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 999,
+                'name': 'Shadow Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'AGENT',
+                'currentValue': 100.0,
+                'warnThreshold': 40.0,
+                'threshold': 50.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': True,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'shadow1', 'name': 'Shadow Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-28T10:00:00Z', 'rawDetails': 'shadow rule exceeded'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-shadow-nohalt-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({'ruleIds': ['shadow1'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            self.assertTrue(os.path.isfile(status_path), 'guardrail-status.json not written')
+            with open(status_path) as f:
+                data = json.load(f)
+
+            # Top-level halt must remain false despite the shadow rule breaching
+            self.assertFalse(
+                data.get('halted', True),
+                f'halted must be false when only a shadow rule breaches; got: {data!r}',
+            )
+            self.assertNotIn(
+                'haltedRule', data,
+                f'haltedRule must be absent when only a shadow rule blocks; got: {data!r}',
+            )
+
+            # The per-rule entry still records the breach + shadowMode flag
+            rules = data.get('rules', [])
+            self.assertEqual(len(rules), 1, f'rules: {rules!r}')
+            self.assertEqual(rules[0].get('state'), 'block',
+                             f'shadow rule still records state:block; got: {rules[0]!r}')
+            self.assertTrue(rules[0].get('shadowMode'),
+                            f'rules[0].shadowMode must be true; got: {rules[0]!r}')
+
+            # No hard-halt notification line was logged (shadow path is distinct)
+            if os.path.isfile(log_path):
+                with open(log_path) as f:
+                    log_text = f.read()
+                self.assertNotIn(
+                    'Halt notification sent', log_text,
+                    f'shadow-only breach must not emit a Halt notification line; log: {log_text!r}',
+                )
+
+    def test_guardrail_check_shadow_mode_transition_notifies_with_prefix(self):
+        """Shadow-mode transition into state:block emits a one-shot [shadow]-prefixed
+        notification (quick-260528-gve). Re-running guardrail-check.sh with the rule
+        still in shadow-block state emits zero additional shadow lines.
+        """
+        import json
+        import os
+        import re
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 999,
+                'name': 'Shadow Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'AGENT',
+                'currentValue': 100.0,
+                'warnThreshold': 40.0,
+                'threshold': 50.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': True,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'shadow1', 'name': 'Shadow Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-28T10:00:00Z', 'rawDetails': 'shadow rule exceeded'}
+        ])
+
+        shadow_re = re.compile(
+            r"\[shadow\] Rule 'Shadow Budget' \(TOTAL_COST, MONTHLY\) "
+            r"would have halted at 100\.0 of 50\.0; shadow mode prevented block\."
+        )
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-shadow-trans-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({'ruleIds': ['shadow1'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            # First run: transition into shadow-block — expect exactly one shadow line
+            result1 = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result1.returncode, 0,
+                f'first run exit {result1.returncode}: '
+                f'stdout={result1.stdout!r} stderr={result1.stderr!r}',
+            )
+
+            self.assertTrue(os.path.isfile(log_path), 'revenium-metering.log must exist')
+            with open(log_path) as f:
+                log_after_run1 = f.read()
+            matches_run1 = shadow_re.findall(log_after_run1)
+            self.assertEqual(
+                len(matches_run1), 1,
+                f'first run must log exactly one [shadow] line; '
+                f'matched {len(matches_run1)}; log={log_after_run1!r}',
+            )
+
+            # Second run: rule still in shadow-block per prev status file — expect zero new lines
+            result2 = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result2.returncode, 0,
+                f'second run exit {result2.returncode}: '
+                f'stdout={result2.stdout!r} stderr={result2.stderr!r}',
+            )
+
+            with open(log_path) as f:
+                log_after_run2 = f.read()
+            matches_run2 = shadow_re.findall(log_after_run2)
+            self.assertEqual(
+                len(matches_run2), 1,
+                f'second run must NOT emit additional [shadow] lines; '
+                f'total matches in log after run 2 = {len(matches_run2)}; '
+                f'log={log_after_run2!r}',
             )
 
     def test_pre_llm_call_halted_emits_guardrail_halt_string(self):

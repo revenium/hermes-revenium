@@ -149,6 +149,9 @@ for r in api_rules:
     if not resolved_rule_id:
         resolved_rule_id = str(r.get('ruleId', '')) if r.get('ruleId') is not None else ''
     # Map API field names to ENF-04 schema field names (RESEARCH.md Section 1)
+    # shadowMode (quick-260528-gve): when true, this rule still records state:block on
+    # breach but is excluded from any_blocked and haltedRule below, so the agent does
+    # not halt. The signal stays visible in the per-rule entry for dashboards.
     new_rules.append({
         'ruleId': resolved_rule_id,              # REVISED: string-hash ID via name join
         'name': rule_name,
@@ -159,6 +162,7 @@ for r in api_rules:
         'warnThreshold': r.get('warnThreshold', 0),
         'hardLimit': r.get('threshold', 0),       # API: threshold -> schema: hardLimit
         'state': state,
+        'shadowMode': bool(r.get('shadowMode', False)),
         'lastChecked': now,
     })
 
@@ -171,8 +175,12 @@ except Exception:
 prev_halted = bool(prev.get('halted', False))
 prev_halted_at = prev.get('haltedAt')
 
-# Top-level halted derivation
-any_blocked = any(r['state'] == 'block' for r in new_rules)
+# Top-level halted derivation — shadow-mode rules are excluded from the halt
+# decision (quick-260528-gve) so they record signal without blocking traffic.
+any_blocked = any(
+    r['state'] == 'block' and not r.get('shadowMode', False)
+    for r in new_rules
+)
 new_halted = autonomous and any_blocked
 
 # HALT_TRANSITION detection: new halt iff new_halted and not prev_halted
@@ -185,10 +193,14 @@ elif new_halted and prev_halted:
 else:
     halted_at = None
 
-# haltedRule tiebreaker (D-02): first blocked rule in ruleIds[] declaration order
+# haltedRule tiebreaker (D-02): first non-shadow blocked rule in ruleIds[]
+# declaration order (quick-260528-gve excludes shadow-mode rules from the picker).
 halted_rule = None
 if new_halted:
-    blocked = [r for r in new_rules if r['state'] == 'block']
+    blocked = [
+        r for r in new_rules
+        if r['state'] == 'block' and not r.get('shadowMode', False)
+    ]
     if blocked:
         first = blocked[0]
         halted_rule = {
@@ -199,6 +211,30 @@ if new_halted:
             'currentValue': first['currentValue'],
             'hardLimit': first['hardLimit'],
         }
+
+# Shadow-mode transition detection (quick-260528-gve): emit a one-shot
+# notification when a shadow rule JUST entered the would-have-halted state
+# this cycle. Gate against prev guardrail-status.json so re-runs are silent.
+prev_rules_by_id = {
+    pr.get('ruleId'): pr
+    for pr in prev.get('rules', [])
+    if pr.get('ruleId')
+}
+shadow_transitions = []
+for nr in new_rules:
+    if nr.get('shadowMode') and nr.get('state') == 'block':
+        pr = prev_rules_by_id.get(nr.get('ruleId'))
+        # transition if: no prev rule OR prev wasn't blocking OR prev wasn't
+        # shadow-mode (e.g. shadowMode just turned on while breaching).
+        if (pr is None) or (pr.get('state') != 'block') or (not pr.get('shadowMode')):
+            shadow_transitions.append({
+                'ruleId': nr['ruleId'],
+                'name': nr['name'],
+                'metricType': nr.get('metricType', ''),
+                'windowType': nr.get('windowType', ''),
+                'currentValue': nr['currentValue'],
+                'hardLimit': nr['hardLimit'],
+            })
 
 # Build output document (ENF-04 + D-04)
 data = {
@@ -237,6 +273,10 @@ if halt_transition and halted_rule:
     print(f"HALTED_WINDOW_TYPE={halted_rule['windowType']}")
     print(f"HALTED_CURRENT_VALUE={halted_rule['currentValue']}")
     print(f"HALTED_HARD_LIMIT={halted_rule['hardLimit']}")
+# Emit shadow-mode transitions as a single JSON-encoded line for bash to parse
+# (quick-260528-gve). Always emitted (defaults to '[]') so bash sed extraction
+# is deterministic.
+print(f"SHADOW_TRANSITIONS={json.dumps(shadow_transitions)}")
 PY
 )
 
@@ -244,6 +284,10 @@ PY
 # harness) can observe HALT_TRANSITION, HALTED_RULE_*, etc. The lines are also
 # retained in HALT_OUTPUT for sed-based extraction below.
 echo "${HALT_OUTPUT}"
+
+# Extract shadow-transition payload (quick-260528-gve). Always present in
+# HALT_OUTPUT; defaults to '[]' when no rule transitioned into shadow-block.
+SHADOW_TRANSITIONS_JSON=$(echo "${HALT_OUTPUT}" | sed -n 's/^SHADOW_TRANSITIONS=//p')
 
 # (I-pre) Phase 19 clean-break: remove stale legacy status file on first successful write.
 # Runs AFTER guardrail-status.json is durably on disk, BEFORE halt notification.
@@ -311,4 +355,35 @@ except Exception:
   else
     info "Guardrail halted but no notification channel configured"
   fi
+fi
+
+# (L) Shadow-mode one-shot notification (quick-260528-gve). For every rule that
+# JUST transitioned into shadow-block this cycle, emit a [shadow]-prefixed
+# message via the same Hermes messaging toolset path (or warn-log if no channel
+# is configured). Gated on prev guardrail-status.json so re-runs are silent.
+# Bash 3.2 compatible: uses mktemp + tempfile + `while read` (no `<<<` here-strings
+# inside subshells).
+if [[ -n "${SHADOW_TRANSITIONS_JSON}" && "${SHADOW_TRANSITIONS_JSON}" != "[]" ]]; then
+  SHADOW_TMP=$(mktemp)
+  SHADOW_TRANSITIONS_JSON="${SHADOW_TRANSITIONS_JSON}" python3 - <<'PY' > "${SHADOW_TMP}"
+import json, os
+for r in json.loads(os.environ['SHADOW_TRANSITIONS_JSON']):
+    # pipe-delimited; pipes don't appear in numeric values or in the short
+    # metric/window enum strings (TOTAL_COST, MONTHLY, etc.).
+    print(f"{r['name']}|{r.get('metricType','')}|{r.get('windowType','')}|{r['currentValue']}|{r['hardLimit']}")
+PY
+  while IFS='|' read -r SR_NAME SR_METRIC SR_WINDOW SR_CV SR_HL; do
+    [[ -z "${SR_NAME}" ]] && continue
+    SHADOW_MSG="[shadow] Rule '${SR_NAME}' (${SR_METRIC}, ${SR_WINDOW}) would have halted at ${SR_CV} of ${SR_HL}; shadow mode prevented block."
+    if [[ -n "${NOTIFY_CHANNEL}" && -n "${NOTIFY_TARGET}" ]] && command -v hermes >/dev/null 2>&1; then
+      if hermes chat --toolsets messaging -q "Use the send_message tool to send this exact message to ${NOTIFY_CHANNEL}:${NOTIFY_TARGET}: ${SHADOW_MSG}" >/dev/null 2>&1; then
+        info "Shadow notification sent via Hermes ${NOTIFY_CHANNEL}: ${SHADOW_MSG}"
+      else
+        warn "Failed to send shadow notification via Hermes ${NOTIFY_CHANNEL}: ${SHADOW_MSG}"
+      fi
+    else
+      warn "${SHADOW_MSG}"
+    fi
+  done < "${SHADOW_TMP}"
+  rm -f "${SHADOW_TMP}"
 fi
