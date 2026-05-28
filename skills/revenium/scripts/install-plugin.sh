@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # install-plugin.sh — install the revenium-classifier on_session_end plugin into
-# Hermes' plugin discovery path and enable it in ~/.hermes/config.yaml.
+# Hermes' plugin discovery path and enable it in ${HOOKS_CONFIG_FILE}.
 #
 # Why this script exists: `hermes skills install`, the GitHub tap install, and
 # `external_dirs` all place skill content under ~/.hermes/skills/<name>/, but
@@ -84,9 +84,9 @@ else
   echo "✓ Plugin installed at ${PLUGIN_DEST}"
 fi
 
-# Patch ~/.hermes/config.yaml to ensure the plugin appears in plugins.enabled.
-# Mirror of examples/setup-local.sh's heredoc — stdlib only, no PyYAML (CLAUDE.md
-# constraint), idempotent on re-run, lenient about list-item indentation.
+# Patch ${HOOKS_CONFIG_FILE} to ensure the plugin appears in plugins.enabled.
+# Mirror of examples/setup-local.sh's heredoc — stdlib only, no PyYAML (per
+# project constraint), idempotent on re-run, lenient about list-item indentation.
 if ${DRY_RUN}; then
   echo "[dry-run] ensure ${PLUGIN_NAME} listed in plugins.enabled of ${HOOKS_CONFIG_FILE}"
 else
