@@ -123,6 +123,9 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-tool-event.golden.json',
+            # Phase 23 — COMPAT-01/02 umbrella regression trip-wire (D-01)
+            ROOT / 'tests' / 'test_compat_v1_4_meta.py',
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'README.md',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
