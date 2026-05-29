@@ -134,7 +134,11 @@ class RepositoryTests(unittest.TestCase):
             if rel.parts and rel.parts[0] == '.planning':
                 continue
             text = path.read_text(errors='ignore')
-            if re.search(r'OpenClaw|openclaw|ClawHub|clawhub', text):
+            # Word-boundary anchored so class-name compounds in Hermes upstream
+            # code (e.g. `ClawHubSource`, `SkillsShSource`) referenced in our
+            # install-path docs aren't false-positively flagged as our forked-from
+            # branding. Standalone product mentions still match correctly.
+            if re.search(r'\b(?:OpenClaw|openclaw|ClawHub|clawhub)\b', text):
                 offenders.append(str(rel))
         self.assertEqual(offenders, [], f'found legacy branding in: {offenders}')
 
