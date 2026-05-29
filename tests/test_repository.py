@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'revenium'
 PLUGIN_DIR = SKILL / 'plugins' / 'revenium-classifier'
+SIDECAR = SKILL / 'scripts' / 'get-root-session-id.py'  # Phase 21 (TRACE-01)
 
 
 def _agent_aux_client_available() -> bool:
@@ -50,6 +51,24 @@ def _restore_plugin_env(snapshot, sys_path_added):
             os.environ.pop(k, None)
         else:
             os.environ[k] = v
+
+
+def _load_root_walk_helper():
+    """Load the get-root-session-id.py sidecar as an importable module.
+
+    The sidecar's filename contains a hyphen (`get-root-session-id.py`)
+    which forbids the `import` syntax. Use importlib.util.spec_from_file_location
+    so the test exercises the canonical Python function (NOT the bash
+    wrapper — that's a Phase 21-03 live-host concern). Phase 21 D-02
+    documents `get_root_session_id(sid, state_db_path=None, max_depth=10) -> str`.
+    """
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'phase21_root_walk_helper', str(SIDECAR),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class RepositoryTests(unittest.TestCase):
@@ -2368,6 +2387,145 @@ class RepositoryTests(unittest.TestCase):
             self.assertIsInstance(result, str)
         finally:
             _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_get_root_session_id_walks_parent_chain(self):
+        """TESTS-01: 3-level chain root -> mid -> leaf; lookup from leaf returns root."""
+        import os
+        import shutil
+        import sqlite3
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-root-walk-01-')
+        try:
+            db_path = os.path.join(tmpdir, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO sessions VALUES (?, ?)",
+                    [('root', None), ('mid', 'root'), ('leaf', 'mid')],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            mod = _load_root_walk_helper()
+            self.assertEqual(
+                mod.get_root_session_id('leaf', state_db_path=db_path), 'root',
+                "3-level chain leaf->mid->root should resolve to 'root'",
+            )
+            self.assertEqual(
+                mod.get_root_session_id('mid', state_db_path=db_path), 'root',
+                "mid should resolve to its parent 'root'",
+            )
+            self.assertEqual(
+                mod.get_root_session_id('root', state_db_path=db_path), 'root',
+                "root with NULL parent should resolve to itself",
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_get_root_session_id_orphan_parent(self):
+        """TESTS-02: parent_session_id references a non-existent row; helper follows once and stops."""
+        import os
+        import shutil
+        import sqlite3
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-root-walk-02-')
+        try:
+            db_path = os.path.join(tmpdir, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)"
+                )
+                # orphan-child points at a parent id that is NOT in the table.
+                # Walk: iter 0 current='orphan-child', row=('nonexistent-parent',)
+                #       -> current='nonexistent-parent'
+                #       iter 1 current='nonexistent-parent', row=None -> return current.
+                # Mirrors classifier.py:67-70 fail-open semantics (D-05).
+                conn.execute(
+                    "INSERT INTO sessions VALUES (?, ?)",
+                    ('orphan-child', 'nonexistent-parent'),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            mod = _load_root_walk_helper()
+            self.assertEqual(
+                mod.get_root_session_id('orphan-child', state_db_path=db_path),
+                'nonexistent-parent',
+                "Orphan-child's parent ref is dangling; helper follows once and stops "
+                "at the unfindable parent id — mirrors classifier.py:67-70 semantics.",
+            )
+
+            # Edge case: a sid with NO row at all in sessions — the very first
+            # SELECT returns None and the helper returns the input sid.
+            self.assertEqual(
+                mod.get_root_session_id('totally-unknown-sid', state_db_path=db_path),
+                'totally-unknown-sid',
+                "A sid with no row in sessions at all should return itself.",
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_get_root_session_id_circular_guard(self):
+        """TESTS-03: A->B->A cyclic chain; max_depth guard terminates the walk."""
+        import os
+        import shutil
+        import sqlite3
+        import tempfile
+        import time
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-root-walk-03-')
+        try:
+            db_path = os.path.join(tmpdir, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO sessions VALUES (?, ?)",
+                    [('a', 'b'), ('b', 'a')],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            mod = _load_root_walk_helper()
+
+            # max_depth=10 cap terminates the cycle. Assertion is on
+            # terminate-without-infinite-loop (str + in {'a', 'b'} + bounded
+            # time) — NOT on which specific cycle node the walk lands on.
+            start = time.monotonic()
+            result = mod.get_root_session_id('a', state_db_path=db_path, max_depth=10)
+            elapsed = time.monotonic() - start
+
+            self.assertIsInstance(result, str, "helper must return a string")
+            self.assertIn(
+                result, {'a', 'b'},
+                "cyclic walk should terminate at one of the two cycle nodes; "
+                "got {!r}".format(result),
+            )
+            self.assertLess(
+                elapsed, 2.0,
+                "cyclic walk must terminate in bounded time; took {:.3f}s "
+                "(guard against the max_depth check being missing)".format(elapsed),
+            )
+
+            # max_depth=1 advances exactly one hop in the cycle.
+            result_d1 = mod.get_root_session_id('a', state_db_path=db_path, max_depth=1)
+            self.assertEqual(
+                result_d1, 'b',
+                "max_depth=1 should advance exactly one hop in the cycle",
+            )
+        finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def test_revenium_classifier_tool_count_end_to_end_cli_substantive(self):
