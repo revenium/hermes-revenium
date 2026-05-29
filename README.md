@@ -6,11 +6,14 @@ Budget enforcement, semantic task-type metering, agentic job tracking, and tool-
 
 Five steps to get up and running:
 
-1. **Install the skill** — the recommended path is a direct-URL install pinned to the v1.3.1 tag (see [Installation](#installation) below for why):
+1. **Install the skill** — clone this repo at the v1.3.1 tag and run `examples/setup-local.sh` (see [Installation](#installation) below for why):
 
    ```bash
-   hermes skills install https://raw.githubusercontent.com/revenium/hermes-revenium/v1.3.1/skills/revenium/SKILL.md
+   git clone --branch v1.3.1 https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
+   bash /tmp/hermes-revenium/examples/setup-local.sh
    ```
+
+   This copies the full skill bundle (SKILL.md + `scripts/` + `references/` + `plugins/`) into `~/.hermes/skills/revenium/` and restarts the Hermes gateway so the classifier plugin reloads.
 
 2. **Set up guardrail budget rules:**
 
@@ -63,29 +66,31 @@ python3 --version
 
 ## Installation
 
-### Option 1: Direct-URL install (recommended)
+### Option 1: `git clone` + `setup-local.sh` (recommended)
 
 ```bash
-hermes skills install https://raw.githubusercontent.com/revenium/hermes-revenium/v1.3.1/skills/revenium/SKILL.md
+git clone --branch v1.3.1 https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
+bash /tmp/hermes-revenium/examples/setup-local.sh
 ```
 
-This pins the install to a specific tag, hits Hermes' `UrlSource` directly, and fetches the canonical content from this GitHub repo. Verdict on Hermes ≥ v0.15.0 is `safe` (or `caution` with only the informational-only `MEDIUM persistence` crontab findings) — install proceeds without `--force`.
+`setup-local.sh` copies the full skill bundle (`SKILL.md` + `scripts/` + `references/` + `plugins/` + taxonomy JSONs) into `~/.hermes/skills/revenium/`, idempotently installs the `revenium-classifier` plugin into `~/.hermes/plugins/`, adds it to the Hermes plugin-enabled list, and restarts the Hermes gateway so the plugin loads. It runs with no network access to Hermes' Skills Hub — so no security-scanner verdict, no `--force`, no community-registry resolution. After it completes, proceed to [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks).
 
-> **Why not `hermes skills tap add revenium/hermes-revenium` + `hermes skills install revenium/hermes-revenium/skills/revenium`?** You can still add the tap (it's useful for discovery — `hermes skills check` will see updates from your tap), but the install command resolves identifiers through a fixed source priority in [`tools/skills_hub.py:create_source_router`](https://github.com/NousResearch/hermes-agent/blob/main/tools/skills_hub.py): `SkillsShSource` and `ClawHubSource` are checked before the configured GitHub taps. Both indices have an older `revenium` snapshot indexed under the bare name that doesn't reflect this repo's current state, so the canonical "tap-add + install" path ends up serving stale content from a third-party registry instead of from your tap. The direct-URL install bypasses this entirely.
+> **Why not `hermes skills install`?**
 >
-> **About the security scan.** Every install is scanned by Hermes' Skills Guard. Expect two informational `MEDIUM persistence` findings — `crontab` references in `install-cron.sh` / `cron.sh` / `uninstall-cron.sh`. That's the scanner correctly detecting a real behavior: the skill installs a per-minute crontab entry to meter the Hermes session DB into Revenium. The cron is required for the skill to function. Review the findings yourself if you want to confirm they're all crontab-related; the scripts are also viewable in [`skills/revenium/scripts/`](skills/revenium/scripts/) before you install.
+> Hermes' two `hermes skills install` modes both have problems for this skill, which is why `git clone + setup-local.sh` is the recommended path:
 >
-> **If your Hermes version is < v0.15.0 or you are installing v1.3.0 (pre-patch).** The scanner in older releases additionally fires `CRITICAL persistence` findings on prose references in the skill content, producing a `dangerous` verdict that `--force` cannot override. Upgrade to v1.3.1 of this skill (the URL above pins that version) to get past install. Stale `~/.hub/quarantine/revenium/` content from a previous install can also surface `CRITICAL persistence` findings referencing files that no longer exist in the genuine skill (`AGENTS.md`, `post-install.sh`); clean that cache with `rm -rf ~/.hub/quarantine/revenium` and re-run.
-
-### Optional: also add the GitHub tap for update discovery
-
-If you want `hermes skills check` and `hermes skills update` to notice when this repo ships a new version, also add the tap:
-
-```bash
-hermes skills tap add revenium/hermes-revenium
-```
-
-The tap entry doesn't change how this skill installs (the direct-URL path above does that); it's purely a discovery hook that surfaces newer commits in `hermes skills check`.
+> - **`hermes skills install revenium/hermes-revenium/skills/revenium`** (the GitHub-tap form) routes through a fixed source-priority order in [`tools/skills_hub.py:create_source_router`](https://github.com/NousResearch/hermes-agent/blob/main/tools/skills_hub.py): `SkillsShSource` and `ClawHubSource` are checked before the configured GitHub taps. Both have a stale `revenium` snapshot indexed from a pre-v1.0 prototype that contains `AGENTS.md` injection logic and a `post-install.sh` neither of which exists in this repo. The scanner fires `CRITICAL persistence` findings on that stale content and refuses the install. Adding the `revenium/hermes-revenium` tap doesn't change the resolution; it's structurally shadowed.
+> - **`hermes skills install https://raw.githubusercontent.com/.../SKILL.md`** (the direct-URL form) only fetches a single file — Hermes' `UrlSource` is documented as claiming "bare HTTP(S) URLs that end in `.md`." The other 30+ files in the skill (`scripts/`, `references/`, `plugins/`, taxonomy JSONs) are not pulled, so the installed skill is non-functional even though it passes the scanner.
+>
+> If you want `hermes skills check` and `hermes skills update` to notice when this repo ships a new version, add the tap anyway:
+>
+> ```bash
+> hermes skills tap add revenium/hermes-revenium
+> ```
+>
+> The tap entry doesn't change how this skill installs; it's purely a discovery hook surfaced by `hermes skills check`.
+>
+> **About the security scan.** `setup-local.sh` doesn't go through Hermes' Skills Hub install path so there's no scan. If you later run `hermes skills install` (against any source), expect two informational `MEDIUM persistence` findings — `crontab` references in `install-cron.sh` / `cron.sh` / `uninstall-cron.sh`. That's the scanner correctly detecting a real behavior: the skill installs a per-minute crontab entry to meter the Hermes session DB into Revenium. The cron is required for the skill to function — there is no version of this without it. Review the scripts in [`skills/revenium/scripts/`](skills/revenium/scripts/) before installing if you want to confirm them yourself.
 
 ### Option 2: Local development
 
