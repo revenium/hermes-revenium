@@ -112,6 +112,16 @@ PY
     while IFS='|' read -r sid tcid tool ts_iso dur success_flag error_msg; do
       [[ -z "${sid}" || -z "${tcid}" ]] && continue
 
+      # Phase 22 (TRACE-04 / D-01): resolve root_sid ONCE per row for subagent
+      # trace inheritance. Phase 21's helper walks state.db.sessions.parent_session_id
+      # to the root delegator (max_depth=10, fail-open on missing/locked db).
+      # Top-level sessions get root_sid == sid -> byte-identical wire output (TRACE-05).
+      # The TOOL ledger key below intentionally stays sid-scoped — the trace-id is
+      # the analytics rollup key; the ledger key is per-subagent idempotency.
+      local root_sid
+      root_sid="$(get_root_session_id "${sid}")"
+      [[ -z "${root_sid}" ]] && root_sid="${sid}"
+
       # Idempotency guard: skip if this (sid, tool_call_id) pair is already ledgered.
       # Fixed-string match (-F): sid/tcid are untrusted and may carry regex
       # metacharacters; the heredoc strips ':' from both, so the "TOOL:<sid>:<tcid>:"
@@ -127,7 +137,7 @@ PY
         --tool-id "${tool}"
         --duration-ms "${dur}"
         --timestamp "${ts_iso}"
-        --trace-id "${sid}"
+        --trace-id "${root_sid}"
         --quiet
       )
 
