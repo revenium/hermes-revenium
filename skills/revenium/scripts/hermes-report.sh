@@ -183,6 +183,24 @@ PY
       continue
     fi
 
+    # Phase 22 (TRACE-02..05 / D-01): resolve root_sid ONCE per session for
+    # subagent trace inheritance. Phase 21's get_root_session_id helper walks
+    # state.db.sessions.parent_session_id to the root delegator (max_depth=10
+    # circular guard, fail-open on missing/locked state.db). Top-level sessions
+    # (no parent_session_id) get root_sid == sid, preserving v1.3 byte-identical
+    # wire output (COMPAT-01 / TRACE-05). Subagent sessions get the root sid so
+    # every downstream --trace-id rolls up under the root delegator's trace
+    # (TRACE-02, TRACE-03). Resolved ONCE per session (not per marker) for the
+    # per-minute cron perf budget (D-01 — per-marker resolution would add
+    # multiple seconds of python3 cold-start to busy ticks).
+    local root_sid
+    root_sid="$(get_root_session_id "${sid}")"
+    # Belt: empty result (would only happen if python3 vanished mid-tick and
+    # the wrapper's command-v guard short-circuits; D-05 fail-open carries from
+    # Phase 21 — but pin the value here so downstream `${root_sid}` references
+    # never expand to empty under set -uo pipefail).
+    [[ -z "${root_sid}" ]] && root_sid="${sid}"
+
     # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.
     # Runs BEFORE the token pre-filter guards so that token-stable sessions
     # (D-08 arc-close: job marker appended after the last LLM call) still reach
@@ -923,7 +941,7 @@ PY
           --request-duration "${duration_ms}"
           --agent "${m_agent:-${REVENIUM_AGENT_NAME}}"
           --transaction-id "${sid}-${total_tokens}-${muid}"
-          --trace-id "${m_trace:-${sid}}"
+          --trace-id "${m_trace:-${root_sid}}"
           --is-streamed
           --quiet
           --task-type "${t_type}"
@@ -1001,7 +1019,7 @@ PY
         --request-duration "${duration_ms}"
         --agent "${REVENIUM_AGENT_NAME}"
         --transaction-id "${sid}-${total_tokens}"
-        --trace-id "${sid}"
+        --trace-id "${root_sid}"
         --is-streamed
         --quiet
         --task-type "unclassified"
