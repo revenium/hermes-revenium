@@ -10956,6 +10956,762 @@ class RepositoryTests(unittest.TestCase):
             self.assertNotIn('--filter AGENT:IS:Hermes', create_argv,
                              f'default AGENT filter must NOT appear when operator passes --filter: {create_argv!r}')
 
+    # ------------------------------------------------------------------
+    # Phase 22 (TESTS-04..07): behavioral tests for subagent trace +
+    # agentic-job inheritance + classifier marker-pair root identifiers.
+    # Wired source code lives in:
+    #   skills/revenium/scripts/hermes-report.sh      (waves 22-01, 22-03)
+    #   skills/revenium/scripts/tool-event-report.sh  (wave  22-02)
+    #   skills/revenium/plugins/revenium-classifier/classifier.py (wave 22-04)
+    # ------------------------------------------------------------------
+
+    def test_hermes_report_subagent_trace_inheritance(self):
+        """TESTS-04 main: synthetic parent -> subagent chain ships meter
+        completion with --trace-id <root_sid> (not subagent sid) AND exactly
+        one --agentic-job-id <root_aid> (REPLACE, not additive) per plan 22-03
+        D-02 override. The subagent's own owning_job_id is dropped on the wire.
+        No --task-id flag is ever emitted (the CLI has no such flag, verified
+        2026-05-29). Top-level meter line in the same harness must not leak
+        the subagent's agentic_job_id."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory(prefix='gsd-phase22-04-') as tmp:
+            # 1. Build skill scripts tree (mirrors production layout: SKILL_DIR
+            #    resolves to <tmp>/skills/revenium so the get_root_session_id
+            #    bash wrapper finds the sidecar at scripts/get-root-session-id.py).
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'hermes-report.sh',
+                         'get-root-session-id.py', 'split_strategies.py'):
+                shutil.copy(str(SKILL / 'scripts' / name), scripts_dir)
+
+            # 2. Build state directory + markers dir.
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'organizationName': 'Test Org'}, f)
+
+            # 3. Seed ROOT marker file with a kind:"job" line so the cron's
+            #    Phase 22 root_aid resolver (hermes-report.sh:215-253) finds
+            #    "root_job_a1" and the override branch fires for the subagent.
+            now = time.time()
+            with open(os.path.join(markers_dir, 'root-sess-abc.jsonl'), 'w') as f:
+                f.write(json.dumps({
+                    'kind': 'job', 'ts': now,
+                    'sid': 'root-sess-abc', 'agentic_job_id': 'root_job_a1',
+                    'job_name': 'refactor auth', 'job_type': 'refactor',
+                    'status': 'SUCCESS',
+                }) + '\n')
+
+            # 4. Seed SUBAGENT marker file with one task marker followed by one
+            #    job marker. The cron's deferred owning_job_id resolver
+            #    (hermes-report.sh:712-731) stamps owning_job_id on the task
+            #    marker. The per-marker meter completion call then takes the
+            #    Phase 22 (JOB-01 / D-02) override branch and ships
+            #    --agentic-job-id root_job_a1 instead of subagent_job_xyz.
+            import secrets
+            with open(os.path.join(markers_dir, 'subagent-sess-xyz.jsonl'), 'w') as f:
+                # Task marker (kind absent → v1.0 path)
+                f.write(json.dumps({
+                    'muid': f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10),
+                    'ts': now,
+                    'sid': 'subagent-sess-xyz',
+                    'task_type': 'code_review',
+                    'operation_type': 'CHAT',
+                    'trace_id': 'root-sess-abc',
+                    'agentic_job_id': 'root_job_a1',
+                }) + '\n')
+                # Job marker for the subagent's own arc. owning_job_id resolves
+                # to its sanitized id "subagent_job_xyz".
+                f.write(json.dumps({
+                    'kind': 'job', 'ts': now,
+                    'sid': 'subagent-sess-xyz',
+                    'agentic_job_id': 'subagent_job_xyz',
+                    'job_name': 'subagent review work',
+                    'job_type': 'review',
+                    'status': 'SUCCESS',
+                }) + '\n')
+
+            # 5. Synthetic state.db with parent → subagent chain. Sessions
+            #    must be older than the 120s settle window (hermes-report.sh:78-167)
+            #    or carry a sentinel; we pick the time-shift form.
+            db_path = os.path.join(tmp, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute('''
+                    CREATE TABLE sessions (
+                        id TEXT PRIMARY KEY, model TEXT, source TEXT,
+                        input_tokens INTEGER, output_tokens INTEGER,
+                        cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                        reasoning_tokens INTEGER, estimated_cost_usd REAL,
+                        api_call_count INTEGER, started_at REAL, ended_at REAL,
+                        billing_provider TEXT, parent_session_id TEXT
+                    )
+                ''')
+                old_ts = now - 300
+                conn.executemany(
+                    "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        ('root-sess-abc', 'claude-sonnet-4', 'cli',
+                         100, 50, 0, 0, 0, 0.01, 1, old_ts, old_ts, 'anthropic', None),
+                        ('subagent-sess-xyz', 'claude-sonnet-4', 'cli',
+                         200, 100, 0, 0, 0, 0.02, 1, old_ts, old_ts, 'anthropic', 'root-sess-abc'),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            # 6. Seed root's jobs ledger entry so the precheck "jobs create"
+            #    skip-gate fires (D-09 idempotency) for the root — its create
+            #    is already done. Without this the root would try to call
+            #    revenium jobs create root_job_a1 against the fake.
+            with open(os.path.join(state_dir, 'revenium-jobs.ledger'), 'w') as f:
+                f.write(f'JOB:root_job_a1:created:{old_ts:.3f}\n')
+
+            # 7. Fake revenium that logs every argv. Three-token case dispatch
+            #    distinguishes `config show`, `jobs --help`, `meter completion --help`
+            #    (capability probe), and the actual calls.
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock"; exit 0 ;;\n'
+                    '  "jobs --help "* | "jobs --help")\n'
+                    '    exit 0 ;;\n'
+                    '  "meter completion --help")\n'
+                    '    echo "--agentic-job-id"; exit 0 ;;\n'
+                    '  "jobs create "*)\n'
+                    '    echo \'{"id":"job-id"}\'; exit 0 ;;\n'
+                    '  *)\n'
+                    '    exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_MARKERS_DIR': markers_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            # 8. Run hermes-report.sh
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hermes-report.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            # 9. Inspect argv log
+            self.assertTrue(
+                os.path.exists(argv_log),
+                f'no argv log written; stdout={result.stdout}\nstderr={result.stderr}',
+            )
+            with open(argv_log) as fh:
+                argv_text = fh.read()
+
+            # 9a. The CLI has no --task-id field. If this trips, the wiring
+            #     drifted from plan 22-03's --agentic-job-id slot semantic.
+            self.assertNotIn(
+                '--task-id', argv_text,
+                f'No --task-id flag should exist anywhere; argv:\n{argv_text}',
+            )
+
+            # 9b. SUBAGENT meter completion assertions (plan 22-03 D-02 override).
+            subagent_meter_lines = [
+                l for l in argv_text.splitlines()
+                if 'meter completion' in l and 'subagent-sess-xyz' in l
+            ]
+            self.assertTrue(
+                subagent_meter_lines,
+                f'expected >=1 meter completion for subagent; got argv:\n{argv_text}',
+            )
+            for line in subagent_meter_lines:
+                self.assertIn(
+                    '--trace-id root-sess-abc', line,
+                    f'subagent meter must carry root --trace-id (TRACE-02):\n{line}',
+                )
+                self.assertNotIn(
+                    '--trace-id subagent-sess-xyz', line,
+                    f'subagent meter must NOT carry its own sid as --trace-id:\n{line}',
+                )
+                self.assertIn(
+                    '--agentic-job-id root_job_a1', line,
+                    f'subagent meter must carry ROOT --agentic-job-id (override):\n{line}',
+                )
+                # Exactly one --agentic-job-id slot — the override REPLACES.
+                self.assertEqual(
+                    line.count('--agentic-job-id'), 1,
+                    f'subagent meter must ship exactly one --agentic-job-id slot:\n{line}',
+                )
+                # Subagent's own owning_job_id must NEVER appear as the value of
+                # --agentic-job-id (would orphan-reference per JOB-02 suppression).
+                self.assertNotIn(
+                    '--agentic-job-id subagent_job_xyz', line,
+                    f'subagent meter must NOT ship its own owning_job_id:\n{line}',
+                )
+
+            # 9c. TOP-LEVEL meter completion assertions (byte-identical v1.3 wire).
+            toplevel_meter_lines = [
+                l for l in argv_text.splitlines()
+                if 'meter completion' in l and 'root-sess-abc' in l
+                and 'subagent-sess-xyz' not in l
+            ]
+            for line in toplevel_meter_lines:
+                self.assertIn(
+                    '--trace-id root-sess-abc', line,
+                    f'top-level meter must carry own sid as --trace-id:\n{line}',
+                )
+                self.assertNotIn(
+                    'subagent_job_xyz', line,
+                    f'top-level meter must not leak subagent owning_job_id:\n{line}',
+                )
+
+    def test_hermes_report_subagent_agentic_job_id_omitted_on_race(self):
+        """TESTS-04 D-05 race window: when the subagent's iteration cannot
+        resolve a root_aid (root marker has no kind:"job" line; root jobs
+        ledger has no JOB:<root>:created entry), the per-marker --agentic-job-id
+        slot is OMITTED entirely — not stubbed, not empty, not the subagent's
+        own id. The --trace-id inheritance is orthogonal and still ships
+        root_sid. Phase 22 D-05."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory(prefix='gsd-phase22-04-race-') as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'hermes-report.sh',
+                         'get-root-session-id.py', 'split_strategies.py'):
+                shutil.copy(str(SKILL / 'scripts' / name), scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'organizationName': 'Test Org'}, f)
+
+            # Subagent has one task marker but NO job marker. The deferred
+            # owning_job_id pass leaves owning_job_id empty; combined with
+            # the missing root job, the override branch falls through and
+            # NO --agentic-job-id flag is appended.
+            now = time.time()
+            import secrets
+            with open(os.path.join(markers_dir, 'subagent-sess-xyz.jsonl'), 'w') as f:
+                f.write(json.dumps({
+                    'muid': f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10),
+                    'ts': now,
+                    'sid': 'subagent-sess-xyz',
+                    'task_type': 'code_review',
+                    'operation_type': 'CHAT',
+                    'trace_id': 'root-sess-abc',
+                }) + '\n')
+            # ROOT marker file intentionally NOT seeded with a kind:"job" line.
+
+            db_path = os.path.join(tmp, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute('''
+                    CREATE TABLE sessions (
+                        id TEXT PRIMARY KEY, model TEXT, source TEXT,
+                        input_tokens INTEGER, output_tokens INTEGER,
+                        cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                        reasoning_tokens INTEGER, estimated_cost_usd REAL,
+                        api_call_count INTEGER, started_at REAL, ended_at REAL,
+                        billing_provider TEXT, parent_session_id TEXT
+                    )
+                ''')
+                old_ts = now - 300
+                conn.executemany(
+                    "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        ('root-sess-abc', 'claude-sonnet-4', 'cli',
+                         100, 50, 0, 0, 0, 0.01, 1, old_ts, old_ts, 'anthropic', None),
+                        ('subagent-sess-xyz', 'claude-sonnet-4', 'cli',
+                         200, 100, 0, 0, 0, 0.02, 1, old_ts, old_ts, 'anthropic', 'root-sess-abc'),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock"; exit 0 ;;\n'
+                    '  "jobs --help "* | "jobs --help")\n'
+                    '    exit 0 ;;\n'
+                    '  "meter completion --help")\n'
+                    '    echo "--agentic-job-id"; exit 0 ;;\n'
+                    '  *)\n'
+                    '    exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home, 'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_MARKERS_DIR': markers_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hermes-report.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            self.assertTrue(os.path.exists(argv_log), 'no argv log written')
+            with open(argv_log) as fh:
+                argv_text = fh.read()
+
+            self.assertNotIn('--task-id', argv_text,
+                             f'No --task-id flag should exist; argv:\n{argv_text}')
+
+            subagent_meter_lines = [
+                l for l in argv_text.splitlines()
+                if 'meter completion' in l and 'subagent-sess-xyz' in l
+            ]
+            self.assertTrue(
+                subagent_meter_lines,
+                f'expected subagent meter line; argv:\n{argv_text}',
+            )
+            for line in subagent_meter_lines:
+                # Trace inheritance still works (TRACE-02).
+                self.assertIn(
+                    '--trace-id root-sess-abc', line,
+                    f'subagent meter must carry root --trace-id even on race:\n{line}',
+                )
+                # D-05: ZERO --agentic-job-id flags when root_aid is unresolved.
+                self.assertEqual(
+                    line.count('--agentic-job-id'), 0,
+                    f'D-05 race: subagent meter must ship ZERO --agentic-job-id slots:\n{line}',
+                )
+                # Defense in depth: subagent's own owning_job_id never appears.
+                self.assertNotIn(
+                    'subagent_job', line,
+                    f'subagent owning_job_id must never reach argv on D-05 race:\n{line}',
+                )
+
+    def test_tool_event_subagent_trace_inheritance(self):
+        """TESTS-05: tool-event-report.sh ships meter tool-event with
+        --trace-id <root_sid> for subagent sessions. The TOOL ledger key
+        remains keyed on the bare sid (Phase 22 invariant — re-keying on
+        root_sid would collide subagent tool calls across siblings).
+        Idempotency holds: a second run does not double-ship the same event."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory(prefix='gsd-phase22-05-') as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'tool-event-report.sh',
+                         'get-root-session-id.py'):
+                shutil.copy(str(SKILL / 'scripts' / name), scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            tool_events_dir = os.path.join(state_dir, 'tool-events')
+            os.makedirs(tool_events_dir, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'organizationName': 'Test Org'}, f)
+
+            db_path = os.path.join(tmp, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO sessions VALUES (?, ?)",
+                    [('root-sess-abc', None),
+                     ('subagent-sess-xyz', 'root-sess-abc')],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            event_file = os.path.join(tool_events_dir, 'subagent-sess-xyz.jsonl')
+            with open(event_file, 'w') as f:
+                event = {
+                    'sid': 'subagent-sess-xyz',
+                    'tool_call_id': 'tc_abc123',
+                    'tool': 'Read',
+                    'ts': time.time(),
+                    'duration_ms': 50,
+                    'success': True,
+                }
+                f.write(json.dumps(event) + '\n')
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock"; exit 0 ;;\n'
+                    '  *)\n'
+                    '    exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_TOOL_EVENTS_DIR': tool_events_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'tool-event-report.sh')],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+
+            self.assertTrue(
+                os.path.exists(argv_log),
+                f'no argv log; stdout={result.stdout}\nstderr={result.stderr}',
+            )
+            with open(argv_log) as fh:
+                argv_text = fh.read()
+
+            tool_event_lines = [
+                l for l in argv_text.splitlines() if 'meter tool-event' in l
+            ]
+            self.assertTrue(
+                tool_event_lines,
+                f'expected at least one meter tool-event line; argv:\n{argv_text}',
+            )
+            for line in tool_event_lines:
+                self.assertIn(
+                    '--trace-id root-sess-abc', line,
+                    f'subagent tool-event must carry root --trace-id (TRACE-04):\n{line}',
+                )
+                self.assertNotIn(
+                    '--trace-id subagent-sess-xyz', line,
+                    f'subagent tool-event must NOT carry subagent sid as trace-id:\n{line}',
+                )
+
+            # TOOL ledger key remains keyed on the bare sid (Phase 22 invariant).
+            ledger_path = os.path.join(state_dir, 'revenium-tool-events.ledger')
+            self.assertTrue(os.path.exists(ledger_path),
+                            'tool-events ledger should be written after meter call')
+            with open(ledger_path) as lh:
+                ledger_text = lh.read()
+            self.assertIn(
+                'TOOL:subagent-sess-xyz:tc_abc123:', ledger_text,
+                f'TOOL ledger must remain sid-scoped (not root_sid-scoped):\n{ledger_text}',
+            )
+
+            # Second-tick idempotency: re-running the script must NOT add a
+            # duplicate meter tool-event call for the same (sid, tool_call_id).
+            argv_calls_before = len(tool_event_lines)
+            subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'tool-event-report.sh')],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            with open(argv_log) as fh:
+                argv_text2 = fh.read()
+            tool_event_lines2 = [
+                l for l in argv_text2.splitlines() if 'meter tool-event' in l
+            ]
+            self.assertEqual(
+                len(tool_event_lines2), argv_calls_before,
+                f'idempotency broken: second run added {len(tool_event_lines2) - argv_calls_before} '
+                f'duplicate meter tool-event calls',
+            )
+
+    def test_jobs_create_not_called_for_subagent(self):
+        """TESTS-06: a synthetic subagent session with a kind:"job" marker
+        does NOT trigger `revenium jobs create`. The suppression gates in
+        hermes-report.sh (plan 22-03 Tasks 2 + 3) skip the precheck + in-loop
+        create stages and the outcome queue push when root_sid != sid. The
+        root's existing ledger entry is the single create per arc."""
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import subprocess
+        import tempfile
+        import time
+
+        with tempfile.TemporaryDirectory(prefix='gsd-phase22-06-') as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            for name in ('common.sh', 'hermes-report.sh',
+                         'get-root-session-id.py', 'split_strategies.py'):
+                shutil.copy(str(SKILL / 'scripts' / name), scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'organizationName': 'Test Org'}, f)
+
+            now = time.time()
+            # Subagent owns a kind:"job" marker — the precheck job scan WOULD
+            # try to create it without the suppression gate.
+            with open(os.path.join(markers_dir, 'subagent-sess-xyz.jsonl'), 'w') as f:
+                f.write(json.dumps({
+                    'kind': 'job', 'ts': now,
+                    'sid': 'subagent-sess-xyz',
+                    'agentic_job_id': 'subagent_job_a1',
+                    'job_name': 'review subagent work',
+                    'job_type': 'review',
+                    'status': 'SUCCESS',
+                }) + '\n')
+
+            db_path = os.path.join(tmp, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute('''
+                    CREATE TABLE sessions (
+                        id TEXT PRIMARY KEY, model TEXT, source TEXT,
+                        input_tokens INTEGER, output_tokens INTEGER,
+                        cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                        reasoning_tokens INTEGER, estimated_cost_usd REAL,
+                        api_call_count INTEGER, started_at REAL, ended_at REAL,
+                        billing_provider TEXT, parent_session_id TEXT
+                    )
+                ''')
+                old_ts = now - 300
+                conn.executemany(
+                    "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        ('root-sess-abc', 'claude-sonnet-4', 'cli',
+                         100, 50, 0, 0, 0, 0.01, 1, old_ts, old_ts, 'anthropic', None),
+                        ('subagent-sess-xyz', 'claude-sonnet-4', 'cli',
+                         200, 100, 0, 0, 0, 0.02, 1, old_ts, old_ts, 'anthropic', 'root-sess-abc'),
+                    ],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+            fake_revenium = os.path.join(bin_dir, 'revenium')
+            with open(fake_revenium, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'printf "%s\\n" "$*" >> "' + argv_log + '"\n'
+                    'case "$1 $2 $3" in\n'
+                    '  "config show "* | "config show")\n'
+                    '    echo "api_key: mock"; exit 0 ;;\n'
+                    '  "jobs --help "* | "jobs --help")\n'
+                    '    exit 0 ;;\n'
+                    '  "meter completion --help")\n'
+                    '    echo "--agentic-job-id"; exit 0 ;;\n'
+                    '  "jobs create "*)\n'
+                    '    echo \'{"id":"job-id"}\'; exit 0 ;;\n'
+                    '  *)\n'
+                    '    exit 0 ;;\n'
+                    'esac\n'
+                )
+            os.chmod(fake_revenium, 0o755)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home, 'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_MARKERS_DIR': markers_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'hermes-report.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+
+            self.assertTrue(os.path.exists(argv_log), 'no argv log written')
+            with open(argv_log) as fh:
+                argv_text = fh.read()
+
+            # Primary assertion: ZERO jobs create calls reference the subagent's
+            # agentic_job_id. Plan 22-03 Task 2-3 gates both precheck and
+            # in-loop create stages on root_sid == sid.
+            create_lines = [
+                l for l in argv_text.splitlines()
+                if 'jobs create' in l and 'subagent_job_a1' in l
+            ]
+            self.assertEqual(
+                len(create_lines), 0,
+                f'subagent session must NOT trigger jobs create; '
+                f'unexpected create lines: {create_lines}\nfull argv:\n{argv_text}',
+            )
+
+            # Bonus: the outcome stage must not fire for the subagent's job
+            # (the queue push is gated symmetrically).
+            outcome_lines = [
+                l for l in argv_text.splitlines()
+                if 'jobs outcome' in l and 'subagent_job_a1' in l
+            ]
+            self.assertEqual(
+                len(outcome_lines), 0,
+                f'subagent session must NOT push onto outcome queue; '
+                f'unexpected outcome lines: {outcome_lines}',
+            )
+
+            # Bonus: jobs ledger must not record a JOB:subagent_job_a1:created line.
+            ledger_path = os.path.join(state_dir, 'revenium-jobs.ledger')
+            if os.path.exists(ledger_path):
+                with open(ledger_path) as lh:
+                    ledger_text = lh.read()
+                self.assertNotIn(
+                    'JOB:subagent_job_a1:created:', ledger_text,
+                    f'subagent create suppression must skip the ledger write too:\n{ledger_text}',
+                )
+
+            # Defense in depth: no --task-id flag anywhere.
+            self.assertNotIn('--task-id', argv_text)
+
+    def test_classifier_writes_root_identifiers_for_subagent(self):
+        """TESTS-07: classifier._write_marker_pair on a subagent session emits
+        GUARDRAIL+CHAT records carrying the root's trace_id and agentic_job_id.
+        Top-level sessions emit trace_id == sid and OMIT agentic_job_id
+        (D-04 backward-compat: byte-identical to v1.3 cron-side semantics)."""
+        import importlib
+        import json
+        import os
+        import shutil
+        import sqlite3
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase22-07-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            # Synthetic state.db: root has no parent, subagent's parent is root.
+            db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(db_path)
+            try:
+                conn.execute(
+                    "CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)"
+                )
+                conn.executemany(
+                    "INSERT INTO sessions VALUES (?, ?)",
+                    [('root-sess-abc', None),
+                     ('subagent-sess-xyz', 'root-sess-abc')],
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            # Seed the ROOT's marker file with a kind:"job" line so
+            # _root_agentic_job_id_for resolves to "root_job_a1".
+            root_marker = os.path.join(md, 'root-sess-abc.jsonl')
+            with open(root_marker, 'w') as f:
+                f.write(json.dumps({
+                    'kind': 'job',
+                    'ts': 1700000000.0,
+                    'sid': 'root-sess-abc',
+                    'agentic_job_id': 'root_job_a1',
+                    'job_name': 'fix auth bug',
+                    'job_type': 'bug_fix',
+                    'status': 'SUCCESS',
+                }) + '\n')
+
+            # Reload classifier so module-level STATE_DB / MARKERS_DIR pick up
+            # the patched env vars set by _setup_plugin_env.
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            # Write the SUBAGENT's marker pair via the function under test.
+            out_path = handler._write_marker_pair('subagent-sess-xyz', 'code_review')
+
+            with open(out_path) as f:
+                lines = [json.loads(l) for l in f if l.strip()]
+            self.assertEqual(
+                len(lines), 2,
+                f'expected GUARDRAIL+CHAT pair, got {len(lines)}: {lines}',
+            )
+
+            for rec in lines:
+                self.assertEqual(
+                    rec.get('sid'), 'subagent-sess-xyz',
+                    f'sid field must remain the subagent sid: {rec}',
+                )
+                self.assertEqual(
+                    rec.get('trace_id'), 'root-sess-abc',
+                    f'trace_id MUST be root sid (MARKER-01): {rec}',
+                )
+                self.assertEqual(
+                    rec.get('agentic_job_id'), 'root_job_a1',
+                    f"agentic_job_id MUST be root's agentic_job_id: {rec}",
+                )
+                self.assertEqual(rec.get('task_type'), 'code_review', rec)
+
+            ops = sorted(r['operation_type'] for r in lines)
+            self.assertEqual(ops, ['CHAT', 'GUARDRAIL'])
+
+            # Top-level session: trace_id == sid, NO agentic_job_id field
+            # (D-04 byte-identical-to-v1.3 cron-side semantic).
+            out_path_root = handler._write_marker_pair('root-sess-abc', 'planning')
+            with open(out_path_root) as f:
+                all_root_lines = [json.loads(l) for l in f if l.strip()]
+            # Filter to the just-written 'planning' pair (skip the seeded kind:"job" line).
+            planning_lines = [r for r in all_root_lines
+                              if r.get('task_type') == 'planning']
+            self.assertEqual(
+                len(planning_lines), 2,
+                f'expected 2 planning records for top-level write, got {len(planning_lines)}',
+            )
+            for rec in planning_lines:
+                self.assertEqual(
+                    rec.get('trace_id'), 'root-sess-abc',
+                    f'top-level trace_id must equal own sid: {rec}',
+                )
+                self.assertNotIn(
+                    'agentic_job_id', rec,
+                    f'top-level marker must OMIT agentic_job_id field (D-04 v1.3 parity): {rec}',
+                )
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()
