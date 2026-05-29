@@ -201,6 +201,58 @@ PY
     # never expand to empty under set -uo pipefail).
     [[ -z "${root_sid}" ]] && root_sid="${sid}"
 
+    # Phase 22 (JOB-01 / D-02): resolve root_aid ONCE per session for subagent
+    # agentic-job inheritance. Only meaningful when root_sid != sid (subagent);
+    # top-level sessions take the v1.3 path (the existing --agentic-job-id
+    # conditional continues to ship m_owning_job_id). On missing root marker
+    # file or no kind:"job" line yet (race window per D-05), root_aid stays
+    # empty and the per-marker cmd array OMITS --agentic-job-id entirely
+    # for this subagent meter call rather than stubbing or shipping the
+    # subagent's own (orphan) m_owning_job_id. The next cron tick retries
+    # idempotently once the root's job marker exists.
+    local root_aid=""
+    if [[ "${root_sid}" != "${sid}" ]]; then
+      root_aid=$(
+        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null || true
+import json, os
+from pathlib import Path
+root_sid = os.environ.get('ROOT_SID', '')
+markers_dir = os.environ.get('MARKERS_DIR', '')
+if not root_sid or not markers_dir:
+    pass
+else:
+    marker_path = Path(markers_dir) / f"{root_sid}.jsonl"
+    if marker_path.exists():
+        latest_aid = ""
+        try:
+            with open(marker_path, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get('kind') == 'job':
+                        aid = rec.get('agentic_job_id') or ''
+                        if isinstance(aid, str) and aid:
+                            # Sanitize pipe / newline / colon (parity with WR-01)
+                            for _bad in ('|', '\n', '\r', ':'):
+                                aid = aid.replace(_bad, '_')
+                            latest_aid = aid
+            if latest_aid:
+                print(latest_aid)
+        except OSError:
+            pass
+PY
+      )
+      # Strip any trailing newline/whitespace the heredoc emitted.
+      root_aid="${root_aid%%$'\n'*}"
+    fi
+
     # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.
     # Runs BEFORE the token pre-filter guards so that token-stable sessions
     # (D-08 arc-close: job marker appended after the last LLM call) still reach
@@ -278,57 +330,63 @@ PY
       )
 
       if [[ -n "${precheck_job_rows}" ]]; then
-        local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts
-        while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts; do
-          [[ -z "${precheck_clean_job_id}" ]] && continue
+        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip
+        # BOTH the outcome queue push and the jobs create call. The root's ledger
+        # entry is the single create per arc; the root's session loop ships the
+        # outcome exactly once. Top-level sessions take the v1.3 path byte-identically.
+        if [[ "${root_sid}" == "${sid}" ]]; then
+          local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts
+          while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts; do
+            [[ -z "${precheck_clean_job_id}" ]] && continue
 
-          # Phase 10: push to outcome queue for every job row — regardless of create outcome.
-          # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
-          # Push before the create-gated continue so already-created jobs are also queued.
-          job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}")
+            # Phase 10: push to outcome queue for every job row — regardless of create outcome.
+            # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
+            # Push before the create-gated continue so already-created jobs are also queued.
+            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}")
 
-          # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
-          if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
-            continue
-          fi
+            # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
+            if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
+              continue
+            fi
 
-          local precheck_jobs_cmd=(
-            revenium jobs create
-            --agentic-job-id "${precheck_clean_job_id}"
-            --quiet
-          )
-          if [[ -n "${precheck_job_name}" ]]; then
-            precheck_jobs_cmd+=(--name "${precheck_job_name}")
-          fi
-          if [[ -n "${precheck_job_type}" ]]; then
-            precheck_jobs_cmd+=(--type "${precheck_job_type}")
-          fi
-          if [[ -n "${source}" ]]; then
-            precheck_jobs_cmd+=(--environment "${source}")
-          fi
+            local precheck_jobs_cmd=(
+              revenium jobs create
+              --agentic-job-id "${precheck_clean_job_id}"
+              --quiet
+            )
+            if [[ -n "${precheck_job_name}" ]]; then
+              precheck_jobs_cmd+=(--name "${precheck_job_name}")
+            fi
+            if [[ -n "${precheck_job_type}" ]]; then
+              precheck_jobs_cmd+=(--type "${precheck_job_type}")
+            fi
+            if [[ -n "${source}" ]]; then
+              precheck_jobs_cmd+=(--environment "${source}")
+            fi
 
-          # D-10: best-effort — never abort or continue the session loop.
-          local precheck_cmd_output precheck_cmd_exit
-          precheck_cmd_output=$("${precheck_jobs_cmd[@]}" 2>&1) && precheck_cmd_exit=0 || precheck_cmd_exit=$?
+            # D-10: best-effort — never abort or continue the session loop.
+            local precheck_cmd_output precheck_cmd_exit
+            precheck_cmd_output=$("${precheck_jobs_cmd[@]}" 2>&1) && precheck_cmd_exit=0 || precheck_cmd_exit=$?
 
-          # D-09: treat exit 0 AND HTTP-409/already-exists as success-equivalent.
-          local precheck_success=false
-          if [[ "${precheck_cmd_exit}" -eq 0 ]]; then
-            precheck_success=true
-          elif echo "${precheck_cmd_output}" | grep -qi "409\|already.exist\|conflict"; then
-            precheck_success=true
-          fi
+            # D-09: treat exit 0 AND HTTP-409/already-exists as success-equivalent.
+            local precheck_success=false
+            if [[ "${precheck_cmd_exit}" -eq 0 ]]; then
+              precheck_success=true
+            elif echo "${precheck_cmd_output}" | grep -qi "409\|already.exist\|conflict"; then
+              precheck_success=true
+            fi
 
-          if [[ "${precheck_success}" == "true" ]]; then
-            # D-15: synchronous-on-success ledger write — same JOB:<id>:created:<ts> pattern.
-            local precheck_now_ts
-            precheck_now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
-            echo "JOB:${precheck_clean_job_id}:created:${precheck_now_ts}" >> "${JOBS_LEDGER_FILE}"
-            info "Job created (pre-guard scan): agentic_job_id=${precheck_clean_job_id}"
-          else
-            warn "jobs create failed (pre-guard): id=${precheck_clean_job_id} exit=${precheck_cmd_exit} — metering continues"
-          fi
-        done <<< "${precheck_job_rows}"
+            if [[ "${precheck_success}" == "true" ]]; then
+              # D-15: synchronous-on-success ledger write — same JOB:<id>:created:<ts> pattern.
+              local precheck_now_ts
+              precheck_now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
+              echo "JOB:${precheck_clean_job_id}:created:${precheck_now_ts}" >> "${JOBS_LEDGER_FILE}"
+              info "Job created (pre-guard scan): agentic_job_id=${precheck_clean_job_id}"
+            else
+              warn "jobs create failed (pre-guard): id=${precheck_clean_job_id} exit=${precheck_cmd_exit} — metering continues"
+            fi
+          done <<< "${precheck_job_rows}"
+        fi
       fi
     fi
 
@@ -776,61 +834,69 @@ PY
       )
 
       if [[ -n "${job_rows}" ]]; then
-        local clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts
-        while IFS='|' read -r clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts; do
-          [[ -z "${clean_job_id}" ]] && continue
+        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions skip the in-loop jobs
+        # stage for the same reason the pre-guard stage skips it — see plan 22-03
+        # Task 2 comment. The two stages must be gated symmetrically; the
+        # pre-guard scan is token-independent (job-only marker arc-close path), the
+        # in-loop stage runs alongside token-positive emission. Both feed the same
+        # job_outcome_queue and both invoke revenium jobs create; both are root-only.
+        if [[ "${root_sid}" == "${sid}" ]]; then
+          local clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts
+          while IFS='|' read -r clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts; do
+            [[ -z "${clean_job_id}" ]] && continue
 
-          # Phase 10: push to outcome queue for every job row — regardless of create outcome.
-          # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
-          # Push before the create-gated continue so already-created jobs are also queued.
-          job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}")
+            # Phase 10: push to outcome queue for every job row — regardless of create outcome.
+            # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
+            # Push before the create-gated continue so already-created jobs are also queued.
+            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}")
 
-          # D-09: ledger-gated idempotency — skip if this job was already created.
-          if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
-            continue
-          fi
+            # D-09: ledger-gated idempotency — skip if this job was already created.
+            if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
+              continue
+            fi
 
-          # Build the jobs create cmd array (D-03, D-04, Pattern 8).
-          local jobs_cmd=(
-            revenium jobs create
-            --agentic-job-id "${clean_job_id}"
-            --quiet
-          )
-          if [[ -n "${job_name}" ]]; then
-            jobs_cmd+=(--name "${job_name}")
-          fi
-          if [[ -n "${job_type}" ]]; then
-            jobs_cmd+=(--type "${job_type}")
-          fi
-          # Planner discretion (D-03): pass --environment from session source column.
-          if [[ -n "${job_env_source}" ]]; then
-            jobs_cmd+=(--environment "${job_env_source}")
-          fi
+            # Build the jobs create cmd array (D-03, D-04, Pattern 8).
+            local jobs_cmd=(
+              revenium jobs create
+              --agentic-job-id "${clean_job_id}"
+              --quiet
+            )
+            if [[ -n "${job_name}" ]]; then
+              jobs_cmd+=(--name "${job_name}")
+            fi
+            if [[ -n "${job_type}" ]]; then
+              jobs_cmd+=(--type "${job_type}")
+            fi
+            # Planner discretion (D-03): pass --environment from session source column.
+            if [[ -n "${job_env_source}" ]]; then
+              jobs_cmd+=(--environment "${job_env_source}")
+            fi
 
-          # D-10: best-effort invocation — capture output and exit code; never abort.
-          local jobs_cmd_output jobs_cmd_exit
-          jobs_cmd_output=$("${jobs_cmd[@]}" 2>&1) && jobs_cmd_exit=0 || jobs_cmd_exit=$?
+            # D-10: best-effort invocation — capture output and exit code; never abort.
+            local jobs_cmd_output jobs_cmd_exit
+            jobs_cmd_output=$("${jobs_cmd[@]}" 2>&1) && jobs_cmd_exit=0 || jobs_cmd_exit=$?
 
-          # D-04 / D-09: treat exit 0 AND HTTP-409/already-exists as success-equivalent.
-          # The CLI exits non-zero for a 409, so check stdout/stderr for 409 indicators too.
-          local jobs_success=false
-          if [[ "${jobs_cmd_exit}" -eq 0 ]]; then
-            jobs_success=true
-          elif echo "${jobs_cmd_output}" | grep -qi "409\|already.exist\|conflict"; then
-            jobs_success=true
-          fi
+            # D-04 / D-09: treat exit 0 AND HTTP-409/already-exists as success-equivalent.
+            # The CLI exits non-zero for a 409, so check stdout/stderr for 409 indicators too.
+            local jobs_success=false
+            if [[ "${jobs_cmd_exit}" -eq 0 ]]; then
+              jobs_success=true
+            elif echo "${jobs_cmd_output}" | grep -qi "409\|already.exist\|conflict"; then
+              jobs_success=true
+            fi
 
-          if [[ "${jobs_success}" == "true" ]]; then
-            # D-15: write JOB:<id>:created:<unix_ts> to jobs ledger on success-or-409.
-            local now_ts
-            now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
-            echo "JOB:${clean_job_id}:created:${now_ts}" >> "${JOBS_LEDGER_FILE}"
-            info "Job created: agentic_job_id=${clean_job_id}"
-          else
-            # D-10: best-effort — warn once, never abort or continue the session loop.
-            warn "jobs create failed: id=${clean_job_id} exit=${jobs_cmd_exit} — metering continues"
-          fi
-        done <<< "${job_rows}"
+            if [[ "${jobs_success}" == "true" ]]; then
+              # D-15: write JOB:<id>:created:<unix_ts> to jobs ledger on success-or-409.
+              local now_ts
+              now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
+              echo "JOB:${clean_job_id}:created:${now_ts}" >> "${JOBS_LEDGER_FILE}"
+              info "Job created: agentic_job_id=${clean_job_id}"
+            else
+              # D-10: best-effort — warn once, never abort or continue the session loop.
+              warn "jobs create failed: id=${clean_job_id} exit=${jobs_cmd_exit} — metering continues"
+            fi
+          done <<< "${job_rows}"
+        fi
       fi
     fi
 
@@ -960,18 +1026,30 @@ PY
         if [[ -n "${source}" ]]; then
           cmd+=(--environment "${source}")
         fi
-        # Phase 9 (D-13): stamp the agentic-job fields when JOBS_CLI_CAPABLE and the
-        # marker has an owning job. Gated on the marker attribute (owning_job_id), not
-        # on jobs create success — the Revenium server absorbs the create/meter race by
-        # correlating on agentic-job-id. --agentic-job-name / --agentic-job-type are
-        # appended only when present so a job marker missing them never emits an empty flag.
-        if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${m_owning_job_id}" ]]; then
-          cmd+=(--agentic-job-id "${m_owning_job_id}")
-          if [[ -n "${m_owning_job_name}" ]]; then
-            cmd+=(--agentic-job-name "${m_owning_job_name}")
-          fi
-          if [[ -n "${m_owning_job_type}" ]]; then
-            cmd+=(--agentic-job-type "${m_owning_job_type}")
+        # Phase 22 (JOB-01 / D-02 / D-05): per-marker --agentic-job-id slot.
+        # The CLI has exactly one --agentic-job-id field (verified via
+        # `revenium meter completion --help` 2026-05-29); this is REPLACE, not ADD.
+        # Top-level (root_sid == sid): v1.3 path, ships m_owning_job_id +
+        #   optional --agentic-job-name / --agentic-job-type siblings.
+        # Subagent (root_sid != sid) with resolved root_aid: OVERRIDE with
+        #   root's agentic_job_id. Sibling name/type flags are dropped in
+        #   this plan; analytics rollup is keyed on --agentic-job-id alone
+        #   (sufficient per D-02 design; future quick-task can plumb siblings).
+        # Subagent with no root_aid (D-05 race): NO --agentic-job-id append.
+        #   The subagent's own m_owning_job_id is NEVER shipped (would
+        #   orphan-reference a non-existent Revenium job row since JOB-02
+        #   suppresses the create). Next cron tick retries idempotently.
+        if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
+          if [[ "${root_sid}" == "${sid}" && -n "${m_owning_job_id}" ]]; then
+            cmd+=(--agentic-job-id "${m_owning_job_id}")
+            if [[ -n "${m_owning_job_name}" ]]; then
+              cmd+=(--agentic-job-name "${m_owning_job_name}")
+            fi
+            if [[ -n "${m_owning_job_type}" ]]; then
+              cmd+=(--agentic-job-type "${m_owning_job_type}")
+            fi
+          elif [[ "${root_sid}" != "${sid}" && -n "${root_aid}" ]]; then
+            cmd+=(--agentic-job-id "${root_aid}")
           fi
         fi
 
