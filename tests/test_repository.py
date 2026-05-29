@@ -88,6 +88,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'guardrail-check.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
+            # Phase 21 — root-walk helper (TRACE-01)
+            SKILL / 'scripts' / 'get-root-session-id.py',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
             SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
             SKILL / 'plugins' / 'revenium-classifier' / '__init__.py',

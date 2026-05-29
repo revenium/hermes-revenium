@@ -86,3 +86,21 @@ has_guardrails_cli() {
   revenium guardrails budget-rules --help >/dev/null 2>&1 && \
   revenium guardrails enforcement-events --help >/dev/null 2>&1
 }
+
+# Phase 21 (TRACE-01, v1.4 path foundation): walk state.db.sessions.parent_session_id
+# to the root delegator and print it on stdout. Shells into the Python sidecar at
+# scripts/get-root-session-id.py (canonical implementation per D-01).
+# Production usage: root_sid="$(get_root_session_id "${sid}")"
+# Fail-open per D-05: empty sid → empty stdout; missing python3 or sidecar failure
+# → echoes the input sid unchanged (matches classifier.py fail-open semantics).
+get_root_session_id() {
+  local sid="${1:-}"
+  if [[ -z "${sid}" ]]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${sid}"
+    return 0
+  fi
+  python3 "${SKILL_DIR}/scripts/get-root-session-id.py" "${sid}" 2>/dev/null || printf '%s\n' "${sid}"
+}
