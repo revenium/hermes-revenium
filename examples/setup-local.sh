@@ -4,6 +4,57 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${HOME}/.hermes/skills/revenium"
 
+# ---------------------------------------------------------------------------
+# Preflight: refuse to install a non-functional skill.
+#
+# The skill is useless without the `revenium` CLI (every cron tick shells out
+# to `revenium meter completion`, `revenium guardrails enforcement-rules get`,
+# etc.) and `sqlite3` (the cron reads token counts from ~/.hermes/state.db
+# via sqlite3). `python3` is used for stdlib heredocs throughout the scripts.
+#
+# Without these, `setup-local.sh` previously reported "Installed skill" and
+# the operator only discovered the install was broken when nothing showed up
+# in Revenium. Fail fast with actionable install instructions instead.
+# ---------------------------------------------------------------------------
+missing=()
+command -v revenium >/dev/null 2>&1 || missing+=("revenium")
+command -v sqlite3  >/dev/null 2>&1 || missing+=("sqlite3")
+command -v python3  >/dev/null 2>&1 || missing+=("python3")
+
+if (( ${#missing[@]} > 0 )); then
+  echo "ERROR: Required dependencies missing: ${missing[*]}" >&2
+  echo >&2
+  echo "Install the missing tools, then re-run this script:" >&2
+  echo >&2
+  for tool in "${missing[@]}"; do
+    case "${tool}" in
+      revenium)
+        echo "  revenium CLI:" >&2
+        echo "    macOS:          brew install revenium/tap/revenium" >&2
+        echo "    Linux:          see https://github.com/revenium/revenium-cli/releases for the binary," >&2
+        echo "                    or 'brew install revenium/tap/revenium' under Linuxbrew." >&2
+        echo "    After install:  run 'revenium config show' and confirm the API key is non-empty;" >&2
+        echo "                    if blank, follow the four 'revenium config set' calls in SKILL.md Setup Flow step 2." >&2
+        ;;
+      sqlite3)
+        echo "  sqlite3:" >&2
+        echo "    macOS:          bundled (or 'brew install sqlite3')" >&2
+        echo "    Debian/Ubuntu:  sudo apt install sqlite3" >&2
+        echo "    RHEL/Fedora:    sudo dnf install sqlite" >&2
+        ;;
+      python3)
+        echo "  python3:" >&2
+        echo "    macOS:          bundled (or 'brew install python3')" >&2
+        echo "    Debian/Ubuntu:  sudo apt install python3" >&2
+        echo "    RHEL/Fedora:    sudo dnf install python3" >&2
+        ;;
+    esac
+    echo >&2
+  done
+  echo "Setup aborted — no files were written." >&2
+  exit 1
+fi
+
 mkdir -p "${HOME}/.hermes/skills"
 
 # Remove stray duplicate skill dirs (e.g. revenium.bak.*, revenium.predeploy.bak.*).
