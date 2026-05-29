@@ -221,6 +221,8 @@ cat ~/.hermes/state/revenium/guardrail-status.json  # expect rules[] populated
 
 Classify the turn if you called any non-read-only tool, produced > 200 words, or answered a multi-step reasoning question. Skip only when your entire response is ≤ 2 sentences AND you called zero tools.
 
+When the current session is a subagent (delegated via `delegate_task` from a root session), markers MUST carry the root delegator's `trace_id` and `agentic_job_id` so analytics roll subagent spend up under the root's arc. The code-side classifier plugin handles this automatically by walking `state.db.sessions.parent_session_id` at marker-write time; if you write a backstop marker yourself, use the root session's id, not the current subagent's id.
+
 See `references/task-classification.md` for the trigger rules, the `write_marker` snippet, the blocklist, and worked examples.
 
 ## FINAL ACTION — JOB DECLARATION

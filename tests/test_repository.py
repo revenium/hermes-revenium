@@ -3222,7 +3222,13 @@ class RepositoryTests(unittest.TestCase):
                 self.assertEqual(r['sid'], 'test-sid-pair')
                 self.assertEqual(r['task_type'], 'code_review')
                 self.assertRegex(r['muid'], r'^[0-9a-f]{33}$')
-                self.assertEqual(set(r.keys()), {'muid', 'ts', 'sid', 'task_type', 'operation_type'})
+                # Phase 22 (MARKER-01): top-level sessions emit trace_id == sid and
+                # OMIT agentic_job_id (state.db is absent in this test, so
+                # _walk_to_root_session fail-opens and returns the input sid;
+                # _root_agentic_job_id_for is not called when root_sid == sid).
+                self.assertEqual(set(r.keys()), {'muid', 'ts', 'sid', 'task_type', 'operation_type', 'trace_id'})
+                self.assertEqual(r['trace_id'], 'test-sid-pair')
+                self.assertNotIn('agentic_job_id', r)
             for l in lines:
                 self.assertLess(len((l + '\n').encode('utf-8')), 1024, 'marker line exceeds 1024 bytes')
         finally:

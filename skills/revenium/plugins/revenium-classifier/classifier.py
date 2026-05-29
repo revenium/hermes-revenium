@@ -763,23 +763,88 @@ def _muid() -> str:
     return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
 
 
+def _root_agentic_job_id_for(root_sid: str) -> str:
+    """Resolve the root's agentic_job_id by scanning markers/<root_sid>.jsonl
+    for the most recent kind:"job" line. Returns "" on missing file, no job
+    marker, JSON decode failure, or any OSError. D-05 fail-open.
+
+    Mirrors the cron-side heredoc in hermes-report.sh (plan 22-03 Task 1) so
+    the classifier and the cron resolve the same value for the same session.
+    Both read the same append-only file with the same latest-wins semantic, so
+    the two values agree by construction (Option A per 22-CONTEXT D-02 — this
+    field is forward-looking observability in the marker; the cron does NOT
+    consume it, it re-resolves independently).
+
+    Pipe/colon/newline sanitization (WR-01 mirror) defends downstream consumers
+    against future upstream writers corrupting the bash IFS='|' parse or the
+    Revenium CLI's argv handling.
+    """
+    if not root_sid:
+        return ""
+    marker_path = MARKERS_DIR / f"{root_sid}.jsonl"
+    if not marker_path.exists():
+        return ""
+    latest_aid = ""
+    try:
+        with open(marker_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("kind") == "job":
+                    aid = rec.get("agentic_job_id") or ""
+                    if isinstance(aid, str) and aid:
+                        for _bad in ("|", "\n", "\r", ":"):
+                            aid = aid.replace(_bad, "_")
+                        latest_aid = aid
+    except OSError:
+        return ""
+    return latest_aid
+
+
 def _write_marker_pair(sid: str, task_type: str) -> Path:
     """Atomic O_APPEND + fcntl.LOCK_EX write of a GUARDRAIL + CHAT marker pair.
 
     Per D-14 + HOOK-06: < 1024 bytes per line, exactly two records, single lock.
     Per Phase 2 marker schema: {muid, ts, sid, task_type, operation_type}.
+
+    Phase 22 (MARKER-01): also emits trace_id resolved to the root delegator;
+    for subagent sessions also emits agentic_job_id resolved to the root's
+    agentic-job (read from markers/<root_sid>.jsonl). Top-level sessions emit
+    trace_id == sid (byte-identical to v1.3's behavior on the cron side via the
+    `marker.get('trace_id', '')` heredoc fallback) and OMIT agentic_job_id.
+
+    Per 22-CONTEXT D-03: the existing module-level _walk_to_root_session helper
+    is reused here (NOT refactored to call the Phase 21 sidecar). The classifier
+    and the cron use independent walk implementations with identical semantics.
     """
     MARKERS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     marker_path = MARKERS_DIR / f"{sid}.jsonl"
 
+    # Phase 22 (MARKER-01 / D-02 / D-05): resolve root_sid + root_aid ONCE per
+    # call, not per record. The two records (GUARDRAIL + CHAT) share the same
+    # inheritance state — resolving twice would waste a sqlite walk + file read.
+    root_sid = _walk_to_root_session(sid)
+    root_aid = _root_agentic_job_id_for(root_sid) if root_sid != sid else ""
+
     def _record(op: str) -> dict:
-        return {
+        rec = {
             "muid": _muid(),
             "ts": time.time(),
             "sid": sid,
             "task_type": task_type,
             "operation_type": op,
+            "trace_id": root_sid,
         }
+        if root_aid:
+            rec["agentic_job_id"] = root_aid
+        return rec
 
     line_g = json.dumps(_record("GUARDRAIL"), separators=(",", ":"), ensure_ascii=True) + "\n"
     line_c = json.dumps(_record("CHAT"), separators=(",", ":"), ensure_ascii=True) + "\n"
