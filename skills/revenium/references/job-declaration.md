@@ -32,7 +32,7 @@ Declare a job marker if ANY of these are true:
 Exactly one of: `SUCCESS`, `FAILED`, `CANCELLED` (uppercase).
 
 - `SUCCESS` requires positive, checkable evidence established in the session: tests run and passed, build green, diff demonstrably correct, question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. No user sign-off required — self-verification is the bar.
-- `FAILED` is narrow: a definitive negative terminal state — the fix didn't fix, the build cannot pass, the goal is objectively unachievable.
+- `FAILED` is narrow: a definitive negative terminal state — the fix didn't fix, the build cannot pass, the goal is objectively unachievable. For a `FAILED` arc, also set `failure_reason` to a brief plain-text cause (e.g. "tests failed: 3 assertion errors in auth module"). The cron forwards it to Revenium as `--metadata` on the job outcome. Omit `failure_reason` for `SUCCESS` and `CANCELLED`.
 - `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded, or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
 
 ## Examples
@@ -53,6 +53,7 @@ User asked you to make the CI pipeline green. After 3 attempts the underlying li
 - `agentic_job_id`: `fix-ci-upstream-blocker-9f2a`
 - `job_type`: `debugging`
 - `status`: `FAILED` (definitive negative terminal state — goal is unachievable)
+- `failure_reason`: "upstream library bug blocks CI; no workaround after 3 attempts"
 
 **Example 4 — User pivot before arc declared (CANCELLED for abandoned arc):**
 User asked you to refactor the auth module (arc in progress, not yet declared). Mid-arc, user says "actually forget that — help me write a release announcement."

@@ -8,6 +8,8 @@
     "--outcome-type": "CONVERTED",
     "--quiet": true
   },
-  "pattern_fields": {},
+  "pattern_fields": {
+    "--metadata": "^\\{\"source\":\"test\"\\}$"
+  },
   "forbidden_fields": ["--budget-id", "--alert-id"]
 }
