@@ -111,22 +111,24 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    ```
    revenium config show
    ```
-   If it reports a non-empty API Key, skip to step 3. If the CLI is not on PATH, tell the user to install it (`brew install revenium/tap/revenium` on macOS) and STOP.
+   Check that **all four** of these are non-empty: **API Key**, **Team ID**, **Tenant ID**, **Owner ID**. If all four are set, skip to step 3. If the CLI is not on PATH, tell the user to install it (`brew install revenium/tap/revenium` on macOS) and STOP.
 
-2. **If no API key is configured:** collect the following from the user:
+   > Do NOT gate solely on the API Key. `revenium jobs create` requires a Team ID; a config with a key but no `team-id` meters completions fine but silently fails every agentic-job create (HTTP 400 "Missing request parameter: teamId"), stranding job outcomes in permanent deferral. All four must be present.
+
+2. **If any of the four are missing:** collect the missing values from the user (skip any that `revenium config show` already reported as set):
    - **API Key**: "Please provide your Revenium API key."
    - **Team ID**: "Please provide your Revenium Team ID."
    - **Tenant ID**: "Please provide your Revenium Tenant ID."
    - **User ID** (owner id): "Please provide your Revenium User ID."
 
-   Then run, in order:
+   Then run `revenium config set ...` for each missing value:
    ```
    revenium config set key API_KEY
    revenium config set team-id TEAM_ID
    revenium config set tenant-id TENANT_ID
    revenium config set owner-id USER_ID
    ```
-   Then re-run `revenium config show` and confirm the API Key is non-empty. If it is still empty, STOP and tell the user to run `/revenium` when ready.
+   Then re-run `revenium config show` and confirm **all four** are now non-empty. If any is still empty, STOP and tell the user to run `/revenium` when ready.
 
 3. **Run the setup script:**
    ```
