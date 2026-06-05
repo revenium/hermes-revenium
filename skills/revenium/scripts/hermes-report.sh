@@ -42,6 +42,19 @@ else
   warn "revenium jobs/--agentic-job-id not available — job work skipped; metering continues as v1.0."
 fi
 
+# quick-260605: resolve teamId once for the whole tick. jobs create/outcome require
+# it; absent, the CLI returns HTTP 400 / exit 4 which the cron's 409-only success
+# check treats as a generic failure — stranding every outcome in permanent
+# OUTCOME-04 deferral. We pass it explicitly on the job calls (robust to an
+# incomplete `revenium config`, leveraging the CLI's --team-id override) and warn
+# loudly when it cannot be resolved, so the failure is diagnosable instead of
+# silent. Empty in the test harness (the shim's `config show` is a no-op) → the
+# --team-id flag is simply omitted, preserving the v1.4 wire shape and argv goldens.
+REVENIUM_TEAM_ID_RESOLVED="$(resolve_team_id)"
+if [[ "${JOBS_CLI_CAPABLE}" == "true" && -z "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
+  warn "teamId not configured — jobs create/outcome will fail (HTTP 400). Run 'revenium config set team-id <id>' or set REVENIUM_TEAM_ID; metering continues."
+fi
+
 # Phase 10: script-level accumulator for terminated job arcs needing outcome reporting.
 # Must be script-global (not local inside main) so it survives from the session loop
 # into the post-loop outcome stage within one main() invocation (CR-01 lesson, D-06).
@@ -373,6 +386,10 @@ PY
             fi
             if [[ -n "${source}" ]]; then
               precheck_jobs_cmd+=(--environment "${source}")
+            fi
+            # quick-260605: pass teamId explicitly when resolved (omitted in tests).
+            if [[ -n "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
+              precheck_jobs_cmd+=(--team-id "${REVENIUM_TEAM_ID_RESOLVED}")
             fi
 
             # D-10: best-effort — never abort or continue the session loop.
@@ -892,6 +909,10 @@ PY
             if [[ -n "${job_env_source}" ]]; then
               jobs_cmd+=(--environment "${job_env_source}")
             fi
+            # quick-260605: pass teamId explicitly when resolved (omitted in tests).
+            if [[ -n "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
+              jobs_cmd+=(--team-id "${REVENIUM_TEAM_ID_RESOLVED}")
+            fi
 
             # D-10: best-effort invocation — capture output and exit code; never abort.
             local jobs_cmd_output jobs_cmd_exit
@@ -1214,6 +1235,10 @@ except Exception:
         --result "${outcome_status}"
         --quiet
       )
+      # quick-260605: pass teamId explicitly when resolved (omitted in tests).
+      if [[ -n "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
+        outcome_cmd+=(--team-id "${REVENIUM_TEAM_ID_RESOLVED}")
+      fi
       # --result is the execution result; --outcome-type is the separate business
       # outcome. A SUCCESS arc maps to a CONVERTED business outcome so Revenium does
       # not leave the job's Outcome Type at its PENDING default. FAILED / CANCELLED

@@ -189,6 +189,24 @@ if ! has_guardrails_cli; then
 fi
 
 # ---------------------------------------------------------------------------
+# teamId precheck (quick-260605)
+# ---------------------------------------------------------------------------
+# guardrails budget-rules create — like jobs create — requires a teamId. Without
+# one the API returns HTTP 400 and rule creation fails opaquely. Fail loudly here
+# so the operator fixes the config before we attempt (and partially apply) rules.
+# Auto mode warns + exits 0 to preserve the fail-open automation contract above.
+if [[ -z "$(resolve_team_id)" ]]; then
+  if [[ "${AUTO}" == "true" ]]; then
+    warn "teamId not configured — skipping setup-guardrails (run 'revenium config set team-id <id>')."
+    exit 0
+  else
+    echo "No Revenium Team ID is configured. Budget-rule creation requires it."
+    echo "Set it with: revenium config set team-id <TEAM_ID>   (then re-run /revenium)"
+    exit 2
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Helpers: read_config_field (shared helper, with list branch)
 # ---------------------------------------------------------------------------
 read_config_field() {

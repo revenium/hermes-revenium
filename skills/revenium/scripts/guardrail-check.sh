@@ -68,10 +68,12 @@ AUTONOMOUS=$(read_config_field autonomousMode)
 NOTIFY_CHANNEL=$(read_config_field notifyChannel)
 NOTIFY_TARGET=$(read_config_field notifyTarget)
 
-# (F) Resolve teamId from revenium config show.
-TEAM_ID=$(revenium config show 2>&1 | sed -n 's/.*Team ID:[ 	]*//p' | tr -d ' ')
+# (F) Resolve teamId via the shared resolver (REVENIUM_TEAM_ID env override, then
+# `revenium config show`; ANSI-safe). quick-260605: single source of truth in
+# common.sh so report.sh and guardrail-check agree.
+TEAM_ID="$(resolve_team_id)"
 if [[ -z "${TEAM_ID}" ]]; then
-  warn "Could not resolve teamId from revenium config show — skipping guardrail check."
+  warn "Could not resolve teamId (set REVENIUM_TEAM_ID or 'revenium config set team-id <id>') — skipping guardrail check."
   exit 0
 fi
 

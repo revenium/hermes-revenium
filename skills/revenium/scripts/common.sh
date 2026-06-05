@@ -104,3 +104,32 @@ get_root_session_id() {
   fi
   python3 "${SKILL_DIR}/scripts/get-root-session-id.py" "${sid}" 2>/dev/null || printf '%s\n' "${sid}"
 }
+
+# quick-260605: resolve the Revenium teamId for CLI calls that require it
+# (jobs create/outcome). Prefers the REVENIUM_TEAM_ID env override, then falls
+# back to parsing `revenium config show`. Prints the team-id on stdout, or an
+# empty string when unresolved. Mirrors guardrail-check.sh's resolution so every
+# caller agrees on one source of truth.
+#
+# Why this exists: `revenium jobs create` requires teamId. When it is absent the
+# CLI returns HTTP 400 / exit 4 ("Missing request parameter: teamId"), which the
+# cron's 409-only success detection treats as a generic failure — so the
+# JOB:created ledger line is never written and the outcome stays deferred forever
+# (OUTCOME-04). Resolving + passing teamId explicitly, plus a loud warn when it is
+# missing, turns that silent permanent failure into a diagnosable one.
+#
+# ANSI-safe via a literal ESC byte (portable across BSD/GNU sed); whitespace
+# stripped. Empty output is the contract for "unresolved" — callers must guard.
+resolve_team_id() {
+  if [[ -n "${REVENIUM_TEAM_ID:-}" ]]; then
+    printf '%s\n' "${REVENIUM_TEAM_ID}"
+    return 0
+  fi
+  local esc
+  esc=$(printf '\033')
+  revenium config show 2>/dev/null \
+    | sed "s/${esc}\[[0-9;]*m//g" \
+    | sed -n 's/.*Team ID:[[:space:]]*//p' \
+    | head -1 \
+    | tr -d '[:space:]'
+}
