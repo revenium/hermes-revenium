@@ -205,6 +205,8 @@ Task-type and agentic-job inference is performed by the deterministic `revenium-
 
 Discrete task arcs are reported as Revenium agentic jobs (`revenium jobs create` / `revenium jobs outcome`). Each arc's business outcome is recorded exactly once — outcomes are immutable and never re-sent. Idempotency is maintained in `~/.hermes/state/revenium/revenium-jobs.ledger`. AI transactions belonging to a job are linked in Revenium via `--agentic-job-id`.
 
+Every job outcome also carries a `--metadata` JSON blob: the deployment `source` (from the session's source column) on every outcome, plus a `failure_reason` on `FAILED` arcs — a brief plain-text cause inferred by the classifier. `SUCCESS` and `CANCELLED` arcs carry source only.
+
 ### Tool-event metering
 
 The `post_tool_call` hook captures each Hermes tool call (tool name, duration in milliseconds, success/failure, `tool_call_id`, session ID, error message) to a per-session file at `~/.hermes/state/revenium/tool-events/<sid>.jsonl`. The hook makes no network call — it is a pure local observer that exits 0 on any internal failure so it never blocks the agent. The cron's `tool-event-report.sh` stage then reads these files and ships each unledgered record via `revenium meter tool-event`, keyed on `<sid>:<tool_call_id>` in `revenium-tool-events.ledger`.

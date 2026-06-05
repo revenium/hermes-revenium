@@ -241,6 +241,10 @@ The frozen Phase 7 D-03 marker shape (for reference if you need the backstop):
 `{"kind":"job","ts":<unix_float>,"sid":<session_id>,"agentic_job_id":<str>,`
 `"job_name":<str>,"job_type":<str>,"status":"SUCCESS"|"FAILED"|"CANCELLED"}`
 
+For a FAILED arc, add an optional `"failure_reason":<str>` (brief plain-text cause).
+The cron ships it to Revenium as `--metadata` on `jobs outcome`; omit it for
+SUCCESS/CANCELLED. Absent key = no-op (readers default to empty).
+
 See `references/job-declaration.md` for the arc-boundary and SUCCESS/FAILED/CANCELLED
 criteria the classifier uses (and the rare backstop case).
 

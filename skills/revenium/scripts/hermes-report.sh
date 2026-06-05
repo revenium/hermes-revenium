@@ -323,7 +323,17 @@ try:
             for _bad in ('|', '\n', '\r'):
                 status = status.replace(_bad, '_')
             marker_ts = m.get('ts', 0) or 0
-            print(f"{clean_id}|{job_name}|{job_type}|{status}|{marker_ts}")
+            # Phase 24 (quick-260531-n4i): carry failure_reason (FAILED arcs only)
+            # so the post-loop outcome stage can ship it as --metadata. Free-text
+            # prose — strip pipe/newline/CR (IFS='|' transport safety) and cap length.
+            failure_reason = m.get('failure_reason', '') or ''
+            if not isinstance(failure_reason, str):
+                failure_reason = ''
+            for _bad in ('|', '\n', '\r'):
+                failure_reason = failure_reason.replace(_bad, ' ')
+            if len(failure_reason) > 500:
+                failure_reason = failure_reason[:500]
+            print(f"{clean_id}|{job_name}|{job_type}|{status}|{marker_ts}|{failure_reason}")
 except OSError:
     pass
 PY
@@ -335,14 +345,15 @@ PY
         # entry is the single create per arc; the root's session loop ships the
         # outcome exactly once. Top-level sessions take the v1.3 path byte-identically.
         if [[ "${root_sid}" == "${sid}" ]]; then
-          local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts
-          while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts; do
+          local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason
+          while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason; do
             [[ -z "${precheck_clean_job_id}" ]] && continue
 
             # Phase 10: push to outcome queue for every job row — regardless of create outcome.
             # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
             # Push before the create-gated continue so already-created jobs are also queued.
-            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}")
+            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs.
+            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
             if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -829,7 +840,16 @@ for job in jobs:
     for _bad in ('|', '\n', '\r'):
         status = status.replace(_bad, '_')
     marker_ts = job.get('ts', 0) or 0
-    print(f"{clean_id}|{job_name}|{job_type}|{source_clean}|{status}|{marker_ts}")
+    # Phase 24 (quick-260531-n4i): carry failure_reason (FAILED arcs only) for
+    # the outcome stage's --metadata. Prose — strip IFS chars, cap length.
+    failure_reason = job.get('failure_reason', '') or ''
+    if not isinstance(failure_reason, str):
+        failure_reason = ''
+    for _bad in ('|', '\n', '\r'):
+        failure_reason = failure_reason.replace(_bad, ' ')
+    if len(failure_reason) > 500:
+        failure_reason = failure_reason[:500]
+    print(f"{clean_id}|{job_name}|{job_type}|{source_clean}|{status}|{marker_ts}|{failure_reason}")
 PY
       )
 
@@ -841,14 +861,15 @@ PY
         # in-loop stage runs alongside token-positive emission. Both feed the same
         # job_outcome_queue and both invoke revenium jobs create; both are root-only.
         if [[ "${root_sid}" == "${sid}" ]]; then
-          local clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts
-          while IFS='|' read -r clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts; do
+          local clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts job_failure_reason
+          while IFS='|' read -r clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts job_failure_reason; do
             [[ -z "${clean_job_id}" ]] && continue
 
             # Phase 10: push to outcome queue for every job row — regardless of create outcome.
             # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
             # Push before the create-gated continue so already-created jobs are also queued.
-            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}")
+            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs.
+            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}|${job_failure_reason}")
 
             # D-09: ledger-gated idempotency — skip if this job was already created.
             if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -1144,11 +1165,11 @@ PY
   # write this tick has already been written by the time this stage runs (D-01).
   # Mirrors the in-loop jobs create stage (D-06: API-first, ledger-on-exit-0).
   if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${#job_outcome_queue[@]}" -gt 0 ]]; then
-    local outcome_id outcome_status_raw outcome_source outcome_marker_ts
+    local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
-    local outcome_now_ts _age_s _stale_threshold
+    local outcome_now_ts _age_s _stale_threshold outcome_metadata
     for _entry in "${job_outcome_queue[@]}"; do
-      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts <<< "${_entry}"
+      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
 
       # OUTCOME-01 gate: skip if already reported (ledger-gated idempotency).
@@ -1199,6 +1220,34 @@ except Exception:
       # carry no --outcome-type (Revenium default applies).
       if [[ "${outcome_status}" == "SUCCESS" ]]; then
         outcome_cmd+=(--outcome-type CONVERTED)
+      fi
+      # Phase 24 (quick-260531-n4i): attach --metadata JSON. source (deployment
+      # environment from the session source column) rides on every outcome when
+      # present; failure_reason is added only for FAILED arcs. json.dumps handles
+      # quoting/escaping so prose reasons cannot break the JSON arg. Omit the flag
+      # entirely when there is nothing to send (preserves v1.4 wire shape for
+      # source-less sessions).
+      outcome_metadata=$(
+        OUTCOME_SOURCE="${outcome_source}" \
+        OUTCOME_STATUS="${outcome_status}" \
+        OUTCOME_FAILURE_REASON="${outcome_failure_reason}" \
+        python3 - <<'PY' 2>/dev/null || true
+import json, os
+meta = {}
+source = os.environ.get('OUTCOME_SOURCE', '').strip()
+if source:
+    meta['source'] = source
+status = os.environ.get('OUTCOME_STATUS', '').strip().upper()
+reason = os.environ.get('OUTCOME_FAILURE_REASON', '').strip()
+if status == 'FAILED' and reason:
+    meta['failure_reason'] = reason
+if meta:
+    print(json.dumps(meta, separators=(',', ':')))
+PY
+      )
+      outcome_metadata="${outcome_metadata%%$'\n'*}"
+      if [[ -n "${outcome_metadata}" ]]; then
+        outcome_cmd+=(--metadata "${outcome_metadata}")
       fi
       outcome_cmd_output=$("${outcome_cmd[@]}" 2>&1) && outcome_cmd_exit=0 || outcome_cmd_exit=$?
 

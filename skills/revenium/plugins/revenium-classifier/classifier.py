@@ -224,10 +224,14 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
         "(e.g. fix_auth_regression, prod_log_triage, weekly_pr_review)\n"
         "  - job_name: a short human-readable name (sentence case, max 60 chars)\n"
         "  - job_type: a snake_case category label matching ^[a-z][a-z0-9_]{1,47}$\n"
-        "  - status: one of SUCCESS, FAILED, or CANCELLED\n\n"
+        "  - status: one of SUCCESS, FAILED, or CANCELLED\n"
+        "  - failure_reason: ONLY when status is FAILED, a brief (max ~200 char) "
+        "plain-text explanation of what went wrong (e.g. 'tests failed: 3 assertion "
+        "errors in auth module'). OMIT this field for SUCCESS and CANCELLED.\n\n"
         "Status guidance:\n"
         "  SUCCESS: only when there is clear evidence the goal was achieved.\n"
-        "  FAILED: only when there is explicit evidence of failure.\n"
+        "  FAILED: only when there is explicit evidence of failure. Always include "
+        "failure_reason.\n"
         "  CANCELLED: use when uncertain — this is the uncertainty-bias catch-all.\n\n"
         "Mint a SPECIFIC agentic_job_id. "
         "You MAY reuse one of the existing job_type labels, but only if it is an exact match. "
@@ -348,11 +352,22 @@ def _validate_job(job: dict) -> "dict | None":
     #     _deed, _fade), allowing colliding ids to slip through. (WR-01)
     #  3. Using re at module scope removes the redundant inline import. (IN-01)
     aid = agentic_job_id.strip() + "_" + secrets.token_hex(2)
+    # failure_reason is meaningful only for FAILED arcs. Coerce non-str / wrong-status
+    # values to empty so SUCCESS/CANCELLED markers stay byte-identical to pre-change
+    # output (the writer omits the key when empty). Cap length defensively so a runaway
+    # LLM response cannot bloat the marker line or the downstream --metadata CLI arg.
+    failure_reason = job.get("failure_reason", "")
+    if not isinstance(failure_reason, str) or status != "FAILED":
+        failure_reason = ""
+    failure_reason = failure_reason.strip()
+    if len(failure_reason) > 500:
+        failure_reason = failure_reason[:500]
     return {
         "agentic_job_id": aid,
         "job_name": (job.get("job_name") or ""),
         "job_type": job_type,
         "status": status,
+        "failure_reason": failure_reason,
     }
 
 
@@ -374,6 +389,13 @@ def _write_job_marker(sid: str, job: dict) -> Path:
         "job_type": job["job_type"],
         "status": job["status"],
     }
+    # Only emit failure_reason when present (FAILED arcs). Omitting it for
+    # SUCCESS/CANCELLED keeps those marker lines byte-identical to the frozen
+    # Phase 7 D-03 shape — readers use .get('failure_reason', '') so the absent
+    # key is a no-op for the metering pipeline.
+    failure_reason = job.get("failure_reason", "")
+    if failure_reason:
+        record["failure_reason"] = failure_reason
     line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
     with open(marker_path, "ab", buffering=0) as f:
         fcntl.flock(f, fcntl.LOCK_EX)
