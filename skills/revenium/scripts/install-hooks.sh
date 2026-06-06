@@ -71,7 +71,7 @@ if [[ -f "${HOOKS_CONFIG_FILE}" ]]; then
 fi
 
 # Patch config.yaml with a stdlib-only re-based Python heredoc (no PyYAML).
-# Mirrors the proven approach in setup-local.sh lines 49-119.
+# Mirrors the proven approach in install.sh lines 49-119.
 # Receives config path, hook script paths, and HOOK_TAG via argv.
 HOOKS_CONFIG_FILE="${HOOKS_CONFIG_FILE}" \
 PRE_LLM_SCRIPT="${PRE_LLM_SCRIPT}" \

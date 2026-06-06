@@ -76,7 +76,7 @@ class RepositoryTests(unittest.TestCase):
         expected = [
             ROOT / 'README.md',
             ROOT / 'docs' / 'installation.md',
-            ROOT / 'examples' / 'setup-local.sh',
+            ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
             SKILL / 'references' / 'troubleshooting.md',

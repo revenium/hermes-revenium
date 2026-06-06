@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
+# install.sh — repo-clone install entry point.
+# Run after `git clone`: copies the skill bundle from this checkout into
+# ~/.hermes/skills/revenium/, then hands off to the bundled
+# scripts/install.sh which wires up credentials, plugin, hooks, guardrail
+# rules, cron, and the gateway restart. All flags pass straight through.
+# (If the skill is already on the host, run scripts/install.sh directly.)
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${HOME}/.hermes/skills/revenium"
 
 # ---------------------------------------------------------------------------
@@ -12,7 +18,7 @@ TARGET_DIR="${HOME}/.hermes/skills/revenium"
 # etc.) and `sqlite3` (the cron reads token counts from ~/.hermes/state.db
 # via sqlite3). `python3` is used for stdlib heredocs throughout the scripts.
 #
-# Without these, `setup-local.sh` previously reported "Installed skill" and
+# Without these, this script previously reported "Installed skill" and
 # the operator only discovered the install was broken when nothing showed up
 # in Revenium. Fail fast with actionable install instructions instead.
 # ---------------------------------------------------------------------------
@@ -92,7 +98,7 @@ fi
 echo "Copied skill bundle to ${TARGET_DIR}"
 echo ""
 
-# quick-260606: hand off to the single installer. setup-local.sh now does exactly
+# quick-260606: hand off to the single installer. install.sh now does exactly
 # one thing the installer cannot — copy the bundle from this repo checkout onto the
 # host — and then delegates ALL wiring (credentials, plugin, hooks, guardrail rules,
 # cron, gateway restart) to install.sh so there is one source of truth and one

@@ -8,7 +8,7 @@ set -euo pipefail
 # Hermes' plugin manager loads on_session_end plugins from a *separate* root:
 # ~/.hermes/plugins/<plugin>/. Without this step the classifier never runs,
 # no kind:"job" markers are written, and agentic-job usage never reaches
-# Revenium. examples/setup-local.sh does this for local dev installs; this
+# Revenium. install.sh does this for local dev installs; this
 # script is the equivalent for tap / hermes-skills-install operators.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -85,7 +85,7 @@ else
 fi
 
 # Patch ${HOOKS_CONFIG_FILE} to ensure the plugin appears in plugins.enabled.
-# Mirror of examples/setup-local.sh's heredoc — stdlib only, no PyYAML (per
+# Mirror of install.sh's heredoc — stdlib only, no PyYAML (per
 # project constraint), idempotent on re-run, lenient about list-item indentation.
 if ${DRY_RUN}; then
   echo "[dry-run] ensure ${PLUGIN_NAME} listed in plugins.enabled of ${HOOKS_CONFIG_FILE}"

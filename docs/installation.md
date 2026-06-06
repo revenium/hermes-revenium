@@ -52,7 +52,7 @@ the plugin, enables the plugin in `config.yaml`, removes stray shadowing copies,
 seeds the taxonomies:
 
 ```bash
-bash examples/setup-local.sh
+bash install.sh
 hermes gateway restart   # restart so the agent loads the updated plugin
 ```
 
