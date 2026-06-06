@@ -59,10 +59,8 @@ fi
 for ((i=1; i<=loop_count; i++)); do
   # Phase 18 (D-06, MIGR-01..04): auto-migration from legacy alertId to ruleIds.
   # Reads alertId inline (Pitfall 5 — no dependency on read_config_field from the
-  # second-stage checker; the legacy alert checker was removed in Phase 19). Empty alertId,
-  # missing config.json, or already-populated ruleIds
-  # all make the migration stage a no-op (exit 0). The `|| true` matches the
-  # rest of the cron pipeline so a migration failure NEVER blocks metering.
+  # second-stage checker; the legacy alert checker was removed in Phase 19). Missing
+  # config.json or no alertId means there is nothing to migrate.
   ALERT_ID_FOR_MIGRATION=$(CONFIG_FILE="${CONFIG_FILE}" python3 - <<'PY' 2>/dev/null || true
 import json, os
 try:
@@ -71,7 +69,16 @@ except Exception:
     print('')
 PY
 )
-  bash "${SKILL_DIR}/scripts/setup-guardrails.sh" --from-alert "${ALERT_ID_FOR_MIGRATION}" --auto 2>/dev/null || true
+  # quick-260606: only invoke the migration when there is actually a legacy alertId.
+  # setup-guardrails' arg parser rejects an empty --from-alert with exit 2 + an
+  # ERROR log (written directly to LOG_FILE, so `2>/dev/null` does not hide it) —
+  # which spammed a spurious "--from-alert requires an alertId argument" every tick
+  # on guardrails-native installs (ruleIds, no alertId) and read like a metering
+  # failure. Guarding here makes the no-op case a true no-op. The `|| true` keeps a
+  # real migration failure from ever blocking metering.
+  if [[ -n "${ALERT_ID_FOR_MIGRATION}" ]]; then
+    bash "${SKILL_DIR}/scripts/setup-guardrails.sh" --from-alert "${ALERT_ID_FOR_MIGRATION}" --auto 2>/dev/null || true
+  fi
   bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/guardrail-check.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
