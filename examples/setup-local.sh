@@ -114,10 +114,12 @@ if command -v hermes >/dev/null 2>&1; then
   fi
 fi
 
-echo "Installed skill to ${TARGET_DIR}"
+echo "Installed skill bundle to ${TARGET_DIR}"
 echo ""
-echo "Next steps:"
-echo "  1. Verify Revenium CLI: revenium config show"
-echo "  2. Install cron: bash ~/.hermes/skills/revenium/scripts/install-cron.sh"
-echo "  3. Start Hermes ('hermes chat') and approve the revenium hooks when prompted."
-echo "     The hooks are registered but inert until you approve them on first use (D-03)."
+echo "Next step — run the one-command installer to finish setup"
+echo "(credentials, plugin, hooks, guardrail rules, cron):"
+echo ""
+echo "  bash ${TARGET_DIR}/scripts/install.sh"
+echo ""
+echo "Then start Hermes ('hermes chat') and approve the revenium hooks when"
+echo "prompted — they are registered but inert until approved on first use (D-03)."
