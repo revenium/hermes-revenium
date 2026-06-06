@@ -4,10 +4,10 @@ Budget enforcement, semantic task-type metering, agentic job tracking, and tool-
 
 ## Quick Start
 
-1. **Install** — clone this repo at the v1.3.1 tag and run `setup-local.sh` (see [Installation](#installation) below for why a clone rather than `hermes skills install`):
+1. **Install** — clone this repo and run `setup-local.sh` (see [Installation](#installation) below for why a clone rather than `hermes skills install`):
 
    ```bash
-   git clone --branch v1.3.1 https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
+   git clone https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
    bash /tmp/hermes-revenium/examples/setup-local.sh
    ```
 
@@ -46,7 +46,7 @@ python3 --version
 ### Option 1: `git clone` + `setup-local.sh` (recommended)
 
 ```bash
-git clone --branch v1.3.1 https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
+git clone https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
 bash /tmp/hermes-revenium/examples/setup-local.sh
 ```
 
