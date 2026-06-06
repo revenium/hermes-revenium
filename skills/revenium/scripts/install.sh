@@ -33,6 +33,8 @@
 #   --skip-cron        Skip installing the metering cron.
 #   --non-interactive  Never prompt; take creds from REVENIUM_* env vars and
 #                      fail if any required value is missing.
+#   --reconfigure      Re-prompt for all four credentials even if already set
+#                      (fixes a wrong/truncated API key — Enter keeps current).
 #   --no-restart       Do not restart the Hermes gateway at the end.
 #   --help             Show this help and exit.
 
@@ -54,6 +56,7 @@ SKIP_GUARDRAILS="false"
 SKIP_CRON="false"
 NON_INTERACTIVE="false"
 NO_RESTART="false"
+RECONFIGURE="false"
 
 usage() { sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
@@ -65,6 +68,7 @@ while [[ $# -gt 0 ]]; do
     --skip-guardrails) SKIP_GUARDRAILS="true"; shift ;;
     --skip-cron) SKIP_CRON="true"; shift ;;
     --non-interactive) NON_INTERACTIVE="true"; shift ;;
+    --reconfigure) RECONFIGURE="true"; shift ;;
     --no-restart) NO_RESTART="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown flag: $1 (try --help)" >&2; exit 2 ;;
@@ -126,14 +130,25 @@ ensure_cred() {
       || die "Failed to set ${label} via 'revenium config set ${key}'."
     return 0
   fi
-  if config_field_set "${label}"; then
+  # --reconfigure forces a re-prompt even when a value is already configured —
+  # the escape hatch for a wrong/truncated key (a bad key surfaces downstream as
+  # HTTP 403 on rule creation, which the "already configured" shortcut would
+  # otherwise make un-fixable through the installer).
+  if [[ "${RECONFIGURE}" != "true" ]] && config_field_set "${label}"; then
     ok "${label} already configured"
     return 0
   fi
   if [[ "${NON_INTERACTIVE}" == "true" ]]; then
     die "${label} not configured and ${envvar} is unset (--non-interactive)."
   fi
-  read -r -p "  Revenium ${label}: " val
+  local prompt_suffix=""
+  config_field_set "${label}" && prompt_suffix=" (press Enter to keep current)"
+  read -r -p "  Revenium ${label}${prompt_suffix}: " val
+  # On --reconfigure, an empty answer keeps the currently-configured value.
+  if [[ -z "${val}" ]] && config_field_set "${label}"; then
+    ok "${label} kept"
+    return 0
+  fi
   [[ -z "${val}" ]] && die "${label} is required."
   revenium config set "${key}" "${val}" >/dev/null 2>&1 \
     && ok "${label} set" \
