@@ -314,6 +314,75 @@ create_rule() {
   local warn_threshold="$3"
   local period="$4"
 
+  # ---------------------------------------------------------------------------
+  # Dedup branch (ported from the sibling skill's idempotent-budget-rules change):
+  # adopt an existing same-scope rule instead of creating a duplicate. This is
+  # what makes re-running setup — or running setup on several hosts that share a
+  # Revenium tenant, or the cron --from-alert migration — idempotent against the
+  # platform rather than just against local config.json. find_existing_rules is
+  # fail-open, so a CLI/JSON error yields no matches and we fall straight through
+  # to a normal create (today's behavior preserved on any error).
+  # ---------------------------------------------------------------------------
+  local existing_ids_raw
+  existing_ids_raw=$(find_existing_rules "${period}") || existing_ids_raw=""
+
+  # Count non-empty lines in the id list (bash 3.2 safe; no arrays).
+  local existing_count=0
+  local _line
+  while IFS= read -r _line; do
+    [[ -n "${_line}" ]] && existing_count=$((existing_count + 1))
+  done <<EOF
+${existing_ids_raw}
+EOF
+
+  if [[ "${existing_count}" -eq 1 ]]; then
+    # Single match — adopt, best-effort rename to the desired (label-bearing)
+    # name, skip create.
+    local existing_id
+    existing_id=$(printf '%s' "${existing_ids_raw}" | tr -d '[:space:]')
+    RULE_ID="${existing_id}"
+    RULE_EXIT=0
+    local _get_json log_existing_name
+    _get_json=$(revenium guardrails budget-rules get "${RULE_ID}" --output json 2>/dev/null) || _get_json=""
+    log_existing_name=$(GET_JSON="${_get_json}" python3 - <<'PY'
+import json, os
+try:
+    d = json.loads(os.environ.get('GET_JSON', ''))
+    print((d.get('name') or '')[:64])
+except Exception:
+    print('')
+PY
+    ) || log_existing_name=""
+    info "Reusing existing budget rule ${RULE_ID} (${log_existing_name:0:64}) — skipping duplicate creation"
+    if [[ -n "${log_existing_name}" && "${log_existing_name}" != "${rule_name}" ]]; then
+      revenium guardrails budget-rules update "${RULE_ID}" --name "${rule_name}" >/dev/null 2>&1 \
+        || warn "Could not rename rule ${RULE_ID} — non-critical"
+    fi
+    return
+  elif [[ "${existing_count}" -gt 1 ]]; then
+    # Multiple matches — warn, print manual delete commands (NO auto-delete: a
+    # shared tenant may host other hosts' rules), adopt first, skip create.
+    echo "WARNING: Found ${existing_count} existing same-scope budget rules — they all meter the same spend."
+    echo "To clean up duplicates, run the following delete commands (no auto-delete; a shared tenant may host other hosts' rules):"
+    local first_id=""
+    while IFS= read -r _line; do
+      _line=$(printf '%s' "${_line}" | tr -d '[:space:]')
+      [[ -z "${_line}" ]] && continue
+      echo "  revenium guardrails budget-rules delete ${_line} --yes"
+      warn "  revenium guardrails budget-rules delete ${_line} --yes"
+      if [[ -z "${first_id}" ]]; then
+        first_id="${_line}"
+      fi
+    done <<EOF
+${existing_ids_raw}
+EOF
+    RULE_ID="${first_id}"
+    RULE_EXIT=0
+    info "Adopting first existing rule ${RULE_ID} — skipping duplicate creation"
+    return
+  fi
+  # Zero matches → fall through to create as normal.
+
   local cmd
   cmd=(revenium guardrails budget-rules create
     --output json
@@ -532,6 +601,131 @@ period_titled() {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: short_host / budget_label (ported from the sibling skill's
+# idempotent-rules change). budget_label returns the deployment label that disambiguates rule
+# names when several hosts share one Revenium tenant: REVENIUM_BUDGET_LABEL if
+# set, otherwise a short hostname (hostname -s -> uname -n -> $HOSTNAME ->
+# "unknown"). Bash 3.2 safe; no herestrings. The `cmd && [[ -n ]] && { ...; }`
+# chains are &&-lists, so a failing probe does not trip `set -e` — it falls
+# through to the next candidate.
+# ---------------------------------------------------------------------------
+short_host() {
+  local h
+  h=$(hostname -s 2>/dev/null) && [[ -n "${h}" ]] && { printf '%s' "${h}"; return; }
+  h=$(uname -n 2>/dev/null) && [[ -n "${h}" ]] && { printf '%s' "${h}"; return; }
+  [[ -n "${HOSTNAME:-}" ]] && { printf '%s' "${HOSTNAME}"; return; }
+  printf 'unknown'
+}
+
+budget_label() {
+  if [[ -n "${REVENIUM_BUDGET_LABEL:-}" ]]; then
+    printf '%s' "${REVENIUM_BUDGET_LABEL}"
+  else
+    short_host
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Helper: find_existing_rules PERIOD
+# Queries Revenium for budget rules whose scope (filter set + windowType/period
+# + groupBy) matches the rule create_rule WOULD create on this run, and prints
+# the matching rule ids (one per line). Group-by is always AGENT for this skill.
+# The desired filter set mirrors create_rule's own branching EXACTLY:
+#   --filters-json  -> opaque inline expression; skip dedup (fail-open to create)
+#   --filter list   -> the operator-supplied dim:op:val triples
+#   neither set     -> the default AGENT:IS:${REVENIUM_AGENT_NAME}
+# Fail-open: a non-zero list call OR non-JSON stdout yields no output, so the
+# caller proceeds to create as normal (preserves today's behavior on any error).
+# Bash 3.2 safe; env-passing heredoc, no herestrings, no associative arrays.
+# ---------------------------------------------------------------------------
+find_existing_rules() {
+  local desired_period="$1"
+  local desired_group_by="AGENT"
+
+  # --filters-json is an opaque inline expression we cannot reliably normalize
+  # against the API's structured filter list — skip dedup (fail-open to create).
+  if [[ -n "${FILTERS_JSON}" ]]; then
+    return 0
+  fi
+
+  # Build the desired filter set (newline-separated dim:op:val), mirroring the
+  # exact branching create_rule uses to construct its --filter args.
+  local desired_filters_nl=""
+  if [[ ${#FILTERS[@]} -gt 0 ]]; then
+    local f
+    for f in "${FILTERS[@]}"; do
+      desired_filters_nl="${desired_filters_nl}${f}"$'\n'
+    done
+  else
+    desired_filters_nl="AGENT:IS:${REVENIUM_AGENT_NAME}"$'\n'
+  fi
+
+  local list_json
+  list_json=$(revenium guardrails budget-rules list --output json 2>/dev/null) || list_json=""
+
+  LIST_JSON="${list_json}" \
+  DESIRED_PERIOD="${desired_period}" \
+  DESIRED_GROUP_BY="${desired_group_by}" \
+  DESIRED_FILTERS_NL="${desired_filters_nl}" \
+  python3 - <<'PY'
+import json, os, sys
+
+def normalize_filter(s):
+    """Normalize a DIM:OP:VALUE string: uppercase DIM and OP, preserve VALUE case."""
+    parts = s.split(':', 2)
+    if len(parts) == 3:
+        return '{}:{}:{}'.format(parts[0].upper(), parts[1].upper(), parts[2])
+    return s.upper()
+
+def make_filter_set(filters):
+    """Normalize a list of {dimension,operator,value} dicts to a frozenset of 'DIM:OP:VAL' strings."""
+    result = set()
+    for f in filters:
+        d = str(f.get('dimension', '')).upper()
+        o = str(f.get('operator', '')).upper()
+        v = str(f.get('value', ''))   # preserve value case
+        result.add('{}:{}:{}'.format(d, o, v))
+    return frozenset(result)
+
+list_json = os.environ.get('LIST_JSON', '')
+desired_period = os.environ.get('DESIRED_PERIOD', '').upper()
+desired_group_by = os.environ.get('DESIRED_GROUP_BY', 'AGENT').upper()
+
+desired_filters = set()
+for line in os.environ.get('DESIRED_FILTERS_NL', '').splitlines():
+    line = line.strip()
+    if line:
+        desired_filters.add(normalize_filter(line))
+desired_filter_set = frozenset(desired_filters)
+
+try:
+    rules = json.loads(list_json)
+    if not isinstance(rules, list):
+        raise ValueError("not a list")
+except Exception:
+    # Fail-open: non-JSON or error -> no output
+    sys.exit(0)
+
+for rule in rules:
+    try:
+        # Compare filters (order-insensitive normalized set)
+        if make_filter_set(rule.get('filters', [])) != desired_filter_set:
+            continue
+        # Compare window type / period (field name varies: windowType or period)
+        rule_period = (rule.get('windowType') or rule.get('period') or '').upper()
+        if rule_period != desired_period:
+            continue
+        # Compare groupBy
+        rule_group_by = str(rule.get('groupBy') or 'AGENT').upper()
+        if rule_group_by != desired_group_by:
+            continue
+        print(rule['id'])
+    except Exception:
+        continue
+PY
+}
+
+# ---------------------------------------------------------------------------
 # Mode A: run_default — all args from CLI flags
 # ---------------------------------------------------------------------------
 run_default() {
@@ -550,7 +744,9 @@ run_default() {
 
   local period_title
   period_title=$(period_titled "${PERIOD}")
-  local rule_name="Hermes ${period_title} Budget"
+  local _label
+  _label=$(budget_label)
+  local rule_name="Hermes ${period_title} Budget — ${_label}"
 
   create_rule "${rule_name}" "${HARD_LIMIT}" "${warn_threshold}" "${PERIOD}"
 
@@ -701,7 +897,9 @@ PY
 
   local period_title
   period_title=$(period_titled "${period}")
-  local base_rule_name="Hermes ${period_title} Budget"
+  local _label
+  _label=$(budget_label)
+  local base_rule_name="Hermes ${period_title} Budget — ${_label}"
 
   # Create base rule
   create_rule "${base_rule_name}" "${hard_limit}" "${warn_threshold}" "${period}"
@@ -820,7 +1018,9 @@ PY
   else
     local period_title
     period_title=$(period_titled "${period}")
-    rule_name="Hermes ${period_title} Budget"
+    local _label
+    _label=$(budget_label)
+    rule_name="Hermes ${period_title} Budget — ${_label}"
   fi
 
   # TOCTOU re-check after flock (concurrent process may have completed migration)
