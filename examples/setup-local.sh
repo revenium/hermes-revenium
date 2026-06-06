@@ -89,37 +89,13 @@ else
   echo "Job taxonomy already exists at ${JOB_TAXONOMY_DEST}, not overwriting"
 fi
 
-# Phase 6 (gap closure): install the on_session_end classifier PLUGIN into ~/.hermes/plugins/
-# — covers gateway, CLI, interactive, ACP, and cron sessions (universal coverage per HOOK-11).
-# `hermes skills install` does NOT relocate plugins/ subdirs; setup-local + install-plugin.sh
-# close the gap. Delegate to install-plugin.sh so the plugin-install + config.yaml-patch
-# logic lives in exactly one place (a divergent inline copy here used to drift from the
-# script). --no-restart because setup-local performs the gateway restart at the end of
-# the run.
-bash "${TARGET_DIR}/scripts/install-plugin.sh" --no-restart
-
-# Phase 12 (D-02): register pre_llm_call / pre_tool_call shell hooks in config.yaml.
-# Guard with || true so a hooks-install hiccup does not abort the whole local setup.
-bash "${TARGET_DIR}/scripts/install-hooks.sh" || true
-
-# Restart the Hermes gateway so the long-lived gateway process reloads the updated
-# classifier plugin. A stale gateway keeps running the pre-update plugin and silently
-# stops writing job markers for gateway-served (Telegram / Slack) sessions — fresh CLI
-# processes pick up the new plugin on their own, but the gateway does not.
-if command -v hermes >/dev/null 2>&1; then
-  if hermes gateway restart >/dev/null 2>&1; then
-    echo "Restarted Hermes gateway (reloaded classifier plugin)"
-  else
-    echo "NOTE: could not restart Hermes gateway — run 'hermes gateway restart' manually"
-  fi
-fi
-
-echo "Installed skill bundle to ${TARGET_DIR}"
+echo "Copied skill bundle to ${TARGET_DIR}"
 echo ""
-echo "Next step — run the one-command installer to finish setup"
-echo "(credentials, plugin, hooks, guardrail rules, cron):"
-echo ""
-echo "  bash ${TARGET_DIR}/scripts/install.sh"
-echo ""
-echo "Then start Hermes ('hermes chat') and approve the revenium hooks when"
-echo "prompted — they are registered but inert until approved on first use (D-03)."
+
+# quick-260606: hand off to the single installer. setup-local.sh now does exactly
+# one thing the installer cannot — copy the bundle from this repo checkout onto the
+# host — and then delegates ALL wiring (credentials, plugin, hooks, guardrail rules,
+# cron, gateway restart) to install.sh so there is one source of truth and one
+# command for the user. All flags (--hard-limit/--period, --non-interactive,
+# --shadow-mode, --skip-guardrails, --skip-cron, --no-restart) pass straight through.
+exec bash "${TARGET_DIR}/scripts/install.sh" "$@"
