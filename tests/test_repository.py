@@ -100,6 +100,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
             SKILL / 'scripts' / 'tool-event-report.sh', # Phase 15 — tool-event reporter
             SKILL / 'scripts' / 'install-plugin.sh',    # Closes tap-install plugin-discovery gap
+            SKILL / 'scripts' / 'install.sh',           # quick-260606 — one-command end-to-end installer
             SKILL / 'scripts' / 'hooks-status.sh',      # Diagnose hooks-registered-but-inert footgun
             # Phase 18 — single rule-creation entry point (D-01)
             SKILL / 'scripts' / 'setup-guardrails.sh',
