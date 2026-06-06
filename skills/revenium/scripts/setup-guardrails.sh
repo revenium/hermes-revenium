@@ -714,105 +714,12 @@ PY
   local base_rule_id="${RULE_ID}"
   local rule_ids_list="${base_rule_id}"
 
-  # Task-type picker (SETUP-02 + D-12, D-13, D-14)
-  if [[ -f "${TAXONOMY_FILE}" ]]; then
-    local labels_json
-    labels_json=$(TAXONOMY_FILE="${TAXONOMY_FILE}" python3 - <<'PY'
-import json, os, sys
-try:
-    d = json.load(open(os.environ['TAXONOMY_FILE']))
-    labels = list(d.get('labels', {}).keys())
-    print(json.dumps(labels))
-except Exception:
-    print('[]')
-PY
-    )
-
-    local label_count
-    label_count=$(echo "${labels_json}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-
-    if [[ "${label_count}" -gt 0 ]]; then
-      echo ""
-      echo "Available task types (optional per-task budget rules):"
-      LABELS_JSON="${labels_json}" python3 - <<'PY'
-import json, os
-labels = json.loads(os.environ['LABELS_JSON'])
-for i, label in enumerate(labels, 1):
-    print(f"  {i}) {label}")
-PY
-
-      local task_selection=""
-      read -r -p 'Which to enforce? (comma-separated indices, or "none"): ' task_selection || task_selection=""
-
-      # Parse selection and create per-task rules
-      local selected_labels
-      selected_labels=$(LABELS_JSON="${labels_json}" TASK_TYPE_SELECTION="${task_selection}" python3 - <<'PY'
-import json, os
-labels = json.loads(os.environ['LABELS_JSON'])
-sel = os.environ['TASK_TYPE_SELECTION'].strip().lower()
-if sel == 'none' or not sel:
-    print('[]')
-else:
-    try:
-        indices = [int(x.strip()) for x in sel.split(',') if x.strip().isdigit()]
-        selected = [labels[i-1] for i in indices if 1 <= i <= len(labels)]
-        print(json.dumps(selected))
-    except Exception:
-        print('[]')
-PY
-      )
-
-      local num_selected
-      num_selected=$(echo "${selected_labels}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
-
-      if [[ "${num_selected}" -gt 0 ]]; then
-        # Iterate selected labels and create per-task rules
-        local label_index=0
-        while [[ ${label_index} -lt ${num_selected} ]]; do
-          local label
-          label=$(LABELS_JSON="${selected_labels}" IDX="${label_index}" python3 - <<'PY'
-import json, os
-labels = json.loads(os.environ['LABELS_JSON'])
-print(labels[int(os.environ['IDX'])])
-PY
-          )
-
-          local task_hard_limit="" task_hl_attempt=0
-          while [[ ${task_hl_attempt} -lt 3 ]]; do
-            read -r -p "Hard limit for ${label} (numeric): " task_hard_limit
-            if validate_hard_limit "${task_hard_limit}"; then
-              break
-            fi
-            echo "Invalid input. Must be a positive number."
-            task_hl_attempt=$((task_hl_attempt + 1))
-          done
-          if ! validate_hard_limit "${task_hard_limit}"; then
-            warn "Skipping task-type rule for ${label} (invalid hard-limit after 3 attempts)."
-            label_index=$((label_index + 1))
-            continue
-          fi
-
-          local task_warn
-          task_warn=$(compute_warn_threshold "${task_hard_limit}")
-
-          local label_title
-          label_title=$(echo "${label}" | python3 -c "import sys; s=sys.stdin.read().strip(); print(s.replace('_',' ').title().replace(' ','_'))" 2>/dev/null || echo "${label}")
-          local task_rule_name="Hermes ${label_title} Budget"
-
-          create_rule "${task_rule_name}" "${task_hard_limit}" "${task_warn}" "${period}"
-
-          if [[ "${RULE_EXIT}" -eq 0 && -n "${RULE_ID}" ]]; then
-            rule_ids_list="${rule_ids_list}
-${RULE_ID}"
-          else
-            warn "Failed to create rule for task type ${label} — skipping."
-          fi
-
-          label_index=$((label_index + 1))
-        done
-      fi
-    fi
-  fi
+  # quick-260606: the interactive per-task-type budget-rule picker was removed.
+  # The base rule above (group-by AGENT, no task-type filter) already enforces
+  # ALL spend across every task type, so a single rule covers everything — no
+  # per-task selection prompt, no per-task rules. Set per-task limits later via
+  # `setup-guardrails.sh --hard-limit N --period P --filter TASK_TYPE:IS:<label>`
+  # if finer-grained enforcement is ever wanted.
 
   # Build JSON array from newline-separated rule IDs
   local new_rule_ids_json
