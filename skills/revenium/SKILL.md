@@ -6,10 +6,11 @@ author: Revenium
 license: MIT
 category: DevOps
 platforms: [macos, linux]
-required_environment_variables:
-  - REVENIUM_API_KEY
-  - REVENIUM_API_URL
-  - REVENIUM_TEAM_ID
+# Credentials live in the `revenium` CLI config (set by install.sh via
+# `revenium config set`), NOT in env vars. Declaring required_environment_variables
+# made Hermes prompt ("Skill Setup Required") for REVENIUM_API_KEY etc. on skill
+# load even though the scripts read them from the CLI config — a redundant prompt.
+# The real credential source is documented via required_credential_files below.
 required_credential_files:
   - path: ~/.config/revenium/config.yaml
     description: Revenium CLI credentials (API key, team-id, tenant-id, owner-id)
