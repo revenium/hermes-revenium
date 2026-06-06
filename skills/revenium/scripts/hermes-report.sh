@@ -99,7 +99,7 @@ main() {
   filtered_sessions=$(
     SESSIONS="${sessions}" \
     MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
-    REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-120}" \
+    REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-45}" \
     SKIPPED_LOG="${sentinel_skipped}" \
     python3 - <<'PY' 2>/dev/null
 import os
@@ -108,9 +108,9 @@ import time
 from pathlib import Path
 
 try:
-    settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '120'))
+    settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '45'))
 except (TypeError, ValueError):
-    settle_seconds = 120
+    settle_seconds = 45
 
 markers_ready_dir = Path(os.environ.get('MARKERS_READY_DIR', ''))
 skipped_log = os.environ.get('SKIPPED_LOG', '')

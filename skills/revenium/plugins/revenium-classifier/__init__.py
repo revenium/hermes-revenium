@@ -25,7 +25,7 @@ def _write_sentinel(session_id) -> None:
     this session. Cron's session-SELECT filter at hermes-report.sh treats sentinel
     presence as 'plugin signalled ready' and reports the session this tick;
     sentinel absence defers reporting until the session's started_at ages past
-    REVENIUM_CRON_SETTLE_SECONDS (default 120s).
+    REVENIUM_CRON_SETTLE_SECONDS (default 45s).
 
     D-04 belt: any IOError / OSError / PermissionError on the sentinel write is
     logged and swallowed — the sentinel is best-effort, and the cron's
