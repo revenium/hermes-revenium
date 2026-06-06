@@ -4,9 +4,9 @@ Budget enforcement, semantic task-type metering, agentic job tracking, and tool-
 
 ## Quick Start
 
-Five steps to get up and running:
+Three steps to get up and running:
 
-1. **Install the skill** — clone this repo at the v1.3.1 tag and run `examples/setup-local.sh` (see [Installation](#installation) below for why):
+1. **Install the skill bundle** — clone this repo at the v1.3.1 tag and run `examples/setup-local.sh` (see [Installation](#installation) below for why):
 
    ```bash
    git clone --branch v1.3.1 https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
@@ -15,39 +15,24 @@ Five steps to get up and running:
 
    This copies the full skill bundle (SKILL.md + `scripts/` + `references/` + `plugins/`) into `~/.hermes/skills/revenium/` and restarts the Hermes gateway so the classifier plugin reloads.
 
-2. **Set up guardrail budget rules:**
+2. **Run the one-command installer:**
 
    ```bash
-   bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
+   bash ~/.hermes/skills/revenium/scripts/install.sh
    ```
 
-   This creates a Revenium guardrail budget rule and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Legacy `alertId` installs auto-migrate on the first cron tick — see [`docs/migration-guardrails.md`](docs/migration-guardrails.md).
+   This single script wires up everything else, in order: it verifies your four Revenium credentials (**API key, team-id, tenant-id, owner-id** — prompting for any that are missing and persisting them with `revenium config set`), installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rules, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run; already-configured steps are skipped.
 
-3. **Install the per-minute metering cron:**
+   Common flags:
+   - `--hard-limit 50 --period MONTHLY` — set the budget non-interactively (otherwise you're prompted).
+   - `--non-interactive` — take all four creds from `REVENIUM_API_KEY` / `REVENIUM_TEAM_ID` / `REVENIUM_TENANT_ID` / `REVENIUM_OWNER_ID` env vars (for automated/CI installs).
+   - `--shadow-mode`, `--skip-guardrails`, `--skip-cron`, `--no-restart`, `--help`.
 
-   ```bash
-   bash ~/.hermes/skills/revenium/scripts/install-cron.sh
-   ```
+   > All four credentials matter: a config with only an API key meters completions fine but fails every guardrails/jobs create with `teamId is required`. The installer ensures all four are persisted.
 
-4. **Install the Hermes shell hooks:**
+3. **Approve hooks on first `hermes chat`** — Hermes shows an approval prompt the first time each hook fires.
 
-   ```bash
-   bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
-   ```
-
-   The hooks register `pre_llm_call`, `pre_tool_call`, and `post_tool_call` in `~/.hermes/config.yaml`. They are inert until you approve them on first `hermes chat`.
-
-5. **Install the on_session_end classifier plugin:**
-
-   ```bash
-   bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
-   ```
-
-   This copies the `revenium-classifier` plugin into `~/.hermes/plugins/` and enables it in `~/.hermes/config.yaml`. Without this step, `on_session_end` never fires and no `kind:"job"` markers are written — so agentic-job usage never reaches Revenium even though completion metering still works.
-
-6. **Approve hooks on first `hermes chat`** — Hermes shows an approval prompt the first time each hook fires.
-
-Each step is detailed in full below.
+> Prefer to run the steps individually? The installer is just an orchestrator over `install-plugin.sh`, `install-hooks.sh`, `setup-guardrails.sh`, and `install-cron.sh` — each is documented in full below.
 
 ## Prerequisites
 
