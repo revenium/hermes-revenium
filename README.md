@@ -4,35 +4,27 @@ Budget enforcement, semantic task-type metering, agentic job tracking, and tool-
 
 ## Quick Start
 
-Three steps to get up and running:
-
-1. **Install the skill bundle** — clone this repo at the v1.3.1 tag and run `examples/setup-local.sh` (see [Installation](#installation) below for why):
+1. **Install** — clone this repo at the v1.3.1 tag and run `setup-local.sh` (see [Installation](#installation) below for why a clone rather than `hermes skills install`):
 
    ```bash
    git clone --branch v1.3.1 https://github.com/revenium/hermes-revenium /tmp/hermes-revenium
    bash /tmp/hermes-revenium/examples/setup-local.sh
    ```
 
-   This copies the full skill bundle (SKILL.md + `scripts/` + `references/` + `plugins/`) into `~/.hermes/skills/revenium/` and restarts the Hermes gateway so the classifier plugin reloads.
+   This one command does everything: it copies the skill bundle into `~/.hermes/skills/revenium/`, then runs the installer — verifies your four Revenium credentials (**API key, team-id, tenant-id, owner-id**, prompting for any that are missing and persisting them with `revenium config set`), installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rule, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run.
 
-2. **Run the one-command installer:**
-
-   ```bash
-   bash ~/.hermes/skills/revenium/scripts/install.sh
-   ```
-
-   This single script wires up everything else, in order: it verifies your four Revenium credentials (**API key, team-id, tenant-id, owner-id** — prompting for any that are missing and persisting them with `revenium config set`), installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rules, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run; already-configured steps are skipped.
-
-   Common flags:
+   Flags pass straight through:
    - `--hard-limit 50 --period MONTHLY` — set the budget non-interactively (otherwise you're prompted).
    - `--non-interactive` — take all four creds from `REVENIUM_API_KEY` / `REVENIUM_TEAM_ID` / `REVENIUM_TENANT_ID` / `REVENIUM_OWNER_ID` env vars (for automated/CI installs).
    - `--shadow-mode`, `--skip-guardrails`, `--skip-cron`, `--no-restart`, `--help`.
 
    > All four credentials matter: a config with only an API key meters completions fine but fails every guardrails/jobs create with `teamId is required`. The installer ensures all four are persisted.
+   >
+   > **Already have the skill on the host** (e.g. installed via a tap)? Skip the clone and run the installer directly: `bash ~/.hermes/skills/revenium/scripts/install.sh`
 
-3. **Approve hooks on first `hermes chat`** — Hermes shows an approval prompt the first time each hook fires.
+2. **Approve hooks on first `hermes chat`** — Hermes shows an approval prompt the first time each hook fires.
 
-> Prefer to run the steps individually? The installer is just an orchestrator over `install-plugin.sh`, `install-hooks.sh`, `setup-guardrails.sh`, and `install-cron.sh` — each is documented in full below.
+> The installer is just an orchestrator over `install-plugin.sh`, `install-hooks.sh`, `setup-guardrails.sh`, and `install-cron.sh` — each is documented in full below if you want to run a step on its own.
 
 ## Prerequisites
 
@@ -58,7 +50,7 @@ git clone --branch v1.3.1 https://github.com/revenium/hermes-revenium /tmp/herme
 bash /tmp/hermes-revenium/examples/setup-local.sh
 ```
 
-`setup-local.sh` copies the full skill bundle (`SKILL.md` + `scripts/` + `references/` + `plugins/` + taxonomy JSONs) into `~/.hermes/skills/revenium/`, idempotently installs the `revenium-classifier` plugin into `~/.hermes/plugins/`, adds it to the Hermes plugin-enabled list, and restarts the Hermes gateway so the plugin loads. It runs with no network access to Hermes' Skills Hub — so no security-scanner verdict, no `--force`, no community-registry resolution. After it completes, proceed to [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks).
+`setup-local.sh` copies the full skill bundle (`SKILL.md` + `scripts/` + `references/` + `plugins/` + taxonomy JSONs) into `~/.hermes/skills/revenium/`, then hands off to `install.sh`, which performs the complete setup (credentials, plugin, hooks, guardrail rule, cron, gateway restart) — see [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks) for what that covers and the flags it accepts. It runs with no network access to Hermes' Skills Hub — so no security-scanner verdict, no `--force`, no community-registry resolution. Nothing further is needed after it completes beyond approving the hooks on your first `hermes chat`.
 
 > **Why not `hermes skills install`?**
 >
@@ -113,13 +105,13 @@ hermes skills publish skills/revenium --to github --repo revenium/hermes-reveniu
 
 ## Required: set up guardrails, cron, and hooks
 
-After installing the skill bundle (any of the options above), run the one-command installer:
+**Option 1 (`setup-local.sh`) already ran this for you** — it hands off to `install.sh` automatically. This section applies if you installed the bundle another way (external_dirs, manual copy, or a tap), or want to re-run/customize a step. Run the one-command installer:
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/install.sh
 ```
 
-It performs every step in this section in order — credentials, plugin, hooks, guardrail rules, cron, gateway restart — and is **idempotent** (already-configured steps are skipped on re-run). Flags: `--hard-limit N --period P` (non-interactive budget), `--non-interactive` (creds from `REVENIUM_*` env vars), `--shadow-mode`, `--skip-guardrails`, `--skip-cron`, `--no-restart`, `--help`.
+It performs every step in this section in order — credentials, plugin, hooks, guardrail rule, cron, gateway restart — and is **idempotent** (already-configured steps are skipped on re-run). Flags: `--hard-limit N --period P` (non-interactive budget), `--non-interactive` (creds from `REVENIUM_*` env vars), `--shadow-mode`, `--skip-guardrails`, `--skip-cron`, `--no-restart`, `--help`.
 
 If you'd rather run the steps yourself (or need to customize one), the individual scripts are documented below — `install.sh` is just an orchestrator over them.
 
