@@ -113,17 +113,37 @@ hermes skills publish skills/revenium --to github --repo revenium/hermes-reveniu
 
 ## Required: set up guardrails, cron, and hooks
 
-After installing the skill (any of the options above), run these commands once in order.
+After installing the skill bundle (any of the options above), run the one-command installer:
 
-**Set up guardrail budget rules:**
+```bash
+bash ~/.hermes/skills/revenium/scripts/install.sh
+```
+
+It performs every step in this section in order — credentials, plugin, hooks, guardrail rules, cron, gateway restart — and is **idempotent** (already-configured steps are skipped on re-run). Flags: `--hard-limit N --period P` (non-interactive budget), `--non-interactive` (creds from `REVENIUM_*` env vars), `--shadow-mode`, `--skip-guardrails`, `--skip-cron`, `--no-restart`, `--help`.
+
+If you'd rather run the steps yourself (or need to customize one), the individual scripts are documented below — `install.sh` is just an orchestrator over them.
+
+### Credentials (all four required)
+
+`install.sh` verifies that **API key, Team ID, Tenant ID, and Owner ID** are all configured, prompting for any that are missing and persisting them with `revenium config set`. This matters: a config with only an API key meters completions fine but fails every `guardrails`/`jobs create` with `HTTP 400: teamId is required` — the API key alone is not enough. To set them manually:
+
+```bash
+revenium config show                         # check what's configured
+revenium config set key       <API_KEY>
+revenium config set team-id   <TEAM_ID>
+revenium config set tenant-id <TENANT_ID>
+revenium config set owner-id  <OWNER_ID>
+```
+
+### Set up guardrail budget rules
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
 ```
 
-The script prompts for budget hard-limit, period, organization name, autonomous mode and notification channel/target, and optionally per-task-type rules. On success it creates Revenium guardrail budget rules and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Legacy `alertId` installs auto-migrate on the first cron tick — see [`docs/migration-guardrails.md`](docs/migration-guardrails.md).
+The script prompts for budget hard-limit, period, organization name, autonomous mode and notification channel/target, and optionally per-task-type rules. On success it creates Revenium guardrail budget rules and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Requires the four credentials above. Legacy `alertId` installs auto-migrate on the first cron tick — see [`docs/migration-guardrails.md`](docs/migration-guardrails.md).
 
-**Install the per-minute metering cron:**
+### Install the per-minute metering cron
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/install-cron.sh
@@ -143,7 +163,7 @@ bash ~/.hermes/skills/revenium/scripts/install-cron.sh --interval-seconds 15 --f
 
 Valid values: `1..60`. Use `--dry-run` to print the crontab line without installing.
 
-**Install the Hermes shell hooks:**
+### Install the Hermes shell hooks
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
@@ -151,7 +171,7 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 
 The shell hooks register `pre_llm_call`, `pre_tool_call`, and `post_tool_call` handlers in `~/.hermes/config.yaml`. They are inert until you approve them on first `hermes chat`. Without the hooks, structural budget enforcement and tool-event capture are inactive.
 
-**Install the on_session_end classifier plugin:**
+### Install the on_session_end classifier plugin
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
@@ -168,7 +188,7 @@ tail -f ~/.hermes/state/revenium/revenium-metering.log
 
 ## First-time setup
 
-The guided Setup Flow is driven by `setup-guardrails.sh --interactive` (step 2 above, or invokable at any time via `/revenium` inside a Hermes session). The skill detects that no `config.json` or `ruleIds` exists and automatically begins setup. Once configured, invoking `/revenium` instead offers status and reconfigure options. The script will:
+The guided Setup Flow is driven by `setup-guardrails.sh --interactive` (run for you by `install.sh`, invokable directly, or available at any time via `/revenium` inside a Hermes session). The skill detects that no `config.json` or `ruleIds` exists and automatically begins setup. Once configured, invoking `/revenium` instead offers status and reconfigure options. The script will:
 
 1. Verify the `revenium` CLI is configured (asks for API key, Team ID, Tenant ID, User ID if not — run `revenium config show` to check, then `revenium login` if unconfigured).
 2. Optionally ask for an organization name (for Revenium reporting attribution).
