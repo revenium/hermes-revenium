@@ -5,7 +5,7 @@
 The task taxonomy is an agent-owned controlled vocabulary stored at `${TAXONOMY_FILE}` (declared
 in `common.sh`; defaults to `~/.hermes/state/revenium/task-taxonomy.json`). The seed file at
 `skills/revenium/task-taxonomy.json` is copied into `${TAXONOMY_FILE}` on fresh installs by
-`examples/setup-local.sh`. After installation, the live file at `${TAXONOMY_FILE}` is mutable:
+`install.sh`. After installation, the live file at `${TAXONOMY_FILE}` is mutable:
 the agent adds new labels to it over time via the atomic write pattern documented below.
 
 Before classifying a substantive turn, the classifier reads `${TAXONOMY_FILE}` as a

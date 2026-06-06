@@ -68,7 +68,7 @@ Phase 6 ships an in-process Hermes lifecycle plugin at `~/.hermes/plugins/reveni
 
 Subagent sessions (where `state.db.sessions.parent_session_id` is non-null) inherit the root user-facing session's `task_type` — one classification per user-request lineage, no per-subagent LLM call. The plugin also gates its LLM call on `guardrail-status.json::halted`; if the budget is halted, the plugin writes `task_type: unclassified` and emits a `WARN` log line instead of spending against the halted budget.
 
-The plugin is installed by `examples/setup-local.sh` into `~/.hermes/plugins/revenium-classifier/`, and the same script idempotently adds `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration. **`hermes skills install` does NOT relocate the `plugins/` subdirectory** — operators installing via that path must additionally copy `~/.hermes/skills/revenium/plugins/revenium-classifier/` to `~/.hermes/plugins/revenium-classifier/` themselves AND add `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration.
+The plugin is installed by `install.sh` into `~/.hermes/plugins/revenium-classifier/`, and the same script idempotently adds `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration. **`hermes skills install` does NOT relocate the `plugins/` subdirectory** — operators installing via that path must additionally copy `~/.hermes/skills/revenium/plugins/revenium-classifier/` to `~/.hermes/plugins/revenium-classifier/` themselves AND add `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration.
 
 After installing or updating the plugin, **run `hermes gateway restart`**. The plugin manager loads plugins once at agent startup; there is no file-watch reload.
 
