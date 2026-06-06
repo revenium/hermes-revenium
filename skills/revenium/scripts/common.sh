@@ -53,6 +53,13 @@ ensure_path() {
   for p in     "${brew_prefix:+${brew_prefix}/bin}"     "${brew_prefix:+${brew_prefix}/sbin}"     /home/linuxbrew/.linuxbrew/bin     /home/linuxbrew/.linuxbrew/sbin     /opt/homebrew/bin     /opt/homebrew/sbin     /usr/local/bin     /usr/bin     "${HOME}/go/bin"     "${HOME}/.local/bin"; do
     [[ -n "${p}" && -d "${p}" ]] && export PATH="${p}:${PATH}"
   done
+  # quick-260606: always succeed. The loop's exit status is that of the LAST
+  # `[[ -d ... ]] && export` — which is 1 when the final candidate (~/.local/bin)
+  # doesn't exist on a host. Callers run `set -euo pipefail` and call ensure_path
+  # right after sourcing, so a non-zero return aborted them silently before any
+  # output (observed: install-plugin.sh dying with no message on a host lacking
+  # ~/.local/bin). ensure_path is best-effort PATH augmentation — never fatal.
+  return 0
 }
 
 log() {
