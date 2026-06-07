@@ -86,7 +86,15 @@ die()  { echo "" >&2; echo "  ✗ $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 step "Checking prerequisites"
 for tool in revenium sqlite3 python3; do
-  command -v "${tool}" >/dev/null 2>&1 || die "${tool} not found on PATH. Install it and re-run. (revenium: brew install revenium/tap/revenium)"
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    case "${tool}" in
+      revenium) hint="brew install revenium/tap/revenium" ;;
+      sqlite3)  hint="brew install sqlite3 (macOS) / apt-get install sqlite3 (Debian/Ubuntu)" ;;
+      python3)  hint="brew install python3 (macOS) / apt-get install python3 (Debian/Ubuntu)" ;;
+      *)        hint="install it via your package manager" ;;
+    esac
+    die "${tool} not found on PATH. Install it and re-run. (${tool}: ${hint})"
+  fi
   ok "${tool}"
 done
 
