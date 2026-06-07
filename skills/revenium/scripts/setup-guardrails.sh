@@ -933,7 +933,7 @@ PY
   migration_notify_reset
 
   local rule_count
-  rule_count=$(echo "${new_rule_ids_json}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
+  rule_count=$(python3 -c "import json,sys; print(len(json.load(sys.stdin)))" <<< "${new_rule_ids_json}" 2>/dev/null || echo "?")
   echo "Created ${rule_count} rule(s). config.json updated. ruleIds=${new_rule_ids_json}"
 }
 
