@@ -7,7 +7,7 @@ hermes skills tap add revenium/hermes-revenium
 hermes skills install revenium/hermes-revenium/skills/revenium --force
 ```
 
-The `--force` flag is required because Hermes' security scanner correctly flags the skill's crontab installer as a persistence mechanism. See the "About the `--force` flag" callout in the [README](../README.md) for details.
+The `--force` flag is required because the scanner returns a `CAUTION` verdict for this skill: it flags the crontab installer as persistence (`MEDIUM`, expected — the cron is the skill's load-bearing metering loop) and the Python heredoc `os.environ` reads as potential exfiltration (`HIGH`, false-positive — the skill's documented data-passing pattern, not credential access). Both findings are expected. `CAUTION` + `--force` is allowed for community-source installs. See the "About the security scan" callout in the [README](../README.md) for the full breakdown.
 
 Hermes discovers custom taps by scanning the repo's `skills/` directory. This repository intentionally places the skill at:
 
