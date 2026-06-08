@@ -293,9 +293,13 @@ then
   exit 0
 fi
 
-# Re-check ruleIds after flock (TOCTOU defense)
+# Re-check ruleIds after flock (TOCTOU defense).
+# Interactive mode is exempt: run_interactive() has its own re-run gate
+# (offers [r]ecreate / [c]ancel), so a populated config must fall through to it
+# rather than exiting here. This re-check only guards the non-interactive paths
+# that create rules unconditionally.
 RULE_IDS=$(read_config_field ruleIds)
-if [[ "${RULE_IDS}" == "nonempty" ]]; then
+if [[ "${MODE}" != "interactive" && "${RULE_IDS}" == "nonempty" ]]; then
   info "ruleIds populated by concurrent process — exiting cleanly"
   exit 0
 fi
