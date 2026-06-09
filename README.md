@@ -174,7 +174,7 @@ tail -f ~/.hermes/state/revenium/revenium-metering.log
 
 The guided Setup Flow is driven by `setup-guardrails.sh --interactive` (run for you by `install.sh`, invokable directly, or available at any time via `/revenium` inside a Hermes session). The skill detects that no `config.json` or `ruleIds` exists and automatically begins setup. Once configured, invoking `/revenium` instead offers status and reconfigure options. The script will:
 
-1. Verify the `revenium` CLI is configured (asks for API key, Team ID, Tenant ID, User ID if not — run `revenium config show` to check, then `revenium login` if unconfigured).
+1. Verify the `revenium` CLI already has all four credentials configured (API key, Team ID, Tenant ID, Owner ID). **`setup-guardrails.sh` does not prompt for credentials** — it only checks that a Team ID resolves, and exits with an error if not, since budget-rule creation fails without one. Credentials are set up by `install.sh` (which prompts for any that are missing) or manually with `revenium config set` (see [Credentials (all four required)](#credentials-all-four-required)). Run `revenium config show` to check what's configured.
 2. Optionally ask for an organization name (for Revenium reporting attribution).
 3. Ask for a budget hard-limit, warn threshold, and period (`DAILY`, `WEEKLY`, `MONTHLY`, `QUARTERLY`).
 4. Ask whether the agent runs autonomously and, if so, which Hermes messaging channel should receive halt notifications.
