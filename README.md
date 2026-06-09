@@ -182,6 +182,46 @@ The guided Setup Flow is driven by `setup-guardrails.sh --interactive` (run for 
 
 Setup is atomic — if any step fails, no partial config is written. The full step-by-step flow lives in [`skills/revenium/references/setup.md`](skills/revenium/references/setup.md).
 
+## Upgrading on a remote host
+
+Re-running `install.sh` **is** the upgrade — it is idempotent (already-configured steps are skipped, no duplicate rules or cron lines). Two things matter on every upgrade: get the new bytes onto the host, and re-sync the **plugin** (updating only `~/.hermes/skills/` leaves the active plugin at `~/.hermes/plugins/` stale). `install.sh` handles the plugin for you.
+
+### Option A — host has the repo (or internet access)
+
+```bash
+ssh <host>
+cd /path/to/hermes-revenium && git pull   # or: git clone https://github.com/revenium/hermes-revenium
+bash install.sh                           # re-copies skill+plugin, re-runs hooks/cron/guardrails, restarts gateway
+```
+
+### Option B — push from your machine via rsync
+
+```bash
+# from the repo root locally
+rsync -av --delete -e ssh skills/revenium/ <user>@<host>:~/.hermes/skills/revenium/
+
+# then on the host, re-run the installer (skips creds already in 'revenium config show')
+ssh <user>@<host> 'bash ~/.hermes/skills/revenium/scripts/install.sh'
+```
+
+> On hosts where `revenium`/`hermes` aren't on the bare login `PATH` (e.g. Linuxbrew installs), prefix the remote command: `PATH="/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$PATH" bash ~/.hermes/skills/revenium/scripts/install.sh`.
+
+### Option C — native install path
+
+```bash
+ssh <host>
+hermes skills install revenium/hermes-revenium/skills/revenium --force   # re-fetch the skill
+bash ~/.hermes/skills/revenium/scripts/install.sh                        # complete setup
+```
+
+### After any upgrade
+
+- If you copied only the skill (not via `install.sh`), run `bash ~/.hermes/skills/revenium/scripts/install-plugin.sh` so `~/.hermes/plugins/revenium-classifier/` gets the new version and the gateway restarts.
+- **Don't leave `.bak` copies** of the skill under `~/.hermes/skills/` — plugin discovery scans their bundled `plugins/` dirs and a stale duplicate can shadow the real one.
+- Verify: `bash ~/.hermes/skills/revenium/scripts/hooks-status.sh` and `crontab -l | grep hermes-revenium-metering`.
+
+For non-interactive/CI upgrades, `install.sh --non-interactive` takes credentials from the `REVENIUM_API_KEY` / `REVENIUM_TEAM_ID` / `REVENIUM_TENANT_ID` / `REVENIUM_OWNER_ID` env vars.
+
 ## How it works
 
 ### Token metering with task-type classification
