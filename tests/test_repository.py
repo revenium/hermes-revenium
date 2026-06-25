@@ -11756,6 +11756,24 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_trace_type_wired_in_both_emit_paths_behind_capability_gate(self):
+        # quick-260625-mlc (TRACE-TYPE-01): --trace-type must be probed once,
+        # resolved once-per-session to the root job type (fallback "uncategorized"),
+        # and appended in BOTH emit paths behind the capability gate — without ever
+        # leaking into --transaction-id (idempotency invariant).
+        text = (SKILL / 'scripts' / 'hermes-report.sh').read_text()
+        # Capability probe exists and greps the CLI help for the flag.
+        self.assertIn('TRACE_TYPE_CLI_CAPABLE', text)
+        self.assertIn('meter completion --help', text)
+        self.assertIn('--trace-type', text)
+        # Appended in exactly two cmd+= sites (per-marker + zero-marker).
+        self.assertEqual(text.count('cmd+=(--trace-type'), 2)
+        # Resolved once-per-session with the literal hard fallback.
+        self.assertIn('root_trace_type', text)
+        self.assertIn('uncategorized', text)
+        # Idempotency: trace-type never enters --transaction-id.
+        self.assertNotRegex(text, r'--transaction-id "[^"]*trace')
+
 
 if __name__ == '__main__':
     unittest.main()

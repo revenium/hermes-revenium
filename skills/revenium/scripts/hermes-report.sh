@@ -42,6 +42,16 @@ else
   warn "revenium jobs/--agentic-job-id not available — job work skipped; metering continues as v1.0."
 fi
 
+# quick-260625-mlc (TRACE-TYPE-01): independent probe for the --trace-type flag
+# (revenium CLI 1.2.1+). Separate capability from jobs/--agentic-job-id — probe it
+# on its own and cache for the whole tick. A negative probe fails open SILENTLY:
+# older installs simply omit --trace-type and meter byte-identically to today
+# (backward-compat constraint). No warn — flag absence is not an error.
+TRACE_TYPE_CLI_CAPABLE=false
+if revenium meter completion --help 2>&1 | grep -q -- '--trace-type'; then
+  TRACE_TYPE_CLI_CAPABLE=true
+fi
+
 # quick-260605: resolve teamId once for the whole tick. jobs create/outcome require
 # it; absent, the CLI returns HTTP 400 / exit 4 which the cron's 409-only success
 # check treats as a generic failure — stranding every outcome in permanent
@@ -213,6 +223,64 @@ PY
     # Phase 21 — but pin the value here so downstream `${root_sid}` references
     # never expand to empty under set -uo pipefail).
     [[ -z "${root_sid}" ]] && root_sid="${sid}"
+
+    # quick-260625-mlc (TRACE-TYPE-01): resolve root_trace_type ONCE per session
+    # (not per marker) and pin it to the ROOT delegator's job type so --trace-type
+    # is byte-identical across every completion that shares this trace — Revenium
+    # requires all transactions in a trace to carry the same traceType. This reads
+    # the ROOT marker file (${root_sid}.jsonl) uniformly for both top-level
+    # (root_sid == sid) and subagent (root_sid != sid) sessions, which is what
+    # guarantees the value matches the root. NOT the per-marker m_owning_job_type
+    # (one session can hold multiple owning job types across markers, which would
+    # emit a mixed trace-type and violate the invariant). Hard fallback to the
+    # literal "uncategorized" when no root job type resolves. Gated on the
+    # capability probe so older installs pay zero cost (verified facts in PLAN
+    # <context>; no new decision ID).
+    local root_trace_type=""
+    if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
+      root_trace_type=$(
+        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null || true
+import json, os
+from pathlib import Path
+root_sid = os.environ.get('ROOT_SID', '')
+markers_dir = os.environ.get('MARKERS_DIR', '')
+if not root_sid or not markers_dir:
+    pass
+else:
+    marker_path = Path(markers_dir) / f"{root_sid}.jsonl"
+    if marker_path.exists():
+        latest_type = ""
+        try:
+            with open(marker_path, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    if rec.get('kind') == 'job':
+                        jt = rec.get('job_type')
+                        if isinstance(jt, str) and jt:
+                            latest_type = jt
+            if latest_type:
+                print(latest_type)
+        except OSError:
+            pass
+PY
+      )
+      # Strip any trailing newline the heredoc emitted.
+      root_trace_type="${root_trace_type%%$'\n'*}"
+      # Sanitize to the allowed charset [A-Za-z0-9_-] (bash bracket class — value
+      # is sanitized here in bash, not python; parity with the m_trace style),
+      # cap at 128 chars, then hard fallback to the literal "uncategorized".
+      root_trace_type="${root_trace_type//[^A-Za-z0-9_-]/_}"
+      root_trace_type="${root_trace_type:0:128}"
+      [[ -z "${root_trace_type}" ]] && root_trace_type="uncategorized"
+    fi
 
     # Phase 22 (JOB-01 / D-02): resolve root_aid ONCE per session for subagent
     # agentic-job inheritance. Only meaningful when root_sid != sid (subagent);
@@ -1090,6 +1158,14 @@ PY
         if [[ -n "${source}" ]]; then
           cmd+=(--environment "${source}")
         fi
+        # quick-260625-mlc (TRACE-TYPE-01): ship the once-per-session root
+        # trace-type (identical for every completion in this session/trace).
+        # Value is always non-empty (falls back to "uncategorized"), so the wire
+        # value is explicit rather than relying on the server default. Never
+        # enters --transaction-id or the ledger line — idempotency is preserved.
+        if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
+          cmd+=(--trace-type "${root_trace_type:-uncategorized}")
+        fi
         # Phase 22 (JOB-01 / D-02 / D-05): per-marker --agentic-job-id slot.
         # The CLI has exactly one --agentic-job-id field (verified via
         # `revenium meter completion --help` 2026-05-29); this is REPLACE, not ADD.
@@ -1179,6 +1255,12 @@ PY
       fi
       if [[ -n "${source}" ]]; then
         cmd+=(--environment "${source}")
+      fi
+      # quick-260625-mlc (TRACE-TYPE-01): identical gated --trace-type append as
+      # the per-marker path — root_trace_type is in scope and already resolved for
+      # this session-loop iteration. Never enters --transaction-id or the ledger.
+      if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
+        cmd+=(--trace-type "${root_trace_type:-uncategorized}")
       fi
 
       local cmd_output cmd_exit
