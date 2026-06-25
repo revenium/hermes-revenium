@@ -1158,6 +1158,14 @@ PY
         if [[ -n "${source}" ]]; then
           cmd+=(--environment "${source}")
         fi
+        # quick-260625-mlc (TRACE-TYPE-01): ship the once-per-session root
+        # trace-type (identical for every completion in this session/trace).
+        # Value is always non-empty (falls back to "uncategorized"), so the wire
+        # value is explicit rather than relying on the server default. Never
+        # enters --transaction-id or the ledger line — idempotency is preserved.
+        if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
+          cmd+=(--trace-type "${root_trace_type:-uncategorized}")
+        fi
         # Phase 22 (JOB-01 / D-02 / D-05): per-marker --agentic-job-id slot.
         # The CLI has exactly one --agentic-job-id field (verified via
         # `revenium meter completion --help` 2026-05-29); this is REPLACE, not ADD.
@@ -1247,6 +1255,12 @@ PY
       fi
       if [[ -n "${source}" ]]; then
         cmd+=(--environment "${source}")
+      fi
+      # quick-260625-mlc (TRACE-TYPE-01): identical gated --trace-type append as
+      # the per-marker path — root_trace_type is in scope and already resolved for
+      # this session-loop iteration. Never enters --transaction-id or the ledger.
+      if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
+        cmd+=(--trace-type "${root_trace_type:-uncategorized}")
       fi
 
       local cmd_output cmd_exit
