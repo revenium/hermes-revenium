@@ -738,11 +738,23 @@ if marker_path.is_file():
         read_err = f"oserror: {exc}"
 
 # Phase 9 (D-11, D-12): deferred owning_job_id resolution pass.
-# For each emitted task marker, find the first job marker whose file position
-# is GREATER than the task marker's position (D-08: job markers appear at arc
-# end, claiming all task markers above them in file order). A task marker with
-# no later job marker gets owning_job_id = None (undeclared arc, D-11).
-# Resolution uses ALL job markers in file order regardless of emission cutoff (D-12).
+# Primary rule (D-08): a task marker is owned by the FIRST job marker whose file
+# position is GREATER than the task marker's position (job markers appear at arc
+# end, claiming all task markers above them in file order).
+#
+# Fallback (TRACE-FIX 2026-06-25): a task marker with NO later job marker is NOT
+# orphaned — it is attributed to the NEAREST PRECEDING job marker instead. The
+# pure "first job after" rule assumed every arc closes with its own job marker
+# below it, but the classifier's _job_marker_exists gate writes at most ONE job
+# marker per session, written EARLY (after the first arc). In long-lived
+# multi-turn sessions (daily pipeline, Slack gateway) the remaining task markers
+# accumulate BELOW that single early job marker and were silently dropped to
+# owning_job_id = None — shipping ~95% of completions with no --agentic-job-id,
+# which in turn left Revenium's server-derived traceType/agenticJobId null.
+# Falling back to the nearest preceding job marker keeps existing arc-end
+# semantics byte-identical (any task WITH a later job still binds to it) while
+# rescuing the trailing tasks. Resolution uses ALL job markers in file order
+# regardless of emission cutoff (D-12).
 for marker in markers:
     task_pos = marker.pop('_file_pos', 0)
     owner = None
@@ -754,6 +766,16 @@ for marker in markers:
             owner_name = job_name
             owner_type = job_type
             break
+    if owner is None:
+        # No job marker after this task: bind to the nearest preceding job marker
+        # (largest job_pos still below task_pos). job_positions is in ascending
+        # file order, so iterate in reverse to find the closest one first.
+        for job_pos, clean_job_id, job_name, job_type in reversed(job_positions):
+            if job_pos < task_pos:
+                owner = clean_job_id
+                owner_name = job_name
+                owner_type = job_type
+                break
     marker['owning_job_id'] = owner
     marker['owning_job_name'] = owner_name
     marker['owning_job_type'] = owner_type
