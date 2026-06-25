@@ -4899,7 +4899,12 @@ class RepositoryTests(unittest.TestCase):
                 )
 
             # --- Fixture B: [task, job, task] ---
-            # First task gets job id; trailing task (no job after it) gets null.
+            # First task gets job id (first job after it). The trailing task has
+            # NO job after it, so the TRACE-FIX fallback binds it to the nearest
+            # preceding job marker instead of orphaning it to None. This is the
+            # long-lived multi-turn session shape (one early job marker, tasks
+            # accumulating below it) that previously left ~95% of completions
+            # unlinked → null agenticJobId/traceType in Revenium.
             sid2 = 'test-attribution-sid2'
             fixture_b = [
                 task_marker(0, 1715515001.0),
@@ -4925,15 +4930,46 @@ class RepositoryTests(unittest.TestCase):
                 f'Fixture B: first task owning_job_id should be {job_id_plain!r}, '
                 f'got {first_m["owning_job_id"]!r}',
             )
-            # Trailing task marker has no job after it → owning_job_id must be None/null
+            # Trailing task marker has no job after it → TRACE-FIX fallback binds
+            # it to the nearest preceding job marker (instead of orphaning to None).
             trailing_m = markers_json_b[1]
             self.assertIn('owning_job_id', trailing_m,
                           f'Fixture B: trailing marker missing owning_job_id: {trailing_m}')
-            self.assertIsNone(
-                trailing_m['owning_job_id'],
-                f'Fixture B: trailing task owning_job_id should be None (no job after it), '
-                f'got {trailing_m["owning_job_id"]!r}',
+            self.assertEqual(
+                trailing_m['owning_job_id'], job_id_plain,
+                f'Fixture B: trailing task owning_job_id should fall back to the '
+                f'nearest preceding job {job_id_plain!r}, got {trailing_m["owning_job_id"]!r}',
             )
+
+            # --- Fixture D: [task, job, task, task, task] ---
+            # Multi-trailing repro of a long multi-turn session: the single early
+            # job marker must own EVERY task — the one above it (first-after) and
+            # all three below it (nearest-preceding fallback). Guards against the
+            # regression where only the first arc's tasks were attributed.
+            sid4 = 'test-attribution-sid4'
+            fixture_d = [
+                task_marker(0, 1715515001.0),
+                job_marker(job_id_plain, 1715515005.0),
+                task_marker(1, 1715515010.0),
+                task_marker(2, 1715515020.0),
+                task_marker(3, 1715515030.0),
+            ]
+            out_d, rc_d = run_heredoc_python(fixture_d, test_sid=sid4)
+            self.assertEqual(rc_d, 0, f'Reader heredoc failed for fixture D: rc={rc_d}')
+            markers_json_d = None
+            for line in out_d.splitlines():
+                if line.startswith('MARKERS_JSON='):
+                    markers_json_d = json.loads(line[len('MARKERS_JSON='):])
+                    break
+            self.assertIsNotNone(markers_json_d, f'MARKERS_JSON not found for fixture D: {out_d}')
+            self.assertEqual(len(markers_json_d), 4,
+                             f'Fixture D: expected 4 task markers, got {len(markers_json_d)}')
+            for i, m in enumerate(markers_json_d):
+                self.assertEqual(
+                    m['owning_job_id'], job_id_plain,
+                    f'Fixture D: task #{i} owning_job_id should be {job_id_plain!r} '
+                    f'(single session job owns all tasks), got {m["owning_job_id"]!r}',
+                )
 
             # --- Fixture C: colon-sanitization ---
             # agentic_job_id with a colon should be sanitized before use
