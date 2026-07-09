@@ -546,7 +546,7 @@ print(model)
 model = '${model}'.lower()
 billing = '${billing_provider}'.lower()
 if billing and billing not in ('', 'none', 'unknown'):
-    if billing == 'openrouter':
+    if billing == 'openrouter' or 'litellm' in billing:
         if 'claude' in model or 'anthropic' in model:
             print('anthropic')
         elif 'gpt' in model or 'o1' in model or 'o3' in model:
