@@ -3692,11 +3692,12 @@ class RepositoryTests(unittest.TestCase):
 
 
     def test_wire_no_provider_regression_per_class(self):
-        """WIRE-04 / D-24: 8-provider regression — every per-marker revenium meter
+        """WIRE-04 / D-24: provider regression — every per-marker revenium meter
         completion argv preserves the same --provider / --model / --model-source flags
         the legacy pre-Phase-3 single-call path would have produced for each of the
         8 provider classes (anthropic, openai, google, xai, deepseek, meta,
-        openrouter-special, bedrock-special)."""
+        openrouter-special, bedrock-special), plus 4 litellm decode cases
+        (anthropic decode, litellm_proxy variant, openai decode, raw fallback)."""
         import json
         import os
         import shutil
@@ -3726,6 +3727,14 @@ class RepositoryTests(unittest.TestCase):
              'anthropic', 'claude-sonnet-4-5',                              'openrouter'),
             ('bedrock-special',   'bedrock',    'anthropic.claude-3-5-sonnet-20241022-v2:0',
              'anthropic', 'claude-3-5-sonnet-20241022-v2:0',               'bedrock'),
+            ('litellm-anthropic', 'litellm',    'claude-sonnet-4-6',
+             'anthropic', 'claude-sonnet-4-6',                              'litellm'),
+            ('litellm-proxy-prefixed', 'litellm_proxy', 'anthropic/claude-sonnet-4-6',
+             'anthropic', 'claude-sonnet-4-6',                              'litellm_proxy'),
+            ('litellm-openai',    'litellm',    'gpt-4o',
+             'openai',    'gpt-4o',                                         'litellm'),
+            ('litellm-fallback',  'litellm',    'command-r-plus',
+             'litellm',   'command-r-plus',                                 'litellm'),
         ]
 
         def build_state_db(path, sessions):
