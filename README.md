@@ -1,5 +1,21 @@
 # Hermes Revenium Skill
 
+![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)
+![Status: Beta](https://img.shields.io/badge/status-beta%20(best--effort)-f0a020?style=for-the-badge)
+
+> ### 🧪 This is a Revenium Labs project
+> **Revenium Labs** projects are field-developed, best-effort solutions. They are working,
+> beta-quality software, built to solve real customer problems and shared in the open. They are
+> **not** part of Revenium's officially supported products.
+>
+> - It works and solves a real problem, but may need adaptation to fit your exact environment.
+> - It's provided as-is, without the versioned-release guarantees, SLAs, or formal support
+>   that back our core products.
+> - We welcome your issues, feedback, and PRs, and **we're happy to work with you** to make it
+>   fit your use case. [Come talk to us on Discord](https://discord.gg/J2DbmjZ2nA).
+>
+> → **[What is Revenium Labs?](https://github.com/revenium/.github/blob/main/LABS.md)**
+
 Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event metering for [Hermes Agent](https://hermes-agent.nousresearch.com) using the [Revenium](https://www.revenium.ai) platform. Every metered completion carries a meaningful `--task-type` drawn from a controlled vocabulary so Revenium analytics show *what the agent was doing* — not just an undifferentiated session total. Discrete task arcs are reported as Revenium agentic jobs with immutable once-only outcomes, and every Hermes tool call is metered via `revenium meter tool-event` — all while budget guardrails halt the agent structurally before it can overspend.
 
 ## Quick Start
