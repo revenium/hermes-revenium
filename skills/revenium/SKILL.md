@@ -108,6 +108,17 @@ Note: `config.json` may carry a legacy `alertId` field from a v1.2 install — t
 
 Follow these steps in order. If any step fails, STOP and explain the failure. Do NOT prompt the user for budget details yourself, and do NOT write any IDs into `config.json` yourself.
 
+0. **Bootstrap the runtime files if they are missing.** `hermes skills install revenium/hermes-revenium/skills/revenium` fetches ONLY `SKILL.md` + `references/` — it does **not** ship `scripts/` or `plugins/`. If `~/.hermes/skills/revenium/scripts/install.sh` does not exist, run the bootstrap (it clones the repo, drops `scripts/` + `plugins/` into place, and hands off to the installer):
+   ```
+   bash ~/.hermes/skills/revenium/references/bootstrap.sh
+   ```
+   If even `references/` did not come down, clone and install directly (this works from a bare host):
+   ```
+   git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium \
+     && bash /tmp/hermes-revenium/install.sh
+   ```
+   `install.sh` runs the whole setup below for you (credentials, plugin, hooks, guardrails, cron, restart). For a fleet of profiles, add `--all-profiles` (or `--profile <name>`). The manual steps below are the equivalent if you prefer to run them one at a time.
+
 1. **Verify the Revenium CLI is configured.** Run:
    ```
    revenium config show

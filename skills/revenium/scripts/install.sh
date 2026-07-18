@@ -29,6 +29,12 @@
 #                      non-interactively (else setup-guardrails prompts).
 #   --period <P>       DAILY | WEEKLY | MONTHLY | QUARTERLY.
 #   --shadow-mode      Create guardrail rules in observe-only shadow mode.
+#   --organization-name <name>
+#                      Persist the ORGANIZATION dimension (a company/product,
+#                      e.g. tableforone) to config.json — threaded onto every
+#                      completion, tool-event, and jobs-create. NOT the agent
+#                      (that is REVENIUM_AGENT_NAME/--agent). Applied even with
+#                      --skip-guardrails and across --all-profiles.
 #   --skip-guardrails  Skip budget-rule creation (creds + plumbing only).
 #   --skip-cron        Skip installing the metering cron.
 #   --non-interactive  Never prompt; take creds from REVENIUM_* env vars and
@@ -36,6 +42,12 @@
 #   --reconfigure      Re-prompt for all four credentials even if already set
 #                      (fixes a wrong/truncated API key — Enter keeps current).
 #   --no-restart       Do not restart the Hermes gateway at the end.
+#   --all-profiles     Fleet install: wire the default home AND every
+#                      ~/.hermes/profiles/<name>/ home. Each profile gets its own
+#                      plugin/hooks/cron and a distinct AGENT (Hermes-<profile>).
+#                      Works in both one-process-per-profile and multiplexed
+#                      single-gateway modes (user-guide/multi-profile-gateways.md).
+#   --profile <name>   Fleet install for the named profile only (repeatable).
 #   --help             Show this help and exit.
 
 set -uo pipefail
@@ -52,24 +64,32 @@ ensure_path
 HARD_LIMIT=""
 PERIOD=""
 SHADOW_MODE="false"
+ORGANIZATION_NAME=""
 SKIP_GUARDRAILS="false"
 SKIP_CRON="false"
 NON_INTERACTIVE="false"
 NO_RESTART="false"
 RECONFIGURE="false"
+ALL_PROFILES="false"
+SELECTED_PROFILES=()
 
-usage() { sed -n '2,46p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --hard-limit) HARD_LIMIT="${2:-}"; shift 2 ;;
     --period) PERIOD="${2:-}"; shift 2 ;;
     --shadow-mode) SHADOW_MODE="true"; shift ;;
+    --organization-name) ORGANIZATION_NAME="${2:-}"; shift 2 ;;
+    --organization-name=*) ORGANIZATION_NAME="${1#--organization-name=}"; shift ;;
     --skip-guardrails) SKIP_GUARDRAILS="true"; shift ;;
     --skip-cron) SKIP_CRON="true"; shift ;;
     --non-interactive) NON_INTERACTIVE="true"; shift ;;
     --reconfigure) RECONFIGURE="true"; shift ;;
     --no-restart) NO_RESTART="true"; shift ;;
+    --all-profiles) ALL_PROFILES="true"; shift ;;
+    --profile) SELECTED_PROFILES+=("${2:?--profile requires a name}"); shift 2 ;;
+    --profile=*) SELECTED_PROFILES+=("${1#--profile=}"); shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: unknown flag: $1 (try --help)" >&2; exit 2 ;;
   esac
@@ -97,6 +117,98 @@ for tool in revenium sqlite3 python3; do
   fi
   ok "${tool}"
 done
+
+# ---------------------------------------------------------------------------
+# 1b. BUG-3 fleet dispatch — wire every selected profile home.
+# ---------------------------------------------------------------------------
+# When --all-profiles / --profile is given we re-exec THIS script once per
+# profile home with HERMES_HOME / REVENIUM_STATE_DIR / REVENIUM_AGENT_NAME set to
+# that profile, so each profile gets its own plugin, hooks, cron line (unique
+# per-profile marker), and a distinct AGENT dimension. REVENIUM_FLEET_CHILD
+# guards against infinite recursion; REVENIUM_FLEET_PROFILE tells the child to
+# install its cron under the per-profile marker (install-cron.sh --profile).
+# Credentials are global to the `revenium` CLI, so the first child configures
+# them and the rest find them already set (idempotent).
+if [[ "${REVENIUM_FLEET_CHILD:-}" != "1" ]] \
+   && { [[ "${ALL_PROFILES}" == "true" ]] || (( ${#SELECTED_PROFILES[@]} > 0 )); }; then
+  step "Fleet install across Hermes profiles"
+
+  # Build the child flag list from parsed state (never re-passes profile flags).
+  child_flags=()
+  [[ -n "${HARD_LIMIT}" ]] && child_flags+=(--hard-limit "${HARD_LIMIT}")
+  [[ -n "${PERIOD}" ]] && child_flags+=(--period "${PERIOD}")
+  [[ "${SHADOW_MODE}" == "true" ]] && child_flags+=(--shadow-mode)
+  [[ -n "${ORGANIZATION_NAME}" ]] && child_flags+=(--organization-name "${ORGANIZATION_NAME}")
+  [[ "${NON_INTERACTIVE}" == "true" ]] && child_flags+=(--non-interactive)
+  [[ "${RECONFIGURE}" == "true" ]] && child_flags+=(--reconfigure)
+  [[ "${SKIP_CRON}" == "true" ]] && child_flags+=(--skip-cron)
+  # Per-profile guardrails only run non-interactively (a fleet must not prompt N
+  # times). Without --hard-limit/--period, skip guardrails per child and tell the
+  # operator to set them per profile with a distinct REVENIUM_AGENT_NAME.
+  if [[ "${SKIP_GUARDRAILS}" == "true" || -z "${HARD_LIMIT}" || -z "${PERIOD}" ]]; then
+    child_flags+=(--skip-guardrails)
+    GUARDRAILS_DEFERRED="true"
+  else
+    GUARDRAILS_DEFERRED="false"
+  fi
+  # The parent owns the single restart at the end; children never restart.
+  child_flags+=(--no-restart)
+
+  fleet_rc=0
+  fleet_count=0
+  while IFS=$'\t' read -r pname phome; do
+    [[ -z "${pname}" ]] && continue
+    if (( ${#SELECTED_PROFILES[@]} > 0 )); then
+      want=false
+      for w in "${SELECTED_PROFILES[@]}"; do [[ "${w}" == "${pname}" ]] && want=true; done
+      ${want} || continue
+    fi
+    pstate="${phome}/state/revenium"
+    pagent="$(default_agent_name_for_profile "${pname}")"
+    say ""
+    step "Profile '${pname}' → ${phome} (agent ${pagent})"
+    if HERMES_HOME="${phome}" \
+       REVENIUM_STATE_DIR="${pstate}" \
+       REVENIUM_AGENT_NAME="${pagent}" \
+       REVENIUM_FLEET_CHILD=1 \
+       REVENIUM_FLEET_PROFILE="${pname}" \
+       bash "${BASH_SOURCE[0]}" "${child_flags[@]}"; then
+      ok "Profile '${pname}' wired"
+    else
+      echo "  ✗ Profile '${pname}' install returned non-zero — see output above." >&2
+      fleet_rc=1
+    fi
+    fleet_count=$((fleet_count + 1))
+  done < <(hermes_profile_homes)
+
+  if (( fleet_count == 0 )); then
+    die "No matching Hermes profiles found under ${HOME}/.hermes/profiles/."
+  fi
+
+  # One gateway restart for the whole fleet (multiplex = one gateway; per-profile
+  # gateways = `hermes-gateways`, see user-guide/multi-profile-gateways.md).
+  if [[ "${NO_RESTART}" != "true" ]] && command -v hermes >/dev/null 2>&1; then
+    step "Restarting the Hermes gateway(s)"
+    if command -v hermes-gateways >/dev/null 2>&1 && hermes-gateways restart >/dev/null 2>&1; then
+      ok "Per-profile gateways restarted (hermes-gateways)"
+    elif hermes gateway restart >/dev/null 2>&1; then
+      ok "Gateway restarted"
+    else
+      say "  NOTE: could not restart the gateway — run 'hermes gateway restart' (or 'hermes-gateways restart') manually."
+    fi
+  fi
+
+  echo ""
+  if [[ "${GUARDRAILS_DEFERRED:-false}" == "true" ]]; then
+    echo "ℹ Guardrail budget rules were NOT created per profile (fleet mode skips"
+    echo "  interactive prompts). Set them per profile with a distinct agent scope, e.g.:"
+    echo "    HERMES_HOME=~/.hermes/profiles/<name> REVENIUM_AGENT_NAME=Hermes-<name> \\"
+    echo "      bash ${SCRIPT_DIR}/setup-guardrails.sh --interactive"
+    echo ""
+  fi
+  echo "✅ Fleet install complete."
+  exit "${fleet_rc}"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Credentials — ensure ALL FOUR are configured
@@ -184,7 +296,12 @@ bash "${SCRIPT_DIR}/install-plugin.sh" --no-restart || die "Plugin install faile
 # 4. Shell hooks
 # ---------------------------------------------------------------------------
 step "Registering pre/post hooks in config.yaml"
-bash "${SCRIPT_DIR}/install-hooks.sh" || warn "install-hooks.sh returned non-zero — review above; continuing."
+# BUG-6: fleet children are gateway-served (headless) — set hooks_auto_accept so
+# the hooks actually fire without an interactive approval prompt.
+hooks_flags=()
+[[ -n "${REVENIUM_FLEET_PROFILE:-}" ]] && hooks_flags+=(--auto-accept)
+bash "${SCRIPT_DIR}/install-hooks.sh" ${hooks_flags[@]+"${hooks_flags[@]}"} \
+  || warn "install-hooks.sh returned non-zero — review above; continuing."
 
 # ---------------------------------------------------------------------------
 # 5. Guardrail budget rules
@@ -220,7 +337,43 @@ else
     gr_cmd+=(--interactive)
   fi
   [[ "${SHADOW_MODE}" == "true" ]] && gr_cmd+=(--shadow-mode)
+  [[ -n "${ORGANIZATION_NAME}" ]] && gr_cmd+=(--organization-name "${ORGANIZATION_NAME}")
   "${gr_cmd[@]}" || die "Guardrail rule creation failed — see the error above."
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. ORGANIZATION dimension — persist even when guardrails were skipped.
+# ---------------------------------------------------------------------------
+# setup-guardrails.sh writes organizationName during rule creation, but a fleet
+# install defers guardrails per profile (and standalone installs may pass
+# --skip-guardrails), so persist the flag value here too. Idempotent; creates
+# config.json if absent. Warns if it looks like an agent name (org-vs-agent).
+if [[ -n "${ORGANIZATION_NAME}" ]]; then
+  warn_if_org_looks_like_agent "${ORGANIZATION_NAME}"
+  mkdir -p "${STATE_DIR}"
+  if CONFIG_FILE="${CONFIG_FILE}" ORG_NAME="${ORGANIZATION_NAME}" python3 - <<'PY'
+import json, os, tempfile
+from pathlib import Path
+p = Path(os.environ['CONFIG_FILE'])
+org = os.environ.get('ORG_NAME', '')
+try:
+    cfg = json.loads(p.read_text())
+    if not isinstance(cfg, dict):
+        cfg = {}
+except Exception:
+    cfg = {}
+if cfg.get('organizationName') == org:
+    raise SystemExit(0)
+cfg['organizationName'] = org
+with tempfile.NamedTemporaryFile('w', dir=str(p.parent), delete=False, suffix='.tmp') as t:
+    json.dump(cfg, t, indent=2); t.write('\n'); t.flush(); os.fsync(t.fileno()); tmp = t.name
+os.rename(tmp, str(p))
+PY
+  then
+    ok "organizationName='${ORGANIZATION_NAME}' persisted to config.json"
+  else
+    warn "could not persist organizationName to config.json — continuing"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -230,7 +383,14 @@ if [[ "${SKIP_CRON}" == "true" ]]; then
   step "Skipping metering cron (--skip-cron)"
 else
   step "Installing the per-minute metering cron"
-  bash "${SCRIPT_DIR}/install-cron.sh" || die "Cron install failed."
+  # As a fleet child, install under the per-profile marker so profiles never
+  # clobber one another (BUG-3). Standalone installs keep the legacy bare marker.
+  if [[ -n "${REVENIUM_FLEET_PROFILE:-}" ]]; then
+    bash "${SCRIPT_DIR}/install-cron.sh" --profile "${REVENIUM_FLEET_PROFILE}" \
+      || die "Cron install failed."
+  else
+    bash "${SCRIPT_DIR}/install-cron.sh" || die "Cron install failed."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
