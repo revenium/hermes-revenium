@@ -10,6 +10,111 @@ source "${SCRIPT_DIR}/common.sh"
 
 ensure_path
 
+# Argument parsing.
+#   --auto-accept    BUG-6: set `hooks_auto_accept: true` at the top level of the
+#                    target profile's config.yaml. REQUIRED for gateway-served
+#                    profiles: headless gateways never show the interactive
+#                    approval prompt, so registered hooks stay INERT (and
+#                    tool-event capture silently never happens) until this is set.
+#   --metering-only  BUG-6: install ONLY the post_tool_call hook (tool-event
+#                    capture). In shadow/metering-only mode the two pre_* hooks
+#                    are inert overhead that still fire on every LLM/tool call.
+#   --all-profiles   Register hooks in the default home AND every
+#                    ~/.hermes/profiles/<name>/ config.yaml.
+#   --profile <name> Register hooks for the named profile only (repeatable).
+AUTO_ACCEPT=false
+METERING_ONLY=false
+ALL_PROFILES=false
+SELECTED_PROFILES=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --auto-accept) AUTO_ACCEPT=true; shift ;;
+    --metering-only) METERING_ONLY=true; shift ;;
+    --all-profiles) ALL_PROFILES=true; shift ;;
+    --profile) SELECTED_PROFILES+=("${2:?--profile requires a name}"); shift 2 ;;
+    --profile=*) SELECTED_PROFILES+=("${1#--profile=}"); shift ;;
+    -h|--help)
+      cat <<USAGE
+Usage: install-hooks.sh [--auto-accept] [--metering-only]
+                        [--all-profiles | --profile <name> ...]
+
+Registers the revenium pre_llm_call / pre_tool_call / post_tool_call shell hooks
+in the target profile's config.yaml. Idempotent.
+
+  --auto-accept    Set hooks_auto_accept: true (REQUIRED for headless gateways —
+                   they never show the approval prompt, so hooks stay inert).
+  --metering-only  Install only post_tool_call (tool-event capture); skip the two
+                   pre_* enforcement hooks (inert overhead in metering-only mode).
+  --all-profiles   Apply to the default home and every ~/.hermes/profiles/<name>/.
+  --profile <name> Apply to the named profile only (repeatable).
+USAGE
+      exit 0 ;;
+    *) echo "ERROR: unknown argument: $1" >&2; echo "Run with --help for usage." >&2; exit 1 ;;
+  esac
+done
+
+# BUG-6 fleet dispatch: re-exec per profile home with HERMES_HOME set so each
+# profile's own config.yaml is patched (and, with --auto-accept, gets the flag).
+if { [[ "${ALL_PROFILES}" == "true" ]] || (( ${#SELECTED_PROFILES[@]} > 0 )); } \
+   && [[ "${REVENIUM_HOOKS_FLEET_CHILD:-}" != "1" ]]; then
+  child_flags=()
+  ${AUTO_ACCEPT} && child_flags+=(--auto-accept)
+  ${METERING_ONLY} && child_flags+=(--metering-only)
+  rc=0
+  matched=0
+  while IFS=$'\t' read -r pname phome; do
+    [[ -z "${pname}" ]] && continue
+    if (( ${#SELECTED_PROFILES[@]} > 0 )); then
+      want=false
+      for w in "${SELECTED_PROFILES[@]}"; do [[ "${w}" == "${pname}" ]] && want=true; done
+      ${want} || continue
+    fi
+    echo "▸ Hooks for profile '${pname}' → ${phome}"
+    REVENIUM_HOOKS_FLEET_CHILD=1 \
+    HERMES_HOME="${phome}" \
+    REVENIUM_STATE_DIR="${phome}/state/revenium" \
+    REVENIUM_HOOKS_CONFIG_FILE="${phome}/config.yaml" \
+      bash "${BASH_SOURCE[0]}" "${child_flags[@]}" || rc=1
+    matched=$((matched + 1))
+  done < <(hermes_profile_homes)
+  (( matched == 0 )) && { echo "ERROR: no matching profiles found." >&2; exit 1; }
+  exit "${rc}"
+fi
+
+# BUG-6: set hooks_auto_accept: true at the top level of config.yaml. Idempotent,
+# stdlib-only (no PyYAML). Headless/gateway-served profiles never show the
+# interactive approval prompt, so without this the registered hooks stay inert.
+apply_auto_accept() {
+  mkdir -p "$(dirname "${HOOKS_CONFIG_FILE}")"
+  CONFIG_YAML="${HOOKS_CONFIG_FILE}" python3 - <<'PYEOF'
+import os
+import re
+from pathlib import Path
+
+path = Path(os.environ['CONFIG_YAML'])
+if not path.exists():
+    path.write_text("hooks_auto_accept: true\n", encoding="utf-8")
+    print("✓ Created " + str(path) + " with hooks_auto_accept: true")
+    raise SystemExit(0)
+
+content = path.read_text(encoding="utf-8")
+m = re.search(r"^(hooks_auto_accept:).*$", content, re.MULTILINE)
+if m:
+    new = content[:m.start()] + "hooks_auto_accept: true" + content[m.end():]
+    if new != content:
+        path.write_text(new, encoding="utf-8")
+        print("✓ Set hooks_auto_accept: true in " + str(path))
+    else:
+        print("✓ hooks_auto_accept already true in " + str(path))
+    raise SystemExit(0)
+if not content.endswith("\n"):
+    content += "\n"
+content += "hooks_auto_accept: true\n"
+path.write_text(content, encoding="utf-8")
+print("✓ Added hooks_auto_accept: true to " + str(path))
+PYEOF
+}
+
 HOOK_TAG="# hermes-revenium-hooks"
 PRE_LLM_SCRIPT="${SKILL_DIR}/scripts/pre_llm_call.sh"
 PRE_TOOL_SCRIPT="${SKILL_DIR}/scripts/pre_tool_call.sh"
@@ -47,18 +152,35 @@ print_approval_banner() {
 BANNER
 }
 
+# BUG-6: apply hooks_auto_accept BEFORE the fast-path so an already-registered
+# install still gets the flag set (headless gateways need it regardless of
+# whether the hook commands are already present).
+if ${AUTO_ACCEPT}; then
+  mkdir -p "${HERMES_HOME}"
+  apply_auto_accept
+fi
+
 # Idempotency check — re-run is a no-op (D-01, CR-01).
-# Key the fast-path on whether ALL revenium command paths are already present,
-# NOT on a bare HOOK_TAG grep — a stale HOOK_TAG without the commands must NOT
-# short-circuit the install.
-if grep -qF "${PRE_LLM_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null \
-   && grep -qF "${PRE_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null \
-   && grep -qF "${POST_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null; then
+# Key the fast-path on whether the required revenium command paths are already
+# present, NOT on a bare HOOK_TAG grep — a stale HOOK_TAG without the commands
+# must NOT short-circuit the install. In --metering-only mode only post_tool_call
+# is required (the two pre_* hooks are intentionally not installed).
+present=true
+if ! grep -qF "${POST_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null; then present=false; fi
+if ! ${METERING_ONLY}; then
+  grep -qF "${PRE_LLM_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null || present=false
+  grep -qF "${PRE_TOOL_SCRIPT}" "${HOOKS_CONFIG_FILE}" 2>/dev/null || present=false
+fi
+if ${present}; then
   echo "Revenium hooks already registered in ${HOOKS_CONFIG_FILE}"
-  # Print the banner even on the no-op fast-path. Most operators run
-  # install-hooks.sh expecting the loud reminder; suppressing it because
-  # the registration is already done was misleading.
-  sed -e "s|SCRIPT_DIR|${SCRIPT_DIR}|g" < <(print_approval_banner)
+  if ${AUTO_ACCEPT}; then
+    echo "✓ hooks_auto_accept enabled — hooks fire without an approval prompt (gateway-ready)."
+  else
+    # Print the banner even on the no-op fast-path. Most operators run
+    # install-hooks.sh expecting the loud reminder; suppressing it because
+    # the registration is already done was misleading.
+    sed -e "s|SCRIPT_DIR|${SCRIPT_DIR}|g" < <(print_approval_banner)
+  fi
   exit 0
 fi
 
@@ -78,6 +200,7 @@ PRE_LLM_SCRIPT="${PRE_LLM_SCRIPT}" \
 PRE_TOOL_SCRIPT="${PRE_TOOL_SCRIPT}" \
 POST_TOOL_SCRIPT="${POST_TOOL_SCRIPT}" \
 HOOK_TAG="${HOOK_TAG}" \
+METERING_ONLY="${METERING_ONLY}" \
 python3 - <<'PYEOF'
 import os
 import re
@@ -88,16 +211,22 @@ pre_llm = os.environ['PRE_LLM_SCRIPT']
 pre_tool = os.environ['PRE_TOOL_SCRIPT']
 post_tool = os.environ['POST_TOOL_SCRIPT']
 hook_tag = os.environ['HOOK_TAG']
+# BUG-6: metering-only installs register ONLY post_tool_call (tool-event capture).
+metering_only = os.environ.get('METERING_ONLY', 'false') == 'true'
 
-# The hooks block to insert — three entries, no matcher: field (fires for ALL tools).
-hooks_block = (
-    "hooks:\n"
+# The hooks block to insert — no matcher: field (fires for ALL tools). In
+# metering-only mode only post_tool_call is written.
+_pre_block = "" if metering_only else (
     "  pre_llm_call:\n"
     "    - command: " + pre_llm + "\n"
     "      timeout: 5\n"
     "  pre_tool_call:\n"
     "    - command: " + pre_tool + "\n"
     "      timeout: 5\n"
+)
+hooks_block = (
+    "hooks:\n"
+    + _pre_block +
     "  post_tool_call:\n"
     "    - command: " + post_tool + "\n"
     "      timeout: 5\n"
@@ -204,7 +333,7 @@ post_tool_present = bool(re.search(re.escape(post_tool), existing_hooks))
 new_hooks = existing_hooks
 status = []
 
-if not pre_llm_present:
+if not metering_only and not pre_llm_present:
     patched = insert_command_under_key(new_hooks, "pre_llm_call", pre_llm)
     if patched is not None:
         new_hooks = patched
@@ -213,7 +342,7 @@ if not pre_llm_present:
         new_hooks = new_hooks + full_event_key("pre_llm_call", pre_llm)
         status.append("Added pre_llm_call key and revenium command to hooks block")
 
-if not pre_tool_present:
+if not metering_only and not pre_tool_present:
     patched = insert_command_under_key(new_hooks, "pre_tool_call", pre_tool)
     if patched is not None:
         new_hooks = patched
@@ -239,10 +368,11 @@ new_content = content[:line_start] + "hooks:\n" + new_hooks + content[hooks_end:
 # resulting hooks block, and never a second copy if one already exists.
 final_extent = hooks_block_extent(new_content)
 final_hooks = new_content[final_extent[1]:final_extent[2]]
-both_present = (
-    bool(re.search(re.escape(pre_llm), final_hooks))
-    and bool(re.search(re.escape(pre_tool), final_hooks))
-    and bool(re.search(re.escape(post_tool), final_hooks))
+both_present = bool(re.search(re.escape(post_tool), final_hooks)) and (
+    metering_only or (
+        bool(re.search(re.escape(pre_llm), final_hooks))
+        and bool(re.search(re.escape(pre_tool), final_hooks))
+    )
 )
 if both_present and not re.search(
         r"^" + re.escape(hook_tag) + r"\s*$", new_content, re.MULTILINE):
@@ -258,14 +388,24 @@ else:
     print("Revenium hooks already present in " + str(config_path))
 PYEOF
 
-chmod +x "${PRE_LLM_SCRIPT}" "${PRE_TOOL_SCRIPT}" "${POST_TOOL_SCRIPT}"
+if ${METERING_ONLY}; then
+  chmod +x "${POST_TOOL_SCRIPT}"
+  echo "Revenium hooks installed in ${HOOKS_CONFIG_FILE} (metering-only)"
+  echo "   post_tool_call: ${POST_TOOL_SCRIPT}"
+else
+  chmod +x "${PRE_LLM_SCRIPT}" "${PRE_TOOL_SCRIPT}" "${POST_TOOL_SCRIPT}"
+  echo "Revenium hooks installed in ${HOOKS_CONFIG_FILE}"
+  echo "   pre_llm_call:   ${PRE_LLM_SCRIPT}"
+  echo "   pre_tool_call:  ${PRE_TOOL_SCRIPT}"
+  echo "   post_tool_call: ${POST_TOOL_SCRIPT}"
+fi
 
-echo "Revenium hooks installed in ${HOOKS_CONFIG_FILE}"
-echo "   pre_llm_call:   ${PRE_LLM_SCRIPT}"
-echo "   pre_tool_call:  ${PRE_TOOL_SCRIPT}"
-echo "   post_tool_call: ${POST_TOOL_SCRIPT}"
-
-# Same banner as the fast-path. Always loud, always last so it stays on screen.
-sed -e "s|SCRIPT_DIR|${SCRIPT_DIR}|g" < <(print_approval_banner)
+# BUG-6: when auto-accept is set the hooks fire without an approval prompt, so the
+# "inert until approved" banner does not apply. Otherwise print it loud and last.
+if ${AUTO_ACCEPT}; then
+  echo "✓ hooks_auto_accept enabled — hooks fire without an approval prompt (gateway-ready)."
+else
+  sed -e "s|SCRIPT_DIR|${SCRIPT_DIR}|g" < <(print_approval_banner)
+fi
 
 echo "To uninstall: bash ${SKILL_DIR}/scripts/uninstall-hooks.sh"
