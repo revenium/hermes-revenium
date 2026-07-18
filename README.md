@@ -24,15 +24,18 @@ Budget enforcement, semantic task-type metering, agentic job tracking, and tool-
 
    ```bash
    hermes skills install revenium/hermes-revenium/skills/revenium --force
-   bash ~/.hermes/skills/revenium/scripts/install.sh
+   bash ~/.hermes/skills/revenium/references/bootstrap.sh
    ```
 
    The first command installs the skill via Hermes' native install path. `--force` is required because the scanner returns a `CAUTION` verdict — see [Why `--force` is required](#why---force-is-required) for what the findings are and why they are expected.
 
-   The second command completes setup: verifies your four Revenium credentials (**API key, team-id, tenant-id, owner-id**, prompting for any that are missing), installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rule, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run.
+   > **Why the bootstrap?** `hermes skills install` fetches only `SKILL.md` + `references/` — it does **not** ship `scripts/` or `plugins/`. `references/bootstrap.sh` clones the repo, drops those two directories into `~/.hermes/skills/revenium/`, and then hands off to `scripts/install.sh`. If your `hermes skills install` didn't even fetch `references/`, clone and install directly instead: `git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium && bash /tmp/hermes-revenium/install.sh`.
+
+   The bootstrap then completes setup: verifies your four Revenium credentials (**API key, team-id, tenant-id, owner-id**, prompting for any that are missing), installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rule, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run.
 
    Flags pass straight through to `install.sh`:
    - `--hard-limit 50 --period MONTHLY` — set the budget non-interactively (otherwise you're prompted).
+   - `--all-profiles` / `--profile <name>` — wire a whole fleet of Hermes profiles (each profile gets its own plugin/hooks/cron and a distinct agent `Hermes-<profile>`). See [Multi-profile / fleet installs](#multi-profile--fleet-installs).
    - `--non-interactive` — take all four creds from `REVENIUM_API_KEY` / `REVENIUM_TEAM_ID` / `REVENIUM_TENANT_ID` / `REVENIUM_OWNER_ID` env vars (for automated/CI installs).
    - `--shadow-mode`, `--skip-guardrails`, `--skip-cron`, `--no-restart`, `--help`.
 
@@ -63,10 +66,10 @@ python3 --version
 
 ```bash
 hermes skills install revenium/hermes-revenium/skills/revenium --force
-bash ~/.hermes/skills/revenium/scripts/install.sh
+bash ~/.hermes/skills/revenium/references/bootstrap.sh
 ```
 
-The first command installs the skill via Hermes' native install path. The second completes setup — credentials, plugin, hooks, guardrail rule, cron, and gateway restart. See [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks) for what `install.sh` covers and the flags it accepts.
+The first command installs the skill via Hermes' native install path. `hermes skills install` fetches only `SKILL.md` + `references/`, so the bootstrap fetches the missing `scripts/` + `plugins/` into `~/.hermes/skills/revenium/` and then completes setup — credentials, plugin, hooks, guardrail rule, cron, and gateway restart. See [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks) for what `install.sh` covers and the flags it accepts.
 
 #### Why `--force` is required
 
@@ -110,6 +113,24 @@ To make this skill discoverable through Hermes' skill index:
 ```bash
 hermes skills publish skills/revenium --to github --repo revenium/hermes-revenium
 ```
+
+## Multi-profile / fleet installs
+
+A Hermes [profile](https://github.com/revenium/hermes-revenium) is a separate Hermes home under `~/.hermes/profiles/<name>/` (the default profile uses `~/.hermes/` directly). To meter a fleet of profiles, add `--all-profiles` (or `--profile <name>`, repeatable) to the installer:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install.sh --all-profiles
+# or specific profiles:
+bash ~/.hermes/skills/revenium/scripts/install.sh --profile gtm --profile qa
+```
+
+This wires plugin + hooks + cron once per profile home, each with:
+
+- **A distinct AGENT** — `REVENIUM_AGENT_NAME` defaults to `Hermes-<profile>` (the default profile stays `Hermes`), so Revenium separates spend per agent. This is the **AGENT** dimension, *not* the ORGANIZATION dimension: `organizationName` is a company/product (e.g. `tableforone`) and is threaded through completions, tool-events, **and** `jobs create` so a job and its transactions share one org — never set it to an agent name.
+- **A unique crontab marker** `# hermes-revenium-metering-<profile>` — a second profile install never clobbers the first. `uninstall-cron.sh` removes every profile's line; orphaned lines (after a `~/.hermes` reset) are reconciled automatically.
+- **`hooks_auto_accept: true`** — headless profile gateways never show the hook-approval prompt, so hooks stay inert without this. Fleet installs set it automatically (`install-hooks.sh --auto-accept`). Use `install-hooks.sh --metering-only` to register only `post_tool_call` for shadow/metering-only profiles.
+
+Both deployment modes work: one-process-per-profile and the multiplexed single gateway (`gateway.multiplex_profiles: true`, where the classifier resolves the owning profile's home/state.db/markers **per session** from the `agent:<profile>:…` namespace). Size `REVENIUM_CRON_SETTLE_SECONDS` (default **600s**) above worst-case job-inference latency. See [`references/setup.md`](skills/revenium/references/setup.md) → **Multi-profile / fleet installs** for the full operational guide.
 
 ## Required: set up guardrails, cron, and hooks
 

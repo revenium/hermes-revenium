@@ -86,6 +86,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'references' / 'halt-survivability.md',
             SKILL / 'references' / 'task-classification.md',
             SKILL / 'references' / 'job-declaration.md',
+            # BUG-5 — bootstrap fetches scripts/ + plugins/ after `hermes skills install`
+            SKILL / 'references' / 'bootstrap.sh',
             SKILL / 'scripts' / 'common.sh',
             SKILL / 'scripts' / 'install-cron.sh',
             SKILL / 'scripts' / 'uninstall-cron.sh',
