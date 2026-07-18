@@ -32,6 +32,17 @@ JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"
 # Phase 10 (D-07): staleness threshold for wedged-job warn. Env-overridable.
 REVENIUM_JOBS_STALE_SECONDS="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+# BUG-1 (agentic-job ↔ transaction association race): the reporter defers a
+# session's completions until either the classifier plugin's .ready sentinel
+# lands (authoritative gate) OR the session ages past this settle window
+# (fallback for when NO plugin is installed and no sentinel ever arrives).
+# The old 45s default was SHORTER than real job-inference latency (observed
+# ~200s under concurrent multi-profile load), so the age-fallback routinely
+# metered + ledgered completions BEFORE the job marker existed, permanently
+# orphaning them from the job created a tick later. This MUST exceed worst-case
+# job-inference time. Metering-only installs (no classifier plugin, no job
+# markers) can safely lower it — there is nothing to wait for.
+REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}"
 # Phase 12: target file for install-hooks.sh (registers pre_llm_call/pre_tool_call hooks).
 HOOKS_CONFIG_FILE="${REVENIUM_HOOKS_CONFIG_FILE:-${HERMES_HOME}/config.yaml}"
 # Phase 14: tool-event capture state paths.
@@ -139,4 +150,63 @@ resolve_team_id() {
     | sed -n 's/.*Team ID:[[:space:]]*//p' \
     | head -1 \
     | tr -d '[:space:]'
+}
+
+# BUG-3 (multi-profile fan-out): enumerate the Hermes profile homes on this host
+# for fleet install/uninstall operations. Prints one TAB-separated
+# "<name>\t<home>" line per profile: the default profile first ("default" →
+# ${HERMES_DEFAULT_HOME:-${HOME}/.hermes}), then one line per
+# ${HERMES_DEFAULT_HOME}/profiles/*/ directory (Hermes' per-profile home layout,
+# see user-guide/profiles.md — "~/.hermes/profiles/<name>/"). The base is the
+# real DEFAULT home, NOT the possibly-overridden HERMES_HOME, so a fleet install
+# enumerates every profile regardless of which home this process was pointed at.
+# `hermes profile list` is the canonical enumerator (reference/profile-commands.md)
+# but scanning the profiles/ dir needs no CLI and works headless — both modes of
+# multi-profile-gateways.md (one-process-per-profile and the multiplexed single
+# gateway) keep each profile's home under this path.
+hermes_profile_homes() {
+  local base="${HERMES_DEFAULT_HOME:-${HOME}/.hermes}"
+  printf 'default\t%s\n' "${base}"
+  local d name
+  if [[ -d "${base}/profiles" ]]; then
+    for d in "${base}/profiles"/*/; do
+      [[ -d "${d}" ]] || continue
+      name="$(basename "${d}")"
+      # Skip a literal "default" profile dir — the default home is already emitted.
+      [[ "${name}" == "default" ]] && continue
+      printf '%s\t%s\n' "${name}" "${d%/}"
+    done
+  fi
+}
+
+# BUG-3: derive the default per-profile AGENT dimension name. The default
+# profile keeps the historical "Hermes"; named profiles attribute to
+# "Hermes-<profile>" so each profile's completions land under a distinct AGENT
+# (--agent argv). Operators override per profile via REVENIUM_AGENT_NAME.
+default_agent_name_for_profile() {
+  local profile="${1:-default}"
+  if [[ -z "${profile}" || "${profile}" == "default" ]]; then
+    printf 'Hermes\n'
+  else
+    printf 'Hermes-%s\n' "${profile}"
+  fi
+}
+
+# BUG-2 (organization-vs-agent hygiene): warn when organizationName looks like it
+# was mistakenly set to the agent/profile identity instead of the ORGANIZATION
+# dimension (a company/product, e.g. "tableforone"). Per-agent attribution is the
+# AGENT dimension (REVENIUM_AGENT_NAME / --agent), NOT organizationName. Best-effort
+# heuristic — only warns, never mutates or fails.
+warn_if_org_looks_like_agent() {
+  local org="${1:-}"
+  [[ -z "${org}" ]] && return 0
+  local agent="${REVENIUM_AGENT_NAME:-Hermes}"
+  # Case-insensitive exact match, or the "Hermes"/"Hermes-<profile>" family.
+  local org_lc agent_lc
+  org_lc="$(printf '%s' "${org}" | tr '[:upper:]' '[:lower:]')"
+  agent_lc="$(printf '%s' "${agent}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${org_lc}" == "${agent_lc}" || "${org_lc}" == hermes || "${org_lc}" == hermes-* ]]; then
+    warn "organizationName='${org}' looks like an AGENT name, not an ORGANIZATION. The ORGANIZATION dimension should be a company/product (e.g. 'tableforone'); per-agent attribution is the AGENT dimension via REVENIUM_AGENT_NAME/--agent. See references/setup.md."
+  fi
+  return 0
 }

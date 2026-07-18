@@ -78,6 +78,10 @@ ORG_NAME=""
 if [[ -f "${CONFIG_FILE}" ]]; then
   ORG_NAME=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('organizationName', ''))" 2>/dev/null || true)
 fi
+# BUG-2: organizationName is the ORGANIZATION dimension (company/product), NOT the
+# agent. Warn if it looks like an agent/profile name so a misconfigured install
+# does not pollute the ORGANIZATION dimension.
+warn_if_org_looks_like_agent "${ORG_NAME}"
 
 main() {
   info "=== Hermes Metering Reporter starting ==="
@@ -109,7 +113,7 @@ main() {
   filtered_sessions=$(
     SESSIONS="${sessions}" \
     MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
-    REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-45}" \
+    REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}" \
     SKIPPED_LOG="${sentinel_skipped}" \
     python3 - <<'PY' 2>/dev/null
 import os
@@ -118,7 +122,7 @@ import time
 from pathlib import Path
 
 try:
-    settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '45'))
+    settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '600'))
 except (TypeError, ValueError):
     settle_seconds = 45
 
@@ -458,6 +462,12 @@ PY
             # quick-260605: pass teamId explicitly when resolved (omitted in tests).
             if [[ -n "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
               precheck_jobs_cmd+=(--team-id "${REVENIUM_TEAM_ID_RESOLVED}")
+            fi
+            # BUG-2: thread the SAME organization dimension through jobs create as
+            # completions/tool-events carry, so a job and its transactions never
+            # land in different orgs. Omitted when unset (preserves v1.4 wire shape).
+            if [[ -n "${ORG_NAME}" ]]; then
+              precheck_jobs_cmd+=(--organization-name "${ORG_NAME}")
             fi
 
             # D-10: best-effort — never abort or continue the session loop.
@@ -1002,6 +1012,12 @@ PY
             # quick-260605: pass teamId explicitly when resolved (omitted in tests).
             if [[ -n "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
               jobs_cmd+=(--team-id "${REVENIUM_TEAM_ID_RESOLVED}")
+            fi
+            # BUG-2: thread the SAME organization dimension through jobs create as
+            # completions/tool-events carry, so a job and its transactions never
+            # land in different orgs. Omitted when unset (preserves v1.4 wire shape).
+            if [[ -n "${ORG_NAME}" ]]; then
+              jobs_cmd+=(--organization-name "${ORG_NAME}")
             fi
 
             # D-10: best-effort invocation — capture output and exit code; never abort.
