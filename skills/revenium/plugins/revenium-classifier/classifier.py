@@ -53,13 +53,85 @@ TRIVIAL_BLOCKLIST = {"ack", "acknowledgment", "greeting", "confirmation", "hello
 
 logger = logging.getLogger("revenium_classifier")
 
+# BUG-4 (multiplex correctness): in the opt-in gateway.multiplex_profiles mode a
+# SINGLE default gateway process serves EVERY profile; sessions are namespaced
+# `agent:<profile>:…` and each profile keeps its OWN home/state.db/markers under
+# ~/.hermes/profiles/<profile>/ (see user-guide/multi-profile-gateways.md). The
+# module-level path constants above are import-time snapshots of the PROCESS env,
+# so in the multiplexer they always point at the default home — every profile's
+# markers would land in the wrong state/revenium/ and the per-profile cron would
+# never see them. To fix this we resolve the owning profile's paths PER SESSION
+# from the session-id namespace and thread them through every filesystem/db
+# helper. In one-process-per-profile mode (the default) the session-id is not
+# namespaced and the profile home does not exist under this process's home, so
+# resolution falls back to the module paths — byte-identical to pre-BUG-4.
 
-def _walk_to_root_session(sid: str, max_depth: int = 10) -> str:
+from collections import namedtuple  # noqa: E402  (kept local to BUG-4 machinery)
+
+_Paths = namedtuple(
+    "_Paths",
+    "hermes_home state_dir markers_dir markers_ready_dir "
+    "taxonomy_file job_taxonomy_file guardrail_status_file state_db",
+)
+
+# `agent:<profile>:<rest>` namespace (multiplex). Capture the profile segment.
+_NS_RE = re.compile(r"^agent:([^:]+):")
+
+
+def _module_paths() -> "_Paths":
+    """The process-level paths (module globals). Read live so tests that reload
+    the module with new env vars still resolve correctly."""
+    return _Paths(
+        HERMES_HOME, STATE_DIR, MARKERS_DIR, MARKERS_READY_DIR,
+        TAXONOMY_FILE, JOB_TAXONOMY_FILE, GUARDRAIL_STATUS_FILE, STATE_DB,
+    )
+
+
+def _paths_for_session(session_id: str) -> "_Paths":
+    """Resolve the state paths that OWN this session.
+
+    Multiplex mode: a `agent:<profile>:…` session is owned by
+    ${HERMES_HOME}/profiles/<profile>/ — but only when that profile home actually
+    exists on disk (so a namespaced session in one-process-per-profile mode, where
+    HERMES_HOME already points at the profile, correctly falls back to the module
+    paths rather than nesting profiles/<profile>/profiles/<profile>). The default
+    profile and any non-namespaced session use the module paths unchanged.
+
+    Fail-open (D-04): any error returns the module paths.
+    """
+    try:
+        m = _NS_RE.match(session_id or "")
+        if not m:
+            return _module_paths()
+        profile = m.group(1)
+        if not profile or profile == "default":
+            return _module_paths()
+        profile_home = HERMES_HOME / "profiles" / profile
+        if not profile_home.is_dir():
+            return _module_paths()
+        state_dir = profile_home / "state" / "revenium"
+        markers_dir = state_dir / "markers"
+        return _Paths(
+            hermes_home=profile_home,
+            state_dir=state_dir,
+            markers_dir=markers_dir,
+            markers_ready_dir=markers_dir / ".ready",
+            taxonomy_file=state_dir / "task-taxonomy.json",
+            job_taxonomy_file=state_dir / "job-taxonomy.json",
+            guardrail_status_file=state_dir / "guardrail-status.json",
+            state_db=profile_home / "state.db",
+        )
+    except Exception:
+        return _module_paths()
+
+
+def _walk_to_root_session(sid: str, max_depth: int = 10, paths: "_Paths | None" = None) -> str:
     """Walk state.db.sessions.parent_session_id chain. Returns input sid if it has
     no parent. Read-only URI mode prevents WAL lock contention with Hermes writer.
     Depth-capped to defeat pathological corrupted parent chains."""
+    p = paths or _module_paths()
     try:
-        uri = f"file:{STATE_DB}?mode=ro"
+        uri = f"file:{p.state_db}?mode=ro"
         with sqlite3.connect(uri, uri=True) as conn:
             current = sid
             for _ in range(max_depth):
@@ -76,7 +148,7 @@ def _walk_to_root_session(sid: str, max_depth: int = 10) -> str:
         return sid  # belt: D-04 invariant
 
 
-def _read_session_messages(sid: str) -> "tuple[str, str]":
+def _read_session_messages(sid: str, paths: "_Paths | None" = None) -> "tuple[str, str]":
     """Return (last_user_content, last_assistant_content) for `sid` from state.db.messages.
 
     The production plugin entrypoint (_on_session_end in __init__.py) always passes
@@ -97,10 +169,11 @@ def _read_session_messages(sid: str) -> "tuple[str, str]":
     """
     if not sid:
         return ("", "")
-    if not STATE_DB.exists():
+    p = paths or _module_paths()
+    if not p.state_db.exists():
         return ("", "")
     try:
-        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=2.0)
+        conn = sqlite3.connect(f"file:{p.state_db}?mode=ro", uri=True, timeout=2.0)
         try:
             cursor = conn.execute(
                 "SELECT role, content FROM messages"
@@ -133,6 +206,7 @@ def _read_session_transcript(
     sid: str,
     max_chars: int = 8000,
     per_msg_cap: int = 500,
+    paths: "_Paths | None" = None,
 ) -> str:
     """Return a chronologically-ordered (timestamp ASC) transcript for `sid`.
 
@@ -151,10 +225,11 @@ def _read_session_transcript(
     """
     if not sid:
         return ""
-    if not STATE_DB.exists():
+    p = paths or _module_paths()
+    if not p.state_db.exists():
         return ""
     try:
-        conn = sqlite3.connect(f"file:{STATE_DB}?mode=ro", uri=True, timeout=2.0)
+        conn = sqlite3.connect(f"file:{p.state_db}?mode=ro", uri=True, timeout=2.0)
         try:
             cursor = conn.execute(
                 "SELECT role, content FROM messages"
@@ -371,15 +446,16 @@ def _validate_job(job: dict) -> "dict | None":
     }
 
 
-def _write_job_marker(sid: str, job: dict) -> Path:
+def _write_job_marker(sid: str, job: dict, paths: "_Paths | None" = None) -> Path:
     """Atomic O_APPEND + fcntl.LOCK_EX write of a single kind:"job" marker line.
 
     Mirror of _write_marker_pair but writes ONE line using the frozen Phase 7 D-03
     record shape. Reader-required keys: kind, agentic_job_id, job_type, status.
     Same compact serialization, same markers/<sid>.jsonl file.
     """
-    MARKERS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    p = paths or _module_paths()
+    p.markers_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker_path = p.markers_dir / f"{sid}.jsonl"
     record = {
         "kind": "job",
         "ts": time.time(),
@@ -403,15 +479,16 @@ def _write_job_marker(sid: str, job: dict) -> Path:
     return marker_path
 
 
-def _read_job_taxonomy_labels() -> list:
+def _read_job_taxonomy_labels(paths: "_Paths | None" = None) -> list:
     """Read JOB_TAXONOMY_FILE and return job_type labels sorted recent-first, alpha within ties.
 
     Copy of _read_taxonomy_labels with TAXONOMY_FILE → JOB_TAXONOMY_FILE.
     Seed entries with no last_seen_at fall into the 'older' alpha bucket — handled
     by the analog without special-casing. Returns [] on any failure (D-04 fail-open).
     """
+    p = paths or _module_paths()
     try:
-        data = json.loads(JOB_TAXONOMY_FILE.read_text(encoding="utf-8"))
+        data = json.loads(p.job_taxonomy_file.read_text(encoding="utf-8"))
         labels = data.get("labels", {})
         if not isinstance(labels, dict):
             return []
@@ -439,7 +516,7 @@ def _read_job_taxonomy_labels() -> list:
     return []
 
 
-def _persist_job_type_to_taxonomy(job_type: str) -> None:
+def _persist_job_type_to_taxonomy(job_type: str, paths: "_Paths | None" = None) -> None:
     """Append job_type to job-taxonomy.json if not already present, updating
     last_seen_at on every call (D-32 mint-back pattern).
 
@@ -450,10 +527,12 @@ def _persist_job_type_to_taxonomy(job_type: str) -> None:
     """
     if not job_type:
         return
+    p = paths or _module_paths()
+    job_taxonomy_file = p.job_taxonomy_file
     import datetime
     try:
-        JOB_TAXONOMY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = JOB_TAXONOMY_FILE.parent / (JOB_TAXONOMY_FILE.name + ".lock")
+        job_taxonomy_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = job_taxonomy_file.parent / (job_taxonomy_file.name + ".lock")
         try:
             with open(lock_path, "a") as lockfd:
                 try:
@@ -467,7 +546,7 @@ def _persist_job_type_to_taxonomy(job_type: str) -> None:
                     )
                     return
                 try:
-                    data = json.loads(JOB_TAXONOMY_FILE.read_text(encoding="utf-8"))
+                    data = json.loads(job_taxonomy_file.read_text(encoding="utf-8"))
                 except Exception:
                     data = {"labels": {}}
                 labels = data.get("labels", {})
@@ -488,12 +567,12 @@ def _persist_job_type_to_taxonomy(job_type: str) -> None:
                         labels[job_type] = {}
                     labels[job_type]["last_seen_at"] = now_iso
                 data["labels"] = labels
-                tmp = JOB_TAXONOMY_FILE.parent / (JOB_TAXONOMY_FILE.name + ".tmp")
+                tmp = job_taxonomy_file.parent / (job_taxonomy_file.name + ".tmp")
                 tmp.write_text(
                     json.dumps(data, indent=2, ensure_ascii=False) + "\n",
                     encoding="utf-8",
                 )
-                tmp.replace(JOB_TAXONOMY_FILE)
+                tmp.replace(job_taxonomy_file)
         except OSError as exc:
             logger.warning(
                 "revenium-classifier: job taxonomy persist skipped, lock contention "
@@ -510,7 +589,7 @@ def _persist_job_type_to_taxonomy(job_type: str) -> None:
         )
 
 
-def _job_marker_exists(sid: str) -> bool:
+def _job_marker_exists(sid: str, paths: "_Paths | None" = None) -> bool:
     """Return True if a kind:"job" marker line already exists for sid, False otherwise.
 
     Mirror of _read_latest_task_type line-by-line tolerant parse, but scans for
@@ -519,7 +598,7 @@ def _job_marker_exists(sid: str) -> bool:
     the ultimate idempotency backstop (D-08). Do NOT mirror _recent_marker_pair_exists;
     D-08 chose presence-scan over wall-clock proximity (PATTERNS.md §_job_marker_exists).
     """
-    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    marker_path = (paths or _module_paths()).markers_dir / f"{sid}.jsonl"
     if not marker_path.is_file():
         return False
     try:
@@ -536,10 +615,10 @@ def _job_marker_exists(sid: str) -> bool:
     return False
 
 
-def _read_latest_task_type(sid: str) -> "str | None":
+def _read_latest_task_type(sid: str, paths: "_Paths | None" = None) -> "str | None":
     """Return the task_type of the most recent valid marker record for `sid`, or None
     if the file is missing or has no valid records. Used by D-05 subagent inheritance."""
-    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    marker_path = (paths or _module_paths()).markers_dir / f"{sid}.jsonl"
     if not marker_path.is_file():
         return None
     try:
@@ -557,12 +636,13 @@ def _read_latest_task_type(sid: str) -> "str | None":
     return None
 
 
-def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0) -> bool:
+def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0,
+                               paths: "_Paths | None" = None) -> bool:
     """D-13: return True if the marker file's tail carries a GUARDRAIL+CHAT pair
     whose most recent ts is within `within_seconds` of time.time(). Used to skip
     the plugin write when the agent's SKILL.md FINAL ACTION snippet already wrote
     markers for this turn. Per Pitfall 6 option (a) — wall-clock proximity."""
-    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    marker_path = (paths or _module_paths()).markers_dir / f"{sid}.jsonl"
     if not marker_path.is_file():
         return False
     try:
@@ -590,24 +670,24 @@ def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0) -> bool:
     return False
 
 
-def _guardrail_halted() -> bool:
+def _guardrail_halted(paths: "_Paths | None" = None) -> bool:
     """Read guardrail-status.json and return True if halted. Fail-open on any
     filesystem or JSON error per D-08."""
     try:
-        data = json.loads(GUARDRAIL_STATUS_FILE.read_text(encoding="utf-8"))
+        data = json.loads((paths or _module_paths()).guardrail_status_file.read_text(encoding="utf-8"))
         return bool(data.get("halted", False))
     except Exception:
         return False
 
 
-def _read_taxonomy_labels() -> list:
+def _read_taxonomy_labels(paths: "_Paths | None" = None) -> list:
     """Read TAXONOMY_FILE and return labels sorted recent-first, alpha within ties.
 
     Labels with a `last_seen_at` ISO timestamp within the last 7 days appear
     first (recent bucket); older labels and labels without `last_seen_at` (seed
     entries) follow alphabetically. Returns [] on any failure (D-04 fail-open)."""
     try:
-        data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
+        data = json.loads((paths or _module_paths()).taxonomy_file.read_text(encoding="utf-8"))
         labels = data.get("labels", {})
         if not isinstance(labels, dict):
             return []
@@ -667,14 +747,15 @@ def _build_classification_prompt(user_msg: str, assistant_resp: str, labels: lis
     )
 
 
-async def _classify_via_llm(context: dict, response_preview: str) -> str:
+async def _classify_via_llm(context: dict, response_preview: str,
+                            paths: "_Paths | None" = None) -> str:
     """Invoke the user's main budgeted LLM via agent.auxiliary_client.call_llm.
     Per Pitfall 8 + A3 + D-06: NO `task=` argument so the call uses the user's
     main provider+model from config.yaml. Returns the LLM-emitted raw string;
     caller validates against LABEL_RE + TRIVIAL_BLOCKLIST via _validate_label."""
     if call_llm is None:
         return "unclassified"
-    labels = _read_taxonomy_labels()
+    labels = _read_taxonomy_labels(paths)
     prompt = _build_classification_prompt(
         context.get("message", "") or "",
         response_preview,
@@ -716,7 +797,7 @@ def _validate_label(label: str) -> str:
     return cleaned
 
 
-def _persist_label_to_taxonomy(label: str) -> None:
+def _persist_label_to_taxonomy(label: str, paths: "_Paths | None" = None) -> None:
     """Append label to task-taxonomy.json if not already present, updating
     last_seen_at on every call (D-32 mint-back).
 
@@ -731,10 +812,11 @@ def _persist_label_to_taxonomy(label: str) -> None:
     skipped and the function returns without raising (D-01, D-02)."""
     if label == "unclassified":
         return
+    taxonomy_file = (paths or _module_paths()).taxonomy_file
     import datetime
     try:
-        TAXONOMY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".lock")
+        taxonomy_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = taxonomy_file.parent / (taxonomy_file.name + ".lock")
         try:
             with open(lock_path, "a") as lockfd:
                 try:
@@ -747,7 +829,7 @@ def _persist_label_to_taxonomy(label: str) -> None:
                     )
                     return
                 try:
-                    data = json.loads(TAXONOMY_FILE.read_text(encoding="utf-8"))
+                    data = json.loads(taxonomy_file.read_text(encoding="utf-8"))
                 except Exception:
                     data = {"labels": {}}
                 labels = data.get("labels", {})
@@ -766,9 +848,9 @@ def _persist_label_to_taxonomy(label: str) -> None:
                         labels[label] = {}
                     labels[label]["last_seen_at"] = now_iso
                 data["labels"] = labels
-                tmp = TAXONOMY_FILE.parent / (TAXONOMY_FILE.name + ".tmp")
+                tmp = taxonomy_file.parent / (taxonomy_file.name + ".tmp")
                 tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-                tmp.replace(TAXONOMY_FILE)
+                tmp.replace(taxonomy_file)
         except OSError as exc:
             logger.warning(
                 "revenium-classifier: taxonomy persist skipped, lock contention for label=%s: %s",
@@ -785,7 +867,7 @@ def _muid() -> str:
     return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
 
 
-def _root_agentic_job_id_for(root_sid: str) -> str:
+def _root_agentic_job_id_for(root_sid: str, paths: "_Paths | None" = None) -> str:
     """Resolve the root's agentic_job_id by scanning markers/<root_sid>.jsonl
     for the most recent kind:"job" line. Returns "" on missing file, no job
     marker, JSON decode failure, or any OSError. D-05 fail-open.
@@ -803,7 +885,7 @@ def _root_agentic_job_id_for(root_sid: str) -> str:
     """
     if not root_sid:
         return ""
-    marker_path = MARKERS_DIR / f"{root_sid}.jsonl"
+    marker_path = (paths or _module_paths()).markers_dir / f"{root_sid}.jsonl"
     if not marker_path.exists():
         return ""
     latest_aid = ""
@@ -830,7 +912,7 @@ def _root_agentic_job_id_for(root_sid: str) -> str:
     return latest_aid
 
 
-def _write_marker_pair(sid: str, task_type: str) -> Path:
+def _write_marker_pair(sid: str, task_type: str, paths: "_Paths | None" = None) -> Path:
     """Atomic O_APPEND + fcntl.LOCK_EX write of a GUARDRAIL + CHAT marker pair.
 
     Per D-14 + HOOK-06: < 1024 bytes per line, exactly two records, single lock.
@@ -846,14 +928,15 @@ def _write_marker_pair(sid: str, task_type: str) -> Path:
     is reused here (NOT refactored to call the Phase 21 sidecar). The classifier
     and the cron use independent walk implementations with identical semantics.
     """
-    MARKERS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
-    marker_path = MARKERS_DIR / f"{sid}.jsonl"
+    p = paths or _module_paths()
+    p.markers_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker_path = p.markers_dir / f"{sid}.jsonl"
 
     # Phase 22 (MARKER-01 / D-02 / D-05): resolve root_sid + root_aid ONCE per
     # call, not per record. The two records (GUARDRAIL + CHAT) share the same
     # inheritance state — resolving twice would waste a sqlite walk + file read.
-    root_sid = _walk_to_root_session(sid)
-    root_aid = _root_agentic_job_id_for(root_sid) if root_sid != sid else ""
+    root_sid = _walk_to_root_session(sid, paths=p)
+    root_aid = _root_agentic_job_id_for(root_sid, paths=p) if root_sid != sid else ""
 
     def _record(op: str) -> dict:
         rec = {
@@ -901,13 +984,20 @@ async def run_classification_async(
     if not session_id:
         return
     try:
+        # BUG-4: resolve the state paths that OWN this session ONCE, up front, and
+        # thread them through every filesystem/db helper below. In the multiplex
+        # single-gateway process this points at the profile's own home/state.db/
+        # markers; everywhere else it is the module (process) paths, byte-identical
+        # to pre-BUG-4.
+        p = _paths_for_session(session_id)
+
         # Step 1 — subagent inheritance (D-05).
-        root_sid = _walk_to_root_session(session_id)
+        root_sid = _walk_to_root_session(session_id, paths=p)
         if root_sid != session_id:
-            parent_task = _read_latest_task_type(root_sid)
+            parent_task = _read_latest_task_type(root_sid, paths=p)
             if parent_task:
-                await asyncio.to_thread(_write_marker_pair, session_id, parent_task)
-                _persist_label_to_taxonomy(parent_task)
+                await asyncio.to_thread(_write_marker_pair, session_id, parent_task, p)
+                _persist_label_to_taxonomy(parent_task, paths=p)
                 return
             # Parent has no marker yet — fall through to classify as if root.
 
@@ -915,12 +1005,12 @@ async def run_classification_async(
         # Capture as a boolean instead of returning early so Step 7 still runs.
         # Steps 4-6 (task write path) are skipped when the agent already wrote
         # markers; Step 7 (job inference) is always attempted afterward.
-        agent_self_classified = _recent_marker_pair_exists(session_id, within_seconds=30.0)
+        agent_self_classified = _recent_marker_pair_exists(session_id, within_seconds=30.0, paths=p)
 
         if not agent_self_classified:
             # Step 4 — budget gate (D-08 / HOOK-04).
-            if _guardrail_halted():
-                await asyncio.to_thread(_write_marker_pair, session_id, "unclassified")
+            if _guardrail_halted(paths=p):
+                await asyncio.to_thread(_write_marker_pair, session_id, "unclassified", p)
                 logger.warning(
                     "revenium-classifier: budget halted, wrote unclassified for sid=%s", session_id
                 )
@@ -931,7 +1021,7 @@ async def run_classification_async(
             # production path: __init__.py:_on_session_end always passes None). Tests
             # that pass content explicitly bypass this lookup via the else branch.
             if not message or not response:
-                db_user, db_asst = _read_session_messages(session_id)
+                db_user, db_asst = _read_session_messages(session_id, paths=p)
                 user_msg = message or db_user
                 asst_resp = response or db_asst
             else:
@@ -939,12 +1029,13 @@ async def run_classification_async(
             raw_label = await _classify_via_llm(
                 {"message": user_msg},
                 asst_resp or "",
+                paths=p,
             )
             task_type = _validate_label(raw_label)
 
             # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
-            await asyncio.to_thread(_write_marker_pair, session_id, task_type)
-            _persist_label_to_taxonomy(task_type)
+            await asyncio.to_thread(_write_marker_pair, session_id, task_type, p)
+            _persist_label_to_taxonomy(task_type, paths=p)
 
         # Step 7 — code-side job-inference (D-01 / Phase 13).
         # Runs unconditionally on every reachable path (self-classified or not).
@@ -954,19 +1045,19 @@ async def run_classification_async(
         try:
             if (
                 root_sid == session_id  # skip subagent sessions (T-13-06)
-                and not _guardrail_halted()  # skip when halted (T-13-09)
-                and not _job_marker_exists(session_id)  # skip if job already written (T-13-07 / D-08)
+                and not _guardrail_halted(paths=p)  # skip when halted (T-13-09)
+                and not _job_marker_exists(session_id, paths=p)  # skip if job already written (T-13-07 / D-08)
             ):
-                transcript = _read_session_transcript(session_id)
+                transcript = _read_session_transcript(session_id, paths=p)
                 if transcript:
-                    job_labels = _read_job_taxonomy_labels()
+                    job_labels = _read_job_taxonomy_labels(paths=p)
                     jobs = await _infer_jobs_via_llm(transcript, job_labels)
                     for job in jobs:
                         try:
                             valid = _validate_job(job)
                             if valid:
-                                await asyncio.to_thread(_write_job_marker, session_id, valid)
-                                _persist_job_type_to_taxonomy(valid["job_type"])
+                                await asyncio.to_thread(_write_job_marker, session_id, valid, p)
+                                _persist_job_type_to_taxonomy(valid["job_type"], paths=p)
                         except Exception as exc:
                             logger.warning(
                                 "revenium-classifier: dropping one job for sid=%s: %s",
