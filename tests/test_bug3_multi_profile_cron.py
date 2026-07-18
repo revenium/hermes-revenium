@@ -139,6 +139,21 @@ class TestBug3MultiProfileCron(unittest.TestCase):
         self.assertNotIn("hermes-revenium-metering", self._crontab(),
                          "uninstall left metering lines behind")
 
+    def test_uninstall_removes_option_b_fleet_wrapper(self):
+        # A host may run the option-(b) fleet-wrapper (cron-fleet.sh, marker
+        # # hermes-revenium-fleet-metering) instead of per-profile lines. Uninstall
+        # must remove that family too (task: "remove ... the fleet wrapper").
+        wrapper = ("* * * * * bash ~/.hermes/skills/revenium/scripts/cron-fleet.sh "
+                   ">> ~/log 2>&1 # hermes-revenium-fleet-metering\n")
+        foreign = "0 3 * * * /usr/bin/backup.sh # nightly-backup\n"
+        Path(self.cronfile).write_text(foreign + wrapper)
+        r = self._run("uninstall-cron.sh")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        ct = self._crontab()
+        self.assertNotIn("hermes-revenium-fleet-metering", ct,
+                         "uninstall did not remove the option-(b) fleet wrapper")
+        self.assertIn("nightly-backup", ct, "uninstall removed a foreign line")
+
     def test_uninstall_preserves_foreign_lines(self):
         Path(self.cronfile).write_text("0 3 * * * /usr/bin/backup.sh # nightly-backup\n")
         self._run("install-cron.sh", "--all-profiles")

@@ -199,8 +199,9 @@ ORPHANS_REMOVED=0
 if [[ -n "${CURRENT}" ]]; then
   while IFS= read -r line; do
     case "${line}" in
-      *hermes-revenium-metering*)
-        script_path="$(printf '%s' "${line}" | grep -oE '[^ ]*cron\.sh' | head -1 || true)"
+      # Match both the per-profile markers and the option-(b) fleet-wrapper.
+      *hermes-revenium*metering*)
+        script_path="$(printf '%s' "${line}" | grep -oE '[^ ]*cron(-fleet)?\.sh' | head -1 || true)"
         if [[ -n "${script_path}" && ! -f "${script_path}" ]]; then
           ORPHANS_REMOVED=$((ORPHANS_REMOVED + 1))
           echo "↻ Removing orphaned metering cron line (missing ${script_path})"
