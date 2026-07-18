@@ -126,7 +126,7 @@ bash ~/.hermes/skills/revenium/scripts/install.sh --profile gtm --profile qa
 
 This wires plugin + hooks + cron once per profile home, each with:
 
-- **A distinct AGENT** — `REVENIUM_AGENT_NAME` defaults to `Hermes-<profile>` (the default profile stays `Hermes`), so Revenium separates spend per agent. This is the **AGENT** dimension, *not* the ORGANIZATION dimension: `organizationName` is a company/product (e.g. `tableforone`) and is threaded through completions, tool-events, **and** `jobs create` so a job and its transactions share one org — never set it to an agent name.
+- **A distinct AGENT** — `REVENIUM_AGENT_NAME` defaults to `Hermes-<profile>` (the default profile stays `Hermes`), so Revenium separates spend per agent. This is the **AGENT** dimension, *not* the ORGANIZATION dimension: `organizationName` is a company/product (e.g. `tableforone`) and is threaded through completions, tool-events, **and** `jobs create` so a job and its transactions share one org — never set it to an agent name. Set the org non-interactively with `--organization-name <name>` on `install.sh` (or `setup-guardrails.sh`); it's persisted to each profile's `config.json` even with `--skip-guardrails`.
 - **A unique crontab marker** `# hermes-revenium-metering-<profile>` — a second profile install never clobbers the first. `uninstall-cron.sh` removes every profile's line; orphaned lines (after a `~/.hermes` reset) are reconciled automatically.
 - **`hooks_auto_accept: true`** — headless profile gateways never show the hook-approval prompt, so hooks stay inert without this. Fleet installs set it automatically (`install-hooks.sh --auto-accept`). Use `install-hooks.sh --metering-only` to register only `post_tool_call` for shadow/metering-only profiles.
 

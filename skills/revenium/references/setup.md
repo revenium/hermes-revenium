@@ -91,6 +91,18 @@ an agent or profile name; that pollutes the ORGANIZATION dimension. The cron log
 a `WARN` if `organizationName` looks like an agent name (`Hermes`, `Hermes-<x>`,
 or the configured agent).
 
+Set the ORGANIZATION in any of three ways:
+
+- Interactive: the `setup-guardrails.sh --interactive` prompt ("Organization name").
+- Non-interactive / CI / fleet: `--organization-name <name>` on `install.sh` or
+  `setup-guardrails.sh` (e.g. `install.sh --all-profiles --organization-name tableforone`).
+  `install.sh` persists it to each profile's `config.json` **even with
+  `--skip-guardrails`**, so a fleet that defers guardrails still gets the org.
+- By hand: add `"organizationName": "…"` to `config.json`.
+
+The ORGANIZATION is typically the SAME across a fleet (one company/product);
+the per-profile distinction is the AGENT, not the org.
+
 ### Cron fan-out (no clobbering)
 
 Each profile gets a **unique** crontab marker

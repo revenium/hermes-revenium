@@ -29,6 +29,12 @@
 #                      non-interactively (else setup-guardrails prompts).
 #   --period <P>       DAILY | WEEKLY | MONTHLY | QUARTERLY.
 #   --shadow-mode      Create guardrail rules in observe-only shadow mode.
+#   --organization-name <name>
+#                      Persist the ORGANIZATION dimension (a company/product,
+#                      e.g. tableforone) to config.json — threaded onto every
+#                      completion, tool-event, and jobs-create. NOT the agent
+#                      (that is REVENIUM_AGENT_NAME/--agent). Applied even with
+#                      --skip-guardrails and across --all-profiles.
 #   --skip-guardrails  Skip budget-rule creation (creds + plumbing only).
 #   --skip-cron        Skip installing the metering cron.
 #   --non-interactive  Never prompt; take creds from REVENIUM_* env vars and
@@ -58,6 +64,7 @@ ensure_path
 HARD_LIMIT=""
 PERIOD=""
 SHADOW_MODE="false"
+ORGANIZATION_NAME=""
 SKIP_GUARDRAILS="false"
 SKIP_CRON="false"
 NON_INTERACTIVE="false"
@@ -66,13 +73,15 @@ RECONFIGURE="false"
 ALL_PROFILES="false"
 SELECTED_PROFILES=()
 
-usage() { sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,51p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --hard-limit) HARD_LIMIT="${2:-}"; shift 2 ;;
     --period) PERIOD="${2:-}"; shift 2 ;;
     --shadow-mode) SHADOW_MODE="true"; shift ;;
+    --organization-name) ORGANIZATION_NAME="${2:-}"; shift 2 ;;
+    --organization-name=*) ORGANIZATION_NAME="${1#--organization-name=}"; shift ;;
     --skip-guardrails) SKIP_GUARDRAILS="true"; shift ;;
     --skip-cron) SKIP_CRON="true"; shift ;;
     --non-interactive) NON_INTERACTIVE="true"; shift ;;
@@ -129,6 +138,7 @@ if [[ "${REVENIUM_FLEET_CHILD:-}" != "1" ]] \
   [[ -n "${HARD_LIMIT}" ]] && child_flags+=(--hard-limit "${HARD_LIMIT}")
   [[ -n "${PERIOD}" ]] && child_flags+=(--period "${PERIOD}")
   [[ "${SHADOW_MODE}" == "true" ]] && child_flags+=(--shadow-mode)
+  [[ -n "${ORGANIZATION_NAME}" ]] && child_flags+=(--organization-name "${ORGANIZATION_NAME}")
   [[ "${NON_INTERACTIVE}" == "true" ]] && child_flags+=(--non-interactive)
   [[ "${RECONFIGURE}" == "true" ]] && child_flags+=(--reconfigure)
   [[ "${SKIP_CRON}" == "true" ]] && child_flags+=(--skip-cron)
@@ -327,7 +337,43 @@ else
     gr_cmd+=(--interactive)
   fi
   [[ "${SHADOW_MODE}" == "true" ]] && gr_cmd+=(--shadow-mode)
+  [[ -n "${ORGANIZATION_NAME}" ]] && gr_cmd+=(--organization-name "${ORGANIZATION_NAME}")
   "${gr_cmd[@]}" || die "Guardrail rule creation failed — see the error above."
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. ORGANIZATION dimension — persist even when guardrails were skipped.
+# ---------------------------------------------------------------------------
+# setup-guardrails.sh writes organizationName during rule creation, but a fleet
+# install defers guardrails per profile (and standalone installs may pass
+# --skip-guardrails), so persist the flag value here too. Idempotent; creates
+# config.json if absent. Warns if it looks like an agent name (org-vs-agent).
+if [[ -n "${ORGANIZATION_NAME}" ]]; then
+  warn_if_org_looks_like_agent "${ORGANIZATION_NAME}"
+  mkdir -p "${STATE_DIR}"
+  if CONFIG_FILE="${CONFIG_FILE}" ORG_NAME="${ORGANIZATION_NAME}" python3 - <<'PY'
+import json, os, tempfile
+from pathlib import Path
+p = Path(os.environ['CONFIG_FILE'])
+org = os.environ.get('ORG_NAME', '')
+try:
+    cfg = json.loads(p.read_text())
+    if not isinstance(cfg, dict):
+        cfg = {}
+except Exception:
+    cfg = {}
+if cfg.get('organizationName') == org:
+    raise SystemExit(0)
+cfg['organizationName'] = org
+with tempfile.NamedTemporaryFile('w', dir=str(p.parent), delete=False, suffix='.tmp') as t:
+    json.dump(cfg, t, indent=2); t.write('\n'); t.flush(); os.fsync(t.fileno()); tmp = t.name
+os.rename(tmp, str(p))
+PY
+  then
+    ok "organizationName='${ORGANIZATION_NAME}' persisted to config.json"
+  else
+    warn "could not persist organizationName to config.json — continuing"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
