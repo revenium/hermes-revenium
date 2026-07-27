@@ -48,8 +48,12 @@ if ${need_fetch}; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "${tmp}"' EXIT
   echo "  Cloning ${REPO} (${REF}) …"
+  # First attempt is silenced: failing because ${REF} is not a branch/tag is the
+  # routine fallback path, not an error worth showing. The fallback clone's stderr
+  # IS surfaced — if that one fails too, its message (auth, 404, network, TLS) is
+  # the only diagnostic the user gets.
   git clone --depth 1 --branch "${REF}" "${REPO}" "${tmp}" >/dev/null 2>&1 \
-    || git clone --depth 1 "${REPO}" "${tmp}" >/dev/null 2>&1 \
+    || git clone --depth 1 "${REPO}" "${tmp}" \
     || { echo "ERROR: git clone failed for ${REPO}" >&2; exit 1; }
 
   src="${tmp}/skills/revenium"

@@ -124,7 +124,10 @@ from pathlib import Path
 try:
     settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '600'))
 except (TypeError, ValueError):
-    settle_seconds = 45
+    # Must match the get() default above: a malformed override must not fall back
+    # to a window shorter than worst-case job-inference latency, or completions
+    # age-fallback before the job marker exists and orphan permanently (BUG-1).
+    settle_seconds = 600
 
 markers_ready_dir = Path(os.environ.get('MARKERS_READY_DIR', ''))
 skipped_log = os.environ.get('SKIPPED_LOG', '')
