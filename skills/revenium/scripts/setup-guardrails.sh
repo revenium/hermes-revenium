@@ -730,8 +730,18 @@ find_existing_rules() {
     desired_filters_nl="AGENT:IS:${REVENIUM_AGENT_NAME}"$'\n'
   fi
 
+  # wants-all-pages: a rule missing from this list is not seen as a duplicate,
+  # so a re-run creates a second rule the operator already has. Batch size
+  # comes from REVENIUM_PAGE_BATCH_SIZE (common.sh). Assumption, not fact
+  # (RESEARCH.md A1, unverified until Phase 30): omitting --page is what
+  # triggers v1.3.0's all-pages aggregation.
+  local list_cmd
+  list_cmd=(revenium guardrails budget-rules list --output json)
+  if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+    list_cmd+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+  fi
   local list_json
-  list_json=$(revenium guardrails budget-rules list --output json 2>/dev/null) || list_json=""
+  list_json=$("${list_cmd[@]}" 2>/dev/null) || list_json=""
 
   LIST_JSON="${list_json}" \
   DESIRED_PERIOD="${desired_period}" \
@@ -850,8 +860,18 @@ run_interactive() {
     echo "Existing budget rules found:"
 
     # List current rules from Revenium and display them
+    # wants-all-pages: a truncated list misleads the operator at the
+    # recreate/cancel prompt, where the displayed set is the basis for the
+    # decision. Batch size from REVENIUM_PAGE_BATCH_SIZE (common.sh).
+    # Assumption, not fact (RESEARCH.md A1, unverified until Phase 30):
+    # omitting --page is what triggers v1.3.0's all-pages aggregation.
+    local list_cmd
+    list_cmd=(revenium guardrails budget-rules list --output json)
+    if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+      list_cmd+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+    fi
     local rules_json
-    rules_json=$(revenium guardrails budget-rules list --output json 2>/dev/null) || rules_json="[]"
+    rules_json=$("${list_cmd[@]}" 2>/dev/null) || rules_json="[]"
 
     # Read current ruleIds from config.json and display matching rules
     CONFIG_FILE="${CONFIG_FILE}" RULES_JSON="${rules_json}" python3 - <<'PY'
@@ -1032,8 +1052,18 @@ run_migration() {
   fi
 
   # Fetch alert list (Pitfall 1: must use list, not get — list has cumulativePeriod + name)
+  # wants-all-pages: a legacy alert missing from this list aborts migration
+  # with a "deleted upstream" error for an alert that still exists. Batch
+  # size from REVENIUM_PAGE_BATCH_SIZE (common.sh). Assumption, not fact
+  # (RESEARCH.md A1, unverified until Phase 30): omitting --page is what
+  # triggers v1.3.0's all-pages aggregation.
+  local list_cmd
+  list_cmd=(revenium alerts budget list --output json)
+  if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+    list_cmd+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+  fi
   local alert_list
-  alert_list=$(revenium alerts budget list --output json 2>/dev/null) || alert_list="[]"
+  alert_list=$("${list_cmd[@]}" 2>/dev/null) || alert_list="[]"
 
   # Filter by alertId, emit KEY=value lines
   local alert_data
