@@ -36,6 +36,14 @@ OPTIONS:
   --hard-limit <N>       Budget hard limit (numeric, e.g. 50.00). Required in default mode.
   --period <P>           Budget period: DAILY | WEEKLY | MONTHLY | QUARTERLY. Required in default mode.
   --shadow-mode          All created rules run in shadow mode (observe only, do not block).
+  --organization-name <name>
+                         Persist the ORGANIZATION dimension (a company/product,
+                         e.g. tableforone) to config.json's organizationName. It
+                         is threaded onto every completion, tool-event, and
+                         jobs-create. This is NOT the agent — per-agent
+                         attribution is REVENIUM_AGENT_NAME / --agent. Works in
+                         both default and --interactive modes (flag skips the
+                         interactive prompt).
   --filter <dim:op:val>  Scope the rule's evaluation to traffic matching this filter.
                          Repeatable. Dims: AGENT, MODEL, PROVIDER, ORGANIZATION,
                          CREDENTIAL, PRODUCT, SUBSCRIBER, TASK_TYPE. Ops: IS, IS_NOT.
@@ -79,6 +87,13 @@ FROM_ALERT=""
 HARD_LIMIT=""
 PERIOD=""
 SHADOW_MODE="false"
+# BUG-2 follow-up: optional ORGANIZATION dimension (a company/product like
+# "tableforone"), persisted to config.json as organizationName and threaded onto
+# every completion / tool-event / jobs-create. This is the ORGANIZATION dimension,
+# NOT the agent — per-agent attribution is REVENIUM_AGENT_NAME/--agent. Previously
+# only the --interactive prompt could set it; this flag lets non-interactive / CI /
+# fleet installs supply it too.
+ORGANIZATION_NAME=""
 # v1.3 hotfix (quick-task 260524-lpu): operator-overridable filter scoping for
 # the created rule. FILTERS is a repeatable list of `dim:op:val` triples;
 # FILTERS_JSON is a single inline JSON expression. They are mutually exclusive
@@ -121,6 +136,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --shadow-mode)
       SHADOW_MODE="true"
+      shift
+      ;;
+    --organization-name)
+      ORGANIZATION_NAME="${2:-}"
+      if [[ -z "${ORGANIZATION_NAME}" ]]; then
+        error "--organization-name requires a value"; exit 2
+      fi
+      shift 2
+      ;;
+    --organization-name=*)
+      ORGANIZATION_NAME="${1#--organization-name=}"
       shift
       ;;
     --filter)
@@ -450,17 +476,23 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# Helper: write_rule_ids_to_config RULE_IDS_JSON
+# Helper: write_rule_ids_to_config RULE_IDS_JSON [ORG_NAME]
 # Atomic write via temp-then-rename. Preserves alertId and all other fields.
+# Optional 2nd arg persists organizationName (BUG-2 follow-up: non-interactive
+# ORGANIZATION dimension). Empty/omitted leaves any existing organizationName
+# untouched.
 # ---------------------------------------------------------------------------
 write_rule_ids_to_config() {
   local rule_ids_json="$1"
-  CONFIG_FILE="${CONFIG_FILE}" NEW_RULE_IDS_JSON="${rule_ids_json}" python3 - <<'PY'
+  local org_name="${2:-}"
+  CONFIG_FILE="${CONFIG_FILE}" NEW_RULE_IDS_JSON="${rule_ids_json}" \
+  ORG_NAME="${org_name}" python3 - <<'PY'
 import json, os, tempfile
 from pathlib import Path
 
 config_path = Path(os.environ['CONFIG_FILE'])
 new_rule_ids = json.loads(os.environ['NEW_RULE_IDS_JSON'])
+org_name = os.environ.get('ORG_NAME', '')
 
 try:
     config = json.loads(config_path.read_text())
@@ -468,6 +500,8 @@ except Exception:
     config = {}
 
 config['ruleIds'] = new_rule_ids
+if org_name:
+    config['organizationName'] = org_name
 # SETUP-03: never write or strip alertId here. D-09 says leave the legacy
 # alertId orphan in place; operator removes it manually in Revenium UI.
 
@@ -759,9 +793,12 @@ run_default() {
     exit 1
   fi
 
+  # BUG-2 follow-up: warn if the org value looks like an agent name, then persist
+  # organizationName alongside ruleIds when the flag was supplied.
+  warn_if_org_looks_like_agent "${ORGANIZATION_NAME}"
   local new_rule_ids_json
   new_rule_ids_json="[\"${RULE_ID}\"]"
-  write_rule_ids_to_config "${new_rule_ids_json}"
+  write_rule_ids_to_config "${new_rule_ids_json}" "${ORGANIZATION_NAME}"
 
   info "config.json now contains ruleIds=[${RULE_ID}]"
   migration_notify_reset
@@ -879,8 +916,14 @@ PY
     exit 1
   fi
 
-  # Optional org name
-  read -r -p "Organization name (optional, press Enter to skip): " org_name || org_name=""
+  # Optional org name — honor a --organization-name flag if supplied, else prompt.
+  if [[ -n "${ORGANIZATION_NAME}" ]]; then
+    org_name="${ORGANIZATION_NAME}"
+    echo "Organization name: ${org_name} (from --organization-name)"
+  else
+    read -r -p "Organization name (optional, press Enter to skip): " org_name || org_name=""
+  fi
+  warn_if_org_looks_like_agent "${org_name}"
 
   # Autonomous mode
   local auto_response=""

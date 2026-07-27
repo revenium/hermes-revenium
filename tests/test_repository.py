@@ -86,6 +86,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'references' / 'halt-survivability.md',
             SKILL / 'references' / 'task-classification.md',
             SKILL / 'references' / 'job-declaration.md',
+            # BUG-5 — bootstrap fetches scripts/ + plugins/ after `hermes skills install`
+            SKILL / 'references' / 'bootstrap.sh',
             SKILL / 'scripts' / 'common.sh',
             SKILL / 'scripts' / 'install-cron.sh',
             SKILL / 'scripts' / 'uninstall-cron.sh',
@@ -11153,6 +11155,9 @@ class RepositoryTests(unittest.TestCase):
                 'HERMES_HOME': tmp,
                 'REVENIUM_STATE_DIR': state_dir,
                 'REVENIUM_MARKERS_DIR': markers_dir,
+                # Pin the settle window (default is now 600s per BUG-1); these
+                # sessions are aged 300s, older than this pinned 120s window.
+                'REVENIUM_CRON_SETTLE_SECONDS': '120',
                 'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
             }
 
@@ -11326,6 +11331,9 @@ class RepositoryTests(unittest.TestCase):
                 'HOME': shim_home, 'HERMES_HOME': tmp,
                 'REVENIUM_STATE_DIR': state_dir,
                 'REVENIUM_MARKERS_DIR': markers_dir,
+                # Pin the settle window (default is now 600s per BUG-1); these
+                # sessions are aged 300s, older than this pinned 120s window.
+                'REVENIUM_CRON_SETTLE_SECONDS': '120',
                 'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
             }
 
@@ -11601,6 +11609,9 @@ class RepositoryTests(unittest.TestCase):
                 'HOME': shim_home, 'HERMES_HOME': tmp,
                 'REVENIUM_STATE_DIR': state_dir,
                 'REVENIUM_MARKERS_DIR': markers_dir,
+                # Pin the settle window (default is now 600s per BUG-1); these
+                # sessions are aged 300s, older than this pinned 120s window.
+                'REVENIUM_CRON_SETTLE_SECONDS': '120',
                 'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
             }
 

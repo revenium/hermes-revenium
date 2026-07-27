@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .classifier import run_classification, MARKERS_READY_DIR
+from .classifier import run_classification, MARKERS_READY_DIR, _paths_for_session
 
 logger = logging.getLogger("revenium_classifier")
 
@@ -25,7 +25,14 @@ def _write_sentinel(session_id) -> None:
     this session. Cron's session-SELECT filter at hermes-report.sh treats sentinel
     presence as 'plugin signalled ready' and reports the session this tick;
     sentinel absence defers reporting until the session's started_at ages past
-    REVENIUM_CRON_SETTLE_SECONDS (default 45s).
+    REVENIUM_CRON_SETTLE_SECONDS (default 600s per BUG-1).
+
+    BUG-4: the sentinel MUST land under the OWNING profile's markers/.ready dir so
+    that profile's per-profile cron picks it up. In the multiplex single-gateway
+    process the module MARKERS_READY_DIR points at the default home, which would
+    strand a namespaced session's sentinel; _paths_for_session resolves the
+    profile's ready dir. Non-multiplex sessions resolve to the module dir
+    (byte-identical to before).
 
     D-04 belt: any IOError / OSError / PermissionError on the sentinel write is
     logged and swallowed — the sentinel is best-effort, and the cron's
@@ -34,8 +41,9 @@ def _write_sentinel(session_id) -> None:
     if not session_id:
         return
     try:
-        MARKERS_READY_DIR.mkdir(parents=True, exist_ok=True)
-        sentinel_path = MARKERS_READY_DIR / session_id
+        ready_dir = _paths_for_session(session_id).markers_ready_dir
+        ready_dir.mkdir(parents=True, exist_ok=True)
+        sentinel_path = ready_dir / session_id
         sentinel_path.touch(exist_ok=True)
     except Exception as exc:
         logger.warning(

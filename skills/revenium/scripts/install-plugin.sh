@@ -61,7 +61,10 @@ PLUGIN_DEST="${PLUGIN_DEST_DIR}/${PLUGIN_NAME}"
 
 if [[ ! -d "${PLUGIN_SRC}" ]]; then
   echo "ERROR: plugin source missing at ${PLUGIN_SRC}" >&2
-  echo "  Re-install the skill or run from a checkout of hermes-revenium." >&2
+  echo "  'hermes skills install' fetches only SKILL.md + references/ — not plugins/" >&2
+  echo "  or scripts/. Run the bootstrap to fetch them, then re-run setup:" >&2
+  echo "    bash ${SKILL_DIR}/references/bootstrap.sh" >&2
+  echo "  (or: git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hr && bash /tmp/hr/install.sh)" >&2
   exit 1
 fi
 

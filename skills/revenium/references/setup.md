@@ -47,6 +47,117 @@ Re-run `setup-guardrails.sh --interactive`. The script detects existing `ruleIds
 
 Hosts upgrading from a v1.2 install that has only `alertId` in `config.json` and no `ruleIds` are auto-migrated on the next cron tick — no operator action required for the common case. Full contract in `docs/migration-guardrails.md` (what changes, what happens automatically, enforcement-posture preservation, loud-on-failure behavior, manual recovery, contributor appendix).
 
+## Multi-profile / fleet installs
+
+A Hermes **profile** is a separate Hermes home directory — its own `config.yaml`,
+`.env`, `SOUL.md`, sessions, skills, cron jobs, and `state.db` under
+`~/.hermes/profiles/<name>/`. The default profile uses `~/.hermes/` directly
+(see the Hermes user guide `user-guide/profiles.md`; enumerate with
+`hermes profile list` or by scanning `~/.hermes/profiles/*/`).
+
+Install the metering skill across a whole fleet in one command:
+
+```bash
+# Wire the default home AND every ~/.hermes/profiles/<name>/ home:
+bash ~/.hermes/skills/revenium/scripts/install.sh --all-profiles
+
+# Or wire specific profiles (repeatable):
+bash ~/.hermes/skills/revenium/scripts/install.sh --profile gtm --profile qa
+```
+
+`--all-profiles` runs the full wiring (plugin, hooks, cron) once per profile with
+`HERMES_HOME` / `REVENIUM_STATE_DIR` / `REVENIUM_AGENT_NAME` set to that profile.
+The individual leaf scripts also accept the same flags:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/install-cron.sh  --all-profiles
+bash ~/.hermes/skills/revenium/scripts/install-hooks.sh --all-profiles --auto-accept
+```
+
+### Per-agent attribution (AGENT vs ORGANIZATION dimension)
+
+Each profile's completions attribute to a **distinct AGENT** so Revenium
+analytics separate spend per agent. `--all-profiles` defaults
+`REVENIUM_AGENT_NAME` to **`Hermes-<profile>`** for named profiles (and `Hermes`
+for the default profile). Override per profile by baking `REVENIUM_AGENT_NAME`
+into that profile's crontab env or the per-state `env` file.
+
+This is the **AGENT** dimension (`--agent` argv). It is **not** the same as the
+**ORGANIZATION** dimension. `organizationName` in `config.json` is the
+ORGANIZATION — a company/product like `tableforone` — and it is threaded through
+completions, tool-events, **and** `revenium jobs create` so a job and its
+transactions never land in different orgs. **Do not** set `organizationName` to
+an agent or profile name; that pollutes the ORGANIZATION dimension. The cron logs
+a `WARN` if `organizationName` looks like an agent name (`Hermes`, `Hermes-<x>`,
+or the configured agent).
+
+Set the ORGANIZATION in any of three ways:
+
+- Interactive: the `setup-guardrails.sh --interactive` prompt ("Organization name").
+- Non-interactive / CI / fleet: `--organization-name <name>` on `install.sh` or
+  `setup-guardrails.sh` (e.g. `install.sh --all-profiles --organization-name tableforone`).
+  `install.sh` persists it to each profile's `config.json` **even with
+  `--skip-guardrails`**, so a fleet that defers guardrails still gets the org.
+- By hand: add `"organizationName": "…"` to `config.json`.
+
+The ORGANIZATION is typically the SAME across a fleet (one company/product);
+the per-profile distinction is the AGENT, not the org.
+
+### Cron fan-out (no clobbering)
+
+Each profile gets a **unique** crontab marker
+`# hermes-revenium-metering-<profile>` that bakes that profile's `HERMES_HOME`,
+`REVENIUM_STATE_DIR`, `REVENIUM_AGENT_NAME`, and `REVENIUM_CRON_SETTLE_SECONDS`.
+Installing a second profile never overwrites the first. `uninstall-cron.sh`
+removes **all** metering lines (every profile) and leaves foreign crontab lines
+untouched. Orphaned metering lines (whose `cron.sh` target no longer exists after
+a `~/.hermes` reset) are reconciled automatically on the next `install-cron.sh`.
+
+### `REVENIUM_CRON_SETTLE_SECONDS` sizing vs job-inference latency
+
+The reporter defers a session's completions until the classifier plugin's
+`.ready` sentinel lands (the **authoritative** gate — the plugin writes it only
+*after* it has written the `kind:"job"` marker), or until the session ages past
+`REVENIUM_CRON_SETTLE_SECONDS`. This age-fallback exists only for installs with
+**no** classifier plugin (no sentinel ever arrives).
+
+The default is **600 seconds**. It **must exceed worst-case job-inference
+latency** — the classifier's job-inference LLM call can take ~200s under
+concurrent multi-profile load. If the window is shorter than that latency, the
+age-fallback meters and ledgers a session's completions *before* the job marker
+exists, and per-muid dedup then permanently **orphans** them from the job created
+a tick later (`revenium jobs transactions <id>` shows "No transactions found").
+Metering-only installs (no classifier plugin, no job markers) can safely lower it
+— there is nothing to wait for.
+
+### Headless gateways: `hooks_auto_accept`
+
+Profile gateways are **headless** and never show Hermes' interactive hook-approval
+prompt, so registered hooks stay **inert** — tool-event capture silently never
+happens. For gateway-served profiles you MUST set `hooks_auto_accept: true` in
+that profile's `config.yaml`. `install-hooks.sh --auto-accept` does this;
+`install.sh --all-profiles` passes `--auto-accept` for every fleet child
+automatically. In shadow/metering-only mode the two `pre_*` enforcement hooks are
+inert overhead that still fire on every LLM/tool call — use
+`install-hooks.sh --metering-only` to register only `post_tool_call`
+(tool-event capture).
+
+### Multiplex mode (one gateway serves all profiles)
+
+Both deployment modes from `user-guide/multi-profile-gateways.md` are supported:
+
+- **One process per profile** (default): each profile's gateway runs with
+  `HERMES_HOME` set to that profile's home. The classifier and cron resolve paths
+  from `HERMES_HOME` directly.
+- **Multiplexed single gateway** (`gateway.multiplex_profiles: true`): ONE default
+  gateway serves every profile; sessions are namespaced `agent:<profile>:…` and
+  each profile keeps its own home/`state.db`/markers. The classifier resolves the
+  **owning profile's** home/state.db/markers/`config.json` **per session** from
+  the `agent:<profile>:…` namespace, so a namespaced session's markers and
+  `.ready` sentinel land under that profile's `state/revenium/` where its
+  per-profile cron picks them up — not in the default home. Non-namespaced
+  sessions and the default profile resolve to the process home unchanged.
+
 ## How attribution works
 
 GUARDRAIL share is overstated when work turns are much larger than classification turns. Read GUARDRAIL share as an upper bound, not an estimate. The S2 equal-split is intentionally simple and biases attribution toward classification overhead in mixed windows. Later strategies (S3 weighted, S4 guardrail-estimator) are deferred to v2.

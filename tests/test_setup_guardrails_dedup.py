@@ -162,6 +162,27 @@ class SetupGuardrailsDedupTests(unittest.TestCase):
         # If the real revenium had shadowed the stub, the log would be empty.
         self.assertTrue(log_lines, "stub revenium was never invoked — PATH shadowing?")
 
+    def test_organization_name_flag_persists_to_config(self):
+        # BUG-2 follow-up: --organization-name writes organizationName to config.json
+        # in the NON-INTERACTIVE (default) path, alongside ruleIds.
+        proc, config, log = self._run(
+            [],
+            args=("--hard-limit", "100", "--period", "MONTHLY",
+                  "--organization-name", "tableforone"),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self._assert_stub_was_used(log)
+        self.assertEqual(config.get("organizationName"), "tableforone",
+                         f"organizationName not persisted; config={config}")
+        self.assertTrue(config.get("ruleIds"), "ruleIds missing")
+
+    def test_no_organization_name_leaves_field_absent(self):
+        # Without the flag, organizationName is not written (default path unchanged).
+        proc, config, log = self._run([])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("organizationName", config,
+                         "organizationName written without the flag")
+
     def test_a_zero_existing_creates_with_label_bearing_name(self):
         proc, config, log = self._run([])
         self.assertEqual(proc.returncode, 0, proc.stderr)
