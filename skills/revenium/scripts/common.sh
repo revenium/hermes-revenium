@@ -55,6 +55,13 @@ RULES_LOCK_FILE="${REVENIUM_RULES_LOCK_FILE:-${STATE_DIR}/rules.lock}"
 MIGRATION_NOTIFY_FILE="${REVENIUM_MIGRATION_NOTIFY_FILE:-${STATE_DIR}/migration-notify-state}"
 # Phase 26 (D-06): mktemp template for capturing CLI stderr on calls whose stdout is JSON-parsed.
 CLI_STDERR_TMP_TEMPLATE="${REVENIUM_CLI_STDERR_TMP_TEMPLATE:-${STATE_DIR}/.cli-stderr.XXXXXX}"
+# Phase 26 (D-09/D-11): per-request batch size for `--output json` list calls
+# classified wants-all-pages. 500 is chosen so a realistic install resolves in
+# a single request while remaining correct for larger ones (RESEARCH.md A3).
+# Env-overridable for installs with unusually many rules. This is a policy
+# tunable, not a state path — kept adjacent to the Phase 26 block for
+# readability even though it belongs next to REVENIUM_CRON_SETTLE_SECONDS in kind.
+REVENIUM_PAGE_BATCH_SIZE="${REVENIUM_PAGE_BATCH_SIZE:-500}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 

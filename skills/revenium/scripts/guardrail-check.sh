@@ -4,6 +4,14 @@
 # per-rule state (block/warn/ok), writes guardrail-status.json atomically,
 # detects new halt transitions, and fires Hermes messaging notification on
 # a new halt (AUDIT-01/02 enforcement-event embedding with graceful degradation).
+#
+# Phase 26 (D-10/D-12, PAGE-03): per-tick HTTP request bound is 2 on a
+# steady-state tick — `enforcement-rules get` plus `budget-rules list` — plus
+# 1 more on a halt transition for `enforcement-events list`. The capability
+# probe (`supports_flag`) is a local `--help` spawn and issues no HTTP request.
+# This bound assumes the team's budget-rule count fits REVENIUM_PAGE_BATCH_SIZE
+# in one request. Enforced by test_cron_tick_request_bound
+# (tests/test_repository.py) — update that test if this bound ever changes.
 
 set -euo pipefail
 
@@ -109,7 +117,20 @@ fi
 # Pre-step: build name -> string-id map once per tick (RESEARCH § ruleId mismatch finding).
 # enforcement-rules API returns integer ruleId values; budget-rules list returns string-hash IDs
 # that match config.json::ruleIds and are accepted by enforcement-events list --rule-id.
-BUDGET_RULES_JSON=$(revenium guardrails budget-rules list --output json 2>/dev/null || echo '[]')
+# wants-all-pages: the map must be complete because a rule missing from it falls
+# back to the API integer ruleId, which the heredoc's own comments (below) note
+# will 422 on enforcement-events list --rule-id. Batch size comes from
+# REVENIUM_PAGE_BATCH_SIZE (common.sh). Assumption, not fact (RESEARCH.md A1,
+# unverified until Phase 30): omitting --page is what triggers v1.3.0's
+# all-pages aggregation. The flag is gated, not sent unconditionally, because
+# on a CLI that doesn't advertise --page, sending nothing reproduces today's
+# exact call and therefore cannot regress, whereas sending --page-size to a CLI
+# whose acceptance of it on this verb is unverified could (PAGE-02, D-01).
+BUDGET_RULES_CMD=(revenium guardrails budget-rules list --output json)
+if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+  BUDGET_RULES_CMD+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+fi
+BUDGET_RULES_JSON=$("${BUDGET_RULES_CMD[@]}" 2>/dev/null || echo '[]')
 
 # (H) Build guardrail-status.json via a single Python heredoc with atomic write.
 HALT_OUTPUT=$(
