@@ -7674,6 +7674,43 @@ class RepositoryTests(unittest.TestCase):
                 rule['lastChecked'] = '<ts>'
         return normalized
 
+    def _revenium_api_calls(self, argv_log_path):
+        """Read the argv-recording log at argv_log_path and return only the
+        lines representing HTTP-backed Revenium API calls.
+
+        Excludes:
+        - any line containing the `--help` token: `supports_flag()` and
+          `has_guardrails_cli()` both spawn `revenium ... --help`, which the
+          CLI answers locally from its own argument parser — no network
+          request is issued.
+        - any line starting with `config show`: both the preflight check
+          (`revenium config show >/dev/null 2>&1`) and `resolve_team_id()`
+          (`revenium config show 2>/dev/null | sed ...`) read the CLI's local
+          config file on disk — also not an HTTP request.
+
+        Keeps lines starting with `guardrails ` or `alerts `, the two
+        subcommand families this skill's HTTP-backed calls live under.
+
+        PAGE-03's per-tick request bound rests entirely on this filter being
+        honest: a filter that also excluded a real HTTP verb would make the
+        bound trivially true regardless of what guardrail-check.sh actually
+        does.
+        """
+        import os
+        if not os.path.isfile(argv_log_path):
+            return []
+        with open(argv_log_path) as f:
+            lines = f.read().splitlines()
+        calls = []
+        for line in lines:
+            if '--help' in line:
+                continue
+            if line.startswith('config show'):
+                continue
+            if line.startswith('guardrails ') or line.startswith('alerts '):
+                calls.append(line)
+        return calls
+
     def test_guardrail_check_writes_status_file(self):
         """guardrail-check.sh with mock enforcement-rules output writes guardrail-status.json
         with correct schema (ENF-04): rules array with 10 keys per rule, top-level
@@ -8908,6 +8945,452 @@ class RepositoryTests(unittest.TestCase):
                 leftover, [],
                 f'stderr temp file(s) survived concurrent runs: {leftover!r}',
             )
+
+    def test_cron_tick_request_bound(self):
+        """PAGE-03 (plan 26-03, D-10): the per-tick HTTP request bound is an
+        enforced equality, not an upper bound. A steady-state (non-halting)
+        tick issues EXACTLY 2 HTTP-backed CLI calls (enforcement-rules get,
+        budget-rules list); a halt-transition tick issues EXACTLY 3, adding
+        enforcement-events list. This is a call COUNTER (D-13) — the stub
+        never serves multi-page fixtures, so this measures how many requests
+        guardrail-check.sh issues, never what the server does with them.
+
+        assertEqual is deliberate: a "less-than-or-equal" upper-bound-style
+        assertion would let a future edit add a fourth steady-state request without
+        this test ever going red, which is exactly the regression the
+        file-header bound in guardrail-check.sh (this plan, Task 1) exists to
+        prevent. This test and that comment point at each other.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        # --- Scenario 1: steady state (no breach) -> exactly 2 calls ---
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-bound-steady-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            enforcement_json = json.dumps({
+                'rules': [{
+                    'ruleId': 42,
+                    'name': 'Engineering Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 10.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 100.0,
+                    'breached': False,
+                    'warnBreached': False,
+                    'shadowMode': False,
+                }]
+            })
+            budget_rules_json = json.dumps([
+                {'id': 'd5jng5', 'name': 'Engineering Budget'}
+            ])
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json)
+            argv_log = self._revenium_argv_log_path(scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'steady-state exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertNotIn(
+                'HALT_TRANSITION=true', result.stdout,
+                'fixture must be non-breaching for the steady-state scenario',
+            )
+
+            api_calls = self._revenium_api_calls(argv_log)
+            self.assertEqual(
+                len(api_calls), 2,
+                f'steady-state tick must issue exactly 2 API calls: {api_calls!r}',
+            )
+            verbs = {' '.join(line.split()[:3]) for line in api_calls}
+            self.assertEqual(
+                verbs,
+                {'guardrails enforcement-rules get', 'guardrails budget-rules list'},
+                f'steady-state tick must call exactly enforcement-rules get and '
+                f'budget-rules list, one each: {api_calls!r}',
+            )
+
+        # --- Scenario 2: halt transition -> exactly 3 calls ---
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-bound-halt-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            enforcement_json = json.dumps({
+                'rules': [{
+                    'ruleId': 42,
+                    'name': 'Engineering Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 150.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 100.0,
+                    'breached': True,
+                    'warnBreached': True,
+                    'shadowMode': False,
+                }]
+            })
+            budget_rules_json = json.dumps([
+                {'id': 'd5jng5', 'name': 'Engineering Budget'}
+            ])
+            events_json = json.dumps([
+                {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
+            ])
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+            argv_log = self._revenium_argv_log_path(scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+            # No pre-existing guardrail-status.json — this run must be the
+            # actual transition, not a carry-forward.
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'halt-transition exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertIn(
+                'HALT_TRANSITION=true', result.stdout,
+                f'fixture must produce a new halt transition; got stdout={result.stdout!r}',
+            )
+
+            api_calls = self._revenium_api_calls(argv_log)
+            self.assertEqual(
+                len(api_calls), 3,
+                f'halt-transition tick must issue exactly 3 API calls: {api_calls!r}',
+            )
+            self.assertEqual(
+                ' '.join(api_calls[2].split()[:3]),
+                'guardrails enforcement-events list',
+                f'third call on a halt transition must be enforcement-events list: {api_calls!r}',
+            )
+
+    def test_budget_rules_list_gated_batch_size(self):
+        """PAGE-02 (plan 26-03): the hot-path budget-rules list argv is proven
+        on both probe branches — the pair D-15's coverage bar requires,
+        matching the pair plan 26-01 landed for the halt-path site.
+
+        Also pins the PAGE-02 ordering edge: the enforcement fixture's rule
+        names are in a deliberately non-alphabetical order ('Zebra Budget'
+        before 'Apple Budget'), and the matching budget-rules list array is in
+        a DIFFERENT order still. guardrail-status.json's rules[] must follow
+        the enforcement-rules get order, never the budget-rules list order or
+        any pagination-flag-dependent reordering — identical across both
+        probe branches.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [
+                {
+                    'ruleId': 1,
+                    'name': 'Zebra Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 10.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 100.0,
+                    'breached': False,
+                    'warnBreached': False,
+                    'shadowMode': False,
+                },
+                {
+                    'ruleId': 2,
+                    'name': 'Apple Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 5.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 50.0,
+                    'breached': False,
+                    'warnBreached': False,
+                    'shadowMode': False,
+                },
+            ]
+        })
+        # Deliberately the opposite order of the enforcement fixture above.
+        budget_rules_json = json.dumps([
+            {'id': 'idApple', 'name': 'Apple Budget'},
+            {'id': 'idZebra', 'name': 'Zebra Budget'},
+        ])
+
+        for label, advertise_page in (('probe-supported', True), ('fallback', False)):
+            with self.subTest(branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-gc-batch-size-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'scripts')
+                    os.makedirs(scripts_dir)
+                    self._make_revenium_stub(
+                        scripts_dir, enforcement_json, budget_rules_json,
+                        advertise_page=advertise_page, advertise_page_size=True,
+                    )
+                    argv_log = self._revenium_argv_log_path(scripts_dir)
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                    with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                        json.dump({'ruleIds': ['idApple', 'idZebra'], 'autonomousMode': True}, f)
+
+                    status_path = os.path.join(state_dir, 'guardrail-status.json')
+                    log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                    env = dict(os.environ)
+                    env['HERMES_HOME'] = tmp
+                    env['REVENIUM_STATE_DIR'] = state_dir
+                    env['GUARDRAIL_STATUS_FILE'] = status_path
+                    env['LOG_FILE'] = log_path
+                    env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                    result = subprocess.run(
+                        ['bash', guardrail_check],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f'[{label}] guardrail-check.sh exit {result.returncode}: '
+                        f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                    )
+
+                    self.assertTrue(
+                        os.path.isfile(argv_log),
+                        f'[{label}] argv log not found at {argv_log!r} — stub was never reached',
+                    )
+                    with open(argv_log) as f:
+                        argv_lines = f.read().splitlines()
+                    list_lines = [
+                        line for line in argv_lines
+                        if line.startswith('guardrails budget-rules list')
+                    ]
+                    self.assertTrue(
+                        list_lines,
+                        f'[{label}] no budget-rules list invocation recorded: {argv_lines!r}',
+                    )
+                    list_argv = list_lines[0]
+                    list_tokens = list_argv.split()
+
+                    if label == 'probe-supported':
+                        self.assertIn(
+                            '--page-size', list_tokens,
+                            f'[{label}] expected --page-size in argv: {list_argv!r}',
+                        )
+                        self.assertIn(
+                            '500', list_tokens,
+                            f'[{label}] expected batch size 500 in argv: {list_argv!r}',
+                        )
+                        self.assertNotIn(
+                            '--page', list_tokens,
+                            f'[{label}] must not send a standalone --page token: {list_argv!r}',
+                        )
+                    else:
+                        self.assertEqual(
+                            list_argv, 'guardrails budget-rules list --output json',
+                            f'[{label}] fallback branch must be byte-identical to '
+                            f"today's shipping call: {list_argv!r}",
+                        )
+
+                    with open(status_path) as f:
+                        data = json.load(f)
+                    rule_names = [r['name'] for r in data.get('rules', [])]
+                    self.assertEqual(
+                        rule_names, ['Zebra Budget', 'Apple Budget'],
+                        f'[{label}] rules[] order must follow enforcement-rules get '
+                        f'order, not budget-rules list order: {rule_names!r}',
+                    )
+
+    def test_duplicate_rule_names_resolve_to_last_listed_id(self):
+        """PAGE-02 adjacency edge (plan 26-03): when budget-rules list returns
+        two entries sharing one `name` with different `id` values, the
+        name-to-string-id map resolves to the LAST entry's id — today's
+        silent last-write-wins behavior. This test pins that behavior rather
+        than changing it: it exists so a pagination change (which alters what
+        the list returns and in what order) cannot quietly flip which id
+        wins, NOT as an endorsement that last-write-wins is the correct
+        collision policy. A future phase wanting a different policy should
+        edit this test as its declaration of that change.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 7,
+                'name': 'Shared Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 10.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'idFirst', 'name': 'Shared Budget'},
+            {'id': 'idLast', 'name': 'Shared Budget'},
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-dup-name-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['idFirst', 'idLast'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            with open(status_path) as f:
+                data = json.load(f)
+            rules = data.get('rules', [])
+            self.assertEqual(len(rules), 1, f'expected exactly one rule: {rules!r}')
+            self.assertEqual(
+                rules[0]['ruleId'], 'idLast',
+                f"duplicate-name collision must resolve to the LAST listed "
+                f"entry's id: {rules!r}",
+            )
+
+    def test_zero_rule_install_writes_empty_status(self):
+        """PAGE-02 empty edge (plan 26-03): a fresh install whose team has
+        zero budget rules — budget-rules list returning an empty JSON array
+        and enforcement-rules get returning an empty rules array — writes
+        guardrail-status.json with an empty rules array, halted:false, and
+        haltedRule ABSENT (not merely falsy), and exits 0 on both probe
+        branches.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({'rules': []})
+        budget_rules_json = json.dumps([])
+
+        for label, advertise_page in (('probe-supported', True), ('fallback', False)):
+            with self.subTest(branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-gc-zero-rule-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'scripts')
+                    os.makedirs(scripts_dir)
+                    self._make_revenium_stub(
+                        scripts_dir, enforcement_json, budget_rules_json,
+                        advertise_page=advertise_page, advertise_page_size=True,
+                    )
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                    with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                        json.dump({'ruleIds': [], 'autonomousMode': True}, f)
+
+                    status_path = os.path.join(state_dir, 'guardrail-status.json')
+                    log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                    env = dict(os.environ)
+                    env['HERMES_HOME'] = tmp
+                    env['REVENIUM_STATE_DIR'] = state_dir
+                    env['GUARDRAIL_STATUS_FILE'] = status_path
+                    env['LOG_FILE'] = log_path
+                    env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                    result = subprocess.run(
+                        ['bash', guardrail_check],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f'[{label}] guardrail-check.sh exit {result.returncode}: '
+                        f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                    )
+                    self.assertTrue(
+                        os.path.isfile(status_path),
+                        f'[{label}] guardrail-status.json not written; stderr={result.stderr!r}',
+                    )
+                    with open(status_path) as f:
+                        data = json.load(f)
+                    self.assertEqual(
+                        data.get('rules', []), [],
+                        f'[{label}] rules must be empty: {data!r}',
+                    )
+                    self.assertFalse(
+                        data.get('halted', True),
+                        f'[{label}] halted must be false: {data!r}',
+                    )
+                    self.assertNotIn(
+                        'haltedRule', data,
+                        f'[{label}] haltedRule must be absent, not merely falsy: {data!r}',
+                    )
 
     def test_guardrail_check_shadow_mode_does_not_halt(self):
         """A breached shadow-mode rule must NOT cause halted:true (quick-260528-gve).
