@@ -8645,6 +8645,270 @@ class RepositoryTests(unittest.TestCase):
                 f'expected the fixture rule name to survive the stderr note; got {rules!r}',
             )
 
+    def test_stderr_pagination_note_does_not_affect_status_or_halt(self):
+        """STDERR-02 (Phase 26 plan 02, Task 2): a stderr pagination note must
+        change neither guardrail-status.json's content nor the halt decision.
+
+        Two runs of a BREACHING + autonomous fixture, each in its own fresh
+        temp STATE_DIR (so neither run's guardrail-status.json is visible to
+        the other as `prev`, which would suppress the transition on a second
+        run against a shared dir) — one with no stderr note, one with the
+        D-08 pagination note emitted by every stub invocation. Asserts:
+        - the two runs' normalized (timestamp-blanked) guardrail-status.json
+          documents are equal as whole dicts, not a field-by-field subset;
+        - both runs' stdout contain the same HALT_TRANSITION= line;
+        - both runs' HALTED_RULE_ID, HALTED_RULE_NAME, EVENT_TS, EVENT_SUMMARY
+          lines are identical;
+        - neither status file contains the note's substrings.
+
+        A third run (non-breaching fixture + note present) proves the
+        false-clear direction: halted stays false and HALT_TRANSITION=false —
+        a stderr note can never manufacture a halt.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+        note = 'Note: showing 1 of N pages.'
+
+        breaching_enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': False,
+            }]
+        })
+        non_breaching_enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 99,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 45.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
+        ])
+
+        def run_once(prefix, enforcement_json, stderr_note):
+            with tempfile.TemporaryDirectory(prefix=prefix) as tmp:
+                scripts_dir = os.path.join(tmp, 'scripts')
+                os.makedirs(scripts_dir)
+                self._make_revenium_stub(
+                    scripts_dir, enforcement_json, budget_rules_json, events_json,
+                    stderr_note=stderr_note,
+                )
+                argv_log = self._revenium_argv_log_path(scripts_dir)
+
+                state_dir = os.path.join(tmp, 'state', 'revenium')
+                os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                config_path = os.path.join(state_dir, 'config.json')
+                with open(config_path, 'w') as f:
+                    json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+                status_path = os.path.join(state_dir, 'guardrail-status.json')
+                log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                env = dict(os.environ)
+                env['HERMES_HOME'] = tmp
+                env['REVENIUM_STATE_DIR'] = state_dir
+                env['GUARDRAIL_STATUS_FILE'] = status_path
+                env['LOG_FILE'] = log_path
+                env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                result = subprocess.run(
+                    ['bash', guardrail_check],
+                    env=env, capture_output=True, text=True, timeout=30,
+                )
+                self.assertTrue(
+                    os.path.isfile(argv_log),
+                    f'argv log not found — stub was never reached (note={stderr_note!r})',
+                )
+                self.assertEqual(
+                    result.returncode, 0,
+                    f'guardrail-check.sh exit {result.returncode} (note={stderr_note!r}): '
+                    f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                )
+                self.assertTrue(
+                    os.path.isfile(status_path),
+                    f'guardrail-status.json not written (note={stderr_note!r})',
+                )
+                with open(status_path, 'r', encoding='utf-8') as f:
+                    raw = f.read()
+                data = json.loads(raw)
+                return result, raw, data
+
+        def stdout_line(stdout, prefix_key):
+            for line in stdout.splitlines():
+                if line.startswith(prefix_key):
+                    return line
+            return None
+
+        # Runs 1 & 2: breaching fixture, without and with the stderr note.
+        result_no_note, raw_no_note, data_no_note = run_once(
+            'gsd-gc-stderr-halt-no-note-', breaching_enforcement_json, None,
+        )
+        result_note, raw_note, data_note = run_once(
+            'gsd-gc-stderr-halt-note-', breaching_enforcement_json, note,
+        )
+
+        normalized_no_note = self._normalize_guardrail_status(data_no_note)
+        normalized_note = self._normalize_guardrail_status(data_note)
+        self.assertEqual(
+            normalized_no_note, normalized_note,
+            f'a stderr note must not change guardrail-status.json content; '
+            f'no-note={normalized_no_note!r} note={normalized_note!r}',
+        )
+
+        for key in ('HALT_TRANSITION=', 'HALTED_RULE_ID=', 'HALTED_RULE_NAME=',
+                    'EVENT_TS=', 'EVENT_SUMMARY='):
+            line_no_note = stdout_line(result_no_note.stdout, key)
+            line_note = stdout_line(result_note.stdout, key)
+            self.assertEqual(
+                line_no_note, line_note,
+                f'{key} line must be identical with/without a stderr note; '
+                f'no-note={line_no_note!r} note={line_note!r}',
+            )
+        self.assertIn(
+            'HALT_TRANSITION=true', result_no_note.stdout,
+            'fixture must actually breach so the halt path executes (test precondition)',
+        )
+
+        self.assertNotIn('Note:', raw_note, f'note leaked into status file: {raw_note!r}')
+        self.assertNotIn('showing 1 of', raw_note, f'note leaked into status file: {raw_note!r}')
+
+        # Run 3: non-breaching fixture + note — the false-clear direction.
+        result_clear, raw_clear, data_clear = run_once(
+            'gsd-gc-stderr-noclear-', non_breaching_enforcement_json, note,
+        )
+        self.assertFalse(
+            data_clear.get('halted'),
+            f'a non-breaching fixture with a stderr note must not halt; got {data_clear!r}',
+        )
+        self.assertIn(
+            'HALT_TRANSITION=false', result_clear.stdout,
+            f'expected HALT_TRANSITION=false for a non-breaching fixture; '
+            f'stdout={result_clear.stdout!r}',
+        )
+        self.assertNotIn('Note:', raw_clear, f'note leaked into status file: {raw_clear!r}')
+        self.assertNotIn('showing 1 of', raw_clear, f'note leaked into status file: {raw_clear!r}')
+
+    def test_concurrent_guardrail_check_runs_do_not_share_stderr_tmp(self):
+        """Phase 26 plan 02, Task 2 (D-06's per-process-uniqueness truth,
+        mechanical form): launches two guardrail-check.sh processes
+        concurrently against the SAME STATE_DIR — CLAUDE.md documents
+        guardrail-check.sh as directly invocable by an operator while cron is
+        ticking, so two overlapping runs is a realistic scenario, not a
+        contrived one. A fixed-name stderr temp file would let one run
+        truncate the other's capture mid-read; `CLI_STDERR_TMP_TEMPLATE`'s
+        `mktemp`-generated uniqueness plus the EXIT trap is what this test
+        proves survives concurrency.
+
+        Asserts: both processes exit 0, guardrail-status.json parses as JSON
+        afterward, and no file whose name starts with `.cli-stderr.` remains
+        under STATE_DIR once both processes have exited.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 99,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 45.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule within limits'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-concurrent-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            procs = [
+                subprocess.Popen(
+                    ['bash', guardrail_check],
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                for _ in range(2)
+            ]
+            results = [p.communicate(timeout=30) for p in procs]
+
+            for i, (proc, (out, err)) in enumerate(zip(procs, results)):
+                self.assertEqual(
+                    proc.returncode, 0,
+                    f'concurrent run {i} exit {proc.returncode}: stdout={out!r} stderr={err!r}',
+                )
+
+            self.assertTrue(
+                os.path.isfile(status_path),
+                'guardrail-status.json not written after concurrent runs',
+            )
+            with open(status_path) as f:
+                json.load(f)  # must be valid JSON
+
+            leftover = [
+                name for name in os.listdir(state_dir)
+                if name.startswith('.cli-stderr.')
+            ]
+            self.assertEqual(
+                leftover, [],
+                f'stderr temp file(s) survived concurrent runs: {leftover!r}',
+            )
+
     def test_guardrail_check_shadow_mode_does_not_halt(self):
         """A breached shadow-mode rule must NOT cause halted:true (quick-260528-gve).
         The per-rule entry still records state:'block' AND shadowMode:true so the

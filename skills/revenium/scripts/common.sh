@@ -53,6 +53,8 @@ GUARDRAIL_STATUS_FILE="${REVENIUM_GUARDRAIL_STATUS_FILE:-${STATE_DIR}/guardrail-
 RULES_LOCK_FILE="${REVENIUM_RULES_LOCK_FILE:-${STATE_DIR}/rules.lock}"
 # Phase 18: notify-once gate for setup-guardrails.sh migration failures (D-10).
 MIGRATION_NOTIFY_FILE="${REVENIUM_MIGRATION_NOTIFY_FILE:-${STATE_DIR}/migration-notify-state}"
+# Phase 26 (D-06): mktemp template for capturing CLI stderr on calls whose stdout is JSON-parsed.
+CLI_STDERR_TMP_TEMPLATE="${REVENIUM_CLI_STDERR_TMP_TEMPLATE:-${STATE_DIR}/.cli-stderr.XXXXXX}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 

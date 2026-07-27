@@ -88,8 +88,21 @@ if [[ -z "${TEAM_ID}" ]]; then
 fi
 
 # (G) Fetch enforcement rules — treat EOF/exit-1 (empty team) as soft-fail.
-ENFORCEMENT_JSON=$(revenium guardrails enforcement-rules get "${TEAM_ID}" --output json 2>&1) || true
-if echo "${ENFORCEMENT_JSON}" | grep -q '"error".*EOF'; then
+# Phase 26 (D-05/D-06/STDERR-01): stdout and stderr are captured separately so
+# ENFORCEMENT_JSON (JSON-parsed one step later) can never be poisoned by a CLI
+# note on stderr. CLI_STDERR_TMP is per-process-unique (mktemp) and trapped so
+# two overlapping guardrail-check.sh runs never share or leak one.
+CLI_STDERR_TMP="$(mktemp "${CLI_STDERR_TMP_TEMPLATE}")"
+trap 'rm -f "${CLI_STDERR_TMP}"' EXIT
+ENFORCEMENT_JSON=$(revenium guardrails enforcement-rules get "${TEAM_ID}" --output json 2>"${CLI_STDERR_TMP}") || true
+ENFORCEMENT_STDERR="$(cat "${CLI_STDERR_TMP}" 2>/dev/null || true)"
+# The EOF soft-fail must keep reading BOTH streams, concatenated, exactly as the
+# pre-split code saw them combined via 2>&1 — narrowing this to stdout-only would
+# make a fresh/empty team hard-fail every cron tick, silently, until an operator
+# reads the log. Do not widen the pattern beyond '"error".*EOF': matching any
+# error would turn a real API outage into a confident "no rules are breached"
+# and enforcement would stop halting while the status file looked healthy.
+if printf '%s\n%s\n' "${ENFORCEMENT_JSON}" "${ENFORCEMENT_STDERR}" | grep -q '"error".*EOF'; then
   ENFORCEMENT_JSON='{"rules": []}'
 fi
 
