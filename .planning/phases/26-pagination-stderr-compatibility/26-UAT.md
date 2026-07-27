@@ -1,5 +1,5 @@
 ---
-status: testing
+status: complete
 phase: 26-pagination-stderr-compatibility
 source: [26-VERIFICATION.md]
 started: 2026-07-27T00:00:00Z
@@ -8,13 +8,7 @@ updated: 2026-07-27T00:00:00Z
 
 ## Current Test
 
-number: 1
-name: Accept or remediate WR-01 — single capability probe reused across different CLI verbs
-expected: |
-  An explicit accept/defer decision recorded — either a VERIFICATION override
-  accepting the risk, or a new plan/backlog item to probe each gated verb
-  independently before Phase 30's live-host run.
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -34,7 +28,11 @@ probe against the `guardrails` family gates a call in the legacy `alerts` family
 The test harness cannot model divergent per-verb behavior (its `--help` fixture
 answers identically for every probed verb), so no automated check can resolve it.
 
-result: [pending]
+result: pass
+decision: "Accepted as-is. The single-probe-reused-across-verbs design (CONTEXT.md
+  D-03) stands as final for this phase. No per-verb probing plan required before
+  Phase 30; the cross-family reuse in setup-guardrails.sh:26 is knowingly carried
+  into Phase 30's live-host run, where the real CLI behavior becomes observable."
 
 ### 2. Unmitigated `must_haves.prohibitions` — silent capability degradation, silent truncation cap
 
@@ -53,15 +51,23 @@ Two prohibition statements the plans themselves authored were left
 Practical risk is low today — no known install exceeds 500 budget rules — but
 both prohibition texts are unconditional and currently unmet in code.
 
-result: [pending]
+result: pass
+decision: "Accepted as-is for this milestone. Both prohibitions (26-01 'capability
+  degradation must never be silent', 26-03 'batch size must never become a silent
+  cap') remain declared-but-unmitigated in code. No follow-up plan opened; the
+  residual risk is accepted on the low real-world probability noted in
+  26-VERIFICATION.md (no known install exceeds 500 budget rules; no CLI generation
+  gap observed in practice)."
 
 ## Summary
 
 total: 2
-passed: 0
+passed: 2
 issues: 0
-pending: 2
+pending: 0
 skipped: 0
 blocked: 0
 
 ## Gaps
+
+[none — both items were risk-acceptance decisions, both accepted as-is]
