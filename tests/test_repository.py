@@ -12407,6 +12407,432 @@ class RepositoryTests(unittest.TestCase):
             self.assertNotIn('--filter AGENT:IS:Hermes', create_argv,
                              f'default AGENT filter must NOT appear when operator passes --filter: {create_argv!r}')
 
+    def _make_setup_revenium_stub(self, bin_dir, argv_log, advertise_page=True,
+                                    create_fails=False, create_stderr=None,
+                                    budget_rules_list='[]'):
+        """Write a fake `revenium` binary into `bin_dir` for setup-guardrails.sh
+        tests — distinct from `_make_revenium_stub` because setup-guardrails.sh
+        tests need a different placement convention (see below) and a
+        different verb set (`alerts budget list`, `budget-rules create`) than
+        guardrail-check.sh's harness covers.
+
+        Placement contract (D-16): the stub belongs in `<home>/.local/bin`
+        with `env['HOME']` pointed at `<home>`, because setup-guardrails.sh
+        calls bare `ensure_path()` — unlike guardrail-check.sh, it has no
+        `_PATH_HEAD` re-prepend — and `ensure_path()`'s prefix loop PREPENDS
+        on every iteration, so the LAST candidate (`${HOME}/.local/bin`) ends
+        up FIRST in the final PATH. A stub placed anywhere else loses to
+        `/opt/homebrew/bin/revenium`, which on a developer machine is a REAL
+        v1.3.0 binary — the test would then silently validate reality
+        instead of the fixture. No real `revenium` binary may ever be
+        reached when this contract is honored.
+
+        Every invocation's full argv (`$*`) is logged verbatim to `argv_log`
+        as the very first statement, before any dispatch.
+
+        A `--help` pre-guard (checked before the 3-word case dispatch, so
+        e.g. `guardrails budget-rules list --help` is never mistaken for a
+        real `list` call) emits parameterized help text mirroring
+        `_make_revenium_stub`'s shape: a `--page int` line only when
+        `advertise_page` is True, a `--page-size int` line always.
+
+        Case dispatch:
+        - `config show` -> an api_key line and a Team ID line.
+        - `guardrails budget-rules list` -> `budget_rules_list`.
+        - `alerts budget list` -> a fixed legacy-alert fixture (alertId
+          `LEGACY01`, threshold 50, period MONTHLY) that the migration path
+          (`--from-alert LEGACY01 --auto`) expects.
+        - `guardrails budget-rules create`: when `create_fails` is True,
+          emits `create_stderr` on stderr (nothing on stdout) and exits 1;
+          otherwise emits a fixed rule JSON (`id: TESTRULE001`) on stdout
+          and exits 0.
+        """
+        import os
+        import shlex
+
+        stub_path = os.path.join(bin_dir, 'revenium')
+
+        help_body_lines = ["echo '  -h, --help             help for list'"]
+        if advertise_page:
+            help_body_lines.append("echo '      --page int         Page number (0-based)'")
+        help_body_lines.append(
+            "echo '      --page-size int    Number of items per page (default 20)'"
+        )
+        help_body = '\n    '.join(help_body_lines)
+
+        if create_fails:
+            create_stderr_text = create_stderr if create_stderr is not None else 'rule creation failed'
+            create_stderr_escaped = create_stderr_text.replace("'", "'\\''")
+            create_body = "printf '%s\\n' '" + create_stderr_escaped + "' >&2\n    exit 1"
+        else:
+            rule_json = (
+                '{"id":"TESTRULE001","name":"Hermes Monthly Budget",'
+                '"metricType":"TOTAL_COST","windowType":"MONTHLY","action":"BLOCK",'
+                '"groupBy":"AGENT","hardLimit":50,"warnThreshold":40,"shadowMode":false}'
+            )
+            rule_json_escaped = rule_json.replace("'", "'\\''")
+            create_body = "echo '" + rule_json_escaped + "'"
+
+        budget_rules_list_escaped = budget_rules_list.replace("'", "'\\''")
+
+        alert_fixture = (
+            '[{"alertId":"LEGACY01","cumulativePeriod":"MONTHLY","threshold":50,'
+            '"name":"Hermes Monthly Budget","currentValue":0,"groups":[],'
+            '"metricType":"TOTAL_COST"}]'
+        )
+        alert_fixture_escaped = alert_fixture.replace("'", "'\\''")
+
+        stub_content = (
+            '#!/usr/bin/env bash\n'
+            "printf '%s\\n' \"$*\" >> " + shlex.quote(argv_log) + '\n'
+            'for _arg in "$@"; do\n'
+            '  if [[ "${_arg}" == "--help" ]]; then\n'
+            f'    {help_body}\n'
+            '    exit 0\n'
+            '  fi\n'
+            'done\n'
+            'case "$1 $2 $3" in\n'
+            "  'config show'|'config show ')\n"
+            "    echo 'api_key: mock-api-key-12345'\n"
+            "    echo 'Team ID: mock-team-12345'\n"
+            "    ;;\n"
+            "  'guardrails budget-rules list') echo '" + budget_rules_list_escaped + "' ;;\n"
+            "  'guardrails budget-rules create') " + create_body + " ;;\n"
+            "  'alerts budget list') echo '" + alert_fixture_escaped + "' ;;\n"
+            '  *) echo "unknown: $*" >&2; exit 1 ;;\n'
+            'esac\n'
+        )
+        with open(stub_path, 'w') as f:
+            f.write(stub_content)
+        os.chmod(stub_path, 0o755)
+        return stub_path
+
+    def test_setup_guardrails_list_sites_send_gated_batch_size(self):
+        """PAGE-02 (plan 26-04, D-11/D-15): the three setup-guardrails.sh list
+        sites — the dedup lookup and the legacy-alert migration fetch (both
+        reached via `--from-alert LEGACY01 --auto`), and the operator display
+        site (reached via `--interactive`'s re-run gate) — are proven on the
+        probe-gated argv shape D-15's both-branches bar requires.
+
+        Sub-runs 1 and 2 cover both probe branches for the migration path
+        (dedup + legacy-alert sites, same run). Sub-run 3 covers only the
+        probe-supported branch for the display site and tolerates a non-zero
+        exit code: with stdin closed, the interactive re-run gate's `read`
+        prompt hits EOF and setup-guardrails.sh's `set -euo pipefail` exits
+        the script — but the display list call happens BEFORE that prompt,
+        so its argv is already recorded by the time the script exits. The
+        assertion in sub-run 3 is on argv, never on exit status.
+
+        `_revenium_api_calls` filters out `--help` probe lines (which also
+        contain the literal `guardrails budget-rules list` / `alerts budget
+        list` substrings as quoted arguments to `supports_flag`, and would
+        otherwise contaminate the argv match) and `config show` lines.
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing')
+
+        # --- Sub-runs 1 & 2: migration path (dedup + legacy-alert sites), both probe branches ---
+        for label, advertise_page in (('probe-supported', True), ('fallback', False)):
+            with self.subTest(scenario='migration', branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-sg-list-mig-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+                    os.makedirs(scripts_dir, exist_ok=True)
+                    shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+                    shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, exist_ok=True)
+                    config_seed = {'alertId': 'LEGACY01', 'autonomousMode': False}
+                    with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                        json.dump(config_seed, f)
+                    open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+                    shim_home = os.path.join(tmp, 'home')
+                    bin_dir = os.path.join(shim_home, '.local', 'bin')
+                    os.makedirs(bin_dir, exist_ok=True)
+                    argv_log = os.path.join(tmp, 'revenium.argv.log')
+                    self._make_setup_revenium_stub(
+                        bin_dir, argv_log, advertise_page=advertise_page,
+                    )
+
+                    env = {
+                        **os.environ,
+                        'HOME': shim_home,
+                        'HERMES_HOME': tmp,
+                        'REVENIUM_STATE_DIR': state_dir,
+                        'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                    }
+
+                    result = subprocess.run(
+                        ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                         '--from-alert', 'LEGACY01', '--auto'],
+                        env=env, capture_output=True, text=True, timeout=15,
+                    )
+                    self.assertEqual(result.returncode, 0,
+                                     f'[{label}] stdout={result.stdout}\nstderr={result.stderr}')
+
+                    self.assertTrue(os.path.exists(argv_log), f'[{label}] argv log not created')
+                    api_calls = self._revenium_api_calls(argv_log)
+
+                    dedup_lines = [l for l in api_calls if l.startswith('guardrails budget-rules list')]
+                    alert_lines = [l for l in api_calls if l.startswith('alerts budget list')]
+                    self.assertTrue(dedup_lines, f'[{label}] no dedup list call recorded: {api_calls!r}')
+                    self.assertTrue(alert_lines, f'[{label}] no legacy alert list call recorded: {api_calls!r}')
+
+                    if label == 'probe-supported':
+                        self.assertIn('--page-size 500', dedup_lines[0],
+                                      f'[{label}] dedup list missing --page-size 500: {dedup_lines[0]!r}')
+                        self.assertIn('--page-size 500', alert_lines[0],
+                                      f'[{label}] alerts budget list missing --page-size 500: {alert_lines[0]!r}')
+                    else:
+                        self.assertNotIn('--page-size', dedup_lines[0],
+                                         f'[{label}] dedup list must carry no pagination flag: {dedup_lines[0]!r}')
+                        self.assertNotIn('--page-size', alert_lines[0],
+                                         f'[{label}] alerts budget list must carry no pagination flag: {alert_lines[0]!r}')
+
+        # --- Sub-run 3: interactive display site, probe-supported branch ---
+        with self.subTest(scenario='interactive-display', branch='probe-supported'):
+            with tempfile.TemporaryDirectory(prefix='gsd-sg-list-disp-') as tmp:
+                scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+                os.makedirs(scripts_dir, exist_ok=True)
+                shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+                shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+                state_dir = os.path.join(tmp, 'state', 'revenium')
+                os.makedirs(state_dir, exist_ok=True)
+                config_seed = {'ruleIds': ['EXISTING01'], 'autonomousMode': False}
+                with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                    json.dump(config_seed, f)
+                open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+                shim_home = os.path.join(tmp, 'home')
+                bin_dir = os.path.join(shim_home, '.local', 'bin')
+                os.makedirs(bin_dir, exist_ok=True)
+                argv_log = os.path.join(tmp, 'revenium.argv.log')
+                budget_rules_list = json.dumps([
+                    {'id': 'EXISTING01', 'name': 'Old Rule', 'hardLimit': 50,
+                     'warnThreshold': 40, 'windowType': 'MONTHLY'}
+                ])
+                self._make_setup_revenium_stub(
+                    bin_dir, argv_log, advertise_page=True,
+                    budget_rules_list=budget_rules_list,
+                )
+
+                env = {
+                    **os.environ,
+                    'HOME': shim_home,
+                    'HERMES_HOME': tmp,
+                    'REVENIUM_STATE_DIR': state_dir,
+                    'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                }
+
+                result = subprocess.run(
+                    ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'), '--interactive'],
+                    env=env, capture_output=True, text=True, timeout=15,
+                    stdin=subprocess.DEVNULL,
+                )
+                # Non-zero exit tolerated — see docstring; assertion is on argv only.
+
+                self.assertTrue(
+                    os.path.exists(argv_log),
+                    f'argv log not created; stdout={result.stdout!r} stderr={result.stderr!r}',
+                )
+                api_calls = self._revenium_api_calls(argv_log)
+                list_lines = [l for l in api_calls if l.startswith('guardrails budget-rules list')]
+                self.assertTrue(list_lines, f'no display list call recorded: {api_calls!r}')
+                self.assertIn('--page-size 500', list_lines[0],
+                              f'display list missing --page-size 500: {list_lines[0]!r}')
+
+    def test_setup_guardrails_rule_create_failure_surfaces_truncated_error(self):
+        """D-07/STDERR-01 (plan 26-04, Task 1): first-ever coverage of the
+        rule-create failure path. All diagnostic text arrives on stderr (the
+        create command's stdout is empty on failure); the metering log must
+        still contain the failure prefix, the exit code, and a 200-char
+        prefix of the stderr text — proving both that STDERR-01's stream
+        split did not lose the diagnostic and that the pre-existing 200-char
+        cap (T-18-LOG-INJECT convention) still applies after the split.
+
+        Asserts against ${STATE_DIR}/revenium-metering.log rather than the
+        subprocess's own stderr: common.sh's error() mirrors to stderr only
+        when fd 2 is a TTY, which it is not under subprocess.run.
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-sg-create-fail-') as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            config_seed = {'alertId': 'LEGACY01', 'autonomousMode': False}
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump(config_seed, f)
+            open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+
+            distinctive_prefix = 'DISTINCTIVE_STDERR_PREFIX_HERE: '
+            tail_marker = 'UNIQUE_TAIL_MARKER_ZZZ'
+            create_stderr = distinctive_prefix + ('F' * 300) + tail_marker
+            self.assertGreater(len(create_stderr), 200,
+                               'fixture must exceed the 200-char cap to exercise truncation')
+
+            self._make_setup_revenium_stub(
+                bin_dir, argv_log, advertise_page=True,
+                create_fails=True, create_stderr=create_stderr,
+            )
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                 '--from-alert', 'LEGACY01', '--auto'],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f'migration create-failure path must exit 0 (cron retries): '
+                             f'stdout={result.stdout}\nstderr={result.stderr}')
+
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+            with open(log_path) as f:
+                log_text = f.read()
+
+            self.assertIn('rule creation failed (exit 1):', log_text,
+                          f'failure prefix + exit code missing from log: {log_text!r}')
+            self.assertIn(distinctive_prefix, log_text,
+                          f'stderr text did not survive the stream split: {log_text!r}')
+            self.assertNotIn(tail_marker, log_text,
+                             f'beyond-cap filler tail leaked past the 200-char truncation: {log_text!r}')
+
+            with open(os.path.join(state_dir, 'config.json')) as f:
+                cfg = json.load(f)
+            self.assertNotIn('ruleIds', cfg,
+                             'a failed rule creation must not write ruleIds to config.json')
+
+    def test_every_json_list_call_site_declares_pagination_classification(self):
+        """Assumption-delta invariant (26-01's decision, implemented here per
+        this plan's Task 3d): every `--output json` list-family invocation
+        across guardrail-check.sh and setup-guardrails.sh must be preceded,
+        within its immediately-adjacent contiguous comment block, by a
+        `# wants-all-pages:` or `# wants-bounded:` classification marker.
+        This phase promoted "the complete result set" (all pages aggregated)
+        over "the first page" as the default noun for a `--output json` list
+        call (26-01's assumption-delta decision, `promote`); this test is
+        what keeps a later phase from silently reintroducing the old
+        first-page default — a list call added later without a marker goes
+        RED here, and a marker removed from an existing site also goes RED.
+
+        Does not verify the flags sent are correct — plans 26-01/26-03 and
+        this plan's Task 3b/3c already do that via argv assertions. It only
+        verifies that no site is left undeclared.
+
+        Scope: the three verbs this skill's list-family calls use —
+        `budget-rules list`, `enforcement-events list`, `alerts budget
+        list` — matched as `revenium guardrails ...` / `revenium alerts ...`
+        literals. This deliberately excludes:
+        - `--help` capability-probe call sites (e.g. `supports_flag
+          "guardrails budget-rules list" "--page"`), which reference the
+          same verb string as a quoted, unprefixed argument — with no
+          literal `revenium ` immediately before `guardrails`/`alerts` on
+          that line, so the pattern below does not match it;
+        - Python heredoc content, which never contains a `revenium
+          guardrails ...` / `revenium alerts ...` shell-command literal.
+        """
+        import re
+
+        verb_pattern = re.compile(
+            r'revenium (?:guardrails (?:budget-rules list|enforcement-events list)'
+            r'|alerts budget list)'
+        )
+        marker_pattern = re.compile(r'^\s*#\s*(wants-all-pages|wants-bounded):')
+        # A bare `local <var>` declaration line (no assignment) may sit between
+        # the marker's contiguous comment block and the array-construction line
+        # it documents (setup-guardrails.sh's `local list_cmd` convention) —
+        # tolerated without breaking the walk, so it isn't mistaken for
+        # unrelated code that should terminate the lookback.
+        local_decl_pattern = re.compile(r'^\s*local\s+\w+\s*$')
+        max_lookback = 20
+
+        files = [
+            SKILL / 'scripts' / 'guardrail-check.sh',
+            SKILL / 'scripts' / 'setup-guardrails.sh',
+        ]
+
+        total_wants_all_pages = 0
+        total_wants_bounded = 0
+        undeclared = []
+
+        for path in files:
+            lines = path.read_text().splitlines()
+            for idx, line in enumerate(lines):
+                if not verb_pattern.search(line):
+                    continue
+                marker_kind = None
+                j = idx - 1
+                steps = 0
+                while j >= 0 and steps < max_lookback:
+                    candidate = lines[j]
+                    stripped = candidate.strip()
+                    if stripped.startswith('#'):
+                        m = marker_pattern.match(candidate)
+                        if m:
+                            marker_kind = m.group(1)
+                            break
+                        j -= 1
+                        steps += 1
+                        continue
+                    if local_decl_pattern.match(candidate):
+                        j -= 1
+                        steps += 1
+                        continue
+                    break
+                if marker_kind is None:
+                    undeclared.append(f'{path.name}:{idx + 1}: {line.strip()}')
+                elif marker_kind == 'wants-all-pages':
+                    total_wants_all_pages += 1
+                else:
+                    total_wants_bounded += 1
+
+        self.assertEqual(
+            undeclared, [],
+            f'list call site(s) with no wants-all-pages/wants-bounded marker in '
+            f'their contiguous comment block: {undeclared!r}',
+        )
+        self.assertEqual(
+            total_wants_all_pages, 4,
+            f'expected exactly 4 wants-all-pages sites across both files, '
+            f'found {total_wants_all_pages}',
+        )
+        self.assertEqual(
+            total_wants_bounded, 1,
+            f'expected exactly 1 wants-bounded site across both files, '
+            f'found {total_wants_bounded}',
+        )
+
     # ------------------------------------------------------------------
     # Phase 22 (TESTS-04..07): behavioral tests for subagent trace +
     # agentic-job inheritance + classifier marker-pair root identifiers.
