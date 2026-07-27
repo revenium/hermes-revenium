@@ -7518,19 +7518,57 @@ class RepositoryTests(unittest.TestCase):
     # Each test has a complete body (no pass, no assert True).
     # ------------------------------------------------------------------
 
+    def _revenium_argv_log_path(self, scripts_dir):
+        """Canonical path of the argv-recording log written by `_make_revenium_stub`
+        into `scripts_dir`. Tests should derive the log path through this helper
+        rather than re-deriving `revenium.argv.log` by hand.
+        """
+        import os
+        return os.path.join(scripts_dir, 'revenium.argv.log')
+
     def _make_revenium_stub(self, scripts_dir, enforcement_json, budget_rules_json,
-                             events_json=None, events_fail=False):
-        """Write a fake `revenium` binary into scripts_dir that handles the Phase 19 subcommands.
+                             events_json=None, events_fail=False, argv_log=None,
+                             advertise_page=True, advertise_page_size=True):
+        """Write a fake `revenium` binary into scripts_dir that handles the Phase 19/26
+        subcommands.
 
         - `revenium config show` → emits 'Team ID: 12802'
         - `revenium guardrails enforcement-rules get <teamId> --output json` → enforcement_json
         - `revenium guardrails budget-rules list --output json` → budget_rules_json
-        - `revenium guardrails enforcement-events list --rule-id <id> --page-size 1 --output json`
-            → events_json if not events_fail, else exit 1
+        - `revenium guardrails enforcement-events list --rule-id <id> --page 0 --page-size 1
+          --output json` (probe-supported form, PAGE_FLAG_SUPPORTED=true)
+          → events_json if not events_fail, else exit 1
+        - `revenium guardrails enforcement-events list --rule-id <id> --page-size 1
+          --output json` (fallback form, no `--page`, PAGE_FLAG_SUPPORTED=false)
+          → events_json if not events_fail, else exit 1
+
+        Every invocation is logged verbatim — one `printf '%s\\n' "$*"` line per
+        call, including `config show` and `--help` probes — into `argv_log`
+        (defaults to `_revenium_argv_log_path(scripts_dir)`). Tests read this log
+        to assert on the exact CLI flags a call site sent, rather than relying on
+        the 3-word `"$1 $2 $3"` case dispatch below, which is flag-blind (it
+        cannot distinguish `--page-size 1` from `--page 0 --page-size 1`).
+
+        `--help` is intercepted by a pre-guard BEFORE the `"$1 $2 $3"` case
+        dispatch — otherwise `revenium guardrails enforcement-events list --help`
+        would match the 3-word dispatch key and route into the events-list arm
+        (returning JSON, not help text). The pre-guard emits parameterized help
+        text reproducing RESEARCH.md's captured v1.3.0 `--help` layout:
+        `advertise_page` gates a `--page int` line, `advertise_page_size` gates a
+        `--page-size int` line (both default True — the v1.3.0 shape). Set
+        `advertise_page=False` (keeping `advertise_page_size=True`) to model the
+        realistic pre-v1.3.0 CLI shape that proves the `--page`/`--page-size`
+        substring collision does not false-positive the capability probe. The
+        two pre-existing two-word `--help` case arms below are now unreachable
+        (the pre-guard always wins) — left in place, removing them is out of
+        scope for this phase.
         """
         import os
         import json
+        import shlex
         stub_path = os.path.join(scripts_dir, 'revenium')
+        if argv_log is None:
+            argv_log = self._revenium_argv_log_path(scripts_dir)
         # Escape the JSON strings for embedding in bash heredoc
         enf_escaped = enforcement_json.replace("'", "'\\''")
         br_escaped = budget_rules_json.replace("'", "'\\''")
@@ -7538,13 +7576,38 @@ class RepositoryTests(unittest.TestCase):
             events_json = '[]'
         ev_escaped = events_json.replace("'", "'\\''")
         events_body = f"exit 1" if events_fail else f"echo '{ev_escaped}'"
+
+        # RESEARCH.md § "Real CLI v1.3.0 --help output" — verbatim captured layout.
+        help_body_lines = ["echo '  -h, --help             help for list'"]
+        if advertise_page:
+            help_body_lines.append("echo '      --page int         Page number (0-based)'")
+        if advertise_page_size:
+            help_body_lines.append(
+                "echo '      --page-size int    Number of items per page (default 20)'"
+            )
+        help_body = '\n    '.join(help_body_lines)
+
         stub_content = (
             '#!/usr/bin/env bash\n'
+            # D-14 (plan 26-01): record every invocation's full argv, unconditionally,
+            # before any dispatch — downstream call-count/argv assertions filter this
+            # log rather than relying on selective per-arm logging.
+            "printf '%s\\n' \"$*\" >> " + shlex.quote(argv_log) + '\n'
+            # D-15 (plan 26-01): --help pre-guard, checked before the "$1 $2 $3" case
+            # dispatch below. Without this, "guardrails enforcement-events list --help"
+            # would match the 3-word dispatch key and route into the events arm.
+            'for _arg in "$@"; do\n'
+            '  if [[ "${_arg}" == "--help" ]]; then\n'
+            f'    {help_body}\n'
+            '    exit 0\n'
+            '  fi\n'
+            'done\n'
             # Match on "$1 $2 $3"; when fewer than 3 args are passed (e.g. "config show"),
             # bash expands the empty $3 to "", producing a trailing space in the string.
             # The 'config show'|'config show ' pattern handles both.
             # The 'guardrails budget-rules --help' and 'guardrails enforcement-events --help'
-            # cases satisfy has_guardrails_cli() probes in guardrail-check.sh.
+            # cases below are unreachable now (the --help pre-guard above always wins) but
+            # left in place — removing them is out of scope for this phase.
             'case "$1 $2 $3" in\n'
             f"  'config show'|'config show ') echo 'Team ID: 12802' ;;\n"
             f"  'guardrails enforcement-rules get') echo '{enf_escaped}' ;;\n"
@@ -7995,6 +8058,157 @@ class RepositoryTests(unittest.TestCase):
                 f'AUDIT-02: stdout must contain EVENT_SUMMARY=(unavailable) on API failure; '
                 f'got: {result.stdout!r}',
             )
+
+    def test_enforcement_events_fetch_gated_page_flag(self):
+        """PAGE-01/COMPAT-02 (plan 26-01): the halt-path enforcement-events fetch is
+        capability-gated on `--page`, proven by recorded argv rather than by
+        inspection. Drives guardrail-check.sh three times, once per `--help`
+        fixture branch, each in its own temp dir (a breaching + autonomous rule
+        fixture so the halt path actually runs and the events-list call fires):
+
+        - Branch A (v1.3.0 shape — advertises both `--page` and `--page-size`):
+          argv must contain BOTH `--page 0` and `--page-size 1`.
+        - Branch B (realistic pre-v1.3.0 shape — advertises `--page-size` only,
+          NOT `--page`): argv must contain `--page-size 1` and NO standalone
+          `--page` token. This is the branch that catches the `--page`/
+          `--page-size` substring collision — a naive substring probe would
+          false-positive on `--page-size` and wrongly add `--page 0`.
+        - Branch C (ancient shape — advertises neither flag): same expectation
+          as branch B — today's exact fallback shape, byte-identical (D-04).
+
+        Stub placement: an arbitrary temp `scripts_dir` prepended to PATH, no
+        HOME override — this is safe for guardrail-check.sh specifically because
+        of its own `_PATH_HEAD` hack (lines 14-20) which re-prepends the test's
+        PATH head after `ensure_path` runs, so ensure_path's Homebrew/system
+        prefixes can never push the stub behind a real `revenium` binary. (This
+        placement convention does NOT transfer to setup-guardrails.sh tests,
+        which have no `_PATH_HEAD` equivalent and must use $HOME/.local/bin —
+        see Pitfall 3 in RESEARCH.md / plan 26-04.)
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
+        ])
+
+        branches = [
+            ('A-v1.3.0', True, True),
+            ('B-pre-v1.3.0-realistic', False, True),
+            ('C-ancient', False, False),
+        ]
+
+        for label, advertise_page, advertise_page_size in branches:
+            with self.subTest(branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-gc-page-gate-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'scripts')
+                    os.makedirs(scripts_dir)
+                    self._make_revenium_stub(
+                        scripts_dir, enforcement_json, budget_rules_json, events_json,
+                        advertise_page=advertise_page,
+                        advertise_page_size=advertise_page_size,
+                    )
+                    argv_log = self._revenium_argv_log_path(scripts_dir)
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                    config_path = os.path.join(state_dir, 'config.json')
+                    with open(config_path, 'w') as f:
+                        json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+                    status_path = os.path.join(state_dir, 'guardrail-status.json')
+                    log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                    env = dict(os.environ)
+                    env['HERMES_HOME'] = tmp
+                    env['REVENIUM_STATE_DIR'] = state_dir
+                    env['GUARDRAIL_STATUS_FILE'] = status_path
+                    env['LOG_FILE'] = log_path
+                    env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                    result = subprocess.run(
+                        ['bash', guardrail_check],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f'[{label}] guardrail-check.sh exit {result.returncode}: '
+                        f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                    )
+                    self.assertTrue(
+                        os.path.isfile(status_path),
+                        f'[{label}] guardrail-status.json not written; stderr={result.stderr!r}',
+                    )
+                    with open(status_path) as f:
+                        json.load(f)  # must be valid JSON
+
+                    # Stub-reachability guard: a missing log means the real system
+                    # `revenium` answered instead of the stub, and the assertions
+                    # below would be validating nothing.
+                    self.assertTrue(
+                        os.path.isfile(argv_log),
+                        f'[{label}] argv log not found at {argv_log!r} — stub was never reached',
+                    )
+                    with open(argv_log) as f:
+                        argv_lines = f.read().splitlines()
+                    events_lines = [
+                        line for line in argv_lines
+                        if 'enforcement-events list' in line and '--help' not in line
+                    ]
+                    self.assertTrue(
+                        events_lines,
+                        f'[{label}] no enforcement-events list invocation recorded; '
+                        f'argv log: {argv_lines!r}',
+                    )
+                    events_argv = events_lines[0]
+                    events_tokens = events_argv.split()
+
+                    self.assertIn(
+                        '--page-size', events_tokens,
+                        f'[{label}] expected --page-size in argv: {events_argv!r}',
+                    )
+                    self.assertIn(
+                        '1', events_tokens,
+                        f'[{label}] expected page-size value 1 in argv: {events_argv!r}',
+                    )
+
+                    if label == 'A-v1.3.0':
+                        self.assertIn(
+                            '--page', events_tokens,
+                            f'[{label}] probe-supported branch must send --page: {events_argv!r}',
+                        )
+                        self.assertIn(
+                            '0', events_tokens,
+                            f'[{label}] probe-supported branch must send --page 0: {events_argv!r}',
+                        )
+                    else:
+                        self.assertNotIn(
+                            '--page', events_tokens,
+                            f'[{label}] fallback branch must NOT send a standalone --page token '
+                            f'(substring-collision check): {events_argv!r}',
+                        )
 
     def test_guardrail_check_shadow_mode_does_not_halt(self):
         """A breached shadow-mode rule must NOT cause halted:true (quick-260528-gve).

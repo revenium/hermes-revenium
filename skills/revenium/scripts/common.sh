@@ -105,6 +105,34 @@ has_guardrails_cli() {
   revenium guardrails enforcement-events --help >/dev/null 2>&1
 }
 
+# Phase 26 (D-01/D-02): generic capability probe for a single CLI flag on a given
+# `revenium` subcommand. Fail-open — returns non-zero (unsupported) on any error,
+# including a missing CLI, a subcommand that rejects --help, or no match. Never
+# logs, never exits itself; callers resolve the result into a shell variable via
+# `if supports_flag ...; then VAR=true; fi` (never `VAR=$(supports_flag ...)` —
+# `local x=$(...)` swallows the command substitution's exit status, see
+# RESEARCH.md Pitfall 2).
+#
+# Usage: supports_flag "<subcommand words>" "<--flag>"
+#   arg1 is deliberately word-split (unquoted) so multi-word subcommands like
+#   "guardrails enforcement-events list" expand into separate positional args.
+#   shellcheck disable=SC2086
+supports_flag() {
+  local help_text
+  # Two-step capture instead of `revenium ... --help 2>&1 | grep -q` — `grep -q`
+  # exits on its first match and can SIGPIPE the upstream `revenium` process;
+  # under `pipefail` that surfaces as exit 141 and the probe would report
+  # "unsupported" nondeterministically. The trailing `|| true` makes explicit
+  # that this assignment's own exit status is deliberately not consulted.
+  # shellcheck disable=SC2086
+  help_text="$(revenium ${1} --help 2>&1)" || true
+  # The `([^A-Za-z0-9-]|$)` trailing boundary stops a probe for "--page" from
+  # matching "--page-size". Without it, any CLI that advertises --page-size
+  # (which includes every pre-v1.3.0 CLI this skill already calls today) would
+  # false-positive as supporting --page.
+  printf '%s\n' "${help_text}" | grep -qE -- "${2}([^A-Za-z0-9-]|\$)"
+}
+
 # Phase 21 (TRACE-01, v1.4 path foundation): walk state.db.sessions.parent_session_id
 # to the root delegator and print it on stdout. Shells into the Python sidecar at
 # scripts/get-root-session-id.py (canonical implementation per D-01).

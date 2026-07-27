@@ -41,6 +41,16 @@ if ! revenium config show >/dev/null 2>&1; then
   exit 0
 fi
 
+# Phase 26 (D-01/D-03): resolve the --page capability once per script run and
+# reuse the result at every gated call site in this tick. No disk cache, no new
+# state path — the result lives solely in this shell variable (PAGE-01
+# concurrency edge: a second concurrent run cannot observe a stale probe result
+# because there is nothing on disk to observe).
+PAGE_FLAG_SUPPORTED=false
+if supports_flag "guardrails enforcement-events list" "--page"; then
+  PAGE_FLAG_SUPPORTED=true
+fi
+
 # (C) read_config_field helper — reads a scalar key from CONFIG_FILE via Python.
 read_config_field() {
   CONFIG_FILE="${CONFIG_FILE}" KEY="$1" python3 - <<'PY'
@@ -312,8 +322,13 @@ if echo "${HALT_OUTPUT}" | grep -q '^HALT_TRANSITION=true$'; then
   # Use a sentinel "__FAIL__" to distinguish API failure (exit non-zero) from an empty
   # result (API succeeded, no events). Both produce '(unavailable)' in the notification
   # per AUDIT-02, but the test asserts on '(unavailable)' for API failures specifically.
-  EVENT_JSON=$(revenium guardrails enforcement-events list \
-    --rule-id "${HALTED_RULE_ID}" --page-size 1 --output json 2>/dev/null || echo '__FAIL__')
+  # wants-bounded: exactly one record in one HTTP request (PAGE-01).
+  EVENT_CMD=(revenium guardrails enforcement-events list --rule-id "${HALTED_RULE_ID}")
+  if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+    EVENT_CMD+=(--page 0)
+  fi
+  EVENT_CMD+=(--page-size 1 --output json)
+  EVENT_JSON=$("${EVENT_CMD[@]}" 2>/dev/null || echo '__FAIL__')
   if [[ "${EVENT_JSON}" == "__FAIL__" ]]; then
     warn "enforcement-events list failed for rule ${HALTED_RULE_ID} — falling back to rule-level data (AUDIT-02)"
     EVENT_TS='(unavailable)'
