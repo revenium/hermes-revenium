@@ -8210,6 +8210,147 @@ class RepositoryTests(unittest.TestCase):
                             f'(substring-collision check): {events_argv!r}',
                         )
 
+    def test_capability_probe_writes_no_state(self):
+        """PAGE-01 concurrency edge (plan 26-01, Task 2): the supports_flag()
+        capability probe writes NO state of its own. After a full
+        guardrail-check.sh run, the only REGULAR files directly under STATE_DIR
+        are config.json, guardrail-status.json, and revenium-metering.log — no
+        probe cache file, no lock, no marker.
+
+        This is the mechanical form of D-03's claim: the probe result
+        (PAGE_FLAG_SUPPORTED) lives solely in the per-process shell variable, so
+        there is no cache file for a second concurrent run to read stale, and no
+        partially-written file for an interrupted run to leave behind. A future
+        plan (26-02) adds an EXIT-trap-cleaned stderr temp file; that trap must
+        keep this exact-set assertion holding (the temp file is removed before
+        the process exits, same as it never existed from this test's vantage
+        point).
+
+        Subdirectories created by common.sh's `mkdir -p` (markers/,
+        markers/.ready, tool-events/) are expected and are NOT regular files —
+        this assertion filters to regular files only, then asserts exact set
+        equality (not a subset/assertIn check).
+
+        Uses a breaching + autonomous, no-notify-channel fixture (same shape as
+        `test_enforcement_events_fetch_gated_page_flag`) so guardrail-check.sh's
+        halt path actually runs — including the `supports_flag()`-gated
+        enforcement-events fetch this plan adds — and so at least one `info`/
+        `warn` log line is written (a totally quiet, non-breaching run never
+        touches LOG_FILE, which would make this test unable to distinguish
+        "log never created" from "probe left no extra state").
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule within limits'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-probe-no-state-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({
+                    'ruleIds': ['d5jng5'],
+                    'autonomousMode': True,
+                    'organizationName': 'TestOrg',
+                }, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            regular_files = {
+                name for name in os.listdir(state_dir)
+                if os.path.isfile(os.path.join(state_dir, name))
+            }
+            self.assertEqual(
+                regular_files,
+                {'config.json', 'guardrail-status.json', 'revenium-metering.log'},
+                f'unexpected regular files directly under STATE_DIR — the capability '
+                f'probe (or something else) is writing state it should not: {regular_files!r}',
+            )
+
+    def test_stub_docstring_matches_gated_event_invocation(self):
+        """PAGE-04 (plan 26-01, Task 2): make PAGE-04 mechanical instead of
+        reviewer-diligence-only. Asserts co-occurrence, in both directions,
+        between `_make_revenium_stub`'s docstring and guardrail-check.sh's
+        source:
+
+        - the docstring mentions `--page 0` AND `--page-size 1`;
+        - guardrail-check.sh's EVENT_CMD construction emits a `--page 0` append
+          AND a `--page-size 1` append.
+
+        LIMITATION (documented per plan): this cannot prove the docstring PROSE
+        is a faithful description of the code — it proves the two artifacts
+        have not drifted onto different flag sets, which is the actual failure
+        mode PAGE-04 guards against (a docstring that names one flag set while
+        the code emits a different one). A technically-correct-but-misleading
+        docstring would still pass this test. Do not over-trust it as a
+        semantic check.
+        """
+        import re
+
+        doc = self._make_revenium_stub.__doc__ or ''
+        self.assertIn('--page 0', doc, 'docstring must name the probe-supported argv shape')
+        self.assertIn('--page-size 1', doc, 'docstring must name the fallback argv shape')
+
+        guardrail_check_path = SKILL / 'scripts' / 'guardrail-check.sh'
+        source = guardrail_check_path.read_text()
+        self.assertTrue(
+            re.search(r'EVENT_CMD\+=\(--page\s+0\)', source),
+            f'guardrail-check.sh must append --page 0 to EVENT_CMD on the probe-supported '
+            f'branch; source did not match expected pattern',
+        )
+        self.assertTrue(
+            re.search(r'EVENT_CMD\+=\(--page-size\s+1\s+--output\s+json\)', source),
+            f'guardrail-check.sh must append --page-size 1 --output json to EVENT_CMD; '
+            f'source did not match expected pattern',
+        )
+
     def test_guardrail_check_shadow_mode_does_not_halt(self):
         """A breached shadow-mode rule must NOT cause halted:true (quick-260528-gve).
         The per-rule entry still records state:'block' AND shadowMode:true so the
