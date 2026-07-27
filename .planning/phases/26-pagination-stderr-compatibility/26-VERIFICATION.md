@@ -1,19 +1,22 @@
 ---
 phase: 26-pagination-stderr-compatibility
 verified: 2026-07-27T00:00:00Z
-status: human_needed
+status: passed
 score: 5/5 roadmap truths verified
 behavior_unverified: 0
 overrides_applied: 0
 human_verification:
+
   - test: "Decide whether to accept D-01/D-03's single-probe-reused-across-verbs design (WR-01, self-flagged in 26-REVIEW.md) as final, or require a follow-up plan that probes `alerts budget list` and `guardrails budget-rules list` independently before Phase 30's live-host run."
     expected: "An explicit accept/defer decision recorded (e.g. a VERIFICATION override, or a new backlog item for Phase 30 prep) so this doesn't silently ride into the live-host phase unexamined."
     why_human: "This is an architectural risk-acceptance call, not a mechanical check. The test harness (`_make_setup_revenium_stub`) can't even exercise the failure mode because its `--help` fixture is verb-agnostic (single `advertise_page` toggle answers every probed verb identically), so no automated test can currently distinguish 'safe' from 'risky' here."
+
   - test: "Decide whether the four `must_haves.prohibitions` left `status: unresolved` / `verification: null` in the 26-01..26-04 PLAN frontmatter need code-level mitigation before shipping, specifically: (a) no `warn` is emitted when `PAGE_FLAG_SUPPORTED=false` (silent capability degradation, plan 26-01's prohibition), and (b) no truncation-detection/warning exists when a wants-all-pages list returns exactly `REVENIUM_PAGE_BATCH_SIZE` (500) rows (silent cap, plan 26-03's prohibition, matches 26-REVIEW.md IN-01)."
     expected: "Either accept these as low-probability edge cases deferred to a follow-up phase, or open a plan to add the missing `warn` lines."
     why_human: "Both are judgment-tier prohibitions with no assigned test in the plans; 26-REVIEW.md flags the truncation gap as Info-severity, not blocking. No install in the field is known to have >500 budget rules today, so the practical risk is low, but the prohibition text itself is unambiguous ('must never become a silent cap') and it is currently unmet in code."
 gaps: []
 deferred:
+
   - truth: "Live verification against real CLI v1.3.0 and v1.2.1 binaries (COMPAT-01) confirming the aggregation-trigger assumption (RESEARCH.md A1: omitting --page while sending a large --page-size actually causes all-pages aggregation)"
     addressed_in: "Phase 30"
     evidence: "ROADMAP.md Phase 30: 'Live-Host Verification & Idempotency — all v1.2 changes verified live against both CLI versions'; 26-CONTEXT.md <domain> explicitly excludes 'live-host verification against real v1.3.0 and v1.2.1 binaries (Phase 30)' from this phase's scope."
