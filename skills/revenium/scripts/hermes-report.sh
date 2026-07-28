@@ -348,6 +348,16 @@ if root_sid and markers_dir:
                     if rec.get('kind') == 'job':
                         jt = rec.get('job_type')
                         if isinstance(jt, str) and jt:
+                            # WR-01 fix: parity with agentic_job_id's own
+                            # cross-boundary sanitization a few lines below
+                            # (and job_name/job_type at the per-marker
+                            # reader) -- strip newline/CR before this value
+                            # crosses the KEY=value heredoc boundary, so a
+                            # hand-edited or disk-corrupted marker file
+                            # cannot forge a second MARKER_STATE= line ahead
+                            # of the real one.
+                            for _bad in ('\n', '\r'):
+                                jt = jt.replace(_bad, '_')
                             latest_type = jt
         except OSError:
             # Fail-open for the trace-type VALUE (unchanged): latest_type
