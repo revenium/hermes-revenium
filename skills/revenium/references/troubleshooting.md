@@ -47,6 +47,7 @@ Then verify:
 - `~/.hermes/state.db` exists
 - `revenium config show` succeeds
 - the session rows in `state.db` have non-zero token counts
+- if the data is arriving but every completion's trace type reads `uncategorized`, see [trace-type-uncategorized.md](trace-type-uncategorized.md)
 
 ## Dashboard shows $0.00 / Total evaluations 0 even though cron is shipping meter completions
 

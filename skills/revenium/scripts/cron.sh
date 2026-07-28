@@ -79,6 +79,10 @@ PY
   if [[ -n "${ALERT_ID_FOR_MIGRATION}" ]]; then
     bash "${SKILL_DIR}/scripts/setup-guardrails.sh" --from-alert "${ALERT_ID_FOR_MIGRATION}" --auto 2>/dev/null || true
   fi
+  # Phase 28 (D-04): refresh plugin-status.json in the same tick the reporter
+  # reads it, so a registration outage is diagnosable within one cron cycle.
+  # Alert-only (D-05) — never repairs, never restarts the gateway.
+  bash "${SKILL_DIR}/scripts/plugin-status.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/guardrail-check.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true

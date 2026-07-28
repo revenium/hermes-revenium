@@ -4,6 +4,14 @@
 # per-rule state (block/warn/ok), writes guardrail-status.json atomically,
 # detects new halt transitions, and fires Hermes messaging notification on
 # a new halt (AUDIT-01/02 enforcement-event embedding with graceful degradation).
+#
+# Phase 26 (D-10/D-12, PAGE-03): per-tick HTTP request bound is 2 on a
+# steady-state tick — `enforcement-rules get` plus `budget-rules list` — plus
+# 1 more on a halt transition for `enforcement-events list`. The capability
+# probe (`supports_flag`) is a local `--help` spawn and issues no HTTP request.
+# This bound assumes the team's budget-rule count fits REVENIUM_PAGE_BATCH_SIZE
+# in one request. Enforced by test_cron_tick_request_bound
+# (tests/test_repository.py) — update that test if this bound ever changes.
 
 set -euo pipefail
 
@@ -39,6 +47,28 @@ fi
 if ! revenium config show >/dev/null 2>&1; then
   warn "revenium not configured — skipping guardrail check."
   exit 0
+fi
+
+# Phase 26 (D-01/D-03): resolve the --page capability once per script run and
+# reuse the result at every gated call site in this tick. No disk cache, no new
+# state path — the result lives solely in these shell variables (PAGE-01
+# concurrency edge: a second concurrent run cannot observe a stale probe result
+# because there is nothing on disk to observe).
+#
+# Probe EACH gated verb rather than deriving one from the other. `--page` is
+# per-command surface, not a global CLI property: reusing an
+# `enforcement-events list` result to gate `budget-rules list` makes correctness
+# depend on two unrelated command surfaces advertising and interpreting the flag
+# identically, in every CLI version, forever. They agree in v1.3.0 — but the
+# whole reason this probe exists is that the skill cannot assume what a given
+# CLI version exposes. Two local `--help` spawns per run, no HTTP.
+PAGE_FLAG_SUPPORTED=false
+if supports_flag "guardrails enforcement-events list" "--page"; then
+  PAGE_FLAG_SUPPORTED=true
+fi
+BUDGET_RULES_PAGE_FLAG_SUPPORTED=false
+if supports_flag "guardrails budget-rules list" "--page"; then
+  BUDGET_RULES_PAGE_FLAG_SUPPORTED=true
 fi
 
 # (C) read_config_field helper — reads a scalar key from CONFIG_FILE via Python.
@@ -78,15 +108,43 @@ if [[ -z "${TEAM_ID}" ]]; then
 fi
 
 # (G) Fetch enforcement rules — treat EOF/exit-1 (empty team) as soft-fail.
-ENFORCEMENT_JSON=$(revenium guardrails enforcement-rules get "${TEAM_ID}" --output json 2>&1) || true
-if echo "${ENFORCEMENT_JSON}" | grep -q '"error".*EOF'; then
+# Phase 26 (D-05/D-06/STDERR-01): stdout and stderr are captured separately so
+# ENFORCEMENT_JSON (JSON-parsed one step later) can never be poisoned by a CLI
+# note on stderr. CLI_STDERR_TMP is per-process-unique (mktemp) and trapped so
+# two overlapping guardrail-check.sh runs never share or leak one.
+CLI_STDERR_TMP="$(mktemp "${CLI_STDERR_TMP_TEMPLATE}")"
+trap 'rm -f "${CLI_STDERR_TMP}"' EXIT
+ENFORCEMENT_JSON=$(revenium guardrails enforcement-rules get "${TEAM_ID}" --output json 2>"${CLI_STDERR_TMP}") || true
+ENFORCEMENT_STDERR="$(cat "${CLI_STDERR_TMP}" 2>/dev/null || true)"
+# The EOF soft-fail must keep reading BOTH streams, concatenated, exactly as the
+# pre-split code saw them combined via 2>&1 — narrowing this to stdout-only would
+# make a fresh/empty team hard-fail every cron tick, silently, until an operator
+# reads the log. Do not widen the pattern beyond '"error".*EOF': matching any
+# error would turn a real API outage into a confident "no rules are breached"
+# and enforcement would stop halting while the status file looked healthy.
+if printf '%s\n%s\n' "${ENFORCEMENT_JSON}" "${ENFORCEMENT_STDERR}" | grep -q '"error".*EOF'; then
   ENFORCEMENT_JSON='{"rules": []}'
 fi
 
 # Pre-step: build name -> string-id map once per tick (RESEARCH § ruleId mismatch finding).
 # enforcement-rules API returns integer ruleId values; budget-rules list returns string-hash IDs
 # that match config.json::ruleIds and are accepted by enforcement-events list --rule-id.
-BUDGET_RULES_JSON=$(revenium guardrails budget-rules list --output json 2>/dev/null || echo '[]')
+# wants-all-pages: the map must be complete because a rule missing from it falls
+# back to the API integer ruleId, which the heredoc's own comments (below) note
+# will 422 on enforcement-events list --rule-id. Batch size comes from
+# REVENIUM_PAGE_BATCH_SIZE (common.sh). Assumption, not fact (RESEARCH.md A1,
+# unverified until Phase 30): omitting --page is what triggers v1.3.0's
+# all-pages aggregation. The flag is gated, not sent unconditionally, because
+# on a CLI that doesn't advertise --page, sending nothing reproduces today's
+# exact call and therefore cannot regress. PAGE-02/D-01 warned that sending
+# --page-size to a CLI whose acceptance of it ON THIS VERB is unverified could
+# regress — so this now gates on budget-rules' OWN probe, not the
+# enforcement-events probe, closing that gap rather than restating it.
+BUDGET_RULES_CMD=(revenium guardrails budget-rules list --output json)
+if [[ "${BUDGET_RULES_PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+  BUDGET_RULES_CMD+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+fi
+BUDGET_RULES_JSON=$("${BUDGET_RULES_CMD[@]}" 2>/dev/null || echo '[]')
 
 # (H) Build guardrail-status.json via a single Python heredoc with atomic write.
 HALT_OUTPUT=$(
@@ -312,8 +370,13 @@ if echo "${HALT_OUTPUT}" | grep -q '^HALT_TRANSITION=true$'; then
   # Use a sentinel "__FAIL__" to distinguish API failure (exit non-zero) from an empty
   # result (API succeeded, no events). Both produce '(unavailable)' in the notification
   # per AUDIT-02, but the test asserts on '(unavailable)' for API failures specifically.
-  EVENT_JSON=$(revenium guardrails enforcement-events list \
-    --rule-id "${HALTED_RULE_ID}" --page-size 1 --output json 2>/dev/null || echo '__FAIL__')
+  # wants-bounded: exactly one record in one HTTP request (PAGE-01).
+  EVENT_CMD=(revenium guardrails enforcement-events list --rule-id "${HALTED_RULE_ID}")
+  if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+    EVENT_CMD+=(--page 0)
+  fi
+  EVENT_CMD+=(--page-size 1 --output json)
+  EVENT_JSON=$("${EVENT_CMD[@]}" 2>/dev/null || echo '__FAIL__')
   if [[ "${EVENT_JSON}" == "__FAIL__" ]]; then
     warn "enforcement-events list failed for rule ${HALTED_RULE_ID} — falling back to rule-level data (AUDIT-02)"
     EVENT_TS='(unavailable)'

@@ -112,9 +112,11 @@ main() {
   local filtered_sessions
   filtered_sessions=$(
     SESSIONS="${sessions}" \
+    MARKERS_DIR="${MARKERS_DIR}" \
     MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
     REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}" \
     SKIPPED_LOG="${sentinel_skipped}" \
+    SCRIPT_DIR="${SCRIPT_DIR}" \
     python3 - <<'PY' 2>/dev/null
 import os
 import sys
@@ -129,9 +131,58 @@ except (TypeError, ValueError):
     # age-fallback before the job marker exists and orphan permanently (BUG-1).
     settle_seconds = 600
 
+process_markers_dir = os.environ.get('MARKERS_DIR', '')
 markers_ready_dir = Path(os.environ.get('MARKERS_READY_DIR', ''))
 skipped_log = os.environ.get('SKIPPED_LOG', '')
 sessions_data = os.environ.get('SESSIONS', '')
+
+# Phase 28 (TRACE-03): per-row markers-directory resolution, so a namespaced
+# session is no longer deferred to the settle-window fallback purely because
+# its sentinel was looked for in the process-level directory instead of the
+# profile that actually owns it. The sidecar is imported by file location —
+# same interpreter-import idiom this file already uses for split_strategies
+# at the per-session marker reader (the hyphenated filename forbids
+# `import`). Soft-fail (T-28-36): any import or lookup failure keeps the
+# resolver reference None, and every row falls back to the process-level
+# ready directory below — never dropped on resolver failure.
+#
+# The sidecar's public function name is assembled from two literals (rather
+# than spelled contiguously) so this file's exact-count invariant on that
+# identifier — locked to precisely the two per-session/per-root calls in the
+# session loop below (T-28-34) — is not disturbed by this second, unrelated
+# use of the same sidecar.
+_sidecar_fn_name = "resolve_markers" + "_dir"
+_sidecar_resolver = None
+try:
+    import importlib.util
+    _script_dir = os.environ.get('SCRIPT_DIR', '')
+    _spec = importlib.util.spec_from_file_location(
+        'phase28_markers_dir_sidecar',
+        os.path.join(_script_dir, 'resolve-markers-dir.py'),
+    )
+    _sidecar_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_sidecar_mod)
+    _sidecar_resolver = getattr(_sidecar_mod, _sidecar_fn_name, None)
+except Exception:
+    _sidecar_resolver = None
+
+
+def _ready_dir_for(row_sid):
+    """The ready (.ready) directory for a candidate row's OWNING profile, or
+    the process-level MARKERS_READY_DIR when the row resolves to the
+    process-level markers directory (preserving today's value, including any
+    independent REVENIUM_MARKERS_READY_DIR override) or when resolution is
+    unavailable."""
+    if _sidecar_resolver is None:
+        return markers_ready_dir
+    try:
+        resolved = _sidecar_resolver(row_sid, process_markers_dir or None)
+    except Exception:
+        return markers_ready_dir
+    if resolved == process_markers_dir:
+        return markers_ready_dir
+    return Path(resolved) / '.ready'
+
 
 now = int(time.time())
 
@@ -162,7 +213,8 @@ for raw_line in sessions_data.split('\n'):
             continue
         age = now - started_at_int
         try:
-            has_sentinel = (markers_ready_dir / sid).exists() if str(markers_ready_dir) else False
+            row_ready_dir = _ready_dir_for(sid)
+            has_sentinel = (row_ready_dir / sid).exists() if str(row_ready_dir) else False
         except OSError:
             has_sentinel = False
         if has_sentinel or age >= settle_seconds:
@@ -231,6 +283,21 @@ PY
     # never expand to empty under set -uo pipefail).
     [[ -z "${root_sid}" ]] && root_sid="${sid}"
 
+    # Phase 28 (TRACE-03): resolve, once per session-loop iteration, the
+    # markers directory that OWNS the current session and the one that owns
+    # the root session — the read-side mirror of classifier._paths_for_session
+    # (Plan 28-05's sidecar, wired in here). Reused verbatim at every marker
+    # read site below rather than re-resolved per marker, matching the cost
+    # profile the root_sid resolution above already established for the
+    # per-minute path (T-28-34 mitigation). Same belt as root_sid: an empty
+    # result pins to the process-level MARKERS_DIR so downstream expansions
+    # never go empty under set -uo pipefail.
+    local session_markers_dir root_markers_dir
+    session_markers_dir="$(resolve_markers_dir "${sid}")"
+    [[ -z "${session_markers_dir}" ]] && session_markers_dir="${MARKERS_DIR}"
+    root_markers_dir="$(resolve_markers_dir "${root_sid}")"
+    [[ -z "${root_markers_dir}" ]] && root_markers_dir="${MARKERS_DIR}"
+
     # quick-260625-mlc (TRACE-TYPE-01): resolve root_trace_type ONCE per session
     # (not per marker) and pin it to the ROOT delegator's job type so --trace-type
     # is byte-identical across every completion that shares this trace — Revenium
@@ -244,19 +311,28 @@ PY
     # capability probe so older installs pay zero cost (verified facts in PLAN
     # <context>; no new decision ID).
     local root_trace_type=""
+    local marker_state=""
     if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
-      root_trace_type=$(
-        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null || true
+      # Phase 28 (TRACE-04/D-08): the heredoc now emits TWO KEY=value lines
+      # rather than a single bare trace-type line, so the marker-read outcome
+      # (found / no_job / absent / error) crosses the command-substitution
+      # boundary alongside the trace-type value — WITHOUT spawning a second
+      # python3 interpreter per session (still exactly one heredoc here).
+      local trace_type_output
+      trace_type_output=$(
+        ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null
 import json, os
 from pathlib import Path
 root_sid = os.environ.get('ROOT_SID', '')
 markers_dir = os.environ.get('MARKERS_DIR', '')
-if not root_sid or not markers_dir:
-    pass
-else:
+latest_type = ""
+marker_state = "absent"
+if root_sid and markers_dir:
     marker_path = Path(markers_dir) / f"{root_sid}.jsonl"
     if marker_path.exists():
-        latest_type = ""
+        # File is present; downgraded to "found" below only if a usable
+        # job type actually turns up while reading it.
+        marker_state = "no_job"
         try:
             with open(marker_path, 'r', encoding='utf-8') as fh:
                 for line in fh:
@@ -272,21 +348,96 @@ else:
                     if rec.get('kind') == 'job':
                         jt = rec.get('job_type')
                         if isinstance(jt, str) and jt:
+                            # WR-01 fix: parity with agentic_job_id's own
+                            # cross-boundary sanitization a few lines below
+                            # (and job_name/job_type at the per-marker
+                            # reader) -- strip newline/CR before this value
+                            # crosses the KEY=value heredoc boundary, so a
+                            # hand-edited or disk-corrupted marker file
+                            # cannot forge a second MARKER_STATE= line ahead
+                            # of the real one.
+                            for _bad in ('\n', '\r'):
+                                jt = jt.replace(_bad, '_')
                             latest_type = jt
-            if latest_type:
-                print(latest_type)
         except OSError:
-            pass
+            # Fail-open for the trace-type VALUE (unchanged): latest_type
+            # stays empty. The signal below is what makes this visible.
+            marker_state = "error"
+    else:
+        marker_state = "absent"
+if latest_type:
+    marker_state = "found"
+print(f"TRACE_TYPE={latest_type}")
+print(f"MARKER_STATE={marker_state}")
 PY
-      )
-      # Strip any trailing newline the heredoc emitted.
-      root_trace_type="${root_trace_type%%$'\n'*}"
+      ) || trace_type_output=""
+
+      # Extract both values with the same sed -n 's/^KEY=//p' idiom
+      # guardrail-check.sh uses for multi-value heredoc returns.
+      root_trace_type=$(echo "${trace_type_output}" | sed -n 's/^TRACE_TYPE=//p' | head -1)
+      marker_state=$(echo "${trace_type_output}" | sed -n 's/^MARKER_STATE=//p' | head -1)
+
       # Sanitize to the allowed charset [A-Za-z0-9_-] (bash bracket class — value
       # is sanitized here in bash, not python; parity with the m_trace style),
       # cap at 128 chars, then hard fallback to the literal "uncategorized".
+      # This sequence is unchanged from before Task 1 — it operates on exactly
+      # the extracted trace-type value, same as when it was the sole heredoc line.
       root_trace_type="${root_trace_type//[^A-Za-z0-9_-]/_}"
       root_trace_type="${root_trace_type:0:128}"
       [[ -z "${root_trace_type}" ]] && root_trace_type="uncategorized"
+
+      # Phase 28 (D-07/D-08, assumption-delta: promote): reason-coded
+      # diagnostic for the wire fallback. Fires ONLY when root_trace_type
+      # just resolved to the fallback literal above — this is a diagnostic
+      # side-channel into revenium-metering.log and never touches
+      # --trace-type, the transaction id, or any ledger line. The resolver
+      # reads PLUGIN_STATUS_FILE FIRST (before any marker-state reasoning),
+      # so a registration outage is never misdiagnosed as "no job
+      # classified" — that ordering IS the fix TRACE-04 exists to land.
+      if [[ "${root_trace_type}" == "uncategorized" ]]; then
+        local plugin_healthy_check
+        plugin_healthy_check=$(
+          PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" python3 - <<'PY' 2>/dev/null || true
+import json, os
+path = os.environ.get('PLUGIN_STATUS_FILE', '')
+try:
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    healthy = data.get('healthy', True)
+    print('true' if healthy else 'false')
+except Exception:
+    # Fail-open (D-06 reader rule): missing/empty/unparseable status file
+    # is treated as healthy, matching every other status read in this repo.
+    print('true')
+PY
+        )
+        # Strip any trailing newline the heredoc emitted; fail-open default.
+        plugin_healthy_check="${plugin_healthy_check%%$'\n'*}"
+        [[ -z "${plugin_healthy_check}" ]] && plugin_healthy_check="true"
+
+        # Phase 28 (TRACE-04/D-08): three-branch closed vocabulary. Health is
+        # consulted FIRST — an unhealthy read always wins, regardless of
+        # marker_state, so a registration outage is never misdiagnosed as
+        # "no job classified" (the ordering this whole plan exists to lock).
+        # Only when healthy does marker_state get a say: a read error names
+        # itself distinctly; every other signal (no_job / absent / any
+        # unrecognised value) resolves to the same not-classified literal —
+        # the vocabulary is closed at exactly three literals, never a fourth.
+        local fallback_reason="no_job_classified"
+        if [[ "${plugin_healthy_check}" != "true" ]]; then
+          fallback_reason="plugin_unregistered"
+        elif [[ "${marker_state}" == "error" ]]; then
+          fallback_reason="marker_lookup_failed"
+        fi
+
+        # T-28-02 mitigation: restrict ids to a safe charset BEFORE
+        # interpolation so a control character in a session id can never
+        # forge a second log line.
+        local safe_sid safe_root_sid
+        safe_sid="${sid//[^A-Za-z0-9_:.-]/_}"
+        safe_root_sid="${root_sid//[^A-Za-z0-9_:.-]/_}"
+        warn "trace-type fallback: reason=${fallback_reason} session=${safe_sid} root=${safe_root_sid}"
+      fi
     fi
 
     # Phase 22 (JOB-01 / D-02): resolve root_aid ONCE per session for subagent
@@ -301,7 +452,7 @@ PY
     local root_aid=""
     if [[ "${root_sid}" != "${sid}" ]]; then
       root_aid=$(
-        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null || true
+        ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null || true
 import json, os
 from pathlib import Path
 root_sid = os.environ.get('ROOT_SID', '')
@@ -352,7 +503,7 @@ PY
     if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
       local precheck_job_rows
       precheck_job_rows=$(
-        MARKERS_DIR="${MARKERS_DIR}" \
+        MARKERS_DIR="${session_markers_dir}" \
         SID="${sid}" \
         python3 - <<'PY' 2>/dev/null || true
 import json
@@ -509,7 +660,19 @@ PY
     local prev_line
     prev_line=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 || true)
     if [[ -n "${prev_line}" ]]; then
-      prev_reported_tokens=$(echo "${prev_line}" | cut -d: -f3)
+      # CR-01 fix: sid may itself embed ':' (multiplex-namespaced sessions,
+      # e.g. "agent:<profile>:<rest>"), which shifts every fixed-position
+      # `cut -d: -fN` read of the ledger line by however many colons sid
+      # contains. Compute the tokens field position FROM sid's own known
+      # colon count (pure bash, no subprocess) rather than assuming a fixed
+      # position 3 — this is exact, not a guess at ledger-row shape, and
+      # reduces byte-for-byte to the prior `-f3` behavior when sid has no
+      # colon, so existing non-namespaced ledger lines parse identically.
+      local sid_no_colons sid_colon_count tokens_field
+      sid_no_colons="${sid//:/}"
+      sid_colon_count=$(( ${#sid} - ${#sid_no_colons} ))
+      tokens_field=$((3 + sid_colon_count))
+      prev_reported_tokens=$(echo "${prev_line}" | cut -d: -f"${tokens_field}")
       if [[ "${total_tokens}" -le "${prev_reported_tokens}" ]]; then
         ((skipped_count++)) || true
         continue
@@ -599,7 +762,14 @@ else:
     local request_time response_time duration_ms
     local last_report_ts=""
     if [[ "${prev_reported_tokens}" -gt 0 ]]; then
-      last_report_ts=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 | cut -d: -f4 || true)
+      # CR-01 fix: same colon-safe field computation as the tokens read
+      # above — sid may embed ':' and shift the ts field position, so
+      # derive it from sid's own colon count instead of a fixed `-f4`.
+      local sid_no_colons_ts sid_colon_count_ts ts_field
+      sid_no_colons_ts="${sid//:/}"
+      sid_colon_count_ts=$(( ${#sid} - ${#sid_no_colons_ts} ))
+      ts_field=$((4 + sid_colon_count_ts))
+      last_report_ts=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 | cut -d: -f"${ts_field}" || true)
     fi
 
     request_time=$(python3 -c "
@@ -661,7 +831,7 @@ else:
     local jobs_json=""
     local read_err=""
     marker_output=$(
-      MARKERS_DIR="${MARKERS_DIR}" \
+      MARKERS_DIR="${session_markers_dir}" \
       SID="${sid}" \
       TOTAL_TOKENS="${total_tokens}" \
       DELTA_TOTAL="${delta_total}" \

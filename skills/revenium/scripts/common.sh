@@ -53,6 +53,19 @@ GUARDRAIL_STATUS_FILE="${REVENIUM_GUARDRAIL_STATUS_FILE:-${STATE_DIR}/guardrail-
 RULES_LOCK_FILE="${REVENIUM_RULES_LOCK_FILE:-${STATE_DIR}/rules.lock}"
 # Phase 18: notify-once gate for setup-guardrails.sh migration failures (D-10).
 MIGRATION_NOTIFY_FILE="${REVENIUM_MIGRATION_NOTIFY_FILE:-${STATE_DIR}/migration-notify-state}"
+# Phase 26 (D-06): mktemp template for capturing CLI stderr on calls whose stdout is JSON-parsed.
+CLI_STDERR_TMP_TEMPLATE="${REVENIUM_CLI_STDERR_TMP_TEMPLATE:-${STATE_DIR}/.cli-stderr.XXXXXX}"
+# Phase 26 (D-09/D-11): per-request batch size for `--output json` list calls
+# classified wants-all-pages. 500 is chosen so a realistic install resolves in
+# a single request while remaining correct for larger ones (RESEARCH.md A3).
+# Env-overridable for installs with unusually many rules. This is a policy
+# tunable, not a state path — kept adjacent to the Phase 26 block for
+# readability even though it belongs next to REVENIUM_CRON_SETTLE_SECONDS in kind.
+REVENIUM_PAGE_BATCH_SIZE="${REVENIUM_PAGE_BATCH_SIZE:-500}"
+# Phase 28 (D-06): writer=plugin-status.sh, reader=hermes-report.sh — the
+# cross-process plugin-health contract that lets the reporter's trace-type
+# fallback distinguish a registration outage from an unclassified session.
+PLUGIN_STATUS_FILE="${REVENIUM_PLUGIN_STATUS_FILE:-${STATE_DIR}/plugin-status.json}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
@@ -105,6 +118,34 @@ has_guardrails_cli() {
   revenium guardrails enforcement-events --help >/dev/null 2>&1
 }
 
+# Phase 26 (D-01/D-02): generic capability probe for a single CLI flag on a given
+# `revenium` subcommand. Fail-open — returns non-zero (unsupported) on any error,
+# including a missing CLI, a subcommand that rejects --help, or no match. Never
+# logs, never exits itself; callers resolve the result into a shell variable via
+# `if supports_flag ...; then VAR=true; fi` (never `VAR=$(supports_flag ...)` —
+# `local x=$(...)` swallows the command substitution's exit status, see
+# RESEARCH.md Pitfall 2).
+#
+# Usage: supports_flag "<subcommand words>" "<--flag>"
+#   arg1 is deliberately word-split (unquoted) so multi-word subcommands like
+#   "guardrails enforcement-events list" expand into separate positional args.
+#   shellcheck disable=SC2086
+supports_flag() {
+  local help_text
+  # Two-step capture instead of `revenium ... --help 2>&1 | grep -q` — `grep -q`
+  # exits on its first match and can SIGPIPE the upstream `revenium` process;
+  # under `pipefail` that surfaces as exit 141 and the probe would report
+  # "unsupported" nondeterministically. The trailing `|| true` makes explicit
+  # that this assignment's own exit status is deliberately not consulted.
+  # shellcheck disable=SC2086
+  help_text="$(revenium ${1} --help 2>&1)" || true
+  # The `([^A-Za-z0-9-]|$)` trailing boundary stops a probe for "--page" from
+  # matching "--page-size". Without it, any CLI that advertises --page-size
+  # (which includes every pre-v1.3.0 CLI this skill already calls today) would
+  # false-positive as supporting --page.
+  printf '%s\n' "${help_text}" | grep -qE -- "${2}([^A-Za-z0-9-]|\$)"
+}
+
 # Phase 21 (TRACE-01, v1.4 path foundation): walk state.db.sessions.parent_session_id
 # to the root delegator and print it on stdout. Shells into the Python sidecar at
 # scripts/get-root-session-id.py (canonical implementation per D-01).
@@ -121,6 +162,26 @@ get_root_session_id() {
     return 0
   fi
   python3 "${SKILL_DIR}/scripts/get-root-session-id.py" "${sid}" 2>/dev/null || printf '%s\n' "${sid}"
+}
+
+# Phase 28 (TRACE-03): resolve the markers directory that OWNS a given session
+# identifier, mirroring classifier._paths_for_session's per-session resolution
+# for the multiplexed-profile case. Shells into the Python sidecar at
+# scripts/resolve-markers-dir.py (canonical implementation, deliberately not
+# shared code with classifier.py — see that file's docstring).
+# Production usage: markers_dir="$(resolve_markers_dir "${sid}")"
+# Fail-open per the sidecar's own contract: empty sid → empty stdout; missing
+# python3 or sidecar failure → prints the process-level MARKERS_DIR unchanged.
+resolve_markers_dir() {
+  local sid="${1:-}"
+  if [[ -z "${sid}" ]]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${MARKERS_DIR}"
+    return 0
+  fi
+  python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" 2>/dev/null || printf '%s\n' "${MARKERS_DIR}"
 }
 
 # quick-260605: resolve the Revenium teamId for CLI calls that require it

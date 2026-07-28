@@ -15,6 +15,39 @@ source "${SCRIPT_DIR}/common.sh"
 
 ensure_path
 
+# Phase 26 (D-01/D-03): resolve the --page capability once per script run and
+# reuse the result at every gated list site below (the dedup lookup, the
+# operator display, and the legacy-alert migration fetch). Probed against
+# `budget-rules list` — the verb this script's own list sites use — rather
+# than `enforcement-events list` (guardrail-check.sh's choice), so the probe
+# matches the CLI surface this script actually calls. No disk cache, no new
+# state path; costs one local process spawn, no HTTP.
+PAGE_FLAG_SUPPORTED=false
+if supports_flag "guardrails budget-rules list" "--page"; then
+  PAGE_FLAG_SUPPORTED=true
+fi
+# `alerts budget list` is a different command surface from `guardrails
+# budget-rules list`, so it gets its own probe. Deriving one verb's pagination
+# support from another's makes correctness depend on unrelated parts of the CLI
+# advertising and interpreting the flag identically in every version — the exact
+# assumption this capability probe exists to avoid making.
+ALERTS_PAGE_FLAG_SUPPORTED=false
+if supports_flag "alerts budget list" "--page"; then
+  ALERTS_PAGE_FLAG_SUPPORTED=true
+fi
+
+# Phase 26 (D-06/D-07): trapped per-process stderr capture, created once here
+# at top level and reused by create_rule() below. create_rule() can run more
+# than once per invocation (e.g. future multi-rule flows), and a `trap ... EXIT`
+# registered inside a function replaces any prior EXIT registration — a
+# per-call mktemp + per-call trap would leak every temp file but the last. One
+# file, reused, is correct: each `2>` redirect truncates it, and mktemp's
+# uniqueness means two concurrent setup runs cannot collide. common.sh's
+# `mkdir -p "${STATE_DIR}"` has already run by this point, so the template's
+# parent directory exists.
+CLI_STDERR_TMP="$(mktemp "${CLI_STDERR_TMP_TEMPLATE}")"
+trap 'rm -f "${CLI_STDERR_TMP}"' EXIT
+
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
@@ -451,12 +484,20 @@ EOF
     cmd+=(--shadow-mode)
   fi
 
-  local rule_json
-  rule_json=$("${cmd[@]}" 2>&1) && RULE_EXIT=0 || RULE_EXIT=$?
+  # Phase 26 (D-07/STDERR-01): stdout and stderr are captured separately so
+  # rule_json (JSON-parsed below on the success path) can never be poisoned by
+  # a CLI note on stderr. On failure, the truncated diagnostic is rebuilt from
+  # BOTH streams concatenated so no diagnostic text is lost to the split — this
+  # is what preserves the existing truncated-error UX. CLI_STDERR_TMP is the
+  # single per-process trapped temp file created once at top level.
+  local rule_json rule_stderr
+  rule_json=$("${cmd[@]}" 2>"${CLI_STDERR_TMP}") && RULE_EXIT=0 || RULE_EXIT=$?
+  rule_stderr="$(cat "${CLI_STDERR_TMP}" 2>/dev/null || true)"
 
   if [[ "${RULE_EXIT}" -ne 0 ]]; then
     local truncated_err
-    truncated_err="${rule_json:0:200}"
+    # T-18-LOG-INJECT convention: cap at 200 chars before embedding in error().
+    truncated_err="$(printf '%s%s' "${rule_json}" "${rule_stderr}" | head -c 200)"
     error "rule creation failed (exit ${RULE_EXIT}): ${truncated_err}"
     RULE_ID=""
     return
@@ -698,8 +739,18 @@ find_existing_rules() {
     desired_filters_nl="AGENT:IS:${REVENIUM_AGENT_NAME}"$'\n'
   fi
 
+  # wants-all-pages: a rule missing from this list is not seen as a duplicate,
+  # so a re-run creates a second rule the operator already has. Batch size
+  # comes from REVENIUM_PAGE_BATCH_SIZE (common.sh). Assumption, not fact
+  # (RESEARCH.md A1, unverified until Phase 30): omitting --page is what
+  # triggers v1.3.0's all-pages aggregation.
+  local list_cmd
+  list_cmd=(revenium guardrails budget-rules list --output json)
+  if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+    list_cmd+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+  fi
   local list_json
-  list_json=$(revenium guardrails budget-rules list --output json 2>/dev/null) || list_json=""
+  list_json=$("${list_cmd[@]}" 2>/dev/null) || list_json=""
 
   LIST_JSON="${list_json}" \
   DESIRED_PERIOD="${desired_period}" \
@@ -818,8 +869,18 @@ run_interactive() {
     echo "Existing budget rules found:"
 
     # List current rules from Revenium and display them
+    # wants-all-pages: a truncated list misleads the operator at the
+    # recreate/cancel prompt, where the displayed set is the basis for the
+    # decision. Batch size from REVENIUM_PAGE_BATCH_SIZE (common.sh).
+    # Assumption, not fact (RESEARCH.md A1, unverified until Phase 30):
+    # omitting --page is what triggers v1.3.0's all-pages aggregation.
+    local list_cmd
+    list_cmd=(revenium guardrails budget-rules list --output json)
+    if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+      list_cmd+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+    fi
     local rules_json
-    rules_json=$(revenium guardrails budget-rules list --output json 2>/dev/null) || rules_json="[]"
+    rules_json=$("${list_cmd[@]}" 2>/dev/null) || rules_json="[]"
 
     # Read current ruleIds from config.json and display matching rules
     CONFIG_FILE="${CONFIG_FILE}" RULES_JSON="${rules_json}" python3 - <<'PY'
@@ -1000,8 +1061,20 @@ run_migration() {
   fi
 
   # Fetch alert list (Pitfall 1: must use list, not get — list has cumulativePeriod + name)
+  # wants-all-pages: a legacy alert missing from this list aborts migration
+  # with a "deleted upstream" error for an alert that still exists. Batch
+  # size from REVENIUM_PAGE_BATCH_SIZE (common.sh). Assumption, not fact
+  # (RESEARCH.md A1, unverified until Phase 30): omitting --page is what
+  # triggers v1.3.0's all-pages aggregation.
+  local list_cmd
+  list_cmd=(revenium alerts budget list --output json)
+  # Gated on the `alerts budget list` probe, not the `guardrails budget-rules
+  # list` one — different command surface, so it gets its own capability answer.
+  if [[ "${ALERTS_PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+    list_cmd+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
+  fi
   local alert_list
-  alert_list=$(revenium alerts budget list --output json 2>/dev/null) || alert_list="[]"
+  alert_list=$("${list_cmd[@]}" 2>/dev/null) || alert_list="[]"
 
   # Filter by alertId, emit KEY=value lines
   local alert_data

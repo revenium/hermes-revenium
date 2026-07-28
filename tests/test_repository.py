@@ -108,6 +108,10 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'setup-guardrails.sh',
             # Phase 19 — guardrail cron stage (replaces budget-check.sh)
             SKILL / 'scripts' / 'guardrail-check.sh',
+            # Phase 28 — plugin-registration health check (D-01, D-06)
+            SKILL / 'scripts' / 'plugin-status.sh',
+            # Phase 28 — cron-side markers-directory resolver sidecar (TRACE-03)
+            SKILL / 'scripts' / 'resolve-markers-dir.py',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 21 — root-walk helper (TRACE-01)
@@ -7518,19 +7522,71 @@ class RepositoryTests(unittest.TestCase):
     # Each test has a complete body (no pass, no assert True).
     # ------------------------------------------------------------------
 
+    def _revenium_argv_log_path(self, scripts_dir):
+        """Canonical path of the argv-recording log written by `_make_revenium_stub`
+        into `scripts_dir`. Tests should derive the log path through this helper
+        rather than re-deriving `revenium.argv.log` by hand.
+        """
+        import os
+        return os.path.join(scripts_dir, 'revenium.argv.log')
+
     def _make_revenium_stub(self, scripts_dir, enforcement_json, budget_rules_json,
-                             events_json=None, events_fail=False):
-        """Write a fake `revenium` binary into scripts_dir that handles the Phase 19 subcommands.
+                             events_json=None, events_fail=False, argv_log=None,
+                             advertise_page=True, advertise_page_size=True,
+                             stderr_note=None, enforcement_stderr=None):
+        """Write a fake `revenium` binary into scripts_dir that handles the Phase 19/26
+        subcommands.
 
         - `revenium config show` → emits 'Team ID: 12802'
         - `revenium guardrails enforcement-rules get <teamId> --output json` → enforcement_json
         - `revenium guardrails budget-rules list --output json` → budget_rules_json
-        - `revenium guardrails enforcement-events list --rule-id <id> --page-size 1 --output json`
-            → events_json if not events_fail, else exit 1
+        - `revenium guardrails enforcement-events list --rule-id <id> --page 0 --page-size 1
+          --output json` (probe-supported form, PAGE_FLAG_SUPPORTED=true)
+          → events_json if not events_fail, else exit 1
+        - `revenium guardrails enforcement-events list --rule-id <id> --page-size 1
+          --output json` (fallback form, no `--page`, PAGE_FLAG_SUPPORTED=false)
+          → events_json if not events_fail, else exit 1
+
+        Every invocation is logged verbatim — one `printf '%s\\n' "$*"` line per
+        call, including `config show` and `--help` probes — into `argv_log`
+        (defaults to `_revenium_argv_log_path(scripts_dir)`). Tests read this log
+        to assert on the exact CLI flags a call site sent, rather than relying on
+        the 3-word `"$1 $2 $3"` case dispatch below, which is flag-blind (it
+        cannot distinguish `--page-size 1` from `--page 0 --page-size 1`).
+
+        `--help` is intercepted by a pre-guard BEFORE the `"$1 $2 $3"` case
+        dispatch — otherwise `revenium guardrails enforcement-events list --help`
+        would match the 3-word dispatch key and route into the events-list arm
+        (returning JSON, not help text). The pre-guard emits parameterized help
+        text reproducing RESEARCH.md's captured v1.3.0 `--help` layout:
+        `advertise_page` gates a `--page int` line, `advertise_page_size` gates a
+        `--page-size int` line (both default True — the v1.3.0 shape). Set
+        `advertise_page=False` (keeping `advertise_page_size=True`) to model the
+        realistic pre-v1.3.0 CLI shape that proves the `--page`/`--page-size`
+        substring collision does not false-positive the capability probe. The
+        two pre-existing two-word `--help` case arms below are now unreachable
+        (the pre-guard always wins) — left in place, removing them is out of
+        scope for this phase.
+
+        Phase 26 plan 02 (D-08, STDERR-01/02): `stderr_note`, when set, is
+        emitted on stderr by EVERY non-`--help` invocation, before that
+        invocation's normal stdout body — e.g. `printf '%s\\n' "$*" >&2`
+        equivalent for the note text. This proves a CLI stderr note (e.g.
+        `--page 0` / `--page-size 1` pagination notes) never poisons a
+        JSON-parsed variable at any of this stub's call sites. `enforcement_stderr`,
+        when set, is emitted on stderr ONLY by the `guardrails enforcement-rules
+        get` arm, in addition to (or, when `enforcement_json` is an empty JSON
+        object, instead of) its stdout body — this reproduces an empty/fresh-team
+        error response arriving on stderr rather than stdout, so tests can prove
+        the `"error".*EOF` soft-fail keeps firing regardless of which stream
+        carries it.
         """
         import os
         import json
+        import shlex
         stub_path = os.path.join(scripts_dir, 'revenium')
+        if argv_log is None:
+            argv_log = self._revenium_argv_log_path(scripts_dir)
         # Escape the JSON strings for embedding in bash heredoc
         enf_escaped = enforcement_json.replace("'", "'\\''")
         br_escaped = budget_rules_json.replace("'", "'\\''")
@@ -7538,16 +7594,57 @@ class RepositoryTests(unittest.TestCase):
             events_json = '[]'
         ev_escaped = events_json.replace("'", "'\\''")
         events_body = f"exit 1" if events_fail else f"echo '{ev_escaped}'"
+
+        # RESEARCH.md § "Real CLI v1.3.0 --help output" — verbatim captured layout.
+        help_body_lines = ["echo '  -h, --help             help for list'"]
+        if advertise_page:
+            help_body_lines.append("echo '      --page int         Page number (0-based)'")
+        if advertise_page_size:
+            help_body_lines.append(
+                "echo '      --page-size int    Number of items per page (default 20)'"
+            )
+        help_body = '\n    '.join(help_body_lines)
+
+        # D-08 (plan 26-02): unconditional stderr note, emitted once per
+        # invocation (before the case dispatch, i.e. before that call's own
+        # stdout body), for every case except --help (which already exited above).
+        stderr_note_line = ''
+        if stderr_note is not None:
+            stderr_note_escaped = stderr_note.replace("'", "'\\''")
+            stderr_note_line = f"printf '%s\\n' '{stderr_note_escaped}' >&2\n"
+
+        # D-07/D-08 (plan 26-02): enforcement-rules-get-only stderr emission,
+        # reproducing an error body arriving on stderr rather than stdout.
+        enforcement_stderr_prefix = ''
+        if enforcement_stderr is not None:
+            enforcement_stderr_escaped = enforcement_stderr.replace("'", "'\\''")
+            enforcement_stderr_prefix = f"printf '%s\\n' '{enforcement_stderr_escaped}' >&2; "
+
         stub_content = (
             '#!/usr/bin/env bash\n'
+            # D-14 (plan 26-01): record every invocation's full argv, unconditionally,
+            # before any dispatch — downstream call-count/argv assertions filter this
+            # log rather than relying on selective per-arm logging.
+            "printf '%s\\n' \"$*\" >> " + shlex.quote(argv_log) + '\n'
+            # D-15 (plan 26-01): --help pre-guard, checked before the "$1 $2 $3" case
+            # dispatch below. Without this, "guardrails enforcement-events list --help"
+            # would match the 3-word dispatch key and route into the events arm.
+            'for _arg in "$@"; do\n'
+            '  if [[ "${_arg}" == "--help" ]]; then\n'
+            f'    {help_body}\n'
+            '    exit 0\n'
+            '  fi\n'
+            'done\n'
+            + stderr_note_line +
             # Match on "$1 $2 $3"; when fewer than 3 args are passed (e.g. "config show"),
             # bash expands the empty $3 to "", producing a trailing space in the string.
             # The 'config show'|'config show ' pattern handles both.
             # The 'guardrails budget-rules --help' and 'guardrails enforcement-events --help'
-            # cases satisfy has_guardrails_cli() probes in guardrail-check.sh.
+            # cases below are unreachable now (the --help pre-guard above always wins) but
+            # left in place — removing them is out of scope for this phase.
             'case "$1 $2 $3" in\n'
             f"  'config show'|'config show ') echo 'Team ID: 12802' ;;\n"
-            f"  'guardrails enforcement-rules get') echo '{enf_escaped}' ;;\n"
+            f"  'guardrails enforcement-rules get') {enforcement_stderr_prefix}echo '{enf_escaped}' ;;\n"
             f"  'guardrails budget-rules list') echo '{br_escaped}' ;;\n"
             f"  'guardrails budget-rules --help') exit 0 ;;\n"
             f"  'guardrails enforcement-events list') {events_body} ;;\n"
@@ -7559,6 +7656,64 @@ class RepositoryTests(unittest.TestCase):
             f.write(stub_content)
         os.chmod(stub_path, 0o755)
         return stub_path
+
+    def _normalize_guardrail_status(self, data):
+        """Phase 26 plan 02 (STDERR-02 test support): deep-copy a parsed
+        guardrail-status.json dict with the three wall-clock timestamp fields —
+        top-level `lastChecked`, each `rules[]` entry's `lastChecked`, and a
+        top-level `haltedAt` when present — replaced with the fixed sentinel
+        `<ts>`. Without this, any dict/byte comparison between two runs of
+        guardrail-check.sh fails on wall-clock alone: guardrail-check.sh stamps
+        `datetime.now(timezone.utc).isoformat()` into all three fields on every
+        run (guardrail-check.sh's Python heredoc, `now = datetime.now(...)`).
+        """
+        import copy
+        normalized = copy.deepcopy(data)
+        if 'lastChecked' in normalized:
+            normalized['lastChecked'] = '<ts>'
+        if 'haltedAt' in normalized:
+            normalized['haltedAt'] = '<ts>'
+        for rule in normalized.get('rules', []):
+            if 'lastChecked' in rule:
+                rule['lastChecked'] = '<ts>'
+        return normalized
+
+    def _revenium_api_calls(self, argv_log_path):
+        """Read the argv-recording log at argv_log_path and return only the
+        lines representing HTTP-backed Revenium API calls.
+
+        Excludes:
+        - any line containing the `--help` token: `supports_flag()` and
+          `has_guardrails_cli()` both spawn `revenium ... --help`, which the
+          CLI answers locally from its own argument parser — no network
+          request is issued.
+        - any line starting with `config show`: both the preflight check
+          (`revenium config show >/dev/null 2>&1`) and `resolve_team_id()`
+          (`revenium config show 2>/dev/null | sed ...`) read the CLI's local
+          config file on disk — also not an HTTP request.
+
+        Keeps lines starting with `guardrails ` or `alerts `, the two
+        subcommand families this skill's HTTP-backed calls live under.
+
+        PAGE-03's per-tick request bound rests entirely on this filter being
+        honest: a filter that also excluded a real HTTP verb would make the
+        bound trivially true regardless of what guardrail-check.sh actually
+        does.
+        """
+        import os
+        if not os.path.isfile(argv_log_path):
+            return []
+        with open(argv_log_path) as f:
+            lines = f.read().splitlines()
+        calls = []
+        for line in lines:
+            if '--help' in line:
+                continue
+            if line.startswith('config show'):
+                continue
+            if line.startswith('guardrails ') or line.startswith('alerts '):
+                calls.append(line)
+        return calls
 
     def test_guardrail_check_writes_status_file(self):
         """guardrail-check.sh with mock enforcement-rules output writes guardrail-status.json
@@ -7995,6 +8150,1257 @@ class RepositoryTests(unittest.TestCase):
                 f'AUDIT-02: stdout must contain EVENT_SUMMARY=(unavailable) on API failure; '
                 f'got: {result.stdout!r}',
             )
+
+    def test_enforcement_events_fetch_gated_page_flag(self):
+        """PAGE-01/COMPAT-02 (plan 26-01): the halt-path enforcement-events fetch is
+        capability-gated on `--page`, proven by recorded argv rather than by
+        inspection. Drives guardrail-check.sh three times, once per `--help`
+        fixture branch, each in its own temp dir (a breaching + autonomous rule
+        fixture so the halt path actually runs and the events-list call fires):
+
+        - Branch A (v1.3.0 shape — advertises both `--page` and `--page-size`):
+          argv must contain BOTH `--page 0` and `--page-size 1`.
+        - Branch B (realistic pre-v1.3.0 shape — advertises `--page-size` only,
+          NOT `--page`): argv must contain `--page-size 1` and NO standalone
+          `--page` token. This is the branch that catches the `--page`/
+          `--page-size` substring collision — a naive substring probe would
+          false-positive on `--page-size` and wrongly add `--page 0`.
+        - Branch C (ancient shape — advertises neither flag): same expectation
+          as branch B — today's exact fallback shape, byte-identical (D-04).
+
+        Stub placement: an arbitrary temp `scripts_dir` prepended to PATH, no
+        HOME override — this is safe for guardrail-check.sh specifically because
+        of its own `_PATH_HEAD` hack (lines 14-20) which re-prepends the test's
+        PATH head after `ensure_path` runs, so ensure_path's Homebrew/system
+        prefixes can never push the stub behind a real `revenium` binary. (This
+        placement convention does NOT transfer to setup-guardrails.sh tests,
+        which have no `_PATH_HEAD` equivalent and must use $HOME/.local/bin —
+        see Pitfall 3 in RESEARCH.md / plan 26-04.)
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
+        ])
+
+        branches = [
+            ('A-v1.3.0', True, True),
+            ('B-pre-v1.3.0-realistic', False, True),
+            ('C-ancient', False, False),
+        ]
+
+        for label, advertise_page, advertise_page_size in branches:
+            with self.subTest(branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-gc-page-gate-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'scripts')
+                    os.makedirs(scripts_dir)
+                    self._make_revenium_stub(
+                        scripts_dir, enforcement_json, budget_rules_json, events_json,
+                        advertise_page=advertise_page,
+                        advertise_page_size=advertise_page_size,
+                    )
+                    argv_log = self._revenium_argv_log_path(scripts_dir)
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                    config_path = os.path.join(state_dir, 'config.json')
+                    with open(config_path, 'w') as f:
+                        json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+                    status_path = os.path.join(state_dir, 'guardrail-status.json')
+                    log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                    env = dict(os.environ)
+                    env['HERMES_HOME'] = tmp
+                    env['REVENIUM_STATE_DIR'] = state_dir
+                    env['GUARDRAIL_STATUS_FILE'] = status_path
+                    env['LOG_FILE'] = log_path
+                    env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                    result = subprocess.run(
+                        ['bash', guardrail_check],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f'[{label}] guardrail-check.sh exit {result.returncode}: '
+                        f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                    )
+                    self.assertTrue(
+                        os.path.isfile(status_path),
+                        f'[{label}] guardrail-status.json not written; stderr={result.stderr!r}',
+                    )
+                    with open(status_path) as f:
+                        json.load(f)  # must be valid JSON
+
+                    # Stub-reachability guard: a missing log means the real system
+                    # `revenium` answered instead of the stub, and the assertions
+                    # below would be validating nothing.
+                    self.assertTrue(
+                        os.path.isfile(argv_log),
+                        f'[{label}] argv log not found at {argv_log!r} — stub was never reached',
+                    )
+                    with open(argv_log) as f:
+                        argv_lines = f.read().splitlines()
+                    events_lines = [
+                        line for line in argv_lines
+                        if 'enforcement-events list' in line and '--help' not in line
+                    ]
+                    self.assertTrue(
+                        events_lines,
+                        f'[{label}] no enforcement-events list invocation recorded; '
+                        f'argv log: {argv_lines!r}',
+                    )
+                    events_argv = events_lines[0]
+                    events_tokens = events_argv.split()
+
+                    self.assertIn(
+                        '--page-size', events_tokens,
+                        f'[{label}] expected --page-size in argv: {events_argv!r}',
+                    )
+                    self.assertIn(
+                        '1', events_tokens,
+                        f'[{label}] expected page-size value 1 in argv: {events_argv!r}',
+                    )
+
+                    if label == 'A-v1.3.0':
+                        self.assertIn(
+                            '--page', events_tokens,
+                            f'[{label}] probe-supported branch must send --page: {events_argv!r}',
+                        )
+                        self.assertIn(
+                            '0', events_tokens,
+                            f'[{label}] probe-supported branch must send --page 0: {events_argv!r}',
+                        )
+                    else:
+                        self.assertNotIn(
+                            '--page', events_tokens,
+                            f'[{label}] fallback branch must NOT send a standalone --page token '
+                            f'(substring-collision check): {events_argv!r}',
+                        )
+
+    def test_capability_probe_writes_no_state(self):
+        """PAGE-01 concurrency edge (plan 26-01, Task 2): the supports_flag()
+        capability probe writes NO state of its own. After a full
+        guardrail-check.sh run, the only REGULAR files directly under STATE_DIR
+        are config.json, guardrail-status.json, and revenium-metering.log — no
+        probe cache file, no lock, no marker.
+
+        This is the mechanical form of D-03's claim: the probe result
+        (PAGE_FLAG_SUPPORTED) lives solely in the per-process shell variable, so
+        there is no cache file for a second concurrent run to read stale, and no
+        partially-written file for an interrupted run to leave behind. A future
+        plan (26-02) adds an EXIT-trap-cleaned stderr temp file; that trap must
+        keep this exact-set assertion holding (the temp file is removed before
+        the process exits, same as it never existed from this test's vantage
+        point).
+
+        Subdirectories created by common.sh's `mkdir -p` (markers/,
+        markers/.ready, tool-events/) are expected and are NOT regular files —
+        this assertion filters to regular files only, then asserts exact set
+        equality (not a subset/assertIn check).
+
+        Uses a breaching + autonomous, no-notify-channel fixture (same shape as
+        `test_enforcement_events_fetch_gated_page_flag`) so guardrail-check.sh's
+        halt path actually runs — including the `supports_flag()`-gated
+        enforcement-events fetch this plan adds — and so at least one `info`/
+        `warn` log line is written (a totally quiet, non-breaching run never
+        touches LOG_FILE, which would make this test unable to distinguish
+        "log never created" from "probe left no extra state").
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule within limits'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-probe-no-state-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({
+                    'ruleIds': ['d5jng5'],
+                    'autonomousMode': True,
+                    'organizationName': 'TestOrg',
+                }, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            regular_files = {
+                name for name in os.listdir(state_dir)
+                if os.path.isfile(os.path.join(state_dir, name))
+            }
+            self.assertEqual(
+                regular_files,
+                {'config.json', 'guardrail-status.json', 'revenium-metering.log'},
+                f'unexpected regular files directly under STATE_DIR — the capability '
+                f'probe (or something else) is writing state it should not: {regular_files!r}',
+            )
+
+    def test_stub_docstring_matches_gated_event_invocation(self):
+        """PAGE-04 (plan 26-01, Task 2): make PAGE-04 mechanical instead of
+        reviewer-diligence-only. Asserts co-occurrence, in both directions,
+        between `_make_revenium_stub`'s docstring and guardrail-check.sh's
+        source:
+
+        - the docstring mentions `--page 0` AND `--page-size 1`;
+        - guardrail-check.sh's EVENT_CMD construction emits a `--page 0` append
+          AND a `--page-size 1` append.
+
+        LIMITATION (documented per plan): this cannot prove the docstring PROSE
+        is a faithful description of the code — it proves the two artifacts
+        have not drifted onto different flag sets, which is the actual failure
+        mode PAGE-04 guards against (a docstring that names one flag set while
+        the code emits a different one). A technically-correct-but-misleading
+        docstring would still pass this test. Do not over-trust it as a
+        semantic check.
+        """
+        import re
+
+        doc = self._make_revenium_stub.__doc__ or ''
+        self.assertIn('--page 0', doc, 'docstring must name the probe-supported argv shape')
+        self.assertIn('--page-size 1', doc, 'docstring must name the fallback argv shape')
+
+        guardrail_check_path = SKILL / 'scripts' / 'guardrail-check.sh'
+        source = guardrail_check_path.read_text()
+        self.assertTrue(
+            re.search(r'EVENT_CMD\+=\(--page\s+0\)', source),
+            f'guardrail-check.sh must append --page 0 to EVENT_CMD on the probe-supported '
+            f'branch; source did not match expected pattern',
+        )
+        self.assertTrue(
+            re.search(r'EVENT_CMD\+=\(--page-size\s+1\s+--output\s+json\)', source),
+            f'guardrail-check.sh must append --page-size 1 --output json to EVENT_CMD; '
+            f'source did not match expected pattern',
+        )
+
+    def test_empty_team_eof_soft_fail_survives_stream_split(self):
+        """Phase 26 plan 02, Task 1 (D-05 atomic-unit characterization test):
+        the empty/fresh-team EOF soft-fail at guardrail-check.sh's
+        enforcement-rules fetch (the `"error".*EOF` grep immediately after the
+        fetch) has had ZERO test coverage since it was introduced (confirmed by
+        searching this whole test file for the substring "EOF" before this
+        plan), despite being the only thing standing between a fresh/empty
+        Revenium team and a hard cron failure every minute. This test pins that
+        behavior BEFORE Task 2 splits stdout from stderr, so the split cannot
+        silently narrow which stream the soft-fail's grep can see.
+
+        Two sub-runs, each its own temp STATE_DIR:
+        1. error body delivered on stdout — already covered by today's
+           combined-blob grep (`2>&1`), so this sub-run is green on unmodified
+           guardrail-check.sh.
+        2. error body delivered on stderr, stdout carries an empty JSON object
+           — a case the current combined-blob grep ALSO happens to catch
+           (because the fetch merges both streams with `2>&1`), but which
+           Task 2's split could silently break if the relocated grep were
+           narrowed to stdout only.
+
+        The fixture (`{"error": "unexpected EOF", "exit_code": 1}`) reproduces
+        the shape the existing grep pattern (`'"error".*EOF'`) targets. It is
+        NOT captured from a live fresh Revenium team — RESEARCH.md's "Real
+        empty/error JSON shape observed against a live (garbage) team-id" /
+        Open Question 2 records that the one real (garbage-team-id, not
+        fresh-team) error body observed during research does NOT contain the
+        literal substring EOF. A genuine v1.3.0 fresh-team response may differ
+        in exact wording; Phase 30's live-host run is what can confirm this.
+
+        Stub placement follows guardrail-check.sh's own convention (an
+        arbitrary temp scripts_dir prepended to PATH, no HOME override) — safe
+        only because of guardrail-check.sh:14-20's `_PATH_HEAD` re-prepend
+        after `ensure_path`.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+        error_body = json.dumps({'error': 'unexpected EOF', 'exit_code': 1})
+        budget_rules_json = json.dumps([])
+
+        sub_runs = [
+            ('stdout', error_body, None),
+            ('stderr', '{}', error_body),
+        ]
+
+        for label, enforcement_json, enforcement_stderr in sub_runs:
+            with self.subTest(stream=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-gc-eof-soft-fail-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'scripts')
+                    os.makedirs(scripts_dir)
+                    self._make_revenium_stub(
+                        scripts_dir, enforcement_json, budget_rules_json,
+                        enforcement_stderr=enforcement_stderr,
+                    )
+                    argv_log = self._revenium_argv_log_path(scripts_dir)
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                    config_path = os.path.join(state_dir, 'config.json')
+                    with open(config_path, 'w') as f:
+                        json.dump({'ruleIds': [], 'autonomousMode': True}, f)
+
+                    status_path = os.path.join(state_dir, 'guardrail-status.json')
+                    log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                    env = dict(os.environ)
+                    env['HERMES_HOME'] = tmp
+                    env['REVENIUM_STATE_DIR'] = state_dir
+                    env['GUARDRAIL_STATUS_FILE'] = status_path
+                    env['LOG_FILE'] = log_path
+                    env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                    result = subprocess.run(
+                        ['bash', guardrail_check],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertTrue(
+                        os.path.isfile(argv_log),
+                        f'[{label}] argv log not found at {argv_log!r} — stub was never reached',
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f'[{label}] guardrail-check.sh exit {result.returncode} — the '
+                        f'empty-team EOF soft-fail did not fire; '
+                        f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                    )
+                    self.assertTrue(
+                        os.path.isfile(status_path),
+                        f'[{label}] guardrail-status.json not written; stderr={result.stderr!r}',
+                    )
+                    with open(status_path) as f:
+                        data = json.load(f)
+                    self.assertEqual(
+                        data.get('rules'), [],
+                        f'[{label}] empty-team soft-fail must yield an empty rules array; '
+                        f'got {data.get("rules")!r}',
+                    )
+                    self.assertFalse(
+                        data.get('halted'),
+                        f'[{label}] empty-team soft-fail must not halt; '
+                        f'got halted={data.get("halted")!r}',
+                    )
+
+    def test_enforcement_stderr_never_enters_parsed_json(self):
+        """STDERR-01 (Phase 26 plan 02, Task 1 — RED here, turned GREEN by
+        Task 2): guardrail-check.sh's enforcement-rules fetch currently merges
+        stderr into `ENFORCEMENT_JSON` via `2>&1`, so any CLI note written to
+        stderr sits inside a variable that gets JSON-parsed one step later.
+
+        This test drives a healthy one-rule fixture with a pagination note
+        (`Note: showing 1 of N pages.`, D-08's chosen literal — the exact wire
+        text is a test-only construct per RESEARCH.md A4, not a confirmed
+        v1.3.0 string) on stderr, and asserts two things:
+
+        1. The raw file BYTES of guardrail-status.json never contain the
+           note's substrings — a substring check on the file, not on a parsed
+           field, so a leak into ANY string value anywhere in the document is
+           caught, not just the fields this test happens to enumerate. This
+           assertion alone is satisfied both before AND after Task 2 (before
+           the fix, the note doesn't literally appear in the output text
+           either — see point 2), so it is a necessary but not sufficient
+           regression guard on its own.
+        2. The healthy fixture's one rule is correctly reflected in
+           guardrail-status.json (`rules` has exactly one entry named
+           'Engineering Budget'). THIS is the assertion that is RED before
+           Task 2: today's `2>&1` merge concatenates the stderr note with the
+           stdout JSON into one string, `json.loads()` on that combined text
+           raises (extra/leading non-JSON data), the exception is swallowed,
+           and the fixture's real rule data is silently dropped to an empty
+           list — a stderr note never needs to look like an error to corrupt
+           the enforcement-rules parse. Task 2's stream split makes the note
+           irrelevant to `ENFORCEMENT_JSON`, restoring the correct one-rule
+           output.
+
+        Stub placement follows guardrail-check.sh's own convention (arbitrary
+        temp scripts_dir on PATH, no HOME override — safe due to
+        `_PATH_HEAD`, see guardrail-check.sh:14-20).
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 99,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 45.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule within limits'}
+        ])
+        note = 'Note: showing 1 of N pages.'
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-stderr-leak-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(
+                scripts_dir, enforcement_json, budget_rules_json, events_json,
+                stderr_note=note,
+            )
+            argv_log = self._revenium_argv_log_path(scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({
+                    'ruleIds': ['d5jng5'],
+                    'autonomousMode': True,
+                    'organizationName': 'TestOrg',
+                }, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertTrue(
+                os.path.isfile(argv_log),
+                f'argv log not found at {argv_log!r} — stub was never reached',
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertTrue(
+                os.path.isfile(status_path),
+                f'guardrail-status.json not written; stderr={result.stderr!r}',
+            )
+            with open(status_path, 'r', encoding='utf-8') as f:
+                raw = f.read()
+            self.assertNotIn(
+                'Note:', raw,
+                f'stderr pagination note leaked verbatim into guardrail-status.json: {raw!r}',
+            )
+            self.assertNotIn(
+                'showing 1 of', raw,
+                f'stderr pagination note leaked verbatim into guardrail-status.json: {raw!r}',
+            )
+            data = json.loads(raw)
+            rules = data.get('rules', [])
+            self.assertEqual(
+                len(rules), 1,
+                f"a stderr note must not corrupt the enforcement-rules JSON parse and drop "
+                f"fixture rule data — expected 1 rule, got {len(rules)}; this fails on "
+                f"unmodified guardrail-check.sh because the '{note}' stderr note is merged "
+                f"via 2>&1 into ENFORCEMENT_JSON, breaking json.loads() and silently emptying "
+                f"'rules'; full status data: {data!r}",
+            )
+            self.assertEqual(
+                rules[0].get('name'), 'Engineering Budget',
+                f'expected the fixture rule name to survive the stderr note; got {rules!r}',
+            )
+
+    def test_stderr_pagination_note_does_not_affect_status_or_halt(self):
+        """STDERR-02 (Phase 26 plan 02, Task 2): a stderr pagination note must
+        change neither guardrail-status.json's content nor the halt decision.
+
+        Two runs of a BREACHING + autonomous fixture, each in its own fresh
+        temp STATE_DIR (so neither run's guardrail-status.json is visible to
+        the other as `prev`, which would suppress the transition on a second
+        run against a shared dir) — one with no stderr note, one with the
+        D-08 pagination note emitted by every stub invocation. Asserts:
+        - the two runs' normalized (timestamp-blanked) guardrail-status.json
+          documents are equal as whole dicts, not a field-by-field subset;
+        - both runs' stdout contain the same HALT_TRANSITION= line;
+        - both runs' HALTED_RULE_ID, HALTED_RULE_NAME, EVENT_TS, EVENT_SUMMARY
+          lines are identical;
+        - neither status file contains the note's substrings.
+
+        A third run (non-breaching fixture + note present) proves the
+        false-clear direction: halted stays false and HALT_TRANSITION=false —
+        a stderr note can never manufacture a halt.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+        note = 'Note: showing 1 of N pages.'
+
+        breaching_enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 42,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 102.5,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': True,
+                'warnBreached': True,
+                'shadowMode': False,
+            }]
+        })
+        non_breaching_enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 99,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 45.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
+        ])
+
+        def run_once(prefix, enforcement_json, stderr_note):
+            with tempfile.TemporaryDirectory(prefix=prefix) as tmp:
+                scripts_dir = os.path.join(tmp, 'scripts')
+                os.makedirs(scripts_dir)
+                self._make_revenium_stub(
+                    scripts_dir, enforcement_json, budget_rules_json, events_json,
+                    stderr_note=stderr_note,
+                )
+                argv_log = self._revenium_argv_log_path(scripts_dir)
+
+                state_dir = os.path.join(tmp, 'state', 'revenium')
+                os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                config_path = os.path.join(state_dir, 'config.json')
+                with open(config_path, 'w') as f:
+                    json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+                status_path = os.path.join(state_dir, 'guardrail-status.json')
+                log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                env = dict(os.environ)
+                env['HERMES_HOME'] = tmp
+                env['REVENIUM_STATE_DIR'] = state_dir
+                env['GUARDRAIL_STATUS_FILE'] = status_path
+                env['LOG_FILE'] = log_path
+                env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                result = subprocess.run(
+                    ['bash', guardrail_check],
+                    env=env, capture_output=True, text=True, timeout=30,
+                )
+                self.assertTrue(
+                    os.path.isfile(argv_log),
+                    f'argv log not found — stub was never reached (note={stderr_note!r})',
+                )
+                self.assertEqual(
+                    result.returncode, 0,
+                    f'guardrail-check.sh exit {result.returncode} (note={stderr_note!r}): '
+                    f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                )
+                self.assertTrue(
+                    os.path.isfile(status_path),
+                    f'guardrail-status.json not written (note={stderr_note!r})',
+                )
+                with open(status_path, 'r', encoding='utf-8') as f:
+                    raw = f.read()
+                data = json.loads(raw)
+                return result, raw, data
+
+        def stdout_line(stdout, prefix_key):
+            for line in stdout.splitlines():
+                if line.startswith(prefix_key):
+                    return line
+            return None
+
+        # Runs 1 & 2: breaching fixture, without and with the stderr note.
+        result_no_note, raw_no_note, data_no_note = run_once(
+            'gsd-gc-stderr-halt-no-note-', breaching_enforcement_json, None,
+        )
+        result_note, raw_note, data_note = run_once(
+            'gsd-gc-stderr-halt-note-', breaching_enforcement_json, note,
+        )
+
+        normalized_no_note = self._normalize_guardrail_status(data_no_note)
+        normalized_note = self._normalize_guardrail_status(data_note)
+        self.assertEqual(
+            normalized_no_note, normalized_note,
+            f'a stderr note must not change guardrail-status.json content; '
+            f'no-note={normalized_no_note!r} note={normalized_note!r}',
+        )
+
+        for key in ('HALT_TRANSITION=', 'HALTED_RULE_ID=', 'HALTED_RULE_NAME=',
+                    'EVENT_TS=', 'EVENT_SUMMARY='):
+            line_no_note = stdout_line(result_no_note.stdout, key)
+            line_note = stdout_line(result_note.stdout, key)
+            self.assertEqual(
+                line_no_note, line_note,
+                f'{key} line must be identical with/without a stderr note; '
+                f'no-note={line_no_note!r} note={line_note!r}',
+            )
+        self.assertIn(
+            'HALT_TRANSITION=true', result_no_note.stdout,
+            'fixture must actually breach so the halt path executes (test precondition)',
+        )
+
+        self.assertNotIn('Note:', raw_note, f'note leaked into status file: {raw_note!r}')
+        self.assertNotIn('showing 1 of', raw_note, f'note leaked into status file: {raw_note!r}')
+
+        # Run 3: non-breaching fixture + note — the false-clear direction.
+        result_clear, raw_clear, data_clear = run_once(
+            'gsd-gc-stderr-noclear-', non_breaching_enforcement_json, note,
+        )
+        self.assertFalse(
+            data_clear.get('halted'),
+            f'a non-breaching fixture with a stderr note must not halt; got {data_clear!r}',
+        )
+        self.assertIn(
+            'HALT_TRANSITION=false', result_clear.stdout,
+            f'expected HALT_TRANSITION=false for a non-breaching fixture; '
+            f'stdout={result_clear.stdout!r}',
+        )
+        self.assertNotIn('Note:', raw_clear, f'note leaked into status file: {raw_clear!r}')
+        self.assertNotIn('showing 1 of', raw_clear, f'note leaked into status file: {raw_clear!r}')
+
+    def test_concurrent_guardrail_check_runs_do_not_share_stderr_tmp(self):
+        """Phase 26 plan 02, Task 2 (D-06's per-process-uniqueness truth,
+        mechanical form): launches two guardrail-check.sh processes
+        concurrently against the SAME STATE_DIR — CLAUDE.md documents
+        guardrail-check.sh as directly invocable by an operator while cron is
+        ticking, so two overlapping runs is a realistic scenario, not a
+        contrived one. A fixed-name stderr temp file would let one run
+        truncate the other's capture mid-read; `CLI_STDERR_TMP_TEMPLATE`'s
+        `mktemp`-generated uniqueness plus the EXIT trap is what this test
+        proves survives concurrency.
+
+        Asserts: both processes exit 0, guardrail-status.json parses as JSON
+        afterward, and no file whose name starts with `.cli-stderr.` remains
+        under STATE_DIR once both processes have exited.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 99,
+                'name': 'Engineering Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 45.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'd5jng5', 'name': 'Engineering Budget'}
+        ])
+        events_json = json.dumps([
+            {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule within limits'}
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-concurrent-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            config_path = os.path.join(state_dir, 'config.json')
+            with open(config_path, 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            procs = [
+                subprocess.Popen(
+                    ['bash', guardrail_check],
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                for _ in range(2)
+            ]
+            results = [p.communicate(timeout=30) for p in procs]
+
+            for i, (proc, (out, err)) in enumerate(zip(procs, results)):
+                self.assertEqual(
+                    proc.returncode, 0,
+                    f'concurrent run {i} exit {proc.returncode}: stdout={out!r} stderr={err!r}',
+                )
+
+            self.assertTrue(
+                os.path.isfile(status_path),
+                'guardrail-status.json not written after concurrent runs',
+            )
+            with open(status_path) as f:
+                json.load(f)  # must be valid JSON
+
+            leftover = [
+                name for name in os.listdir(state_dir)
+                if name.startswith('.cli-stderr.')
+            ]
+            self.assertEqual(
+                leftover, [],
+                f'stderr temp file(s) survived concurrent runs: {leftover!r}',
+            )
+
+    def test_cron_tick_request_bound(self):
+        """PAGE-03 (plan 26-03, D-10): the per-tick HTTP request bound is an
+        enforced equality, not an upper bound. A steady-state (non-halting)
+        tick issues EXACTLY 2 HTTP-backed CLI calls (enforcement-rules get,
+        budget-rules list); a halt-transition tick issues EXACTLY 3, adding
+        enforcement-events list. This is a call COUNTER (D-13) — the stub
+        never serves multi-page fixtures, so this measures how many requests
+        guardrail-check.sh issues, never what the server does with them.
+
+        assertEqual is deliberate: a "less-than-or-equal" upper-bound-style
+        assertion would let a future edit add a fourth steady-state request without
+        this test ever going red, which is exactly the regression the
+        file-header bound in guardrail-check.sh (this plan, Task 1) exists to
+        prevent. This test and that comment point at each other.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        # --- Scenario 1: steady state (no breach) -> exactly 2 calls ---
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-bound-steady-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            enforcement_json = json.dumps({
+                'rules': [{
+                    'ruleId': 42,
+                    'name': 'Engineering Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 10.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 100.0,
+                    'breached': False,
+                    'warnBreached': False,
+                    'shadowMode': False,
+                }]
+            })
+            budget_rules_json = json.dumps([
+                {'id': 'd5jng5', 'name': 'Engineering Budget'}
+            ])
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json)
+            argv_log = self._revenium_argv_log_path(scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'steady-state exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertNotIn(
+                'HALT_TRANSITION=true', result.stdout,
+                'fixture must be non-breaching for the steady-state scenario',
+            )
+
+            api_calls = self._revenium_api_calls(argv_log)
+            self.assertEqual(
+                len(api_calls), 2,
+                f'steady-state tick must issue exactly 2 API calls: {api_calls!r}',
+            )
+            verbs = {' '.join(line.split()[:3]) for line in api_calls}
+            self.assertEqual(
+                verbs,
+                {'guardrails enforcement-rules get', 'guardrails budget-rules list'},
+                f'steady-state tick must call exactly enforcement-rules get and '
+                f'budget-rules list, one each: {api_calls!r}',
+            )
+
+        # --- Scenario 2: halt transition -> exactly 3 calls ---
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-bound-halt-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            enforcement_json = json.dumps({
+                'rules': [{
+                    'ruleId': 42,
+                    'name': 'Engineering Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 150.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 100.0,
+                    'breached': True,
+                    'warnBreached': True,
+                    'shadowMode': False,
+                }]
+            })
+            budget_rules_json = json.dumps([
+                {'id': 'd5jng5', 'name': 'Engineering Budget'}
+            ])
+            events_json = json.dumps([
+                {'created': '2026-05-22T14:03:38Z', 'rawDetails': 'rule exceeded hard-limit'}
+            ])
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json, events_json)
+            argv_log = self._revenium_argv_log_path(scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['d5jng5'], 'autonomousMode': True}, f)
+            # No pre-existing guardrail-status.json — this run must be the
+            # actual transition, not a carry-forward.
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'halt-transition exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            self.assertIn(
+                'HALT_TRANSITION=true', result.stdout,
+                f'fixture must produce a new halt transition; got stdout={result.stdout!r}',
+            )
+
+            api_calls = self._revenium_api_calls(argv_log)
+            self.assertEqual(
+                len(api_calls), 3,
+                f'halt-transition tick must issue exactly 3 API calls: {api_calls!r}',
+            )
+            self.assertEqual(
+                ' '.join(api_calls[2].split()[:3]),
+                'guardrails enforcement-events list',
+                f'third call on a halt transition must be enforcement-events list: {api_calls!r}',
+            )
+
+    def test_budget_rules_list_gated_batch_size(self):
+        """PAGE-02 (plan 26-03): the hot-path budget-rules list argv is proven
+        on both probe branches — the pair D-15's coverage bar requires,
+        matching the pair plan 26-01 landed for the halt-path site.
+
+        Also pins the PAGE-02 ordering edge: the enforcement fixture's rule
+        names are in a deliberately non-alphabetical order ('Zebra Budget'
+        before 'Apple Budget'), and the matching budget-rules list array is in
+        a DIFFERENT order still. guardrail-status.json's rules[] must follow
+        the enforcement-rules get order, never the budget-rules list order or
+        any pagination-flag-dependent reordering — identical across both
+        probe branches.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [
+                {
+                    'ruleId': 1,
+                    'name': 'Zebra Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 10.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 100.0,
+                    'breached': False,
+                    'warnBreached': False,
+                    'shadowMode': False,
+                },
+                {
+                    'ruleId': 2,
+                    'name': 'Apple Budget',
+                    'metricType': 'TOTAL_COST',
+                    'periodType': 'MONTHLY',
+                    'groupBy': 'ORGANIZATION',
+                    'currentValue': 5.0,
+                    'warnThreshold': 80.0,
+                    'threshold': 50.0,
+                    'breached': False,
+                    'warnBreached': False,
+                    'shadowMode': False,
+                },
+            ]
+        })
+        # Deliberately the opposite order of the enforcement fixture above.
+        budget_rules_json = json.dumps([
+            {'id': 'idApple', 'name': 'Apple Budget'},
+            {'id': 'idZebra', 'name': 'Zebra Budget'},
+        ])
+
+        for label, advertise_page in (('probe-supported', True), ('fallback', False)):
+            with self.subTest(branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-gc-batch-size-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'scripts')
+                    os.makedirs(scripts_dir)
+                    self._make_revenium_stub(
+                        scripts_dir, enforcement_json, budget_rules_json,
+                        advertise_page=advertise_page, advertise_page_size=True,
+                    )
+                    argv_log = self._revenium_argv_log_path(scripts_dir)
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                    with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                        json.dump({'ruleIds': ['idApple', 'idZebra'], 'autonomousMode': True}, f)
+
+                    status_path = os.path.join(state_dir, 'guardrail-status.json')
+                    log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                    env = dict(os.environ)
+                    env['HERMES_HOME'] = tmp
+                    env['REVENIUM_STATE_DIR'] = state_dir
+                    env['GUARDRAIL_STATUS_FILE'] = status_path
+                    env['LOG_FILE'] = log_path
+                    env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                    result = subprocess.run(
+                        ['bash', guardrail_check],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f'[{label}] guardrail-check.sh exit {result.returncode}: '
+                        f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                    )
+
+                    self.assertTrue(
+                        os.path.isfile(argv_log),
+                        f'[{label}] argv log not found at {argv_log!r} — stub was never reached',
+                    )
+                    with open(argv_log) as f:
+                        argv_lines = f.read().splitlines()
+                    # Exclude `--help`: guardrail-check.sh probes this verb's
+                    # own --page capability (rather than deriving it from the
+                    # enforcement-events probe), and that probe is answered
+                    # locally by the CLI's argument parser — not an API call.
+                    # Same exclusion `_revenium_api_calls` already applies.
+                    list_lines = [
+                        line for line in argv_lines
+                        if line.startswith('guardrails budget-rules list')
+                        and '--help' not in line
+                    ]
+                    self.assertTrue(
+                        list_lines,
+                        f'[{label}] no budget-rules list invocation recorded: {argv_lines!r}',
+                    )
+                    list_argv = list_lines[0]
+                    list_tokens = list_argv.split()
+
+                    if label == 'probe-supported':
+                        self.assertIn(
+                            '--page-size', list_tokens,
+                            f'[{label}] expected --page-size in argv: {list_argv!r}',
+                        )
+                        self.assertIn(
+                            '500', list_tokens,
+                            f'[{label}] expected batch size 500 in argv: {list_argv!r}',
+                        )
+                        self.assertNotIn(
+                            '--page', list_tokens,
+                            f'[{label}] must not send a standalone --page token: {list_argv!r}',
+                        )
+                    else:
+                        self.assertEqual(
+                            list_argv, 'guardrails budget-rules list --output json',
+                            f'[{label}] fallback branch must be byte-identical to '
+                            f"today's shipping call: {list_argv!r}",
+                        )
+
+                    with open(status_path) as f:
+                        data = json.load(f)
+                    rule_names = [r['name'] for r in data.get('rules', [])]
+                    self.assertEqual(
+                        rule_names, ['Zebra Budget', 'Apple Budget'],
+                        f'[{label}] rules[] order must follow enforcement-rules get '
+                        f'order, not budget-rules list order: {rule_names!r}',
+                    )
+
+    def test_duplicate_rule_names_resolve_to_last_listed_id(self):
+        """PAGE-02 adjacency edge (plan 26-03): when budget-rules list returns
+        two entries sharing one `name` with different `id` values, the
+        name-to-string-id map resolves to the LAST entry's id — today's
+        silent last-write-wins behavior. This test pins that behavior rather
+        than changing it: it exists so a pagination change (which alters what
+        the list returns and in what order) cannot quietly flip which id
+        wins, NOT as an endorsement that last-write-wins is the correct
+        collision policy. A future phase wanting a different policy should
+        edit this test as its declaration of that change.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({
+            'rules': [{
+                'ruleId': 7,
+                'name': 'Shared Budget',
+                'metricType': 'TOTAL_COST',
+                'periodType': 'MONTHLY',
+                'groupBy': 'ORGANIZATION',
+                'currentValue': 10.0,
+                'warnThreshold': 80.0,
+                'threshold': 100.0,
+                'breached': False,
+                'warnBreached': False,
+                'shadowMode': False,
+            }]
+        })
+        budget_rules_json = json.dumps([
+            {'id': 'idFirst', 'name': 'Shared Budget'},
+            {'id': 'idLast', 'name': 'Shared Budget'},
+        ])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-dup-name-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json, budget_rules_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['idFirst', 'idLast'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = log_path
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', guardrail_check],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'guardrail-check.sh exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+
+            with open(status_path) as f:
+                data = json.load(f)
+            rules = data.get('rules', [])
+            self.assertEqual(len(rules), 1, f'expected exactly one rule: {rules!r}')
+            self.assertEqual(
+                rules[0]['ruleId'], 'idLast',
+                f"duplicate-name collision must resolve to the LAST listed "
+                f"entry's id: {rules!r}",
+            )
+
+    def test_zero_rule_install_writes_empty_status(self):
+        """PAGE-02 empty edge (plan 26-03): a fresh install whose team has
+        zero budget rules — budget-rules list returning an empty JSON array
+        and enforcement-rules get returning an empty rules array — writes
+        guardrail-status.json with an empty rules array, halted:false, and
+        haltedRule ABSENT (not merely falsy), and exits 0 on both probe
+        branches.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        enforcement_json = json.dumps({'rules': []})
+        budget_rules_json = json.dumps([])
+
+        for label, advertise_page in (('probe-supported', True), ('fallback', False)):
+            with self.subTest(branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-gc-zero-rule-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'scripts')
+                    os.makedirs(scripts_dir)
+                    self._make_revenium_stub(
+                        scripts_dir, enforcement_json, budget_rules_json,
+                        advertise_page=advertise_page, advertise_page_size=True,
+                    )
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, mode=0o700, exist_ok=True)
+                    with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                        json.dump({'ruleIds': [], 'autonomousMode': True}, f)
+
+                    status_path = os.path.join(state_dir, 'guardrail-status.json')
+                    log_path = os.path.join(state_dir, 'revenium-metering.log')
+
+                    env = dict(os.environ)
+                    env['HERMES_HOME'] = tmp
+                    env['REVENIUM_STATE_DIR'] = state_dir
+                    env['GUARDRAIL_STATUS_FILE'] = status_path
+                    env['LOG_FILE'] = log_path
+                    env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+                    result = subprocess.run(
+                        ['bash', guardrail_check],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0,
+                        f'[{label}] guardrail-check.sh exit {result.returncode}: '
+                        f'stdout={result.stdout!r} stderr={result.stderr!r}',
+                    )
+                    self.assertTrue(
+                        os.path.isfile(status_path),
+                        f'[{label}] guardrail-status.json not written; stderr={result.stderr!r}',
+                    )
+                    with open(status_path) as f:
+                        data = json.load(f)
+                    self.assertEqual(
+                        data.get('rules', []), [],
+                        f'[{label}] rules must be empty: {data!r}',
+                    )
+                    self.assertFalse(
+                        data.get('halted', True),
+                        f'[{label}] halted must be false: {data!r}',
+                    )
+                    self.assertNotIn(
+                        'haltedRule', data,
+                        f'[{label}] haltedRule must be absent, not merely falsy: {data!r}',
+                    )
 
     def test_guardrail_check_shadow_mode_does_not_halt(self):
         """A breached shadow-mode rule must NOT cause halted:true (quick-260528-gve).
@@ -11010,6 +12416,432 @@ class RepositoryTests(unittest.TestCase):
                           f'operator filter --filter MODEL:IS:claude-3-opus missing from create argv: {create_argv!r}')
             self.assertNotIn('--filter AGENT:IS:Hermes', create_argv,
                              f'default AGENT filter must NOT appear when operator passes --filter: {create_argv!r}')
+
+    def _make_setup_revenium_stub(self, bin_dir, argv_log, advertise_page=True,
+                                    create_fails=False, create_stderr=None,
+                                    budget_rules_list='[]'):
+        """Write a fake `revenium` binary into `bin_dir` for setup-guardrails.sh
+        tests — distinct from `_make_revenium_stub` because setup-guardrails.sh
+        tests need a different placement convention (see below) and a
+        different verb set (`alerts budget list`, `budget-rules create`) than
+        guardrail-check.sh's harness covers.
+
+        Placement contract (D-16): the stub belongs in `<home>/.local/bin`
+        with `env['HOME']` pointed at `<home>`, because setup-guardrails.sh
+        calls bare `ensure_path()` — unlike guardrail-check.sh, it has no
+        `_PATH_HEAD` re-prepend — and `ensure_path()`'s prefix loop PREPENDS
+        on every iteration, so the LAST candidate (`${HOME}/.local/bin`) ends
+        up FIRST in the final PATH. A stub placed anywhere else loses to
+        `/opt/homebrew/bin/revenium`, which on a developer machine is a REAL
+        v1.3.0 binary — the test would then silently validate reality
+        instead of the fixture. No real `revenium` binary may ever be
+        reached when this contract is honored.
+
+        Every invocation's full argv (`$*`) is logged verbatim to `argv_log`
+        as the very first statement, before any dispatch.
+
+        A `--help` pre-guard (checked before the 3-word case dispatch, so
+        e.g. `guardrails budget-rules list --help` is never mistaken for a
+        real `list` call) emits parameterized help text mirroring
+        `_make_revenium_stub`'s shape: a `--page int` line only when
+        `advertise_page` is True, a `--page-size int` line always.
+
+        Case dispatch:
+        - `config show` -> an api_key line and a Team ID line.
+        - `guardrails budget-rules list` -> `budget_rules_list`.
+        - `alerts budget list` -> a fixed legacy-alert fixture (alertId
+          `LEGACY01`, threshold 50, period MONTHLY) that the migration path
+          (`--from-alert LEGACY01 --auto`) expects.
+        - `guardrails budget-rules create`: when `create_fails` is True,
+          emits `create_stderr` on stderr (nothing on stdout) and exits 1;
+          otherwise emits a fixed rule JSON (`id: TESTRULE001`) on stdout
+          and exits 0.
+        """
+        import os
+        import shlex
+
+        stub_path = os.path.join(bin_dir, 'revenium')
+
+        help_body_lines = ["echo '  -h, --help             help for list'"]
+        if advertise_page:
+            help_body_lines.append("echo '      --page int         Page number (0-based)'")
+        help_body_lines.append(
+            "echo '      --page-size int    Number of items per page (default 20)'"
+        )
+        help_body = '\n    '.join(help_body_lines)
+
+        if create_fails:
+            create_stderr_text = create_stderr if create_stderr is not None else 'rule creation failed'
+            create_stderr_escaped = create_stderr_text.replace("'", "'\\''")
+            create_body = "printf '%s\\n' '" + create_stderr_escaped + "' >&2\n    exit 1"
+        else:
+            rule_json = (
+                '{"id":"TESTRULE001","name":"Hermes Monthly Budget",'
+                '"metricType":"TOTAL_COST","windowType":"MONTHLY","action":"BLOCK",'
+                '"groupBy":"AGENT","hardLimit":50,"warnThreshold":40,"shadowMode":false}'
+            )
+            rule_json_escaped = rule_json.replace("'", "'\\''")
+            create_body = "echo '" + rule_json_escaped + "'"
+
+        budget_rules_list_escaped = budget_rules_list.replace("'", "'\\''")
+
+        alert_fixture = (
+            '[{"alertId":"LEGACY01","cumulativePeriod":"MONTHLY","threshold":50,'
+            '"name":"Hermes Monthly Budget","currentValue":0,"groups":[],'
+            '"metricType":"TOTAL_COST"}]'
+        )
+        alert_fixture_escaped = alert_fixture.replace("'", "'\\''")
+
+        stub_content = (
+            '#!/usr/bin/env bash\n'
+            "printf '%s\\n' \"$*\" >> " + shlex.quote(argv_log) + '\n'
+            'for _arg in "$@"; do\n'
+            '  if [[ "${_arg}" == "--help" ]]; then\n'
+            f'    {help_body}\n'
+            '    exit 0\n'
+            '  fi\n'
+            'done\n'
+            'case "$1 $2 $3" in\n'
+            "  'config show'|'config show ')\n"
+            "    echo 'api_key: mock-api-key-12345'\n"
+            "    echo 'Team ID: mock-team-12345'\n"
+            "    ;;\n"
+            "  'guardrails budget-rules list') echo '" + budget_rules_list_escaped + "' ;;\n"
+            "  'guardrails budget-rules create') " + create_body + " ;;\n"
+            "  'alerts budget list') echo '" + alert_fixture_escaped + "' ;;\n"
+            '  *) echo "unknown: $*" >&2; exit 1 ;;\n'
+            'esac\n'
+        )
+        with open(stub_path, 'w') as f:
+            f.write(stub_content)
+        os.chmod(stub_path, 0o755)
+        return stub_path
+
+    def test_setup_guardrails_list_sites_send_gated_batch_size(self):
+        """PAGE-02 (plan 26-04, D-11/D-15): the three setup-guardrails.sh list
+        sites — the dedup lookup and the legacy-alert migration fetch (both
+        reached via `--from-alert LEGACY01 --auto`), and the operator display
+        site (reached via `--interactive`'s re-run gate) — are proven on the
+        probe-gated argv shape D-15's both-branches bar requires.
+
+        Sub-runs 1 and 2 cover both probe branches for the migration path
+        (dedup + legacy-alert sites, same run). Sub-run 3 covers only the
+        probe-supported branch for the display site and tolerates a non-zero
+        exit code: with stdin closed, the interactive re-run gate's `read`
+        prompt hits EOF and setup-guardrails.sh's `set -euo pipefail` exits
+        the script — but the display list call happens BEFORE that prompt,
+        so its argv is already recorded by the time the script exits. The
+        assertion in sub-run 3 is on argv, never on exit status.
+
+        `_revenium_api_calls` filters out `--help` probe lines (which also
+        contain the literal `guardrails budget-rules list` / `alerts budget
+        list` substrings as quoted arguments to `supports_flag`, and would
+        otherwise contaminate the argv match) and `config show` lines.
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing')
+
+        # --- Sub-runs 1 & 2: migration path (dedup + legacy-alert sites), both probe branches ---
+        for label, advertise_page in (('probe-supported', True), ('fallback', False)):
+            with self.subTest(scenario='migration', branch=label):
+                with tempfile.TemporaryDirectory(prefix='gsd-sg-list-mig-') as tmp:
+                    scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+                    os.makedirs(scripts_dir, exist_ok=True)
+                    shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+                    shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+                    state_dir = os.path.join(tmp, 'state', 'revenium')
+                    os.makedirs(state_dir, exist_ok=True)
+                    config_seed = {'alertId': 'LEGACY01', 'autonomousMode': False}
+                    with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                        json.dump(config_seed, f)
+                    open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+                    shim_home = os.path.join(tmp, 'home')
+                    bin_dir = os.path.join(shim_home, '.local', 'bin')
+                    os.makedirs(bin_dir, exist_ok=True)
+                    argv_log = os.path.join(tmp, 'revenium.argv.log')
+                    self._make_setup_revenium_stub(
+                        bin_dir, argv_log, advertise_page=advertise_page,
+                    )
+
+                    env = {
+                        **os.environ,
+                        'HOME': shim_home,
+                        'HERMES_HOME': tmp,
+                        'REVENIUM_STATE_DIR': state_dir,
+                        'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                    }
+
+                    result = subprocess.run(
+                        ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                         '--from-alert', 'LEGACY01', '--auto'],
+                        env=env, capture_output=True, text=True, timeout=15,
+                    )
+                    self.assertEqual(result.returncode, 0,
+                                     f'[{label}] stdout={result.stdout}\nstderr={result.stderr}')
+
+                    self.assertTrue(os.path.exists(argv_log), f'[{label}] argv log not created')
+                    api_calls = self._revenium_api_calls(argv_log)
+
+                    dedup_lines = [l for l in api_calls if l.startswith('guardrails budget-rules list')]
+                    alert_lines = [l for l in api_calls if l.startswith('alerts budget list')]
+                    self.assertTrue(dedup_lines, f'[{label}] no dedup list call recorded: {api_calls!r}')
+                    self.assertTrue(alert_lines, f'[{label}] no legacy alert list call recorded: {api_calls!r}')
+
+                    if label == 'probe-supported':
+                        self.assertIn('--page-size 500', dedup_lines[0],
+                                      f'[{label}] dedup list missing --page-size 500: {dedup_lines[0]!r}')
+                        self.assertIn('--page-size 500', alert_lines[0],
+                                      f'[{label}] alerts budget list missing --page-size 500: {alert_lines[0]!r}')
+                    else:
+                        self.assertNotIn('--page-size', dedup_lines[0],
+                                         f'[{label}] dedup list must carry no pagination flag: {dedup_lines[0]!r}')
+                        self.assertNotIn('--page-size', alert_lines[0],
+                                         f'[{label}] alerts budget list must carry no pagination flag: {alert_lines[0]!r}')
+
+        # --- Sub-run 3: interactive display site, probe-supported branch ---
+        with self.subTest(scenario='interactive-display', branch='probe-supported'):
+            with tempfile.TemporaryDirectory(prefix='gsd-sg-list-disp-') as tmp:
+                scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+                os.makedirs(scripts_dir, exist_ok=True)
+                shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+                shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+                state_dir = os.path.join(tmp, 'state', 'revenium')
+                os.makedirs(state_dir, exist_ok=True)
+                config_seed = {'ruleIds': ['EXISTING01'], 'autonomousMode': False}
+                with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                    json.dump(config_seed, f)
+                open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+                shim_home = os.path.join(tmp, 'home')
+                bin_dir = os.path.join(shim_home, '.local', 'bin')
+                os.makedirs(bin_dir, exist_ok=True)
+                argv_log = os.path.join(tmp, 'revenium.argv.log')
+                budget_rules_list = json.dumps([
+                    {'id': 'EXISTING01', 'name': 'Old Rule', 'hardLimit': 50,
+                     'warnThreshold': 40, 'windowType': 'MONTHLY'}
+                ])
+                self._make_setup_revenium_stub(
+                    bin_dir, argv_log, advertise_page=True,
+                    budget_rules_list=budget_rules_list,
+                )
+
+                env = {
+                    **os.environ,
+                    'HOME': shim_home,
+                    'HERMES_HOME': tmp,
+                    'REVENIUM_STATE_DIR': state_dir,
+                    'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                }
+
+                result = subprocess.run(
+                    ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'), '--interactive'],
+                    env=env, capture_output=True, text=True, timeout=15,
+                    stdin=subprocess.DEVNULL,
+                )
+                # Non-zero exit tolerated — see docstring; assertion is on argv only.
+
+                self.assertTrue(
+                    os.path.exists(argv_log),
+                    f'argv log not created; stdout={result.stdout!r} stderr={result.stderr!r}',
+                )
+                api_calls = self._revenium_api_calls(argv_log)
+                list_lines = [l for l in api_calls if l.startswith('guardrails budget-rules list')]
+                self.assertTrue(list_lines, f'no display list call recorded: {api_calls!r}')
+                self.assertIn('--page-size 500', list_lines[0],
+                              f'display list missing --page-size 500: {list_lines[0]!r}')
+
+    def test_setup_guardrails_rule_create_failure_surfaces_truncated_error(self):
+        """D-07/STDERR-01 (plan 26-04, Task 1): first-ever coverage of the
+        rule-create failure path. All diagnostic text arrives on stderr (the
+        create command's stdout is empty on failure); the metering log must
+        still contain the failure prefix, the exit code, and a 200-char
+        prefix of the stderr text — proving both that STDERR-01's stream
+        split did not lose the diagnostic and that the pre-existing 200-char
+        cap (T-18-LOG-INJECT convention) still applies after the split.
+
+        Asserts against ${STATE_DIR}/revenium-metering.log rather than the
+        subprocess's own stderr: common.sh's error() mirrors to stderr only
+        when fd 2 is a TTY, which it is not under subprocess.run.
+        """
+        import json
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        script = SKILL / 'scripts' / 'setup-guardrails.sh'
+        self.assertTrue(script.exists(), 'setup-guardrails.sh missing')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-sg-create-fail-') as tmp:
+            scripts_dir = os.path.join(tmp, 'skills', 'revenium', 'scripts')
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(SKILL / 'scripts' / 'common.sh'), scripts_dir)
+            shutil.copy(str(SKILL / 'scripts' / 'setup-guardrails.sh'), scripts_dir)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            config_seed = {'alertId': 'LEGACY01', 'autonomousMode': False}
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump(config_seed, f)
+            open(os.path.join(state_dir, 'revenium-metering.log'), 'w').close()
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            argv_log = os.path.join(tmp, 'revenium.argv.log')
+
+            distinctive_prefix = 'DISTINCTIVE_STDERR_PREFIX_HERE: '
+            tail_marker = 'UNIQUE_TAIL_MARKER_ZZZ'
+            create_stderr = distinctive_prefix + ('F' * 300) + tail_marker
+            self.assertGreater(len(create_stderr), 200,
+                               'fixture must exceed the 200-char cap to exercise truncation')
+
+            self._make_setup_revenium_stub(
+                bin_dir, argv_log, advertise_page=True,
+                create_fails=True, create_stderr=create_stderr,
+            )
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': tmp,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'setup-guardrails.sh'),
+                 '--from-alert', 'LEGACY01', '--auto'],
+                env=env, capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0,
+                             f'migration create-failure path must exit 0 (cron retries): '
+                             f'stdout={result.stdout}\nstderr={result.stderr}')
+
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+            with open(log_path) as f:
+                log_text = f.read()
+
+            self.assertIn('rule creation failed (exit 1):', log_text,
+                          f'failure prefix + exit code missing from log: {log_text!r}')
+            self.assertIn(distinctive_prefix, log_text,
+                          f'stderr text did not survive the stream split: {log_text!r}')
+            self.assertNotIn(tail_marker, log_text,
+                             f'beyond-cap filler tail leaked past the 200-char truncation: {log_text!r}')
+
+            with open(os.path.join(state_dir, 'config.json')) as f:
+                cfg = json.load(f)
+            self.assertNotIn('ruleIds', cfg,
+                             'a failed rule creation must not write ruleIds to config.json')
+
+    def test_every_json_list_call_site_declares_pagination_classification(self):
+        """Assumption-delta invariant (26-01's decision, implemented here per
+        this plan's Task 3d): every `--output json` list-family invocation
+        across guardrail-check.sh and setup-guardrails.sh must be preceded,
+        within its immediately-adjacent contiguous comment block, by a
+        `# wants-all-pages:` or `# wants-bounded:` classification marker.
+        This phase promoted "the complete result set" (all pages aggregated)
+        over "the first page" as the default noun for a `--output json` list
+        call (26-01's assumption-delta decision, `promote`); this test is
+        what keeps a later phase from silently reintroducing the old
+        first-page default — a list call added later without a marker goes
+        RED here, and a marker removed from an existing site also goes RED.
+
+        Does not verify the flags sent are correct — plans 26-01/26-03 and
+        this plan's Task 3b/3c already do that via argv assertions. It only
+        verifies that no site is left undeclared.
+
+        Scope: the three verbs this skill's list-family calls use —
+        `budget-rules list`, `enforcement-events list`, `alerts budget
+        list` — matched as `revenium guardrails ...` / `revenium alerts ...`
+        literals. This deliberately excludes:
+        - `--help` capability-probe call sites (e.g. `supports_flag
+          "guardrails budget-rules list" "--page"`), which reference the
+          same verb string as a quoted, unprefixed argument — with no
+          literal `revenium ` immediately before `guardrails`/`alerts` on
+          that line, so the pattern below does not match it;
+        - Python heredoc content, which never contains a `revenium
+          guardrails ...` / `revenium alerts ...` shell-command literal.
+        """
+        import re
+
+        verb_pattern = re.compile(
+            r'revenium (?:guardrails (?:budget-rules list|enforcement-events list)'
+            r'|alerts budget list)'
+        )
+        marker_pattern = re.compile(r'^\s*#\s*(wants-all-pages|wants-bounded):')
+        # A bare `local <var>` declaration line (no assignment) may sit between
+        # the marker's contiguous comment block and the array-construction line
+        # it documents (setup-guardrails.sh's `local list_cmd` convention) —
+        # tolerated without breaking the walk, so it isn't mistaken for
+        # unrelated code that should terminate the lookback.
+        local_decl_pattern = re.compile(r'^\s*local\s+\w+\s*$')
+        max_lookback = 20
+
+        files = [
+            SKILL / 'scripts' / 'guardrail-check.sh',
+            SKILL / 'scripts' / 'setup-guardrails.sh',
+        ]
+
+        total_wants_all_pages = 0
+        total_wants_bounded = 0
+        undeclared = []
+
+        for path in files:
+            lines = path.read_text().splitlines()
+            for idx, line in enumerate(lines):
+                if not verb_pattern.search(line):
+                    continue
+                marker_kind = None
+                j = idx - 1
+                steps = 0
+                while j >= 0 and steps < max_lookback:
+                    candidate = lines[j]
+                    stripped = candidate.strip()
+                    if stripped.startswith('#'):
+                        m = marker_pattern.match(candidate)
+                        if m:
+                            marker_kind = m.group(1)
+                            break
+                        j -= 1
+                        steps += 1
+                        continue
+                    if local_decl_pattern.match(candidate):
+                        j -= 1
+                        steps += 1
+                        continue
+                    break
+                if marker_kind is None:
+                    undeclared.append(f'{path.name}:{idx + 1}: {line.strip()}')
+                elif marker_kind == 'wants-all-pages':
+                    total_wants_all_pages += 1
+                else:
+                    total_wants_bounded += 1
+
+        self.assertEqual(
+            undeclared, [],
+            f'list call site(s) with no wants-all-pages/wants-bounded marker in '
+            f'their contiguous comment block: {undeclared!r}',
+        )
+        self.assertEqual(
+            total_wants_all_pages, 4,
+            f'expected exactly 4 wants-all-pages sites across both files, '
+            f'found {total_wants_all_pages}',
+        )
+        self.assertEqual(
+            total_wants_bounded, 1,
+            f'expected exactly 1 wants-bounded site across both files, '
+            f'found {total_wants_bounded}',
+        )
 
     # ------------------------------------------------------------------
     # Phase 22 (TESTS-04..07): behavioral tests for subagent trace +
