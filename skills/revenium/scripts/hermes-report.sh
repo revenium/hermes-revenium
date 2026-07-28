@@ -650,7 +650,19 @@ PY
     local prev_line
     prev_line=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 || true)
     if [[ -n "${prev_line}" ]]; then
-      prev_reported_tokens=$(echo "${prev_line}" | cut -d: -f3)
+      # CR-01 fix: sid may itself embed ':' (multiplex-namespaced sessions,
+      # e.g. "agent:<profile>:<rest>"), which shifts every fixed-position
+      # `cut -d: -fN` read of the ledger line by however many colons sid
+      # contains. Compute the tokens field position FROM sid's own known
+      # colon count (pure bash, no subprocess) rather than assuming a fixed
+      # position 3 — this is exact, not a guess at ledger-row shape, and
+      # reduces byte-for-byte to the prior `-f3` behavior when sid has no
+      # colon, so existing non-namespaced ledger lines parse identically.
+      local sid_no_colons sid_colon_count tokens_field
+      sid_no_colons="${sid//:/}"
+      sid_colon_count=$(( ${#sid} - ${#sid_no_colons} ))
+      tokens_field=$((3 + sid_colon_count))
+      prev_reported_tokens=$(echo "${prev_line}" | cut -d: -f"${tokens_field}")
       if [[ "${total_tokens}" -le "${prev_reported_tokens}" ]]; then
         ((skipped_count++)) || true
         continue
@@ -740,7 +752,14 @@ else:
     local request_time response_time duration_ms
     local last_report_ts=""
     if [[ "${prev_reported_tokens}" -gt 0 ]]; then
-      last_report_ts=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 | cut -d: -f4 || true)
+      # CR-01 fix: same colon-safe field computation as the tokens read
+      # above — sid may embed ':' and shift the ts field position, so
+      # derive it from sid's own colon count instead of a fixed `-f4`.
+      local sid_no_colons_ts sid_colon_count_ts ts_field
+      sid_no_colons_ts="${sid//:/}"
+      sid_colon_count_ts=$(( ${#sid} - ${#sid_no_colons_ts} ))
+      ts_field=$((4 + sid_colon_count_ts))
+      last_report_ts=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 | cut -d: -f"${ts_field}" || true)
     fi
 
     request_time=$(python3 -c "
