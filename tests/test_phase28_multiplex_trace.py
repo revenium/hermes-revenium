@@ -693,6 +693,90 @@ class Phase28MultiplexTraceEndToEndTests(unittest.TestCase):
         self.assertEqual(data["liveness"], "stalled", data)
         self.assertIn("brokenAt", data)
 
+    # ---- Test 7 (CR-01 regression: colon-safe ledger token-delta arithmetic) --
+
+    def test_multiplex_second_tick_ledger_arithmetic_survives_colon_sid(self):
+        """CR-01 regression: hermes-report.sh's ledger token-delta arithmetic
+        must not crash or misparse on a namespaced (colon-bearing) sid's
+        SECOND report tick, when a prior ledger row already exists for that
+        sid. Reproduces the review's exact repro: seed a session, report it
+        once, grow its token totals, report again -- the second tick must
+        exit 0 (no `unbound variable` crash), emit exactly one NEW ledger
+        row, and that row's tokens field must be the correct new total (not
+        a colon-shifted field from mid-sid)."""
+        scripts_dir = self._build_scripts_dir()
+        shim_home, bin_dir, argv_log = self._build_fake_revenium()
+
+        sid = "agent:gtm:sess-1"
+        db_path = os.path.join(self.dh, "state.db")
+        _seed_sessions_db(db_path, [(sid, None, 100, 50)])
+
+        p = self.classifier._paths_for_session(sid)
+        self.classifier._write_job_marker(
+            sid,
+            {"agentic_job_id": "job-cr01-1", "job_name": "cr01 job",
+             "job_type": "debugging", "status": "SUCCESS", "failure_reason": ""},
+            p,
+        )
+
+        result1 = self._run_reporter(scripts_dir, shim_home, bin_dir)
+        self.assertEqual(result1.returncode, 0, result1.stdout + result1.stderr)
+        argv_text_1 = self._read_argv_log(argv_log, result1)
+        lines1 = _meter_completion_lines(argv_text_1, sid)
+        self.assertEqual(len(lines1), 1, f"expected exactly 1 completion on tick 1; got {lines1!r}")
+
+        ledger_path = os.path.join(self.dh, "state", "revenium", "revenium-hermes.ledger")
+        self.assertTrue(os.path.isfile(ledger_path), "ledger file must exist after tick 1")
+        with open(ledger_path) as f:
+            ledger_lines_after_1 = [l for l in f.read().splitlines() if l.strip()]
+        sid_lines_1 = [l for l in ledger_lines_after_1 if l.startswith(f"HERMES:{sid}:")]
+        self.assertEqual(len(sid_lines_1), 1, f"expected exactly 1 ledger row after tick 1; got {sid_lines_1!r}")
+
+        # Grow the session's token totals (simulating continued activity)
+        # and report again -- this is the exact repro step that crashed
+        # hermes-report.sh with "line 654: gtm: unbound variable" pre-fix.
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute(
+                "UPDATE sessions SET input_tokens = ?, output_tokens = ? WHERE id = ?",
+                (200, 100, sid),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result2 = self._run_reporter(scripts_dir, shim_home, bin_dir)
+        self.assertEqual(
+            result2.returncode, 0,
+            f"reporter must not crash on tick 2 for a colon-bearing sid; "
+            f"stdout={result2.stdout}\nstderr={result2.stderr}",
+        )
+        self.assertNotIn("unbound variable", result2.stderr)
+
+        argv_text_2 = self._read_argv_log(argv_log, result2)
+        lines2 = _meter_completion_lines(argv_text_2, sid)
+        self.assertEqual(
+            len(lines2), 2,
+            f"expected exactly 2 completions total (one per tick) after tick 2; "
+            f"got {lines2!r}\nargv:\n{argv_text_2}",
+        )
+
+        with open(ledger_path) as f:
+            ledger_lines_after_2 = [l for l in f.read().splitlines() if l.strip()]
+        sid_lines_2 = [l for l in ledger_lines_after_2 if l.startswith(f"HERMES:{sid}:")]
+        self.assertEqual(
+            len(sid_lines_2), 2,
+            f"expected exactly 2 ledger rows (one per tick) after tick 2; got {sid_lines_2!r}",
+        )
+        # The tokens field (third-from-last colon-delimited field: last is
+        # muid, second-to-last is ts) of the SECOND row must be the new
+        # total (300), proving the colon-safe field computation -- not a
+        # field shifted into the middle of sid's own "gtm" segment (the
+        # pre-fix crash symptom).
+        second_row = sid_lines_2[1]
+        tokens_field_value = second_row.split(":")[-3]
+        self.assertEqual(tokens_field_value, "300", f"ledger row: {second_row!r}")
+
 
 if __name__ == "__main__":
     unittest.main()
