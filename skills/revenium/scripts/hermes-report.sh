@@ -338,9 +338,19 @@ PY
         plugin_healthy_check="${plugin_healthy_check%%$'\n'*}"
         [[ -z "${plugin_healthy_check}" ]] && plugin_healthy_check="true"
 
+        # Phase 28 (TRACE-04/D-08): three-branch closed vocabulary. Health is
+        # consulted FIRST — an unhealthy read always wins, regardless of
+        # marker_state, so a registration outage is never misdiagnosed as
+        # "no job classified" (the ordering this whole plan exists to lock).
+        # Only when healthy does marker_state get a say: a read error names
+        # itself distinctly; every other signal (no_job / absent / any
+        # unrecognised value) resolves to the same not-classified literal —
+        # the vocabulary is closed at exactly three literals, never a fourth.
         local fallback_reason="no_job_classified"
         if [[ "${plugin_healthy_check}" != "true" ]]; then
           fallback_reason="plugin_unregistered"
+        elif [[ "${marker_state}" == "error" ]]; then
+          fallback_reason="marker_lookup_failed"
         fi
 
         # T-28-02 mitigation: restrict ids to a safe charset BEFORE
