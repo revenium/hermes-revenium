@@ -26,6 +26,15 @@ PAGE_FLAG_SUPPORTED=false
 if supports_flag "guardrails budget-rules list" "--page"; then
   PAGE_FLAG_SUPPORTED=true
 fi
+# `alerts budget list` is a different command surface from `guardrails
+# budget-rules list`, so it gets its own probe. Deriving one verb's pagination
+# support from another's makes correctness depend on unrelated parts of the CLI
+# advertising and interpreting the flag identically in every version — the exact
+# assumption this capability probe exists to avoid making.
+ALERTS_PAGE_FLAG_SUPPORTED=false
+if supports_flag "alerts budget list" "--page"; then
+  ALERTS_PAGE_FLAG_SUPPORTED=true
+fi
 
 # Phase 26 (D-06/D-07): trapped per-process stderr capture, created once here
 # at top level and reused by create_rule() below. create_rule() can run more
@@ -1059,7 +1068,9 @@ run_migration() {
   # triggers v1.3.0's all-pages aggregation.
   local list_cmd
   list_cmd=(revenium alerts budget list --output json)
-  if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+  # Gated on the `alerts budget list` probe, not the `guardrails budget-rules
+  # list` one — different command surface, so it gets its own capability answer.
+  if [[ "${ALERTS_PAGE_FLAG_SUPPORTED}" == "true" ]]; then
     list_cmd+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
   fi
   local alert_list

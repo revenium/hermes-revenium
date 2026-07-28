@@ -51,12 +51,24 @@ fi
 
 # Phase 26 (D-01/D-03): resolve the --page capability once per script run and
 # reuse the result at every gated call site in this tick. No disk cache, no new
-# state path — the result lives solely in this shell variable (PAGE-01
+# state path — the result lives solely in these shell variables (PAGE-01
 # concurrency edge: a second concurrent run cannot observe a stale probe result
 # because there is nothing on disk to observe).
+#
+# Probe EACH gated verb rather than deriving one from the other. `--page` is
+# per-command surface, not a global CLI property: reusing an
+# `enforcement-events list` result to gate `budget-rules list` makes correctness
+# depend on two unrelated command surfaces advertising and interpreting the flag
+# identically, in every CLI version, forever. They agree in v1.3.0 — but the
+# whole reason this probe exists is that the skill cannot assume what a given
+# CLI version exposes. Two local `--help` spawns per run, no HTTP.
 PAGE_FLAG_SUPPORTED=false
 if supports_flag "guardrails enforcement-events list" "--page"; then
   PAGE_FLAG_SUPPORTED=true
+fi
+BUDGET_RULES_PAGE_FLAG_SUPPORTED=false
+if supports_flag "guardrails budget-rules list" "--page"; then
+  BUDGET_RULES_PAGE_FLAG_SUPPORTED=true
 fi
 
 # (C) read_config_field helper — reads a scalar key from CONFIG_FILE via Python.
@@ -124,10 +136,12 @@ fi
 # unverified until Phase 30): omitting --page is what triggers v1.3.0's
 # all-pages aggregation. The flag is gated, not sent unconditionally, because
 # on a CLI that doesn't advertise --page, sending nothing reproduces today's
-# exact call and therefore cannot regress, whereas sending --page-size to a CLI
-# whose acceptance of it on this verb is unverified could (PAGE-02, D-01).
+# exact call and therefore cannot regress. PAGE-02/D-01 warned that sending
+# --page-size to a CLI whose acceptance of it ON THIS VERB is unverified could
+# regress — so this now gates on budget-rules' OWN probe, not the
+# enforcement-events probe, closing that gap rather than restating it.
 BUDGET_RULES_CMD=(revenium guardrails budget-rules list --output json)
-if [[ "${PAGE_FLAG_SUPPORTED}" == "true" ]]; then
+if [[ "${BUDGET_RULES_PAGE_FLAG_SUPPORTED}" == "true" ]]; then
   BUDGET_RULES_CMD+=(--page-size "${REVENIUM_PAGE_BATCH_SIZE}")
 fi
 BUDGET_RULES_JSON=$("${BUDGET_RULES_CMD[@]}" 2>/dev/null || echo '[]')

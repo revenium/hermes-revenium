@@ -9207,9 +9207,15 @@ class RepositoryTests(unittest.TestCase):
                     )
                     with open(argv_log) as f:
                         argv_lines = f.read().splitlines()
+                    # Exclude `--help`: guardrail-check.sh probes this verb's
+                    # own --page capability (rather than deriving it from the
+                    # enforcement-events probe), and that probe is answered
+                    # locally by the CLI's argument parser — not an API call.
+                    # Same exclusion `_revenium_api_calls` already applies.
                     list_lines = [
                         line for line in argv_lines
                         if line.startswith('guardrails budget-rules list')
+                        and '--help' not in line
                     ]
                     self.assertTrue(
                         list_lines,
