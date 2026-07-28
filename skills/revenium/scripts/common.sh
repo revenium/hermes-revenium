@@ -164,6 +164,26 @@ get_root_session_id() {
   python3 "${SKILL_DIR}/scripts/get-root-session-id.py" "${sid}" 2>/dev/null || printf '%s\n' "${sid}"
 }
 
+# Phase 28 (TRACE-03): resolve the markers directory that OWNS a given session
+# identifier, mirroring classifier._paths_for_session's per-session resolution
+# for the multiplexed-profile case. Shells into the Python sidecar at
+# scripts/resolve-markers-dir.py (canonical implementation, deliberately not
+# shared code with classifier.py — see that file's docstring).
+# Production usage: markers_dir="$(resolve_markers_dir "${sid}")"
+# Fail-open per the sidecar's own contract: empty sid → empty stdout; missing
+# python3 or sidecar failure → prints the process-level MARKERS_DIR unchanged.
+resolve_markers_dir() {
+  local sid="${1:-}"
+  if [[ -z "${sid}" ]]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${MARKERS_DIR}"
+    return 0
+  fi
+  python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" 2>/dev/null || printf '%s\n' "${MARKERS_DIR}"
+}
+
 # quick-260605: resolve the Revenium teamId for CLI calls that require it
 # (jobs create/outcome). Prefers the REVENIUM_TEAM_ID env override, then falls
 # back to parsing `revenium config show`. Prints the team-id on stdout, or an
