@@ -160,10 +160,17 @@ try:
     window_seconds = int(os.environ.get('WINDOW_SECONDS', '600'))
 except (TypeError, ValueError):
     window_seconds = 600
-try:
-    window_minutes = int(os.environ.get('WINDOW_MINUTES', '10'))
-except (TypeError, ValueError):
-    window_minutes = 10
+# D-02 keeps the stall bar at REVENIUM_CRON_SETTLE_SECONDS (== window_seconds):
+# the exact age at which hermes-report.sh stops waiting for a sentinel, so
+# "not firing" is reported the same tick the fallback trace-type starts.
+#
+# The SELECT horizon must therefore be strictly wider than that bar. Selecting
+# only sessions younger than the bar would make `age >= bar` unsatisfiable by
+# construction and liveness could never leave 'firing' — the detector would be
+# silently inert. Look back twice the bar so a session that ages out stays
+# visible for one further window and can be counted exactly once.
+settle_seconds = window_seconds
+lookback_seconds = window_seconds * 2
 
 _resolver = None
 try:
@@ -200,9 +207,9 @@ if state_db and os.path.isfile(state_db):
         conn = sqlite3.connect(state_db)
         try:
             cur = conn.execute(
-                "SELECT id FROM sessions WHERE ended_at IS NOT NULL "
+                "SELECT id, ended_at FROM sessions WHERE ended_at IS NOT NULL "
                 "AND ended_at >= strftime('%s','now') - ?",
-                (window_seconds,),
+                (lookback_seconds,),
             )
             rows = cur.fetchall()
         finally:
@@ -210,69 +217,87 @@ if state_db and os.path.isfile(state_db):
     except Exception:
         rows = []
 
+# Per-session sentinel correspondence, NOT directory freshness. Asking only
+# "is anything fresh in this profile's .ready dir?" lets one sentinel vouch for
+# every session that ended in the window: a classifier that fires for 1 of 3
+# sessions still reads as healthy, the broken-state alert never fires, and the
+# two missed sessions surface downstream as `no_job_classified` — attributing a
+# plugin execution failure to "this session had no job". Match each ended
+# session to its OWN sentinel instead, exactly as the reporter does at
+# `hermes-report.sh`'s G-03 gate (`(row_ready_dir / sid).exists()`).
+fresh_sentinels_total = 0
+missing_settled = 0
+missing_pending = 0
+now = time.time()
 for row in rows:
     sid = row[0] if row else None
     if not sid:
         continue
     recent_ended += 1
-    ready_dirs_seen.add(ready_dir_for(sid))
-
-fresh_sentinels_total = 0
-any_stalled = False
-cutoff = time.time() - (window_minutes * 60)
-for rd in ready_dirs_seen:
-    count = 0
+    rd = ready_dir_for(sid)
+    ready_dirs_seen.add(rd)
     try:
-        p = Path(rd)
-        if p.is_dir():
-            for f in p.iterdir():
-                try:
-                    if f.is_file() and f.stat().st_mtime >= cutoff:
-                        count += 1
-                except OSError:
-                    continue
+        has_sentinel = bool(rd) and (Path(rd) / sid).exists()
     except OSError:
-        count = 0
-    fresh_sentinels_total += count
-    if count == 0:
-        any_stalled = True
+        has_sentinel = False
+    if has_sentinel:
+        fresh_sentinels_total += 1
+        continue
+    # No sentinel: only evidence of a stall once the session has aged past the
+    # settle window. Younger ones are still legitimately in flight — counting
+    # them would alert on every normal session-end race.
+    try:
+        ended_at = float(row[1]) if row[1] is not None else None
+    except (TypeError, ValueError):
+        ended_at = None
+    if ended_at is None or (now - ended_at) >= settle_seconds:
+        missing_settled += 1
+    else:
+        missing_pending += 1
 
 if recent_ended == 0:
     liveness = 'idle'
-elif any_stalled:
+elif missing_settled > 0:
     liveness = 'stalled'
 else:
     liveness = 'firing'
 
 print(f"RECENT_ENDED={recent_ended}")
 print(f"FRESH_SENTINELS={fresh_sentinels_total}")
+print(f"MISSING_SETTLED={missing_settled}")
+print(f"MISSING_PENDING={missing_pending}")
 print(f"LIVENESS={liveness}")
 PY
   ) || LIVENESS_OUTPUT=""
 
   recent_ended=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^RECENT_ENDED=//p' | head -1)
   fresh_sentinels=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^FRESH_SENTINELS=//p' | head -1)
+  missing_settled=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^MISSING_SETTLED=//p' | head -1)
+  missing_pending=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^MISSING_PENDING=//p' | head -1)
   liveness=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^LIVENESS=//p' | head -1)
 
   [[ "${recent_ended}" =~ ^[0-9]+$ ]] || recent_ended=0
   [[ "${fresh_sentinels}" =~ ^[0-9]+$ ]] || fresh_sentinels=0
+  [[ "${missing_settled}" =~ ^[0-9]+$ ]] || missing_settled=0
+  [[ "${missing_pending}" =~ ^[0-9]+$ ]] || missing_pending=0
   case "${liveness}" in
     idle|firing|stalled) ;;
     *) liveness="unknown" ;;
   esac
 
-  echo "    ${recent_ended} session(s) with ended_at inside the last ${window_seconds}s (state.db)"
-  echo "    ${fresh_sentinels} sentinel(s) modified inside the last ${window_seconds}s across owning profile(s)"
+  echo "    ${recent_ended} session(s) with ended_at inside the last $(( window_seconds * 2 ))s (state.db)"
+  echo "    ${fresh_sentinels} of them have their own sentinel"
+  echo "    ${missing_settled} aged past ${window_seconds}s with no sentinel; ${missing_pending} still within the grace window"
 
   case "${liveness}" in
     idle)
       echo "    ℹ idle host — no sessions ended in the window, nothing for the classifier to have missed"
       ;;
     firing)
-      echo "    ✓ classifier is firing — sentinel activity matches recently-ended sessions"
+      echo "    ✓ classifier is firing — every settled session has its own sentinel"
       ;;
     stalled)
-      echo "    ✗ classifier NOT firing — sessions ended but no sentinel activity in the window"
+      echo "    ✗ classifier NOT firing — ${missing_settled} session(s) aged past the settle window with no sentinel of their own"
       ;;
     *)
       echo "    ? liveness computation failed — treating as non-broken (fail-open)"

@@ -414,9 +414,15 @@ class Phase28PluginStatusTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_plugin_status_stalled_no_sentinels(self):
-        """Registered plugin, one session ended inside the window,
+        """Registered plugin, one session aged past the settle window with
         MARKERS_READY_DIR empty -> exit 2, liveness stalled, healthy false,
-        brokenAt present."""
+        brokenAt present.
+
+        The session must be OLDER than SETTLE_SECONDS: per D-02 the stall bar
+        is the settle window itself, so a sentinel-less session only counts as
+        evidence of a stall once the reporter would have given up waiting for
+        it. A 5-second-old session with no sentinel yet is a normal in-flight
+        session, not a broken classifier."""
         tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-stalled-empty-')
         try:
             hermes_home = os.path.join(tmp, '.hermes')
@@ -424,7 +430,7 @@ class Phase28PluginStatusTests(unittest.TestCase):
             state_dir = os.path.join(hermes_home, 'state', 'revenium')
             status_file = os.path.join(state_dir, 'plugin-status.json')
             self._registered_fixture(hermes_home)
-            seed_state_db(hermes_home, [time.time() - 5])
+            seed_state_db(hermes_home, [time.time() - (SETTLE_SECONDS * 1.5)])
             # MARKERS_READY_DIR left empty (but present, mirroring
             # common.sh's own mkdir -p of it).
             os.makedirs(os.path.join(state_dir, 'markers', '.ready'), exist_ok=True)
@@ -452,8 +458,17 @@ class Phase28PluginStatusTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_plugin_status_stalled_aged_sentinel(self):
-        """Registered plugin, one session ended inside the window, only a
-        sentinel file older than the window -> exit 2, liveness stalled."""
+        """Classifier fired in the past but not for the session that has now
+        aged out: a sentinel exists in the ready dir, but it belongs to a
+        DIFFERENT (older) session -> exit 2, liveness stalled.
+
+        This is the faithful shape of "stale classifier". The previous fixture
+        gave the recently-ended session its OWN sentinel and relied on that
+        file's mtime being old — a state that cannot occur in production, since
+        a sentinel is written at session end and therefore always carries
+        roughly that session's end time. Liveness now matches each session to
+        its own sentinel by name, so staleness is expressed by absence for the
+        settled session, not by an implausible mtime on a present one."""
         tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-stalled-aged-')
         try:
             hermes_home = os.path.join(tmp, '.hermes')
@@ -461,10 +476,14 @@ class Phase28PluginStatusTests(unittest.TestCase):
             state_dir = os.path.join(hermes_home, 'state', 'revenium')
             status_file = os.path.join(state_dir, 'plugin-status.json')
             self._registered_fixture(hermes_home)
-            seed_state_db(hermes_home, [time.time() - 5])
+            seed_state_db(hermes_home, [time.time() - (SETTLE_SECONDS * 1.5)])
             markers_ready_dir = os.path.join(state_dir, 'markers', '.ready')
-            # Sentinel exists but its mtime is well outside the settle window.
-            touch_sentinel(markers_ready_dir, 'sess-0', age_seconds=SETTLE_SECONDS * 5)
+            # A sentinel from an earlier, unrelated session — proof the
+            # classifier once ran, but not for sess-0, which has now settled.
+            touch_sentinel(
+                markers_ready_dir, 'sess-from-a-previous-run',
+                age_seconds=SETTLE_SECONDS * 5,
+            )
             env = {
                 **os.environ,
                 'HERMES_HOME': hermes_home,
@@ -485,6 +504,93 @@ class Phase28PluginStatusTests(unittest.TestCase):
             self.assertFalse(data['healthy'])
             self.assertEqual(data['liveness'], 'stalled')
             self.assertIn('brokenAt', data)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_partial_miss_is_stalled(self):
+        """Three sessions settle; only ONE receives a sentinel -> exit 2,
+        liveness stalled.
+
+        Greptile P1 regression. The pre-fix check counted fresh files in the
+        shared .ready directory and asked only "is anything fresh here?", so a
+        single sentinel vouched for every session that ended in the window: a
+        classifier firing for 1 of 3 sessions read as healthy, the broken-state
+        alert never fired, and the two missed sessions surfaced downstream as
+        `no_job_classified` — reporting a plugin execution failure as "this
+        session had no job to classify". Under directory-freshness semantics
+        this fixture yields firing/exit 0; it must now yield stalled/exit 2."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-partial-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            self._registered_fixture(hermes_home)
+            aged = time.time() - (SETTLE_SECONDS * 1.5)
+            seed_state_db(hermes_home, [aged, aged, aged])
+            markers_ready_dir = os.path.join(state_dir, 'markers', '.ready')
+            # sess-0 classified; sess-1 and sess-2 silently missed.
+            touch_sentinel(markers_ready_dir, 'sess-0', age_seconds=1)
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 2,
+                'a fresh sentinel for one session must not vouch for two '
+                f'others; got {result.returncode}:\n{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertFalse(data['healthy'])
+            self.assertEqual(data['liveness'], 'stalled')
+            self.assertIn('brokenAt', data)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_sentinel_less_session_within_grace_is_not_stalled(self):
+        """A session that ended seconds ago with no sentinel yet -> exit 0,
+        liveness firing.
+
+        The counterweight to the partial-miss test: per-session matching must
+        not turn the normal asynchronous gap between session end and sentinel
+        write into a fleet-wide alert. Only sessions that have aged past
+        SETTLE_SECONDS — the bar at which hermes-report.sh stops waiting —
+        count as evidence of a stall."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-grace-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            self._registered_fixture(hermes_home)
+            seed_state_db(hermes_home, [time.time() - 5])
+            os.makedirs(os.path.join(state_dir, 'markers', '.ready'), exist_ok=True)
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                'an in-flight session must not be reported as a stall; '
+                f'got {result.returncode}:\n{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertTrue(data['healthy'])
+            self.assertEqual(data['liveness'], 'firing')
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -527,8 +633,10 @@ class Phase28PluginStatusTests(unittest.TestCase):
     # -- Task 2: not-broken-to-broken transition + notification -------------
 
     def _stalled_fixture_env(self, tmp, notify_channel=None, notify_target=None):
-        """Build a registered-but-stalled fixture: one session ended inside
-        the window, MARKERS_READY_DIR empty. Returns
+        """Build a registered-but-stalled fixture: one session that has aged
+        PAST the settle window with MARKERS_READY_DIR empty, so it counts as a
+        genuine stall rather than a session still legitimately in flight.
+        Returns
         (scripts_dir, status_file, log_file, base_env_dict) — base_env_dict
         has no HOME/PATH override yet; callers add those per-test so each
         test controls hermes-CLI visibility explicitly (never inherit the
@@ -539,7 +647,7 @@ class Phase28PluginStatusTests(unittest.TestCase):
         status_file = os.path.join(state_dir, 'plugin-status.json')
         log_file = os.path.join(state_dir, 'revenium-metering.log')
         self._registered_fixture(hermes_home)
-        seed_state_db(hermes_home, [time.time() - 5])
+        seed_state_db(hermes_home, [time.time() - (SETTLE_SECONDS * 1.5)])
         os.makedirs(os.path.join(state_dir, 'markers', '.ready'), exist_ok=True)
         config = {}
         if notify_channel is not None:

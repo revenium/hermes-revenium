@@ -665,7 +665,13 @@ class Phase28MultiplexTraceEndToEndTests(unittest.TestCase):
         dir) while a named profile (gtm) has a recently-ended session and
         NO sentinel activity in its own .ready/ dir. The genuinely broken
         gtm classifier must surface as liveness=stalled/healthy=false, not
-        be masked by the healthy default profile."""
+        be masked by the healthy default profile.
+
+        Both sessions are aged past settle_seconds: liveness matches each
+        session to its own sentinel and only treats a sentinel-less session as
+        evidence of a stall once it has aged past the bar at which
+        hermes-report.sh stops waiting. A 5-second-old session with no sentinel
+        is still legitimately in flight, so it would prove nothing here."""
         settle_seconds = 120
         self._registered_fixture()
         default_sid = "default-sess-1"
@@ -673,7 +679,7 @@ class Phase28MultiplexTraceEndToEndTests(unittest.TestCase):
         _seed_sessions_db(
             os.path.join(self.dh, "state.db"),
             [(default_sid, None, 100, 50), (gtm_sid, None, 100, 50)],
-            age_seconds=5,
+            age_seconds=int(settle_seconds * 1.5),
         )
         default_ready_dir = os.path.join(self.dh, "state", "revenium", "markers", ".ready")
         self._touch_sentinel(default_ready_dir, default_sid, age_seconds=1)
