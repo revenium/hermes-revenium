@@ -244,19 +244,28 @@ PY
     # capability probe so older installs pay zero cost (verified facts in PLAN
     # <context>; no new decision ID).
     local root_trace_type=""
+    local marker_state=""
     if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
-      root_trace_type=$(
-        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null || true
+      # Phase 28 (TRACE-04/D-08): the heredoc now emits TWO KEY=value lines
+      # rather than a single bare trace-type line, so the marker-read outcome
+      # (found / no_job / absent / error) crosses the command-substitution
+      # boundary alongside the trace-type value — WITHOUT spawning a second
+      # python3 interpreter per session (still exactly one heredoc here).
+      local trace_type_output
+      trace_type_output=$(
+        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null
 import json, os
 from pathlib import Path
 root_sid = os.environ.get('ROOT_SID', '')
 markers_dir = os.environ.get('MARKERS_DIR', '')
-if not root_sid or not markers_dir:
-    pass
-else:
+latest_type = ""
+marker_state = "absent"
+if root_sid and markers_dir:
     marker_path = Path(markers_dir) / f"{root_sid}.jsonl"
     if marker_path.exists():
-        latest_type = ""
+        # File is present; downgraded to "found" below only if a usable
+        # job type actually turns up while reading it.
+        marker_state = "no_job"
         try:
             with open(marker_path, 'r', encoding='utf-8') as fh:
                 for line in fh:
@@ -273,17 +282,29 @@ else:
                         jt = rec.get('job_type')
                         if isinstance(jt, str) and jt:
                             latest_type = jt
-            if latest_type:
-                print(latest_type)
         except OSError:
-            pass
+            # Fail-open for the trace-type VALUE (unchanged): latest_type
+            # stays empty. The signal below is what makes this visible.
+            marker_state = "error"
+    else:
+        marker_state = "absent"
+if latest_type:
+    marker_state = "found"
+print(f"TRACE_TYPE={latest_type}")
+print(f"MARKER_STATE={marker_state}")
 PY
-      )
-      # Strip any trailing newline the heredoc emitted.
-      root_trace_type="${root_trace_type%%$'\n'*}"
+      ) || trace_type_output=""
+
+      # Extract both values with the same sed -n 's/^KEY=//p' idiom
+      # guardrail-check.sh uses for multi-value heredoc returns.
+      root_trace_type=$(echo "${trace_type_output}" | sed -n 's/^TRACE_TYPE=//p' | head -1)
+      marker_state=$(echo "${trace_type_output}" | sed -n 's/^MARKER_STATE=//p' | head -1)
+
       # Sanitize to the allowed charset [A-Za-z0-9_-] (bash bracket class — value
       # is sanitized here in bash, not python; parity with the m_trace style),
       # cap at 128 chars, then hard fallback to the literal "uncategorized".
+      # This sequence is unchanged from before Task 1 — it operates on exactly
+      # the extracted trace-type value, same as when it was the sole heredoc line.
       root_trace_type="${root_trace_type//[^A-Za-z0-9_-]/_}"
       root_trace_type="${root_trace_type:0:128}"
       [[ -z "${root_trace_type}" ]] && root_trace_type="uncategorized"
