@@ -290,8 +290,10 @@ STATUS_OUTPUT=$(
   LIVENESS="${liveness}" \
   PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" \
   python3 - <<'PY'
+import fcntl
 import json
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -300,66 +302,123 @@ status_file = Path(os.environ['PLUGIN_STATUS_FILE'])
 registered = os.environ['REGISTERED'] == 'true'
 liveness = os.environ['LIVENESS']
 
-# Fail-open load of the previous document (matches guardrail-status.json's
-# carry-forward idiom). A missing/corrupt file defaults prev_healthy to TRUE
-# so a fresh install never alerts on its very first tick.
-prev = {}
+
+def _load_prev():
+    """Fail-open load of the previous document (matches guardrail-status.json's
+    carry-forward idiom). A missing/corrupt file defaults prev_healthy to TRUE
+    so a fresh install never alerts on its very first tick."""
+    prev = {}
+    try:
+        prev = json.loads(status_file.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+    prev_healthy = prev.get('healthy', True)
+    if not isinstance(prev_healthy, bool):
+        prev_healthy = True
+    return prev_healthy, prev.get('brokenAt')
+
+
+# WR-03 fix: the read-decide-write sequence below has no protection against
+# a second concurrent invocation (the operator doc explicitly instructs
+# `bash plugin-status.sh` manual runs, which cron.lock never serializes
+# against). Two processes racing this window could both observe the same
+# prev_healthy=true, both compute transition=true, and both dispatch a
+# broken-transition notification. Mirror classifier.py's
+# _persist_label_to_taxonomy sidecar-lock pattern: a non-blocking LOCK_EX on
+# PLUGIN_STATUS_FILE + ".lock" held for the whole read-decide-write. On lock
+# contention (another process mid-decision), skip the write and report the
+# PREVIOUS document's healthy/liveness unchanged with transition=false —
+# never mutate the file and never double-notify; the process holding the
+# lock is the sole authority for this tick.
+status_file.parent.mkdir(parents=True, exist_ok=True)
+lock_path = status_file.parent / (status_file.name + '.lock')
 try:
-    prev = json.loads(status_file.read_text(encoding='utf-8'))
-except Exception:
-    pass
-prev_healthy = prev.get('healthy', True)
-if not isinstance(prev_healthy, bool):
-    prev_healthy = True
-prev_broken_at = prev.get('brokenAt')
+    lockfd = open(lock_path, 'a')
+except OSError:
+    lockfd = None
 
-# Verdict table (D-06 contract, Plan 28-01): registered AND liveness not
-# 'stalled' is healthy. 'unknown' (stage 1 failed, stage 2 never ran) and
-# 'idle'/'firing' are all non-broken.
-healthy = registered and liveness != 'stalled'
+got_lock = False
+if lockfd is not None:
+    try:
+        fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        got_lock = True
+    except OSError:
+        got_lock = False
 
-now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+if not got_lock:
+    prev_healthy, _ = _load_prev()
+    print(f"PLUGIN_HEALTHY={'true' if prev_healthy else 'false'}", file=sys.stdout)
+    print("PLUGIN_BROKEN_TRANSITION=false", file=sys.stdout)
+    print(
+        "revenium-classifier plugin-status: lock contention, skipping this tick's write",
+        file=sys.stderr,
+    )
+    if lockfd is not None:
+        try:
+            lockfd.close()
+        except OSError:
+            pass
+    sys.exit(0)
 
-data = {
-    'healthy': healthy,
-    'registered': registered,
-    'liveness': liveness,
-    'lastChecked': now,
-}
-
-# Transition-only debounce (D-06): computed and the atomic write below
-# lands BEFORE the bash tail's notify branch runs, so a repeat tick reads
-# this already-broken document and stays silent. This boolean is the ONLY
-# debounce mechanism — no separate rate-limit file.
-transition = (not healthy) and prev_healthy
-
-if not healthy:
-    if prev_healthy:
-        data['brokenAt'] = now
-    else:
-        data['brokenAt'] = prev_broken_at or now
-# healthy == True: brokenAt key omitted entirely (contract) — a recovery run
-# clears any carried-forward brokenAt by simply never writing the key.
-
-# Atomic write: write-tmp-rename, reused verbatim from guardrail-check.sh
-# (T-28-01 mitigation) so a concurrent reader never observes a partial doc.
-tmp_fd, tmp_path = tempfile.mkstemp(
-    dir=str(status_file.parent),
-    prefix='.plugin-status-',
-    suffix='.tmp',
-)
 try:
-    with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
-        f.write(json.dumps(data, indent=2) + '\n')
-    os.replace(tmp_path, str(status_file))
+    prev_healthy, prev_broken_at = _load_prev()
+
+    # Verdict table (D-06 contract, Plan 28-01): registered AND liveness not
+    # 'stalled' is healthy. 'unknown' (stage 1 failed, stage 2 never ran) and
+    # 'idle'/'firing' are all non-broken.
+    healthy = registered and liveness != 'stalled'
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    data = {
+        'healthy': healthy,
+        'registered': registered,
+        'liveness': liveness,
+        'lastChecked': now,
+    }
+
+    # Transition-only debounce (D-06): computed and the atomic write below
+    # lands BEFORE the bash tail's notify branch runs, so a repeat tick reads
+    # this already-broken document and stays silent. This boolean is the ONLY
+    # debounce mechanism — no separate rate-limit file.
+    transition = (not healthy) and prev_healthy
+
+    if not healthy:
+        if prev_healthy:
+            data['brokenAt'] = now
+        else:
+            data['brokenAt'] = prev_broken_at or now
+    # healthy == True: brokenAt key omitted entirely (contract) — a recovery run
+    # clears any carried-forward brokenAt by simply never writing the key.
+
+    # Atomic write: write-tmp-rename, reused verbatim from guardrail-check.sh
+    # (T-28-01 mitigation) so a concurrent reader never observes a partial doc.
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(status_file.parent),
+        prefix='.plugin-status-',
+        suffix='.tmp',
+    )
+    try:
+        with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(data, indent=2) + '\n')
+        os.replace(tmp_path, str(status_file))
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except FileNotFoundError:
+            pass
+
+    print(f"PLUGIN_HEALTHY={'true' if healthy else 'false'}")
+    print(f"PLUGIN_BROKEN_TRANSITION={'true' if transition else 'false'}")
 finally:
     try:
-        os.unlink(tmp_path)
-    except FileNotFoundError:
+        fcntl.flock(lockfd, fcntl.LOCK_UN)
+    except OSError:
         pass
-
-print(f"PLUGIN_HEALTHY={'true' if healthy else 'false'}")
-print(f"PLUGIN_BROKEN_TRANSITION={'true' if transition else 'false'}")
+    try:
+        lockfd.close()
+    except OSError:
+        pass
 PY
 )
 
