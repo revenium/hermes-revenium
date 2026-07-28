@@ -108,6 +108,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'setup-guardrails.sh',
             # Phase 19 — guardrail cron stage (replaces budget-check.sh)
             SKILL / 'scripts' / 'guardrail-check.sh',
+            # Phase 28 — plugin-registration health check (D-01, D-06)
+            SKILL / 'scripts' / 'plugin-status.sh',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 21 — root-walk helper (TRACE-01)
