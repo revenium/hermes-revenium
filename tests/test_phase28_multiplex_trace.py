@@ -579,6 +579,120 @@ class Phase28MultiplexTraceEndToEndTests(unittest.TestCase):
         for line in lines:
             self.assertEqual(_trace_type_value(line), "debugging", line)
 
+    # ---- Test 6 (WR-04 / CR-02 regression: plugin-status.sh liveness under
+    # a namespaced, two-profile fixture) ----
+    #
+    # WR-04: no test combined a namespaced (multiplex) session with
+    # plugin-status.sh's liveness verdict before this — exactly the gap that
+    # let CR-02 (single-default-profile-scoped liveness check misreporting
+    # under gateway.multiplex_profiles) ship undetected. These two tests
+    # exercise both directions of that misdiagnosis.
+
+    _PLUGIN_STATUS_SCRIPTS = ("common.sh", "plugin-status.sh", "resolve-markers-dir.py")
+
+    def _build_status_scripts_dir(self):
+        scripts_dir = os.path.join(self.tmp, "status-scripts", "skills", "revenium", "scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        for name in self._PLUGIN_STATUS_SCRIPTS:
+            shutil.copy(str(SKILL / "scripts" / name), scripts_dir)
+        return scripts_dir
+
+    def _registered_fixture(self):
+        """Write config.yaml + plugins/revenium-classifier under self.dh so
+        plugin-status.sh's stage-1 registration check passes (mirrors
+        Phase28PluginStatusTests._registered_fixture)."""
+        plugin_dir = os.path.join(self.dh, "plugins", "revenium-classifier")
+        os.makedirs(plugin_dir, exist_ok=True)
+        with open(os.path.join(self.dh, "config.yaml"), "w") as f:
+            f.write("plugins:\n  enabled:\n    - revenium-classifier\n")
+
+    def _touch_sentinel(self, ready_dir, name, age_seconds):
+        os.makedirs(ready_dir, exist_ok=True)
+        path = os.path.join(ready_dir, name)
+        Path(path).touch()
+        ts = time.time() - age_seconds
+        os.utime(path, (ts, ts))
+        return path
+
+    def _run_plugin_status(self, scripts_dir, settle_seconds, status_file):
+        env = {
+            **os.environ,
+            "HERMES_HOME": self.dh,
+            "REVENIUM_PLUGIN_STATUS_FILE": status_file,
+            "REVENIUM_CRON_SETTLE_SECONDS": str(settle_seconds),
+        }
+        # Load-bearing (mirrors _run_reporter): clear per-path overrides so
+        # common.sh derives the canonical layout from HERMES_HOME, matching
+        # the multiplexed-gateway environment this fixture reproduces.
+        for k in ("REVENIUM_STATE_DIR", "REVENIUM_MARKERS_DIR",
+                  "REVENIUM_MARKERS_READY_DIR", "REVENIUM_TAXONOMY_FILE",
+                  "REVENIUM_JOB_TAXONOMY_FILE"):
+            env.pop(k, None)
+        return subprocess.run(
+            ["bash", os.path.join(scripts_dir, "plugin-status.sh")],
+            env=env, capture_output=True, text=True, timeout=10,
+        )
+
+    def test_multiplex_named_profile_firing_default_idle_no_false_stall(self):
+        """A named profile (gtm) with a recently-ended session and a fresh
+        sentinel under ITS OWN .ready/ dir, alongside a wholly idle default
+        profile, must report liveness=firing/healthy=true — not the false
+        stalled verdict CR-02 produced by aggregating gtm's ended session
+        against the default profile's (empty) .ready/ dir."""
+        settle_seconds = 120
+        self._registered_fixture()
+        sid = "agent:gtm:sess-1"
+        _seed_sessions_db(os.path.join(self.dh, "state.db"), [(sid, None, 100, 50)], age_seconds=5)
+        gtm_ready_dir = os.path.join(self.gtm, "state", "revenium", "markers", ".ready")
+        self._touch_sentinel(gtm_ready_dir, sid, age_seconds=1)
+
+        scripts_dir = self._build_status_scripts_dir()
+        status_file = os.path.join(self.tmp, "plugin-status.json")
+        result = self._run_plugin_status(scripts_dir, settle_seconds, status_file)
+
+        self.assertEqual(
+            result.returncode, 0,
+            f"expected exit 0 (firing), got {result.returncode}:\n{result.stdout}\n{result.stderr}",
+        )
+        data = json.loads(Path(status_file).read_text())
+        self.assertTrue(data["healthy"], data)
+        self.assertEqual(data["liveness"], "firing", data)
+        self.assertNotIn("brokenAt", data)
+
+    def test_multiplex_named_profile_stalled_not_masked_by_healthy_default(self):
+        """The inverse of the above: the default profile is healthy (a
+        recently-ended session with a fresh sentinel in its own .ready/
+        dir) while a named profile (gtm) has a recently-ended session and
+        NO sentinel activity in its own .ready/ dir. The genuinely broken
+        gtm classifier must surface as liveness=stalled/healthy=false, not
+        be masked by the healthy default profile."""
+        settle_seconds = 120
+        self._registered_fixture()
+        default_sid = "default-sess-1"
+        gtm_sid = "agent:gtm:sess-1"
+        _seed_sessions_db(
+            os.path.join(self.dh, "state.db"),
+            [(default_sid, None, 100, 50), (gtm_sid, None, 100, 50)],
+            age_seconds=5,
+        )
+        default_ready_dir = os.path.join(self.dh, "state", "revenium", "markers", ".ready")
+        self._touch_sentinel(default_ready_dir, default_sid, age_seconds=1)
+        # gtm's own .ready/ dir stays empty (already created in setUp) —
+        # its classifier is genuinely not firing.
+
+        scripts_dir = self._build_status_scripts_dir()
+        status_file = os.path.join(self.tmp, "plugin-status.json")
+        result = self._run_plugin_status(scripts_dir, settle_seconds, status_file)
+
+        self.assertEqual(
+            result.returncode, 2,
+            f"expected exit 2 (stalled), got {result.returncode}:\n{result.stdout}\n{result.stderr}",
+        )
+        data = json.loads(Path(status_file).read_text())
+        self.assertFalse(data["healthy"], data)
+        self.assertEqual(data["liveness"], "stalled", data)
+        self.assertIn("brokenAt", data)
+
 
 if __name__ == "__main__":
     unittest.main()

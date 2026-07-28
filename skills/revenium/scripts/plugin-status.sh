@@ -120,35 +120,164 @@ if ${registered}; then
   echo
   echo "[2] Runtime liveness (window=${window_seconds}s / ${window_minutes}m)"
 
-  # Count sessions whose ended_at falls inside the window. A missing or
-  # unreadable state.db resolves to zero (idle branch) — same tolerance
-  # hooks-status.sh uses for its own state.db cross-check.
-  if [[ -f "${STATE_DB}" ]]; then
-    recent_ended=$(sqlite3 "${STATE_DB}" \
-      "SELECT COUNT(*) FROM sessions WHERE ended_at IS NOT NULL AND ended_at >= strftime('%s','now') - ${window_seconds};" \
-      2>/dev/null || echo 0)
-  fi
-  [[ "${recent_ended}" =~ ^[0-9]+$ ]] || recent_ended=0
+  # CR-02 (Phase 28 review): a single aggregate recent_ended count against a
+  # single fresh_sentinels count — both scoped to the default-profile
+  # STATE_DB / MARKERS_READY_DIR — misreports under gateway.multiplex_profiles:
+  # every profile's sessions live in the ONE shared state.db, but each named
+  # profile's classifier sentinels land under its OWN
+  # ~/.hermes/profiles/<profile>/state/revenium/markers/.ready/ directory.
+  # Group recently-ended sessions by their OWNING profile's ready directory
+  # (via the SAME resolve-markers-dir.py sidecar hermes-report.sh's own
+  # per-session resolution already uses — parity, not a third reimplementation
+  # of the agent:<profile>: namespace pattern) and check freshness
+  # independently per group. This is what stops an idle default profile from
+  # masking a firing named profile, and stops a genuinely broken named
+  # profile from hiding behind a healthy default (both directions of the
+  # misdiagnosis TRACE-04 exists to prevent). Fail-open: any import or lookup
+  # failure (e.g. an isolated scratch tree that never shipped
+  # resolve-markers-dir.py alongside this script) resolves every sid to the
+  # single default ready dir, reproducing this script's pre-fix behavior
+  # exactly — never a new failure mode.
+  LIVENESS_OUTPUT=$(
+    STATE_DB="${STATE_DB}" \
+    MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
+    MARKERS_DIR="${MARKERS_DIR}" \
+    SCRIPT_DIR="${SCRIPT_DIR}" \
+    WINDOW_SECONDS="${window_seconds}" \
+    WINDOW_MINUTES="${window_minutes}" \
+    python3 - <<'PY' 2>/dev/null
+import importlib.util
+import os
+import sqlite3
+import time
+from pathlib import Path
 
-  # Count sentinels modified inside the window. Deliberately does NOT consult
-  # job-marker presence anywhere — a registration outage must stay
-  # distinguishable from a classification failure (TRACE-04).
-  fresh_sentinels=$(find "${MARKERS_READY_DIR}" -maxdepth 1 -type f -mmin "-${window_minutes}" 2>/dev/null | wc -l | tr -d ' ')
+state_db = os.environ.get('STATE_DB', '')
+default_ready_dir = os.environ.get('MARKERS_READY_DIR', '')
+process_markers_dir = os.environ.get('MARKERS_DIR', '')
+script_dir = os.environ.get('SCRIPT_DIR', '')
+try:
+    window_seconds = int(os.environ.get('WINDOW_SECONDS', '600'))
+except (TypeError, ValueError):
+    window_seconds = 600
+try:
+    window_minutes = int(os.environ.get('WINDOW_MINUTES', '10'))
+except (TypeError, ValueError):
+    window_minutes = 10
+
+_resolver = None
+try:
+    spec = importlib.util.spec_from_file_location(
+        'phase28_markers_dir_sidecar_status',
+        os.path.join(script_dir, 'resolve-markers-dir.py'),
+    )
+    _mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(_mod)
+    _resolver = getattr(_mod, 'resolve_markers_dir', None)
+except Exception:
+    _resolver = None
+
+
+def ready_dir_for(sid):
+    """The .ready directory for sid's OWNING profile, or the process-level
+    default when resolution is unavailable or sid is not namespaced."""
+    if _resolver is None:
+        return default_ready_dir
+    try:
+        resolved = _resolver(sid, process_markers_dir or None)
+    except Exception:
+        return default_ready_dir
+    if resolved == process_markers_dir:
+        return default_ready_dir
+    return str(Path(resolved) / '.ready')
+
+
+recent_ended = 0
+ready_dirs_seen = set()
+rows = []
+if state_db and os.path.isfile(state_db):
+    try:
+        conn = sqlite3.connect(state_db)
+        try:
+            cur = conn.execute(
+                "SELECT id FROM sessions WHERE ended_at IS NOT NULL "
+                "AND ended_at >= strftime('%s','now') - ?",
+                (window_seconds,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        rows = []
+
+for row in rows:
+    sid = row[0] if row else None
+    if not sid:
+        continue
+    recent_ended += 1
+    ready_dirs_seen.add(ready_dir_for(sid))
+
+fresh_sentinels_total = 0
+any_stalled = False
+cutoff = time.time() - (window_minutes * 60)
+for rd in ready_dirs_seen:
+    count = 0
+    try:
+        p = Path(rd)
+        if p.is_dir():
+            for f in p.iterdir():
+                try:
+                    if f.is_file() and f.stat().st_mtime >= cutoff:
+                        count += 1
+                except OSError:
+                    continue
+    except OSError:
+        count = 0
+    fresh_sentinels_total += count
+    if count == 0:
+        any_stalled = True
+
+if recent_ended == 0:
+    liveness = 'idle'
+elif any_stalled:
+    liveness = 'stalled'
+else:
+    liveness = 'firing'
+
+print(f"RECENT_ENDED={recent_ended}")
+print(f"FRESH_SENTINELS={fresh_sentinels_total}")
+print(f"LIVENESS={liveness}")
+PY
+  ) || LIVENESS_OUTPUT=""
+
+  recent_ended=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^RECENT_ENDED=//p' | head -1)
+  fresh_sentinels=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^FRESH_SENTINELS=//p' | head -1)
+  liveness=$(echo "${LIVENESS_OUTPUT}" | sed -n 's/^LIVENESS=//p' | head -1)
+
+  [[ "${recent_ended}" =~ ^[0-9]+$ ]] || recent_ended=0
   [[ "${fresh_sentinels}" =~ ^[0-9]+$ ]] || fresh_sentinels=0
+  case "${liveness}" in
+    idle|firing|stalled) ;;
+    *) liveness="unknown" ;;
+  esac
 
   echo "    ${recent_ended} session(s) with ended_at inside the last ${window_seconds}s (state.db)"
-  echo "    ${fresh_sentinels} sentinel(s) modified inside the last ${window_seconds}s (${MARKERS_READY_DIR})"
+  echo "    ${fresh_sentinels} sentinel(s) modified inside the last ${window_seconds}s across owning profile(s)"
 
-  if [[ "${recent_ended}" -eq 0 ]]; then
-    liveness="idle"
-    echo "    ℹ idle host — no sessions ended in the window, nothing for the classifier to have missed"
-  elif [[ "${fresh_sentinels}" -gt 0 ]]; then
-    liveness="firing"
-    echo "    ✓ classifier is firing — sentinel activity matches recently-ended sessions"
-  else
-    liveness="stalled"
-    echo "    ✗ classifier NOT firing — sessions ended but no sentinel activity in the window"
-  fi
+  case "${liveness}" in
+    idle)
+      echo "    ℹ idle host — no sessions ended in the window, nothing for the classifier to have missed"
+      ;;
+    firing)
+      echo "    ✓ classifier is firing — sentinel activity matches recently-ended sessions"
+      ;;
+    stalled)
+      echo "    ✗ classifier NOT firing — sessions ended but no sentinel activity in the window"
+      ;;
+    *)
+      echo "    ? liveness computation failed — treating as non-broken (fail-open)"
+      ;;
+  esac
 else
   echo
   echo "[2] Runtime liveness"
