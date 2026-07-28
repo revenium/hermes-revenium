@@ -57,6 +57,33 @@ def seed_state_db(hermes_home, ended_ats):
     return db_path
 
 
+def write_hermes_shim(bin_dir):
+    """Write an argv-logging fake `hermes` binary into bin_dir. Returns the
+    path to the argv log the shim appends to (one line per invocation, the
+    invocation's full "$*").
+
+    Placement is load-bearing (Task 2 <action>): this MUST live at
+    <shim_home>/.local/bin/hermes with HOME set to <shim_home> and PATH
+    prepending that directory. ensure_path (common.sh) prepends
+    "${HOME}/.local/bin" last, which makes it win PATH resolution over any
+    stub placed elsewhere — and, on a host with a REAL `hermes` CLI already
+    on PATH (as this repo's own dev machines do), placing the stub anywhere
+    else lets the real binary run instead, against real Hermes state.
+    """
+    import shlex
+    os.makedirs(bin_dir, exist_ok=True)
+    argv_log = os.path.join(bin_dir, 'hermes.argv.log')
+    shim_path = os.path.join(bin_dir, 'hermes')
+    with open(shim_path, 'w') as f:
+        f.write(
+            '#!/usr/bin/env bash\n'
+            "printf '%s\\n' \"$*\" >> " + shlex.quote(argv_log) + '\n'
+            'exit 0\n'
+        )
+    os.chmod(shim_path, 0o755)
+    return argv_log
+
+
 def touch_sentinel(markers_ready_dir, name, age_seconds):
     """Create an empty sentinel file at markers_ready_dir/name and set its
     mtime to age_seconds in the past (0 = now) via os.utime, so freshness
@@ -238,20 +265,28 @@ class Phase28PluginStatusTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp_reg, ignore_errors=True)
 
-    def test_plugin_status_sh_never_probes_hermes_cli(self):
-        """Source invariant: the script body contains no invocation of, or
-        probe for, the Hermes command-line tool. Comment lines are filtered
-        out first so a header comment explaining WHY the tool is not probed
-        cannot itself trip the assertion."""
+    def test_plugin_status_sh_never_probes_hermes_cli_for_verdict(self):
+        """Source invariant, revised for Task 2 (D-05/D-06): the two verdict
+        stages (registration + liveness) never shell out to the Hermes CLI,
+        and the script never takes a repair action (gateway restart, plugin
+        reinstall, `hermes plugins` probe). The ONLY sanctioned Hermes CLI
+        invocation anywhere in the script is the Task 2 not-broken-to-broken
+        notification dispatch via `hermes chat --toolsets messaging` — if a
+        `command -v hermes` probe is present at all, it must be paired with
+        that exact dispatch, never with a repair-oriented invocation.
+        Comment lines are filtered out first so a header comment explaining
+        this invariant cannot itself trip the assertion."""
         text = (SKILL / 'scripts' / 'plugin-status.sh').read_text()
         code_lines = [
             line for line in text.splitlines()
             if not line.strip().startswith('#')
         ]
         code_text = '\n'.join(code_lines)
-        self.assertNotIn('command -v hermes', code_text)
         self.assertNotIn('hermes gateway', code_text)
         self.assertNotIn('hermes plugins', code_text)
+        self.assertNotIn('hermes restart', code_text)
+        if 'command -v hermes' in code_text:
+            self.assertIn('hermes chat --toolsets messaging', code_text)
 
     # -- Task 1: stage-2 liveness -------------------------------------------
 
@@ -486,6 +521,273 @@ class Phase28PluginStatusTests(unittest.TestCase):
             self.assertFalse(data['healthy'])
             self.assertFalse(data['registered'])
             self.assertEqual(data['liveness'], 'unknown')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # -- Task 2: not-broken-to-broken transition + notification -------------
+
+    def _stalled_fixture_env(self, tmp, notify_channel=None, notify_target=None):
+        """Build a registered-but-stalled fixture: one session ended inside
+        the window, MARKERS_READY_DIR empty. Returns
+        (scripts_dir, status_file, log_file, base_env_dict) — base_env_dict
+        has no HOME/PATH override yet; callers add those per-test so each
+        test controls hermes-CLI visibility explicitly (never inherit the
+        real dev machine's `hermes` unintentionally)."""
+        hermes_home = os.path.join(tmp, '.hermes')
+        scripts_dir = setup_skill_tree(hermes_home)
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        status_file = os.path.join(state_dir, 'plugin-status.json')
+        log_file = os.path.join(state_dir, 'revenium-metering.log')
+        self._registered_fixture(hermes_home)
+        seed_state_db(hermes_home, [time.time() - 5])
+        os.makedirs(os.path.join(state_dir, 'markers', '.ready'), exist_ok=True)
+        config = {}
+        if notify_channel is not None:
+            config['notifyChannel'] = notify_channel
+        if notify_target is not None:
+            config['notifyTarget'] = notify_target
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+            json.dump(config, f)
+        base_env = {
+            'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+            'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+        }
+        return scripts_dir, status_file, log_file, base_env
+
+    def test_plugin_status_broken_transition_notifies_once(self):
+        """First run resolving broken against an absent prior status file
+        emits the transition marker on stdout and, with a notify channel
+        configured, dispatches exactly one message whose first token is
+        'chat' — proving the only use of the tool is notification dispatch."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-notify-once-')
+        try:
+            scripts_dir, status_file, log_file, base_env = self._stalled_fixture_env(
+                tmp, notify_channel='slack', notify_target='#ops',
+            )
+            shim_home = os.path.join(tmp, 'shimhome')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            argv_log = write_hermes_shim(bin_dir)
+            env = {
+                **os.environ,
+                **base_env,
+                'HOME': shim_home,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+
+            # Snapshot mtimes of the things this script only INSPECTS, never
+            # mutates: the plugin destination directory and config.yaml.
+            hermes_home = base_env['HERMES_HOME']
+            plugin_dest_dir = os.path.join(hermes_home, 'plugins', 'revenium-classifier')
+            config_yaml = os.path.join(hermes_home, 'config.yaml')
+            mtime_plugin_before = os.path.getmtime(plugin_dest_dir)
+            mtime_config_before = os.path.getmtime(config_yaml)
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn(
+                'PLUGIN_BROKEN_TRANSITION=true', result.stdout,
+                f'expected transition marker on first broken run; stdout={result.stdout!r}',
+            )
+            self.assertTrue(
+                os.path.isfile(argv_log),
+                'hermes shim argv log not found — notification dispatch never reached the shim',
+            )
+            with open(argv_log) as f:
+                lines = [l for l in f.read().splitlines() if l.strip()]
+            self.assertEqual(
+                len(lines), 1,
+                f'expected exactly 1 dispatch on the first broken run; got {lines!r}',
+            )
+            self.assertEqual(
+                lines[0].split()[0], 'chat',
+                f'the only sanctioned hermes invocation is `hermes chat ...`; got {lines[0]!r}',
+            )
+
+            # The script must mutate nothing it inspects.
+            self.assertEqual(
+                os.path.getmtime(plugin_dest_dir), mtime_plugin_before,
+                'plugin destination directory mtime changed — the script must never write to it',
+            )
+            self.assertEqual(
+                os.path.getmtime(config_yaml), mtime_config_before,
+                'config.yaml mtime changed — the script must never write to it',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_repeat_broken_is_silent(self):
+        """A second run against the same still-broken fixture emits no
+        transition marker and dispatches zero additional messages."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-notify-repeat-')
+        try:
+            scripts_dir, status_file, log_file, base_env = self._stalled_fixture_env(
+                tmp, notify_channel='slack', notify_target='#ops',
+            )
+            shim_home = os.path.join(tmp, 'shimhome')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            argv_log = write_hermes_shim(bin_dir)
+            env = {
+                **os.environ,
+                **base_env,
+                'HOME': shim_home,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+            result1 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertIn('PLUGIN_BROKEN_TRANSITION=true', result1.stdout)
+            with open(argv_log) as f:
+                lines_after_1 = [l for l in f.read().splitlines() if l.strip()]
+            self.assertEqual(len(lines_after_1), 1)
+
+            result2 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result2.returncode, 2, result2.stdout + result2.stderr)
+            self.assertIn(
+                'PLUGIN_BROKEN_TRANSITION=false', result2.stdout,
+                f'second run against unchanged broken fixture must NOT re-transition; '
+                f'stdout={result2.stdout!r}',
+            )
+            with open(argv_log) as f:
+                lines_after_2 = [l for l in f.read().splitlines() if l.strip()]
+            self.assertEqual(
+                len(lines_after_2), 1,
+                f'repeat broken tick must dispatch zero additional messages; got {lines_after_2!r}',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_no_channel_configured(self):
+        """A broken run with no notifyChannel/notifyTarget configured logs
+        an informational line and still exits with the verdict's exit code —
+        it never fails the script."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-no-channel-')
+        try:
+            scripts_dir, status_file, log_file, base_env = self._stalled_fixture_env(tmp)
+            shim_home = os.path.join(tmp, 'shimhome')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir, exist_ok=True)
+            env = {
+                **os.environ,
+                **base_env,
+                'HOME': shim_home,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertTrue(os.path.isfile(log_file), 'revenium-metering.log must exist')
+            log_text = Path(log_file).read_text()
+            self.assertIn(
+                '[INFO ]', log_text,
+                f'expected an informational log line when no channel is configured; log={log_text!r}',
+            )
+            self.assertIn('no notification channel configured', log_text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_messaging_tool_absent(self):
+        """A broken run with the messaging CLI absent from PATH logs a
+        warning and still exits with the verdict's exit code. PATH is
+        restricted to a fixed, known-safe set (never inheriting the real
+        dev machine's PATH) so this test cannot accidentally find and
+        invoke a REAL `hermes` binary."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-no-tool-')
+        try:
+            scripts_dir, status_file, log_file, base_env = self._stalled_fixture_env(
+                tmp, notify_channel='slack', notify_target='#ops',
+            )
+            shim_home = os.path.join(tmp, 'shimhome')
+            # Deliberately empty — no hermes shim written here.
+            os.makedirs(shim_home, exist_ok=True)
+            env = {
+                **os.environ,
+                **base_env,
+                'HOME': shim_home,
+                # Fixed minimal PATH: enough for bash/python3/sqlite3 to
+                # resolve, but excludes any real hermes install location.
+                'PATH': '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin',
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertTrue(os.path.isfile(log_file), 'revenium-metering.log must exist')
+            log_text = Path(log_file).read_text()
+            self.assertIn(
+                '[WARN ]', log_text,
+                f'expected a warning log line when the messaging tool is absent; log={log_text!r}',
+            )
+            self.assertIn('hermes CLI not available', log_text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_recovery_clears_broken_at(self):
+        """A run that resolves back to healthy after a broken run clears
+        brokenAt and emits no notification."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-recovery-')
+        try:
+            scripts_dir, status_file, log_file, base_env = self._stalled_fixture_env(
+                tmp, notify_channel='slack', notify_target='#ops',
+            )
+            hermes_home = base_env['HERMES_HOME']
+            state_dir = base_env['REVENIUM_STATE_DIR']
+            shim_home = os.path.join(tmp, 'shimhome')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            argv_log = write_hermes_shim(bin_dir)
+            env = {
+                **os.environ,
+                **base_env,
+                'HOME': shim_home,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            }
+            result1 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result1.returncode, 2, result1.stdout + result1.stderr)
+            data1 = json.loads(Path(status_file).read_text())
+            self.assertIn('brokenAt', data1)
+
+            # Recover: add a freshly-touched sentinel so this tick resolves firing.
+            markers_ready_dir = os.path.join(state_dir, 'markers', '.ready')
+            touch_sentinel(markers_ready_dir, 'sess-0', age_seconds=1)
+
+            result2 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result2.returncode, 0,
+                f'expected exit 0 on recovery, got {result2.returncode}:\n'
+                f'{result2.stdout}\n{result2.stderr}',
+            )
+            data2 = json.loads(Path(status_file).read_text())
+            self.assertTrue(data2['healthy'])
+            self.assertNotIn('brokenAt', data2, 'brokenAt must be cleared on recovery')
+            self.assertIn(
+                'PLUGIN_BROKEN_TRANSITION=false', result2.stdout,
+                f'a recovery run must not be a broken-transition; stdout={result2.stdout!r}',
+            )
+            with open(argv_log) as f:
+                lines = [l for l in f.read().splitlines() if l.strip()]
+            self.assertEqual(
+                len(lines), 1,
+                f'recovery run must dispatch zero additional notifications '
+                f'(only the first broken run should have dispatched); got {lines!r}',
+            )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

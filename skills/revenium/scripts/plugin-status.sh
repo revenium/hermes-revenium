@@ -28,7 +28,11 @@ set -uo pipefail
 # must NEVER shell out to the hermes CLI to compute either verdict — it is
 # slow, and on the diagnosis host `hermes` was not even on the bare PATH.
 # Alert-only (D-05): this script never repairs anything, never restarts the
-# gateway, and never invokes install-plugin.sh itself.
+# gateway, and never invokes install-plugin.sh itself. The ONE sanctioned use
+# of the `hermes` CLI anywhere in this script is the Plan 28-03 Task 2
+# not-broken-to-broken transition notification (D-06) below — gated strictly
+# behind the transition marker, never part of either verdict stage above,
+# and itself fail-open (it never changes this script's exit status).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
@@ -38,6 +42,25 @@ ensure_path
 
 PLUGIN_NAME="revenium-classifier"
 PLUGIN_DEST_DIR="${HERMES_HOME}/plugins/${PLUGIN_NAME}"
+
+# (C) read_config_field helper — reads a scalar key from CONFIG_FILE via
+# Python. Mirrors guardrail-check.sh's helper of the same name (D-06 reuse),
+# but fails open to an empty string on a missing/corrupt CONFIG_FILE — unlike
+# guardrail-check.sh, this script must run even when config.json has never
+# been created (metering-only installs, fresh hosts).
+read_config_field() {
+  CONFIG_FILE="${CONFIG_FILE}" KEY="$1" python3 - <<'PY'
+import json, os
+try:
+    val = json.load(open(os.environ['CONFIG_FILE'])).get(os.environ['KEY'], '')
+except Exception:
+    val = ''
+if isinstance(val, bool):
+    print('true' if val else 'false')
+else:
+    print(val if val is not None else '')
+PY
+}
 
 echo "Revenium plugin registration status"
 echo "────────────────────────────────────"
@@ -175,12 +198,19 @@ data = {
     'lastChecked': now,
 }
 
+# Transition-only debounce (D-06): computed and the atomic write below
+# lands BEFORE the bash tail's notify branch runs, so a repeat tick reads
+# this already-broken document and stays silent. This boolean is the ONLY
+# debounce mechanism — no separate rate-limit file.
+transition = (not healthy) and prev_healthy
+
 if not healthy:
     if prev_healthy:
         data['brokenAt'] = now
     else:
         data['brokenAt'] = prev_broken_at or now
-# healthy == True: brokenAt key omitted entirely (contract).
+# healthy == True: brokenAt key omitted entirely (contract) — a recovery run
+# clears any carried-forward brokenAt by simply never writing the key.
 
 # Atomic write: write-tmp-rename, reused verbatim from guardrail-check.sh
 # (T-28-01 mitigation) so a concurrent reader never observes a partial doc.
@@ -200,11 +230,13 @@ finally:
         pass
 
 print(f"PLUGIN_HEALTHY={'true' if healthy else 'false'}")
+print(f"PLUGIN_BROKEN_TRANSITION={'true' if transition else 'false'}")
 PY
 )
 
 echo "${STATUS_OUTPUT}"
 PLUGIN_HEALTHY=$(echo "${STATUS_OUTPUT}" | sed -n 's/^PLUGIN_HEALTHY=//p' | head -1)
+PLUGIN_BROKEN_TRANSITION=$(echo "${STATUS_OUTPUT}" | sed -n 's/^PLUGIN_BROKEN_TRANSITION=//p' | head -1)
 
 # --- 4. Verdict + actionable guidance --------------------------------------
 echo
@@ -223,6 +255,41 @@ elif [[ "${liveness}" == "stalled" ]]; then
 else
   echo "✓ Plugin is registered. Liveness: ${liveness}."
   EXIT_CODE=0
+fi
+
+# --- 5. Not-broken-to-broken transition notification (D-06, Task 2) --------
+# Reuses guardrail-check.sh's exact Hermes messaging dispatch shape. Fires
+# ONLY on the transition (already debounced by the atomic write above having
+# landed); every branch here is fail-open and NEVER changes EXIT_CODE. This
+# is the one sanctioned Hermes CLI invocation in this script — a
+# notification, never a repair action (D-05): no gateway restart, no
+# installer invocation, no clearing of a broken verdict from here (the
+# verdict tree recomputing it on a later tick is the only path that clears
+# brokenAt).
+if [[ "${PLUGIN_BROKEN_TRANSITION}" == "true" ]]; then
+  NOTIFY_CHANNEL=$(read_config_field notifyChannel)
+  NOTIFY_TARGET=$(read_config_field notifyTarget)
+
+  if [[ "${registered}" != "true" ]]; then
+    VERDICT_DESC="not registered"
+  else
+    VERDICT_DESC="registered but not firing (liveness=${liveness})"
+  fi
+  NOTIFY_MSG="Revenium classifier plugin health check FAILED — ${VERDICT_DESC}. Restart the Hermes gateway, then re-run: bash ${SCRIPT_DIR}/install-plugin.sh"
+
+  if [[ -n "${NOTIFY_CHANNEL}" && -n "${NOTIFY_TARGET}" ]]; then
+    if command -v hermes >/dev/null 2>&1; then
+      if hermes chat --toolsets messaging -q "Use the send_message tool to send this exact message to ${NOTIFY_CHANNEL}:${NOTIFY_TARGET}: ${NOTIFY_MSG}" >/dev/null 2>&1; then
+        info "Plugin-health notification sent via Hermes ${NOTIFY_CHANNEL}"
+      else
+        warn "Failed to send plugin-health notification via Hermes ${NOTIFY_CHANNEL}"
+      fi
+    else
+      warn "hermes CLI not available — plugin-health notification not sent"
+    fi
+  else
+    info "Plugin health check failed but no notification channel configured"
+  fi
 fi
 
 exit "${EXIT_CODE}"
