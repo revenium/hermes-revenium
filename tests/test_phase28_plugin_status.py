@@ -9,8 +9,10 @@ per-branch tempfile.mkdtemp + try/finally shutil.rmtree + scratch-scripts-tree s
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -19,6 +21,11 @@ SKILL = ROOT / 'skills' / 'revenium'
 
 CONTRACT_KEYS = {'healthy', 'registered', 'liveness', 'lastChecked'}
 LIVENESS_VALUES = {'unknown', 'idle', 'firing', 'stalled'}
+
+# Task 1 (28-03): small settle window so the aged-sentinel branch doesn't
+# need a multi-minute-old fixture — os.utime sets deterministic mtimes
+# instead of depending on wall-clock test runtime.
+SETTLE_SECONDS = 120
 
 
 def setup_skill_tree(hermes_home):
@@ -29,6 +36,37 @@ def setup_skill_tree(hermes_home):
     for name in ('common.sh', 'plugin-status.sh'):
         shutil.copy(str(SKILL / 'scripts' / name), scripts_dir)
     return scripts_dir
+
+
+def seed_state_db(hermes_home, ended_ats):
+    """Create <hermes_home>/state.db with a minimal `sessions` table and one
+    row per entry in ended_ats (a list of epoch-second floats/ints, or None
+    for a row with no ended_at)."""
+    db_path = os.path.join(hermes_home, 'state.db')
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, ended_at REAL)')
+        for i, ended_at in enumerate(ended_ats):
+            conn.execute(
+                'INSERT INTO sessions (id, ended_at) VALUES (?, ?)',
+                (f'sess-{i}', ended_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def touch_sentinel(markers_ready_dir, name, age_seconds):
+    """Create an empty sentinel file at markers_ready_dir/name and set its
+    mtime to age_seconds in the past (0 = now) via os.utime, so freshness
+    assertions are deterministic rather than runtime-dependent."""
+    os.makedirs(markers_ready_dir, exist_ok=True)
+    path = os.path.join(markers_ready_dir, name)
+    Path(path).touch()
+    ts = time.time() - age_seconds
+    os.utime(path, (ts, ts))
+    return path
 
 
 class Phase28PluginStatusTests(unittest.TestCase):
@@ -214,6 +252,242 @@ class Phase28PluginStatusTests(unittest.TestCase):
         self.assertNotIn('command -v hermes', code_text)
         self.assertNotIn('hermes gateway', code_text)
         self.assertNotIn('hermes plugins', code_text)
+
+    # -- Task 1: stage-2 liveness -------------------------------------------
+
+    def _registered_fixture(self, hermes_home):
+        """Write config.yaml + plugins/revenium-classifier so stage 1 passes."""
+        plugin_dir = os.path.join(hermes_home, 'plugins', 'revenium-classifier')
+        os.makedirs(plugin_dir, exist_ok=True)
+        with open(os.path.join(hermes_home, 'config.yaml'), 'w') as f:
+            f.write('plugins:\n  enabled:\n    - revenium-classifier\n')
+
+    def test_plugin_status_no_state_db_is_idle(self):
+        """Registered plugin, no state.db at all -> exit 0, liveness idle,
+        healthy true."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-no-db-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            self._registered_fixture(hermes_home)
+            # Deliberately no state.db written at all.
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'expected exit 0 (idle, no state.db), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertTrue(data['healthy'])
+            self.assertEqual(data['liveness'], 'idle')
+            self.assertNotIn('brokenAt', data)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_idle_host_not_broken(self):
+        """Registered plugin, state.db present with zero sessions whose
+        ended_at falls inside the window -> exit 0, liveness idle, healthy
+        true. An idle host is never reported broken (D-02)."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-idle-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            self._registered_fixture(hermes_home)
+            # One session, but ended well outside the settle window.
+            seed_state_db(hermes_home, [time.time() - (SETTLE_SECONDS * 10)])
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'expected exit 0 (idle), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertTrue(data['healthy'])
+            self.assertEqual(data['liveness'], 'idle')
+            self.assertNotIn('brokenAt', data)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_firing(self):
+        """Registered plugin, one session ended inside the window, one
+        sentinel file freshly modified in MARKERS_READY_DIR -> exit 0,
+        liveness firing, healthy true. NO marker file is ever created here,
+        proving liveness never depends on marker content (TRACE-04)."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-firing-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            self._registered_fixture(hermes_home)
+            seed_state_db(hermes_home, [time.time() - 5])
+            markers_ready_dir = os.path.join(state_dir, 'markers', '.ready')
+            touch_sentinel(markers_ready_dir, 'sess-0', age_seconds=1)
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'expected exit 0 (firing), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertTrue(data['healthy'])
+            self.assertEqual(data['liveness'], 'firing')
+            self.assertNotIn('brokenAt', data)
+            # No marker file anywhere under markers/ (only markers/.ready/
+            # holds the sentinel) — proves liveness is marker-independent.
+            markers_dir = os.path.join(state_dir, 'markers')
+            marker_files = [
+                p for p in Path(markers_dir).rglob('*')
+                if p.is_file() and '.ready' not in p.parts
+            ]
+            self.assertEqual(marker_files, [])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_stalled_no_sentinels(self):
+        """Registered plugin, one session ended inside the window,
+        MARKERS_READY_DIR empty -> exit 2, liveness stalled, healthy false,
+        brokenAt present."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-stalled-empty-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            self._registered_fixture(hermes_home)
+            seed_state_db(hermes_home, [time.time() - 5])
+            # MARKERS_READY_DIR left empty (but present, mirroring
+            # common.sh's own mkdir -p of it).
+            os.makedirs(os.path.join(state_dir, 'markers', '.ready'), exist_ok=True)
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 2,
+                f'expected exit 2 (stalled, empty ready dir), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertFalse(data['healthy'])
+            self.assertEqual(data['liveness'], 'stalled')
+            self.assertIn('brokenAt', data)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_stalled_aged_sentinel(self):
+        """Registered plugin, one session ended inside the window, only a
+        sentinel file older than the window -> exit 2, liveness stalled."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-stalled-aged-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            self._registered_fixture(hermes_home)
+            seed_state_db(hermes_home, [time.time() - 5])
+            markers_ready_dir = os.path.join(state_dir, 'markers', '.ready')
+            # Sentinel exists but its mtime is well outside the settle window.
+            touch_sentinel(markers_ready_dir, 'sess-0', age_seconds=SETTLE_SECONDS * 5)
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 2,
+                f'expected exit 2 (stalled, aged sentinel), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertFalse(data['healthy'])
+            self.assertEqual(data['liveness'], 'stalled')
+            self.assertIn('brokenAt', data)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plugin_status_unregistered_short_circuits_stage_two(self):
+        """Unregistered plugin with recent sessions and fresh sentinels ->
+        still exit 1 (stage 1 short-circuits before stage 2 runs)."""
+        tmp = tempfile.mkdtemp(prefix='gsd-phase28-plugstat-unreg-shortcircuit-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = setup_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            # Deliberately NOT registered: no plugins/ dir, no config.yaml entry.
+            seed_state_db(hermes_home, [time.time() - 5])
+            markers_ready_dir = os.path.join(state_dir, 'markers', '.ready')
+            touch_sentinel(markers_ready_dir, 'sess-0', age_seconds=1)
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+                'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(
+                result.returncode, 1,
+                f'expected exit 1 (unregistered short-circuits stage 2), got {result.returncode}:\n'
+                f'{result.stdout}\n{result.stderr}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertFalse(data['healthy'])
+            self.assertFalse(data['registered'])
+            self.assertEqual(data['liveness'], 'unknown')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == '__main__':
