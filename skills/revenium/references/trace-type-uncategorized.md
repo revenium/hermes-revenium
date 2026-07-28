@@ -44,20 +44,34 @@ ls -la ~/.hermes/state/revenium/markers/<root-session-id>.jsonl
 ```
 
 **Root cause.** The classifier's `on_session_end` hook either never ran for this session, or ran
-and failed before reaching the marker write. Both produce the identical absent-file signature —
-this doc cannot tell you which from disk state alone (see the note at the end of this file).
+and failed before reaching the marker write. A registration outage — the plugin never loaded by
+Hermes at all — is the specific failure that produced a live nine-day fleet-wide incident, and it
+is the one the check below is built to catch.
 
-**Fix.** Confirm the classifier plugin is installed and healthy for the profile that owns the
-session:
+**Fix.** Run the registration-level health check this skill ships, from the installed scripts
+directory:
 
 ```bash
-ls -la ~/.hermes/skills/revenium/plugins/revenium-classifier/
+bash ~/.hermes/skills/revenium/scripts/plugin-status.sh
 ```
 
-If the plugin is present and the file is still never written after a fresh session completes,
-this is not something an operator can resolve by re-running the cron — it needs the classifier
-plugin itself investigated. Re-running `bash ~/.hermes/skills/revenium/scripts/cron.sh` will not
-create the marker; the marker is written by the classifier, not the reporter.
+This replaces an older instruction that listed the skill bundle's own plugin source directory.
+That directory is not one of Hermes' plugin-discovery roots, so a listing of it succeeds whether
+or not the plugin is actually loaded — it reported "present" throughout the entire nine-day
+outage. `plugin-status.sh` checks registration and runtime liveness instead, and its exit code
+tells you what to do next:
+
+| Exit code | Meaning | Next step |
+|-----------|---------|-----------|
+| `1` | Not registered — the plugin directory is absent from a Hermes plugin-discovery root, or it is not listed in `plugins.enabled` | Run `bash ~/.hermes/skills/revenium/scripts/install-plugin.sh` |
+| `2` | Registered but not firing (liveness `stalled`) — the plugin is placed and enabled, but the running gateway is not producing sentinels for recently-ended sessions | Restart the Hermes gateway so it reloads the plugin, then re-run `plugin-status.sh` to confirm |
+| `0` | Healthy — the registration path is fine | The cause is elsewhere in this document; continue to the sections below |
+
+If `plugin-status.sh` reports exit `0` and the marker file is still never written after a fresh
+session completes, this is not something an operator can resolve by re-running the cron — it
+needs the classifier plugin itself investigated. Re-running
+`bash ~/.hermes/skills/revenium/scripts/cron.sh` will not create the marker; the marker is written
+by the classifier, not the reporter.
 
 ## Marker file present, no job record
 
@@ -146,14 +160,34 @@ timing tuning problem (raise `REVENIUM_CRON_SETTLE_SECONDS`), not a code bug —
 the timestamp comparison above that this is actually what happened before changing the setting,
 since it produces the same end symptom as the other three failure modes.
 
+## Reason codes in the metering log
+
+Every time the reporter falls back to `uncategorized`, it also writes exactly one `reason=` line
+to `revenium-metering.log` naming which of a closed, three-literal vocabulary caused it. Grep the
+log directly rather than guessing from the wire value alone:
+
+```bash
+grep 'reason=' ~/.hermes/state/revenium/revenium-metering.log | tail -20
+```
+
+| Reason literal | On-disk symptom | Next step |
+|-----------------|------------------|-----------|
+| `reason=plugin_unregistered` | `plugin-status.sh` reports the classifier is not registered (exit `1`) or registered but not firing (exit `2`) — checked and reported FIRST, ahead of any marker-state reasoning | See "No marker file for the root session" above; run `plugin-status.sh` and follow its exit-code table |
+| `reason=no_job_classified` | The plugin is registered and healthy, but the marker lookup found nothing usable — either no marker file yet, or a marker file with no `kind:"job"` line | See "Marker file present, no job record" and "Reporter runs before the classifier writes the marker" above |
+| `reason=marker_lookup_failed` | The plugin is registered and healthy, but reading the marker file itself raised an error (for example, something other than a plain file occupying that path, or a permissions problem) | Inspect the marker path directly with `ls -la` and check ownership/permissions; this is not the same symptom as an absent file |
+
+`reason=plugin_unregistered` is the one literal no in-plugin diagnostic could ever have reported —
+the failure mode it names is the plugin never loading in the first place, so nothing running
+inside the plugin ever gets a chance to log anything. That is exactly why this check runs on the
+cron side instead.
+
 ---
 
-**A note on telling these apart.** As of this version of the skill, the on-disk signature for "no
-marker file" is identical whether the classifier's hook never ran, ran and raised before writing
-anything, or ran and legitimately found nothing to write — and the on-disk signature for "marker
-present, no job record" is identical whether label validation rejected every candidate job or the
-LLM call itself failed. Today, distinguishing these requires source-level investigation; this is
-a known, present limitation, not a design choice this reference can work around. A future version
-of this skill is expected to make these cases distinguishable in logs — when that ships, this
-file should be read as describing the on-disk symptoms that logging identifies, not as the final
-word on how to tell them apart.
+**A note on telling these apart.** As of this version of the skill, the metering log's `reason=`
+line separates a registration outage (`plugin_unregistered`) from every other cause of
+`uncategorized`, and separates a genuine marker-read error (`marker_lookup_failed`) from an
+absent-or-jobless marker (`no_job_classified`). What it does not separate is the finer split
+inside "marker present, no job record": whether the LLM call returned zero jobs, the LLM call
+itself failed, or every candidate job failed label validation. Those three causes still share the
+same `no_job_classified` reason code and the same on-disk marker shape — telling them apart still
+means inspecting the classifier plugin's own logs, not this document.
