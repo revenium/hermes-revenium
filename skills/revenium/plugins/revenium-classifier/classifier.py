@@ -410,6 +410,15 @@ def _validate_job(job: dict) -> "dict | None":
         return None
     job_type = job_type.strip().lower()
     if not LABEL_RE.match(job_type):
+        # T-28-07: %r (repr), never %s or an f-string — job_type is the raw,
+        # still-unvalidated LLM response at this branch, so a newline or
+        # control character in it must not be able to forge a second log
+        # record on the revenium_classifier logger.
+        logger.warning(
+            "revenium-classifier: rejected job classification, job_type failed "
+            "label validation: %r",
+            job_type,
+        )
         return None
     status_raw = job.get("status", "")
     if not isinstance(status_raw, str):
