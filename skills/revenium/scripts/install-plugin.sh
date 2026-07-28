@@ -166,6 +166,12 @@ if ! ${DRY_RUN}; then
   ASSERT_FAIL=""
   if [[ ! -d "${PLUGIN_DEST}" ]]; then
     ASSERT_FAIL="plugin directory missing at ${PLUGIN_DEST}"
+  elif [[ ! -f "${PLUGIN_DEST}/classifier.py" || ! -f "${PLUGIN_DEST}/__init__.py" || ! -f "${PLUGIN_DEST}/plugin.yaml" ]]; then
+    # WR-02 fix: a partially-completed `cp -R` (disk full mid-copy, an
+    # interrupted process) leaves PLUGIN_DEST present as a directory but
+    # missing the files Hermes actually needs to load the plugin. Checking
+    # directory presence alone let this partial-failure mode report success.
+    ASSERT_FAIL="plugin files missing/incomplete at ${PLUGIN_DEST}"
   elif [[ ! -f "${HOOKS_CONFIG_FILE}" ]]; then
     ASSERT_FAIL="${HOOKS_CONFIG_FILE} does not exist"
   fi
