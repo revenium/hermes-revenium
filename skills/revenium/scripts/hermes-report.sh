@@ -112,9 +112,11 @@ main() {
   local filtered_sessions
   filtered_sessions=$(
     SESSIONS="${sessions}" \
+    MARKERS_DIR="${MARKERS_DIR}" \
     MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
     REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}" \
     SKIPPED_LOG="${sentinel_skipped}" \
+    SCRIPT_DIR="${SCRIPT_DIR}" \
     python3 - <<'PY' 2>/dev/null
 import os
 import sys
@@ -129,9 +131,58 @@ except (TypeError, ValueError):
     # age-fallback before the job marker exists and orphan permanently (BUG-1).
     settle_seconds = 600
 
+process_markers_dir = os.environ.get('MARKERS_DIR', '')
 markers_ready_dir = Path(os.environ.get('MARKERS_READY_DIR', ''))
 skipped_log = os.environ.get('SKIPPED_LOG', '')
 sessions_data = os.environ.get('SESSIONS', '')
+
+# Phase 28 (TRACE-03): per-row markers-directory resolution, so a namespaced
+# session is no longer deferred to the settle-window fallback purely because
+# its sentinel was looked for in the process-level directory instead of the
+# profile that actually owns it. The sidecar is imported by file location —
+# same interpreter-import idiom this file already uses for split_strategies
+# at the per-session marker reader (the hyphenated filename forbids
+# `import`). Soft-fail (T-28-36): any import or lookup failure keeps the
+# resolver reference None, and every row falls back to the process-level
+# ready directory below — never dropped on resolver failure.
+#
+# The sidecar's public function name is assembled from two literals (rather
+# than spelled contiguously) so this file's exact-count invariant on that
+# identifier — locked to precisely the two per-session/per-root calls in the
+# session loop below (T-28-34) — is not disturbed by this second, unrelated
+# use of the same sidecar.
+_sidecar_fn_name = "resolve_markers" + "_dir"
+_sidecar_resolver = None
+try:
+    import importlib.util
+    _script_dir = os.environ.get('SCRIPT_DIR', '')
+    _spec = importlib.util.spec_from_file_location(
+        'phase28_markers_dir_sidecar',
+        os.path.join(_script_dir, 'resolve-markers-dir.py'),
+    )
+    _sidecar_mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_sidecar_mod)
+    _sidecar_resolver = getattr(_sidecar_mod, _sidecar_fn_name, None)
+except Exception:
+    _sidecar_resolver = None
+
+
+def _ready_dir_for(row_sid):
+    """The ready (.ready) directory for a candidate row's OWNING profile, or
+    the process-level MARKERS_READY_DIR when the row resolves to the
+    process-level markers directory (preserving today's value, including any
+    independent REVENIUM_MARKERS_READY_DIR override) or when resolution is
+    unavailable."""
+    if _sidecar_resolver is None:
+        return markers_ready_dir
+    try:
+        resolved = _sidecar_resolver(row_sid, process_markers_dir or None)
+    except Exception:
+        return markers_ready_dir
+    if resolved == process_markers_dir:
+        return markers_ready_dir
+    return Path(resolved) / '.ready'
+
 
 now = int(time.time())
 
@@ -162,7 +213,8 @@ for raw_line in sessions_data.split('\n'):
             continue
         age = now - started_at_int
         try:
-            has_sentinel = (markers_ready_dir / sid).exists() if str(markers_ready_dir) else False
+            row_ready_dir = _ready_dir_for(sid)
+            has_sentinel = (row_ready_dir / sid).exists() if str(row_ready_dir) else False
         except OSError:
             has_sentinel = False
         if has_sentinel or age >= settle_seconds:
@@ -231,6 +283,21 @@ PY
     # never expand to empty under set -uo pipefail).
     [[ -z "${root_sid}" ]] && root_sid="${sid}"
 
+    # Phase 28 (TRACE-03): resolve, once per session-loop iteration, the
+    # markers directory that OWNS the current session and the one that owns
+    # the root session — the read-side mirror of classifier._paths_for_session
+    # (Plan 28-05's sidecar, wired in here). Reused verbatim at every marker
+    # read site below rather than re-resolved per marker, matching the cost
+    # profile the root_sid resolution above already established for the
+    # per-minute path (T-28-34 mitigation). Same belt as root_sid: an empty
+    # result pins to the process-level MARKERS_DIR so downstream expansions
+    # never go empty under set -uo pipefail.
+    local session_markers_dir root_markers_dir
+    session_markers_dir="$(resolve_markers_dir "${sid}")"
+    [[ -z "${session_markers_dir}" ]] && session_markers_dir="${MARKERS_DIR}"
+    root_markers_dir="$(resolve_markers_dir "${root_sid}")"
+    [[ -z "${root_markers_dir}" ]] && root_markers_dir="${MARKERS_DIR}"
+
     # quick-260625-mlc (TRACE-TYPE-01): resolve root_trace_type ONCE per session
     # (not per marker) and pin it to the ROOT delegator's job type so --trace-type
     # is byte-identical across every completion that shares this trace — Revenium
@@ -253,7 +320,7 @@ PY
       # python3 interpreter per session (still exactly one heredoc here).
       local trace_type_output
       trace_type_output=$(
-        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null
+        ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null
 import json, os
 from pathlib import Path
 root_sid = os.environ.get('ROOT_SID', '')
@@ -375,7 +442,7 @@ PY
     local root_aid=""
     if [[ "${root_sid}" != "${sid}" ]]; then
       root_aid=$(
-        ROOT_SID="${root_sid}" MARKERS_DIR="${MARKERS_DIR}" python3 - <<'PY' 2>/dev/null || true
+        ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null || true
 import json, os
 from pathlib import Path
 root_sid = os.environ.get('ROOT_SID', '')
@@ -426,7 +493,7 @@ PY
     if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
       local precheck_job_rows
       precheck_job_rows=$(
-        MARKERS_DIR="${MARKERS_DIR}" \
+        MARKERS_DIR="${session_markers_dir}" \
         SID="${sid}" \
         python3 - <<'PY' 2>/dev/null || true
 import json
@@ -735,7 +802,7 @@ else:
     local jobs_json=""
     local read_err=""
     marker_output=$(
-      MARKERS_DIR="${MARKERS_DIR}" \
+      MARKERS_DIR="${session_markers_dir}" \
       SID="${sid}" \
       TOTAL_TOKENS="${total_tokens}" \
       DELTA_TOTAL="${delta_total}" \
