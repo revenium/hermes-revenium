@@ -142,8 +142,47 @@ if not enabled_match:
 
 indent = enabled_match.group(1)
 list_item_indent = indent + "  "
+enabled_value = enabled_match.group(2).strip()
+enabled_line_start_abs = plugins_match.end() + enabled_match.start()
 enabled_line_end_in_block = enabled_match.end()
 enabled_line_end_abs = plugins_match.end() + enabled_line_end_in_block
+
+# `enabled:` may carry an inline FLOW sequence rather than opening a block
+# sequence. Appending "  - name" beneath `enabled: []` produces invalid YAML —
+# a complete flow sequence cannot be continued by block items — and Hermes
+# responds by discarding the ENTIRE config and falling back to defaults, so
+# every unrelated user override (providers, fallback chain, model settings)
+# silently stops applying. Rewrite flow forms in place instead of appending.
+flow_match = re.match(r"^\[(.*)\]$", enabled_value)
+if flow_match:
+    existing = [item.strip() for item in flow_match.group(1).split(",") if item.strip()]
+    if plugin_name not in existing:
+        existing.append(plugin_name)
+    # Emit block form: it is what this script writes everywhere else, so all
+    # future runs take the ordinary append path rather than re-parsing flow.
+    replacement = f"{indent}enabled:\n" + "".join(
+        f"{list_item_indent}- {item}\n" for item in existing
+    )
+    trailing = content[enabled_line_end_abs:]
+    if trailing.startswith("\n"):
+        trailing = trailing[1:]
+    new_content = content[:enabled_line_start_abs] + replacement + trailing
+    path.write_text(new_content, encoding="utf-8")
+    print(f"✓ Converted plugins.enabled to block form and added {plugin_name} in {path}")
+    raise SystemExit(0)
+
+if enabled_value and not enabled_value.startswith("#"):
+    # A scalar (e.g. `enabled: null`) is not a list; appending block items to
+    # it is the same invalid-YAML trap. Replace the scalar outright.
+    replacement = f"{indent}enabled:\n{list_item_indent}- {plugin_name}\n"
+    trailing = content[enabled_line_end_abs:]
+    if trailing.startswith("\n"):
+        trailing = trailing[1:]
+    new_content = content[:enabled_line_start_abs] + replacement + trailing
+    path.write_text(new_content, encoding="utf-8")
+    print(f"✓ Replaced non-list plugins.enabled and added {plugin_name} in {path}")
+    raise SystemExit(0)
+
 new_content = (
     content[:enabled_line_end_abs]
     + f"\n{list_item_indent}- {plugin_name}"
