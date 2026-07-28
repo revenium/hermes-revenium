@@ -124,6 +124,25 @@ namespaced session ids), also confirm that setting is consistent across the flee
 changes which resolution mechanism is live and is the one this failure mode is most likely to
 affect.
 
+### A recorded deployment assumption, not a supported configuration
+
+Some fleets are driven by a wrapper script that is not part of this repository — for example, a
+`cron-fleet.sh` that this skill does not ship and cannot read. This is a recorded assumption about
+one such deployment, nothing more: no code in this repository accommodates a file it cannot read,
+and there is no detection step or compatibility shim for it here.
+
+Such a wrapper typically repoints `HERMES_HOME` to give each profile its own Hermes home, rather
+than relying on the classifier's namespaced-session multiplex mechanism described above. In that
+layout the cron side and the classifier side agree on the markers directory by construction —
+both run against the exact same per-profile `HERMES_HOME`, so there is no separate namespace for
+the two to disagree about.
+
+Do not run this repository's own repository-native per-profile cron (`install-cron.sh` invoked
+once per profile home) alongside such a wrapper. Two schedulers metering the same sessions
+double-report: each scheduler maintains its own ledger view of what it has already reported, so
+running both against the same profile's sessions produces duplicate `revenium meter completion`
+calls for the same usage. Pick exactly one fleet-scheduling mode per profile and never mix them.
+
 ## Reporter runs before the classifier writes the marker
 
 **Symptom.** The marker eventually appears, but the completion had already been reported as
