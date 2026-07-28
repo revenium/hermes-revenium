@@ -110,6 +110,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'guardrail-check.sh',
             # Phase 28 — plugin-registration health check (D-01, D-06)
             SKILL / 'scripts' / 'plugin-status.sh',
+            # Phase 28 — cron-side markers-directory resolver sidecar (TRACE-03)
+            SKILL / 'scripts' / 'resolve-markers-dir.py',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 21 — root-walk helper (TRACE-01)
