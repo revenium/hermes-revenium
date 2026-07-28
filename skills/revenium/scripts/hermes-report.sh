@@ -287,6 +287,49 @@ PY
       root_trace_type="${root_trace_type//[^A-Za-z0-9_-]/_}"
       root_trace_type="${root_trace_type:0:128}"
       [[ -z "${root_trace_type}" ]] && root_trace_type="uncategorized"
+
+      # Phase 28 (D-07/D-08, assumption-delta: promote): reason-coded
+      # diagnostic for the wire fallback. Fires ONLY when root_trace_type
+      # just resolved to the fallback literal above — this is a diagnostic
+      # side-channel into revenium-metering.log and never touches
+      # --trace-type, the transaction id, or any ledger line. The resolver
+      # reads PLUGIN_STATUS_FILE FIRST (before any marker-state reasoning),
+      # so a registration outage is never misdiagnosed as "no job
+      # classified" — that ordering IS the fix TRACE-04 exists to land.
+      if [[ "${root_trace_type}" == "uncategorized" ]]; then
+        local plugin_healthy_check
+        plugin_healthy_check=$(
+          PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" python3 - <<'PY' 2>/dev/null || true
+import json, os
+path = os.environ.get('PLUGIN_STATUS_FILE', '')
+try:
+    with open(path, encoding='utf-8') as f:
+        data = json.load(f)
+    healthy = data.get('healthy', True)
+    print('true' if healthy else 'false')
+except Exception:
+    # Fail-open (D-06 reader rule): missing/empty/unparseable status file
+    # is treated as healthy, matching every other status read in this repo.
+    print('true')
+PY
+        )
+        # Strip any trailing newline the heredoc emitted; fail-open default.
+        plugin_healthy_check="${plugin_healthy_check%%$'\n'*}"
+        [[ -z "${plugin_healthy_check}" ]] && plugin_healthy_check="true"
+
+        local fallback_reason="no_job_classified"
+        if [[ "${plugin_healthy_check}" != "true" ]]; then
+          fallback_reason="plugin_unregistered"
+        fi
+
+        # T-28-02 mitigation: restrict ids to a safe charset BEFORE
+        # interpolation so a control character in a session id can never
+        # forge a second log line.
+        local safe_sid safe_root_sid
+        safe_sid="${sid//[^A-Za-z0-9_:.-]/_}"
+        safe_root_sid="${root_sid//[^A-Za-z0-9_:.-]/_}"
+        warn "trace-type fallback: reason=${fallback_reason} session=${safe_sid} root=${safe_root_sid}"
+      fi
     fi
 
     # Phase 22 (JOB-01 / D-02): resolve root_aid ONCE per session for subagent

@@ -62,6 +62,10 @@ CLI_STDERR_TMP_TEMPLATE="${REVENIUM_CLI_STDERR_TMP_TEMPLATE:-${STATE_DIR}/.cli-s
 # tunable, not a state path — kept adjacent to the Phase 26 block for
 # readability even though it belongs next to REVENIUM_CRON_SETTLE_SECONDS in kind.
 REVENIUM_PAGE_BATCH_SIZE="${REVENIUM_PAGE_BATCH_SIZE:-500}"
+# Phase 28 (D-06): writer=plugin-status.sh, reader=hermes-report.sh — the
+# cross-process plugin-health contract that lets the reporter's trace-type
+# fallback distinguish a registration outage from an unclassified session.
+PLUGIN_STATUS_FILE="${REVENIUM_PLUGIN_STATUS_FILE:-${STATE_DIR}/plugin-status.json}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
