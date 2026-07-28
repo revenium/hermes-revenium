@@ -154,6 +154,51 @@ print(f"✓ Added {plugin_name} to plugins.enabled in {path}")
 PY
 fi
 
+# Post-install self-assertion (T-28-10): re-verify placement + enablement
+# independently of the write steps' own return values, so a partially-failed
+# install can never report success. Runs ONLY on the non-dry-run path — an
+# assertion here on --dry-run would break the exit-0/zero-mutation contract
+# pinned by test_install_plugin_sh_dry_run. Does not probe `hermes plugins
+# list` (see install-plugin's discretionary decision, D-03): that proves
+# nothing this check doesn't already cover and returns zero signal when the
+# `hermes` CLI isn't on PATH.
+if ! ${DRY_RUN}; then
+  ASSERT_FAIL=""
+  if [[ ! -d "${PLUGIN_DEST}" ]]; then
+    ASSERT_FAIL="plugin directory missing at ${PLUGIN_DEST}"
+  elif [[ ! -f "${HOOKS_CONFIG_FILE}" ]]; then
+    ASSERT_FAIL="${HOOKS_CONFIG_FILE} does not exist"
+  fi
+
+  if [[ -z "${ASSERT_FAIL}" ]]; then
+    if ! CONFIG_YAML="${HOOKS_CONFIG_FILE}" PLUGIN_NAME="${PLUGIN_NAME}" python3 - <<'PY'
+import os
+import re
+import sys
+from pathlib import Path
+
+path = Path(os.environ['CONFIG_YAML'])
+plugin_name = os.environ['PLUGIN_NAME']
+content = path.read_text(encoding='utf-8')
+sys.exit(0 if re.search(r"^\s*-\s*" + re.escape(plugin_name) + r"\s*$", content, re.MULTILINE) else 1)
+PY
+    then
+      ASSERT_FAIL="${PLUGIN_NAME} not found in plugins.enabled of ${HOOKS_CONFIG_FILE}"
+    fi
+  fi
+
+  if [[ -n "${ASSERT_FAIL}" ]]; then
+    echo "" >&2
+    echo "✗ Post-install assertion failed: ${ASSERT_FAIL}" >&2
+    echo "  Refusing to report success — the plugin is not fully placed and enabled." >&2
+    exit 1
+  fi
+
+  echo "✓ Post-install assertion passed: ${PLUGIN_NAME} is placed at ${PLUGIN_DEST} and enabled in ${HOOKS_CONFIG_FILE}."
+  echo "  Next: run ${SCRIPT_DIR}/plugin-status.sh for runtime (gateway-load) confirmation —"
+  echo "  placement and enablement are proven here; gateway load is not."
+fi
+
 # Restart the gateway so the long-running gateway process reloads the new
 # plugin. Fresh CLI sessions pick up the plugin themselves; the gateway does
 # not. Best-effort — missing `hermes` CLI or a non-running gateway is fine,
