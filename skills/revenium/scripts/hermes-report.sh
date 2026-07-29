@@ -52,6 +52,22 @@ if revenium meter completion --help 2>&1 | grep -q -- '--trace-type'; then
   TRACE_TYPE_CLI_CAPABLE=true
 fi
 
+# Phase 29 (SQUAD-04): capability gate for the v1.3.0 squad flags
+# (--squad-id/--squad-name/--squad-role). Uses supports_flag (Phase 26,
+# common.sh) rather than the raw `grep -q` idiom the two probes above still
+# use — supports_flag closes two defects those older probes carry: `grep -q`'s
+# early exit can SIGPIPE the upstream revenium process (surfacing as exit
+# 141 under pipefail), and an unanchored match lets a shorter flag match a
+# longer sibling (e.g. a probe for --squad-id false-positiving against a
+# hypothetical --squad-identifier). Fails silently on a negative probe —
+# flag absence on an older CLI is the supported configuration (SQUAD-04's
+# byte-identical-argv contract), not an error, and a per-minute cron must
+# not emit a per-tick warning for it.
+SQUAD_CLI_CAPABLE=false
+if supports_flag "meter completion" "--squad-id"; then
+  SQUAD_CLI_CAPABLE=true
+fi
+
 # quick-260605: resolve teamId once for the whole tick. jobs create/outcome require
 # it; absent, the CLI returns HTTP 400 / exit 4 which the cron's 409-only success
 # check treats as a generic failure — stranding every outcome in permanent
