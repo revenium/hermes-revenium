@@ -5,9 +5,18 @@ agent startup; we wire on_session_end → _on_session_end which dispatches
 into the shared classifier.run_classification for the actual classification
 + marker write.
 
-Invariant D-04: _on_session_end MUST NEVER raise — exceptions are logged
-via logger.warning and swallowed so the plugin manager does not mark the
-plugin unhealthy.
+Phase 29 (HOOK-01): on_session_end fires only from _session_expiry_watcher,
+which never runs while Hermes' SessionResetPolicy defaults to mode:"none" —
+so interactive gateway sessions were never classified. on_session_finalize
+fires from three production sites (gateway/run.py shutdown + session_expired,
+slash_commands.py user reset) and needs no reset policy, so we ALSO wire
+on_session_finalize → a dedicated _on_session_finalize callback. The two
+hooks carry different kwargs (see _on_session_finalize's docstring) and are
+therefore never signature-compatible — each gets its own callback.
+
+Invariant D-04: neither _on_session_end nor _on_session_finalize MUST EVER
+raise — exceptions are logged via logger.warning and swallowed so the
+plugin manager does not mark the plugin unhealthy.
 """
 from __future__ import annotations
 
@@ -103,15 +112,87 @@ def _on_session_end(
         _write_sentinel(session_id)
 
 
+def _on_session_finalize(
+    *,
+    session_id,
+    platform=None,
+    reason=None,
+    **kwargs,
+) -> None:
+    """Synchronous on_session_finalize callback per the Hermes plugin contract.
+
+    on_session_finalize fires from three production sites — gateway shutdown
+    (reason="shutdown"), session expiry (reason="session_expired"), and a
+    user-initiated slash-command reset (reason="new_session") — and requires
+    no session_reset configuration, unlike on_session_end which only ever
+    fires from _session_expiry_watcher. This hook carries NO `completed` and
+    NO `interrupted` kwarg (confirmed by direct source read, see
+    29-RESEARCH.md / <hook_signature_contract>); it MUST NOT reuse
+    _on_session_end's signature, which would TypeError on every real
+    invocation and be silently swallowed by Hermes' invoke_hook.
+
+    On a reset path the payload also carries old_session_id / new_session_id
+    (absorbed by **kwargs); this callback always classifies the session_id it
+    was handed, never those.
+
+    D-06: this callback does NOT pre-check whether session_id already has a
+    marker — that permanent guard is implemented once, authoritatively,
+    inside run_classification_async (plan 29-04) so every registered trigger
+    inherits it regardless of firing order. Calling run_classification
+    unconditionally here is correct both before and after that guard lands.
+
+    D-04 belt: any exception raised by the underlying pipeline is caught and
+    logged here; we never propagate so the plugin manager does not mark the
+    plugin unhealthy.
+
+    D-21: after run_classification completes (any outcome), AND in the outer
+    except handler (D-04 belt extension), we write the same per-session
+    sentinel _on_session_end writes — on_session_finalize is a genuine
+    session boundary, semantically equivalent for the cron's
+    sentinel-or-aged filter, and restoring it here is what makes Phase 28's
+    fleet liveness signal meaningful again for interactive gateway traffic.
+
+    **kwargs absorbs any additional fields (old_session_id, new_session_id,
+    or fields a future Hermes version may add) so the plugin stays
+    forward-compatible.
+    """
+    try:
+        if not session_id:
+            return
+        run_classification(
+            session_id=session_id,
+            model=None,
+            platform=platform,
+            message=None,
+            response=None,
+        )
+        _write_sentinel(session_id)
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier on_session_finalize failed for sid=%s reason=%s: %s",
+            session_id,
+            reason,
+            exc,
+        )
+        _write_sentinel(session_id)
+
+
 def register(ctx) -> None:
     """Plugin registration entry point per the Hermes plugin contract.
 
     Hermes' plugin manager imports this package at agent startup and calls
-    register(ctx) exactly once. We register the _on_session_end callback
-    against the on_session_end event so it fires for every run_conversation()
-    exit (gateway-served + CLI + interactive + ACP + cron-spawned).
+    register(ctx) exactly once. We register:
+
+    - _on_session_end against on_session_end, which fires for every
+      run_conversation() exit (gateway-served + CLI + interactive + ACP +
+      cron-spawned) — but only when _session_expiry_watcher actually runs.
+    - _on_session_finalize against on_session_finalize, which fires from
+      three production sites and needs no session_reset configuration, so
+      it is the one that actually classifies interactive gateway sessions
+      today (Phase 29 / HOOK-01).
 
     No try/except — registration failure must surface to the plugin manager
     so operators see the unhealthy-plugin state at gateway-restart time.
     """
     ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_hook("on_session_finalize", _on_session_finalize)
