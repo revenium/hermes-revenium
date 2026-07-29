@@ -305,5 +305,192 @@ class HookRegistrationTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class HookRegistrationHardeningTests(unittest.TestCase):
+    """Task 2 — proves the boundary callback against the shapes it actually
+    meets in production: the three real `reason` values, the reset payload's
+    extra identifiers, subagent inheritance, the halt gate, and the sentinel
+    guarantee."""
+
+    def test_reset_path_classifies_session_id_not_old_or_new(self):
+        """on_session_finalize fires from gateway/slash_commands.py:215 with
+        old_session_id / new_session_id present in the payload. The callback
+        must classify the session_id it was handed — not either identifier."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-reset-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase29_reset_test'
+            mod = _load_plugin_module(mod_name)
+            classifier_sub = _classifier_submodule(mod_name)
+
+            sid = 'reset-session-sid'
+            old_sid = 'reset-old-sid'
+            new_sid = 'reset-new-sid'
+            _seed_substantive_session_jsonl(hh, sid)
+
+            with unittest.mock.patch.object(classifier_sub, 'call_llm',
+                                             return_value=_llm_response('planning')):
+                mod._on_session_finalize(
+                    session_id=sid,
+                    platform='gateway',
+                    reason='new_session',
+                    old_session_id=old_sid,
+                    new_session_id=new_sid,
+                )
+
+            self.assertTrue((classifier_sub.MARKERS_DIR / f'{sid}.jsonl').is_file(),
+                            'the handed session_id must be classified')
+            self.assertFalse((classifier_sub.MARKERS_DIR / f'{old_sid}.jsonl').exists(),
+                             'old_session_id must NOT be classified')
+            self.assertFalse((classifier_sub.MARKERS_DIR / f'{new_sid}.jsonl').exists(),
+                             'new_session_id must NOT be classified')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_root_session_produces_exactly_one_job_marker(self):
+        """For a root session (parent_session_id unset), the boundary callback
+        must still drive Step 7 job inference and produce exactly one
+        kind:"job" record."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-jobmarker-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase29_jobmarker_test'
+            mod = _load_plugin_module(mod_name)
+            classifier_sub = _classifier_submodule(mod_name)
+
+            sid = 'root-session-job-sid'
+
+            # Seed state.db with a root row (parent_session_id NULL) so
+            # _walk_to_root_session resolves sid to itself deliberately,
+            # not merely by fail-open on a missing db.
+            state_db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(state_db_path)
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", (sid, None))
+            conn.commit()
+            conn.close()
+
+            task_resp = _llm_response('code_review')
+            job_array_resp = _llm_response(json.dumps([
+                {"agentic_job_id": "root_job_a1b2", "job_name": "Root job",
+                 "job_type": "bug_fix", "status": "SUCCESS"},
+            ]))
+            fake_transcript = "user: fix the bug\nassistant: fixed it."
+
+            with unittest.mock.patch.object(classifier_sub, 'call_llm',
+                                             side_effect=[task_resp, job_array_resp]), \
+                 unittest.mock.patch.object(classifier_sub, '_read_session_transcript',
+                                            return_value=fake_transcript):
+                mod._on_session_finalize(session_id=sid, platform='gateway', reason='shutdown')
+
+            marker_path = classifier_sub.MARKERS_DIR / f'{sid}.jsonl'
+            self.assertTrue(marker_path.is_file())
+            recs = [json.loads(l) for l in marker_path.read_text(encoding='utf-8').splitlines()]
+            job_recs = [r for r in recs if r.get('kind') == 'job']
+            self.assertEqual(len(job_recs), 1,
+                             f'expected exactly one job record, got {len(job_recs)}: {job_recs}')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_subagent_inheritance_still_short_circuits(self):
+        """When triggered by the boundary hook, a subagent session whose root
+        already carries a task_type must inherit it directly — no LLM call."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-subagent-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase29_subagent_test'
+            mod = _load_plugin_module(mod_name)
+            classifier_sub = _classifier_submodule(mod_name)
+
+            root_sid = 'subagent-root-sid'
+            child_sid = 'subagent-child-sid'
+
+            state_db_path = os.path.join(hh, 'state.db')
+            conn = sqlite3.connect(state_db_path)
+            conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)")
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", (root_sid, None))
+            conn.execute("INSERT INTO sessions VALUES (?, ?)", (child_sid, root_sid))
+            conn.commit()
+            conn.close()
+
+            root_marker = os.path.join(md, f'{root_sid}.jsonl')
+            with open(root_marker, 'w', encoding='utf-8') as f:
+                rec = {"muid": "a" * 33, "ts": 1.0, "sid": root_sid,
+                       "task_type": "code_review", "operation_type": "GUARDRAIL"}
+                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                f.write(json.dumps(dict(rec, operation_type="CHAT"), separators=(",", ":")) + "\n")
+
+            with unittest.mock.patch.object(classifier_sub, 'call_llm') as mock_llm:
+                mod._on_session_finalize(session_id=child_sid, platform='gateway', reason='shutdown')
+                self.assertEqual(mock_llm.call_count, 0,
+                                 'subagent inheritance must beat the LLM path via the boundary hook')
+
+            child_marker = classifier_sub.MARKERS_DIR / f'{child_sid}.jsonl'
+            self.assertTrue(child_marker.is_file())
+            lines = child_marker.read_text(encoding='utf-8').splitlines()
+            self.assertEqual(len(lines), 2)
+            recs = [json.loads(l) for l in lines]
+            self.assertEqual({r['task_type'] for r in recs}, {'code_review'})
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_halt_gate_still_wins(self):
+        """With guardrail-status.json halted, the boundary callback must write
+        task_type=unclassified and never call the LLM."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-halt-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase29_halt_test'
+            mod = _load_plugin_module(mod_name)
+            classifier_sub = _classifier_submodule(mod_name)
+
+            sid = 'halted-session-sid'
+            guardrail_status_path = os.path.join(sd, 'guardrail-status.json')
+            with open(guardrail_status_path, 'w', encoding='utf-8') as f:
+                json.dump({"halted": True}, f)
+
+            with unittest.mock.patch.object(classifier_sub, 'call_llm') as mock_llm:
+                mod._on_session_finalize(session_id=sid, platform='gateway', reason='shutdown')
+                self.assertEqual(mock_llm.call_count, 0,
+                                 'call_llm must never be invoked while halted')
+
+            marker_path = classifier_sub.MARKERS_DIR / f'{sid}.jsonl'
+            self.assertTrue(marker_path.is_file())
+            recs = [json.loads(l) for l in marker_path.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_sentinel_lands_when_classification_produces_nothing(self):
+        """Even when run_classification returns normally after doing nothing
+        useful, the sentinel must still be written — the cron's settle
+        filter must not be left waiting."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-sentinel-noop-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        ready_dir = os.path.join(sd, 'markers', '.ready')
+        prev_ready = os.environ.get('REVENIUM_MARKERS_READY_DIR')
+        os.environ['REVENIUM_MARKERS_READY_DIR'] = ready_dir
+        os.makedirs(ready_dir, mode=0o700, exist_ok=True)
+        try:
+            mod = _load_plugin_module('phase29_sentinel_noop_test')
+            sid = 'sentinel-noop-sid'
+            with unittest.mock.patch.object(mod, 'run_classification', return_value=None):
+                mod._on_session_finalize(session_id=sid, platform='gateway', reason='shutdown')
+
+            sentinel_path = os.path.join(ready_dir, sid)
+            self.assertTrue(os.path.exists(sentinel_path),
+                            'sentinel must be written even when classification produced nothing')
+        finally:
+            if prev_ready is None:
+                os.environ.pop('REVENIUM_MARKERS_READY_DIR', None)
+            else:
+                os.environ['REVENIUM_MARKERS_READY_DIR'] = prev_ready
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
