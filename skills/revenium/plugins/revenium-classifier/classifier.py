@@ -645,12 +645,53 @@ def _read_latest_task_type(sid: str, paths: "_Paths | None" = None) -> "str | No
     return None
 
 
+def _session_already_classified(sid: str, paths: "_Paths | None" = None) -> bool:
+    """Phase 29 (HOOK-03/HOOK-04): the authoritative already-classified gate for
+    EVERY registered trigger (on_session_end, on_session_finalize, post_llm_call),
+    consulted at the one call site inside run_classification_async so every
+    trigger and every firing order inherits the same answer.
+
+    Permanent and reads no timestamp — unlike _recent_marker_pair_exists below,
+    which is a 30-second wall-clock window built for a same-turn race and
+    returns False the moment a session's classification is more than 30 seconds
+    old. A session classified at turn 1 and re-checked at a session-end boundary
+    minutes or hours later must still read as classified; only a permanent latch
+    gets that right.
+
+    The literal value "unclassified" counts as classified. A trivial opening
+    turn (TRIVIAL_BLOCKLIST membership, see _validate_label) and an active
+    guardrail halt both yield "unclassified". Excluding that value from the
+    latch would make a session whose first turn was "hi" pay a fresh
+    auxiliary-LLM inference on every subsequent turn until a substantive one
+    arrived — spend scaling with turn count, which is exactly what HOOK-03
+    forbids. A session's first classification outcome is therefore its label
+    for the session's lifetime, "unclassified" included.
+
+    Deliberately does NOT use _job_marker_exists: that primitive matches only
+    kind == "job" records, is scoped to root sessions only, and is
+    unconditionally False for subagent sessions (which never get their own job
+    marker by design) — it says nothing about whether Step 5's task
+    classification has already run. _read_latest_task_type is the correct
+    primitive: permanent, fail-open, and meaningful for both root and subagent
+    sessions."""
+    return _read_latest_task_type(sid, paths=paths) is not None
+
+
 def _recent_marker_pair_exists(sid: str, within_seconds: float = 30.0,
                                paths: "_Paths | None" = None) -> bool:
     """D-13: return True if the marker file's tail carries a GUARDRAIL+CHAT pair
     whose most recent ts is within `within_seconds` of time.time(). Used to skip
     the plugin write when the agent's SKILL.md FINAL ACTION snippet already wrote
-    markers for this turn. Per Pitfall 6 option (a) — wall-clock proximity."""
+    markers for this turn. Per Pitfall 6 option (a) — wall-clock proximity.
+
+    Phase 29: demoted. _session_already_classified superseded this function as
+    the classification gate at run_classification_async's Step 3 call site —
+    that permanent latch strictly subsumes this recency window for the purpose
+    the call site serves (any pair recent enough to satisfy this window also
+    satisfies "a task_type record exists for this session"). This function is
+    retained for the same-turn SKILL.md race it was originally written for and
+    because existing unit tests pin its standalone behaviour directly; it has
+    no production caller as of Phase 29."""
     marker_path = (paths or _module_paths()).markers_dir / f"{sid}.jsonl"
     if not marker_path.is_file():
         return False
@@ -979,16 +1020,19 @@ async def run_classification_async(
     """Async classifier entry point. D-04: never raises out of this function.
 
     Drives the D-04..D-14 pipeline: subagent inheritance →
-    D-13 dedupe (gates task re-write only, not job inference) → budget gate →
-    LLM classification → validated label → atomic marker pair write →
-    code-side job inference. Invoked from the plugin entrypoint's sync
-    wrapper run_classification() via asyncio.run().
+    permanent already-classified gate (gates task re-write only, not job
+    inference) → budget gate → LLM classification → validated label → atomic
+    marker pair write → code-side job inference. Invoked from the plugin
+    entrypoint's sync wrapper run_classification() via asyncio.run().
 
-    Step 3 (D-13 dedupe) captures agent_self_classified and gates only Steps
-    4-6 (task write path) behind 'if not agent_self_classified:'. Step 7
-    (job inference) runs unconditionally afterward so that job markers are
-    produced on the dominant self-classify code path. Step 7 carries its own
-    three idempotency gates (root_sid, _guardrail_halted, _job_marker_exists).
+    Step 3 captures already_classified via _session_already_classified — the
+    Phase 29 permanent per-session latch that every registered trigger
+    (on_session_end, on_session_finalize, post_llm_call) inherits regardless
+    of firing order or elapsed time — and gates only Steps 4-6 (task write
+    path) behind 'if not already_classified:'. Step 7 (job inference) runs
+    unconditionally afterward so that job markers are produced on the
+    dominant self-classify code path. Step 7 carries its own three
+    idempotency gates (root_sid, _guardrail_halted, _job_marker_exists).
     """
     if not session_id:
         return
@@ -1010,13 +1054,15 @@ async def run_classification_async(
                 return
             # Parent has no marker yet — fall through to classify as if root.
 
-        # Step 3 — D-13 belt: did the agent already self-classify? (HOOK-07)
-        # Capture as a boolean instead of returning early so Step 7 still runs.
-        # Steps 4-6 (task write path) are skipped when the agent already wrote
-        # markers; Step 7 (job inference) is always attempted afterward.
-        agent_self_classified = _recent_marker_pair_exists(session_id, within_seconds=30.0, paths=p)
+        # Step 3 — the permanent already-classified gate (HOOK-03/HOOK-04,
+        # promoted from the D-13 recency window in Phase 29). Capture as a
+        # boolean instead of returning early so Step 7 still runs. Steps 4-6
+        # (task write path) are skipped when this session has ever been
+        # classified before (by ANY registered trigger); Step 7 (job
+        # inference) is always attempted afterward.
+        already_classified = _session_already_classified(session_id, paths=p)
 
-        if not agent_self_classified:
+        if not already_classified:
             # Step 4 — budget gate (D-08 / HOOK-04).
             if _guardrail_halted(paths=p):
                 await asyncio.to_thread(_write_marker_pair, session_id, "unclassified", p)
