@@ -125,11 +125,15 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
             # Phase 18 — operator-facing migration doc (MIGR-06, D-16)
             ROOT / 'docs' / 'migration-guardrails.md',
+            # Phase 29 Plan 03 — AGENT-03 operator note (no-observable-change + squad flags)
+            ROOT / 'docs' / 'migration-agent-dimension.md',
             # Phase 20 — COMPAT-01 golden-argv wire-shape fixtures (D-01..D-04)
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-tool-event.golden.json',
+            # Phase 29 Plan 03 — AGENT-01 no-observable-change baseline golden
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-markerless.golden.json',
             # Phase 23 — COMPAT-01/02 umbrella regression trip-wire (D-01)
             ROOT / 'tests' / 'test_compat_v1_4_meta.py',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'README.md',
