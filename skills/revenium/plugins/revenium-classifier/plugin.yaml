@@ -4,3 +4,4 @@ description: Universal-coverage Hermes plugin that classifies every run_conversa
 hooks:
   - on_session_end
   - on_session_finalize
+  - post_llm_call

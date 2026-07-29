@@ -14,9 +14,20 @@ on_session_finalize → a dedicated _on_session_finalize callback. The two
 hooks carry different kwargs (see _on_session_finalize's docstring) and are
 therefore never signature-compatible — each gets its own callback.
 
-Invariant D-04: neither _on_session_end nor _on_session_finalize MUST EVER
-raise — exceptions are logged via logger.warning and swallowed so the
-plugin manager does not mark the plugin unhealthy.
+Phase 29 (HOOK-02): on_session_finalize still waits for a session boundary
+(shutdown, expiry, or reset) that may be minutes or hours away. post_llm_call
+fires once per COMPLETED turn from agent/turn_finalizer.py, so we ALSO wire
+post_llm_call → a dedicated _on_post_llm_call callback, making an ordinary
+session produce a classified job on its first turn. Because run_classification
+now invokes an auxiliary LLM on a per-turn hook, Phase 29 also promotes
+classifier._session_already_classified to the single authoritative gate at
+run_classification_async's Step 3 (HOOK-03/HOOK-04) — every registered
+trigger inherits that one guard, so "exactly one classification per session"
+holds regardless of which hook fires first.
+
+Invariant D-04: none of _on_session_end, _on_session_finalize, or
+_on_post_llm_call MUST EVER raise — exceptions are logged via logger.warning
+and swallowed so the plugin manager does not mark the plugin unhealthy.
 """
 from __future__ import annotations
 
@@ -177,6 +188,95 @@ def _on_session_finalize(
         _write_sentinel(session_id)
 
 
+def _on_post_llm_call(
+    *,
+    session_id,
+    task_id=None,
+    turn_id=None,
+    user_message=None,
+    assistant_response=None,
+    conversation_history=None,
+    model=None,
+    platform=None,
+    **kwargs,
+) -> None:
+    """Synchronous post_llm_call callback per the Hermes plugin contract.
+
+    post_llm_call fires from agent/turn_finalizer.py's finalize_turn, guarded
+    upstream by 'if final_response and not interrupted:' — so it fires once
+    per COMPLETED turn (an interrupted turn fires nothing at all; the
+    on_session_finalize boundary hook is what classifies that session
+    instead, per CONTEXT.md D-06). Confirmed kwargs (RESEARCH.md /
+    <hook_signature_contract>): session_id, task_id, turn_id, user_message,
+    assistant_response, conversation_history, model, platform. This hook
+    carries NO `completed` and NO `interrupted` kwarg of its own — it must
+    NOT reuse _on_session_end's or _on_session_finalize's signature.
+
+    D-05: classifying on the first completed turn is what makes an ordinary
+    prompt produce a job without waiting for a session boundary. Passing the
+    turn's own user_message/assistant_response through as message/response
+    (rather than None, the way _on_session_end does) matters, not merely for
+    symmetry: post_llm_call fires from finalize_turn, so at turn 1 the
+    exchange may not yet be persisted to state.db, and Step 5's
+    _read_session_messages fallback would then classify an empty
+    conversation. Handing this callback's own turn content to Step 5 makes
+    turn-1 classification independent of persistence timing.
+
+    No guard here. Task 1 (Phase 29 / HOOK-03) placed the authoritative
+    already-classified latch inside run_classification_async's Step 3, where
+    the per-session _Paths are already resolved by _paths_for_session. A
+    second guard in this file would need to resolve those paths again, which
+    is exactly where a multiplexed-profile session would get the wrong
+    markers directory. One gate, one path resolution — every registered
+    trigger inherits it.
+
+    No sentinel here, deliberately. _write_sentinel means "the plugin has
+    finished with this session", and the cron's sentinel-or-aged filter
+    (hermes-report.sh) reports a session immediately once the sentinel
+    appears. Writing it mid-session (post_llm_call fires on every turn, not
+    just the last one) would change WHEN live sessions are metered — a
+    metering-timing change no requirement in this phase asks for, and one
+    that would interact with Phase 28's liveness/sentinel-or-aged logic in
+    ways this plan does not analyze. D-05's goal — the session's first
+    metered delta carries a real trace type — is already achieved by the
+    turn-1 marker landing before the reporter picks the session up at the
+    settle boundary; the sentinel stays the job of a genuine session
+    boundary (_on_session_end / _on_session_finalize).
+
+    Accepted latency cost: run_classification blocks on asyncio.run and
+    makes a real auxiliary-LLM call, so the FIRST turn of a session pays
+    that latency on the user-visible completion path — unlike
+    on_session_end/on_session_finalize, which fire after the user already
+    has their response. D-05 accepts this by choosing turn 1. Every
+    subsequent turn in the same session short-circuits on Task 1's
+    permanent latch and costs only a marker-file read.
+
+    D-04 belt: any exception raised by the underlying pipeline is caught and
+    logged here; we never propagate so the plugin manager does not mark the
+    plugin unhealthy.
+
+    **kwargs absorbs any additional fields a future Hermes version may add
+    to the post_llm_call payload, keeping the plugin forward-compatible.
+    """
+    try:
+        if not session_id:
+            return
+        run_classification(
+            session_id=session_id,
+            model=model,
+            platform=platform,
+            message=user_message,
+            response=assistant_response,
+        )
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier post_llm_call failed for sid=%s turn_id=%s: %s",
+            session_id,
+            turn_id,
+            exc,
+        )
+
+
 def register(ctx) -> None:
     """Plugin registration entry point per the Hermes plugin contract.
 
@@ -188,11 +288,23 @@ def register(ctx) -> None:
       cron-spawned) — but only when _session_expiry_watcher actually runs.
     - _on_session_finalize against on_session_finalize, which fires from
       three production sites and needs no session_reset configuration, so
-      it is the one that actually classifies interactive gateway sessions
-      today (Phase 29 / HOOK-01).
+      it is the one that classifies a session at its boundary (shutdown,
+      expiry, or reset) regardless of whether anything classified it
+      earlier (Phase 29 / HOOK-01).
+    - _on_post_llm_call against post_llm_call, which fires once per
+      COMPLETED turn from agent/turn_finalizer.py — the trigger that
+      classifies an ordinary session on its FIRST turn, without waiting for
+      any boundary (Phase 29 / HOOK-02).
+
+    All three callbacks dispatch into the same run_classification pipeline,
+    which gates re-classification behind the single permanent latch at
+    run_classification_async's Step 3 (Phase 29 / HOOK-03, HOOK-04) — so
+    "exactly one classification per session" is a property of the pipeline,
+    not of any one callback or firing order.
 
     No try/except — registration failure must surface to the plugin manager
     so operators see the unhealthy-plugin state at gateway-restart time.
     """
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_finalize", _on_session_finalize)
+    ctx.register_hook("post_llm_call", _on_post_llm_call)

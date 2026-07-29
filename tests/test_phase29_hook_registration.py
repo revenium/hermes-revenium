@@ -76,9 +76,9 @@ def _llm_response(content):
 
 class HookRegistrationTests(unittest.TestCase):
     def test_register_wires_on_session_end_and_on_session_finalize(self):
-        """register(ctx) must bind BOTH hooks, and on_session_finalize must be
-        bound to _on_session_finalize specifically (a runtime binding
-        assertion, immune to how the file is commented)."""
+        """register(ctx) must bind ALL THREE hooks, and each hook name must be
+        bound to its own dedicated callback (a runtime binding assertion,
+        immune to how the file is commented)."""
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-register-')
         snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
@@ -92,12 +92,14 @@ class HookRegistrationTests(unittest.TestCase):
 
             mod.register(StubCtx())
 
-            self.assertEqual(len(registered), 2,
-                             'register(ctx) must call register_hook exactly twice')
+            self.assertEqual(len(registered), 3,
+                             'register(ctx) must call register_hook exactly three times')
             self.assertIs(registered['on_session_end'], mod._on_session_end)
             self.assertIs(registered['on_session_finalize'], mod._on_session_finalize,
                           'on_session_finalize must be bound to _on_session_finalize, '
                           'not _on_session_end')
+            self.assertIs(registered['post_llm_call'], mod._on_post_llm_call,
+                          'post_llm_call must be bound to _on_post_llm_call')
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -488,6 +490,186 @@ class HookRegistrationHardeningTests(unittest.TestCase):
                 os.environ.pop('REVENIUM_MARKERS_READY_DIR', None)
             else:
                 os.environ['REVENIUM_MARKERS_READY_DIR'] = prev_ready
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class PostLlmCallRegistrationTests(unittest.TestCase):
+    """Task 2 (HOOK-02) — proves _on_post_llm_call's signature contract,
+    never-raise discipline, no-sentinel omission, and turn-content
+    pass-through. Mirrors HookRegistrationTests' on_session_finalize cases."""
+
+    def test_signature_has_confirmed_kwargs_no_completed_interrupted(self):
+        """Runtime-signature assertion: _on_post_llm_call must accept all
+        eight confirmed kwargs, must NOT declare completed or interrupted,
+        and must carry a **kwargs (VAR_KEYWORD) parameter."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-postllm-sig-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod = _load_plugin_module('phase29_postllm_sig_test')
+            params = inspect.signature(mod._on_post_llm_call).parameters
+            expected = {
+                'session_id', 'task_id', 'turn_id', 'user_message',
+                'assistant_response', 'conversation_history', 'model', 'platform',
+            }
+            self.assertTrue(expected <= set(params),
+                            f'missing confirmed kwargs: {expected - set(params)}')
+            self.assertNotIn('completed', params)
+            self.assertNotIn('interrupted', params)
+            self.assertTrue(
+                any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()),
+                '_on_post_llm_call must declare a **kwargs parameter for forward compatibility',
+            )
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_no_typeerror_for_full_confirmed_kwarg_set(self):
+        """Invoking with the full confirmed production kwarg set must not
+        raise TypeError."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-postllm-full-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase29_postllm_full_test'
+            mod = _load_plugin_module(mod_name)
+            classifier_sub = _classifier_submodule(mod_name)
+            try:
+                with unittest.mock.patch.object(classifier_sub, 'call_llm',
+                                                 return_value=_llm_response('code_review')):
+                    mod._on_post_llm_call(
+                        session_id='postllm-full-sid',
+                        task_id='task-1',
+                        turn_id='turn-1',
+                        user_message='please review src/foo.py',
+                        assistant_response='reviewed and looks good',
+                        conversation_history=[],
+                        model='claude-x',
+                        platform='gateway',
+                    )
+            except TypeError as exc:
+                self.fail(f'_on_post_llm_call raised TypeError for the full confirmed kwarg set: {exc}')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_no_typeerror_for_unknown_extra_kwarg(self):
+        """**kwargs must absorb any future payload field without raising."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-postllm-extrakwarg-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod = _load_plugin_module('phase29_postllm_extrakwarg_test')
+            try:
+                mod._on_post_llm_call(
+                    session_id='postllm-extrakwarg-sid',
+                    user_message='hi',
+                    assistant_response='hello',
+                    some_future_field='unexpected-value',
+                )
+            except TypeError as exc:
+                self.fail(f'_on_post_llm_call raised TypeError for an unknown extra kwarg: {exc}')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_never_raises_on_none_session_id(self):
+        """D-04 belt: a falsy session_id must return normally, no exception."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-postllm-nonesid-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod = _load_plugin_module('phase29_postllm_nonesid_test')
+            try:
+                result = mod._on_post_llm_call(session_id=None, user_message='hi', assistant_response='hello')
+            except Exception as exc:
+                self.fail(f'_on_post_llm_call raised for session_id=None: {exc}')
+            self.assertIsNone(result)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_never_raises_when_run_classification_raises(self):
+        """D-04 belt: an exploding run_classification must be swallowed, not
+        propagated."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-postllm-explode-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod = _load_plugin_module('phase29_postllm_explode_test')
+            with unittest.mock.patch.object(mod, 'run_classification',
+                                             side_effect=RuntimeError('boom from run_classification')):
+                try:
+                    mod._on_post_llm_call(
+                        session_id='postllm-explode-sid',
+                        user_message='hi',
+                        assistant_response='hello',
+                    )
+                except Exception as exc:
+                    self.fail(f'_on_post_llm_call raised when run_classification exploded: {exc}')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_no_sentinel_written(self):
+        """_on_post_llm_call must NOT call _write_sentinel and must leave no
+        sentinel file behind — this is behavioral (not a source grep), since
+        the omission is explained by a comment rather than being enforceable
+        via grep."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-postllm-nosentinel-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        ready_dir = os.path.join(sd, 'markers', '.ready')
+        prev_ready = os.environ.get('REVENIUM_MARKERS_READY_DIR')
+        os.environ['REVENIUM_MARKERS_READY_DIR'] = ready_dir
+        os.makedirs(ready_dir, mode=0o700, exist_ok=True)
+        try:
+            mod_name = 'phase29_postllm_nosentinel_test'
+            mod = _load_plugin_module(mod_name)
+            classifier_sub = _classifier_submodule(mod_name)
+            sid = 'postllm-nosentinel-sid'
+            with unittest.mock.patch.object(mod, '_write_sentinel') as mock_sentinel, \
+                 unittest.mock.patch.object(classifier_sub, 'call_llm',
+                                            return_value=_llm_response('code_review')):
+                mod._on_post_llm_call(
+                    session_id=sid,
+                    user_message='please review src/foo.py',
+                    assistant_response='reviewed and looks good',
+                )
+                self.assertEqual(mock_sentinel.call_count, 0,
+                                 '_on_post_llm_call must never call _write_sentinel')
+
+            sentinel_path = os.path.join(ready_dir, sid)
+            self.assertFalse(os.path.exists(sentinel_path),
+                             'no sentinel file must exist after _on_post_llm_call')
+        finally:
+            if prev_ready is None:
+                os.environ.pop('REVENIUM_MARKERS_READY_DIR', None)
+            else:
+                os.environ['REVENIUM_MARKERS_READY_DIR'] = prev_ready
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_passes_turn_content_through_as_message_and_response(self):
+        """The callback's own user_message/assistant_response must reach
+        run_classification as message/response, by equality — not by
+        assertIn — so turn-1 classification does not depend on state.db
+        persistence timing."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-postllm-passthrough-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod = _load_plugin_module('phase29_postllm_passthrough_test')
+            with unittest.mock.patch.object(mod, 'run_classification') as mock_run:
+                mod._on_post_llm_call(
+                    session_id='postllm-passthrough-sid',
+                    task_id='task-9',
+                    turn_id='turn-9',
+                    user_message='please review src/foo.py',
+                    assistant_response='reviewed and looks good',
+                    conversation_history=[{'role': 'user', 'content': 'x'}],
+                    model='claude-x',
+                    platform='gateway',
+                )
+            self.assertEqual(mock_run.call_count, 1)
+            _, kwargs = mock_run.call_args
+            self.assertEqual(kwargs['message'], 'please review src/foo.py')
+            self.assertEqual(kwargs['response'], 'reviewed and looks good')
+        finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
