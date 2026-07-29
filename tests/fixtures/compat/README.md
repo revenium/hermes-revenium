@@ -25,6 +25,17 @@ the entire v1.x release line.
   success-path bare `--success` flag and the absence of
   `--error-message`.
 
+## AGENT-01 no-observable-change baseline
+
+- **meter-completion-markerless.golden.json** — a fifth fixture, added in
+  Phase 29 Plan 03, that is NOT part of the immutability contract above. It
+  captures the markerless `revenium meter completion` argv from the working
+  tree immediately BEFORE the AGENT-01 edit (root-inherited `--agent`), and
+  pins the full ordered token list under `argv_order` so
+  `tests/test_phase29_agent_inheritance.py` can prove the post-edit argv is
+  byte-identical when no root agent value exists — the "no observable
+  change" claim in `docs/migration-agent-dimension.md` made falsifiable.
+
 ## Immutability contract
 
 These fixtures are **IMMUTABLE** across the v1.x line (v1.0 through

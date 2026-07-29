@@ -1531,7 +1531,15 @@ PY
         --completion-start-time "${request_time}"
         --response-time "${response_time}"
         --request-duration "${duration_ms}"
-        --agent "${REVENIUM_AGENT_NAME}"
+        # Phase 29 (AGENT-01 / D-01): inherit the root session's agent name
+        # instead of reading REVENIUM_AGENT_NAME directly — same expression
+        # and same once-per-session root_agent_name plan 29-02 resolves for
+        # --squad-name, so both consumers share one resolution. Byte-
+        # identical to today per the measured finding in
+        # docs/migration-agent-dimension.md: no marker writer has ever
+        # populated the `agent` field, so this falls back to
+        # REVENIUM_AGENT_NAME on every current install.
+        --agent "${root_agent_name:-${REVENIUM_AGENT_NAME}}"
         --transaction-id "${sid}-${total_tokens}"
         --trace-id "${root_sid}"
         --is-streamed
