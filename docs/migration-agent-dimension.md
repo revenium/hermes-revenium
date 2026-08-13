@@ -64,6 +64,42 @@ CLI advertises support for them (v1.3.0 and newer). An older CLI continues to
 meter exactly as it did before this release — no missing-flag errors, no
 behavior change on the wire.
 
+## Hook registration: three triggers, one wider source set
+
+As of v1.4, the `revenium-classifier` plugin registers three hooks
+(`__init__.py:308-310`, mirrored in `plugin.yaml:4-7`):
+
+- `on_session_end` — the pre-existing hook, unchanged.
+- `on_session_finalize` — new in v1.4, the session-boundary trigger.
+- `post_llm_call` — new in v1.4, the per-turn trigger.
+
+Before this release, exactly one of the three fired: `on_session_end`.
+
+**The practical effect: interactive gateway session conversation content now
+reaches the auxiliary classifier LLM.** Before this release, in practice only
+the scheduled `cron_*` sessions' content reached it — interactive gateway
+sessions never fired any hook at all. `_read_session_messages` (called at
+`classifier.py:1079`) and `_read_session_transcript` (called at
+`classifier.py:1106`) are the two readers that carry that content into the
+classification call, for every session kind alike; what changed is which
+session kinds now reach them.
+
+**Same destination, same data category — a wider source set.** This is not a
+new data-sharing behavior, a new egress, or a new recipient: the auxiliary LLM
+is the same auxiliary LLM, and conversation content is the same data category
+it always sent. What changed is which sessions feed that existing flow.
+Unlike the AGENT dimension above, this is a real change to disclose, not an
+absence of one — an operator with a data-handling policy needs to know the
+source set widened.
+
+**Bounded to one inference per session.** Classification happens at most once
+per session, not once per turn. `_session_already_classified`
+(`classifier.py:648-677`) is a permanent latch consulted at a single call site
+inside `run_classification_async` (`classifier.py:1063`) that every trigger
+flows through, in every firing order — so adding two more triggers did not
+add inferences. A session of N turns costs one classification inference, not
+N.
+
 ## Where to look if you build on this
 
 - `tests/test_phase29_agent_inheritance.py` is the test suite that keeps the
