@@ -95,7 +95,8 @@ def assert_argv_matches_golden(test_case, argv, golden):
         )
 
 
-def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None):
+def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None,
+                squad_capable=True):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -114,10 +115,23 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
     Branch contracts:
       config)     -> exit 0  (neutralizes hermes-report.sh:29-31 preflight)
       guardrails) -> exit 0  (neutralizes has_guardrails_cli() probes per RESEARCH Pitfall 1 ext)
-      meter)      -> JOBS_CLI_CAPABLE probe + subcommand-routed capture
+      meter)      -> JOBS_CLI_CAPABLE probe + subcommand-routed capture. When
+                     squad_capable=True (the default), the `--help` probe ALSO
+                     advertises --squad-id/--squad-name/--squad-role (Phase 29,
+                     CLI v1.3.0 shape) so SQUAD_CLI_CAPABLE resolves true. When
+                     squad_capable=False, those three lines are omitted and this
+                     branch's output is byte-identical to the pre-Phase-29 shim.
       jobs)       -> bare --help probe + JOBS_LOG-routed capture
       *)          -> exit 0  (default catch-all)
     """
+    if squad_capable:
+        squad_help_lines = (
+            '      echo "--squad-id string        Squad (root session) identifier"\n'
+            '      echo "--squad-name string       Squad (root session) display name"\n'
+            '      echo "--squad-role string       Squad role: root or subagent"\n'
+        )
+    else:
+        squad_help_lines = ''
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
@@ -126,7 +140,17 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         '  meter)\n'
         '    # Pitfall 2: hermes-report.sh:39 calls `revenium meter completion --help`\n'
         '    # to probe for --agentic-job-id capability. Respond so JOBS_CLI_CAPABLE=1.\n'
+        '    # --agentic-job-id is deliberately the LAST line echoed before exit 0:\n'
+        '    # hermes-report.sh:39-40 pipes this straight into a live `grep -q --`\n'
+        '    # (not the two-step supports_flag capture), and grep -q exits the instant\n'
+        '    # it finds its match. Any echo written AFTER the matched line risks a\n'
+        '    # SIGPIPE on this writer once grep closes the read end, which — under\n'
+        '    # this script'"'"'s `set -uo pipefail` — can flip the pipeline'"'"'s exit status\n'
+        '    # non-zero and flake JOBS_CLI_CAPABLE false. Keeping the probed flag last\n'
+        '    # (as the pre-Phase-29 single-line shim always did) makes the match the\n'
+        '    # final write, closing the race window this ordering would otherwise open.\n'
         '    if [[ "$3" == "--help" ]]; then\n'
+        + squad_help_lines +
         '      echo "--agentic-job-id  Agentic job instance identifier"\n'
         '      exit 0\n'
         '    fi\n'

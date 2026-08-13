@@ -52,6 +52,22 @@ if revenium meter completion --help 2>&1 | grep -q -- '--trace-type'; then
   TRACE_TYPE_CLI_CAPABLE=true
 fi
 
+# Phase 29 (SQUAD-04): capability gate for the v1.3.0 squad flags
+# (--squad-id/--squad-name/--squad-role). Uses supports_flag (Phase 26,
+# common.sh) rather than the raw `grep -q` idiom the two probes above still
+# use — supports_flag closes two defects those older probes carry: `grep -q`'s
+# early exit can SIGPIPE the upstream revenium process (surfacing as exit
+# 141 under pipefail), and an unanchored match lets a shorter flag match a
+# longer sibling (e.g. a probe for --squad-id false-positiving against a
+# hypothetical --squad-identifier). Fails silently on a negative probe —
+# flag absence on an older CLI is the supported configuration (SQUAD-04's
+# byte-identical-argv contract), not an error, and a per-minute cron must
+# not emit a per-tick warning for it.
+SQUAD_CLI_CAPABLE=false
+if supports_flag "meter completion" "--squad-id"; then
+  SQUAD_CLI_CAPABLE=true
+fi
+
 # quick-260605: resolve teamId once for the whole tick. jobs create/outcome require
 # it; absent, the CLI returns HTTP 400 / exit 4 which the cron's 409-only success
 # check treats as a generic failure — stranding every outcome in permanent
@@ -297,6 +313,76 @@ PY
     [[ -z "${session_markers_dir}" ]] && session_markers_dir="${MARKERS_DIR}"
     root_markers_dir="$(resolve_markers_dir "${root_sid}")"
     [[ -z "${root_markers_dir}" ]] && root_markers_dir="${MARKERS_DIR}"
+
+    # Phase 29 (SQUAD-02 / D-03): resolve root_agent_name ONCE per session,
+    # independent of TRACE_TYPE_CLI_CAPABLE — --squad-name (and, in Plan
+    # 29-03, --agent) need the root's agent value regardless of that
+    # unrelated capability gate, so it cannot ride on the trace-type
+    # heredoc below. Per 29-02-PLAN.md's <agent_field_finding>, no
+    # production code path writes a marker's `agent` field today, so this
+    # resolves to the empty string on every real install currently,
+    # collapsing --squad-name to REVENIUM_AGENT_NAME at both emit paths —
+    # built now so the day a writer starts populating it, squad attribution
+    # already reads it from the root rather than from each session.
+    # Bounded by a `[[ -f ... ]]` existence test so no python3 process is
+    # spawned when the root has no marker file — the common case today.
+    local root_agent_name=""
+    if [[ -f "${root_markers_dir}/${root_sid}.jsonl" ]]; then
+      local root_agent_output
+      root_agent_output=$(
+        ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null
+import json, os
+from pathlib import Path
+root_sid = os.environ.get('ROOT_SID', '')
+markers_dir = os.environ.get('MARKERS_DIR', '')
+agent_value = ""
+if root_sid and markers_dir:
+    marker_path = Path(markers_dir) / f"{root_sid}.jsonl"
+    if marker_path.exists():
+        try:
+            with open(marker_path, 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    val = rec.get('agent')
+                    if isinstance(val, str) and val:
+                        # Keep the LAST record carrying a non-empty agent
+                        # value — matches _read_latest_task_type's
+                        # last-wins discipline for the same marker file.
+                        agent_value = val
+        except OSError:
+            pass
+# T-29-01: truncate at the first pipe/newline/CR before this value crosses
+# the KEY=value heredoc boundary. A hostile agent value cannot forge a
+# second ROOT_AGENT= line this way (no newline survives to start one), and
+# unlike a same-length character replace it also cannot leak any
+# attacker-controlled suffix into the value that DOES survive -- a replace
+# would still embed a forged "ROOT_AGENT=..." fragment as literal trailing
+# text in the sanitized value. Truncating is safe here specifically
+# because this heredoc prints exactly ONE free-standing value (unlike the
+# fixed-arity m_agent/m_trace WR-01 loop a few hundred lines below, where
+# a pipe-delimited row's column COUNT must be preserved and replace, not
+# truncate, is the correct choice).
+for _idx, _ch in enumerate(agent_value):
+    if _ch in ('|', '\n', '\r'):
+        agent_value = agent_value[:_idx]
+        break
+print(f"ROOT_AGENT={agent_value}")
+PY
+      ) || root_agent_output=""
+      # Extract with the same sed -n 's/^KEY=//p' idiom used for the
+      # trace-type heredoc's multi-value return; `head -1` is the second
+      # belt against a forged second ROOT_AGENT= line.
+      root_agent_name=$(echo "${root_agent_output}" | sed -n 's/^ROOT_AGENT=//p' | head -1)
+      root_agent_name="${root_agent_name:0:128}"
+    fi
 
     # quick-260625-mlc (TRACE-TYPE-01): resolve root_trace_type ONCE per session
     # (not per marker) and pin it to the ROOT delegator's job type so --trace-type
@@ -1382,6 +1468,27 @@ PY
           fi
         fi
 
+        # Phase 29 (SQUAD-01/02/03 / D-03/D-04): squad attribution, gated on
+        # a single CLI capability probe and appended identically at both
+        # emit paths (29-02-PLAN.md <shared_root_resolution_decision>).
+        # --squad-id is the root session id — the same per-session root
+        # walk already feeding --trace-id above; --squad-name is the root's
+        # agent name, falling back to REVENIUM_AGENT_NAME so it is never
+        # emitted empty (D-03); --squad-role is the literal "root" for the
+        # root session itself and "subagent" for every session hanging off
+        # it. Flag order (--squad-id, --squad-name, --squad-role) is part
+        # of the argv contract the tests assert — keep it identical at
+        # both sites.
+        if [[ "${SQUAD_CLI_CAPABLE}" == "true" ]]; then
+          cmd+=(--squad-id "${root_sid}")
+          cmd+=(--squad-name "${root_agent_name:-${REVENIUM_AGENT_NAME}}")
+          if [[ "${root_sid}" == "${sid}" ]]; then
+            cmd+=(--squad-role "root")
+          else
+            cmd+=(--squad-role "subagent")
+          fi
+        fi
+
         local cmd_output cmd_exit
         cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 
@@ -1424,7 +1531,15 @@ PY
         --completion-start-time "${request_time}"
         --response-time "${response_time}"
         --request-duration "${duration_ms}"
-        --agent "${REVENIUM_AGENT_NAME}"
+        # Phase 29 (AGENT-01 / D-01): inherit the root session's agent name
+        # instead of reading REVENIUM_AGENT_NAME directly — same expression
+        # and same once-per-session root_agent_name plan 29-02 resolves for
+        # --squad-name, so both consumers share one resolution. Byte-
+        # identical to today per the measured finding in
+        # docs/migration-agent-dimension.md: no marker writer has ever
+        # populated the `agent` field, so this falls back to
+        # REVENIUM_AGENT_NAME on every current install.
+        --agent "${root_agent_name:-${REVENIUM_AGENT_NAME}}"
         --transaction-id "${sid}-${total_tokens}"
         --trace-id "${root_sid}"
         --is-streamed
@@ -1450,6 +1565,21 @@ PY
       # this session-loop iteration. Never enters --transaction-id or the ledger.
       if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
         cmd+=(--trace-type "${root_trace_type:-uncategorized}")
+      fi
+
+      # Phase 29 (SQUAD-01/02/03 / D-03/D-04): identical gated squad append
+      # as the per-marker path above — root_sid and root_agent_name are
+      # already resolved for this session-loop iteration. See that site's
+      # comment for the full rationale; kept byte-identical here so the
+      # argv contract holds at both emit paths.
+      if [[ "${SQUAD_CLI_CAPABLE}" == "true" ]]; then
+        cmd+=(--squad-id "${root_sid}")
+        cmd+=(--squad-name "${root_agent_name:-${REVENIUM_AGENT_NAME}}")
+        if [[ "${root_sid}" == "${sid}" ]]; then
+          cmd+=(--squad-role "root")
+        else
+          cmd+=(--squad-role "subagent")
+        fi
       fi
 
       local cmd_output cmd_exit

@@ -125,11 +125,15 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
             # Phase 18 — operator-facing migration doc (MIGR-06, D-16)
             ROOT / 'docs' / 'migration-guardrails.md',
+            # Phase 29 Plan 03 — AGENT-03 operator note (no-observable-change + squad flags)
+            ROOT / 'docs' / 'migration-agent-dimension.md',
             # Phase 20 — COMPAT-01 golden-argv wire-shape fixtures (D-01..D-04)
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-tool-event.golden.json',
+            # Phase 29 Plan 03 — AGENT-01 no-observable-change baseline golden
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-markerless.golden.json',
             # Phase 23 — COMPAT-01/02 umbrella regression trip-wire (D-01)
             ROOT / 'tests' / 'test_compat_v1_4_meta.py',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'README.md',
@@ -1906,7 +1910,19 @@ class RepositoryTests(unittest.TestCase):
     def test_revenium_classifier_dedupe(self):
         """HOOK-07 / D-13: when a fresh GUARDRAIL+CHAT pair already exists in the marker
         file (within 30s), the hook skips the write to avoid double-writes with the
-        agent's FINAL ACTION code path."""
+        agent's FINAL ACTION code path.
+
+        Phase 29 (HOOK-03/HOOK-04): Step 3's gate was promoted from the 30-second
+        recency window (_recent_marker_pair_exists) to the permanent latch
+        _session_already_classified (see classifier.py's <assumption_delta_decision>
+        in 29-04-PLAN.md). This test's second half previously asserted that aging
+        the markers past 30 seconds caused a SECOND classification (4 task lines).
+        That was correct only for the demoted recency-window gate; under the
+        promoted permanent latch a session that has ever been classified stays
+        classified regardless of elapsed time, so aging must NOT trigger a second
+        classification. The direct _recent_marker_pair_exists assertions below
+        still hold — that primitive itself is unchanged, only demoted (no
+        production caller as of Phase 29)."""
         import asyncio
         import importlib
         import json
@@ -1970,18 +1986,25 @@ class RepositoryTests(unittest.TestCase):
             self.assertGreaterEqual(len(lines), 2, f"marker file has too few lines; got {len(lines)}")
             self.assertEqual(len(task_recs), 2, f"hook double-wrote task pair; got {len(task_recs)} task lines")
 
-            # Now age the markers beyond 30s and try again — hook should write
+            # Age the markers beyond 30s. _recent_marker_pair_exists (the demoted
+            # recency-window primitive) now returns False for this same pair — but
+            # Step 3's actual gate is _session_already_classified, which reads no
+            # timestamp and still finds a valid task_type record for this sid, so
+            # a second trigger must NOT reclassify (Phase 29 promotion).
             with open(marker_path, 'w', encoding='utf-8') as f:
                 rec1['ts'] = now - 120
                 rec2['ts'] = now - 120
                 f.write(json.dumps(rec1, separators=(",", ":")) + "\n")
                 f.write(json.dumps(rec2, separators=(",", ":")) + "\n")
             self.assertFalse(handler._recent_marker_pair_exists(sid, within_seconds=30.0))
-            mock_resp = unittest.mock.MagicMock()
-            mock_resp.choices = [unittest.mock.MagicMock()]
-            mock_resp.choices[0].message.content = "research"
-            with unittest.mock.patch.object(handler, 'call_llm', return_value=mock_resp), \
+            self.assertTrue(handler._session_already_classified(sid),
+                            'the promoted permanent latch must still read this session as classified')
+            with unittest.mock.patch.object(handler, 'call_llm') as mock_llm_aged, \
                  unittest.mock.patch.object(handler, '_infer_jobs_via_llm', return_value=[]):
+                mock_llm_aged.side_effect = AssertionError(
+                    "LLM task classification must NOT re-run for an already-classified "
+                    "session, even after the 30s recency window has elapsed"
+                )
                 asyncio.run(handler.run_classification_async(
                     session_id=context['session_id'],
                     message=context.get('message'),
@@ -1989,13 +2012,14 @@ class RepositoryTests(unittest.TestCase):
                     model=context.get('model'),
                     platform=context.get('platform'),
                 ))
-            # Now marker file has 2 stale + 2 new task lines = 4 GUARDRAIL/CHAT lines
-            # (Step 7 may add a job line too, so assert task-line count not total lines).
+                mock_llm_aged.assert_not_called()
+            # Marker file must still hold exactly the original 2 task lines — the
+            # permanent latch prevents a second classification regardless of age.
             lines = marker_path.read_text().splitlines()
             recs_aged = [json.loads(l) for l in lines]
             task_recs_aged = [r for r in recs_aged if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
-            self.assertEqual(len(task_recs_aged), 4,
-                             f"expected 4 task lines (2 stale + 2 new); got {len(task_recs_aged)}")
+            self.assertEqual(len(task_recs_aged), 2,
+                             f"expected the original 2 task lines with no re-classification; got {len(task_recs_aged)}")
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
