@@ -168,6 +168,7 @@ class Phase29AgentInheritanceTestCase(unittest.TestCase):
             'TZ': 'UTC',
             'REVENIUM_ORGANIZATION_NAME': '',
             'REVENIUM_AGENT_NAME': 'Hermes',
+            'REVENIUM_SQUAD_NAME': '',
         }
 
     def _run(self):

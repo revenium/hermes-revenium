@@ -167,6 +167,7 @@ class Phase29SquadCapabilityGateTestCase(unittest.TestCase):
             'JOBS_LOG': self.jobs_log,
             'TZ': 'UTC',
             'REVENIUM_ORGANIZATION_NAME': '',
+            'REVENIUM_SQUAD_NAME': '',
         }
 
     def _run_and_capture_meter_argv(self):

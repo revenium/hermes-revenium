@@ -147,6 +147,14 @@ class Phase29SquadArgvTestCase(unittest.TestCase):
             'JOBS_LOG': self.jobs_log,
             'TZ': 'UTC',
             'REVENIUM_ORGANIZATION_NAME': '',
+            # quick-260814-okp: explicitly neutralize REVENIUM_SQUAD_NAME so
+            # an ambient export on the developer's or fleet host's shell
+            # (this env dict starts from {**os.environ, ...}) can never
+            # silently flip this module's --squad-name assertions. Empty
+            # is treated as unset by the ${VAR:-...} resolution in
+            # hermes-report.sh, so this preserves the pre-override
+            # two-level fallback these tests assert against.
+            'REVENIUM_SQUAD_NAME': '',
         }
 
     def _run(self):
