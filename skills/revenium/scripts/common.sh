@@ -36,6 +36,20 @@ PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
 # via env when running multiple distinct Hermes installs against one Revenium
 # tenant that share an API key but need separate rule scoping.
 REVENIUM_AGENT_NAME="${REVENIUM_AGENT_NAME:-Hermes}"
+# quick-260814-okp: the SQUAD dimension (--squad-name), deliberately distinct
+# from the AGENT dimension above -- a squad is meant to SPAN agents, e.g. one
+# fleet/team grouping many `Hermes-<profile>` agents. Measured motivation: the
+# platform forms squad groups by NAME, and --squad-name resolved from the
+# agent name (see hermes-report.sh's root_agent_name fallback), so every
+# multi-profile fleet install collapsed one squad per agent -- observed
+# 2026-08-14 on the dev tenant, `revenium squads list` returned four squads,
+# three with agentCount: 1, each named after one agent. The empty default is
+# LOAD-BEARING for backward compatibility: unset falls through to the
+# pre-existing root_agent_name/REVENIUM_AGENT_NAME resolution unchanged. When
+# set, this is the HIGHEST-precedence input to --squad-name -- it is an
+# explicit operator declaration of squad identity and outranks any
+# marker-derived value.
+REVENIUM_SQUAD_NAME="${REVENIUM_SQUAD_NAME:-}"
 # v1.1 job-tracking scaffolding (D-13): separate ledger for agentic jobs and forward-compat taxonomy path.
 JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger}"
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"

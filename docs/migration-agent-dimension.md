@@ -48,8 +48,19 @@ entirely):
 | Flag | Value |
 |------|-------|
 | `--squad-id` | The root session's id — the same session that dispatched every subagent hanging off it. |
-| `--squad-name` | The root's agent name, falling back to `REVENIUM_AGENT_NAME` for the same reason `--agent` does today — never emitted empty. |
+| `--squad-name` | The operator-set `REVENIUM_SQUAD_NAME` override, if set; otherwise the root's marker-derived agent name; otherwise `REVENIUM_AGENT_NAME` — never emitted empty. |
 | `--squad-role` | The literal string `root` for the root session itself, `subagent` for every session dispatched from it. |
+
+**`REVENIUM_SQUAD_NAME` (quick-260814-okp).** The override was added because
+squad grouping on the Revenium platform is by *name*, and name-equals-agent-
+name made every squad single-agent on a multi-profile fleet (each profile's
+distinct `Hermes-<profile>` agent name produced a distinct, single-member
+squad). Setting `REVENIUM_SQUAD_NAME` lets an operator declare one squad
+identity that spans many agents. Installs that do not set it see **no change
+on the wire** — the resolution falls through to exactly the two-level
+fallback this table originally described. See
+`skills/revenium/references/setup.md` → **Squad grouping across the fleet**
+for the fleet recipe.
 
 **This vocabulary is topology, not function.** `--squad-role` describes where a
 session sits in the dispatch tree, not what it did (`planner`, `executor`,

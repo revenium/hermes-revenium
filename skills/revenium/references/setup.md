@@ -103,6 +103,73 @@ Set the ORGANIZATION in any of three ways:
 The ORGANIZATION is typically the SAME across a fleet (one company/product);
 the per-profile distinction is the AGENT, not the org.
 
+### Squad grouping across the fleet (`REVENIUM_SQUAD_NAME`)
+
+The **SQUAD** dimension is a different grouping than AGENT, and it is meant to
+**span** agents rather than mirror them. `--squad-id` is the root session id —
+it groups one root session with every subagent it dispatches into a single
+*execution*. The squad *name* is what the Revenium platform groups those
+executions into: a fleet or team identity, not a single agent's identity.
+
+**Why a default install shows one squad per profile.** Without
+`REVENIUM_SQUAD_NAME` set, `--squad-name` resolves to the agent name (falling
+back through the root session's marker-derived agent name to
+`REVENIUM_AGENT_NAME`). A fleet install gives each profile a distinct
+`Hermes-<profile>` agent name (see Per-agent attribution above), so every
+profile becomes its own single-agent squad — the SQUAD dimension ends up
+duplicating the AGENT dimension instead of adding a fleet-level view on top
+of it.
+
+**Resolution order:** the operator override (`REVENIUM_SQUAD_NAME`) first,
+then the root session's marker-derived agent name, then
+`REVENIUM_AGENT_NAME`. Leaving it unset reproduces today's behavior exactly —
+no wire change.
+
+**Setting it for one install:** append it to that install's `env` file at
+`~/.hermes/state/revenium/env`, which `cron.sh` sources with `allexport` on
+every tick — the same channel `docs/migration-guardrails.md` documents for
+`REVENIUM_AGENT_NAME`:
+
+```bash
+echo 'REVENIUM_SQUAD_NAME=gtm-fleet' >> ~/.hermes/state/revenium/env
+```
+
+**The fleet recipe.** Export ONE shared squad name above the per-profile
+loop, while each profile keeps its OWN agent name and its own `HERMES_HOME` /
+`REVENIUM_STATE_DIR` — the illustration below is the pattern to follow, not a
+script this repo ships:
+
+```bash
+# Shared across every profile — hoisted OUTSIDE the loop:
+export REVENIUM_SQUAD_NAME="gtm-fleet"
+
+for profile in gtm-alice gtm-bob gtm-carol; do
+  (
+    # Per-profile — distinct inside the loop:
+    export HERMES_HOME="${HOME}/.hermes/profiles/${profile}"
+    export REVENIUM_STATE_DIR="${HERMES_HOME}/state/revenium"
+    export REVENIUM_AGENT_NAME="Hermes-${profile}"
+    bash "${HERMES_HOME}/skills/revenium/scripts/cron.sh"
+  )
+done
+```
+
+Resulting shape: three agents (`Hermes-gtm-alice`, `Hermes-gtm-bob`,
+`Hermes-gtm-carol`), one squad (`gtm-fleet`).
+
+**Two caveats:**
+
+- `install-cron.sh` does **not** bake `REVENIUM_SQUAD_NAME` into the crontab
+  line — the `env` file (or a wrapper's exported environment, as above) is
+  the channel.
+- Running `hermes-report.sh` by hand does **not** source the `env` file —
+  only `cron.sh` does. A manual run needs the variable exported in the
+  calling shell.
+
+Against a `revenium` CLI older than v1.3.0, the three squad flags (including
+`--squad-name`) are omitted entirely, so `REVENIUM_SQUAD_NAME` is inert
+rather than an error on older installs.
+
 ### Cron fan-out (no clobbering)
 
 Each profile gets a **unique** crontab marker
