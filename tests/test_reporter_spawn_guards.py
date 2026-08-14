@@ -1,0 +1,275 @@
+"""quick-260814-e7c -- cut hermes-report.sh's per-session python3 spawn cost.
+
+Task 1 locks the bash-guard equivalent of H5 -- the standalone job-marker
+scan (WR-02 fix) -- which already tests a file-existence predicate
+(`marker_path.is_file()`) as its own first action:
+
+  H5: the WR-02 job-marker scan is guarded by `-f` on the session marker
+      file, mirroring `marker_path.is_file()`. This is the 84%-of-sessions
+      case measured on the live fleet host and the load-bearing WR-02
+      regression guard: a token-stable session (already in the HERMES
+      ledger) WITH a job marker must still reach `revenium jobs create`.
+
+Follows the fixture idiom established by tests/test_bounded_logging.py and
+tests/test_phase28_reason_codes.py: a scratch skill-scripts tree, a seeded
+state.db, a controllable plugin-status.json, and a stub `revenium` binary
+under a redirected HOME/.local/bin (ensure_path prepends `${HOME}/.local/bin`
+LAST, so it lands FIRST in PATH and wins over any real system binary -- a
+stub anywhere else is shadowed).
+"""
+import json
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from tests.test_bounded_logging import (
+    _make_scripts_dir,
+    _seed_state_db,
+    _write_revenium_shim,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+SKILL = ROOT / 'skills' / 'revenium'
+HERMES_REPORT = SKILL / 'scripts' / 'hermes-report.sh'
+
+# Captured once at import time so the shim can exec the SAME interpreter
+# running this test suite, by absolute path -- no PATH lookup inside the shim.
+REAL_PYTHON3 = sys.executable
+
+# Measured spawn ceiling for a no-marker, first-tick session against THIS
+# committed script (H5 guard only). Re-measured and lowered in Task 2 once
+# H2/H3/H4 land.
+NO_MARKER_SPAWN_CEILING = 14
+
+
+def _write_python_spawn_shim(bin_dir, spawn_log_path):
+    """Fake `python3`: satisfies the reporter's `command -v python3` preflight,
+    appends one line to $PY_SPAWN_LOG per invocation, then execs the REAL
+    interpreter (by absolute path, captured at import time) with argv passed
+    through unchanged -- transparent to every real heredoc in the reporter."""
+    shim = os.path.join(bin_dir, 'python3')
+    with open(shim, 'w') as f:
+        f.write(
+            '#!/bin/sh\n'
+            'echo x >> "$PY_SPAWN_LOG"\n'
+            f'exec {shlex.quote(REAL_PYTHON3)} "$@"\n'
+        )
+    os.chmod(shim, 0o755)
+    return shim
+
+
+def _build_spawn_fixture(tmp, sid='sess-1', marker_mode='absent',
+                          marker_job_id='job-abc', plugin_healthy=True):
+    """Scratch skill-scripts tree + state dir + one aged, token-bearing
+    session, a controllable root marker (absent / job / directory-shaped),
+    and both the `revenium` argv-recording shim and the `python3` spawn-
+    counting shim under the same redirected HOME/.local/bin.
+
+    Returns (scripts_dir, state_dir, log_file, ledger_file,
+    jobs_ledger_file, invocations_log, spawn_log, env).
+    """
+    scripts_dir = _make_scripts_dir(tmp)
+    hermes_home = tmp
+    state_dir = os.path.join(hermes_home, 'state', 'revenium')
+    markers_dir = os.path.join(state_dir, 'markers')
+    os.makedirs(markers_dir, exist_ok=True)
+    with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+        json.dump({'organizationName': 'Test Org'}, f)
+    with open(os.path.join(state_dir, 'plugin-status.json'), 'w') as f:
+        json.dump({'healthy': bool(plugin_healthy)}, f)
+
+    marker_path = os.path.join(markers_dir, f'{sid}.jsonl')
+    if marker_mode == 'absent':
+        pass
+    elif marker_mode == 'job':
+        with open(marker_path, 'w') as f:
+            f.write(json.dumps({
+                'kind': 'job',
+                'agentic_job_id': marker_job_id,
+                'job_type': 'deploy_pipeline',
+                'job_name': 'deploy',
+                'status': 'SUCCESS',
+            }) + '\n')
+    elif marker_mode == 'no_job':
+        with open(marker_path, 'w') as f:
+            f.write(json.dumps({'kind': 'job'}) + '\n')
+    elif marker_mode == 'directory':
+        os.makedirs(marker_path, exist_ok=True)
+    else:
+        raise ValueError(f'unknown marker_mode: {marker_mode}')
+
+    _seed_state_db(hermes_home, sid)
+
+    shim_home = os.path.join(tmp, 'home')
+    bin_dir = os.path.join(shim_home, '.local', 'bin')
+    os.makedirs(bin_dir, exist_ok=True)
+    invocations_log = os.path.join(tmp, 'invocations.log')
+    open(invocations_log, 'w').close()
+    _write_revenium_shim(bin_dir, invocations_log)
+
+    spawn_log = os.path.join(tmp, 'py-spawns.log')
+    open(spawn_log, 'w').close()
+    _write_python_spawn_shim(bin_dir, spawn_log)
+
+    log_file = os.path.join(state_dir, 'revenium-metering.log')
+    ledger_file = os.path.join(state_dir, 'revenium-hermes.ledger')
+    jobs_ledger_file = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+    env = {
+        **os.environ,
+        'HOME': shim_home,
+        'HERMES_HOME': hermes_home,
+        'REVENIUM_STATE_DIR': state_dir,
+        'REVENIUM_MARKERS_DIR': markers_dir,
+        'REVENIUM_CRON_SETTLE_SECONDS': '120',
+        'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+        'INVOCATIONS_LOG': invocations_log,
+        'PY_SPAWN_LOG': spawn_log,
+        'TZ': 'UTC',
+    }
+    return (
+        scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
+        invocations_log, spawn_log, env,
+    )
+
+
+def _run_reporter(scripts_dir, env):
+    return subprocess.run(
+        ['bash', os.path.join(scripts_dir, 'hermes-report.sh')],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+
+
+def _seed_ledger_token_stable(ledger_file, sid, total_tokens=150):
+    """Write a HERMES ledger row for `sid` whose token total already equals
+    the seeded session's total (100 input + 50 output), so the token
+    pre-filter below the WR-02 scan would `continue` this session -- the
+    exact D-08 arc-close shape the WR-02 scan exists to reach past."""
+    with open(ledger_file, 'w') as f:
+        f.write(f'HERMES:{sid}:{total_tokens}:{time.time():.3f}\n')
+
+
+def _spawn_count(spawn_log):
+    with open(spawn_log) as f:
+        return len([l for l in f.read().splitlines() if l.strip()])
+
+
+class WR02JobMarkerScanGuardTests(unittest.TestCase):
+    """Task 1 -- H5 guard (`-f` mirroring `is_file()`)."""
+
+    def test_no_marker_token_stable_session_is_a_noop(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h5-nomarker-') as tmp:
+            (scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
+             invocations_log, spawn_log, env) = _build_spawn_fixture(
+                tmp, sid='sess-h5-a', marker_mode='absent',
+            )
+            _seed_ledger_token_stable(ledger_file, 'sess-h5-a')
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(
+                Path(invocations_log).read_text().strip(), '',
+                'a token-stable, no-marker session must not re-meter',
+            )
+            ledger_text = Path(ledger_file).read_text()
+            self.assertEqual(
+                ledger_text.count('HERMES:sess-h5-a:'), 1,
+                f'ledger must gain no new row: {ledger_text}',
+            )
+            jobs_text = (
+                Path(jobs_ledger_file).read_text()
+                if os.path.exists(jobs_ledger_file) else ''
+            )
+            self.assertNotIn('JOB:', jobs_text, jobs_text)
+
+    def test_wr02_token_stable_session_with_job_marker_still_creates_job(self):
+        """THE regression guard against the forbidden approach (see PLAN.md's
+        <forbidden_approach>): no guard in this plan may key off token
+        totals, ledger presence, or ended_at. A token-stable session (its
+        total already recorded in the HERMES ledger) that carries a job
+        marker must still reach `revenium jobs create` -- Phase 9's WR-02
+        fix, which this guard sits directly beneath."""
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h5-wr02-') as tmp:
+            (scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
+             invocations_log, spawn_log, env) = _build_spawn_fixture(
+                tmp, sid='sess-h5-b', marker_mode='job', marker_job_id='job-wr02',
+            )
+            _seed_ledger_token_stable(ledger_file, 'sess-h5-b')
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertTrue(
+                os.path.exists(jobs_ledger_file),
+                'jobs ledger must exist -- the WR-02 scan must have run',
+            )
+            jobs_text = Path(jobs_ledger_file).read_text()
+            self.assertIn(
+                'JOB:job-wr02:created:', jobs_text,
+                f'a token-stable session with a job marker must still reach '
+                f'jobs create: {jobs_text}',
+            )
+            # WR-02's own token-stability contract: the session itself must
+            # NOT have been re-metered just because it also has a job.
+            self.assertEqual(
+                Path(invocations_log).read_text().strip(), '',
+                'token-stable session must not re-meter even though its '
+                'job marker was processed',
+            )
+
+    def test_directory_shaped_session_marker_creates_no_job(self):
+        """`-f` (bash) mirrors `is_file()` (Python), which is False for a
+        directory -- proving `-f`, not `-e`, was used for H5."""
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h5-dir-') as tmp:
+            (scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
+             invocations_log, spawn_log, env) = _build_spawn_fixture(
+                tmp, sid='sess-h5-c', marker_mode='directory',
+            )
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            jobs_text = (
+                Path(jobs_ledger_file).read_text()
+                if os.path.exists(jobs_ledger_file) else ''
+            )
+            self.assertNotIn('JOB:', jobs_text, jobs_text)
+
+
+class SpawnCeilingTests(unittest.TestCase):
+    """Measured spawn-count relational property + locked ceiling."""
+
+    def test_no_marker_session_spawns_strictly_fewer_than_marker_present(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-spawn-nomarker-') as tmp_a, \
+             tempfile.TemporaryDirectory(prefix='gsd-e7c-spawn-marker-') as tmp_b:
+            (scripts_dir_a, _sd_a, _lf_a, _ledger_a, _jl_a, _inv_a, spawn_log_a,
+             env_a) = _build_spawn_fixture(tmp_a, sid='sess-spawn-a', marker_mode='absent')
+            (scripts_dir_b, _sd_b, _lf_b, _ledger_b, _jl_b, _inv_b, spawn_log_b,
+             env_b) = _build_spawn_fixture(tmp_b, sid='sess-spawn-b', marker_mode='job')
+
+            r_a = _run_reporter(scripts_dir_a, env_a)
+            self.assertEqual(r_a.returncode, 0, r_a.stdout + r_a.stderr)
+            r_b = _run_reporter(scripts_dir_b, env_b)
+            self.assertEqual(r_b.returncode, 0, r_b.stdout + r_b.stderr)
+
+            spawn_count_a = _spawn_count(spawn_log_a)
+            spawn_count_b = _spawn_count(spawn_log_b)
+
+            self.assertLess(
+                spawn_count_a, spawn_count_b,
+                f'no-marker session ({spawn_count_a} spawns) must spawn '
+                f'strictly fewer python3 processes than the marker-present '
+                f'session ({spawn_count_b} spawns)',
+            )
+            self.assertLessEqual(
+                spawn_count_a, NO_MARKER_SPAWN_CEILING,
+                f'no-marker session spawned {spawn_count_a} python3 '
+                f'processes, exceeding the measured ceiling of '
+                f'{NO_MARKER_SPAWN_CEILING} -- either a new unconditional '
+                f'spawn was added to the hot path, or the ceiling needs '
+                f're-measuring downward after a further guard landed',
+            )
+
+
+if __name__ == '__main__':
+    unittest.main()

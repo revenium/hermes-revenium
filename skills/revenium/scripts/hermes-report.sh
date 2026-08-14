@@ -612,7 +612,25 @@ PY
     # moved — this scan is additive only. Both share the single
     # JOB:<id>:created gate; the synchronous-on-success ledger write prevents
     # a double-create within one tick (D-09).
-    if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
+    #
+    # quick-260814-e7c (PERF-01, H5): the heredoc's own first two statements
+    # (after reading its env) are `if not markers_dir or not sid: raise
+    # SystemExit(0)` and `if not marker_path.is_file(): raise SystemExit(0)`
+    # — mirrored here as a bash `-f` pre-test on the session marker file, the
+    # same predicate the heredoc evaluates itself (is_file() -> -f). Measured
+    # on the live fleet host: 1,663 of 1,977 `devops` sessions (84%) have NO
+    # marker file at all, so for those sessions this heredoc's ENTIRE body
+    # already reduces to "exit 0, print nothing" — both exit paths leave
+    # `precheck_job_rows` empty, which makes the `if [[ -n
+    # "${precheck_job_rows}" ]]` body below (the ONLY other content in this
+    # block) a no-op. Hoisting `-f` into the outer condition therefore skips
+    # a block that was already a no-op; it is NOT a skip predicated on token
+    # totals, ledger rows, or `ended_at` (the forbidden approach this plan
+    # explicitly rules out — see PLAN.md's <forbidden_approach>), so a
+    # token-stable session WITH a job marker still reaches this block and
+    # still reaches the jobs-create call below (WR-02, proven by
+    # tests/test_reporter_spawn_guards.py's WR-02 regression test).
+    if [[ "${JOBS_CLI_CAPABLE}" == "true" && -f "${session_markers_dir}/${sid}.jsonl" ]]; then
       local precheck_job_rows
       precheck_job_rows=$(
         MARKERS_DIR="${session_markers_dir}" \
