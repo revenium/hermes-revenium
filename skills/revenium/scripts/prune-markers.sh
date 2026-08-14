@@ -77,6 +77,8 @@ MARKERS_DIR_PY="${MARKERS_DIR}" \
 LEDGER_FILE_PY="${LEDGER_FILE}" \
 MARKER_RETENTION_DAYS_PY="${MARKER_RETENTION_DAYS}" \
 DRY_RUN_PY="${DRY_RUN}" \
+FLAG_DIRS_PY="${WARN_FLAGS_DIR}
+${FALLBACK_WARN_FLAGS_DIR}" \
 python3 - <<'PY' >"${prune_out}"
 import os
 import sys
@@ -181,6 +183,72 @@ for fname in entries:
             sys.exit(1)
     else:
         removed += 1  # count for dry-run summary
+
+# ---------------------------------------------------------------------------
+# quick-260813-wnz (LOG-01/D-05): second pass -- bound the once-per-
+# (session, reason) flag directories (WARN_FLAGS_DIR and
+# FALLBACK_WARN_FLAGS_DIR, passed in newline-separated via FLAG_DIRS_PY) so
+# the fix for the fallback re-warn spam cannot itself become a new
+# unbounded-growth path. Filtered to files ending in '.flag'; staleness is
+# the flag's own mtime (a flag's mtime IS the moment we last warned, so it
+# needs no ledger correlation, unlike a marker's mtime). Gated by the SAME
+# MARKER_RETENTION_DAYS preflight and cutoff_secs the marker pass above
+# uses; --dry-run honored identically.
+# ---------------------------------------------------------------------------
+flag_dirs = [d for d in os.environ.get('FLAG_DIRS_PY', '').split('\n') if d]
+
+flags_scanned = 0
+flags_kept = 0
+flags_removed = 0
+
+for flag_dir in flag_dirs:
+    try:
+        flag_entries = sorted(os.listdir(flag_dir))
+    except FileNotFoundError:
+        continue
+
+    for fname in flag_entries:
+        if not fname.endswith('.flag'):
+            continue
+        fpath = os.path.join(flag_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+
+        flags_scanned += 1
+        mtime = os.path.getmtime(fpath)
+        age_secs = time.time() - mtime
+        age_days = age_secs / 86400
+
+        if age_secs < cutoff_secs:
+            flags_kept += 1
+            continue
+
+        action = 'dry-run, would remove' if dry_run else 'removed'
+        print(
+            'prune: ' + action +
+            ' dir=' + flag_dir +
+            ' flag=' + fname +
+            ' mtime=' + iso(mtime) +
+            ' age_days=' + str(round(age_days, 1)),
+            flush=True,
+        )
+
+        if not dry_run:
+            try:
+                os.unlink(fpath)
+                flags_removed += 1
+            except OSError as exc:
+                print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
+                sys.exit(1)
+        else:
+            flags_removed += 1  # count for dry-run summary
+
+print(
+    'prune: flags summary, scanned=' + str(flags_scanned) +
+    ' kept=' + str(flags_kept) +
+    ' removed=' + str(flags_removed),
+    flush=True,
+)
 
 print(
     'prune: summary, scanned=' + str(scanned) +

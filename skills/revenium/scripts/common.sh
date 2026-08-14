@@ -18,6 +18,15 @@ MARKERS_DIR="${REVENIUM_MARKERS_DIR:-${STATE_DIR}/markers}"
 MARKERS_READY_DIR="${REVENIUM_MARKERS_READY_DIR:-${STATE_DIR}/markers/.ready}"
 # Phase 19 (D-06): warn-band rate-limit sentinel directory (markers/.warn); zero-byte flag files per (session, ruleId).
 WARN_FLAGS_DIR="${REVENIUM_WARN_FLAGS_DIR:-${MARKERS_DIR}/.warn}"
+# quick-260813-wnz (LOG-01/D-01): once-per-(session, reason) sentinel directory
+# for hermes-report.sh's trace-type fallback WARN (markers/.fallback-warn).
+# Mirrors WARN_FLAGS_DIR above byte-for-byte: one zero-byte flag file per
+# (session, reason), created lazily by its writer (deliberately absent from
+# the eager `mkdir -p` below, same as WARN_FLAGS_DIR). Measured motivation:
+# without this gate, an ended session that can never acquire a job
+# classification re-warned once per minute forever -- 9,039,937 lines
+# fleet-wide, 98.2% of one 646 MB log, in 27 days.
+FALLBACK_WARN_FLAGS_DIR="${REVENIUM_FALLBACK_WARN_FLAGS_DIR:-${MARKERS_DIR}/.fallback-warn}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 MARKER_RETENTION_DAYS="${REVENIUM_MARKER_RETENTION_DAYS:-30}"
 PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
