@@ -347,6 +347,10 @@ PY
     # already reads it from the root rather than from each session.
     # Bounded by a `[[ -f ... ]]` existence test so no python3 process is
     # spawned when the root has no marker file — the common case today.
+    # quick-260814-okp: the operator-set REVENIUM_SQUAD_NAME now takes
+    # precedence over root_agent_name at --squad-name (see both emit sites
+    # below) — root_agent_name itself is UNCHANGED here and remains
+    # load-bearing for --agent inheritance regardless of the override.
     local root_agent_name=""
     if [[ -f "${root_markers_dir}/${root_sid}.jsonl" ]]; then
       local root_agent_output
@@ -1571,16 +1575,18 @@ PY
         # a single CLI capability probe and appended identically at both
         # emit paths (29-02-PLAN.md <shared_root_resolution_decision>).
         # --squad-id is the root session id — the same per-session root
-        # walk already feeding --trace-id above; --squad-name is the root's
-        # agent name, falling back to REVENIUM_AGENT_NAME so it is never
-        # emitted empty (D-03); --squad-role is the literal "root" for the
-        # root session itself and "subagent" for every session hanging off
-        # it. Flag order (--squad-id, --squad-name, --squad-role) is part
-        # of the argv contract the tests assert — keep it identical at
-        # both sites.
+        # walk already feeding --trace-id above; --squad-name resolves
+        # three levels deep (quick-260814-okp): the operator-set
+        # REVENIUM_SQUAD_NAME first (an explicit squad-identity
+        # declaration), then the root's marker-derived agent name, then
+        # REVENIUM_AGENT_NAME — never emitted empty (D-03); --squad-role is
+        # the literal "root" for the root session itself and "subagent" for
+        # every session hanging off it. Flag order (--squad-id,
+        # --squad-name, --squad-role) is part of the argv contract the
+        # tests assert — keep it identical at both sites.
         if [[ "${SQUAD_CLI_CAPABLE}" == "true" ]]; then
           cmd+=(--squad-id "${root_sid}")
-          cmd+=(--squad-name "${root_agent_name:-${REVENIUM_AGENT_NAME}}")
+          cmd+=(--squad-name "${REVENIUM_SQUAD_NAME:-${root_agent_name:-${REVENIUM_AGENT_NAME}}}")
           if [[ "${root_sid}" == "${sid}" ]]; then
             cmd+=(--squad-role "root")
           else
@@ -1669,11 +1675,12 @@ PY
       # Phase 29 (SQUAD-01/02/03 / D-03/D-04): identical gated squad append
       # as the per-marker path above — root_sid and root_agent_name are
       # already resolved for this session-loop iteration. See that site's
-      # comment for the full rationale; kept byte-identical here so the
+      # comment for the full rationale (including the quick-260814-okp
+      # REVENIUM_SQUAD_NAME override) — kept byte-identical here so the
       # argv contract holds at both emit paths.
       if [[ "${SQUAD_CLI_CAPABLE}" == "true" ]]; then
         cmd+=(--squad-id "${root_sid}")
-        cmd+=(--squad-name "${root_agent_name:-${REVENIUM_AGENT_NAME}}")
+        cmd+=(--squad-name "${REVENIUM_SQUAD_NAME:-${root_agent_name:-${REVENIUM_AGENT_NAME}}}")
         if [[ "${root_sid}" == "${sid}" ]]; then
           cmd+=(--squad-role "root")
         else
