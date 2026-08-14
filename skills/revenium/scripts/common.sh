@@ -78,12 +78,18 @@ PLUGIN_STATUS_FILE="${REVENIUM_PLUGIN_STATUS_FILE:-${STATE_DIR}/plugin-status.js
 # quick-260813-wnz (LOG-03/D-04): bound the per-profile metering log
 # (LOG_FILE). There was no rotation anywhere and one profile's log reached
 # 646 MB. 50 MiB (52428800 bytes) is the size at which rotate_log_if_needed
-# (below) truncates IN PLACE, keeping the last 10 MiB (10485760 bytes) --
+# (below) truncates IN PLACE, keeping the last 2 MiB (2097152 bytes) --
 # never renaming or unlinking, since cron's `>> "${LOG_FILE}" 2>&1` append fd
 # (install-cron.sh) is opened for the whole tick and would strand on a
 # renamed/unlinked inode.
+#
+# KEEP_BYTES is 2 MiB rather than 10 MiB deliberately: it is the size of the
+# in-place rewrite, and the rewrite's duration IS the window of the known
+# race documented on rotate_log_if_needed below. Measured on a 59 MB log:
+# 10 MiB keep => 68-223 ms rewrite; 2 MiB keep cuts that several-fold. 2 MiB
+# still retains ~20k log lines, far more than any diagnostic needs.
 REVENIUM_LOG_MAX_BYTES="${REVENIUM_LOG_MAX_BYTES:-52428800}"
-REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-10485760}"
+REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-2097152}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
@@ -139,6 +145,37 @@ error() { log "ERROR" "$@"; }
 # malformed override, a keep size not strictly less than the max, an
 # unwritable target) degrades to a silent no-op returning 0 -- matching
 # ensure_path's never-fatal contract.
+#
+# KNOWN RACE, accepted deliberately -- read this before "fixing" it.
+# The rewrite below reads the retained tail, writes it at offset 0, then
+# truncates. A process appending in that window writes at the OLD end of file
+# (O_APPEND targets current EOF), and the truncate then discards those bytes.
+# Such an append is silently lost.
+#
+# Measured exposure at these defaults on a 59 MB log: a 68-223 ms window with
+# 10 MiB keep (hence the 2 MiB keep above, which cuts it several-fold), during
+# which ~0.4-1.8% of a concurrent append storm was dropped. Bounded further by:
+#   * it only fires when the log crosses REVENIUM_LOG_MAX_BYTES -- roughly once
+#     every two months per profile at the post-quick-260813-wnz growth rate;
+#   * cron.sh calls this while holding LOCK_FILE, and the reporter/guardrail/
+#     tool-event children of that same tick log AFTER it returns, so they are
+#     never exposed. Only a SEPARATELY invoked script (a human running
+#     `bash hermes-report.sh` by hand) can hit it;
+#   * only log lines are at risk. The ledger, the metering argv, and
+#     idempotency are all untouched by rotation.
+#
+# Two fixes were evaluated and rejected:
+#   1. Absorb the race by re-reading anything appended past original_size until
+#      the file stops growing. IMPLEMENTED AND MEASURED: no effect (old 2686/
+#      2655/2367 vs new 2640/2764/2542 lines surviving -- indistinguishable).
+#      The dominant window is the WRITE, which happens after any such settle
+#      check, so the loop covers the wrong phase. Do not re-attempt this.
+#   2. Exclude appenders with a lock. `log()` appends with a bare `>>` from
+#      every script, so this needs flock(1) per log line -- a subprocess per
+#      line, which directly undoes quick-260814-e7c's spawn reduction.
+# A real fix means making the standalone entry points take LOCK_FILE, which
+# changes their semantics (a manual run would skip/block during a live tick).
+# That is a deliberate design change, not a patch to this function.
 rotate_log_if_needed() {
   local target="${1:-${LOG_FILE}}"
   local rotate_output
