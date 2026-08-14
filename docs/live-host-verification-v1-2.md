@@ -48,10 +48,10 @@ ledger lines and zero new metering calls, on every ledger surface?**
 | Pagination request count | Replayed-argv `--verbose` wire trace, corroborated by a real tick's log timestamps and the repository's own exact-equality unit test | PASS, qualified — 2 requests on a steady-state tick, exact equality with the declared bound; the count is proven for the reconstructed argv shape, not for the production call path itself. See Known limitations |
 | stderr isolation | Induced multi-page response via verb substitution onto a real, high-volume list command | PASS — the pagination note lands on stderr only; stdout stays clean, parseable JSON |
 | Trace-type population | Induced multi-agent session; real LLM-inferred labels read from the classifier's marker files | PASS — non-fallback labels observed on both the root and the subagent session |
-| Squad flags | Same induced session; emission-side argv plus a platform read | PASS — squad id equals the root session id on both rows; role correctly split root/subagent at emission |
+| Squad flags | Same induced session; emission-side argv plus a platform read | PASS — squad id equals the root session id on both rows; the role split lands as `root` on the root's rows and `subagent` on the subagent's rows, confirmed on the platform side per row, not only at emission |
 | Agent naming | Same induced session; platform read | PASS — squad name matches the profile's configured agent name on both rows |
 | Ledger idempotency | Forced re-run: three confirmed-executed pipeline invocations, strictly sequential, against a frozen snapshot; byte-for-byte hash comparison across all three ledger surfaces | PASS, qualified — zero new lines and zero new metering calls across three verified-executed iterations on one profile; see Known limitations for scope |
-| Squad grouping | Platform read: the squad-detail and timeline commands called directly with the raw root session id, plus a fragmentation test against the subagent's own id | PASS, qualified — correct membership, no fragmentation (the subagent's own id returns not-found); per-row role confirmation is limited by this CLI version's response shape |
+| Squad grouping | Platform read: the squad-detail and timeline commands called directly with the raw root session id, plus a fragmentation test against the subagent's own id | PASS — correct membership, no fragmentation (the subagent's own id returns not-found); the timeline reports `role` per event and it resolves `root` on the root's rows and `subagent` on the subagent's rows |
 
 ## Procedure
 
@@ -231,10 +231,11 @@ revenium squads get <root-session-id> --output json
 - A live before/after file-level snapshot of the guardrail-status file on a
   real tick (as opposed to the structural stdout/stderr argument) remains
   open.
-- Per-row platform-side confirmation of the subagent role is not observable
-  in this CLI version's aggregated response shape — only the squad-level role
-  and the correct session-to-squad grouping are directly confirmed
-  platform-side.
+*(A limitation previously listed here — that per-row confirmation of the
+subagent role was not observable — was withdrawn after re-checking. The
+squad-detail command's agent array does aggregate by agent and shows only one
+role, but the timeline command reports `role` on every individual event, and it
+resolves correctly per row. See the Squad flags and Squad grouping rows above.)*
 
 ## Verified against
 
