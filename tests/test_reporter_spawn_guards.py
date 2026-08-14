@@ -1,14 +1,27 @@
 """quick-260814-e7c -- cut hermes-report.sh's per-session python3 spawn cost.
 
-Task 1 locks the bash-guard equivalent of H5 -- the standalone job-marker
-scan (WR-02 fix) -- which already tests a file-existence predicate
-(`marker_path.is_file()`) as its own first action:
+Locks the bash-guard equivalent of four heredocs (H2, H3, H4, H5) that already
+test a file-existence predicate as their own first action:
 
-  H5: the WR-02 job-marker scan is guarded by `-f` on the session marker
-      file, mirroring `marker_path.is_file()`. This is the 84%-of-sessions
-      case measured on the live fleet host and the load-bearing WR-02
-      regression guard: a token-stable session (already in the HERMES
-      ledger) WITH a job marker must still reach `revenium jobs create`.
+  H5 (Task 1): the WR-02 job-marker scan is guarded by `-f` on the session
+      marker file, mirroring `marker_path.is_file()`. This is the 84%-of-
+      sessions case on the live fleet host and the load-bearing WR-02
+      regression guard: a token-stable session (already in the HERMES ledger)
+      WITH a job marker must still reach `revenium jobs create`.
+  H2 (Task 2): the trace-type / marker-state heredoc is guarded by `-e` on
+      the root marker file, mirroring `marker_path.exists()`.
+  H3 (Task 2): the plugin-health heredoc is guarded by `-s` on
+      PLUGIN_STATUS_FILE, mirroring the heredoc's own fail-open-on-any-
+      exception body (missing / empty-string / zero-byte all raise and
+      print 'true').
+  H4 (Task 2): the root agentic-job-id heredoc is guarded by `-e` on the
+      root marker file (subagent sessions only), mirroring `exists()`.
+
+`-f` (`is_file()`) and `-e` (`exists()`) are NOT interchangeable: `exists()`
+is True for a directory, whose subsequent `open()` raises OSError -- H2 must
+still spawn python3 for that shape and resolve `marker_lookup_failed`, not
+silently misreport `no_job_classified`. The directory-shaped-marker tests
+below are what catch a `-f`/`-e` mix-up.
 
 Follows the fixture idiom established by tests/test_bounded_logging.py and
 tests/test_phase28_reason_codes.py: a scratch skill-scripts tree, a seeded
@@ -42,9 +55,11 @@ HERMES_REPORT = SKILL / 'scripts' / 'hermes-report.sh'
 REAL_PYTHON3 = sys.executable
 
 # Measured spawn ceiling for a no-marker, first-tick session against THIS
-# committed script (H5 guard only). Re-measured and lowered in Task 2 once
-# H2/H3/H4 land.
-NO_MARKER_SPAWN_CEILING = 14
+# committed script. Task 1 alone measured 14 (H5 guard only); re-measured and
+# lowered here now that H2/H3/H4 also guard their heredocs (13 -- Task 3
+# lowers this further to 12 once the root-markers-dir resolution is also
+# memoized for top-level sessions).
+NO_MARKER_SPAWN_CEILING = 13
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):
@@ -234,6 +249,79 @@ class WR02JobMarkerScanGuardTests(unittest.TestCase):
                 if os.path.exists(jobs_ledger_file) else ''
             )
             self.assertNotIn('JOB:', jobs_text, jobs_text)
+
+
+class TraceTypeAndPluginHealthGuardTests(unittest.TestCase):
+    """Task 2 -- H2 (`-e`), H3 (`-s`), H4 (`-e`, subagent-only) guards."""
+
+    def test_no_root_marker_resolves_no_job_classified(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h2-absent-') as tmp:
+            (scripts_dir, state_dir, log_file, *_rest, env) = _build_spawn_fixture(
+                tmp, sid='sess-h2-absent', marker_mode='absent', plugin_healthy=True,
+            )
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            log_text = Path(log_file).read_text()
+            self.assertIn('reason=no_job_classified', log_text, log_text)
+
+    def test_directory_shaped_root_marker_resolves_marker_lookup_failed(self):
+        """`-e` (bash) mirrors `exists()` (Python), which is True for a
+        directory -- so this case must still spawn python3 and resolve to
+        the distinct `marker_lookup_failed` reason, NOT silently fall
+        through to `no_job_classified` (which a wrong `-f` guard would
+        produce by treating the directory as absent)."""
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h2-dir-') as tmp:
+            (scripts_dir, state_dir, log_file, *_rest, env) = _build_spawn_fixture(
+                tmp, sid='sess-h2-dir', marker_mode='directory', plugin_healthy=True,
+            )
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            log_text = Path(log_file).read_text()
+            self.assertIn('reason=marker_lookup_failed', log_text, log_text)
+            self.assertNotIn('reason=no_job_classified', log_text, log_text)
+
+    def test_job_marker_present_ships_trace_type_no_reason_line(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h2-job-') as tmp:
+            (scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
+             invocations_log, spawn_log, env) = _build_spawn_fixture(
+                tmp, sid='sess-h2-job', marker_mode='job', plugin_healthy=True,
+            )
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            log_text = Path(log_file).read_text()
+            self.assertNotIn('reason=', log_text, log_text)
+            argv = shlex.split(Path(invocations_log).read_text().strip())
+            self.assertIn('--trace-type', argv)
+            self.assertEqual(argv[argv.index('--trace-type') + 1], 'deploy_pipeline')
+
+    def test_zero_byte_plugin_status_fails_open_to_no_job_classified(self):
+        """`-s` (bash) mirrors the heredoc's own fail-open-on-exception body:
+        a zero-byte plugin-status.json must resolve exactly like a healthy
+        read, NOT like an unregistered plugin. A `-f` guard would also pass
+        (a zero-byte file still exists as a regular file), but `-s` is the
+        predicate that additionally matches the heredoc's actual `except
+        Exception` semantics for the zero-byte case specifically."""
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h3-zerobyte-') as tmp:
+            (scripts_dir, state_dir, log_file, *_rest, env) = _build_spawn_fixture(
+                tmp, sid='sess-h3-zero', marker_mode='absent', plugin_healthy=True,
+            )
+            status_path = os.path.join(state_dir, 'plugin-status.json')
+            open(status_path, 'w').close()  # truncate to zero bytes
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            log_text = Path(log_file).read_text()
+            self.assertIn('reason=no_job_classified', log_text, log_text)
+            self.assertNotIn('reason=plugin_unregistered', log_text, log_text)
+
+    def test_unhealthy_plugin_status_wins_over_marker_state(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-e7c-h3-unhealthy-') as tmp:
+            (scripts_dir, state_dir, log_file, *_rest, env) = _build_spawn_fixture(
+                tmp, sid='sess-h3-unhealthy', marker_mode='absent', plugin_healthy=False,
+            )
+            r = _run_reporter(scripts_dir, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            log_text = Path(log_file).read_text()
+            self.assertIn('reason=plugin_unregistered', log_text, log_text)
 
 
 class SpawnCeilingTests(unittest.TestCase):

@@ -409,9 +409,24 @@ PY
       # (found / no_job / absent / error) crosses the command-substitution
       # boundary alongside the trace-type value — WITHOUT spawning a second
       # python3 interpreter per session (still exactly one heredoc here).
-      local trace_type_output
-      trace_type_output=$(
-        ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null
+      local trace_type_output=""
+      # quick-260814-e7c (PERF-01, H2): bash mirror of the heredoc's own
+      # `if marker_path.exists(): ... else: marker_state = "absent"`. On the
+      # no-file path the heredoc's output is fully determined without
+      # spawning python3: TRACE_TYPE= (empty) then MARKER_STATE=absent — so
+      # the two `sed -n 's/^KEY=//p' | head -1` extractions below would
+      # yield exactly `""` and `absent`, which the else branch assigns
+      # directly. This also skips six subprocesses, not one: the two
+      # `echo | sed | head` pipelines go with it. Uses `-e`, mirroring
+      # Python's `exists()` (not `-f`/`is_file()`): a DIRECTORY at the
+      # marker path is also `exists()` == True, so it still enters this
+      # branch and still spawns python3, whose `open()` raises `OSError` ->
+      # `MARKER_STATE=error`. A `-f` guard would wrongly route that case to
+      # the absent branch and silently change the reason code from
+      # marker_lookup_failed to no_job_classified.
+      if [[ -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then
+        trace_type_output=$(
+          ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null
 import json, os
 from pathlib import Path
 root_sid = os.environ.get('ROOT_SID', '')
@@ -461,12 +476,16 @@ if latest_type:
 print(f"TRACE_TYPE={latest_type}")
 print(f"MARKER_STATE={marker_state}")
 PY
-      ) || trace_type_output=""
+        ) || trace_type_output=""
 
-      # Extract both values with the same sed -n 's/^KEY=//p' idiom
-      # guardrail-check.sh uses for multi-value heredoc returns.
-      root_trace_type=$(echo "${trace_type_output}" | sed -n 's/^TRACE_TYPE=//p' | head -1)
-      marker_state=$(echo "${trace_type_output}" | sed -n 's/^MARKER_STATE=//p' | head -1)
+        # Extract both values with the same sed -n 's/^KEY=//p' idiom
+        # guardrail-check.sh uses for multi-value heredoc returns.
+        root_trace_type=$(echo "${trace_type_output}" | sed -n 's/^TRACE_TYPE=//p' | head -1)
+        marker_state=$(echo "${trace_type_output}" | sed -n 's/^MARKER_STATE=//p' | head -1)
+      else
+        root_trace_type=""
+        marker_state="absent"
+      fi
 
       # Sanitize to the allowed charset [A-Za-z0-9_-] (bash bracket class — value
       # is sanitized here in bash, not python; parity with the m_trace style),
@@ -486,9 +505,20 @@ PY
       # so a registration outage is never misdiagnosed as "no job
       # classified" — that ordering IS the fix TRACE-04 exists to land.
       if [[ "${root_trace_type}" == "uncategorized" ]]; then
-        local plugin_healthy_check
-        plugin_healthy_check=$(
-          PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" python3 - <<'PY' 2>/dev/null || true
+        local plugin_healthy_check="true"
+        # quick-260814-e7c (PERF-01, H3): the heredoc's body is a single
+        # `try: open(path); json.load(...) except Exception: print('true')`.
+        # A missing path, an empty string path, and a zero-byte file all
+        # raise and print `true` — exactly the value this guard already
+        # defaults to, so skipping the spawn entirely reproduces every one
+        # of those cases. Uses `-s` (not `-f`) because it also covers the
+        # zero-byte case; a directory has nonzero size, so `-s` is true
+        # there too and the interpreter still runs and still prints `true`
+        # (its `open()` raises, caught by the same `except Exception`) — no
+        # behavioral difference for that shape either.
+        if [[ -s "${PLUGIN_STATUS_FILE}" ]]; then
+          plugin_healthy_check=$(
+            PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" python3 - <<'PY' 2>/dev/null || true
 import json, os
 path = os.environ.get('PLUGIN_STATUS_FILE', '')
 try:
@@ -501,10 +531,11 @@ except Exception:
     # is treated as healthy, matching every other status read in this repo.
     print('true')
 PY
-        )
-        # Strip any trailing newline the heredoc emitted; fail-open default.
-        plugin_healthy_check="${plugin_healthy_check%%$'\n'*}"
-        [[ -z "${plugin_healthy_check}" ]] && plugin_healthy_check="true"
+          )
+          # Strip any trailing newline the heredoc emitted; fail-open default.
+          plugin_healthy_check="${plugin_healthy_check%%$'\n'*}"
+          [[ -z "${plugin_healthy_check}" ]] && plugin_healthy_check="true"
+        fi
 
         # Phase 28 (TRACE-04/D-08): three-branch closed vocabulary. Health is
         # consulted FIRST — an unhealthy read always wins, regardless of
@@ -562,7 +593,15 @@ PY
     # subagent's own (orphan) m_owning_job_id. The next cron tick retries
     # idempotently once the root's job marker exists.
     local root_aid=""
-    if [[ "${root_sid}" != "${sid}" ]]; then
+    # quick-260814-e7c (PERF-01, H4): bash mirror of the heredoc's own
+    # `if marker_path.exists():` guard. The heredoc prints only inside
+    # `if marker_path.exists():` -> `try:` -> `if latest_aid:`; with no file
+    # it prints nothing, root_aid stays "" (already its `local` default),
+    # and the trailing strip of "" is "". Uses `-e` for predicate fidelity
+    # with `exists()`, though here the directory case converges either way —
+    # `open()` on a directory raises `OSError`, caught, nothing printed — so
+    # `-e` is chosen for consistency with H2, not necessity.
+    if [[ "${root_sid}" != "${sid}" && -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then
       root_aid=$(
         ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null || true
 import json, os
