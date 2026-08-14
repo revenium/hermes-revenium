@@ -45,7 +45,7 @@ ledger lines and zero new metering calls, on every ledger surface?**
 
 | Behavior | Method | Result |
 |---|---|---|
-| Pagination request count | Replayed-argv `--verbose` wire trace, corroborated by a real tick's log timestamps and the repository's own exact-equality unit test | PASS — 2 requests on a steady-state tick, exact equality with the declared bound |
+| Pagination request count | Replayed-argv `--verbose` wire trace, corroborated by a real tick's log timestamps and the repository's own exact-equality unit test | PASS, qualified — 2 requests on a steady-state tick, exact equality with the declared bound; the count is proven for the reconstructed argv shape, not for the production call path itself. See Known limitations |
 | stderr isolation | Induced multi-page response via verb substitution onto a real, high-volume list command | PASS — the pagination note lands on stderr only; stdout stays clean, parseable JSON |
 | Trace-type population | Induced multi-agent session; real LLM-inferred labels read from the classifier's marker files | PASS — non-fallback labels observed on both the root and the subagent session |
 | Squad flags | Same induced session; emission-side argv plus a platform read | PASS — squad id equals the root session id on both rows; role correctly split root/subagent at emission |
@@ -193,6 +193,20 @@ revenium squads get <root-session-id> --output json
   naturally high-volume list command for the one this skill's hot path
   actually calls, because the verifying tenant's real data on that hot-path
   command could not reach a second page at any page size.
+
+**Measured on a replay, not on the production call path:**
+
+- The per-tick request count was obtained by reconstructing the guardrail
+  stage's two request-issuing invocations from the deployed script and
+  replaying them with the CLI's verbose flag. That proves how many requests
+  *that argv shape* puts on the wire — it does not prove that the unmodified
+  production script issues that argv on a real tick. This phase was barred
+  from editing the scripts under test, so the production call path was never
+  instrumented directly. The result rests on three legs together: this
+  replay, a real tick's log timestamps establishing the unmodified script ran
+  in that window, and the repository's own exact-equality request-bound unit
+  test. Read the request count as strong converging evidence, not as a direct
+  measurement of production.
 - The classifier rollout to nine of ten profiles was an operator-authorized
   production change performed as part of this verification, not a passively
   observed pre-existing state.
