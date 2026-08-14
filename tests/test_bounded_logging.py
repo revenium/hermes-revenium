@@ -360,5 +360,220 @@ class PruneFlagDirectoriesTests(unittest.TestCase):
             self.assertIn('prune: flags summary,', Path(metering_log).read_text())
 
 
+# ---------------------------------------------------------------------------
+# Shared fixture helpers -- Task 2 (plugin-status.sh quiet-cron mode)
+# ---------------------------------------------------------------------------
+
+PLUGIN_SETTLE_SECONDS = 120
+
+
+def _plugstat_skill_tree(hermes_home):
+    """Mirrors tests/test_phase28_plugin_status.py's setup_skill_tree."""
+    scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+    os.makedirs(scripts_dir, exist_ok=True)
+    for name in ('common.sh', 'plugin-status.sh'):
+        shutil.copy(str(SKILL / 'scripts' / name), scripts_dir)
+    return scripts_dir
+
+
+def _plugstat_seed_db(hermes_home, ended_ats):
+    """Mirrors tests/test_phase28_plugin_status.py's seed_state_db."""
+    db_path = os.path.join(hermes_home, 'state.db')
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, ended_at REAL)')
+        for i, ended_at in enumerate(ended_ats):
+            conn.execute(
+                'INSERT INTO sessions (id, ended_at) VALUES (?, ?)', (f'sess-{i}', ended_at),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def _plugstat_touch_sentinel(markers_ready_dir, name, age_seconds):
+    """Mirrors tests/test_phase28_plugin_status.py's touch_sentinel."""
+    os.makedirs(markers_ready_dir, exist_ok=True)
+    path = os.path.join(markers_ready_dir, name)
+    Path(path).touch()
+    ts = time.time() - age_seconds
+    os.utime(path, (ts, ts))
+    return path
+
+
+def _plugstat_registered_fixture(hermes_home):
+    """Mirrors tests/test_phase28_plugin_status.py's _registered_fixture."""
+    plugin_dir = os.path.join(hermes_home, 'plugins', 'revenium-classifier')
+    os.makedirs(plugin_dir, exist_ok=True)
+    with open(os.path.join(hermes_home, 'config.yaml'), 'w') as f:
+        f.write('plugins:\n  enabled:\n    - revenium-classifier\n')
+
+
+def _plugstat_env(hermes_home, state_dir, status_file):
+    return {
+        **os.environ,
+        'HERMES_HOME': hermes_home,
+        'REVENIUM_STATE_DIR': state_dir,
+        'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+        'REVENIUM_CRON_SETTLE_SECONDS': str(PLUGIN_SETTLE_SECONDS),
+    }
+
+
+class PluginStatusQuietModeTests(unittest.TestCase):
+    def test_no_flag_run_still_emits_markers_on_stdout(self):
+        """Regression the 281 pre-existing tests depend on: a no-flag
+        invocation must be byte-identical to pre-fix behavior."""
+        tmp = tempfile.mkdtemp(prefix='gsd-wnz-plugstat-noflag-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = _plugstat_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            _plugstat_registered_fixture(hermes_home)
+            env = _plugstat_env(hermes_home, state_dir, status_file)
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('PLUGIN_HEALTHY=true', result.stdout)
+            self.assertIn('Revenium plugin registration status', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_quiet_healthy_unchanged_second_tick_is_silent(self):
+        tmp = tempfile.mkdtemp(prefix='gsd-wnz-plugstat-quiet-unchanged-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = _plugstat_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            _plugstat_registered_fixture(hermes_home)
+            env = _plugstat_env(hermes_home, state_dir, status_file)
+
+            r1 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh'), '--quiet-unchanged'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(r1.returncode, 0, r1.stdout + r1.stderr)
+            # First-ever tick: no previous document existed -> state changed
+            # -> prints even under the quiet flag.
+            self.assertIn('Revenium plugin registration status', r1.stdout)
+
+            r2 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh'), '--quiet-unchanged'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+            self.assertEqual(
+                r2.stdout, '',
+                f'second unchanged healthy quiet tick must be silent: {r2.stdout!r}',
+            )
+            data = json.loads(Path(status_file).read_text())
+            self.assertTrue(
+                data['healthy'], 'status file must still be refreshed under quiet suppression',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_quiet_stalled_still_prints_and_exits_2(self):
+        tmp = tempfile.mkdtemp(prefix='gsd-wnz-plugstat-quiet-stalled-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = _plugstat_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            _plugstat_registered_fixture(hermes_home)
+            _plugstat_seed_db(hermes_home, [time.time() - (PLUGIN_SETTLE_SECONDS * 1.5)])
+            os.makedirs(os.path.join(state_dir, 'markers', '.ready'), exist_ok=True)
+            env = _plugstat_env(hermes_home, state_dir, status_file)
+
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh'), '--quiet-unchanged'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('Revenium plugin registration status', result.stdout)
+            self.assertIn('NOT firing', result.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_quiet_recovery_from_broken_still_prints(self):
+        tmp = tempfile.mkdtemp(prefix='gsd-wnz-plugstat-quiet-recovery-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = _plugstat_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            _plugstat_registered_fixture(hermes_home)
+            _plugstat_seed_db(hermes_home, [time.time() - (PLUGIN_SETTLE_SECONDS * 1.5)])
+            os.makedirs(os.path.join(state_dir, 'markers', '.ready'), exist_ok=True)
+            env = _plugstat_env(hermes_home, state_dir, status_file)
+
+            r1 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh'), '--quiet-unchanged'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(r1.returncode, 2, r1.stdout + r1.stderr)
+
+            markers_ready_dir = os.path.join(state_dir, 'markers', '.ready')
+            _plugstat_touch_sentinel(markers_ready_dir, 'sess-0', age_seconds=1)
+
+            r2 = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh'), '--quiet-unchanged'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+            self.assertIn(
+                'Revenium plugin registration status', r2.stdout,
+                'a broken -> healthy recovery tick must still print in full',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_quiet_first_tick_with_no_prior_status_file_prints(self):
+        tmp = tempfile.mkdtemp(prefix='gsd-wnz-plugstat-quiet-first-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = _plugstat_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            _plugstat_registered_fixture(hermes_home)
+            env = _plugstat_env(hermes_home, state_dir, status_file)
+
+            self.assertFalse(os.path.exists(status_file))
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh'), '--quiet-unchanged'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotEqual(result.stdout, '', 'first-ever tick (no prior doc) must print')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_unrecognized_extra_argument_does_not_change_exit_code(self):
+        tmp = tempfile.mkdtemp(prefix='gsd-wnz-plugstat-unknown-arg-')
+        try:
+            hermes_home = os.path.join(tmp, '.hermes')
+            scripts_dir = _plugstat_skill_tree(hermes_home)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            _plugstat_registered_fixture(hermes_home)
+            env = _plugstat_env(hermes_home, state_dir, status_file)
+
+            r_no_flag = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            r_unknown = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'plugin-status.sh'), '--some-unknown-flag'],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(r_no_flag.returncode, r_unknown.returncode)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
