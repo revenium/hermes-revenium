@@ -173,6 +173,15 @@ class CommonShDeclarationTests(unittest.TestCase):
             r'\$\{MARKERS_DIR\}/\.fallback-warn\}"',
         )
 
+    def test_log_rotation_tunables_declared_with_override_shape(self):
+        text = COMMON_SH.read_text()
+        self.assertRegex(
+            text, r'REVENIUM_LOG_MAX_BYTES="\$\{REVENIUM_LOG_MAX_BYTES:-\d+\}"',
+        )
+        self.assertRegex(
+            text, r'REVENIUM_LOG_KEEP_BYTES="\$\{REVENIUM_LOG_KEEP_BYTES:-\d+\}"',
+        )
+
 
 class FallbackWarnBoundingTests(unittest.TestCase):
     def test_repeat_tick_suppresses_per_session_warn(self):
@@ -573,6 +582,192 @@ class PluginStatusQuietModeTests(unittest.TestCase):
             self.assertEqual(r_no_flag.returncode, r_unknown.returncode)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 -- in-place log rotation
+# ---------------------------------------------------------------------------
+
+def _source_common_script(hermes_home, state_dir, extra_env_lines=''):
+    return (
+        f'export HERMES_HOME={hermes_home!r}\n'
+        f'export REVENIUM_STATE_DIR={state_dir!r}\n'
+        f'{extra_env_lines}'
+        f'source {str(COMMON_SH)!r}\n'
+    )
+
+
+class LogRotationTests(unittest.TestCase):
+    def test_oversized_log_rotates_in_place_preserving_tail_and_inode(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-wnz-rotate-big-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+
+            lines = [f'line-{i:04d} ' + ('x' * 10) for i in range(200)]
+            with open(log_file, 'w') as f:
+                f.write('\n'.join(lines) + '\n')
+            original_size = os.path.getsize(log_file)
+            original_ino = os.stat(log_file).st_ino
+
+            max_bytes = original_size // 2
+            keep_bytes = max_bytes // 4
+
+            script = _source_common_script(
+                hermes_home, state_dir,
+                f'export REVENIUM_LOG_MAX_BYTES={max_bytes!r}\n'
+                f'export REVENIUM_LOG_KEEP_BYTES={keep_bytes!r}\n',
+            ) + 'rotate_log_if_needed "${LOG_FILE}"\n'
+
+            result = subprocess.run(
+                ['bash', '-c', script], capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            new_size = os.path.getsize(log_file)
+            new_ino = os.stat(log_file).st_ino
+            self.assertLessEqual(new_size, max_bytes)
+            self.assertEqual(new_ino, original_ino, 'inode must survive rotation')
+
+            content = Path(log_file).read_text()
+            self.assertIn('line-0199', content, 'last original line must survive')
+            self.assertNotIn('line-0000 ', content, 'first original line must be gone')
+            first_line = content.splitlines()[0]
+            self.assertTrue(
+                first_line.startswith('line-'),
+                f'retained content must start on a whole line, got: {first_line!r}',
+            )
+            self.assertIn('truncated in place', content)
+
+    def test_undersized_log_untouched(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-wnz-rotate-small-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+            content = 'small log content\n' * 5
+            with open(log_file, 'w') as f:
+                f.write(content)
+            original_size = os.path.getsize(log_file)
+            original_ino = os.stat(log_file).st_ino
+
+            script = _source_common_script(
+                hermes_home, state_dir,
+                'export REVENIUM_LOG_MAX_BYTES=999999999\n'
+                'export REVENIUM_LOG_KEEP_BYTES=1000\n',
+            ) + 'rotate_log_if_needed "${LOG_FILE}"\n'
+
+            result = subprocess.run(
+                ['bash', '-c', script], capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(os.path.getsize(log_file), original_size)
+            self.assertEqual(os.stat(log_file).st_ino, original_ino)
+            self.assertEqual(Path(log_file).read_text(), content)
+
+    def test_missing_target_and_malformed_override_are_noop(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-wnz-rotate-missing-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+
+            # Missing target -> no-op, returns 0, creates nothing.
+            script = _source_common_script(hermes_home, state_dir) + (
+                'rotate_log_if_needed "${LOG_FILE}"; echo "EXIT=$?"\n'
+            )
+            result = subprocess.run(
+                ['bash', '-c', script], capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('EXIT=0', result.stdout)
+            self.assertFalse(os.path.exists(log_file), 'missing target must create nothing')
+
+            # Malformed override -> no-op even against an oversized file.
+            with open(log_file, 'w') as f:
+                f.write('x' * 1000 + '\n')
+            original_size = os.path.getsize(log_file)
+            script2 = _source_common_script(
+                hermes_home, state_dir,
+                'export REVENIUM_LOG_MAX_BYTES=notanumber\n'
+                'export REVENIUM_LOG_KEEP_BYTES=100\n',
+            ) + 'rotate_log_if_needed "${LOG_FILE}"; echo "EXIT=$?"\n'
+            result2 = subprocess.run(
+                ['bash', '-c', script2], capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result2.returncode, 0, result2.stderr)
+            self.assertIn('EXIT=0', result2.stdout)
+            self.assertEqual(
+                os.path.getsize(log_file), original_size, 'malformed override must not rotate',
+            )
+
+    def test_keep_size_not_strictly_less_than_max_is_noop(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-wnz-rotate-keep-ge-max-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+            with open(log_file, 'w') as f:
+                f.write('x' * 1000 + '\n')
+            original_size = os.path.getsize(log_file)
+
+            script = _source_common_script(
+                hermes_home, state_dir,
+                'export REVENIUM_LOG_MAX_BYTES=100\n'
+                'export REVENIUM_LOG_KEEP_BYTES=100\n',
+            ) + 'rotate_log_if_needed "${LOG_FILE}"; echo "EXIT=$?"\n'
+            result = subprocess.run(
+                ['bash', '-c', script], capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('EXIT=0', result.stdout)
+            self.assertEqual(os.path.getsize(log_file), original_size)
+
+    def test_info_call_after_rotation_appends_readable_line(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-wnz-rotate-append-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, exist_ok=True)
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+            with open(log_file, 'w') as f:
+                f.write(('x' * 2000 + '\n') * 5)
+
+            script = _source_common_script(
+                hermes_home, state_dir,
+                'export REVENIUM_LOG_MAX_BYTES=1000\n'
+                'export REVENIUM_LOG_KEEP_BYTES=200\n',
+            ) + 'rotate_log_if_needed "${LOG_FILE}"\ninfo "post-rotation-marker"\n'
+
+            result = subprocess.run(
+                ['bash', '-c', script], capture_output=True, text=True, timeout=15,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            content = Path(log_file).read_text()
+            self.assertIn('post-rotation-marker', content)
+
+    def test_cron_sh_exits_zero_with_only_common_and_cron_present(self):
+        """Mirrors tests/test_repository.py's cron loop test shape (copies
+        ONLY common.sh and cron.sh into the scratch tree) -- rotate_log_if_needed
+        must resolve from common.sh alone, with no other script dependency."""
+        with tempfile.TemporaryDirectory(prefix='gsd-wnz-cron-rotate-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            scripts_dir = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(state_dir, exist_ok=True)
+            os.makedirs(scripts_dir, exist_ok=True)
+            shutil.copy(str(COMMON_SH), scripts_dir)
+            shutil.copy(str(CRON_SH), scripts_dir)
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+            }
+            result = subprocess.run(
+                ['bash', os.path.join(scripts_dir, 'cron.sh')],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, f'{result.stdout}\n{result.stderr}')
 
 
 if __name__ == '__main__':

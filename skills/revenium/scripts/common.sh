@@ -75,6 +75,15 @@ REVENIUM_PAGE_BATCH_SIZE="${REVENIUM_PAGE_BATCH_SIZE:-500}"
 # cross-process plugin-health contract that lets the reporter's trace-type
 # fallback distinguish a registration outage from an unclassified session.
 PLUGIN_STATUS_FILE="${REVENIUM_PLUGIN_STATUS_FILE:-${STATE_DIR}/plugin-status.json}"
+# quick-260813-wnz (LOG-03/D-04): bound the per-profile metering log
+# (LOG_FILE). There was no rotation anywhere and one profile's log reached
+# 646 MB. 50 MiB (52428800 bytes) is the size at which rotate_log_if_needed
+# (below) truncates IN PLACE, keeping the last 10 MiB (10485760 bytes) --
+# never renaming or unlinking, since cron's `>> "${LOG_FILE}" 2>&1` append fd
+# (install-cron.sh) is opened for the whole tick and would strand on a
+# renamed/unlinked inode.
+REVENIUM_LOG_MAX_BYTES="${REVENIUM_LOG_MAX_BYTES:-52428800}"
+REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-10485760}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
@@ -118,6 +127,80 @@ log() {
 info()  { log "INFO " "$@"; }
 warn()  { log "WARN " "$@"; }
 error() { log "ERROR" "$@"; }
+
+# quick-260813-wnz (LOG-03/D-04): bound a metering log file to
+# REVENIUM_LOG_MAX_BYTES, truncating IN PLACE (never renaming, never
+# unlinking, never creating a `.1` sibling) so cron's `>> "${LOG_FILE}" 2>&1`
+# append fd -- opened for the whole tick (install-cron.sh) -- keeps writing
+# to the LIVE file rather than an unlinked inode. Takes one optional
+# argument, the target path, defaulting to ${LOG_FILE}; the argument exists
+# so the out-of-tree fleet wrapper can point it at its own log without a
+# second implementation. Never fatal: every failure path (missing target,
+# malformed override, a keep size not strictly less than the max, an
+# unwritable target) degrades to a silent no-op returning 0 -- matching
+# ensure_path's never-fatal contract.
+rotate_log_if_needed() {
+  local target="${1:-${LOG_FILE}}"
+  local rotate_output
+  rotate_output=$(
+    ROTATE_TARGET="${target}" \
+    ROTATE_MAX_BYTES="${REVENIUM_LOG_MAX_BYTES}" \
+    ROTATE_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES}" \
+    python3 - <<'PY' 2>/dev/null
+import os
+
+target = os.environ.get('ROTATE_TARGET', '')
+
+try:
+    max_bytes = int(os.environ.get('ROTATE_MAX_BYTES', ''))
+    keep_bytes = int(os.environ.get('ROTATE_KEEP_BYTES', ''))
+except (TypeError, ValueError):
+    raise SystemExit(0)
+
+if keep_bytes >= max_bytes:
+    raise SystemExit(0)
+
+if not target:
+    raise SystemExit(0)
+
+try:
+    original_size = os.path.getsize(target)
+except OSError:
+    raise SystemExit(0)
+
+if original_size <= max_bytes:
+    raise SystemExit(0)
+
+try:
+    with open(target, 'r+b') as f:
+        f.seek(original_size - keep_bytes)
+        # Discard one partial line so the retained content starts on a
+        # whole line -- never mid-line.
+        f.readline()
+        remainder = f.read()
+        f.seek(0)
+        f.write(remainder)
+        f.truncate()
+    print(f"ROTATED_FROM={original_size}")
+    print(f"ROTATED_RETAINED={len(remainder)}")
+except OSError:
+    raise SystemExit(0)
+PY
+  ) || true
+
+  if [[ -n "${rotate_output}" ]]; then
+    local rotated_from rotated_retained
+    rotated_from=$(echo "${rotate_output}" | sed -n 's/^ROTATED_FROM=//p' | head -1)
+    rotated_retained=$(echo "${rotate_output}" | sed -n 's/^ROTATED_RETAINED=//p' | head -1)
+    if [[ "${rotated_from}" =~ ^[0-9]+$ ]]; then
+      # Lands as the first entry appended AFTER truncation -- ahead of
+      # whatever else this tick's scripts log next -- making the
+      # truncation self-documenting.
+      info "rotate_log_if_needed: ${target} exceeded ${REVENIUM_LOG_MAX_BYTES} bytes (was ${rotated_from}) — truncated in place, retained last ${rotated_retained} bytes"
+    fi
+  fi
+  return 0
+}
 
 # Phase 17 (D-10..D-13): two-subcommand probe for v1.3 guardrails CLI capability.
 # Returns 0 if both subcommand families exist, non-zero otherwise (fail-open).

@@ -36,6 +36,12 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +o allexport
 fi
 
+# quick-260813-wnz (LOG-03): there was no rotation anywhere and one profile's
+# log reached 646 MB. Rotate once per tick, after ENV_FILE overrides apply
+# and while cron.lock is still held above (serializes against a concurrent
+# tick). No `|| true` needed -- the helper returns 0 unconditionally.
+rotate_log_if_needed "${LOG_FILE}"
+
 # Optional sub-minute looping. Default REVENIUM_CRON_LOOP_COUNT=1 preserves
 # the historical "fire once per cron tick" behavior; demos / dashboards that
 # want metrics in Revenium faster than 60s set both knobs (install-cron.sh
