@@ -18,6 +18,15 @@ MARKERS_DIR="${REVENIUM_MARKERS_DIR:-${STATE_DIR}/markers}"
 MARKERS_READY_DIR="${REVENIUM_MARKERS_READY_DIR:-${STATE_DIR}/markers/.ready}"
 # Phase 19 (D-06): warn-band rate-limit sentinel directory (markers/.warn); zero-byte flag files per (session, ruleId).
 WARN_FLAGS_DIR="${REVENIUM_WARN_FLAGS_DIR:-${MARKERS_DIR}/.warn}"
+# quick-260813-wnz (LOG-01/D-01): once-per-(session, reason) sentinel directory
+# for hermes-report.sh's trace-type fallback WARN (markers/.fallback-warn).
+# Mirrors WARN_FLAGS_DIR above byte-for-byte: one zero-byte flag file per
+# (session, reason), created lazily by its writer (deliberately absent from
+# the eager `mkdir -p` below, same as WARN_FLAGS_DIR). Measured motivation:
+# without this gate, an ended session that can never acquire a job
+# classification re-warned once per minute forever -- 9,039,937 lines
+# fleet-wide, 98.2% of one 646 MB log, in 27 days.
+FALLBACK_WARN_FLAGS_DIR="${REVENIUM_FALLBACK_WARN_FLAGS_DIR:-${MARKERS_DIR}/.fallback-warn}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 MARKER_RETENTION_DAYS="${REVENIUM_MARKER_RETENTION_DAYS:-30}"
 PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
@@ -66,6 +75,21 @@ REVENIUM_PAGE_BATCH_SIZE="${REVENIUM_PAGE_BATCH_SIZE:-500}"
 # cross-process plugin-health contract that lets the reporter's trace-type
 # fallback distinguish a registration outage from an unclassified session.
 PLUGIN_STATUS_FILE="${REVENIUM_PLUGIN_STATUS_FILE:-${STATE_DIR}/plugin-status.json}"
+# quick-260813-wnz (LOG-03/D-04): bound the per-profile metering log
+# (LOG_FILE). There was no rotation anywhere and one profile's log reached
+# 646 MB. 50 MiB (52428800 bytes) is the size at which rotate_log_if_needed
+# (below) truncates IN PLACE, keeping the last 2 MiB (2097152 bytes) --
+# never renaming or unlinking, since cron's `>> "${LOG_FILE}" 2>&1` append fd
+# (install-cron.sh) is opened for the whole tick and would strand on a
+# renamed/unlinked inode.
+#
+# KEEP_BYTES is 2 MiB rather than 10 MiB deliberately: it is the size of the
+# in-place rewrite, and the rewrite's duration IS the window of the known
+# race documented on rotate_log_if_needed below. Measured on a 59 MB log:
+# 10 MiB keep => 68-223 ms rewrite; 2 MiB keep cuts that several-fold. 2 MiB
+# still retains ~20k log lines, far more than any diagnostic needs.
+REVENIUM_LOG_MAX_BYTES="${REVENIUM_LOG_MAX_BYTES:-52428800}"
+REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-2097152}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
 
@@ -109,6 +133,111 @@ log() {
 info()  { log "INFO " "$@"; }
 warn()  { log "WARN " "$@"; }
 error() { log "ERROR" "$@"; }
+
+# quick-260813-wnz (LOG-03/D-04): bound a metering log file to
+# REVENIUM_LOG_MAX_BYTES, truncating IN PLACE (never renaming, never
+# unlinking, never creating a `.1` sibling) so cron's `>> "${LOG_FILE}" 2>&1`
+# append fd -- opened for the whole tick (install-cron.sh) -- keeps writing
+# to the LIVE file rather than an unlinked inode. Takes one optional
+# argument, the target path, defaulting to ${LOG_FILE}; the argument exists
+# so the out-of-tree fleet wrapper can point it at its own log without a
+# second implementation. Never fatal: every failure path (missing target,
+# malformed override, a keep size not strictly less than the max, an
+# unwritable target) degrades to a silent no-op returning 0 -- matching
+# ensure_path's never-fatal contract.
+#
+# KNOWN RACE, accepted deliberately -- read this before "fixing" it.
+# The rewrite below reads the retained tail, writes it at offset 0, then
+# truncates. A process appending in that window writes at the OLD end of file
+# (O_APPEND targets current EOF), and the truncate then discards those bytes.
+# Such an append is silently lost.
+#
+# Measured exposure at these defaults on a 59 MB log: a 68-223 ms window with
+# 10 MiB keep (hence the 2 MiB keep above, which cuts it several-fold), during
+# which ~0.4-1.8% of a concurrent append storm was dropped. Bounded further by:
+#   * it only fires when the log crosses REVENIUM_LOG_MAX_BYTES -- roughly once
+#     every two months per profile at the post-quick-260813-wnz growth rate;
+#   * cron.sh calls this while holding LOCK_FILE, and the reporter/guardrail/
+#     tool-event children of that same tick log AFTER it returns, so they are
+#     never exposed. Only a SEPARATELY invoked script (a human running
+#     `bash hermes-report.sh` by hand) can hit it;
+#   * only log lines are at risk. The ledger, the metering argv, and
+#     idempotency are all untouched by rotation.
+#
+# Two fixes were evaluated and rejected:
+#   1. Absorb the race by re-reading anything appended past original_size until
+#      the file stops growing. IMPLEMENTED AND MEASURED: no effect (old 2686/
+#      2655/2367 vs new 2640/2764/2542 lines surviving -- indistinguishable).
+#      The dominant window is the WRITE, which happens after any such settle
+#      check, so the loop covers the wrong phase. Do not re-attempt this.
+#   2. Exclude appenders with a lock. `log()` appends with a bare `>>` from
+#      every script, so this needs flock(1) per log line -- a subprocess per
+#      line, which directly undoes quick-260814-e7c's spawn reduction.
+# A real fix means making the standalone entry points take LOCK_FILE, which
+# changes their semantics (a manual run would skip/block during a live tick).
+# That is a deliberate design change, not a patch to this function.
+rotate_log_if_needed() {
+  local target="${1:-${LOG_FILE}}"
+  local rotate_output
+  rotate_output=$(
+    ROTATE_TARGET="${target}" \
+    ROTATE_MAX_BYTES="${REVENIUM_LOG_MAX_BYTES}" \
+    ROTATE_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES}" \
+    python3 - <<'PY' 2>/dev/null
+import os
+
+target = os.environ.get('ROTATE_TARGET', '')
+
+try:
+    max_bytes = int(os.environ.get('ROTATE_MAX_BYTES', ''))
+    keep_bytes = int(os.environ.get('ROTATE_KEEP_BYTES', ''))
+except (TypeError, ValueError):
+    raise SystemExit(0)
+
+if keep_bytes >= max_bytes:
+    raise SystemExit(0)
+
+if not target:
+    raise SystemExit(0)
+
+try:
+    original_size = os.path.getsize(target)
+except OSError:
+    raise SystemExit(0)
+
+if original_size <= max_bytes:
+    raise SystemExit(0)
+
+try:
+    with open(target, 'r+b') as f:
+        f.seek(original_size - keep_bytes)
+        # Discard one partial line so the retained content starts on a
+        # whole line -- never mid-line.
+        f.readline()
+        remainder = f.read()
+        f.seek(0)
+        f.write(remainder)
+        f.truncate()
+    print(f"ROTATED_FROM={original_size}")
+    print(f"ROTATED_RETAINED={len(remainder)}")
+except OSError:
+    raise SystemExit(0)
+PY
+  ) || true
+
+  if [[ -n "${rotate_output}" ]]; then
+    local rotated_from rotated_retained
+    rotated_from=$(echo "${rotate_output}" | sed -n 's/^ROTATED_FROM=//p' | head -1)
+    rotated_retained=$(echo "${rotate_output}" | sed -n 's/^ROTATED_RETAINED=//p' | head -1)
+    if [[ "${rotated_from}" =~ ^[0-9]+$ ]]; then
+      # Lands as the first entry appended AFTER truncation -- ahead of
+      # whatever else this tick's scripts log next -- making the
+      # truncation self-documenting.
+      info "rotate_log_if_needed: ${target} exceeded ${REVENIUM_LOG_MAX_BYTES} bytes (was ${rotated_from}) — truncated in place, retained last ${rotated_retained} bytes"
+    fi
+  fi
+  return 0
+}
 
 # Phase 17 (D-10..D-13): two-subcommand probe for v1.3 guardrails CLI capability.
 # Returns 0 if both subcommand families exist, non-zero otherwise (fail-open).

@@ -43,6 +43,42 @@ ensure_path
 PLUGIN_NAME="revenium-classifier"
 PLUGIN_DEST_DIR="${HERMES_HOME}/plugins/${PLUGIN_NAME}"
 
+# quick-260813-wnz (LOG-02/D-03): opt-in quiet mode -- ONLY cron.sh passes
+# --quiet-unchanged. A manual `bash plugin-status.sh` invocation (no flags)
+# stays byte-identical to pre-fix behavior, matching the operator docs that
+# instruct a human to run this script and read the banner
+# (references/trace-type-uncategorized.md, docs/live-host-verification-v1-2.md)
+# and tests/test_phase28_plugin_status.py's assertions on that stdout shape.
+# The default branch of this scan is a NO-OP, never an error: cron.sh
+# forwards its own positional args through this same invocation and this
+# script has always ignored them.
+QUIET_UNCHANGED=false
+for arg in "$@"; do
+  case "${arg}" in
+    --quiet-unchanged) QUIET_UNCHANGED=true ;;
+    *) ;;
+  esac
+done
+
+# Capture whether the REAL stdout is a terminal BEFORE any redirection,
+# mirroring common.sh's `[[ -t 2 ]]` "a human is watching" idiom.
+STDOUT_IS_TTY=false
+[[ -t 1 ]] && STDOUT_IS_TTY=true
+
+# quick-260813-wnz (LOG-02): buffer the entire banner into a temp file so a
+# quiet, unchanged, healthy cron tick can be suppressed without rewriting any
+# of the individual `echo` calls below. Save the real stdout onto fd 3, point
+# stdout at the buffer, and install an EXIT trap that always cleans it up
+# (holds regardless of which exit path below fires). Everything from here
+# through the close of the verdict tree (EXIT_CODE assignment) is buffered,
+# INCLUDING `echo "${STATUS_OUTPUT}"` -- command substitutions inside this
+# region capture their own stdout via their own pipe and are unaffected by
+# this outer redirect.
+PLUGIN_STATUS_BUFFER="$(mktemp "${STATE_DIR}/.plugin-status-buffer.XXXXXX" 2>/dev/null || mktemp)"
+trap 'rm -f "${PLUGIN_STATUS_BUFFER}"' EXIT
+exec 3>&1
+exec 1>"${PLUGIN_STATUS_BUFFER}"
+
 # (C) read_config_field helper — reads a scalar key from CONFIG_FILE via
 # Python. Mirrors guardrail-check.sh's helper of the same name (D-06 reuse),
 # but fails open to an empty string on a missing/corrupt CONFIG_FILE — unlike
@@ -331,7 +367,13 @@ liveness = os.environ['LIVENESS']
 def _load_prev():
     """Fail-open load of the previous document (matches guardrail-status.json's
     carry-forward idiom). A missing/corrupt file defaults prev_healthy to TRUE
-    so a fresh install never alerts on its very first tick."""
+    so a fresh install never alerts on its very first tick.
+
+    quick-260813-wnz (LOG-02): also returns the raw previous mapping (empty
+    dict when no document existed or it was corrupt) so callers can compute
+    the LOG-02 change decision from the RAW document -- prev_healthy's
+    defaulting-to-True semantics above are the fresh-install-never-alerts
+    rule and must not be reused for that decision."""
     prev = {}
     try:
         prev = json.loads(status_file.read_text(encoding='utf-8'))
@@ -340,7 +382,7 @@ def _load_prev():
     prev_healthy = prev.get('healthy', True)
     if not isinstance(prev_healthy, bool):
         prev_healthy = True
-    return prev_healthy, prev.get('brokenAt')
+    return prev_healthy, prev.get('brokenAt'), prev
 
 
 # WR-03 fix: the read-decide-write sequence below has no protection against
@@ -371,9 +413,13 @@ if lockfd is not None:
         got_lock = False
 
 if not got_lock:
-    prev_healthy, _ = _load_prev()
+    prev_healthy, _, _ = _load_prev()
     print(f"PLUGIN_HEALTHY={'true' if prev_healthy else 'false'}", file=sys.stdout)
     print("PLUGIN_BROKEN_TRANSITION=false", file=sys.stdout)
+    # quick-260813-wnz (LOG-02): when we did not get to decide (lock
+    # contention), we do not suppress -- hardcode changed=true so the
+    # bash-side gate below always prints on this branch.
+    print("PLUGIN_STATE_CHANGED=true", file=sys.stdout)
     print(
         "revenium-classifier plugin-status: lock contention, skipping this tick's write",
         file=sys.stderr,
@@ -386,7 +432,7 @@ if not got_lock:
     sys.exit(0)
 
 try:
-    prev_healthy, prev_broken_at = _load_prev()
+    prev_healthy, prev_broken_at, prev_doc = _load_prev()
 
     # Verdict table (D-06 contract, Plan 28-01): registered AND liveness not
     # 'stalled' is healthy. 'unknown' (stage 1 failed, stage 2 never ran) and
@@ -407,6 +453,18 @@ try:
     # this already-broken document and stays silent. This boolean is the ONLY
     # debounce mechanism — no separate rate-limit file.
     transition = (not healthy) and prev_healthy
+
+    # quick-260813-wnz (LOG-02/D-03): the change decision for the quiet-mode
+    # gate, computed HERE where the previous document is loaded (the only
+    # place it is read). True when no previous document existed at all
+    # (prev_doc == {}), otherwise true when any of healthy/registered/
+    # liveness differs from the previous document's value. Deliberately NOT
+    # derived from prev_healthy's defaulting-to-True semantics above -- that
+    # default exists so a fresh install never ALERTS, which is a different
+    # question from whether this tick's output CHANGED.
+    changed = (not prev_doc) or any(
+        prev_doc.get(k) != data[k] for k in ('healthy', 'registered', 'liveness')
+    )
 
     if not healthy:
         if prev_healthy:
@@ -435,6 +493,7 @@ try:
 
     print(f"PLUGIN_HEALTHY={'true' if healthy else 'false'}")
     print(f"PLUGIN_BROKEN_TRANSITION={'true' if transition else 'false'}")
+    print(f"PLUGIN_STATE_CHANGED={'true' if changed else 'false'}")
 finally:
     try:
         fcntl.flock(lockfd, fcntl.LOCK_UN)
@@ -450,6 +509,11 @@ PY
 echo "${STATUS_OUTPUT}"
 PLUGIN_HEALTHY=$(echo "${STATUS_OUTPUT}" | sed -n 's/^PLUGIN_HEALTHY=//p' | head -1)
 PLUGIN_BROKEN_TRANSITION=$(echo "${STATUS_OUTPUT}" | sed -n 's/^PLUGIN_BROKEN_TRANSITION=//p' | head -1)
+PLUGIN_STATE_CHANGED=$(echo "${STATUS_OUTPUT}" | sed -n 's/^PLUGIN_STATE_CHANGED=//p' | head -1)
+case "${PLUGIN_STATE_CHANGED}" in
+  true|false) ;;
+  *) PLUGIN_STATE_CHANGED=true ;;  # empty/unrecognized -- never suppress
+esac
 
 # --- 4. Verdict + actionable guidance --------------------------------------
 echo
@@ -468,6 +532,27 @@ elif [[ "${liveness}" == "stalled" ]]; then
 else
   echo "✓ Plugin is registered. Liveness: ${liveness}."
   EXIT_CODE=0
+fi
+
+# --- Restore stdout and gate the buffered banner (LOG-02/D-03) -------------
+# The buffered region closes here, at the close of the verdict tree (EXIT_CODE
+# now assigned). Restore the real stdout, then print the buffer UNLESS ALL of:
+# the quiet flag was passed, real stdout is not a terminal, the health marker
+# is true, the change marker is false, and the transition marker is false.
+# Any one of those failing means print everything. The transition-
+# notification block below writes only to the log helpers and to `hermes
+# chat` (never to this script's stdout), so its position relative to this
+# gate does not change its behavior -- it stays AFTER the restore so a future
+# stdout-emitting addition there is never silently swallowed by the buffer.
+exec 1>&3
+exec 3>&-
+
+if [[ "${QUIET_UNCHANGED}" == "true" && "${STDOUT_IS_TTY}" != "true" && \
+      "${PLUGIN_HEALTHY}" == "true" && "${PLUGIN_STATE_CHANGED}" != "true" && \
+      "${PLUGIN_BROKEN_TRANSITION}" != "true" ]]; then
+  : # suppressed: quiet cron tick, healthy, unchanged, no transition
+else
+  cat "${PLUGIN_STATUS_BUFFER}"
 fi
 
 # --- 5. Not-broken-to-broken transition notification (D-06, Task 2) --------

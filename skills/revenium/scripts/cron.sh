@@ -36,6 +36,12 @@ if [[ -f "${ENV_FILE}" ]]; then
   set +o allexport
 fi
 
+# quick-260813-wnz (LOG-03): there was no rotation anywhere and one profile's
+# log reached 646 MB. Rotate once per tick, after ENV_FILE overrides apply
+# and while cron.lock is still held above (serializes against a concurrent
+# tick). No `|| true` needed -- the helper returns 0 unconditionally.
+rotate_log_if_needed "${LOG_FILE}"
+
 # Optional sub-minute looping. Default REVENIUM_CRON_LOOP_COUNT=1 preserves
 # the historical "fire once per cron tick" behavior; demos / dashboards that
 # want metrics in Revenium faster than 60s set both knobs (install-cron.sh
@@ -82,7 +88,12 @@ PY
   # Phase 28 (D-04): refresh plugin-status.json in the same tick the reporter
   # reads it, so a registration outage is diagnosable within one cron cycle.
   # Alert-only (D-05) — never repairs, never restarts the gateway.
-  bash "${SKILL_DIR}/scripts/plugin-status.sh" "$@" || true
+  # quick-260813-wnz (LOG-02/D-03): --quiet-unchanged is cron-only opt-in --
+  # suppresses the ~11-line human banner on a healthy, unchanged tick. The
+  # banner alone produced 11,252 repetitions per line in a 150 MB fleet log,
+  # 11,139 of them the idle-host no-op. A manual `bash plugin-status.sh`
+  # invocation (no flag) is unaffected.
+  bash "${SKILL_DIR}/scripts/plugin-status.sh" --quiet-unchanged "$@" || true
   bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/guardrail-check.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true

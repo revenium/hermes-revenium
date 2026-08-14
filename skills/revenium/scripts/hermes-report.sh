@@ -273,6 +273,11 @@ PY
 
   local reported_count=0
   local skipped_count=0
+  # quick-260813-wnz (LOG-01/D-02): fed by a herestring (`done <<< "${sessions}"`
+  # at the loop's close below), NOT a pipe -- the loop body therefore runs in
+  # THIS shell, so a counter incremented inside it survives to the aggregate
+  # line near the end-of-run summary. A pipe would silently zero it.
+  local fallback_tick_count=0
 
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider; do
 
@@ -522,7 +527,28 @@ PY
         local safe_sid safe_root_sid
         safe_sid="${sid//[^A-Za-z0-9_:.-]/_}"
         safe_root_sid="${root_sid//[^A-Za-z0-9_:.-]/_}"
-        warn "trace-type fallback: reason=${fallback_reason} session=${safe_sid} root=${safe_root_sid}"
+
+        # quick-260813-wnz (LOG-01/D-01/D-02): count every fallback (warned
+        # or suppressed) for the per-tick aggregate below, then gate the
+        # per-session WARN to once per (session, reason) via a zero-byte
+        # flag file under FALLBACK_WARN_FLAGS_DIR -- mirrors
+        # pre_llm_call.sh's warn-band rate-limit idiom (WARN_FLAGS_DIR)
+        # byte-for-byte. Keying on (session, reason) means a reason
+        # TRANSITION creates a NEW flag filename and therefore warns once
+        # more -- that transition is the informative event and must not be
+        # swallowed. The vocabulary is closed at three literals, so a
+        # session can produce at most 3 lines for its entire life instead of
+        # one per minute forever.
+        ((fallback_tick_count++)) || true
+        local fallback_flag="${FALLBACK_WARN_FLAGS_DIR}/${safe_sid}__${fallback_reason}.flag"
+        if [[ ! -e "${fallback_flag}" ]]; then
+          # Tolerate a failed flag creation (e.g. a read-only state dir)
+          # without aborting: this script runs `set -uo pipefail` without
+          # `-e`, and a read-only state directory must degrade to today's
+          # every-tick warn rather than crash the reporter.
+          mkdir -p "${FALLBACK_WARN_FLAGS_DIR}" 2>/dev/null && touch "${fallback_flag}" 2>/dev/null
+          warn "trace-type fallback: reason=${fallback_reason} session=${safe_sid} root=${safe_root_sid}"
+        fi
       fi
     fi
 
@@ -1720,6 +1746,15 @@ PY
         warn "outcome failed: id=${outcome_id} exit=${outcome_cmd_exit} — retries next tick"
       fi
     done
+  fi
+
+  # quick-260813-wnz (LOG-01/D-02): one aggregate line per tick when the
+  # fallback count is non-zero; silent when zero. Per-session detail is
+  # gated to once-per-(session, reason) above (FALLBACK_WARN_FLAGS_DIR) --
+  # this line is what keeps the backlog-size signal alive despite that gate,
+  # rather than trading the per-tick spam for total silence.
+  if [[ "${fallback_tick_count}" -gt 0 ]]; then
+    info "trace-type fallback: ${fallback_tick_count} session(s) resolved to the fallback this tick (per-session detail logged once per session+reason, not every tick)"
   fi
 
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="
