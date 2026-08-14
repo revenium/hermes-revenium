@@ -55,11 +55,13 @@ HERMES_REPORT = SKILL / 'scripts' / 'hermes-report.sh'
 REAL_PYTHON3 = sys.executable
 
 # Measured spawn ceiling for a no-marker, first-tick session against THIS
-# committed script. Task 1 alone measured 14 (H5 guard only); re-measured and
-# lowered here now that H2/H3/H4 also guard their heredocs (13 -- Task 3
-# lowers this further to 12 once the root-markers-dir resolution is also
-# memoized for top-level sessions).
-NO_MARKER_SPAWN_CEILING = 13
+# committed script (macOS, Python 3.x stdlib subprocess). Task 1 alone
+# measured 14 (H5 guard only); Task 2 lowered it to 13 (H2/H3/H4 landed);
+# Task 3's root-markers-dir memoization for top-level sessions (PERF-02)
+# lowers it once more, to 12. Locking a ceiling (rather than only the
+# relational property below) catches a future edit that adds an
+# unconditional spawn to the hot path without also lowering this constant.
+NO_MARKER_SPAWN_CEILING = 12
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):
@@ -357,6 +359,87 @@ class SpawnCeilingTests(unittest.TestCase):
                 f'spawn was added to the hot path, or the ceiling needs '
                 f're-measuring downward after a further guard landed',
             )
+
+
+class GuardPermanenceTests(unittest.TestCase):
+    """Task 3 Part B -- each guard literal must precede, and stay near, the
+    heredoc anchor it guards, using the same `src.index(...)` ordering idiom
+    as tests/test_phase28_reason_codes.py's health-read-ordering assertion.
+
+    Guard -> mirrored Python predicate (documented here so a future editor
+    reading a failure learns why `-f` vs `-e` vs `-s` matters):
+      H5: `-f` mirrors `marker_path.is_file()` (WR-02 job-marker scan).
+      H2: `-e` mirrors `marker_path.exists()` (trace-type / marker-state).
+      H3: `-s` mirrors the plugin-health heredoc's fail-open-on-exception
+          body (covers missing / empty-string / zero-byte, unlike `-f`).
+      H4: `-e` mirrors `marker_path.exists()` (root agentic-job id,
+          subagent-only).
+    """
+
+    GUARD_PAIRS = (
+        (
+            'H5',
+            'JOBS_CLI_CAPABLE}" == "true" && -f "${session_markers_dir}/${sid}.jsonl"',
+            "MARKERS_DIR=\"${session_markers_dir}\" \\",
+            4000,
+        ),
+        (
+            'H2',
+            'if [[ -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then',
+            "ROOT_SID=\"${root_sid}\" MARKERS_DIR=\"${root_markers_dir}\" python3 - <<'PY' 2>/dev/null\nimport json, os\nfrom pathlib import Path\nroot_sid = os.environ.get('ROOT_SID', '')\nmarkers_dir = os.environ.get('MARKERS_DIR', '')\nlatest_type",
+            2000,
+        ),
+        (
+            'H3',
+            'if [[ -s "${PLUGIN_STATUS_FILE}" ]]; then',
+            'plugin_healthy_check=$(',
+            1000,
+        ),
+        (
+            'H4',
+            'root_sid}" != "${sid}" && -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then',
+            "ROOT_SID=\"${root_sid}\" MARKERS_DIR=\"${root_markers_dir}\" python3 - <<'PY' 2>/dev/null || true\nimport json, os\nfrom pathlib import Path\nroot_sid = os.environ.get('ROOT_SID', '')\nmarkers_dir = os.environ.get('MARKERS_DIR', '')\nif not root_sid or not markers_dir:",
+            1500,
+        ),
+    )
+
+    def test_each_guard_precedes_and_is_near_its_heredoc_anchor(self):
+        src = HERMES_REPORT.read_text(encoding='utf-8')
+        for name, guard_literal, heredoc_anchor, max_window in self.GUARD_PAIRS:
+            guard_idx = src.index(guard_literal)
+            anchor_idx = src.index(heredoc_anchor)
+            self.assertLess(
+                guard_idx, anchor_idx,
+                f'{name}: guard literal must precede its heredoc anchor',
+            )
+            self.assertLess(
+                anchor_idx - guard_idx, max_window,
+                f'{name}: guard literal is too far from its heredoc anchor '
+                f'({anchor_idx - guard_idx} chars) -- likely guarding the '
+                f'wrong heredoc',
+            )
+
+    def test_h1_already_guarded_heredoc_untouched(self):
+        """H1 (root_agent_output) was already guarded before this plan
+        (Phase 29) -- this plan must not touch it."""
+        src = HERMES_REPORT.read_text(encoding='utf-8')
+        self.assertIn(
+            'if [[ -f "${root_markers_dir}/${root_sid}.jsonl" ]]; then',
+            src,
+        )
+
+    def test_root_markers_dir_memoized_for_top_level_sessions(self):
+        """Task 3 Part A (PERF-02, severable) -- for a top-level session
+        (root_sid == sid), root_markers_dir must be assigned directly from
+        session_markers_dir rather than re-resolved via a second
+        resolve_markers_dir call. Both call sites must remain present in the
+        file (T-28-34's exact-count invariant)."""
+        src = HERMES_REPORT.read_text(encoding='utf-8')
+        self.assertIn('root_markers_dir="${session_markers_dir}"', src)
+        self.assertEqual(
+            src.count('resolve_markers_dir'), 2,
+            'exactly two resolve_markers_dir call sites must remain (T-28-34)',
+        )
 
 
 if __name__ == '__main__':

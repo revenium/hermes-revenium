@@ -316,8 +316,24 @@ PY
     local session_markers_dir root_markers_dir
     session_markers_dir="$(resolve_markers_dir "${sid}")"
     [[ -z "${session_markers_dir}" ]] && session_markers_dir="${MARKERS_DIR}"
-    root_markers_dir="$(resolve_markers_dir "${root_sid}")"
-    [[ -z "${root_markers_dir}" ]] && root_markers_dir="${MARKERS_DIR}"
+    if [[ "${root_sid}" == "${sid}" ]]; then
+      # quick-260814-e7c (PERF-02): the resolver two lines up is a pure
+      # function of its sid argument plus process env and one
+      # profile_home.is_dir() stat (resolve-markers-dir.py) -- two calls with
+      # the identical argument microseconds apart in the same loop iteration
+      # return the identical string. For a top-level session (root_sid ==
+      # sid, the majority) the call in the else branch below would recompute
+      # a value already in hand two lines up, so memoize instead of spawning
+      # a second python3. Dropping the `[[ -z ]]` belt here is safe because
+      # session_markers_dir was already pinned non-empty on the line above.
+      # Both resolver call sites remain present in this file (T-28-34's
+      # exact-count invariant on the identifier is unaffected — this is a
+      # conditional route to one OR the other call, not a removal of either).
+      root_markers_dir="${session_markers_dir}"
+    else
+      root_markers_dir="$(resolve_markers_dir "${root_sid}")"
+      [[ -z "${root_markers_dir}" ]] && root_markers_dir="${MARKERS_DIR}"
+    fi
 
     # Phase 29 (SQUAD-02 / D-03): resolve root_agent_name ONCE per session,
     # independent of TRACE_TYPE_CLI_CAPABLE — --squad-name (and, in Plan
