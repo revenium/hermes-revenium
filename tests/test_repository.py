@@ -127,6 +127,9 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'docs' / 'migration-guardrails.md',
             # Phase 29 Plan 03 — AGENT-03 operator note (no-observable-change + squad flags)
             ROOT / 'docs' / 'migration-agent-dimension.md',
+            # Phase 31 — sizing-gate verdict and evidence, committed so it survives
+            # deletion of the gitignored planning tree (AUX-06, D-04)
+            ROOT / 'docs' / 'auxiliary-usage-sizing.md',
             # Phase 20 — COMPAT-01 golden-argv wire-shape fixtures (D-01..D-04)
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
