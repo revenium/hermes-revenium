@@ -82,6 +82,12 @@ When uncertain whether to mint or reuse, mint a new specific label rather than c
 a bland catch-all. Catch-alls to avoid when a more specific label fits: `generation`, `analysis`,
 `review`, `task`.
 
+These four are deliberately **absent from the seed file**. Seeding a catch-all contradicts the
+mint-first policy above: the prompt tells the classifier to avoid emitting them while the seed
+offers them as reusable vocabulary. The seed shipped 2026-05-12 under the earlier closed-set
+design ("pick the best-fitting label"); the 2026-05-14 mint-first rewrite superseded that model
+but the seed was never revisited. Do not re-add them.
+
 Minting process: choose a snake_case name matching the regex above; the classifier plugin
 persists the new entry to `${TAXONOMY_FILE}` automatically via the atomic write pattern below
 before the marker is written.
@@ -141,39 +147,8 @@ taking action. The turn output is primarily knowledge, not a produced artifact.
 Examples: "find all usages of X", "what does this API return"
 
 Disambiguation: if the turn moves beyond gathering into diagnosing a specific problem or
-profiling system behavior, prefer `analysis`.
-
-### analysis
-
-Use `analysis` when the turn diagnoses a problem, profiles system behavior, or characterizes
-how a system works based on evidence. The turn output is a finding or characterization, not
-a fix or new artifact.
-
-Examples: "why is this test failing", "trace the data flow for X"
-
-Disambiguation: if the turn is primarily reading docs or searching for background information,
-prefer `research`. If the turn results in a concrete fix, prefer `debugging`.
-
-### generation
-
-Use `generation` when the turn produces new code, tests, configuration, or documentation from
-scratch. The turn output is a new artifact that did not previously exist.
-
-Examples: "write a function that does X", "add tests for module Y"
-
-Disambiguation: if the turn modifies existing code without changing behavior, prefer `refactor`.
-If the turn produces a plan or design doc rather than runnable code, prefer `planning`.
-
-### review
-
-Use `review` when the turn evaluates existing work — documents, designs, plans, pull requests,
-or diffs — for correctness or fit. The subject of review is not exclusively code.
-
-Examples: "review this PR", "does this doc make sense"
-
-Disambiguation: when the review is specifically of code (functions, diffs, architecture), prefer
-`code_review`. When the subject is a design document, specification, or prose document, use
-`review`.
+profiling system behavior, mint a specific label for that diagnosis (e.g.
+`slow_query_profiling`) rather than reusing `research`.
 
 ### code_review
 
@@ -183,8 +158,8 @@ architectural decision — for correctness, style, or architectural fit.
 Examples: "review this function", "check this diff for bugs"
 
 Disambiguation: when the subject of review is a design document, runbook, or prose rather than
-code, prefer `review`. Both `review` and `code_review` involve reading existing work; the
-distinction is whether the subject is code.
+code, mint a specific label naming the artifact (e.g. `runbook_review`, `adr_review`).
+`code_review` is for code specifically — a function, a diff, a module, an architectural decision.
 
 ### refactor
 
@@ -194,7 +169,8 @@ The turn output is modified source code that is functionally equivalent to the o
 Examples: "extract this into a helper", "rename these variables"
 
 Disambiguation: if the turn changes behavior (fixes a bug, adds a feature), it is not a
-refactor. If the turn produces a new module from scratch, prefer `generation`.
+refactor. If the turn produces a new artifact from scratch, mint a specific label naming what
+was produced (e.g. `webhook_handler_impl`), not a generic one.
 
 ### planning
 
@@ -203,8 +179,9 @@ output is a structured description of future work, not the work itself.
 
 Examples: "break this into subtasks", "design the schema for X"
 
-Disambiguation: if the turn produces runnable code or configuration, prefer `generation`. If the
-turn evaluates an existing plan or design for correctness, prefer `review`.
+Disambiguation: if the turn produces runnable code or configuration, mint a specific label for
+what was built. If the turn evaluates an existing plan or design for correctness, mint a
+specific label naming the artifact reviewed (e.g. `migration_plan_review`).
 
 ### debugging
 
@@ -213,5 +190,6 @@ involves identifying the root cause of a failure and producing a correction.
 
 Examples: "this test fails intermittently", "fix this error"
 
-Disambiguation: if the turn identifies the cause without fixing it, prefer `analysis`. If the
-turn produces a new feature rather than correcting a defect, prefer `generation`.
+Disambiguation: if the turn identifies the cause without fixing it, mint a specific label for
+the diagnosis (e.g. `race_condition_diagnosis`). If the turn produces a new feature rather than
+correcting a defect, mint a specific label naming the feature.

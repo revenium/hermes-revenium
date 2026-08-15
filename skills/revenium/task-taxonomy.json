@@ -7,27 +7,6 @@
         "what does this API return"
       ]
     },
-    "analysis": {
-      "description": "Diagnosing a problem, profiling behavior, or characterizing a system",
-      "examples": [
-        "why is this test failing",
-        "trace the data flow for X"
-      ]
-    },
-    "generation": {
-      "description": "Writing new code, tests, configuration, or documentation from scratch",
-      "examples": [
-        "write a function that does X",
-        "add tests for module Y"
-      ]
-    },
-    "review": {
-      "description": "Reviewing existing work — docs, designs, or diffs — for correctness or fit",
-      "examples": [
-        "review this PR",
-        "does this doc make sense"
-      ]
-    },
     "code_review": {
       "description": "Reviewing code specifically for correctness, style, or architectural fit",
       "examples": [
