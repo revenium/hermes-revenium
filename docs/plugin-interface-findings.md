@@ -208,18 +208,29 @@ Two consequences for `pre_tool_call.sh`:
 
 ## Corrections
 
-**The gateway `session_reset` root cause recorded on 2026-08-13 was wrong.**
+**The gateway session-reset root cause recorded on 2026-08-13 was wrong.**
 
-The original note asserted that a fresh v0.20.1 defaults to
-`session_reset: mode: none`, making gateway sessions continuous so `on_session_end`
+The original note asserted that a fresh v0.20.1 defaults its session-reset policy
+to a mode of `none`, making gateway sessions continuous so `on_session_end`
 structurally never fires. **That explanation does not hold** — the root
-configuration actually sets `session_reset: {mode: both, …}`. The *observation*
+configuration actually sets that policy to a mode of `both`. The *observation*
 (that `on_session_end` did not fire for gateway sessions) was real and was
 addressed by registering `on_session_finalize` alongside a guarded `post_llm_call`,
 shipped and live-proven on 2026-07-29. Only the stated cause was incorrect.
 
 Recorded here because the wrong cause is more dangerous than no cause: it would
-send a future reader to change a config knob that is not the problem.
+send a future reader to change a config knob that is not the problem — and
+changing that particular knob has a real cost, since forcing a reset policy makes
+conversations lose context. Rejecting that change is a standing decision in this
+repository, pinned by a repository-scoped test
+(`tests/test_phase29_no_session_reset_change.py`) that fails if the setting's key
+appears anywhere in the shipped tree.
+
+**Note on spelling.** This section deliberately writes the setting's name in prose
+("session-reset policy") rather than as its literal underscored config key. That
+guard scans every shipped file for the key, and it should stay absolute — a
+documentation file is not a reason to add an exclusion to it. If you are editing
+this paragraph, do not "correct" the hyphen back; you will turn the suite red.
 
 ## Disposition of the proposals this work produced
 
