@@ -201,6 +201,30 @@ The gate is re-runnable from the SQL above, and the verdict recorded here is
 a measurement, not a policy — if fleet traffic composition changes
 materially, re-running the gate is a read-only exercise.
 
+## Independent confirmation
+
+Re-derived 2026-08-15: connected to the production fleet host read-only and
+ran the three queries above, verbatim, against each of the ten profiles' own
+session databases, then summed the results. Only `SELECT` statements were
+issued; nothing was written to any session database.
+
+**Cost share: 0.4598%** (unchanged from the gate read, still below the 1%
+threshold).
+
+| Metric | Original gate read | Independent re-derivation |
+|---|---|---|
+| Cost share | 0.4598% | 0.4598% |
+| Total cost | $137.62116203 | $137.62116203 |
+| Total tokens | 962,643,980 | 962,643,980 |
+| Auxiliary cost | $0.63284979 | $0.63284978 |
+| Auxiliary tokens | 1,003,215 | 1,003,215 |
+
+Consistent with the recorded gate measurement — the auxiliary-cost figure
+differs from the original by $0.00000001, a floating-point summation-order
+artifact of aggregating ten profiles' `REAL` columns in a different order,
+not a change in underlying data. Still well below the 1% threshold. The
+0.4598% gate figure above is the decision of record and is left unchanged.
+
 ## Verified against
 
 Date: 2026-08-15. Method: read-only SQL against ten metered profiles on a
