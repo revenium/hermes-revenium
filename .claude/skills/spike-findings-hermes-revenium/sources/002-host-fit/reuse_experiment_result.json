@@ -1,0 +1,38 @@
+{
+  "COLD": {
+    "seed_size": 4,
+    "labels": [
+      "settlement_id_int64_overflow",
+      "reconciliation_dedupe_bug",
+      "settlement_dedup_bug_root_cause",
+      "dedupe_key_int64_overflow"
+    ],
+    "reused": 0,
+    "minted_new": 4,
+    "distinct": 4
+  },
+  "WARM": {
+    "seed_size": 5,
+    "labels": [
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug"
+    ],
+    "reused": 4,
+    "minted_new": 0,
+    "distinct": 1
+  },
+  "HOT": {
+    "seed_size": 9,
+    "labels": [
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug"
+    ],
+    "reused": 4,
+    "minted_new": 0,
+    "distinct": 1
+  }
+}

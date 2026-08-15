@@ -539,9 +539,11 @@ See the mermaid diagram under "Architecture" above for the component and data-fl
 <!-- GSD:skills-start source:skills/ -->
 ## Project Skills
 
-No project skills found. Add skills to any of: `.claude/skills/`, `.agents/skills/`, `.cursor/skills/`, `.github/skills/`, or `.codex/skills/` with a `SKILL.md` index file.
+- **Spike findings for hermes-revenium** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-hermes-revenium")`
 
-Note: `skills/revenium/` is the *product* (a Hermes skill), not a Claude Code project skill, and `assistant-skill/revenium-install/` is a portable coding-assistant skill for install/verify/troubleshoot. Neither is discovered by the paths above.
+  Blueprint from the 2026-08-15 `portable-task-classifier` spikes: how to extract the classification core into a stdlib-only library without changing Hermes' behavior, what the label taxonomy actually does across hosts, and where classification must sit relative to a request path. Lives at `.claude/skills/spike-findings-hermes-revenium/`.
+
+Note: `skills/revenium/` is the *product* (a Hermes skill), not a Claude Code project skill, and `assistant-skill/revenium-install/` is a portable coding-assistant skill for install/verify/troubleshoot. Neither is discovered as a project skill.
 <!-- GSD:skills-end -->
 
 <!-- GSD:workflow-start source:GSD defaults -->
