@@ -1,0 +1,112 @@
+{
+  "BASELINE      (seed + examples)": {
+    "outcomes": {
+      "example_verbatim": 2,
+      "minted": 3
+    },
+    "emitted": [
+      [
+        "flaky-1",
+        "sql_query_debug"
+      ],
+      [
+        "perf-1",
+        "perf_query_optimization"
+      ],
+      [
+        "docs-1",
+        "webhooks_docs"
+      ],
+      [
+        "flaky-2",
+        "ci_flaky_test_triage"
+      ],
+      [
+        "sec-1",
+        "prod_log_triage"
+      ]
+    ]
+  },
+  "SEED_ONLY     (seed, no examples)": {
+    "outcomes": {
+      "minted": 5
+    },
+    "emitted": [
+      [
+        "flaky-1",
+        "debugging_test_flakiness_module_scope"
+      ],
+      [
+        "perf-1",
+        "performance_n_plus_one_fix"
+      ],
+      [
+        "docs-1",
+        "webhooks_reference_docs"
+      ],
+      [
+        "flaky-2",
+        "debugging_intermittent_test_failure"
+      ],
+      [
+        "sec-1",
+        "code_review_auth_middleware"
+      ]
+    ]
+  },
+  "EXAMPLES_ONLY (no seed, examples)": {
+    "outcomes": {
+      "minted": 4,
+      "unclassified": 1
+    },
+    "emitted": [
+      [
+        "flaky-1",
+        "checkout_test_ci_flake_fix"
+      ],
+      [
+        "perf-1",
+        "prod_dashboard_n_plus_one_fix"
+      ],
+      [
+        "docs-1",
+        "webhooks_reference_docs"
+      ],
+      [
+        "flaky-2",
+        "unclassified"
+      ],
+      [
+        "sec-1",
+        "auth_middleware_review"
+      ]
+    ]
+  },
+  "FLOOR         (no seed, no examples)": {
+    "outcomes": {
+      "minted": 5
+    },
+    "emitted": [
+      [
+        "flaky-1",
+        "buggy_test_fixture_scoping"
+      ],
+      [
+        "perf-1",
+        "performance_n_plus_one_fix"
+      ],
+      [
+        "docs-1",
+        "documentation_authoring"
+      ],
+      [
+        "flaky-2",
+        "ci_flake_investigation"
+      ],
+      [
+        "sec-1",
+        "security_review_auth_middleware"
+      ]
+    ]
+  }
+}

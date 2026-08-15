@@ -53,9 +53,17 @@ honors these.
 - **The shared artifact that matters is the TAXONOMY, not the code.** Per-host taxonomy files
   re-pay cold-start drift per host and converge on different attractors; a served vocabulary
   does not.
-- **Seed the vocabulary with a curated domain taxonomy.** The shipped generic seed
-  (`research`/`analysis`/`code_review`/`generation`) acts as an attractor that produces
-  reproducibly *wrong* labels, not merely fragmented ones.
+- **Two attractors pull the classifier toward inapt labels, not one.** The seed vocabulary is
+  one (`code_review` was emitted for a CI-flakiness item). The prompt's five hardcoded *"Good
+  examples"* (`classifier.py:787`) are the other, and produced the more vivid failures —
+  `sql_query_debug` and `prod_log_triage` were copied verbatim onto unrelated work. Spike 003
+  originally blamed the seed for all of it; corrected in quick task 260815-r39.
+- **Seed the vocabulary with a curated domain taxonomy**, and never seed a label the prompt's
+  AVOID line names. Seed changes affect fresh installs only.
+- **Do not change the prompt's examples without a temperature-0 instrument.** They demonstrably
+  get copied AND they anchor the 2-4 word granularity (removing them: copying → 0, but labels in
+  the target range 14/15 → 8/15). Measured effect sizes for one condition ranged 7%–40% across
+  runs — that is harness noise, not signal.
 - **Classify out of band, never on a request's critical path.** Inline classification adds a
   full model round-trip plus a vocabulary fetch to every request, and a classifier calling
   through the proxy it guards can be blocked by the halt rule it is enforcing.

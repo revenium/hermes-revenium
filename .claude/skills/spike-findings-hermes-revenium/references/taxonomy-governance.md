@@ -23,14 +23,36 @@ From the `portable-task-classifier` idea in `.planning/spikes/MANIFEST.md`:
 
 ### The three interventions, ranked by measured leverage
 
-**1. Curate the seed vocabulary.** Cheapest, biggest effect, needs neither library nor service.
+**1. Curate the seed vocabulary.** Cheapest, lowest-risk, needs neither library nor service.
+(Shipped for the three catch-alls in quick task 260815-r39: the seed offered `generation`,
+`analysis` and `review` as reusable vocabulary while the prompt's AVOID line names those exact
+words. Seed changes affect fresh installs only, so the blast radius is small — unlike a prompt
+change, which takes effect on every install's next classification.)
 
 Measured (`sources/003-taxonomy-drift/fragmentation.py`, 2 runs): with the shipped generic seed
 (`research`, `analysis`, `code_review`, `generation`), a CI-flakiness investigation was labelled
-`sql_query_debug` in **both** runs by multiple hosts, and one security review drew
-`prod_log_triage` — a seed label from an unrelated domain. The prompt already says *"AVOID bland
-catch-all labels like generation, analysis, review, task when a more specific label fits"* and
-the model does it anyway.
+`sql_query_debug` in **both** runs by multiple hosts, `code_review` by another, and one security
+review drew `prod_log_triage`.
+
+> **CORRECTION (quick task 260815-r39).** Spike 003 called all of those "seeded generic labels".
+> That was wrong, and the error is instructive. `code_review` *is* a seed label, so seed reuse is
+> real. But `sql_query_debug` and `prod_log_triage` are **not in the seed at all** — they are two
+> of the five hardcoded *"Good examples"* inside the prompt string itself
+> (`classifier.py:787`: `weekly_pr_review, prod_log_triage, news_summary, sql_query_debug,
+> release_notes_draft`). The model was copying its own few-shot examples verbatim onto unrelated
+> work. There are **two** attractors, not one, and the more vivid failures came from the prompt.
+
+A follow-up 2×2 (seed present/absent × examples present/absent) confirmed both attractors are
+real and added a third finding: removing the examples also raised reuse of an *apt* existing
+label from 3/5 to 4/5, because the examples were stealing classifications away from a correct
+label already in the vocabulary. But the examples also anchor the 2-4 word granularity they were
+added for — deleting them dropped labels in the target range from 14/15 to 8/15, and the *stated*
+rule ("Use 2-4 words joined by underscores") did not substitute for the demonstrated pattern.
+
+**The prompt-side fix is therefore NOT settled.** Effect sizes for the same condition ranged
+7%–40% across runs, which is the resolution limit of the CLI harness (no `temperature=0`). Ship a
+prompt change only against a temperature-0 instrument. The *seed* half was shipped on coherence
+grounds instead — see below.
 
 The seed is not a neutral starting point. Ship a vocabulary of specific, domain-shaped labels,
 or ship a smaller one.

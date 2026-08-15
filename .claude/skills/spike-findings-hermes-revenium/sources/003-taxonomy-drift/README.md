@@ -65,10 +65,15 @@ fragmentation 3.25 → 2.0, with two of five items at full 3/3 consensus (`perf-
 exactly the items where an earlier host had already minted an apt label for a later host to
 find. Run 2 reproduced the direction more strongly (1.4, three items at consensus).
 
-**4. Third surprise: the generic seed causes *misclassification*, not just fragmentation.**
+**4. Third surprise: the classifier emits inapt labels verbatim, not just fragmented ones.**
 `flaky-1` — a CI flakiness investigation — came back as `sql_query_debug` (Hermes) and
-`code_review` (LiteLLM). Those are seeded generic labels being reused for work they do not
-describe. The prompt explicitly says *"AVOID bland catch-all labels like generation, analysis,
+`code_review` (LiteLLM).
+
+> **CORRECTION (quick task 260815-r39):** this step originally called both "seeded generic
+> labels". `code_review` is one. `sql_query_debug` is **not in the seed** — it is one of the five
+> hardcoded *"Good examples"* in the prompt string (`classifier.py:787`), as is `prod_log_triage`
+> below. The model copied its own few-shot examples. Two attractors, and the prompt's is the more
+> vivid one. The prompt explicitly says *"AVOID bland catch-all labels like generation, analysis,
 review, task when a more specific label fits"*, and the model did it anyway. The seed
 vocabulary is not a neutral starting point — it is an attractor, and a bad one.
 
@@ -109,8 +114,9 @@ Run 2's shared arm, for comparison with run 1 below:
   sec-1    auth_middleware_review (all three)                           CONSENSUS
 ```
 
-**`flaky-1` drew the seeded label `sql_query_debug` in both runs, from multiple hosts.** That
-is a reproducible misclassification, not sampling noise — see trail step 4.
+**`flaky-1` drew `sql_query_debug` in both runs, from multiple hosts.** That is a reproducible
+misclassification, not sampling noise — but it is a *prompt example* being copied, not a seed
+label being reused. See the correction in trail step 4.
 
 ### Run 1 detail
 
@@ -132,8 +138,9 @@ SHARED
   sec-1    Hermes=code_review_auth_middleware | LiteLLM=unclassified            | Claude=code_review_auth_middleware
 ```
 
-Two anomalies worth keeping: `sec-1` produced `prod_log_triage` from one host (a seeded label
-from a *different* domain entirely), and one shared-arm classification returned `unclassified`
+Two anomalies worth keeping: `sec-1` produced `prod_log_triage` from one host (a *prompt
+example*, not a seed label — see the trail step 4 correction), and one shared-arm classification
+returned `unclassified`
 — i.e. the raw model output failed `LABEL_RE` or hit the blocklist and was correctly rejected.
 
 ### What this means for the original question
