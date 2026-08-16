@@ -275,10 +275,21 @@ class RepositoryTests(unittest.TestCase):
         self.assertIsInstance(labels, dict, '"labels" must be a dict')
         label_regex = re.compile(r'^[a-z][a-z0-9_]{1,47}$')
         forbidden = {'ack', 'acknowledgment', 'greeting', 'confirmation', 'hello', 'thanks'}
-        expected_labels = ['research', 'analysis', 'generation', 'review',
-                           'code_review', 'refactor', 'planning', 'debugging']
+        # quick-260815-r39: the three catch-alls the classification prompt itself
+        # names in its AVOID line (generation, analysis, review) were removed from
+        # the seed. Phase 2's D-06 order shipped 2026-05-12 under the closed-set
+        # design ("pick the best-fitting label"); the mint-first prompt rewrite two
+        # days later (3fcdd58) superseded that model, and seeding a label the prompt
+        # tells the classifier to avoid is a contradiction. D-06's ORDER is preserved
+        # for the survivors. Do not re-add the catch-alls without also reverting the
+        # mint-first policy in references/task-taxonomy.md.
+        expected_labels = ['research', 'code_review', 'refactor', 'planning', 'debugging']
         self.assertEqual(list(labels.keys()), expected_labels,
-                         'seed taxonomy labels must match D-06 order exactly')
+                         'seed taxonomy labels must match the post-260815-r39 set exactly')
+        for catch_all in ('generation', 'analysis', 'review'):
+            self.assertNotIn(catch_all, labels,
+                             f'catch-all "{catch_all}" is named in the prompt AVOID line '
+                             f'and must not be seeded')
         for label, schema in labels.items():
             self.assertRegex(label, label_regex, f'label "{label}" fails regex')
             self.assertNotIn(label, forbidden, f'forbidden label "{label}" in seed taxonomy')
