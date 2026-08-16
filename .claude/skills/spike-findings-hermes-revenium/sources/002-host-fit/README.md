@@ -150,5 +150,13 @@ and it wants to be a service with a client, not a JSON file per host.
   to quote a drift rate.
 - **The HOT arm was not adversarial.** Its near-misses were all clearly worse than the apt
   label. A harder test would offer two equally defensible labels.
-- **The LiteLLM payload is synthetic** (shape-accurate, hand-written). The Claude Code
-  transcript is real.
+- **Both fixtures are synthetic** (shape-accurate, hand-written). The Claude Code *record
+  shapes* were captured from a real session on 2026-08-15 and the fixture reproduces them
+  field-for-field, but the transcript content was regenerated: the original capture carried a
+  developer email, home paths, GitHub account names and token scopes that nothing in the
+  adapter reads (Greptile P2 on PR #42; no live credentials — `gh` had already masked the token
+  values). The replacement also adds `isSidechain` turns, which the real capture happened not
+  to contain, so the subagent path is exercised rather than merely present.
+- **The measured run below used the original real transcript**, hence `github_account_switching`
+  as its label and the 19-turn / 0-subagent counts. Re-running against the synthetic fixture
+  gives 8 turns / 2 subagent turns and a different label; the adapter behavior is unchanged.

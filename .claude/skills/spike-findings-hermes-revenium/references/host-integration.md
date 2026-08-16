@@ -63,6 +63,9 @@ the taxonomy has nowhere local to live. Use `InMemoryTaxonomy` backed by a servi
 One JSONL per session at `~/.claude/projects/<slug>/<session-uuid>.jsonl`. Record shapes
 verified on a real machine (2026-08-15):
 
+*(The shipped fixture reproduces these shapes with synthetic content — see the sources
+README. The shapes themselves were observed on a real machine.)*
+
 - `type=user` → `message.content` (str **or** content-block list), `sessionId`, `isSidechain`,
   `uuid`, `parentUuid`, `cwd`, `gitBranch`
 - `type=assistant` → `message.content` (block list), `message.usage{input_tokens,
