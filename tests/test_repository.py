@@ -2162,6 +2162,51 @@ class RepositoryTests(unittest.TestCase):
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_prompt_empty_taxonomy_retains_shape_anchor(self):
+        """quick-260815-r39 / Greptile P2 on PR #47: the degraded-taxonomy path.
+
+        Removing the prompt's concrete examples is justified by the seed vocabulary
+        anchoring 2-4 word granularity. But _read_taxonomy_labels fails OPEN — a
+        missing, malformed or empty ${TAXONOMY_FILE} yields [], and in that state the
+        prompt now carries NEITHER anchor.
+
+        Measured cost of that state (powered_ab.py's FLOOR arm, n=15): labels in the
+        2-4 word target fall to 8/15 (53%) with a mean of 4.47 words, versus 90% when
+        the seed is present. Fresh installs copy the seed so the normal path is
+        unaffected; this pins the degraded path so a further regression — losing the
+        granularity RULE as well, or emitting the placeholder shape as a real label —
+        cannot pass unnoticed.
+        """
+        import importlib
+        import sys
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-empty-taxonomy-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            if 'classifier' in sys.modules:
+                importlib.reload(sys.modules['classifier'])
+            import classifier as handler
+
+            result = handler._build_classification_prompt("user text", "assistant text", [])
+
+            # The empty vocabulary must be stated, not silently omitted.
+            self.assertIn("(no existing labels yet)", result)
+
+            # The granularity RULE is the only anchor left in this state — it must survive.
+            self.assertIn("2-4 words joined by underscores", result)
+
+            # And the mint-first framing plus the label grammar must still be present.
+            self.assertIn("Mint a SPECIFIC, DESCRIPTIVE label", result)
+            self.assertIn("^[a-z][a-z0-9_]{1,47}$", result)
+
+            # Still no copyable concrete examples, even with nothing else to anchor on.
+            for example in ("weekly_pr_review", "prod_log_triage", "news_summary",
+                            "sql_query_debug", "release_notes_draft"):
+                self.assertNotIn(example, result)
+        finally:
+            _restore_plugin_env(snap, added)
+
     def test_revenium_classifier_prompt_mint_first_bias(self):
         """Regression guard for the mint-first prompt rewrite.
 
@@ -2201,7 +2246,13 @@ class RepositoryTests(unittest.TestCase):
                 "Prompt must contain the mint-first anchor phrase",
             )
 
-            # Concrete example labels anchoring granularity
+            # quick-260815-r39: the five concrete example labels were REMOVED. A powered
+            # paired A/B (n=80/arm) measured them being copied verbatim onto unrelated
+            # work in 20% of classifications (95% CI [12.7%, 30.0%]) vs 1.3% without
+            # them ([0.2%, 6.7%]), while 2-4 word granularity IMPROVED 78.7% -> 90.0%.
+            # The granularity they were added to anchor is supplied by the seed
+            # vocabulary instead. This assertion is inverted deliberately: it is the
+            # trip-wire against reintroducing copyable examples.
             for example in (
                 "weekly_pr_review",
                 "prod_log_triage",
@@ -2209,7 +2260,14 @@ class RepositoryTests(unittest.TestCase):
                 "sql_query_debug",
                 "release_notes_draft",
             ):
-                self.assertIn(example, result, f"Prompt must contain example label '{example}'")
+                self.assertNotIn(
+                    example, result,
+                    f"Prompt must NOT contain the copyable example label '{example}' "
+                    f"(quick-260815-r39); re-run powered_ab.py before changing this",
+                )
+
+            # The granularity RULE stays — only the copyable instances went away.
+            self.assertIn("2-4 words joined by underscores", result)
 
             # AVOID line naming bland catch-alls
             self.assertIn(
