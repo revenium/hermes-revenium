@@ -373,13 +373,24 @@ def prune_spool_dir(spool_dir, ledger_fn, ledger_path, label):
         s_scanned += 1
         sid = fname[:-len('.jsonl')]
 
+        # Age a spool from the NEWER of its last successful shipment and its
+        # own mtime. The ledger timestamp alone is not safe here: every line
+        # in a spool file is a billable record, and mtime advances whenever a
+        # fresh event is appended. A session that shipped long ago and then
+        # resumed carries an ancient ledger entry alongside brand-new
+        # unshipped events in the same file -- ageing that file from the
+        # ledger alone deletes revenue before it is ever reported.
+        #
+        # Markers can age from the ledger alone because a marker is a
+        # classification record that has already served its purpose once its
+        # session is reported. A spool line has not.
         last_ts = ledger_fn(sid, ledger_path)
-        if last_ts is not None:
+        mtime = os.path.getmtime(fpath)
+        if last_ts is not None and last_ts >= mtime:
             age_secs = time.time() - last_ts
             ts_label = iso(last_ts)
             ts_source = 'last_ledger_ts'
         else:
-            mtime = os.path.getmtime(fpath)
             age_secs = time.time() - mtime
             ts_label = iso(mtime)
             ts_source = 'mtime'

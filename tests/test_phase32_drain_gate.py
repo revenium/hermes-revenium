@@ -271,22 +271,67 @@ class AbsentFromStateDbTests(DrainGateTestBase):
 
 
 class RetentionBoundaryNotTrackedTests(DrainGateTestBase):
-    def test_session_older_than_retention_is_not_tracked_at_all(self):
+    """The retention filter bounds the quiet-tick map, but it must never be
+    the reason an OPEN session escapes the terminal check.
+
+    An earlier revision of this class asserted that a session past retention
+    is "drained by definition" while its state.db row carried
+    `ended_at = None` -- i.e. while it was still open. That pinned a real
+    under-billing bug rather than a safety property: the gate would report
+    drained, an operator would disable legacy completions, and the session's
+    subsequent usage would be skipped by BOTH reporters (legacy because it is
+    disabled, event because D-09 skips sessions present in the legacy
+    ledger). The two cases are now separated -- ended sessions still age out
+    of tracking, open ones never do.
+    """
+
+    def test_ended_session_older_than_retention_is_not_tracked_at_all(self):
         tmpdir, hh, sd = self._setup_tree()
         try:
             sid = 'sess-ancient'
             # 10 days old; retention set to 1 day below -- well past.
             old_ts = time.time() - (10 * 86400)
             self._write_ledger(sd, [_ledger_line(sid, 1500, old_ts)])
-            self._write_state_db(hh, [(sid, None)])
+            # ENDED long ago -- this is the case retention may legitimately
+            # drop, because it can no longer accrue usage.
+            self._write_state_db(hh, [(sid, old_ts)])
 
             rc, doc, out, err = self._run(hh, sd, extra_env={'REVENIUM_MARKER_RETENTION_DAYS': '1'})
             self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
-            self.assertTrue(doc['drained'], 'a session past retention is drained by definition')
+            self.assertTrue(doc['drained'],
+                            'an ENDED session past retention is drained by definition')
             self.assertEqual(doc['ledgerSessionsTracked'], 0,
-                             'a session past retention must not be tracked individually')
+                             'an ended session past retention must not be tracked individually')
             self.assertNotIn(sid, doc['quietTicks'])
             self.assertEqual(doc['pending'], [])
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_open_session_older_than_retention_is_still_tracked_and_blocks(self):
+        """The regression this class exists for: ledger age must not let a
+        live session slip past the gate."""
+        tmpdir, hh, sd = self._setup_tree()
+        try:
+            sid = 'sess-ancient-but-open'
+            old_ts = time.time() - (10 * 86400)
+            self._write_ledger(sd, [_ledger_line(sid, 1500, old_ts)])
+            # STILL OPEN (ended_at IS NULL) despite an ancient ledger line --
+            # a long-lived gateway conversation, or one that resumed.
+            self._write_state_db(hh, [(sid, None)])
+
+            rc, doc, out, err = self._run(hh, sd, extra_env={'REVENIUM_MARKER_RETENTION_DAYS': '1'})
+            # C-11: exit 10 IS the not-drained verdict, not an error.
+            self.assertEqual(rc, 10, f'stdout={out!r} stderr={err!r}')
+            self.assertFalse(doc['drained'],
+                             'an OPEN session must block the gate no matter how old its '
+                             'newest ledger line is -- disabling legacy completions here '
+                             'would leave its usage billed by neither reporter')
+            self.assertEqual(doc['ledgerSessionsTracked'], 1,
+                             'an open session is force-included past the retention filter')
+            self.assertIn(sid, doc['quietTicks'])
+            self.assertEqual([p['sid'] for p in doc['pending']], [sid])
+            self.assertFalse(doc['pending'][0]['terminal'],
+                             'the pending entry must record it as non-terminal')
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

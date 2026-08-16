@@ -110,11 +110,46 @@ class EventSpoolRetentionTests(Phase32RetentionTestBase):
             old_ts = int(time.time()) - OLD_DAYS * 86400
             with open(p['event_ledger'], 'a') as f:
                 f.write(f'API:arid-stale|{sid}|{old_ts}\n')
+            # Age the file itself too. A session that shipped long ago and has
+            # spooled nothing since has an OLD mtime as well as an old ledger
+            # row -- writing the file moments ago while claiming its newest
+            # shipment was weeks ago describes a state that cannot occur, and
+            # is in fact the signature of the resumed-session case covered by
+            # test_event_spool_with_fresh_events_and_stale_ledger_is_kept.
+            os.utime(spool_path, (old_ts, old_ts))
 
             r = _run(env)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertFalse(os.path.exists(spool_path),
-                             'an event spool file whose newest ledger row is past the cutoff must be removed')
+                             'an event spool file whose newest ledger row AND mtime are past '
+                             'the cutoff must be removed')
+        finally:
+            shutil.rmtree(p['tmpdir'], ignore_errors=True)
+
+    def test_event_spool_with_fresh_events_and_stale_ledger_is_kept(self):
+        """Regression: a spool must age from the NEWER of its last shipment
+        and its own mtime.
+
+        A session that shipped weeks ago and then resumed carries an ancient
+        ledger row alongside brand-new unshipped events in the same file.
+        Ageing it from the ledger alone deletes billable records before they
+        are ever reported -- revenue lost silently, with the ledger's own
+        success entry as the thing that caused it.
+        """
+        env, p = self._setup()
+        try:
+            sid = 'resumed-event-sid'
+            spool_path = os.path.join(p['spool_dir'], f'{sid}.jsonl')
+            self._write_spool(spool_path, sid)          # fresh mtime = unshipped events
+            old_ts = int(time.time()) - OLD_DAYS * 86400
+            with open(p['event_ledger'], 'a') as f:
+                f.write(f'API:arid-ancient|{sid}|{old_ts}\n')   # shipped long ago
+
+            r = _run(env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(os.path.exists(spool_path),
+                            'a spool carrying fresh unshipped events must survive, however '
+                            'old its last successful shipment was')
         finally:
             shutil.rmtree(p['tmpdir'], ignore_errors=True)
 
@@ -166,11 +201,16 @@ class ToolEventsSpoolRetentionTests(Phase32RetentionTestBase):
             old_ts = int(time.time()) - OLD_DAYS * 86400
             with open(p['tool_ledger'], 'a') as f:
                 f.write(f'TOOL:{sid}:tcid-1:{old_ts}\n')
+            # Age the file too -- a spool is pruned on the NEWER of its last
+            # shipment and its own mtime, so a fresh mtime means unshipped
+            # records are present and the file must survive.
+            os.utime(spool_path, (old_ts, old_ts))
 
             r = _run(env)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertFalse(os.path.exists(spool_path),
-                             'a tool-events spool file whose newest ledger row is past the cutoff must be removed')
+                             'a tool-events spool file whose newest ledger row AND mtime are '
+                             'past the cutoff must be removed')
         finally:
             shutil.rmtree(p['tmpdir'], ignore_errors=True)
 
@@ -312,6 +352,9 @@ class LegacyLedgerUntouchedTests(Phase32RetentionTestBase):
             old_ts = int(time.time()) - OLD_DAYS * 86400
             with open(p['event_ledger'], 'w') as f:
                 f.write(f'API:arid-1|{stale_sid}|{old_ts}\n')
+            # Stale in BOTH senses, so the companion is genuinely prunable
+            # and this test keeps exercising a real pruning run.
+            os.utime(spool_path, (old_ts, old_ts))
 
             r = _run(env)
             self.assertEqual(r.returncode, 0, r.stderr)

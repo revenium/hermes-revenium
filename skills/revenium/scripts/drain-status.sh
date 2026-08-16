@@ -231,13 +231,52 @@ try:
         _finish(False, False, 0, 0, 0, [], {}, {},
                 reason='legacy ledger unreadable')
 
+    # Which legacy-owned sessions are STILL OPEN? This must be answered
+    # BEFORE the retention filter below, not after.
+    #
+    # An earlier revision filtered on ledger age alone, reasoning that a
+    # session whose newest ledger line predates the retention window is
+    # "drained by definition". That is only true when the session has also
+    # ENDED. A long-lived session -- a gateway conversation, or one that
+    # resumed after a quiet spell -- can carry an ancient newest-ledger-line
+    # and still be open and still be spending. Dropping it here would hide
+    # it from the terminal check below, report the gate drained, and let an
+    # operator disable legacy completions while it is live. Its subsequent
+    # usage would then be skipped by BOTH reporters: the legacy path because
+    # it is disabled, the event path because D-09 skips any session already
+    # present in the legacy ledger. That is a silent, permanent under-bill --
+    # the exact failure D-13 exists to prevent, re-entering through the
+    # retention filter.
+    #
+    # No `IN (...)` clause: open sessions are few while the historical ledger
+    # is large, so selecting the open set outright is both cheaper and immune
+    # to SQLite's bound-variable limit.
+    open_sids = set()
+    if state_db and os.path.isfile(state_db):
+        try:
+            uri = f"file:{state_db}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                for row in conn.execute(
+                        'SELECT id FROM sessions WHERE ended_at IS NULL'):
+                    open_sids.add(str(row[0]))
+        except Exception:
+            # A db that exists but cannot be queried leaves openness
+            # indeterminate for every session. Never assume drained on doubt.
+            pending_preview = sorted(sid_max_ts.items(), key=lambda kv: kv[1])[:pending_cap]
+            _finish(False, False, len(sid_max_ts), 0, len(sid_max_ts),
+                    [{'sid': sid, 'ageSeconds': round(now - ts, 1)}
+                     for sid, ts in pending_preview],
+                    {}, {}, reason='state.db unreadable')
+
     # C-11: a session whose newest ledger line is older than the retention
-    # window is drained by definition and is NOT tracked individually --
-    # keeps the quiet-tick map bounded on a fleet ledger with thousands of
-    # historical sessions.
+    # window is not tracked individually -- that keeps the quiet-tick map
+    # bounded on a fleet ledger holding thousands of historical sessions.
+    # A still-open session is force-included regardless of its ledger age,
+    # per the reasoning above; the bound is preserved because the carve-out
+    # is sized by the open-session count, not by ledger history.
     tracked = {
         sid: ts for sid, ts in sid_max_ts.items()
-        if (now - ts) < retention_cutoff_seconds
+        if (now - ts) < retention_cutoff_seconds or sid in open_sids
     }
 
     # --- 2. Query state.db (read-only URI, ONE query for every tracked
