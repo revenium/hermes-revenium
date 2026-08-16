@@ -73,8 +73,10 @@ The blocklist is a closed set for v1. Adding entries requires a release.
 ## Mint policy
 
 The classifier reads `${TAXONOMY_FILE}` before every substantive turn and mints a SPECIFIC,
-DESCRIPTIVE label that captures what the agent actually did (2-4 words joined by underscores;
-examples: `weekly_pr_review`, `prod_log_triage`, `news_summary`). Existing labels are reused
+DESCRIPTIVE label that captures what the agent actually did (2-4 words joined by underscores).
+The prompt deliberately carries no concrete example labels: they were copied verbatim onto
+unrelated work in 20% of classifications, and removing them also improved granularity
+(quick task 260815-r39). Existing labels are reused
 only when they describe the SAME specific work — "close enough" reuse caused taxonomy
 fragmentation in practice (quick task 260514-nfb).
 

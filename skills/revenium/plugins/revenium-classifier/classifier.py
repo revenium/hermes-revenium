@@ -783,8 +783,14 @@ def _build_classification_prompt(user_msg: str, assistant_resp: str, labels: lis
         "You are classifying a Hermes session turn for spend attribution. "
         "Output ONLY a single snake_case label, no explanation, no quotes, no punctuation.\n\n"
         "Mint a SPECIFIC, DESCRIPTIVE label that captures what the agent actually did. "
-        "Use 2-4 words joined by underscores. "
-        "Good examples: weekly_pr_review, prod_log_triage, news_summary, sql_query_debug, release_notes_draft.\n\n"
+        # quick-260815-r39: the five concrete "Good examples" that used to sit here were
+        # copied VERBATIM onto unrelated work in 20% of classifications (16/80, 95% CI
+        # [12.7%, 30.0%]); removing them took that to 1.3% (1/80, [0.2%, 6.7%]) and
+        # IMPROVED the 2-4 word granularity they were added to anchor, 78.7% -> 90.0%
+        # (paired difference -11.3%, 95% CI [-21.3%, -1.2%]). The seed vocabulary below
+        # is what actually anchors label shape. Do not reintroduce concrete examples
+        # without re-running .planning/quick/260815-r39-*/powered_ab.py.
+        "Use 2-4 words joined by underscores.\n\n"
         "AVOID bland catch-all labels like generation, analysis, review, task when a more specific label fits.\n\n"
         f"Existing labels (for reference): {labels_block}\n\n"
         "You MAY reuse one of the existing labels, but only if it describes the SAME specific work — "

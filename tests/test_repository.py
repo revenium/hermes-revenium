@@ -2183,7 +2183,13 @@ class RepositoryTests(unittest.TestCase):
                 "Prompt must contain the mint-first anchor phrase",
             )
 
-            # Concrete example labels anchoring granularity
+            # quick-260815-r39: the five concrete example labels were REMOVED. A powered
+            # paired A/B (n=80/arm) measured them being copied verbatim onto unrelated
+            # work in 20% of classifications (95% CI [12.7%, 30.0%]) vs 1.3% without
+            # them ([0.2%, 6.7%]), while 2-4 word granularity IMPROVED 78.7% -> 90.0%.
+            # The granularity they were added to anchor is supplied by the seed
+            # vocabulary instead. This assertion is inverted deliberately: it is the
+            # trip-wire against reintroducing copyable examples.
             for example in (
                 "weekly_pr_review",
                 "prod_log_triage",
@@ -2191,7 +2197,14 @@ class RepositoryTests(unittest.TestCase):
                 "sql_query_debug",
                 "release_notes_draft",
             ):
-                self.assertIn(example, result, f"Prompt must contain example label '{example}'")
+                self.assertNotIn(
+                    example, result,
+                    f"Prompt must NOT contain the copyable example label '{example}' "
+                    f"(quick-260815-r39); re-run powered_ab.py before changing this",
+                )
+
+            # The granularity RULE stays — only the copyable instances went away.
+            self.assertIn("2-4 words joined by underscores", result)
 
             # AVOID line naming bland catch-alls
             self.assertIn(
