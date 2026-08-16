@@ -106,7 +106,7 @@ User typed "what is 2+2?" You replied "4." in one sentence. No tools called.
 **Example 3 — Borderline classify (CLASSIFY):**
 User asked you to explain POSIX O_APPEND atomicity. You wrote a five-paragraph response covering the kernel guarantee, macOS vs Linux behavior, and the belt-and-suspenders flock recommendation. No tools were called.
 - Rule (b) triggered: > 200 words of new content.
-- Required action: `write_marker("analysis", "GUARDRAIL")` then `write_marker("analysis", "CHAT")`.
+- Required action: `write_marker("posix_append_atomicity_explainer", "GUARDRAIL")` then `write_marker("posix_append_atomicity_explainer", "CHAT")`.
 
 **Example 4 — Borderline skip (SKIP):**
 User said "good morning, can you confirm you're ready?" You replied "Good morning — ready when you are." over two short lines. No tools called.
