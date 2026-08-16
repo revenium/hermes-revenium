@@ -1,0 +1,34 @@
+{
+  "verb": ["meter", "completion"],
+  "exact_match_fields": {
+    "__verb": "meter",
+    "__subcommand": "completion",
+    "--model": "claude-sonnet-4-6",
+    "--provider": "anthropic",
+    "--input-tokens": "100",
+    "--output-tokens": "50",
+    "--cache-read-tokens": "10",
+    "--cache-creation-tokens": "5",
+    "--total-tokens": "165",
+    "--stop-reason": "END",
+    "--request-duration": "500",
+    "--agent": "Hermes",
+    "--transaction-id": "event:compat-event-arid-001",
+    "--trace-id": "compat-event-sid-001",
+    "--is-streamed": true,
+    "--quiet": true,
+    "--task-type": "code_review",
+    "--operation-type": "CHAT",
+    "--model-source": "anthropic",
+    "--agentic-job-id": "compat-event-job-001",
+    "--squad-id": "compat-event-sid-001",
+    "--squad-name": "Hermes",
+    "--squad-role": "root"
+  },
+  "pattern_fields": {
+    "--request-time": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+    "--completion-start-time": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+    "--response-time": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$"
+  },
+  "forbidden_fields": ["--total-cost", "--input-messages", "--output-response", "--budget-id", "--alert-id"]
+}

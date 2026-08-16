@@ -104,8 +104,40 @@ PLUGIN_STATUS_FILE="${REVENIUM_PLUGIN_STATUS_FILE:-${STATE_DIR}/plugin-status.js
 # still retains ~20k log lines, far more than any diagnostic needs.
 REVENIUM_LOG_MAX_BYTES="${REVENIUM_LOG_MAX_BYTES:-52428800}"
 REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-2097152}"
+# Phase 32 (D-01/D-03): per-API-call metering event spool + its idempotency
+# ledger. The spool gets its OWN directory rather than sharing TOOL_EVENTS_DIR
+# because the record shape (contract C-2) and downstream shipper
+# (api-event-report.sh) are unrelated to tool-call capture; the ledger gets
+# its OWN key domain rather than sharing LEDGER_FILE/HERMES: because
+# api_request_id is a per-CALL identifier, not the per-SESSION-total key the
+# old ledger indexes on (D-08) — the two idempotency domains must never
+# collide.
+EVENT_SPOOL_DIR="${REVENIUM_EVENT_SPOOL_DIR:-${STATE_DIR}/api-events}"
+EVENT_LEDGER_FILE="${REVENIUM_EVENT_LEDGER_FILE:-${STATE_DIR}/revenium-api-events.ledger}"
+# Phase 32 Plan 03 (C-9): the shadow-comparison readout, the drain-gate status
+# document, and the rollout switches that separate the event path's DEPLOY
+# (landing a hook + a shipper that are inert) from its BILLING FLIP (letting
+# the new path ship for real, or letting the old path stop shipping).
+# Defaults are the safe no-op for both switches: REVENIUM_EVENT_METERING_MODE
+# defaults to "shadow" (ships nothing, writes no ledger line) and
+# REVENIUM_LEGACY_COMPLETIONS defaults to "enabled" (the old path keeps
+# billing). A fleet can therefore land this phase's code with zero observable
+# change, then flip each switch independently and reversibly. Both switches
+# are ALSO readable from config.json (eventMeteringMode / legacyCompletions)
+# with the environment taking precedence over config — see
+# resolve_switch_setting() below, and api-event-report.sh/hermes-report.sh's
+# own pre-source capture of the raw environment value, which is what makes
+# that precedence actually reachable.
+EVENT_SHADOW_REPORT_FILE="${REVENIUM_EVENT_SHADOW_REPORT_FILE:-${STATE_DIR}/event-shadow-report.jsonl}"
+DRAIN_STATUS_FILE="${REVENIUM_DRAIN_STATUS_FILE:-${STATE_DIR}/drain-status.json}"
+REVENIUM_EVENT_METERING_MODE="${REVENIUM_EVENT_METERING_MODE:-shadow}"
+REVENIUM_LEGACY_COMPLETIONS="${REVENIUM_LEGACY_COMPLETIONS:-enabled}"
+# C-11: consecutive quiet drain-checks (no new HERMES: line for a tracked
+# session) required before that session is considered drained. Env-overridable
+# for an operator who wants a faster/slower cutover than the default.
+REVENIUM_DRAIN_QUIET_TICKS="${REVENIUM_DRAIN_QUIET_TICKS:-15}"
 
-mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
+mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}"
 
 ensure_path() {
   local brew_prefix=""
@@ -289,6 +321,54 @@ supports_flag() {
   printf '%s\n' "${help_text}" | grep -qE -- "${2}([^A-Za-z0-9-]|\$)"
 }
 
+# Phase 32 Plan 03 (C-9/T-32-15): resolve a closed two-literal switch with
+# env > config.json > hard-default precedence. Shared by api-event-report.sh
+# (REVENIUM_EVENT_METERING_MODE / config key eventMeteringMode) and
+# hermes-report.sh (REVENIUM_LEGACY_COMPLETIONS / config key
+# legacyCompletions) so the two scripts can never disagree on how this
+# resolution works.
+#
+# Callers MUST pass the RAW environment value captured BEFORE this file's own
+# "${VAR:-default}" declarations above overwrote it (each caller captures its
+# own raw value into a differently-named variable immediately after computing
+# SCRIPT_DIR and before `source common.sh`) — passing the already-defaulted
+# variable would make config.json unreachable whenever the operator simply
+# left the env var unset, since it would never appear empty by the time this
+# function saw it.
+#
+# Prints two lines on stdout: the resolved value, then "true"/"false" for
+# whether the input was present but neither empty nor one of the two allowed
+# literals (a typo). Callers warn on "true" using their own warn() — never
+# silently, per T-32-15: a typo must never silently change billing behavior.
+#
+# Usage: resolve_switch_setting "${_RAW_ENV_VALUE}" configKeyName default_val allowed1 allowed2
+resolve_switch_setting() {
+  local raw_env="$1" config_key="$2" default_val="$3" allowed1="$4" allowed2="$5"
+  local raw="${raw_env}"
+  if [[ -z "${raw}" && -f "${CONFIG_FILE}" ]]; then
+    raw=$(CONFIG_FILE="${CONFIG_FILE}" KEY="${config_key}" python3 - <<'PY' 2>/dev/null
+import json, os
+try:
+    v = json.load(open(os.environ['CONFIG_FILE'])).get(os.environ['KEY'], '')
+    print(v if isinstance(v, str) else '')
+except Exception:
+    print('')
+PY
+)
+  fi
+  case "${raw}" in
+    "${allowed1}"|"${allowed2}")
+      printf '%s\nfalse\n' "${raw}"
+      ;;
+    "")
+      printf '%s\nfalse\n' "${default_val}"
+      ;;
+    *)
+      printf '%s\ntrue\n' "${default_val}"
+      ;;
+  esac
+}
+
 # Phase 21 (TRACE-01, v1.4 path foundation): walk state.db.sessions.parent_session_id
 # to the root delegator and print it on stdout. Shells into the Python sidecar at
 # scripts/get-root-session-id.py (canonical implementation per D-01).
@@ -325,6 +405,27 @@ resolve_markers_dir() {
     return 0
   fi
   python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" 2>/dev/null || printf '%s\n' "${MARKERS_DIR}"
+}
+
+# Phase 32 (EVT-03): resolve the api-events spool directory that OWNS a given
+# session identifier — the same per-session, per-profile resolution as
+# resolve_markers_dir above, generalized onto a second subdirectory (see
+# scripts/resolve-markers-dir.py's resolve_state_subdir). Shells into the
+# SAME sidecar with a second "api-events" argument rather than a new file.
+# Production usage: spool_dir="$(resolve_spool_dir "${sid}")"
+# Fail-open, identical contract to resolve_markers_dir: empty sid → empty
+# stdout; missing python3 or sidecar failure → prints the process-level
+# EVENT_SPOOL_DIR unchanged.
+resolve_spool_dir() {
+  local sid="${1:-}"
+  if [[ -z "${sid}" ]]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${EVENT_SPOOL_DIR}"
+    return 0
+  fi
+  python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" "api-events" 2>/dev/null || printf '%s\n' "${EVENT_SPOOL_DIR}"
 }
 
 # quick-260605: resolve the Revenium teamId for CLI calls that require it

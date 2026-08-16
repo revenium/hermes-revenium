@@ -97,6 +97,18 @@ PY
   bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/guardrail-check.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
+  # Phase 32 (D-01/D-03): fifth stage, ships the post_api_request spool.
+  # Same || true isolation as every other stage above — a failure here must
+  # never block the guardrail/tool-event stages that already ran this tick.
+  bash "${SKILL_DIR}/scripts/api-event-report.sh" "$@" || true
+  # Phase 32 Plan 03 (C-11/D-13): sixth stage, refreshes drain-status.json.
+  # Placed AFTER the metering stages above so this tick's verdict reflects
+  # any HERMES: ledger lines those stages just wrote, not last tick's.
+  # Makes zero HTTP requests (reads only the local ledger + state.db) — adds
+  # a cron STAGE, not a cron REQUEST (test_cron_tick_request_bound's
+  # neighbourhood pins this). Same --quiet-unchanged/|| true posture as
+  # plugin-status.sh above.
+  bash "${SKILL_DIR}/scripts/drain-status.sh" --quiet-unchanged "$@" || true
   # Sleep between iterations only; never after the last one (the next cron
   # tick lands within ~60s anyway, so a trailing sleep is wasted).
   if (( i < loop_count && loop_sleep > 0 )); then

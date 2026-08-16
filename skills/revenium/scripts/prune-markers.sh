@@ -4,6 +4,14 @@
 # (field 4 of HERMES:<sid>:<total_tokens>:<unix_ts>:<muid> lines). If no
 # ledger entry exists for a sid (orphan marker), file mtime is used instead.
 # Safe to run manually at any time; NOT wired into cron (D-28).
+#
+# Phase 32 (D-15): also prunes the two per-session JSONL spool directories —
+# the new event spool (EVENT_SPOOL_DIR) and the pre-existing tool-event spool
+# (TOOL_EVENTS_DIR, which this script had NEVER referenced before this
+# change) — and the new api_request_id-keyed ledger (EVENT_LEDGER_FILE). All
+# four passes share the same lock, the same MARKER_RETENTION_DAYS preflight,
+# and the same --dry-run semantics. The frozen legacy HERMES: ledger
+# (LEDGER_FILE) is never touched by any of the new passes.
 
 set -euo pipefail
 
@@ -79,8 +87,13 @@ MARKER_RETENTION_DAYS_PY="${MARKER_RETENTION_DAYS}" \
 DRY_RUN_PY="${DRY_RUN}" \
 FLAG_DIRS_PY="${WARN_FLAGS_DIR}
 ${FALLBACK_WARN_FLAGS_DIR}" \
+EVENT_SPOOL_DIR_PY="${EVENT_SPOOL_DIR}" \
+TOOL_EVENTS_DIR_PY="${TOOL_EVENTS_DIR}" \
+EVENT_LEDGER_FILE_PY="${EVENT_LEDGER_FILE}" \
+TOOL_EVENTS_LEDGER_FILE_PY="${TOOL_EVENTS_LEDGER_FILE}" \
 python3 - <<'PY' >"${prune_out}"
 import os
+import re
 import sys
 import time
 
@@ -256,6 +269,270 @@ print(
     ' removed=' + str(removed),
     flush=True,
 )
+
+# ---------------------------------------------------------------------------
+# Phase 32 (D-15): third pass -- the two per-session JSONL spool directories,
+# the new event spool (EVENT_SPOOL_DIR) and the pre-existing tool-event spool
+# (TOOL_EVENTS_DIR). TOOL_EVENTS_DIR is in scope DELIBERATELY: this script has
+# never referenced it before, so the spool-then-ship pattern D-01/D-03 copy
+# has had NO retention at all until now -- the new event spool would have
+# silently inherited that same unbounded-growth gap. Structure mirrors the
+# marker pass above (ledger-timestamp staleness, mtime fallback for an
+# orphan, the same cutoff_secs, the same --dry-run semantics) so the file
+# reads as one idea repeated rather than three separate designs.
+# ---------------------------------------------------------------------------
+
+_NS_PREFIX_RE = re.compile(r'^agent:([^:]+):')
+
+
+def _strip_ns_prefix(sid):
+    """Strip a leading `agent:<profile>:` namespace prefix, if present.
+    Mirrors api_event_spool.py's _NS_RE -- deliberately not shared code (see
+    that module's own docstring on why the duplication is intentional)."""
+    m = _NS_PREFIX_RE.match(sid)
+    if m:
+        return sid[m.end():]
+    return sid
+
+
+def tool_ledger_last_ts(sid, ledger_path):
+    """Newest timestamp for sid in the TOOL: ledger. Colon-delimited
+    (TOOL:<sid>:<tool_call_id>:<ts>) and safe to fixed-position-split on ':'
+    because post_tool_call.sh strips structural colons from sid before ever
+    ledgering it -- unlike the marker pass's HERMES: ledger, whose sid can be
+    a colon-bearing agent:<profile>:... identifier."""
+    try:
+        with open(ledger_path, 'r', encoding='utf-8') as f:
+            prefix = 'TOOL:' + sid + ':'
+            last_ts = None
+            for line in f:
+                line = line.rstrip('\n')
+                if not line.startswith(prefix):
+                    continue
+                parts = line.split(':')
+                if len(parts) >= 4:
+                    try:
+                        ts = float(parts[3])
+                        if last_ts is None or ts > last_ts:
+                            last_ts = ts
+                    except ValueError:
+                        pass
+            return last_ts
+    except FileNotFoundError:
+        return None
+
+
+def event_ledger_last_ts(sid, ledger_path):
+    """Newest timestamp for sid in the API: ledger
+    (API:<api_request_id>|<sid>|<unix_ts>). Deliberately NOT the marker
+    pass's colon-splitting parser: api_request_id preserves structural
+    colons (contract C-4), so a colon-based split would misparse it -- pipe
+    is this ledger's real delimiter. The ledger's sid field is the RAW
+    session id (Phase 32 Plan 01 decision); the spool FILENAME is already
+    the namespace-stripped component, so both sides are normalized through
+    _strip_ns_prefix before comparing."""
+    target = _strip_ns_prefix(sid)
+    try:
+        with open(ledger_path, 'r', encoding='utf-8') as f:
+            last_ts = None
+            for line in f:
+                line = line.rstrip('\n')
+                if not line.startswith('API:'):
+                    continue
+                parts = line.split('|')
+                if len(parts) != 3:
+                    continue
+                _arid_field, ledger_sid, ts_field = parts
+                if _strip_ns_prefix(ledger_sid) != target:
+                    continue
+                try:
+                    ts = float(ts_field)
+                    if last_ts is None or ts > last_ts:
+                        last_ts = ts
+                except ValueError:
+                    pass
+            return last_ts
+    except FileNotFoundError:
+        return None
+
+
+def prune_spool_dir(spool_dir, ledger_fn, ledger_path, label):
+    s_scanned = s_kept = s_removed = 0
+    try:
+        entries = sorted(os.listdir(spool_dir))
+    except FileNotFoundError:
+        entries = []
+
+    for fname in entries:
+        if not fname.endswith('.jsonl'):
+            continue
+        fpath = os.path.join(spool_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+
+        s_scanned += 1
+        sid = fname[:-len('.jsonl')]
+
+        # Age a spool from the NEWER of its last successful shipment and its
+        # own mtime. The ledger timestamp alone is not safe here: every line
+        # in a spool file is a billable record, and mtime advances whenever a
+        # fresh event is appended. A session that shipped long ago and then
+        # resumed carries an ancient ledger entry alongside brand-new
+        # unshipped events in the same file -- ageing that file from the
+        # ledger alone deletes revenue before it is ever reported.
+        #
+        # Markers can age from the ledger alone because a marker is a
+        # classification record that has already served its purpose once its
+        # session is reported. A spool line has not.
+        last_ts = ledger_fn(sid, ledger_path)
+        mtime = os.path.getmtime(fpath)
+        if last_ts is not None and last_ts >= mtime:
+            age_secs = time.time() - last_ts
+            ts_label = iso(last_ts)
+            ts_source = 'last_ledger_ts'
+        else:
+            age_secs = time.time() - mtime
+            ts_label = iso(mtime)
+            ts_source = 'mtime'
+        age_days = age_secs / 86400
+
+        if age_secs < cutoff_secs:
+            s_kept += 1
+            continue
+
+        action = 'dry-run, would remove' if dry_run else 'removed'
+        print(
+            'prune: ' + action +
+            ' dir=' + label +
+            ' sid=' + sid +
+            ' spool=' + fname +
+            ' ' + ts_source + '=' + ts_label +
+            ' age_days=' + str(round(age_days, 1)),
+            flush=True,
+        )
+
+        if not dry_run:
+            try:
+                os.unlink(fpath)
+                s_removed += 1
+            except OSError as exc:
+                print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
+                sys.exit(1)
+        else:
+            s_removed += 1
+
+    print(
+        'prune: ' + label + ' summary, scanned=' + str(s_scanned) +
+        ' kept=' + str(s_kept) +
+        ' removed=' + str(s_removed),
+        flush=True,
+    )
+    return s_scanned, s_kept, s_removed
+
+
+event_spool_dir_py = os.environ.get('EVENT_SPOOL_DIR_PY', '')
+tool_events_dir_py = os.environ.get('TOOL_EVENTS_DIR_PY', '')
+event_ledger_file_py = os.environ.get('EVENT_LEDGER_FILE_PY', '')
+tool_events_ledger_file_py = os.environ.get('TOOL_EVENTS_LEDGER_FILE_PY', '')
+
+if event_spool_dir_py:
+    prune_spool_dir(event_spool_dir_py, event_ledger_last_ts, event_ledger_file_py, 'api-events')
+
+if tool_events_dir_py:
+    prune_spool_dir(tool_events_dir_py, tool_ledger_last_ts, tool_events_ledger_file_py, 'tool-events')
+
+# ---------------------------------------------------------------------------
+# Phase 32 (D-15/D-08): fourth pass -- the new api_request_id-keyed ledger
+# (EVENT_LEDGER_FILE, API: lines). An API: line is dropped only when it is
+# BOTH past the cutoff AND its session's spool file no longer exists
+# (T-32-20): removing an idempotency record ahead of the data it protects is
+# how a pruning change turns into a double-report, so survival of the spool
+# file always wins over age. The frozen legacy HERMES: ledger (LEDGER_FILE)
+# is NEVER touched by this pass -- it is the rollback record (D-08) and the
+# drain gate's own input (contract C-11); this function only ever opens
+# EVENT_LEDGER_FILE, a wholly separate file.
+# ---------------------------------------------------------------------------
+
+def prune_event_ledger(ledger_path, spool_dir):
+    if not ledger_path:
+        return 0, 0, 0
+    try:
+        with open(ledger_path, 'r', encoding='utf-8') as f:
+            raw_lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return 0, 0, 0
+
+    l_scanned = l_kept = l_removed = 0
+    out_lines = []
+    now_ts = time.time()
+
+    for raw_line in raw_lines:
+        if not raw_line.startswith('API:'):
+            out_lines.append(raw_line)
+            continue
+        parts = raw_line.split('|')
+        if len(parts) != 3:
+            # Unrecognised shape -- keep. Never guess-delete an idempotency
+            # record whose fields this pass cannot parse with confidence.
+            out_lines.append(raw_line)
+            continue
+
+        l_scanned += 1
+        _arid_field, ledger_sid, ts_field = parts
+        try:
+            ts = float(ts_field)
+        except ValueError:
+            out_lines.append(raw_line)
+            l_kept += 1
+            continue
+
+        age_secs = now_ts - ts
+        if age_secs < cutoff_secs:
+            out_lines.append(raw_line)
+            l_kept += 1
+            continue
+
+        component = _strip_ns_prefix(ledger_sid)
+        spool_path = os.path.join(spool_dir, component + '.jsonl') if spool_dir else ''
+        if spool_path and os.path.isfile(spool_path):
+            # T-32-20: the record this line protects could still be re-read
+            # and re-shipped -- keep it regardless of age.
+            out_lines.append(raw_line)
+            l_kept += 1
+            continue
+
+        action = 'dry-run, would remove' if dry_run else 'removed'
+        print(
+            'prune: ' + action +
+            ' dir=api-events-ledger' +
+            ' sid=' + ledger_sid +
+            ' age_days=' + str(round(age_secs / 86400, 1)),
+            flush=True,
+        )
+        l_removed += 1
+        if dry_run:
+            # --dry-run must remove nothing -- keep the line in the rewrite
+            # buffer too (moot in practice since the write below is also
+            # gated on `not dry_run`, but keeps this function's own
+            # bookkeeping honest under either gate independently).
+            out_lines.append(raw_line)
+
+    if not dry_run and l_removed:
+        with open(ledger_path, 'w', encoding='utf-8') as f:
+            for ln in out_lines:
+                f.write(ln + '\n')
+
+    print(
+        'prune: api-events-ledger summary, scanned=' + str(l_scanned) +
+        ' kept=' + str(l_kept) +
+        ' removed=' + str(l_removed),
+        flush=True,
+    )
+    return l_scanned, l_kept, l_removed
+
+
+if event_ledger_file_py:
+    prune_event_ledger(event_ledger_file_py, event_spool_dir_py)
 PY
 prune_rc=$?
 set -e
