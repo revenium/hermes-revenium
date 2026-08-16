@@ -25,9 +25,18 @@ run_classification_async's Step 3 (HOOK-03/HOOK-04) — every registered
 trigger inherits that one guard, so "exactly one classification per session"
 holds regardless of which hook fires first.
 
-Invariant D-04: none of _on_session_end, _on_session_finalize, or
-_on_post_llm_call MUST EVER raise — exceptions are logged via logger.warning
-and swallowed so the plugin manager does not mark the plugin unhealthy.
+Invariant D-04: none of _on_session_end, _on_session_finalize,
+_on_post_llm_call, or _on_post_api_request MUST EVER raise — exceptions are
+logged via logger.warning and swallowed so the plugin manager does not mark
+the plugin unhealthy.
+
+Phase 32 (D-01/D-02/EVT-01): a fourth hook, post_api_request, is registered
+here for event-driven completion metering. Unlike the three hooks above it
+carries no classification concern at all -- it delegates straight to
+api_event_spool.spool_api_request, which appends a JSONL record to a
+per-session spool file and makes NO network call (D-01). It fires ONCE PER
+API CALL rather than once per turn (RESEARCH.md Pitfall 2), so it must never
+inherit the other callbacks' accepted turn-1 LLM-call latency.
 """
 from __future__ import annotations
 
@@ -35,6 +44,7 @@ import logging
 from pathlib import Path
 
 from .classifier import run_classification, MARKERS_READY_DIR, _paths_for_session
+from .api_event_spool import spool_api_request
 
 logger = logging.getLogger("revenium_classifier")
 
@@ -277,6 +287,83 @@ def _on_post_llm_call(
         )
 
 
+def _on_post_api_request(
+    *,
+    session_id,
+    api_request_id=None,
+    task_id=None,
+    turn_id=None,
+    platform=None,
+    model=None,
+    provider=None,
+    base_url=None,
+    api_mode=None,
+    api_call_count=None,
+    api_duration=None,
+    started_at=None,
+    ended_at=None,
+    finish_reason=None,
+    message_count=None,
+    response_model=None,
+    response=None,
+    usage=None,
+    assistant_message=None,
+    assistant_content_chars=None,
+    assistant_tool_call_count=None,
+    **kwargs,
+) -> None:
+    """Synchronous post_api_request callback per the Hermes plugin contract.
+
+    Phase 32 (D-01/D-02/EVT-01): fires ONCE PER API CALL, not once per turn
+    like the other three callbacks in this file (RESEARCH.md Pitfall 2) —
+    often several times within a single turn's tool-call round trips. Does
+    exactly one thing: hands its kwargs to api_event_spool.spool_api_request,
+    which appends a JSONL record to disk and makes NO network call, NO LLM
+    call, and NO database read (D-01).
+
+    `response` and `assistant_message` are deliberately NOT forwarded to the
+    spool writer. Contract C-2 forbids prompt/response content from ever
+    entering the spool record (T-32-03), and per Contract C-3 (the ported
+    langfuse fix, docs/plugin-interface-findings.md § E2), `response` on
+    THIS hook is always a sanitized dict with no real `.usage` attribute —
+    the writer reads token counts directly from the separate top-level
+    `usage` summary kwarg, never from `response`.
+
+    D-04 belt: spool_api_request already wraps its own body in
+    try/except + logger.warning, but this callback catches again so a
+    defect anywhere in the metering handler can never surface as a broken
+    turn — matching the belt-and-suspenders posture of every callback here.
+
+    **kwargs absorbs any additional fields a future Hermes version may add
+    to the post_api_request payload, keeping the plugin forward-compatible.
+    """
+    try:
+        if not session_id:
+            return
+        spool_api_request(
+            session_id=session_id,
+            api_request_id=api_request_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            platform=platform,
+            model=model,
+            response_model=response_model,
+            provider=provider,
+            base_url=base_url,
+            api_mode=api_mode,
+            api_duration=api_duration,
+            finish_reason=finish_reason,
+            usage=usage,
+        )
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier post_api_request failed for sid=%s api_request_id=%s: %s",
+            session_id,
+            api_request_id,
+            exc,
+        )
+
+
 def register(ctx) -> None:
     """Plugin registration entry point per the Hermes plugin contract.
 
@@ -295,12 +382,17 @@ def register(ctx) -> None:
       COMPLETED turn from agent/turn_finalizer.py — the trigger that
       classifies an ordinary session on its FIRST turn, without waiting for
       any boundary (Phase 29 / HOOK-02).
+    - _on_post_api_request against post_api_request, which fires once per
+      API CALL (Phase 32 / D-02) and spools a per-call metering event —
+      unrelated to classification, kept in its own module
+      (api_event_spool.py) so the seam stays visible.
 
-    All three callbacks dispatch into the same run_classification pipeline,
-    which gates re-classification behind the single permanent latch at
-    run_classification_async's Step 3 (Phase 29 / HOOK-03, HOOK-04) — so
-    "exactly one classification per session" is a property of the pipeline,
-    not of any one callback or firing order.
+    The first three callbacks dispatch into the same run_classification
+    pipeline, which gates re-classification behind the single permanent
+    latch at run_classification_async's Step 3 (Phase 29 / HOOK-03,
+    HOOK-04) — so "exactly one classification per session" is a property of
+    the pipeline, not of any one callback or firing order. The fourth
+    callback is independent of that pipeline entirely.
 
     No try/except — registration failure must surface to the plugin manager
     so operators see the unhealthy-plugin state at gateway-restart time.
@@ -308,3 +400,4 @@ def register(ctx) -> None:
     ctx.register_hook("on_session_end", _on_session_end)
     ctx.register_hook("on_session_finalize", _on_session_finalize)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
+    ctx.register_hook("post_api_request", _on_post_api_request)

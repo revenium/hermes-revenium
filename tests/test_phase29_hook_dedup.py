@@ -97,6 +97,25 @@ def _kwargs_for_hook(name, sid):
             user_message='please fix the bug', assistant_response='fixed the bug',
             conversation_history=[], model=None, platform='gateway',
         )
+    if name == 'post_api_request':
+        # Phase 32 (D-02): the fourth trigger, unrelated to the
+        # classification pipeline this module proves dedup over (it calls
+        # api_event_spool.spool_api_request, never _classify_via_llm) — its
+        # inclusion here must leave every classify-count assertion in this
+        # module unchanged, which is exactly what this companion invariant
+        # test is designed to catch if that ever stops being true.
+        now = time.time()
+        return dict(
+            session_id=sid, api_request_id=f'{sid}:task-1:turn-1:api:1',
+            task_id='t1', turn_id='turn-1', platform='gateway',
+            model='claude-sonnet-4-6', provider='anthropic',
+            base_url='https://api.anthropic.com', api_mode='anthropic_messages',
+            api_call_count=1, api_duration=1.234,
+            started_at=now, ended_at=now + 1.234,
+            finish_reason='stop', message_count=1,
+            response_model='claude-sonnet-4-6',
+            usage={'input_tokens': 100, 'output_tokens': 50, 'total_tokens': 150},
+        )
     raise AssertionError(
         f'no kwarg builder registered for hook {name!r} — a fourth trigger '
         'was added without extending this test'

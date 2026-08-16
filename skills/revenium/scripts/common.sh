@@ -104,8 +104,18 @@ PLUGIN_STATUS_FILE="${REVENIUM_PLUGIN_STATUS_FILE:-${STATE_DIR}/plugin-status.js
 # still retains ~20k log lines, far more than any diagnostic needs.
 REVENIUM_LOG_MAX_BYTES="${REVENIUM_LOG_MAX_BYTES:-52428800}"
 REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-2097152}"
+# Phase 32 (D-01/D-03): per-API-call metering event spool + its idempotency
+# ledger. The spool gets its OWN directory rather than sharing TOOL_EVENTS_DIR
+# because the record shape (contract C-2) and downstream shipper
+# (api-event-report.sh) are unrelated to tool-call capture; the ledger gets
+# its OWN key domain rather than sharing LEDGER_FILE/HERMES: because
+# api_request_id is a per-CALL identifier, not the per-SESSION-total key the
+# old ledger indexes on (D-08) — the two idempotency domains must never
+# collide.
+EVENT_SPOOL_DIR="${REVENIUM_EVENT_SPOOL_DIR:-${STATE_DIR}/api-events}"
+EVENT_LEDGER_FILE="${REVENIUM_EVENT_LEDGER_FILE:-${STATE_DIR}/revenium-api-events.ledger}"
 
-mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}"
+mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}"
 
 ensure_path() {
   local brew_prefix=""

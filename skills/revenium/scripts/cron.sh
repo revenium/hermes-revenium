@@ -97,6 +97,10 @@ PY
   bash "${SKILL_DIR}/scripts/hermes-report.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/guardrail-check.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/tool-event-report.sh" "$@" || true
+  # Phase 32 (D-01/D-03): fifth stage, ships the post_api_request spool.
+  # Same || true isolation as every other stage above — a failure here must
+  # never block the guardrail/tool-event stages that already ran this tick.
+  bash "${SKILL_DIR}/scripts/api-event-report.sh" "$@" || true
   # Sleep between iterations only; never after the last one (the next cron
   # tick lands within ~60s anyway, so a trailing sleep is wasted).
   if (( i < loop_count && loop_sleep > 0 )); then

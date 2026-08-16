@@ -76,9 +76,14 @@ def _llm_response(content):
 
 class HookRegistrationTests(unittest.TestCase):
     def test_register_wires_on_session_end_and_on_session_finalize(self):
-        """register(ctx) must bind ALL THREE hooks, and each hook name must be
+        """register(ctx) must bind ALL FOUR hooks, and each hook name must be
         bound to its own dedicated callback (a runtime binding assertion,
-        immune to how the file is commented)."""
+        immune to how the file is commented).
+
+        Phase 32 (D-02): a fourth hook, post_api_request, joined the
+        registration set — updated here (not left at 3) because the count
+        assertion is a direct, mechanical consequence of that hook's
+        addition, not an independent behavior this plan touches."""
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase29-register-')
         snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
         try:
@@ -92,14 +97,16 @@ class HookRegistrationTests(unittest.TestCase):
 
             mod.register(StubCtx())
 
-            self.assertEqual(len(registered), 3,
-                             'register(ctx) must call register_hook exactly three times')
+            self.assertEqual(len(registered), 4,
+                             'register(ctx) must call register_hook exactly four times')
             self.assertIs(registered['on_session_end'], mod._on_session_end)
             self.assertIs(registered['on_session_finalize'], mod._on_session_finalize,
                           'on_session_finalize must be bound to _on_session_finalize, '
                           'not _on_session_end')
             self.assertIs(registered['post_llm_call'], mod._on_post_llm_call,
                           'post_llm_call must be bound to _on_post_llm_call')
+            self.assertIs(registered['post_api_request'], mod._on_post_api_request,
+                          'post_api_request must be bound to _on_post_api_request')
         finally:
             _restore_plugin_env(snap, added)
             shutil.rmtree(tmpdir, ignore_errors=True)
