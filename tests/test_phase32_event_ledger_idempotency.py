@@ -336,5 +336,304 @@ class ReasoningTokensCapabilityGateTests(EventReportTestBase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ============================================================================
+# Task 3 — the new ledger as a real idempotency domain
+# ============================================================================
+
+def _build_failable_shim(shim_path, meter_log, fail_flag):
+    """A minimal revenium shim whose `meter completion` branch fails (exit 1,
+    no ledger-triggering output) whenever fail_flag exists on disk, and
+    succeeds (capturing argv to meter_log) otherwise. Deliberately NOT
+    routed through _compat_helpers.build_shim — failure simulation is
+    specific to this idempotency proof and shouldn't grow a shared helper's
+    surface for one caller."""
+    body = f'''#!/usr/bin/env bash
+case "$1" in
+  config) exit 0 ;;
+  guardrails) exit 0 ;;
+  meter)
+    if [[ "$3" == "--help" ]]; then
+      echo "--agentic-job-id  Agentic job instance identifier"
+      exit 0
+    fi
+    case "$2" in
+      completion)
+        if [[ -f "{fail_flag}" ]]; then
+          echo "simulated failure" >&2
+          exit 1
+        fi
+        printf "%q " "$@" >> "{meter_log}"
+        printf "\\n"      >> "{meter_log}"
+        ;;
+    esac
+    exit 0
+    ;;
+  jobs)
+    if [[ "$2" == "--help" ]]; then exit 0; fi
+    exit 0
+    ;;
+  *) exit 0 ;;
+esac
+'''
+    with open(shim_path, 'w') as f:
+        f.write(body)
+    os.chmod(shim_path, 0o755)
+
+
+class RepeatWithinRunDedupTests(EventReportTestBase):
+    """Test 1/2 — the same spool file shipped twice (separate runs) produces
+    one call and one ledger line; a spool file containing the same
+    api_request_id TWICE (one run) also produces exactly one call."""
+
+    def test_same_spool_shipped_twice_produces_one_call_and_one_ledger_line(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-repeat-across-runs'
+            arid = f'{sid}:t1:api:1'
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, arid, OLD_TS, OLD_TS + 1)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+
+            rc1, _i1, out1 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc1, 0, out1)
+            self.assertEqual(len(self._completions(meter_log)), 1)
+
+            ledger_path = os.path.join(sd, 'revenium-api-events.ledger')
+            with open(ledger_path) as f:
+                ledger_lines_1 = [l for l in f.read().splitlines() if l]
+            self.assertEqual(len(ledger_lines_1), 1)
+
+            rc2, _i2, out2 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc2, 0, out2)
+            self.assertEqual(len(self._completions(meter_log)), 1,
+                             'second run over the same spool must not add a second call')
+
+            with open(ledger_path) as f:
+                ledger_lines_2 = [l for l in f.read().splitlines() if l]
+            self.assertEqual(len(ledger_lines_2), 1,
+                             'second run must not add a second ledger line')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_duplicate_api_request_id_within_one_spool_file_ships_once(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-dup-within-run'
+            arid = f'{sid}:t1:api:1'
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'), [
+                _event_record(sid, arid, OLD_TS, OLD_TS + 1),
+                _event_record(sid, arid, OLD_TS + 5, OLD_TS + 6),  # same arid again
+            ])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(len(self._completions(meter_log)), 1,
+                             'two records sharing one api_request_id must ship exactly once')
+
+            ledger_path = os.path.join(sd, 'revenium-api-events.ledger')
+            with open(ledger_path) as f:
+                ledger_lines = [l for l in f.read().splitlines() if l]
+            self.assertEqual(len(ledger_lines), 1)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class FailedCallLeavesNoLedgerLineTests(EventReportTestBase):
+    """Test 3 — a shim forced to exit non-zero produces a call attempt and
+    NO ledger line; the next run retries and succeeds."""
+
+    def test_failed_call_retries_on_next_run(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            shim = os.path.join(bin_dir, 'revenium')
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            fail_flag = os.path.join(tmpdir, 'FAIL')
+            Path(fail_flag).touch()
+            _build_failable_shim(shim, meter_log, fail_flag)
+
+            sid = 'sess-fails-then-retries'
+            arid = f'{sid}:t1:api:1'
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, arid, OLD_TS, OLD_TS + 1)])
+
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc1, _i1, out1 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc1, 0, out1)
+            self.assertEqual(len(self._completions(meter_log)), 0,
+                             'a failed call must not be captured as a successful invocation')
+            self.assertIn('Failed:', self._log_text(sd))
+
+            ledger_path = os.path.join(sd, 'revenium-api-events.ledger')
+            if os.path.exists(ledger_path):
+                with open(ledger_path) as f:
+                    ledger_lines = [l for l in f.read().splitlines() if l]
+                self.assertEqual(len(ledger_lines), 0,
+                                 'a failed call must leave NO ledger line')
+
+            # Clear the failure and re-run — the retry must now succeed.
+            os.remove(fail_flag)
+            rc2, _i2, out2 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc2, 0, out2)
+            self.assertEqual(len(self._completions(meter_log)), 1,
+                             'the retry must succeed once the failure is cleared')
+            with open(ledger_path) as f:
+                ledger_lines = [l for l in f.read().splitlines() if l]
+            self.assertEqual(len(ledger_lines), 1)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class PreSeededLedgerTests(EventReportTestBase):
+    """Test 4 — a ledger pre-seeded with the identifier produces no call."""
+
+    def test_preseeded_ledger_entry_produces_no_call(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-preseeded'
+            arid = f'{sid}:t1:api:1'
+
+            ledger_path = os.path.join(sd, 'revenium-api-events.ledger')
+            with open(ledger_path, 'w') as f:
+                f.write(f'API:{arid}|{sid}|1700000000.000\n')
+
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, arid, OLD_TS, OLD_TS + 1)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(len(self._completions(meter_log)), 0,
+                             'a pre-seeded ledger entry must suppress the ship entirely')
+
+            with open(ledger_path) as f:
+                ledger_lines = [l for l in f.read().splitlines() if l]
+            self.assertEqual(len(ledger_lines), 1, 'no NEW ledger line should be appended')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class IdentifierShapeRoundTripTests(EventReportTestBase):
+    """Test 5/6 — an api_request_id containing colons round-trips correctly
+    through the presence check; one containing a pipe character is
+    sanitised such that the line stays parseable and the check still
+    matches on the next run."""
+
+    def test_colon_bearing_api_request_id_round_trips(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-colon-arid'
+            arid = f'{sid}:task-7:turn-3:api:9'  # structural colons, preserved per C-4
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, arid, OLD_TS, OLD_TS + 1)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+
+            rc1, _i1, out1 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc1, 0, out1)
+            self.assertEqual(len(self._completions(meter_log)), 1)
+
+            ledger_path = os.path.join(sd, 'revenium-api-events.ledger')
+            with open(ledger_path) as f:
+                ledger_line = f.read().splitlines()[0]
+            self.assertTrue(ledger_line.startswith(f'API:{arid}|{sid}|'),
+                            f'unexpected ledger line shape: {ledger_line!r}')
+
+            rc2, _i2, out2 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc2, 0, out2)
+            self.assertEqual(len(self._completions(meter_log)), 1,
+                             'a colon-bearing identifier must still dedup correctly on re-run')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_pipe_bearing_api_request_id_sanitised_and_still_dedups(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-pipe-arid'
+            raw_arid = f'{sid}:t1|api|1'  # pipe chars — must not survive into the ledger row
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, raw_arid, OLD_TS, OLD_TS + 1)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+
+            rc1, _i1, out1 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc1, 0, out1)
+            self.assertEqual(len(self._completions(meter_log)), 1)
+
+            ledger_path = os.path.join(sd, 'revenium-api-events.ledger')
+            with open(ledger_path) as f:
+                ledger_lines = [l for l in f.read().splitlines() if l]
+            self.assertEqual(len(ledger_lines), 1)
+            # Exactly 3 pipe-delimited fields — a stray '|' from the raw
+            # identifier would have produced a 4th field and broken parsing.
+            self.assertEqual(len(ledger_lines[0].split('|')), 3,
+                             f'pipe character leaked into the ledger row: {ledger_lines[0]!r}')
+
+            rc2, _i2, out2 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc2, 0, out2)
+            self.assertEqual(len(self._completions(meter_log)), 1,
+                             'the sanitised identifier must still dedup correctly on re-run')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class ThreeConsecutiveRunsByteIdenticalLedgerTests(EventReportTestBase):
+    """Explicit fixture-level analogue of the forced-re-run proof: three
+    consecutive runs over a fixed spool leave the ledger file's bytes
+    identical after runs two and three."""
+
+    def test_three_runs_leave_ledger_byte_identical_after_the_first(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-three-runs'
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'), [
+                _event_record(sid, f'{sid}:t1:api:1', OLD_TS, OLD_TS + 1),
+                _event_record(sid, f'{sid}:t1:api:2', OLD_TS + 1, OLD_TS + 2),
+            ])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            ledger_path = os.path.join(sd, 'revenium-api-events.ledger')
+
+            rc1, _i1, out1 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc1, 0, out1)
+            self.assertEqual(len(self._completions(meter_log)), 2)
+            with open(ledger_path, 'rb') as f:
+                bytes_after_run1 = f.read()
+
+            rc2, _i2, out2 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc2, 0, out2)
+            with open(ledger_path, 'rb') as f:
+                bytes_after_run2 = f.read()
+            self.assertEqual(bytes_after_run1, bytes_after_run2,
+                             'ledger bytes must be identical after run 2')
+
+            rc3, _i3, out3 = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc3, 0, out3)
+            with open(ledger_path, 'rb') as f:
+                bytes_after_run3 = f.read()
+            self.assertEqual(bytes_after_run1, bytes_after_run3,
+                             'ledger bytes must be identical after run 3')
+
+            self.assertEqual(len(self._completions(meter_log)), 2,
+                             'only the first run\'s two calls should ever be captured')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
