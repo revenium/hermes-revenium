@@ -120,6 +120,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'get-root-session-id.py',
             # Phase 32 — event-driven completion metering cron stage (EVT-01/EVT-04)
             SKILL / 'scripts' / 'api-event-report.sh',
+            # Phase 32 Plan 03 — drain-completion gate (C-11/D-13, EVT-12)
+            SKILL / 'scripts' / 'drain-status.sh',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
             SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
             SKILL / 'plugins' / 'revenium-classifier' / '__init__.py',
@@ -9144,6 +9146,65 @@ class RepositoryTests(unittest.TestCase):
                 ' '.join(api_calls[2].split()[:3]),
                 'guardrails enforcement-events list',
                 f'third call on a halt transition must be enforcement-events list: {api_calls!r}',
+            )
+
+    def test_drain_status_adds_a_cron_stage_but_no_request(self):
+        """Phase 32 Plan 03 (EVT-12, C-11): drain-status.sh is cron.sh's sixth
+        stage, but test_cron_tick_request_bound (above) proves the per-tick
+        HTTP bound is UNCHANGED at 2 steady-state / 3 halt-transition —
+        neither scenario includes this stage's contribution because it makes
+        NONE. Proven here structurally rather than by re-running the whole
+        pipeline: point PATH at a `revenium` stub that fails loudly if
+        invoked at all, and confirm drain-status.sh still runs to a clean,
+        deterministic exit — it cannot have made any HTTP-backed CLI call to
+        get there."""
+        import os
+        import subprocess
+        import tempfile
+
+        drain_status = str(SKILL / 'scripts' / 'drain-status.sh')
+
+        with tempfile.TemporaryDirectory(prefix='gsd-drain-bound-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            # A `revenium` on PATH that always fails loudly -- if
+            # drain-status.sh shells out to it even once, the exit-code
+            # assertion below fails immediately and unambiguously.
+            poison_shim = os.path.join(scripts_dir, 'revenium')
+            with open(poison_shim, 'w') as f:
+                f.write(
+                    '#!/usr/bin/env bash\n'
+                    'echo "POISON: revenium CLI invoked unexpectedly: $*" >&2\n'
+                    'exit 99\n'
+                )
+            os.chmod(poison_shim, 0o755)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            # scripts_dir FIRST on PATH so the poison shim shadows any real
+            # `revenium` this host might have installed.
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            result = subprocess.run(
+                ['bash', drain_status],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotIn(
+                'POISON', result.stdout + result.stderr,
+                f'drain-status.sh invoked the revenium CLI — it must make zero '
+                f'HTTP-backed calls: stdout={result.stdout!r} stderr={result.stderr!r}',
+            )
+            # Exit 0 (drained) on a fresh/empty ledger -- proves the script
+            # ran to a normal, deterministic conclusion without the poison
+            # shim ever firing.
+            self.assertEqual(
+                result.returncode, 0,
+                f'drain-status.sh unexpected exit {result.returncode}: '
+                f'stdout={result.stdout!r} stderr={result.stderr!r}',
             )
 
     def test_budget_rules_list_gated_batch_size(self):
