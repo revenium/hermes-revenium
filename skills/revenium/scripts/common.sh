@@ -337,6 +337,27 @@ resolve_markers_dir() {
   python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" 2>/dev/null || printf '%s\n' "${MARKERS_DIR}"
 }
 
+# Phase 32 (EVT-03): resolve the api-events spool directory that OWNS a given
+# session identifier — the same per-session, per-profile resolution as
+# resolve_markers_dir above, generalized onto a second subdirectory (see
+# scripts/resolve-markers-dir.py's resolve_state_subdir). Shells into the
+# SAME sidecar with a second "api-events" argument rather than a new file.
+# Production usage: spool_dir="$(resolve_spool_dir "${sid}")"
+# Fail-open, identical contract to resolve_markers_dir: empty sid → empty
+# stdout; missing python3 or sidecar failure → prints the process-level
+# EVENT_SPOOL_DIR unchanged.
+resolve_spool_dir() {
+  local sid="${1:-}"
+  if [[ -z "${sid}" ]]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${EVENT_SPOOL_DIR}"
+    return 0
+  fi
+  python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" "api-events" 2>/dev/null || printf '%s\n' "${EVENT_SPOOL_DIR}"
+}
+
 # quick-260605: resolve the Revenium teamId for CLI calls that require it
 # (jobs create/outcome). Prefers the REVENIUM_TEAM_ID env override, then falls
 # back to parsing `revenium config show`. Prints the team-id on stdout, or an

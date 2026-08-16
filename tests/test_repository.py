@@ -110,16 +110,23 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'guardrail-check.sh',
             # Phase 28 — plugin-registration health check (D-01, D-06)
             SKILL / 'scripts' / 'plugin-status.sh',
-            # Phase 28 — cron-side markers-directory resolver sidecar (TRACE-03)
+            # Phase 28 — cron-side markers-directory resolver sidecar (TRACE-03),
+            # generalized in Phase 32 (EVT-03) to resolve any per-session state
+            # subdirectory (markers, api-events) through one code path.
             SKILL / 'scripts' / 'resolve-markers-dir.py',
             # Python module (excluded from bash -n check by *.sh glob in test_shell_scripts_have_valid_syntax)
             SKILL / 'scripts' / 'split_strategies.py',
             # Phase 21 — root-walk helper (TRACE-01)
             SKILL / 'scripts' / 'get-root-session-id.py',
+            # Phase 32 — event-driven completion metering cron stage (EVT-01/EVT-04)
+            SKILL / 'scripts' / 'api-event-report.sh',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
             SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
             SKILL / 'plugins' / 'revenium-classifier' / '__init__.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'classifier.py',
+            # Phase 32 — post_api_request spool writer, kept as its own module
+            # so the metering seam stays visible (D-02, EVT-01/EVT-02/EVT-03)
+            SKILL / 'plugins' / 'revenium-classifier' / 'api_event_spool.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',

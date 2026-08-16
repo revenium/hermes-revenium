@@ -488,5 +488,86 @@ class SpoolHardeningTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class SpoolDirResolutionParityTests(unittest.TestCase):
+    """Task 3e — the plugin's _spool_dir_for_session and the cron-side
+    sidecar's resolve_state_subdir(..., "api-events") must agree on every
+    identifier shape below. The two implementations are deliberately NOT
+    shared code (mirrors classifier.py / resolve-markers-dir.py's own
+    documented split); this test is the only mechanism keeping them honest."""
+
+    def _load_sidecar(self):
+        sidecar_path = SCRIPTS_DIR / 'resolve-markers-dir.py'
+        spec = importlib.util.spec_from_file_location(
+            'phase32_spool_dir_sidecar', str(sidecar_path),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_plugin_and_sidecar_agree_on_every_identifier_shape(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-parity-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_parity_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+            sidecar = self._load_sidecar()
+
+            # A real profile home so the "profile home exists" case is
+            # genuine, not merely asserted.
+            existing_profile_home = os.path.join(hh, 'profiles', 'coder')
+            os.makedirs(existing_profile_home, exist_ok=True)
+
+            cases = [
+                'plain-session-id',                                  # non-namespaced
+                'agent:coder:sess-with-existing-profile',             # profile home exists
+                'agent:ghost-profile:sess-with-missing-profile',      # profile home missing
+                'agent:default:sess-default-profile',                 # default-profile namespace
+                '',                                                   # empty identifier
+                'agent:../../evil:sess-traversal-profile',            # traversal-shaped profile segment
+            ]
+
+            for sid in cases:
+                plugin_dir = str(spool_sub._spool_dir_for_session(sid))
+                sidecar_dir = sidecar.resolve_state_subdir(sid, 'api-events')
+                self.assertEqual(
+                    plugin_dir, sidecar_dir,
+                    f'plugin and sidecar disagree for sid={sid!r}: '
+                    f'plugin={plugin_dir!r} sidecar={sidecar_dir!r}',
+                )
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_resolve_markers_dir_still_byte_compatible_after_generalization(self):
+        """The pre-existing resolve_markers_dir(session_id, override) public
+        shape must be untouched by the resolve_state_subdir generalization —
+        same positional signature, same return value, for both the
+        namespaced and non-namespaced cases."""
+        sidecar = self._load_sidecar()
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-markers-compat-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            os.makedirs(os.path.join(hermes_home, 'profiles', 'coder'), exist_ok=True)
+            prev_home = os.environ.get('HERMES_HOME')
+            os.environ['HERMES_HOME'] = hermes_home
+            try:
+                self.assertEqual(
+                    sidecar.resolve_markers_dir('plain-sid'),
+                    sidecar.resolve_state_subdir('plain-sid', 'markers'),
+                )
+                self.assertEqual(
+                    sidecar.resolve_markers_dir('agent:coder:sess-1'),
+                    sidecar.resolve_state_subdir('agent:coder:sess-1', 'markers'),
+                )
+            finally:
+                if prev_home is None:
+                    os.environ.pop('HERMES_HOME', None)
+                else:
+                    os.environ['HERMES_HOME'] = prev_home
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -43,13 +43,45 @@ fi
 
 touch "${EVENT_LEDGER_FILE}"
 
+# Phase 32 (EVT-03): resolve the set of spool directories to sweep — the
+# process-level one plus each OTHER Hermes profile's own api-events
+# directory, so a multiplexed gateway's per-profile records are not
+# stranded (BUG-4's read-side gap, mirrored onto the spool). Directories
+# are resolved ONCE here, before any file or record is read — never
+# per-record — matching the cost discipline hermes-report.sh's own
+# per-session resolvers document. Dedup by realpath (bash 3.2 has no
+# associative arrays) so a directory reachable via more than one profile
+# entry is never swept twice in one run.
+_spool_dirs=()
+_seen_spool_dirs=$'\n'
+
+_add_spool_dir() {
+  local d="$1"
+  [[ -d "${d}" ]] || return 0
+  local real
+  real="$(cd "${d}" 2>/dev/null && pwd -P)" || return 0
+  case "${_seen_spool_dirs}" in
+    *$'\n'"${real}"$'\n'*) return 0 ;;
+  esac
+  _seen_spool_dirs="${_seen_spool_dirs}${real}"$'\n'
+  _spool_dirs+=("${d}")
+}
+
+_add_spool_dir "${EVENT_SPOOL_DIR}"
+while IFS=$'\t' read -r _profile_name _profile_home; do
+  [[ -z "${_profile_home}" ]] && continue
+  _add_spool_dir "${_profile_home}/state/revenium/api-events"
+done < <(hermes_profile_homes)
+
 main() {
   info "=== API Event Reporter starting ==="
 
   local reported_count=0
   local skipped_count=0
 
-  for event_file in "${EVENT_SPOOL_DIR}"/*.jsonl; do
+  local spool_dir event_file
+  for spool_dir in "${_spool_dirs[@]}"; do
+  for event_file in "${spool_dir}"/*.jsonl; do
     [[ -f "${event_file}" ]] || continue
 
     local rows
@@ -188,6 +220,7 @@ PY
         warn "Failed: sid=${sid} api_request_id=${arid} exit=${cmd_exit} output=${cmd_output}"
       fi
     done <<< "${rows}"
+  done
   done
 
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="
