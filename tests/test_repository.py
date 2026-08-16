@@ -155,6 +155,9 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 Plan 04 — the event path's own argv-shape golden,
             # additive to (not part of) the v1.x immutability contract above
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-event.golden.json',
+            # Phase 32 Plan 04 — operator document for the event-driven
+            # metering rollout (switches, drain gate, known differences, rollback)
+            ROOT / 'docs' / 'event-metering.md',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
