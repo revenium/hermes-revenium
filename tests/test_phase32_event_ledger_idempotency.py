@@ -86,6 +86,12 @@ class EventReportTestBase(unittest.TestCase):
             'INVOCATIONS_LOG': inv_log,
             'METER_LOG': meter_log,
             'TZ': 'UTC',
+            # Phase 32 Plan 03 (C-9): REVENIUM_EVENT_METERING_MODE now
+            # defaults to "shadow" (ships nothing) — this module tests the
+            # LIVE settle-gate/D-09/ledger-idempotency behavior plan 32-02
+            # built, so it opts in explicitly. extra_env (below) can still
+            # override this per-test if a future test needs to.
+            'REVENIUM_EVENT_METERING_MODE': 'live',
         }
         if extra_env:
             env.update(extra_env)

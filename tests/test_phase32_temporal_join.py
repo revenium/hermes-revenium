@@ -101,6 +101,12 @@ class TemporalJoinTestBase(unittest.TestCase):
             'INVOCATIONS_LOG': inv_log,
             'METER_LOG': meter_log,
             'TZ': 'UTC',
+            # Phase 32 Plan 03 (C-9): REVENIUM_EVENT_METERING_MODE now
+            # defaults to "shadow" (ships nothing) — this module tests the
+            # LIVE shipping/temporal-join behavior plans 32-01/32-02 built,
+            # so it opts in explicitly rather than silently asserting on a
+            # shadow run that ships zero completions.
+            'REVENIUM_EVENT_METERING_MODE': 'live',
         }
         return run_script(SCRIPTS_DIR / 'api-event-report.sh', env, inv_log)
 

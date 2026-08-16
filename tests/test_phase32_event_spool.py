@@ -129,6 +129,11 @@ class ApiEventReportShipperTests(unittest.TestCase):
             'INVOCATIONS_LOG': inv_log,
             'METER_LOG': meter_log,
             'TZ': 'UTC',
+            # Phase 32 Plan 03 (C-9): REVENIUM_EVENT_METERING_MODE now
+            # defaults to "shadow" (ships nothing) — this tracer test proves
+            # the LIVE shipping path plan 32-01 built, so it opts in
+            # explicitly rather than silently asserting on a shadow run.
+            'REVENIUM_EVENT_METERING_MODE': 'live',
         }
         return run_script(SCRIPTS_DIR / 'api-event-report.sh', base_env, inv_log)
 
