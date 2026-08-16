@@ -224,5 +224,269 @@ class ApiEventReportShipperTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class SpoolHardeningTests(unittest.TestCase):
+    """Task 2 — proves the three ways the tracer's writer could be wrong or
+    dangerous are actually closed: the usage fallback, identifier
+    validation, and never-raise under malformed input."""
+
+    # --- (a) usage fallback, proven not asserted ---
+
+    def test_response_usage_key_conflict_kwarg_wins(self):
+        """A `response` shaped exactly as Hermes builds it (a plain dict
+        carrying a `usage` key whose values DIFFER from the top-level
+        `usage` kwarg) must not influence the record — the top-level kwarg
+        always wins, because this hook's `response` never carries a real
+        `.usage` attribute (Contract C-3)."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-usage-conflict-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_usage_conflict_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            conflicting_response = {
+                'model': 'claude-sonnet-4-6', 'finish_reason': 'stop',
+                'assistant_message': {'role': 'assistant', 'content': 'ignored'},
+                'usage': {'input_tokens': 999999, 'output_tokens': 999999,
+                          'total_tokens': 1999998},
+            }
+            payload = _synthetic_payload(response=conflicting_response)
+            spool_sub.spool_api_request(**payload)
+
+            event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+            self.assertTrue(event_path.is_file())
+            rec = json.loads(event_path.read_text(encoding='utf-8').splitlines()[0])
+            self.assertEqual(rec['input_tokens'], 2048,
+                             'input_tokens must come from the top-level usage kwarg')
+            self.assertEqual(rec['output_tokens'], 512,
+                             'output_tokens must come from the top-level usage kwarg')
+            self.assertEqual(rec['total_tokens'], 2560,
+                             'total_tokens must come from the top-level usage kwarg')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_response_present_but_usage_none_writes_nothing(self):
+        """A `response` dict present alongside `usage=None` must write NO
+        record — not a record of zeros."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-usage-none-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_usage_none_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(
+                response={'model': 'x', 'usage': {'input_tokens': 5}},
+                usage=None,
+            )
+            spool_sub.spool_api_request(**payload)
+
+            event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+            self.assertFalse(event_path.exists(),
+                             'usage=None must write no record, not a record of zeros')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_output_tokens_falls_back_to_completion_tokens(self):
+        """output_tokens absent with completion_tokens present must populate
+        output_tokens from completion_tokens (langfuse's own fallback)."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-completion-fallback-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_completion_fallback_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(usage={
+                'input_tokens': 100, 'completion_tokens': 77, 'total_tokens': 177,
+            })
+            spool_sub.spool_api_request(**payload)
+
+            event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+            rec = json.loads(event_path.read_text(encoding='utf-8').splitlines()[0])
+            self.assertEqual(rec['output_tokens'], 77)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # --- (b) identifier validation before path construction ---
+
+    def test_traversal_shaped_session_id_writes_nothing(self):
+        """A traversal-shaped, non-namespaced session_id must fail the
+        filename allowlist and write nothing — no fallback to a scan or a
+        pseudo identifier."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-traversal-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_traversal_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(session_id='../../../etc/passwd')
+            spool_sub.spool_api_request(**payload)
+
+            api_events_dir = Path(sd) / 'api-events'
+            written = list(api_events_dir.glob('**/*.jsonl')) if api_events_dir.exists() else []
+            self.assertEqual(written, [], f'expected no file written, found: {written}')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_traversal_shaped_namespaced_remainder_writes_nothing(self):
+        """A namespaced identifier whose REMAINDER (after `agent:<profile>:`
+        is consumed by per-profile resolution) is traversal-shaped must also
+        write nothing — the allowlist applies to the filename component,
+        not just the whole raw string."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-ns-traversal-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_ns_traversal_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(session_id='agent:someprofile:../../evil')
+            spool_sub.spool_api_request(**payload)
+
+            state_root = Path(hh)
+            written = list(state_root.glob('**/api-events/**/*.jsonl'))
+            self.assertEqual(written, [], f'expected no file written, found: {written}')
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_empty_api_request_id_after_sanitisation_writes_nothing(self):
+        """An api_request_id that sanitises to empty (all forbidden chars)
+        must write no record."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-empty-arid-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_empty_arid_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(api_request_id='|||\n\r')
+            spool_sub.spool_api_request(**payload)
+
+            event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+            self.assertFalse(event_path.exists())
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # --- (c) never raise, under any input ---
+
+    def test_usage_as_string_never_raises_and_writes_nothing(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-usage-string-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_usage_string_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(usage='not-a-dict')
+            try:
+                result = spool_sub.spool_api_request(**payload)
+            except Exception as exc:
+                self.fail(f'spool_api_request raised for usage=string: {exc}')
+            self.assertIsNone(result)
+
+            event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+            self.assertFalse(event_path.exists())
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_none_started_at_never_raises_and_writes_nothing(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-none-started-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_none_started_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(started_at=None)
+            try:
+                spool_sub.spool_api_request(**payload)
+            except Exception as exc:
+                self.fail(f'spool_api_request raised for started_at=None: {exc}')
+
+            event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+            self.assertFalse(event_path.exists())
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_unwritable_spool_dir_never_raises_and_writes_nothing(self):
+        """chmod the STATE_DIR (the spool dir's parent) to 0o500 so the
+        spool subdirectory itself cannot be created — a leaf-directory chmod
+        would be silently undone by the writer's own belt-and-suspenders
+        chmod(0o700), so the parent is the correct failure point to force."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-unwritable-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_unwritable_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            os.chmod(sd, 0o500)
+            try:
+                payload = _synthetic_payload()
+                try:
+                    spool_sub.spool_api_request(**payload)
+                except Exception as exc:
+                    self.fail(f'spool_api_request raised with an unwritable spool dir: {exc}')
+
+                event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+                self.assertFalse(event_path.exists())
+            finally:
+                os.chmod(sd, 0o700)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_none_session_id_never_raises_and_writes_nothing(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-none-sid-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_none_sid_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            payload = _synthetic_payload(session_id=None)
+            try:
+                result = spool_sub.spool_api_request(**payload)
+            except Exception as exc:
+                self.fail(f'spool_api_request raised for session_id=None: {exc}')
+            self.assertIsNone(result)
+
+            api_events_dir = Path(sd) / 'api-events'
+            written = list(api_events_dir.glob('**/*.jsonl')) if api_events_dir.exists() else []
+            self.assertEqual(written, [])
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # --- record key-set exactness ---
+
+    def test_record_key_set_equals_contract_c2_allowlist_exactly(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-hardening-keyset-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_hardening_keyset_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+
+            spool_sub.spool_api_request(**_synthetic_payload())
+
+            event_path = Path(sd) / 'api-events' / 'test-session.jsonl'
+            rec = json.loads(event_path.read_text(encoding='utf-8').splitlines()[0])
+            self.assertEqual(set(rec.keys()), set(spool_sub._RECORD_KEYS))
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
