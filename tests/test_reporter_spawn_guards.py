@@ -58,10 +58,21 @@ REAL_PYTHON3 = sys.executable
 # committed script (macOS, Python 3.x stdlib subprocess). Task 1 alone
 # measured 14 (H5 guard only); Task 2 lowered it to 13 (H2/H3/H4 landed);
 # Task 3's root-markers-dir memoization for top-level sessions (PERF-02)
-# lowers it once more, to 12. Locking a ceiling (rather than only the
+# lowered it once more, to 12. Locking a ceiling (rather than only the
 # relational property below) catches a future edit that adds an
 # unconditional spawn to the hot path without also lowering this constant.
-NO_MARKER_SPAWN_CEILING = 12
+#
+# Phase 32 Plan 03 (C-11/D-13) raises it back to 13: resolve_switch_setting
+# (common.sh) reads config.json's legacyCompletions key via ONE python3
+# spawn at STARTUP -- once per run, not once per session and not inside the
+# per-session loop this file's guards otherwise police -- whenever
+# REVENIUM_LEGACY_COMPLETIONS is unset AND config.json exists (this
+# fixture's config.json always exists, for organizationName). A fixed
+# per-run cost is architecturally different from the per-session/per-record
+# hot-path cost quick-260814-e7c cut; the relational property below (fewer
+# spawns than a marker-present session) is what actually polices runaway
+# per-session growth.
+NO_MARKER_SPAWN_CEILING = 13
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):

@@ -5,6 +5,11 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Phase 32 Plan 03 (C-9): captured BEFORE common.sh's own
+# "${REVENIUM_LEGACY_COMPLETIONS:-enabled}" declaration overwrites the
+# variable — see resolve_switch_setting's own comment in common.sh for why
+# this precedes `source common.sh`.
+_LEGACY_COMPLETIONS_ENV_RAW="${REVENIUM_LEGACY_COMPLETIONS:-}"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/common.sh"
 
@@ -98,6 +103,55 @@ fi
 # agent. Warn if it looks like an agent/profile name so a misconfigured install
 # does not pollute the ORGANIZATION dimension.
 warn_if_org_looks_like_agent "${ORG_NAME}"
+
+# Phase 32 Plan 03 (C-11/D-13): resolve REVENIUM_LEGACY_COMPLETIONS once at
+# startup (env > config.json's legacyCompletions > the "enabled" default),
+# and re-read drain-status.json's own `drained` field once at startup with a
+# FAIL-SAFE read — a missing file, invalid JSON, or an absent field ALL
+# resolve to not-drained. This is the whole of contract C-11's enforcement:
+# the legacy completions path is skipped for a session ONLY when the
+# operator's setting is "disabled" AND the gate independently confirms
+# drained. A disable request made while the gate says not-drained is
+# refused — completions keep metering — because D-09 and D-11 compose into a
+# silent, permanent under-bill otherwise (32-CONTEXT.md D-13).
+_legacy_completions_resolution=$(resolve_switch_setting "${_LEGACY_COMPLETIONS_ENV_RAW}" "legacyCompletions" "enabled" "enabled" "disabled")
+REVENIUM_LEGACY_COMPLETIONS_RESOLVED=$(printf '%s' "${_legacy_completions_resolution}" | sed -n '1p')
+_legacy_completions_invalid=$(printf '%s' "${_legacy_completions_resolution}" | sed -n '2p')
+if [[ "${_legacy_completions_invalid}" == "true" ]]; then
+  warn "REVENIUM_LEGACY_COMPLETIONS/legacyCompletions had an unrecognised value — falling back to 'enabled' (completions keep metering)."
+fi
+
+DRAIN_GATE_DRAINED="false"
+DRAIN_GATE_PENDING_COUNT=""
+if [[ -f "${DRAIN_STATUS_FILE}" ]]; then
+  _drain_gate_output=$(DRAIN_STATUS_FILE="${DRAIN_STATUS_FILE}" python3 - <<'PY' 2>/dev/null
+import json, os
+try:
+    doc = json.load(open(os.environ['DRAIN_STATUS_FILE']))
+except Exception:
+    print('DRAINED=false')
+    print('PENDING=')
+else:
+    drained = doc.get('drained')
+    pending = doc.get('pendingCount')
+    print(f"DRAINED={'true' if drained is True else 'false'}")
+    print(f"PENDING={pending if isinstance(pending, int) else ''}")
+PY
+)
+  DRAIN_GATE_DRAINED=$(printf '%s' "${_drain_gate_output}" | sed -n 's/^DRAINED=//p' | head -1)
+  DRAIN_GATE_PENDING_COUNT=$(printf '%s' "${_drain_gate_output}" | sed -n 's/^PENDING=//p' | head -1)
+  [[ "${DRAIN_GATE_DRAINED}" == "true" ]] || DRAIN_GATE_DRAINED="false"
+fi
+
+LEGACY_COMPLETIONS_SKIP="false"
+if [[ "${REVENIUM_LEGACY_COMPLETIONS_RESOLVED}" == "disabled" ]]; then
+  if [[ "${DRAIN_GATE_DRAINED}" == "true" ]]; then
+    LEGACY_COMPLETIONS_SKIP="true"
+    info "legacy completions path disabled — drain gate reports drained; skipping legacy completion emission this run."
+  else
+    warn "REVENIUM_LEGACY_COMPLETIONS=disabled but the drain gate reports NOT drained (pending=${DRAIN_GATE_PENDING_COUNT:-unknown}) — refusing to disable; completions keep metering. Run drain-status.sh for details."
+  fi
+fi
 
 main() {
   info "=== Hermes Metering Reporter starting ==="
@@ -1410,6 +1464,17 @@ PY
       fi
     fi
 
+    # Phase 32 Plan 03 (C-11/D-13): the ENTIRE legacy completion-emission
+    # block below (both the per-marker and zero-marker paths) is skipped for
+    # this session only when LEGACY_COMPLETIONS_SKIP was resolved true at
+    # startup (REVENIUM_LEGACY_COMPLETIONS=disabled AND the drain gate
+    # reports drained). This is the ONLY change this plan makes to the
+    # session loop — the jobs-create stage above (and the post-loop jobs
+    # outcome stage below) are OUTSIDE this guard and keep running in every
+    # configuration, because post_api_request carries no job lifecycle
+    # signal (D-10). The superseded code inside this guard is retained, not
+    # deleted — disabling it is a setting flip, not a revert (D-11).
+    if [[ "${LEGACY_COMPLETIONS_SKIP}" != "true" ]]; then
     # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
     # per-marker Revenium calls with extended transaction-id and per-call v2
     # ledger writes. Else fall through to the legacy single-call path (T06
@@ -1708,6 +1773,7 @@ PY
         warn "Command: ${cmd[*]}"
       fi
     fi
+    fi # LEGACY_COMPLETIONS_SKIP guard (Phase 32 Plan 03, C-11/D-13)
   done <<< "${sessions}"
 
   # Phase 10: post-loop outcome stage — report each terminated arc exactly once.
