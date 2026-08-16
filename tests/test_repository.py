@@ -152,6 +152,9 @@ class RepositoryTests(unittest.TestCase):
             # Phase 23 — COMPAT-01/02 umbrella regression trip-wire (D-01)
             ROOT / 'tests' / 'test_compat_v1_4_meta.py',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'README.md',
+            # Phase 32 Plan 04 — the event path's own argv-shape golden,
+            # additive to (not part of) the v1.x immutability contract above
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-event.golden.json',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

@@ -98,6 +98,33 @@ The assertion machinery lives in
 no-shift `revenium` shim builder (`build_shim`) that captures argv
 without losing token boundaries.
 
+## meter-completion-event.golden.json — the event path's own contract (Phase 32)
+
+- **meter-completion-event.golden.json** — a sixth fixture, added in Phase 32
+  Plan 04, pinning the `revenium meter completion` argv shape shipped by
+  `skills/revenium/scripts/api-event-report.sh` (the new event-driven
+  completion path, contract C-2/C-5/C-7/C-8). Loaded by
+  `tests/test_compat_meter_completion_event.py`.
+
+This fixture is **additive** to the v1.x contract above, not a replacement for
+it, and is **NOT** part of the immutability contract or the v1.4 umbrella
+meta suite (`test_compat_v1_4_meta.py`) — that suite's identifier is the
+milestone-level acceptance gate for the *legacy* (cron-reconstructed) wire
+shape specifically. The event path is a second, independently-versioned
+argv contract that ships alongside the legacy one during shadow/canary/drain,
+and eventually on its own once the legacy path is retired. The four v1.x
+fixtures above remain immutable and untouched by this fixture's existence.
+
+It pins the event path's own deliberate differences from the legacy shape as
+required *absences* in `forbidden_fields`: `--total-cost` (contract C-8 — the
+event carries no cost field; Revenium prices the row server-side) and
+`--input-messages` / `--output-response` (content flags the CLI offers that
+this path must never pass, matching the spool record's closed 19-key
+schema). It also asserts directly (not just via the golden) that `--model`
+is populated from the spooled event's `response_model` field rather than its
+`model` field — the source of the multi-model attribution the legacy path's
+session-level `model` column could not resolve.
+
 ## v1.4 subagent inheritance — orthogonal to top-level compat
 
 v1.4 (Phases 21-23) adds subagent `--trace-id` + `--agentic-job-id`
