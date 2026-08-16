@@ -1,0 +1,59 @@
+{
+  "prompt_growth": [
+    {
+      "vocab_size": 0,
+      "prompt_bytes": 1228,
+      "est_tokens": 306,
+      "truncated": false
+    },
+    {
+      "vocab_size": 4,
+      "prompt_bytes": 1286,
+      "est_tokens": 320,
+      "truncated": false
+    },
+    {
+      "vocab_size": 25,
+      "prompt_bytes": 1742,
+      "est_tokens": 434,
+      "truncated": false
+    },
+    {
+      "vocab_size": 100,
+      "prompt_bytes": 2244,
+      "est_tokens": 560,
+      "truncated": true
+    },
+    {
+      "vocab_size": 500,
+      "prompt_bytes": 2244,
+      "est_tokens": 560,
+      "truncated": true
+    },
+    {
+      "vocab_size": 2000,
+      "prompt_bytes": 2244,
+      "est_tokens": 560,
+      "truncated": true
+    }
+  ],
+  "baseline_s": [
+    5.217815160751343,
+    7.303684234619141,
+    5.248775243759155,
+    16.11478614807129,
+    5.944609880447388
+  ],
+  "classification_s": [
+    5.302410125732422,
+    5.196928024291992,
+    5.486400127410889,
+    5.302146911621094,
+    5.425665855407715
+  ],
+  "delta_median_s": -0.64,
+  "service_hop_ms": {
+    "p50": 0.37097930908203125,
+    "p95": 0.6890296936035156
+  }
+}

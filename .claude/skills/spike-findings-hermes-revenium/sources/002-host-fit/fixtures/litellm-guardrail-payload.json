@@ -1,0 +1,39 @@
+{
+  "_comment": "Representative payload shape a LiteLLM custom guardrail receives in async_pre_call_hook / async_post_call_success_hook. The guardrail sees ONE request/response pair with no session history, no session DB, and no durable filesystem — which is exactly the constraint spike 002 tests. Shape follows the LiteLLM CustomGuardrail hook signature (data dict + user_api_key_dict + call_type); values here are synthetic.",
+  "call_type": "completion",
+  "data": {
+    "model": "claude-sonnet-5",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant for the payments team."
+      },
+      {
+        "role": "user",
+        "content": "Our reconciliation job is dropping about 0.3% of settlement rows overnight. Here's the job config and last night's log tail — figure out where the rows are going."
+      }
+    ],
+    "temperature": 0.0,
+    "metadata": {
+      "user_api_key_alias": "payments-team",
+      "user_api_key_team_id": "team_9f2c",
+      "user_api_key_user_id": "u_4471",
+      "requester_ip_address": "10.0.3.44"
+    }
+  },
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "role": "assistant",
+          "content": "The drop is in the dedupe stage: `settlement_id` is being compared after a lossy cast to int64, so ids above 2^53 collide and the second row is discarded as a duplicate. Three fixes, cheapest first: (1) compare as strings, (2) widen the column, (3) add a uniqueness assertion before the write."
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 1840,
+      "completion_tokens": 96,
+      "total_tokens": 1936
+    }
+  }
+}

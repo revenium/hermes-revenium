@@ -1,0 +1,142 @@
+{
+  "CURRENT (engineering-adjacent)": {
+    "labels": [
+      [
+        "flaky-1",
+        "debugging_flaky_test"
+      ],
+      [
+        "perf-1",
+        "perf_bug_fix"
+      ],
+      [
+        "docs-1",
+        "documentation_writing"
+      ],
+      [
+        "flaky-2",
+        "ci_flake_investigation"
+      ],
+      [
+        "sec-1",
+        "auth_middleware_review"
+      ],
+      [
+        "flaky-1",
+        "sql_debugging_flaky_test"
+      ],
+      [
+        "perf-1",
+        "prod_log_triage"
+      ],
+      [
+        "docs-1",
+        "webhook_docs_writing"
+      ],
+      [
+        "flaky-2",
+        "ci_intermittent_test_debugging"
+      ],
+      [
+        "sec-1",
+        "code_review_finding"
+      ],
+      [
+        "flaky-1",
+        "ci_flaky_test_debug"
+      ],
+      [
+        "perf-1",
+        "prod_dashboard_perf_fix"
+      ],
+      [
+        "docs-1",
+        "webhooks_docs_writing"
+      ],
+      [
+        "flaky-2",
+        "flaky_test_diagnosis"
+      ],
+      [
+        "sec-1",
+        "code_review_auth_middleware"
+      ]
+    ],
+    "buckets": {
+      "minted": 14,
+      "example_verbatim": 1
+    },
+    "mean_words": 3.27,
+    "in_range": "15/15"
+  },
+  "FAR (unrelated domains)": {
+    "labels": [
+      [
+        "flaky-1",
+        "ci_flaky_test_debugging"
+      ],
+      [
+        "perf-1",
+        "performance_fix_n_plus_one"
+      ],
+      [
+        "docs-1",
+        "webhooks_reference_docs"
+      ],
+      [
+        "flaky-2",
+        "ci_intermittent_test_flake"
+      ],
+      [
+        "sec-1",
+        "code_review"
+      ],
+      [
+        "flaky-1",
+        "debugging_flaky_test_fixture"
+      ],
+      [
+        "perf-1",
+        "database_n_plus_one_fix"
+      ],
+      [
+        "docs-1",
+        "webhooks_reference_docs"
+      ],
+      [
+        "flaky-2",
+        "debugging_flaky_ci_test"
+      ],
+      [
+        "sec-1",
+        "code_review"
+      ],
+      [
+        "flaky-1",
+        "debugging_flaky_shared_fixture"
+      ],
+      [
+        "perf-1",
+        "performance_bottleneck_fix"
+      ],
+      [
+        "docs-1",
+        "webhooks_reference_docs"
+      ],
+      [
+        "flaky-2",
+        "cicd_flakiness_debug"
+      ],
+      [
+        "sec-1",
+        "auth_security_review"
+      ]
+    ],
+    "buckets": {
+      "minted": 13,
+      "seed_verbatim": 2
+    },
+    "mean_words": 3.47,
+    "in_range": "13/15"
+  }
+}

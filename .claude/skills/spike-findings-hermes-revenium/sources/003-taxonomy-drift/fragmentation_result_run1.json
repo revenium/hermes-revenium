@@ -1,0 +1,125 @@
+{
+  "independent": {
+    "labels": {
+      "flaky-1": {
+        "Hermes": "sql_query_debug",
+        "LiteLLM proxy": "code_review",
+        "Claude Code": "ci_flaky_test_root_cause"
+      },
+      "perf-1": {
+        "Hermes": "perf_bottleneck_fix",
+        "LiteLLM proxy": "database_query_optimization",
+        "Claude Code": "perf_fix_n_plus_one"
+      },
+      "docs-1": {
+        "Hermes": "webhooks_docs_writing",
+        "LiteLLM proxy": "webhooks_reference_docs",
+        "Claude Code": "webhooks_reference_docs"
+      },
+      "flaky-2": {
+        "Hermes": "ci_intermittent_test_debug",
+        "LiteLLM proxy": "ci_flaky_test_debug",
+        "Claude Code": "ci_flaky_test_root_cause"
+      },
+      "sec-1": {
+        "Hermes": "review_code_change",
+        "LiteLLM proxy": "prod_log_triage",
+        "Claude Code": "auth_middleware_security_review"
+      }
+    },
+    "distinct_labels_minted": [
+      "auth_middleware_security_review",
+      "ci_flaky_test_debug",
+      "ci_flaky_test_root_cause",
+      "ci_intermittent_test_debug",
+      "database_query_optimization",
+      "perf_bottleneck_fix",
+      "perf_fix_n_plus_one",
+      "prod_log_triage",
+      "review_code_change",
+      "sql_query_debug",
+      "webhooks_docs_writing",
+      "webhooks_reference_docs"
+    ],
+    "fragmentation_ratio": 3.25,
+    "per_item_distinct_labels": {
+      "flaky-1": 3,
+      "perf-1": 3,
+      "docs-1": 2,
+      "flaky-2": 3,
+      "sec-1": 3
+    },
+    "mean_labels_per_item": 2.8,
+    "same_activity_collapsed": {
+      "flaky-1~flaky-2": {
+        "Hermes": false,
+        "LiteLLM proxy": false,
+        "Claude Code": true
+      }
+    },
+    "final_vocabulary_size": {
+      "Hermes": 9,
+      "LiteLLM proxy": 8,
+      "Claude Code": 8
+    }
+  },
+  "shared": {
+    "labels": {
+      "flaky-1": {
+        "Hermes": "sql_query_debug",
+        "LiteLLM proxy": "code_review",
+        "Claude Code": "ci_flaky_test_debug"
+      },
+      "perf-1": {
+        "Hermes": "performance_debug_query_optimization",
+        "LiteLLM proxy": "performance_debug_query_optimization",
+        "Claude Code": "performance_debug_query_optimization"
+      },
+      "docs-1": {
+        "Hermes": "webhooks_docs_writeup",
+        "LiteLLM proxy": "webhooks_reference_docs_writeup",
+        "Claude Code": "webhooks_reference_docs_writeup"
+      },
+      "flaky-2": {
+        "Hermes": "ci_flaky_test_debug",
+        "LiteLLM proxy": "ci_flaky_test_debug",
+        "Claude Code": "ci_flaky_test_debug"
+      },
+      "sec-1": {
+        "Hermes": "code_review_auth_middleware",
+        "LiteLLM proxy": "unclassified",
+        "Claude Code": "code_review_auth_middleware"
+      }
+    },
+    "distinct_labels_minted": [
+      "ci_flaky_test_debug",
+      "code_review_auth_middleware",
+      "performance_debug_query_optimization",
+      "sql_query_debug",
+      "unclassified",
+      "webhooks_docs_writeup",
+      "webhooks_reference_docs_writeup"
+    ],
+    "fragmentation_ratio": 2.0,
+    "per_item_distinct_labels": {
+      "flaky-1": 3,
+      "perf-1": 1,
+      "docs-1": 2,
+      "flaky-2": 1,
+      "sec-1": 2
+    },
+    "mean_labels_per_item": 1.8,
+    "same_activity_collapsed": {
+      "flaky-1~flaky-2": {
+        "Hermes": false,
+        "LiteLLM proxy": false,
+        "Claude Code": true
+      }
+    },
+    "final_vocabulary_size": {
+      "Hermes": 10,
+      "LiteLLM proxy": 10,
+      "Claude Code": 10
+    }
+  }
+}

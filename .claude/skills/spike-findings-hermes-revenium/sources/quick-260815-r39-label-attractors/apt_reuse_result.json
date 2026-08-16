@@ -1,0 +1,24 @@
+{
+  "WARM + examples": {
+    "labels": [
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug",
+      "sql_query_debug",
+      "reconciliation_dedupe_bug",
+      "sql_query_debug"
+    ],
+    "apt_reuse": 3,
+    "n": 5
+  },
+  "WARM - examples": {
+    "labels": [
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_bug",
+      "reconciliation_dedupe_id_overflow",
+      "reconciliation_dedupe_bug"
+    ],
+    "apt_reuse": 4,
+    "n": 5
+  }
+}

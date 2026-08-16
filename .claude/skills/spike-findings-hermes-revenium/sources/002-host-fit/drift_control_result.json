@@ -1,0 +1,26 @@
+{
+  "control": [
+    "prod_reconciliation_bug",
+    "settlement_dedupe_int64_overflow",
+    "sql_query_debug"
+  ],
+  "treatment": {
+    "Hermes": [
+      "sql_row_dedupe_bug",
+      "prod_log_triage",
+      "reconciliation_dedupe_bug"
+    ],
+    "LiteLLM proxy": [
+      "reconciliation_dedupe_int64_bug",
+      "sql_query_debug",
+      "reconciliation_row_drop_debug"
+    ],
+    "Claude Code": [
+      "prod_log_row_dedup_bug",
+      "reconciliation_row_dedupe_bug",
+      "sql_row_dedup_overflow"
+    ]
+  },
+  "control_stable": false,
+  "distinct_labels_total": 11
+}
