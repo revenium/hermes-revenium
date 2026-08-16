@@ -96,7 +96,7 @@ def assert_argv_matches_golden(test_case, argv, golden):
 
 
 def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None,
-                squad_capable=True):
+                squad_capable=True, reasoning_tokens_capable=False):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -132,6 +132,15 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         )
     else:
         squad_help_lines = ''
+    # Phase 32 Plan 02 (Task 1c): additive, opt-in capability line for the
+    # --reasoning-tokens probe (supports_flag "meter completion" "--reasoning-tokens").
+    # Default False preserves every existing caller's shim byte-for-byte.
+    if reasoning_tokens_capable:
+        reasoning_help_lines = (
+            '      echo "--reasoning-tokens int    Reasoning token count"\n'
+        )
+    else:
+        reasoning_help_lines = ''
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
@@ -150,7 +159,8 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         '    # (as the pre-Phase-29 single-line shim always did) makes the match the\n'
         '    # final write, closing the race window this ordering would otherwise open.\n'
         '    if [[ "$3" == "--help" ]]; then\n'
-        + squad_help_lines +
+        + squad_help_lines
+        + reasoning_help_lines +
         '      echo "--agentic-job-id  Agentic job instance identifier"\n'
         '      exit 0\n'
         '    fi\n'
