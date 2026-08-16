@@ -21,8 +21,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
+def _repo_root(start: Path) -> Path:
+    """Walk up until we find the repo (marker: skills/revenium). Depth-independent, so
+    these harnesses work both at .planning/spikes/ and archived under .claude/skills/."""
+    for parent in [start, *start.parents]:
+        if (parent / "skills" / "revenium").is_dir():
+            return parent
+    raise RuntimeError(f"repo root not found above {start}")
+
+
+
 SPIKE_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SPIKE_DIR.parents[2]
+REPO_ROOT = _repo_root(SPIKE_DIR)
 PLUGIN_DIR = REPO_ROOT / "skills" / "revenium" / "plugins" / "revenium-classifier"
 
 BASELINE = "--baseline" in sys.argv
