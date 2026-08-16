@@ -592,15 +592,38 @@ PY
     [[ -z "${sid}" ]] && continue
     [[ -z "${count}" || "${count}" == "0" ]] && continue
 
+    # The gate this session ends up at, used for its one shadow row. Reset
+    # per session; only ever moved AWAY from "shipped" by a gate below.
+    local session_gate="shipped"
+
     # D-09 partition: session-level skip, checked BEFORE the settle gate —
     # this is the whole of the no-overlap guarantee between the two paths.
+    #
+    # D-09 is a SHIPPING guard, and shadow mode does not ship. In live mode
+    # the skip is absolute: the legacy path owns this session, so returning
+    # here is what makes the two paths partition disjointly. In shadow mode
+    # returning here would destroy the stage's entire purpose. Legacy is
+    # still actively billing during shadow, so EVERY session lands in the
+    # HERMES: ledger within a tick; skipping them all leaves every event-side
+    # field zero and coverage_ratio pinned at 0.0000 forever, and no
+    # per-field equivalence can ever be measured (C-10's own requirement,
+    # and plan 32-05's stated deliverable).
+    #
+    # So in shadow we record the gate and fall THROUGH to enrichment. This is
+    # safe by construction rather than by care: the mode check immediately
+    # before the CLI invocation below already suppresses both the call and
+    # the ledger append, so a fallen-through session cannot ship or be
+    # recorded no matter what it computes. Its row is tagged "legacy_skip",
+    # which still tells the operator it would not have shipped in live mode.
     if grep -q "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null; then
-      info "skipping ${sid} — already owned by the legacy HERMES: ledger (D-09 partition)"
       ((legacy_skipped_sessions++)) || true
       if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
-        _emit_shadow_row "${sid}" "legacy_skip" "${platform}" ""
+        session_gate="legacy_skip"
+        info "shadow: ${sid} is legacy-owned (D-09) — computing would-be rows for comparison, shipping nothing"
+      else
+        info "skipping ${sid} — already owned by the legacy HERMES: ledger (D-09 partition)"
+        continue
       fi
-      continue
     fi
 
     local session_markers_dir
@@ -1014,7 +1037,10 @@ PY
     done <<< "${rows}"
 
     if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
-      _emit_shadow_row "${sid}" "shipped" "${platform}" "${rows}"
+      # ${session_gate} is "shipped" unless a gate above moved it. A
+      # legacy-owned session reaches here in shadow mode carrying fully
+      # enriched rows and the gate that would have stopped it live.
+      _emit_shadow_row "${sid}" "${session_gate}" "${platform}" "${rows}"
     fi
   done
 

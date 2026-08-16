@@ -293,7 +293,22 @@ class HeldAndLegacySkippedGateFieldsTests(ShadowReadoutTestBase):
     """Test 4 — held and legacy-skipped sessions appear with the right gate
     value and zeroed event fields."""
 
-    def test_legacy_skipped_session_appears_with_zeroed_fields(self):
+    def test_legacy_skipped_session_computes_would_be_rows_but_ships_nothing(self):
+        """D-09 is a SHIPPING guard, and shadow mode does not ship.
+
+        An earlier revision returned at the D-09 gate in every mode, which
+        left the shadow readout structurally unable to produce its own
+        deliverable. Legacy is still actively billing throughout the shadow
+        window, so every session lands in the HERMES: ledger within a tick;
+        skipping them all pinned every event-side field at zero and
+        coverage_ratio at 0.0000 forever. Observed live on the fleet: an
+        entire shadow report of `legacy_skip` rows with nothing in them.
+
+        The gate label is still recorded — it is real information about what
+        would happen in live mode — but the row now carries the values the
+        event path WOULD have shipped, which is the comparison the stage
+        exists to produce.
+        """
         tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
         try:
             self._build_default_shim(bin_dir)
@@ -304,20 +319,62 @@ class HeldAndLegacySkippedGateFieldsTests(ShadowReadoutTestBase):
 
             _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
                          [_event_record(sid, f'{sid}:t1:api:1', OLD_TS, OLD_TS + 1)])
-            self._write_state_db(hh, [_session_row(sid, input_tokens=10, output_tokens=5)])
+            self._write_state_db(hh, [_session_row(sid, input_tokens=100, output_tokens=50)])
 
             meter_log = os.path.join(tmpdir, 'meter.log')
             inv_log = os.path.join(tmpdir, 'inv.log')
             rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
             self.assertEqual(rc, 0, out)
 
+            # The safety property is unchanged and is what makes falling
+            # through to enrichment legal in the first place.
+            self.assertEqual(len(self._completions(meter_log)), 0,
+                             'a legacy-owned session must still ship nothing in shadow mode')
+            self.assertEqual(len(self._ledger_lines(sd)), 0,
+                             'a legacy-owned session must still write no event ledger line')
+
             rows = self._shadow_rows(sd)
             self.assertEqual(len(rows), 1)
             row = rows[0]
-            self.assertEqual(row['gate'], 'legacy_skip')
-            self.assertEqual(row['event_rows'], 0)
-            self.assertEqual(row['event_input'], 0)
+            self.assertEqual(row['gate'], 'legacy_skip',
+                             'the gate label must still say it would not have shipped live')
             self.assertEqual(row['legacy_ledger_lines'], 1)
+            # The regression this test exists for: the event side is populated.
+            self.assertEqual(row['event_rows'], 1,
+                             'the would-be row must be computed, not zeroed by the skip')
+            self.assertEqual(row['event_input'], 100)
+            self.assertEqual(row['event_output'], 50)
+            self.assertEqual(row['event_total'], 150)
+            self.assertGreater(row['coverage_ratio'], 0.0,
+                               'coverage must be measurable for a legacy-owned session — '
+                               'a shadow window of these pinned at 0.0 is exactly the '
+                               'failure that made the readout useless on the fleet')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_legacy_skipped_session_is_skipped_absolutely_in_live_mode(self):
+        """The D-09 partition itself is unchanged where it matters: in live
+        mode a legacy-owned session is returned on, ships nothing, and
+        produces no shadow row. Falling through is a shadow-only behavior."""
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-legacy-skip-live'
+            with open(os.path.join(sd, 'revenium-hermes.ledger'), 'w') as f:
+                f.write(f'HERMES:{sid}:1234:1700000000.000:abc123\n')
+
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, f'{sid}:t1:api:1', OLD_TS, OLD_TS + 1)])
+            self._write_state_db(hh, [_session_row(sid, input_tokens=100, output_tokens=50)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log,
+                                       extra_env={'REVENIUM_EVENT_METERING_MODE': 'live'})
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len(self._completions(meter_log)), 0,
+                             'D-09 must still skip a legacy-owned session absolutely in live mode')
+            self.assertEqual(len(self._ledger_lines(sd)), 0)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
