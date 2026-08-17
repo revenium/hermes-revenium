@@ -200,14 +200,29 @@ billing terms: the affected surface only ever produces a disposable comparison
 file, and `revenium-api-events.ledger` stayed empty on every profile
 throughout.
 
-The cause was not a defect in the deployed code and not an unexplained change.
-Mid-window, the cross-profile spool sweep was fixed and that single script was
-pushed to the fleet directly, roughly a second after the fix was committed.
-The reports written before that push carried the pre-fix behaviour; those
-written after did not. An initial pass that looked only at the deployed host
-could not see this and recorded the cause as unattributed — correlating the
-host's file timestamps and authentication log against the repository's commit
-history closed it completely.
+There *was* a real defect, and it was real in production: the build deployed at
+the start of the window swept every profile's spool directory instead of only
+its own, so each profile's run read every other profile's spooled events. That
+is the same cross-profile defect this phase had already fixed once on the
+shipping side. Mid-window it was fixed here too, and that single script was
+pushed to the fleet roughly a second after the fix was committed. Reports
+written before the push carry the sweeping behaviour; those written after do
+not.
+
+So two distinct things are true and should not be collapsed. The **anomaly** was
+a genuine code defect, briefly live on the fleet. The **disappearance** of the
+anomaly was not mysterious — it was that fix landing. What the currently
+deployed build contains is the corrected single-profile read. An initial pass
+that looked only at the deployed host could see the anomaly stop but not why,
+and recorded the cause as unattributed; correlating the host's file timestamps
+and authentication log against the repository's commit history closed it.
+
+Why it cost nothing: in shadow mode the swept records only ever reach the
+disposable comparison report. Had the same build been running in **live** mode,
+each non-owning profile would have found no legacy ledger line for a foreign
+session, concluded it was unowned, and shipped it against its own event ledger —
+up to 9x duplicate billing. The defect's blast radius was bounded by the mode,
+not by the code.
 
 Two lessons worth keeping, both of which cost real investigation time here:
 
@@ -222,11 +237,28 @@ Two lessons worth keeping, both of which cost real investigation time here:
   a deployed tree should take the same timestamped backup the documented deploy
   sequence takes, and record itself, or the next reader has nothing to correlate.
 
-The `profiles`-axis regression test this anomaly would have called for already
-exists in this repository, added alongside the sweep fix: it asserts that a
-shipper run does not process a sibling profile's spool file. Together with the
-existing `ticks`-axis coverage, the never-double-report invariant is now
-tested on both axes.
+A `profiles`-axis regression test landed alongside the sweep fix: it asserts a
+run does not process a sibling profile's spool file, and leaves that file in
+place for its owner. Be precise about what it does and does not cover, because
+the difference matters at the moment the event path goes live:
+
+- **It asserts in shadow mode**, by checking the foreign session is absent from
+  the shadow comparison rows. It does not exercise live shipping.
+- **The `ticks`-axis tests** exercise the other half — live shipping and
+  event-ledger deduplication across repeated runs.
+- **No test yet asserts that a *live-mode* run refuses to ship a sibling
+  profile's session.** So "never-double-report is covered on both axes" would
+  overstate it: the profiles axis is covered for *reading*, the ticks axis for
+  *shipping*, and the live-mode intersection of the two is covered only by
+  construction.
+
+That construction argument is real but is not a test: the spool directory list is
+resolved to a single entry before any mode branch, so shadow and live share one
+discovery path and neither can see a sibling's spool. The isolation is therefore
+structural rather than mode-specific. Still, the one axis that produced a 9x
+duplicate-billing defect is also the one whose live path has no direct
+assertion — closing that gap is worth doing before or alongside the first live
+rollout, not after.
 
 ## State files added
 
