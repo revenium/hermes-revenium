@@ -295,8 +295,12 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
         "completed by the agent. A task arc is a goal-directed sequence of turns with a "
         "single objective; follow-up fixes to the same goal are part of the same arc.\n\n"
         "Output ONLY a JSON array of job objects. Each object must have:\n"
-        "  - agentic_job_id: a SPECIFIC, DESCRIPTIVE snake_case business label "
-        "(e.g. fix_auth_regression, prod_log_triage, weekly_pr_review)\n"
+        # quick-260815-r39 applies here too: concrete example labels get copied
+        # verbatim onto unrelated work. The turn classifier's examples were measured
+        # and removed; these are the same mechanism on the job-inference path, so they
+        # go for the same reason. The shape is described instead of exemplified.
+        "  - agentic_job_id: a SPECIFIC, DESCRIPTIVE snake_case business label naming "
+        "the concrete work, not its category (2-4 words joined by underscores)\n"
         "  - job_name: a short human-readable name (sentence case, max 60 chars)\n"
         "  - job_type: a snake_case category label matching ^[a-z][a-z0-9_]{1,47}$\n"
         "  - status: one of SUCCESS, FAILED, or CANCELLED\n"
