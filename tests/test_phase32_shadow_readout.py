@@ -181,6 +181,70 @@ class ShipsNothingButProducesOneRowPerSessionTests(ShadowReadoutTestBase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class CrossProfileIsolationTests(ShadowReadoutTestBase):
+    """A run must read ONLY its own profile's spool directory.
+
+    An earlier revision also swept every other profile's api-events dir, to
+    protect a multiplexed gateway from stranding records. On the live fleet
+    that produced a cross-profile double-ship: every profile's run read every
+    other profile's spool files while each per-session lookup — the state.db
+    env map, the legacy HERMES: ledger D-09 partitions on, and the
+    api_request_id event ledger providing idempotency — resolved against the
+    RUNNING profile, not the OWNING one.
+
+    One marketing-owned session was observed in all ten profiles' shadow
+    reports. Its owner found its legacy ledger lines and skipped it; every
+    non-owner found none, concluded it was unowned, and in live mode would
+    have shipped it against its own separate event ledger. Up to 9x duplicate
+    billing. The never-double-report invariant held across ticks and failed
+    across profiles — an axis no test covered, which is why nothing caught it.
+
+    The sweep was also redundant: the plugin routes each spool WRITE into the
+    owning profile's directory, and the fleet runner invokes this script once
+    per profile, so every file is read by exactly its owner.
+    """
+
+    def test_another_profiles_spool_file_is_not_processed(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+
+            # A sibling profile under the same HERMES_HOME, holding a spool
+            # file this run must not touch.
+            other_spool = os.path.join(hh, 'profiles', 'otherprofile',
+                                       'state', 'revenium', 'api-events')
+            os.makedirs(other_spool, exist_ok=True)
+            foreign_sid = 'sess-owned-by-another-profile'
+            _write_jsonl(os.path.join(other_spool, f'{foreign_sid}.jsonl'),
+                         [_event_record(foreign_sid, f'{foreign_sid}:t1:api:1',
+                                        OLD_TS, OLD_TS + 1)])
+
+            # This profile has its own session, so the run does real work and
+            # a clean result cannot come from the script simply doing nothing.
+            own_sid = 'sess-owned-by-this-profile'
+            _write_jsonl(os.path.join(spool_dir, f'{own_sid}.jsonl'),
+                         [_event_record(own_sid, f'{own_sid}:t1:api:1', OLD_TS, OLD_TS + 1)])
+            self._write_state_db(hh, [_session_row(own_sid)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+
+            sids = {r['sid'] for r in self._shadow_rows(sd)}
+            self.assertIn(own_sid, sids, 'the run must still process its own spool')
+            self.assertNotIn(foreign_sid, sids,
+                             "a run must not process another profile's spool file — its "
+                             "legacy-ledger and event-ledger lookups resolve against the "
+                             "WRONG profile, so D-09 reports the session unowned and live "
+                             "mode ships a row its owner is also shipping")
+            self.assertTrue(os.path.exists(os.path.join(other_spool, f'{foreign_sid}.jsonl')),
+                            "the other profile's spool file must be left in place for its "
+                            "own run to consume")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 class CoverageRatioTests(ShadowReadoutTestBase):
     """Test 2 — coverage_ratio is 1.0 when constructed events exactly match
     database counters, and 0.0 when a session has database counters and no

@@ -134,35 +134,32 @@ if [[ -f "${CONFIG_FILE}" ]]; then
   ORG_NAME=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('organizationName', ''))" 2>/dev/null || true)
 fi
 
-# Phase 32 (EVT-03): resolve the set of spool directories to sweep — the
-# process-level one plus each OTHER Hermes profile's own api-events
-# directory, so a multiplexed gateway's per-profile records are not
-# stranded (BUG-4's read-side gap, mirrored onto the spool). Directories
-# are resolved ONCE here, before any file or record is read — never
-# per-record — matching the cost discipline hermes-report.sh's own
-# per-session resolvers document. Dedup by realpath (bash 3.2 has no
-# associative arrays) so a directory reachable via more than one profile
-# entry is never swept twice in one run.
-_spool_dirs=()
-_seen_spool_dirs=$'\n'
-
-_add_spool_dir() {
-  local d="$1"
-  [[ -d "${d}" ]] || return 0
-  local real
-  real="$(cd "${d}" 2>/dev/null && pwd -P)" || return 0
-  case "${_seen_spool_dirs}" in
-    *$'\n'"${real}"$'\n'*) return 0 ;;
-  esac
-  _seen_spool_dirs="${_seen_spool_dirs}${real}"$'\n'
-  _spool_dirs+=("${d}")
-}
-
-_add_spool_dir "${EVENT_SPOOL_DIR}"
-while IFS=$'\t' read -r _profile_name _profile_home; do
-  [[ -z "${_profile_home}" ]] && continue
-  _add_spool_dir "${_profile_home}/state/revenium/api-events"
-done < <(hermes_profile_homes)
+# Phase 32 (EVT-03): sweep THIS profile's spool directory only.
+#
+# An earlier revision also swept every OTHER profile's api-events directory,
+# intending to protect a multiplexed gateway from stranding records. Measured
+# on the live fleet, that produced a cross-profile double-ship: every profile's
+# run read every other profile's spool files, while each per-session lookup —
+# the state.db env map, the legacy HERMES: ledger that D-09 partitions on, and
+# the api_request_id event ledger that provides idempotency — resolved against
+# the RUNNING profile rather than the OWNING one.
+#
+# Observed: one marketing-owned session appeared in all ten profiles' shadow
+# reports. Its owner found 2 legacy ledger lines and correctly skipped it;
+# every non-owner found 0, concluded the session was unowned, and in live mode
+# would have shipped it — each appending to its OWN event ledger, so nothing
+# deduplicated them. Up to 9x duplicate billing per session. The
+# never-double-report invariant held across ticks and failed across profiles,
+# an axis no test exercised.
+#
+# The sweep was also unnecessary. The plugin's own `_paths_for_session` already
+# routes each spool WRITE into the owning profile's directory (confirmed live:
+# the marketing session's spool file was in marketing's directory), and the
+# fleet runner already invokes this script once per profile. So every spool
+# file is read by exactly its owner, nothing is stranded, and D-09's ledger
+# check is correct again because the ledger it consults always belongs to the
+# session it is asked about.
+_spool_dirs=("${EVENT_SPOOL_DIR}")
 
 # C-6: the .ready directory that owns a resolved per-session markers
 # directory — mirrors hermes-report.sh's own belt: when the resolved
