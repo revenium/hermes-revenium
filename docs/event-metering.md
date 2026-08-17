@@ -192,17 +192,41 @@ surprises beyond them:**
   rather than removed: this fleet's provider mix is not guaranteed to stay
   that way, and other installs have needed exactly this fallback before.
 
-**One follow-up was opened, not closed, by this stage:** a shadow-report-only
-artifact (never the shipping path, never the idempotency ledger) briefly
-showed one profile's session data appearing in every other profile's
-comparison report, self-resolved before this readout without a code change
-visible in version control. It cost nothing in billing terms — the affected
-surface only ever produces a disposable comparison file — but the same class
-of profile-isolation failure on the *shipping* path is exactly the kind of
-defect a prior fix in this phase already closed once, on the shipping side.
-Recommended as a dedicated follow-up: extend this repository's
-never-double-report test coverage to the *profiles* axis specifically,
-alongside the *ticks* axis it already covers.
+**One anomaly was observed during the window and is now fully explained.** For
+part of the shadow window, a shadow-report-only artifact — never the shipping
+path, never the idempotency ledger — showed one profile's session data
+appearing in every other profile's comparison report. It cost nothing in
+billing terms: the affected surface only ever produces a disposable comparison
+file, and `revenium-api-events.ledger` stayed empty on every profile
+throughout.
+
+The cause was not a defect in the deployed code and not an unexplained change.
+Mid-window, the cross-profile spool sweep was fixed and that single script was
+pushed to the fleet directly, roughly a second after the fix was committed.
+The reports written before that push carried the pre-fix behaviour; those
+written after did not. An initial pass that looked only at the deployed host
+could not see this and recorded the cause as unattributed — correlating the
+host's file timestamps and authentication log against the repository's commit
+history closed it completely.
+
+Two lessons worth keeping, both of which cost real investigation time here:
+
+- **A content hash only proves what was true when you sampled it.** Every hash
+  check of the shipper happened after the corrective push, so all of them
+  agreed — and that agreement was mistaken for evidence that nothing had ever
+  differed. The pre-fix build was simply never hashed. Sampling after the fact
+  cannot establish what was running before.
+- **A single-file push to a fleet leaves almost no trace.** Only one file in a
+  49-file deployed tree carried the telltale modification time, and because the
+  push was non-interactive it created no login record. Any out-of-band push to
+  a deployed tree should take the same timestamped backup the documented deploy
+  sequence takes, and record itself, or the next reader has nothing to correlate.
+
+The `profiles`-axis regression test this anomaly would have called for already
+exists in this repository, added alongside the sweep fix: it asserts that a
+shipper run does not process a sibling profile's spool file. Together with the
+existing `ticks`-axis coverage, the never-double-report invariant is now
+tested on both axes.
 
 ## State files added
 
