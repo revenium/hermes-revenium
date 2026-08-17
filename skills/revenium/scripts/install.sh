@@ -287,6 +287,37 @@ done
 ok "All four credentials present"
 
 # ---------------------------------------------------------------------------
+# 2b. Seed the runtime taxonomies
+#
+# quick-260817-l6o: the classifier reads ${TAXONOMY_FILE} in the STATE dir, not
+# the copy that ships in the skill dir. Only the repo-clone entry point
+# (root install.sh) seeded it, so every tap install — `hermes skills install`
+# -> references/bootstrap.sh -> this script — left the runtime file absent.
+# _read_taxonomy_labels fails open to [], so those hosts classified against an
+# empty vocabulary. That is the weakest measured configuration: with no seed and
+# (since PR #47) no prompt examples, labels in the 2-4 word target fall to 53%
+# versus 90% with a seed present.
+#
+# Guarded exactly like the root script: a taxonomy that already exists is a
+# vocabulary the host has GROWN, and overwriting it would discard every minted
+# label and re-open the cold-start window. Never overwrite.
+# ---------------------------------------------------------------------------
+step "Seeding runtime taxonomies"
+mkdir -p "$(dirname "${TAXONOMY_FILE}")"
+for seed_pair in "task-taxonomy.json:${TAXONOMY_FILE}" "job-taxonomy.json:${JOB_TAXONOMY_FILE}"; do
+  seed_name="${seed_pair%%:*}"
+  seed_dest="${seed_pair#*:}"
+  seed_src="${SKILL_DIR}/${seed_name}"
+  if [[ -f "${seed_dest}" ]]; then
+    echo "  ✓ ${seed_dest} already exists — not overwriting"
+  elif [[ -f "${seed_src}" ]]; then
+    cp "${seed_src}" "${seed_dest}" && echo "  ✓ Seeded ${seed_dest}"
+  else
+    warn "seed ${seed_src} missing — ${seed_dest} will be built by mint-back instead"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # 3. Classifier plugin
 # ---------------------------------------------------------------------------
 step "Installing the revenium-classifier plugin"
