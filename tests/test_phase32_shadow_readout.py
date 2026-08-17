@@ -339,6 +339,8 @@ class HeldAndLegacySkippedGateFieldsTests(ShadowReadoutTestBase):
             self.assertEqual(row['gate'], 'legacy_skip',
                              'the gate label must still say it would not have shipped live')
             self.assertEqual(row['legacy_ledger_lines'], 1)
+            self.assertTrue(row['legacy_owned'],
+                            'ownership is recorded in its own field, independent of gate')
             # The regression this test exists for: the event side is populated.
             self.assertEqual(row['event_rows'], 1,
                              'the would-be row must be computed, not zeroed by the skip')
@@ -349,6 +351,85 @@ class HeldAndLegacySkippedGateFieldsTests(ShadowReadoutTestBase):
                                'coverage must be measurable for a legacy-owned session — '
                                'a shadow window of these pinned at 0.0 is exactly the '
                                'failure that made the readout useless on the fleet')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_legacy_owned_session_inside_settle_window_keeps_ownership_signal(self):
+        """Greptile P1 on #48: the settle gate must not erase legacy ownership.
+
+        `gate` records what stopped the session on THIS tick and `held` is
+        genuinely that — enrichment cannot run without a marker, so zeroed
+        event fields are correct here. But ownership is permanent, and the
+        first revision of the fallthrough let the hardcoded "held" label
+        discard it, so the report lost the signal entirely for any
+        legacy-owned session still inside its settle window.
+        """
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-legacy-owned-and-held'
+            with open(os.path.join(sd, 'revenium-hermes.ledger'), 'w') as f:
+                f.write(f'HERMES:{sid}:1234:1700000000.000:abc123\n')
+
+            # Fresh event, no .ready sentinel -> inside the settle window.
+            fresh_ts = time.time()
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, f'{sid}:t1:api:1', fresh_ts, fresh_ts + 1)])
+            self._write_state_db(hh, [_session_row(sid, input_tokens=100, output_tokens=50)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+
+            rows = self._shadow_rows(sd)
+            self.assertEqual(len(rows), 1, f'the session must still appear: {rows!r}')
+            row = rows[0]
+            self.assertEqual(row['gate'], 'held',
+                             'held is what actually stopped it on this tick')
+            self.assertTrue(row['legacy_owned'],
+                            'ownership is permanent and must survive a held tick')
+            self.assertEqual(len(self._completions(meter_log)), 0)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_session_with_no_enrichable_events_still_appears_in_report(self):
+        """Greptile P1 on #48: every exit must emit a row.
+
+        A session can pass the cheap peek and then have every event fail the
+        stricter enrichment validation, leaving `rows` empty. That exit
+        previously returned without emitting, so the session vanished from
+        the report AND from the per-platform aggregate. An empty gateway
+        bucket reads as "post_api_request never fires on gateway" — a false
+        negative on the one question the shadow stage exists to answer.
+        """
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-no-enrichable-events'
+            # Passes the peek (sid + api_request_id + ts present) but carries
+            # an unparseable timestamp pair, so enrichment drops every event.
+            rec = _event_record(sid, f'{sid}:t1:api:1', OLD_TS, OLD_TS + 1)
+            rec['ended_at'] = 'not-a-timestamp'
+            rec['ts'] = OLD_TS
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'), [rec])
+            os.makedirs(ready_dir, exist_ok=True)
+            open(os.path.join(ready_dir, sid), 'w').close()
+            self._write_state_db(hh, [_session_row(sid, input_tokens=100, output_tokens=50)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+
+            rows = self._shadow_rows(sd)
+            self.assertEqual(len(rows), 1,
+                             f'a session with no enrichable events must still be reported '
+                             f'so its platform stays visible in the aggregate: {rows!r}')
+            self.assertEqual(rows[0]['gate'], 'no_valid_events')
+            self.assertEqual(rows[0]['platform'], 'cli',
+                             'the platform must survive so the bucket is not silently lost')
+            self.assertEqual(len(self._completions(meter_log)), 0)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

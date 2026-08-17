@@ -182,9 +182,25 @@ _ready_dir_for_markers_dir() {
 # Phase 32 Plan 03 (C-10): append ONE shadow-comparison row for one session
 # to EVENT_SHADOW_REPORT_FILE (and to the run-scoped accumulator file used to
 # build the end-of-run per-platform aggregate). Called once per session, at
-# every gate (shipped/held/legacy_skip) — a held or legacy-skipped session is
-# recorded with zeroed event fields, because "the event path would have held
-# this session" is itself part of the comparison (C-10).
+# EVERY exit from the per-session flow — a session that reaches no exit at
+# all is a session missing from the platform aggregate, which would read as
+# "the hook never fired on that platform" and is the one failure mode this
+# report cannot afford (constraint 5 is answered from those buckets).
+#
+# Two INDEPENDENT facts are recorded, deliberately in separate fields,
+# because an earlier revision conflated them in `gate` and lost one:
+#
+#   gate          — what stopped this session on THIS tick, or "shipped".
+#                   Transient: "held" resolves itself once the marker lands.
+#                   One of: shipped | held | legacy_skip | no_valid_events.
+#   legacy_owned  — whether the legacy HERMES: ledger owns this session.
+#                   Permanent, and true regardless of which gate won, so
+#                   ownership survives a tick where some other gate fired.
+#
+# Event-side fields are zeroed only where enrichment genuinely could not run
+# (held: no marker yet; no_valid_events: nothing survived validation). A
+# legacy-owned session in shadow mode DOES enrich — see the D-09 gate's own
+# comment for why that is both necessary and safe.
 #
 # Relies on ${_env_map_file} (the once-per-run state.db map: sid, source,
 # model, billing_provider, input/output/cache_read/cache_write tokens, cost —
@@ -194,11 +210,12 @@ _ready_dir_for_markers_dir() {
 # CALLED from within main()'s own execution.
 #
 # Args: sid, gate ("shipped"|"held"|"legacy_skip"), platform, rows_text
-# (pipe-delimited enriched event rows exactly as built for CLI argv
-# construction — empty for held/legacy_skip gates, where no enrichment ever
-# ran).
+# Args: sid, gate, platform, rows_text (pipe-delimited enriched event rows
+# exactly as built for CLI argv construction — empty only where enrichment
+# could not run), legacy_owned ("true"|"false", defaults false).
 _emit_shadow_row() {
   local s_sid="$1" s_gate="$2" s_platform="$3" s_rows="$4"
+  local s_legacy_owned="${5:-false}"
 
   local db_row model_legacy billing_provider_legacy
   local db_input db_output db_cache_read db_cache_write cost_legacy
@@ -222,6 +239,7 @@ _emit_shadow_row() {
   legacy_last_total_tokens=$(grep "^HERMES:${s_sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 | cut -d: -f3)
 
   SHADOW_SID="${s_sid}" SHADOW_GATE="${s_gate}" SHADOW_PLATFORM="${s_platform}" \
+  SHADOW_LEGACY_OWNED="${s_legacy_owned}" \
   SHADOW_ROWS="${s_rows}" \
   SHADOW_DB_INPUT="${db_input}" SHADOW_DB_OUTPUT="${db_output}" \
   SHADOW_DB_CACHE_READ="${db_cache_read}" SHADOW_DB_CACHE_WRITE="${db_cache_write}" \
@@ -238,6 +256,8 @@ from datetime import datetime, timezone
 
 sid = os.environ.get('SHADOW_SID', '')
 gate = os.environ.get('SHADOW_GATE', 'held')
+# Independent of `gate`: ownership is permanent, gate is per-tick.
+legacy_owned = (os.environ.get('SHADOW_LEGACY_OWNED', 'false') == 'true')
 platform = os.environ.get('SHADOW_PLATFORM', '') or ''
 rows_text = os.environ.get('SHADOW_ROWS', '')
 report_file = os.environ.get('SHADOW_REPORT_FILE', '')
@@ -355,6 +375,7 @@ row = {
     'sid': sid,
     'platform': platform,
     'gate': gate,
+    'legacy_owned': legacy_owned,
     'event_rows': event_rows,
     'event_input': event_input,
     'event_output': event_output,
@@ -592,9 +613,12 @@ PY
     [[ -z "${sid}" ]] && continue
     [[ -z "${count}" || "${count}" == "0" ]] && continue
 
-    # The gate this session ends up at, used for its one shadow row. Reset
-    # per session; only ever moved AWAY from "shipped" by a gate below.
+    # Per-session shadow-row state, reset every iteration. `session_gate`
+    # is what stops this session on THIS tick; `session_legacy_owned` is a
+    # permanent property recorded independently so it cannot be lost when a
+    # later gate overwrites the gate label.
     local session_gate="shipped"
+    local session_legacy_owned=false
 
     # D-09 partition: session-level skip, checked BEFORE the settle gate —
     # this is the whole of the no-overlap guarantee between the two paths.
@@ -618,6 +642,10 @@ PY
     if grep -q "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null; then
       ((legacy_skipped_sessions++)) || true
       if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
+        # Ownership is permanent and is recorded in its own field, so it
+        # survives a tick on which some other gate (held, no_valid_events)
+        # is the thing that actually stopped this session.
+        session_legacy_owned=true
         session_gate="legacy_skip"
         info "shadow: ${sid} is legacy-owned (D-09) — computing would-be rows for comparison, shipping nothing"
       else
@@ -659,7 +687,10 @@ except Exception:
         info "holding ${sid} — awaiting plugin sentinel (age=${age}s < settle=${REVENIUM_CRON_SETTLE_SECONDS}s, events=${count})"
         ((held_sessions++)) || true
         if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
-          _emit_shadow_row "${sid}" "held" "${platform}" ""
+          # "held" is genuinely what stopped it this tick and enrichment
+          # truly cannot run without a marker, so the event fields ARE
+          # legitimately zero here — but ownership rides along separately.
+          _emit_shadow_row "${sid}" "held" "${platform}" "" "${session_legacy_owned}"
         fi
         continue
       fi
@@ -933,7 +964,16 @@ except OSError:
 PY
     )
 
-    [[ -z "${rows}" ]] && continue
+    if [[ -z "${rows}" ]]; then
+      # Every exit must emit. A session that vanishes here is missing from
+      # the platform aggregate, and an empty gateway bucket would read as
+      # "post_api_request never fires on gateway" — a false negative on the
+      # exact question the shadow stage exists to answer (constraint 5).
+      if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
+        _emit_shadow_row "${sid}" "no_valid_events" "${platform}" "" "${session_legacy_owned}"
+      fi
+      continue
+    fi
 
     local sid_r arid_r model_r provider_raw_r provider_resolved_r
     local input_r output_r cache_read_r cache_write_r reasoning_r total_r
@@ -1040,7 +1080,7 @@ PY
       # ${session_gate} is "shipped" unless a gate above moved it. A
       # legacy-owned session reaches here in shadow mode carrying fully
       # enriched rows and the gate that would have stopped it live.
-      _emit_shadow_row "${sid}" "${session_gate}" "${platform}" "${rows}"
+      _emit_shadow_row "${sid}" "${session_gate}" "${platform}" "${rows}" "${session_legacy_owned}"
     fi
   done
 
