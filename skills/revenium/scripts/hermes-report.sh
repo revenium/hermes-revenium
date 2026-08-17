@@ -332,6 +332,12 @@ PY
   # THIS shell, so a counter incremented inside it survives to the aggregate
   # line near the end-of-run summary. A pipe would silently zero it.
   local fallback_tick_count=0
+  # quick-260817-pgg (EVT-07): per-tick count of sessions whose legacy
+  # completion emission was suppressed because the event ledger already owns
+  # them. Declared here (not inside the loop) for the same herestring reason
+  # as fallback_tick_count above -- the loop body runs in THIS shell, so the
+  # increments survive to the aggregate line near the end-of-run summary.
+  local event_owned_skip_count=0
 
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider; do
 
@@ -1464,6 +1470,90 @@ PY
       fi
     fi
 
+    # quick-260817-pgg (EVT-07): the RECIPROCAL half of the D-09 partition —
+    # does the event ledger already own this session?
+    #
+    # WHY. Before this, D-09 was one-directional: api-event-report.sh skips
+    # any session the legacy HERMES: ledger owns (api-event-report.sh:639),
+    # but this file contained ZERO references to the event ledger. The
+    # never-double-report guarantee therefore rested on cron.sh running the
+    # legacy stage (line 97) before the event stage (line 103) — an ORDERING
+    # assumption, not a mutual exclusion. It failed on 2026-08-17: canary
+    # session 20260817_213057_3a319e was reached by an out-of-band event
+    # shipper at 21:32:46 (4 rows) and then billed AGAIN by the legacy stage
+    # at 21:33:28 (2 rows). See 32-CANARY-EVIDENCE.md. The D-09 skip was not
+    # broken — it fired correctly one tick later; it simply arrives too late,
+    # because nothing on the legacy side ever asked the reciprocal question.
+    # This check is that question. The partition is now first-writer-wins on
+    # EITHER side, holding regardless of stage order or out-of-band
+    # invocation, rather than depending on both.
+    #
+    # WHY HERE, and not an early `continue` at the top of the loop. The event
+    # path SHIPS --agentic-job-id (api-event-report.sh:1038) but never CREATES
+    # a job — `revenium jobs create` is called only from this file (D-10:
+    # post_api_request carries no job lifecycle signal, so hermes-report.sh
+    # keeps its jobs half and loses its completions half). An early `continue`
+    # would suppress the in-loop jobs-create stage and the post-loop outcome
+    # queue for this session, ORPHANING every event row's job reference. So
+    # the check composes into the existing D-13 guard below, which already
+    # wraps exactly the completions block and deliberately leaves both jobs
+    # stages outside it. The cost profile that placement implies — an
+    # event-owned session still pays the full delta/model/timestamp/marker-read
+    # compute before being suppressed — is the one D-13 already accepted here.
+    #
+    # WHY A PIPE PATTERN, not the `^HERMES:${sid}:` colon shape used a few
+    # hundred lines above. The event ledger line is `API:<arid>|<sid>|<ts>`
+    # (api-event-report.sh:1067), pipe-delimited ON PURPOSE: a real
+    # api_request_id embeds colons (`sess:t1:api:1`), so no colon-position
+    # parse of that line is possible — the shipper's own reader agrees
+    # (api-event-report.sh:443-459: strip the `API:` prefix, then find('|')).
+    # A colon-anchored pattern here would be a SILENT ALWAYS-FALSE no-op: it
+    # would look correct in review and never once fire. Both surrounding pipes
+    # are required — a bare unanchored "${sid}" would false-positive against
+    # another session's api_request_id — and the identifier is pipe-sanitised
+    # on write (_clean(), api-event-report.sh:951), so a smuggled pipe cannot
+    # forge a match. `-F` because a session id may contain `.` and `-`; regex
+    # interpretation of the id is never wanted.
+    #
+    # FAIL-OPEN. The `-s` pre-test is both the fail-open mechanism and the perf
+    # guard (the quick-260814-e7c idiom this file already uses): a missing or
+    # zero-byte event ledger spawns no grep at all, so the overwhelming
+    # majority of installs — which have no event path — pay one bash file test
+    # and behave byte-identically to before. An unreadable file falls through
+    # grep's own non-zero exit. Every failure mode resolves to "not owned",
+    # i.e. legacy proceeds exactly as it does today. This never creates or
+    # writes the ledger; it is a read-only consultation of a file
+    # api-event-report.sh owns.
+    #
+    # DECIDED, NOT SILENT — the skip is UNCONDITIONAL, i.e. it does NOT
+    # consult REVENIUM_EVENT_METERING_MODE. Accepted consequence: if the event
+    # path owns a session and the event path is later DISABLED while legacy
+    # stays enabled, legacy skips that session forever and its subsequent
+    # token growth is billed by NEITHER path. That is the mirror image of the
+    # composition D-13 exists to prevent, on an axis D-13 does not cover — the
+    # drain gate reasons over sessions in the HERMES: ledger, and an
+    # event-owned session never appears there, so it is invisible to that gate.
+    # Chosen anyway, over a mode-gated guard, for three reasons: (1) an event
+    # ledger line exists ONLY because a call succeeded, so "owned" means money
+    # already left and cannot be un-sent (D-08); (2) a mode-gated guard would
+    # let a live->shadow flip re-bill the session from prev_reported_tokens=0,
+    # OVER-billing the portion already shipped — and over-billing is the
+    # failure this repo treats as load-bearing; (3) an unconditional guard
+    # keeps the partition a pure function of on-disk facts, which is D-09's own
+    # stated virtue. Flagged for operator review: the candidate follow-ups are
+    # an event-side drain gate, or a documented "clear the event ledger before
+    # rolling the event path back" step.
+    local event_owned="false"
+    if [[ -s "${EVENT_LEDGER_FILE}" ]] && grep -qF "|${sid}|" "${EVENT_LEDGER_FILE}" 2>/dev/null; then
+      event_owned="true"
+      # Counted, never logged per session: a suppressed session persists in
+      # state.db indefinitely, so a per-session-per-tick line would be exactly
+      # the unbounded per-tick warn this repo has already paid for once (the
+      # WARN_FLAGS_DIR / FALLBACK_WARN_FLAGS_DIR incident). One aggregate line
+      # per tick near the end-of-run summary is this file's own answer to that.
+      ((event_owned_skip_count++)) || true
+    fi
+
     # Phase 32 Plan 03 (C-11/D-13): the ENTIRE legacy completion-emission
     # block below (both the per-marker and zero-marker paths) is skipped for
     # this session only when LEGACY_COMPLETIONS_SKIP was resolved true at
@@ -1474,7 +1564,12 @@ PY
     # configuration, because post_api_request carries no job lifecycle
     # signal (D-10). The superseded code inside this guard is retained, not
     # deleted — disabling it is a setting flip, not a revert (D-11).
-    if [[ "${LEGACY_COMPLETIONS_SKIP}" != "true" ]]; then
+    #
+    # quick-260817-pgg (EVT-07): the condition now requires BOTH gates to be
+    # clear. reported_count / skipped_count are deliberately left untouched by
+    # the event_owned suppression so the existing summary line keeps its
+    # current meaning.
+    if [[ "${LEGACY_COMPLETIONS_SKIP}" != "true" && "${event_owned}" != "true" ]]; then
     # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
     # per-marker Revenium calls with extended transaction-id and per-call v2
     # ledger writes. Else fall through to the legacy single-call path (T06
@@ -1773,7 +1868,7 @@ PY
         warn "Command: ${cmd[*]}"
       fi
     fi
-    fi # LEGACY_COMPLETIONS_SKIP guard (Phase 32 Plan 03, C-11/D-13)
+    fi # LEGACY_COMPLETIONS_SKIP + event_owned guard (Phase 32 Plan 03 C-11/D-13; quick-260817-pgg EVT-07)
   done <<< "${sessions}"
 
   # Phase 10: post-loop outcome stage — report each terminated arc exactly once.
@@ -1901,6 +1996,15 @@ PY
   # rather than trading the per-tick spam for total silence.
   if [[ "${fallback_tick_count}" -gt 0 ]]; then
     info "trace-type fallback: ${fallback_tick_count} session(s) resolved to the fallback this tick (per-session detail logged once per session+reason, not every tick)"
+  fi
+
+  # quick-260817-pgg (EVT-07): the same per-tick-aggregate discipline for the
+  # reciprocal D-09 skip — one line when non-zero, silent when zero, and NO
+  # per-session line (an event-owned session stays in state.db forever, so a
+  # per-session line would grow without bound). This is the only operator-
+  # visible signal that the legacy path is deferring to the event path.
+  if [[ "${event_owned_skip_count}" -gt 0 ]]; then
+    info "legacy completions suppressed for ${event_owned_skip_count} session(s) this tick — already owned by the event ledger (D-09 partition, reciprocal direction)"
   fi
 
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="
