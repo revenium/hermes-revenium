@@ -149,6 +149,61 @@ canary flip (letting the event path ship for real on even one profile) is
 gated behind an explicit operator decision rather than happening as a
 byproduct of deploying this phase's code.
 
+## Shadow-stage findings (2026-08-17)
+
+The shadow stage ran fleet-wide (all ten metered profiles) for roughly 20 hours
+before this readout. `revenium-api-events.ledger` stayed empty on every profile
+throughout — shadow mode shipped nothing, as designed.
+
+**The gateway question is answered: `post_api_request` fires on gateway-served
+turns.** A live, continuously-open gateway-served conversation (channel-name
+platform value, not the literal string `gateway` — matching the caveat this
+document's design phase raised) produced spooled events with exact per-call
+agreement against `state.db` for the portion of its history inside the shadow
+window. Corroborated independently by the owning profile's own gateway-service
+and channel-integration configuration. This closes the one open question the
+shadow stage existed to resolve before any canary could be authorised.
+
+**Fleet coverage:** of 14 real sessions observed across cron, CLI, and
+gateway-served surfaces, 12 showed exact 1.000 event-vs-database token
+agreement. The two exceptions were each individually explained rather than
+averaged away: one was a multi-week-old session whose database counter
+reflects its entire history while the event count only reflects the shadow
+window (a scale mismatch, not a missed call); the other was a single
+still-in-flight, multi-call session where the event count briefly ran ahead of
+a database snapshot taken moments earlier (a measurement-instant race that
+resolves on the next tick, confirmed to involve no duplicate event records).
+
+**The three predicted systematic deltas are confirmed on real traffic, with no
+surprises beyond them:**
+
+- **Row count and operation type.** The legacy path's session-delta pair
+  (one `GUARDRAIL` row, one `CHAT` row, tokens split via `equal_split`) is
+  replaced by one `CHAT` row per API call. Observed 1–23 event rows per
+  session against the legacy path's fixed two, with exact token conservation
+  on every session where a clean comparison was possible.
+- **Cost.** The event path never sent `--total-cost` on any observed row, as
+  designed — Revenium prices these rows server-side.
+- **Provider.** The event path's resolved provider matched the legacy path's
+  would-be resolution on every observed row. The routing-layer fallback
+  branch (added for installs that route through OpenRouter, LiteLLM, or
+  Bedrock) was not exercised on this fleet's traffic in this window — every
+  provider value seen was already a direct model-provider name. Kept in place
+  rather than removed: this fleet's provider mix is not guaranteed to stay
+  that way, and other installs have needed exactly this fallback before.
+
+**One follow-up was opened, not closed, by this stage:** a shadow-report-only
+artifact (never the shipping path, never the idempotency ledger) briefly
+showed one profile's session data appearing in every other profile's
+comparison report, self-resolved before this readout without a code change
+visible in version control. It cost nothing in billing terms — the affected
+surface only ever produces a disposable comparison file — but the same class
+of profile-isolation failure on the *shipping* path is exactly the kind of
+defect a prior fix in this phase already closed once, on the shipping side.
+Recommended as a dedicated follow-up: extend this repository's
+never-double-report test coverage to the *profiles* axis specifically,
+alongside the *ticks* axis it already covers.
+
 ## State files added
 
 - `~/.hermes/state/revenium/api-events/<sid>.jsonl` — the per-session
