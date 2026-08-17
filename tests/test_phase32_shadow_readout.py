@@ -244,6 +244,108 @@ class CrossProfileIsolationTests(ShadowReadoutTestBase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_live_mode_does_not_ship_another_profiles_spool_file(self):
+        """The profiles axis, asserted on the SHIPPING surface, not the shadow report.
+
+        The class docstring's incident is the profiles axis failing while the
+        never-double-report invariant held across ticks: one marketing-owned
+        session was observed in all ten profiles' shadow reports, and every
+        non-owner — finding no line for it in its own legacy `HERMES:`
+        ledger — concluded it was unowned and in live mode would have shipped
+        it against its own separate event ledger. Up to 9x duplicate billing.
+
+        `test_another_profiles_spool_file_is_not_processed` above asserts via
+        `self._shadow_rows`, and its own docstring already concedes the limit
+        of that proof: it shows the foreign session is absent from the
+        comparison report, not that live mode would not have shipped it.
+        That concession is structural, not incidental — shadow mode invokes
+        the CLI zero times and writes zero ledger lines for EVERY session,
+        shipped or not, so a shadow-row assertion cannot distinguish
+        "correctly isolated" from "shadow ships nothing for anyone". Every
+        test in this module that only inspects `_shadow_rows` would pass
+        identically whether or not the profiles bug from the incident above
+        were still present, PROVIDED it ran in shadow mode.
+
+        So the live-mode intersection — the one axis that actually produced
+        the defect — was covered only by construction: `_spool_dirs` resolves
+        to a single entry before any mode branch is evaluated
+        (api-event-report.sh:162). That is correct today, but the wave-6
+        canary is about to flip one profile's mode to `live`, a one-way
+        billing step, so the intersection earns its own direct assertion on
+        the meter invocation log and the event ledger — the surfaces a
+        re-introduced spool sweep would actually corrupt. This test is
+        expected to PASS unmodified against `main`; it is a regression guard
+        against re-introduction, not a fix for an open defect.
+        """
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+
+            # A sibling profile under the same HERMES_HOME, holding a spool
+            # file this run must not ship.
+            other_spool = os.path.join(hh, 'profiles', 'otherprofile',
+                                       'state', 'revenium', 'api-events')
+            os.makedirs(other_spool, exist_ok=True)
+            foreign_sid = 'sess-live-owned-by-another-profile'
+            foreign_spool = os.path.join(other_spool, f'{foreign_sid}.jsonl')
+            _write_jsonl(foreign_spool,
+                         [_event_record(foreign_sid, f'{foreign_sid}:t1:api:1',
+                                        OLD_TS, OLD_TS + 1)])
+            # The foreign session is deliberately absent from state.db and
+            # from this profile's legacy HERMES: ledger — the live-fleet
+            # condition under which a non-owner concludes a session is
+            # unowned and ships it.
+
+            # This profile's own work, so a clean result cannot come from the
+            # script simply doing nothing. Neither sid is a substring of the
+            # other, which is what makes the argv/ledger token scans below
+            # sound.
+            own_sid = 'sess-live-owned-by-this-profile'
+            _write_jsonl(os.path.join(spool_dir, f'{own_sid}.jsonl'),
+                         [_event_record(own_sid, f'{own_sid}:t1:api:1', OLD_TS, OLD_TS + 1)])
+            self._write_state_db(hh, [_session_row(own_sid, input_tokens=100, output_tokens=50)])
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(
+                hh, sd, shim_home, meter_log, inv_log,
+                extra_env={'REVENIUM_EVENT_METERING_MODE': 'live'},
+            )
+            self.assertEqual(rc, 0, out)
+
+            # Exactly one completion: the vacuity guard AND the proof live
+            # mode actually resolved — a mistyped mode value falls back to
+            # shadow, ships zero, and would fail here rather than passing on
+            # an empty shipping surface.
+            completions = self._completions(meter_log)
+            self.assertEqual(len(completions), 1,
+                             f'expected exactly one shipped completion: {completions!r}')
+
+            transaction_ids = set()
+            for argv in completions:
+                if '--transaction-id' in argv:
+                    transaction_ids.add(argv[argv.index('--transaction-id') + 1])
+            self.assertEqual(transaction_ids, {f'event:{own_sid}:t1:api:1'})
+
+            foreign_completions = [a for a in completions if any(foreign_sid in tok for tok in a)]
+            self.assertEqual(foreign_completions, [],
+                             "a non-owner's legacy-ledger and event-ledger lookups resolve "
+                             "against the WRONG profile, so a swept foreign session ships a "
+                             "row its real owner also ships")
+
+            ledger = self._ledger_lines(sd)
+            self.assertEqual(len(ledger), 1, f'expected exactly one ledger line: {ledger!r}')
+            ledger_sids = {line.split('|')[1] for line in ledger}
+            self.assertEqual(ledger_sids, {own_sid},
+                             "the per-profile event ledger is the idempotency domain a "
+                             "cross-profile ship silently escapes")
+
+            self.assertTrue(os.path.exists(foreign_spool),
+                            "the other profile's spool file must be left in place for its "
+                            "own run to consume")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 class CoverageRatioTests(ShadowReadoutTestBase):
     """Test 2 — coverage_ratio is 1.0 when constructed events exactly match
