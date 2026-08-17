@@ -87,6 +87,48 @@ class TaxonomySeedingTests(unittest.TestCase):
             # the absent one is still seeded in the same run
             self.assertIn('seeded_job', (state / 'job-taxonomy.json').read_text())
 
+    def test_seeds_into_independently_overridden_directories(self):
+        """Greptile P1 on #51: TAXONOMY_FILE and JOB_TAXONOMY_FILE are independently
+        overridable (REVENIUM_TAXONOMY_FILE / REVENIUM_JOB_TAXONOMY_FILE) and may live
+        in different directories. Preparing only the first one left the second cp to
+        fail silently, so job classification started empty while the installer still
+        reported success."""
+        block = _extract_seed_block(BUNDLED)
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = Path(tmp) / 'skill'
+            skill.mkdir()
+            (skill / 'task-taxonomy.json').write_text('{"labels": {"seeded_task": {}}}')
+            (skill / 'job-taxonomy.json').write_text('{"labels": {"seeded_job": {}}}')
+            # Two destinations, in two directories, NEITHER of which exists yet.
+            task_dest = Path(tmp) / 'state-a' / 'task-taxonomy.json'
+            job_dest = Path(tmp) / 'state-b' / 'nested' / 'job-taxonomy.json'
+            script = (f'set -uo pipefail\nstep() {{ :; }}\nwarn() {{ echo "WARN $*"; }}\n'
+                      f'SKILL_DIR="{skill}"\nTAXONOMY_FILE="{task_dest}"\n'
+                      f'JOB_TAXONOMY_FILE="{job_dest}"\n{block}\n')
+            r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(task_dest.exists(), 'task taxonomy not seeded')
+            self.assertTrue(
+                job_dest.exists(),
+                'job taxonomy not seeded into its own directory — the second destination '
+                f'parent was never created. stdout={r.stdout!r} stderr={r.stderr!r}')
+            self.assertIn('seeded_job', job_dest.read_text())
+
+    def test_both_installers_prepare_each_seed_destination(self):
+        """Trip-wire for the same defect in the root installer, which had it too."""
+        for installer in (ROOT_INSTALLER, BUNDLED):
+            text = installer.read_text()
+            mkdirs = re.findall(r'mkdir -p "\$\(dirname "\$\{(\w+)\}"\)"', text)
+            self.assertTrue(
+                mkdirs,
+                f'{installer.relative_to(ROOT)} must prepare its seed destination parents')
+            if installer is ROOT_INSTALLER:
+                self.assertIn('JOB_TAXONOMY_DEST', mkdirs,
+                              'root install.sh must mkdir the job taxonomy parent too')
+            else:
+                self.assertIn('seed_dest', mkdirs,
+                              'bundled install.sh must mkdir per destination inside the loop')
+
     def test_bundled_seed_block_tolerates_a_missing_seed(self):
         """A skill dir without seeds must warn and continue, not abort the install."""
         block = _extract_seed_block(BUNDLED)

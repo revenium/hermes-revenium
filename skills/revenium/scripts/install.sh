@@ -303,7 +303,6 @@ ok "All four credentials present"
 # label and re-open the cold-start window. Never overwrite.
 # ---------------------------------------------------------------------------
 step "Seeding runtime taxonomies"
-mkdir -p "$(dirname "${TAXONOMY_FILE}")"
 for seed_pair in "task-taxonomy.json:${TAXONOMY_FILE}" "job-taxonomy.json:${JOB_TAXONOMY_FILE}"; do
   seed_name="${seed_pair%%:*}"
   seed_dest="${seed_pair#*:}"
@@ -311,7 +310,15 @@ for seed_pair in "task-taxonomy.json:${TAXONOMY_FILE}" "job-taxonomy.json:${JOB_
   if [[ -f "${seed_dest}" ]]; then
     echo "  ✓ ${seed_dest} already exists — not overwriting"
   elif [[ -f "${seed_src}" ]]; then
-    cp "${seed_src}" "${seed_dest}" && echo "  ✓ Seeded ${seed_dest}"
+    # Per-destination mkdir: TAXONOMY_FILE and JOB_TAXONOMY_FILE are independently
+    # overridable (REVENIUM_TAXONOMY_FILE / REVENIUM_JOB_TAXONOMY_FILE), so they can
+    # live in different directories. Preparing only the first one left the second cp
+    # to fail silently and the host to start job classification empty while the
+    # installer still reported success.
+    mkdir -p "$(dirname "${seed_dest}")" \
+      && cp "${seed_src}" "${seed_dest}" \
+      && echo "  ✓ Seeded ${seed_dest}" \
+      || warn "could not seed ${seed_dest} from ${seed_src} — it will be built by mint-back instead"
   else
     warn "seed ${seed_src} missing — ${seed_dest} will be built by mint-back instead"
   fi
