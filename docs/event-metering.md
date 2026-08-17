@@ -149,6 +149,117 @@ canary flip (letting the event path ship for real on even one profile) is
 gated behind an explicit operator decision rather than happening as a
 byproduct of deploying this phase's code.
 
+## Shadow-stage findings (2026-08-17)
+
+The shadow stage ran fleet-wide (all ten metered profiles) for roughly 20 hours
+before this readout. `revenium-api-events.ledger` stayed empty on every profile
+throughout — shadow mode shipped nothing, as designed.
+
+**The gateway question is answered: `post_api_request` fires on gateway-served
+turns.** A live, continuously-open gateway-served conversation (channel-name
+platform value, not the literal string `gateway` — matching the caveat this
+document's design phase raised) produced spooled events with exact per-call
+agreement against `state.db` for the portion of its history inside the shadow
+window. Corroborated independently by the owning profile's own gateway-service
+and channel-integration configuration. This closes the one open question the
+shadow stage existed to resolve before any canary could be authorised.
+
+**Fleet coverage:** of 14 real sessions observed across cron, CLI, and
+gateway-served surfaces, 12 showed exact 1.000 event-vs-database token
+agreement. The two exceptions were each individually explained rather than
+averaged away: one was a multi-week-old session whose database counter
+reflects its entire history while the event count only reflects the shadow
+window (a scale mismatch, not a missed call); the other was a single
+still-in-flight, multi-call session where the event count briefly ran ahead of
+a database snapshot taken moments earlier (a measurement-instant race that
+resolves on the next tick, confirmed to involve no duplicate event records).
+
+**The three predicted systematic deltas are confirmed on real traffic, with no
+surprises beyond them:**
+
+- **Row count and operation type.** The legacy path's session-delta pair
+  (one `GUARDRAIL` row, one `CHAT` row, tokens split via `equal_split`) is
+  replaced by one `CHAT` row per API call. Observed 1–23 event rows per
+  session against the legacy path's fixed two, with exact token conservation
+  on every session where a clean comparison was possible.
+- **Cost.** The event path never sent `--total-cost` on any observed row, as
+  designed — Revenium prices these rows server-side.
+- **Provider.** The event path's resolved provider matched the legacy path's
+  would-be resolution on every observed row. The routing-layer fallback
+  branch (added for installs that route through OpenRouter, LiteLLM, or
+  Bedrock) was not exercised on this fleet's traffic in this window — every
+  provider value seen was already a direct model-provider name. Kept in place
+  rather than removed: this fleet's provider mix is not guaranteed to stay
+  that way, and other installs have needed exactly this fallback before.
+
+**One anomaly was observed during the window and is now fully explained.** For
+part of the shadow window, a shadow-report-only artifact — never the shipping
+path, never the idempotency ledger — showed one profile's session data
+appearing in every other profile's comparison report. It cost nothing in
+billing terms: the affected surface only ever produces a disposable comparison
+file, and `revenium-api-events.ledger` stayed empty on every profile
+throughout.
+
+There *was* a real defect, and it was real in production: the build deployed at
+the start of the window swept every profile's spool directory instead of only
+its own, so each profile's run read every other profile's spooled events. That
+is the same cross-profile defect this phase had already fixed once on the
+shipping side. Mid-window it was fixed here too, and that single script was
+pushed to the fleet roughly a second after the fix was committed. Reports
+written before the push carry the sweeping behaviour; those written after do
+not.
+
+So two distinct things are true and should not be collapsed. The **anomaly** was
+a genuine code defect, briefly live on the fleet. The **disappearance** of the
+anomaly was not mysterious — it was that fix landing. What the currently
+deployed build contains is the corrected single-profile read. An initial pass
+that looked only at the deployed host could see the anomaly stop but not why,
+and recorded the cause as unattributed; correlating the host's file timestamps
+and authentication log against the repository's commit history closed it.
+
+Why it cost nothing: in shadow mode the swept records only ever reach the
+disposable comparison report. Had the same build been running in **live** mode,
+each non-owning profile would have found no legacy ledger line for a foreign
+session, concluded it was unowned, and shipped it against its own event ledger —
+up to 9x duplicate billing. The defect's blast radius was bounded by the mode,
+not by the code.
+
+Two lessons worth keeping, both of which cost real investigation time here:
+
+- **A content hash only proves what was true when you sampled it.** Every hash
+  check of the shipper happened after the corrective push, so all of them
+  agreed — and that agreement was mistaken for evidence that nothing had ever
+  differed. The pre-fix build was simply never hashed. Sampling after the fact
+  cannot establish what was running before.
+- **A single-file push to a fleet leaves almost no trace.** Only one file in a
+  49-file deployed tree carried the telltale modification time, and because the
+  push was non-interactive it created no login record. Any out-of-band push to
+  a deployed tree should take the same timestamped backup the documented deploy
+  sequence takes, and record itself, or the next reader has nothing to correlate.
+
+A `profiles`-axis regression test landed alongside the sweep fix: it asserts a
+run does not process a sibling profile's spool file, and leaves that file in
+place for its owner. Be precise about what it does and does not cover, because
+the difference matters at the moment the event path goes live:
+
+- **It asserts in shadow mode**, by checking the foreign session is absent from
+  the shadow comparison rows. It does not exercise live shipping.
+- **The `ticks`-axis tests** exercise the other half — live shipping and
+  event-ledger deduplication across repeated runs.
+- **No test yet asserts that a *live-mode* run refuses to ship a sibling
+  profile's session.** So "never-double-report is covered on both axes" would
+  overstate it: the profiles axis is covered for *reading*, the ticks axis for
+  *shipping*, and the live-mode intersection of the two is covered only by
+  construction.
+
+That construction argument is real but is not a test: the spool directory list is
+resolved to a single entry before any mode branch, so shadow and live share one
+discovery path and neither can see a sibling's spool. The isolation is therefore
+structural rather than mode-specific. Still, the one axis that produced a 9x
+duplicate-billing defect is also the one whose live path has no direct
+assertion — closing that gap is worth doing before or alongside the first live
+rollout, not after.
+
 ## State files added
 
 - `~/.hermes/state/revenium/api-events/<sid>.jsonl` — the per-session
