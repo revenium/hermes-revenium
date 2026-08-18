@@ -153,6 +153,133 @@ if [[ "${REVENIUM_LEGACY_COMPLETIONS_RESOLVED}" == "disabled" ]]; then
   fi
 fi
 
+# quick-260817-tfe (OWN-03): the ENGAGEMENT GATE. The ownership protocol is
+# active only when SOME event-path artifact exists on this install — a
+# non-empty event ledger, any entry under OWNERS_DIR, or any spool file. When
+# it is false nothing below claims, nothing creates OWNERS_DIR, and the wire
+# output is byte-identical to an install that never heard of this change,
+# which is the overwhelming majority of them.
+#
+# Pure bash, no subprocess: an UNMATCHED glob stays literal (nullglob is off),
+# so the array always has exactly one element and `-e` on it is a safe
+# emptiness probe. `${arr[0]}` is therefore always defined under `set -u`.
+#
+# WHY THE SPOOL DISJUNCT IS SAFE. A spool file must already exist for the
+# event path to ever reach a session, and the composed 600-second settle
+# windows on BOTH sides defer any session whose spool file appeared after
+# this tick's startup — so a session cannot slip past this gate and be
+# claimed by the event path in the same tick.
+_owners_probe_glob=("${OWNERS_DIR}"/*)
+_spool_probe_glob=("${EVENT_SPOOL_DIR}"/*.jsonl)
+OWNERSHIP_PROTOCOL_ACTIVE="false"
+if [[ -s "${EVENT_LEDGER_FILE}" ]] \
+   || [[ -e "${_owners_probe_glob[0]}" ]] \
+   || [[ -e "${_spool_probe_glob[0]}" ]]; then
+  OWNERSHIP_PROTOCOL_ACTIVE="true"
+fi
+
+# quick-260817-tfe (OWN-01/OWN-04): the CLAIM PRIMITIVE. Establishes session
+# ownership with a create-and-exclusive open — atomic across processes, with
+# no lock held and none needed. That matters here specifically: flock is taken
+# only by cron.sh (this script takes none, api-event-report.sh takes none), so
+# an out-of-band shipper invocation — the exact pattern behind the 2026-08-17
+# double-bill — runs unlocked and can interleave with a cron tick. O_EXCL
+# holds regardless, and holds for any future caller that forgets to lock.
+#
+# Usage: _claim_session_owner <sid> <legacy|event> <baseline-tokens>
+# Prints, on stdout, three KEY=value lines:
+#   OWNER=    the side that owns the session (this call's side on a fresh
+#             create; the EXISTING record's first line when the file was
+#             already there — the file always wins, that is the arbiter)
+#   CLAIMED=  true only when THIS call created the record. The
+#             once-per-record gate the dual-ledger warn hangs on.
+#   BASELINE= the record's catch-up baseline, or empty when it has none.
+# Prints NOTHING on any I/O failure — empty output is the contract for
+# "sentinel unavailable", and each caller resolves that its own way
+# (OWN-04: legacy fails OPEN and bills, the event path fails CLOSED and
+# defers). The EXISTS branch has its OWN handler because a record whose bytes
+# are not valid UTF-8 raises there, not in the create — relying on the
+# create's handler would let a decode failure crash the heredoc.
+_claim_session_owner() {
+  OWNERS_DIR="${OWNERS_DIR}" \
+  CLAIM_SID="${1:-}" \
+  CLAIM_SIDE="${2:-}" \
+  CLAIM_BASELINE="${3:-0}" \
+  python3 - <<'PY' 2>/dev/null
+import os
+
+owners_dir = os.environ.get('OWNERS_DIR', '')
+sid = os.environ.get('CLAIM_SID', '')
+side = os.environ.get('CLAIM_SIDE', '')
+
+# Closed two-literal vocabulary; anything else is a caller bug, not a record
+# state, and must not create a file that the total ownership predicate would
+# then have to interpret.
+if not owners_dir or not sid or side not in ('legacy', 'event'):
+    raise SystemExit(0)
+
+# T-OWN-01: the ONLY filename derivation, mirrored byte-for-byte by
+# prune-markers.sh's owners pass. Replacing the separator and NUL means no
+# traversal-shaped segment can escape OWNERS_DIR; the 200-character cap keeps
+# the name inside every filesystem's per-component limit.
+name = sid.replace('/', '_').replace('\x00', '_')[:200]
+if not name:
+    raise SystemExit(0)
+path = os.path.join(owners_dir, name)
+
+try:
+    baseline = int(os.environ.get('CLAIM_BASELINE', '0') or '0')
+except (TypeError, ValueError):
+    baseline = 0
+if baseline < 0:
+    baseline = 0
+
+try:
+    os.makedirs(owners_dir, mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+except FileExistsError:
+    # The record already exists — it wins, always. Read only its FIRST line
+    # (the owner) and SECOND line (the baseline); a multi-line file can
+    # therefore never forge a second decision. Its own handler: a non-UTF-8
+    # or otherwise unreadable record degrades to empty output here rather
+    # than raising out of the heredoc. Never repaired, never overwritten.
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            existing_owner = fh.readline().strip()
+            existing_baseline_raw = fh.readline().strip()
+    except Exception:
+        raise SystemExit(0)
+    try:
+        existing_baseline = int(existing_baseline_raw)
+    except (TypeError, ValueError):
+        existing_baseline = None
+    if existing_baseline is not None and existing_baseline < 0:
+        existing_baseline = None
+    print(f"OWNER={existing_owner}")
+    print("CLAIMED=false")
+    print(f"BASELINE={existing_baseline if existing_baseline is not None else ''}")
+    raise SystemExit(0)
+except Exception:
+    raise SystemExit(0)
+
+try:
+    with os.fdopen(fd, 'w') as fh:
+        fh.write(side + "\n")
+        # A second line is written ONLY for a real catch-up baseline. A record
+        # with no second line is "no floor" — which is what every non-
+        # dual-ledger claim wants, and what a record written by an older build
+        # degrades to.
+        if baseline > 0:
+            fh.write(str(baseline) + "\n")
+except Exception:
+    raise SystemExit(0)
+
+print(f"OWNER={side}")
+print("CLAIMED=true")
+print(f"BASELINE={baseline if baseline > 0 else ''}")
+PY
+}
+
 main() {
   info "=== Hermes Metering Reporter starting ==="
 
@@ -332,6 +459,17 @@ PY
   # THIS shell, so a counter incremented inside it survives to the aggregate
   # line near the end-of-run summary. A pipe would silently zero it.
   local fallback_tick_count=0
+  # quick-260817-tfe (OWN-01/OWN-04): per-tick aggregates for the two
+  # ownership outcomes an operator needs to see. Declared HERE, next to
+  # fallback_tick_count and before the while loop, for the identical
+  # herestring reason documented above — the loop body runs in THIS shell, so
+  # these increments survive to the aggregate lines near the end-of-run
+  # summary. Reported as ONE line per tick when non-zero and nothing when
+  # zero, never per session: a suppressed session persists in state.db
+  # indefinitely, and this repo has already paid 9,039,937 log lines in 27
+  # days for one ungated per-tick warn.
+  local event_owned_skip_count=0
+  local claim_unavailable_count=0
 
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider; do
 
@@ -893,6 +1031,156 @@ PY
       fi
     fi
 
+    # quick-260817-tfe: HOISTED legacy-ledger lookup. This is the SAME grep the
+    # prior-line read below has always done — moved up so the ownership
+    # resolution can reuse its result rather than adding a third grep of the
+    # same file for the same sid. It answers both questions at once: "does the
+    # legacy path already hold rows for this session?" (the resolution table's
+    # own-ledger predicate) and "what is its last reported total?" (the delta
+    # baseline).
+    local prev_line
+    prev_line=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 || true)
+    local legacy_rows_present="false"
+    [[ -n "${prev_line}" ]] && legacy_rows_present="true"
+
+    # =====================================================================
+    # quick-260817-tfe (OWN-01/OWN-02/OWN-04): SESSION OWNERSHIP RESOLUTION.
+    #
+    # WHY THIS EXISTS. Before this, the two metering paths partitioned by
+    # DERIVING ownership — each grepped the other's BILLING ledger at an
+    # arbitrary instant. That is order-dependent (it double-billed a real
+    # production session on 2026-08-17) and retention-coupled (pruning an
+    # event-owned session's API: rows erased its only ownership record and let
+    # this path re-bill its whole cumulative total from a zero baseline).
+    # Ownership is now a fact established ONCE, by an O_EXCL create.
+    #
+    # WHY HERE, and not at the emission guard. Only the SUPPRESSION composes
+    # into the D-13 guard below; the RESOLUTION has to run before the delta
+    # block, because the catch-up baseline must be in hand before any delta is
+    # computed. Resolving early also tightens the partition: this path now
+    # claims a session on the first tick it sees it, even when that tick's
+    # delta is zero.
+    #
+    # WHY THE PIPE-DELIMITED FIXED-STRING MATCH, and not the `^HERMES:` colon
+    # idiom used a few lines up. An event ledger line is
+    # `API:<api_request_id>|<sid>|<ts>` — pipe-delimited ON PURPOSE, because a
+    # real api_request_id embeds colons (`sess:t1:api:1`); the shipper's own
+    # reader agrees (strip the `API:` prefix, then find the first pipe). A
+    # colon-position parse here would be a silent ALWAYS-FALSE no-op that
+    # looks correct in review and never once fires. Both surrounding pipes are
+    # required so another session's api_request_id cannot false-positive, and
+    # the identifier is pipe-sanitised on write, so a smuggled pipe cannot
+    # forge a match. The `-s` pre-test is both the fail-open mechanism and the
+    # perf guard.
+    #
+    # OPERATOR REVIEW — SURFACED, DELIBERATELY NOT FIXED HERE.
+    # drain-status.sh reasons over the HERMES: ledger to answer what is really
+    # an ownership question (which legacy-owned sessions are still open, and
+    # therefore whether this path may be disabled). An EVENT-owned session
+    # never appears in that ledger, so it is invisible to that gate. Two
+    # consequences: (1) the gate can report `drained` while event-owned
+    # sessions are still spending — correct for what it measures, easy to
+    # misread as "all sessions are accounted for"; (2) if the event path owns
+    # a session and is later returned to `shadow` or uninstalled while this
+    # path stays enabled, the DURABLE record keeps this path off that session
+    # FOREVER and its later growth is billed by neither. That hole existed
+    # before too, but transiently — it healed when the API: rows aged out, by
+    # way of the zero-baseline re-bill that is P1-2. This design makes the
+    # hole permanent and the re-bill impossible. That is the intended trade
+    # (over-billing is the failure this repo treats as load-bearing) and it is
+    # a CHANGE in behaviour, not a preservation of it. Candidate follow-ups,
+    # none implemented here: teach drain-status.sh to read OWNERS_DIR; add an
+    # event-side drain gate; or document a "clear the owners records and the
+    # event ledger before rolling the event path back" runbook step.
+    # =====================================================================
+    local session_event_owned="false"
+    local owner_baseline=""
+    if [[ "${OWNERSHIP_PROTOCOL_ACTIVE}" == "true" ]]; then
+      local event_rows_present="false"
+      if [[ -s "${EVENT_LEDGER_FILE}" ]] && grep -qF "|${sid}|" "${EVENT_LEDGER_FILE}" 2>/dev/null; then
+        event_rows_present="true"
+      fi
+
+      # The resolution table, implemented identically in api-event-report.sh:
+      #   neither ledger  -> the claiming side (here: legacy)
+      #   legacy only     -> legacy       (backfill)
+      #   event only      -> event        (backfill)
+      #   BOTH            -> legacy, plus a warn, plus a catch-up baseline
+      #
+      # The dual row resolves to LEGACY, and consulting THIS script's own
+      # ledger is what makes that possible. A one-directional backfill would
+      # see a non-empty event ledger, cede the session as `event`, and lock
+      # this path out of a session it has an active, still-growing billing
+      # history for — while the event path may be on `shadow` and shipping
+      # nothing. That session's future growth would be billed by NEITHER path,
+      # permanently. Legacy wins because it holds a working delta baseline,
+      # because the event path may not even be enabled, and because it
+      # composes with OWN-04's fail direction rather than fighting it.
+      local claim_side="legacy"
+      local claim_baseline_in=0
+      local dual_ledger="false"
+      if [[ "${legacy_rows_present}" == "true" && "${event_rows_present}" == "true" ]]; then
+        dual_ledger="true"
+        claim_side="legacy"
+        # BASELINE CATCH-UP: legacy-wins is UNSAFE without this. This path's
+        # delta baseline comes SOLELY from LEDGER_FILE and is blind to the
+        # event ledger, so on a dual claim whose last HERMES: line PREDATES
+        # the event rows, the first post-claim delta would span tokens the
+        # event path already metered and bill them twice — the original
+        # defect's own class, reintroduced by the rule meant to close it.
+        # Recording the session's CURRENT total at the claim instant makes the
+        # claim honest instead of assuming it: the first post-claim delta is
+        # genuinely zero, and only real future growth bills. The cost is a
+        # bounded, one-time, quantifiable UNDER-bill — the direction OWN-04
+        # already commits to.
+        claim_baseline_in="${total_tokens}"
+      elif [[ "${event_rows_present}" == "true" ]]; then
+        claim_side="event"
+      fi
+
+      local claim_output=""
+      claim_output=$(_claim_session_owner "${sid}" "${claim_side}" "${claim_baseline_in}") || claim_output=""
+
+      if [[ -z "${claim_output}" ]]; then
+        # OWN-04, fail OPEN: an unreadable/uncreatable sentinel must leave
+        # exactly ONE biller, and this is the incumbent path every install
+        # depends on and the goldens pin. The event path fails CLOSED under
+        # the same condition; symmetric fail-open would double-bill under a
+        # shared directory failure.
+        ((claim_unavailable_count++)) || true
+      else
+        local claim_owner claim_created claim_baseline_out
+        claim_owner=$(printf '%s\n' "${claim_output}" | sed -n 's/^OWNER=//p' | head -1)
+        claim_created=$(printf '%s\n' "${claim_output}" | sed -n 's/^CLAIMED=//p' | head -1)
+        claim_baseline_out=$(printf '%s\n' "${claim_output}" | sed -n 's/^BASELINE=//p' | head -1)
+
+        # THE SINGLE OWNERSHIP PREDICATE, total over every possible string:
+        # the record blocks this path if and only if its first line is exactly
+        # the literal `event`. A corrupt, truncated or hostile record resolves
+        # to "legacy bills, event defers" — today's behaviour, exactly one
+        # biller. There is no third branch.
+        if [[ "${claim_owner}" == "event" ]]; then
+          session_event_owned="true"
+          ((event_owned_skip_count++)) || true
+        fi
+        if [[ "${claim_baseline_out}" =~ ^[0-9]+$ ]]; then
+          owner_baseline="${claim_baseline_out}"
+        fi
+
+        # Gated on the primitive's OWN created flag so it fires exactly ONCE
+        # per record — on the tick the record is actually created, by whichever
+        # process creates it. A dual-ledger session is a PERMANENT on-disk
+        # state that matches every tick forever; an ungated warn here would be
+        # the same unbounded per-tick warn this repo has already paid
+        # 9,039,937 lines for. It must stay findable (it is evidence of a past
+        # double-bill) and it must not be per-tick.
+        if [[ "${dual_ledger}" == "true" && "${claim_created}" == "true" ]]; then
+          local safe_claim_sid="${sid//[^A-Za-z0-9_:.-]/_}"
+          warn "dual-ledger session claimed for the legacy path: session=${safe_claim_sid} baseline=${claim_baseline_in} — rows exist in BOTH the HERMES: and API: ledgers (evidence of a past double-bill); legacy retains ownership and its delta baseline is reset to the session's current total, so the overlap is never re-billed"
+        fi
+      fi
+    fi
+
     local ledger_key="HERMES:${sid}:${total_tokens}"
     if grep -q "^HERMES:${sid}:${total_tokens}:" "${LEDGER_FILE}" 2>/dev/null; then
       ((skipped_count++)) || true
@@ -900,8 +1188,6 @@ PY
     fi
 
     local prev_reported_tokens=0
-    local prev_line
-    prev_line=$(grep "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null | tail -1 || true)
     if [[ -n "${prev_line}" ]]; then
       # CR-01 fix: sid may itself embed ':' (multiplex-namespaced sessions,
       # e.g. "agent:<profile>:<rest>"), which shifts every fixed-position
@@ -916,10 +1202,33 @@ PY
       sid_colon_count=$(( ${#sid} - ${#sid_no_colons} ))
       tokens_field=$((3 + sid_colon_count))
       prev_reported_tokens=$(echo "${prev_line}" | cut -d: -f"${tokens_field}")
-      if [[ "${total_tokens}" -le "${prev_reported_tokens}" ]]; then
-        ((skipped_count++)) || true
-        continue
+    fi
+
+    # quick-260817-tfe (OWN-02): FLOOR the ledger-derived baseline at the
+    # catch-up value carried on the owners record's second line. Read from the
+    # DURABLE record on EVERY tick — not special-cased to the claim tick —
+    # which is what makes it survive a restart, a prune of the event ledger,
+    # and an operator's manual run. Take the MAXIMUM, never an assignment: a
+    # stale record must never LOWER a baseline the ledger has already moved
+    # past, or it would re-open the very re-bill it exists to close.
+    # Everything downstream is unchanged — the growth guard below
+    # short-circuits the claim tick on its own, and the ratio math measures
+    # from the floored value on every later tick.
+    if [[ "${owner_baseline}" =~ ^[0-9]+$ && "${owner_baseline}" -gt 0 ]]; then
+      local _floor_prev="${prev_reported_tokens}"
+      [[ "${_floor_prev}" =~ ^[0-9]+$ ]] || _floor_prev=0
+      if [[ "${owner_baseline}" -gt "${_floor_prev}" ]]; then
+        prev_reported_tokens="${owner_baseline}"
       fi
+    fi
+
+    # The growth guard, unchanged in effect: it previously lived inside the
+    # `[[ -n "${prev_line}" ]]` block above and is hoisted out only so the
+    # floor can be applied before it runs. With no prior line and no floor,
+    # prev_reported_tokens is 0 and this is false — byte-identical to before.
+    if [[ "${prev_reported_tokens}" -gt 0 && "${total_tokens}" -le "${prev_reported_tokens}" ]]; then
+      ((skipped_count++)) || true
+      continue
     fi
 
     local delta_input delta_output delta_cache_read delta_cache_write delta_total
@@ -1474,7 +1783,18 @@ PY
     # configuration, because post_api_request carries no job lifecycle
     # signal (D-10). The superseded code inside this guard is retained, not
     # deleted — disabling it is a setting flip, not a revert (D-11).
-    if [[ "${LEGACY_COMPLETIONS_SKIP}" != "true" ]]; then
+    #
+    # quick-260817-tfe (OWN-01): the condition now requires BOTH gates clear.
+    # The ownership SUPPRESSION composes HERE, and nowhere earlier, for a
+    # measured reason: api-event-report.sh SHIPS --agentic-job-id but contains
+    # zero `jobs create` calls — job creation is legacy-only (D-10) — so an
+    # early `continue` at the top of the session loop would orphan every event
+    # row's job reference. This guard wraps only the completion-emission block
+    # and deliberately leaves the pre-guard jobs scan, the in-loop jobs-create
+    # stage and the post-loop outcome stage OUTSIDE it. reported_count and
+    # skipped_count are left untouched by the ownership suppression so the
+    # existing summary keeps its meaning.
+    if [[ "${LEGACY_COMPLETIONS_SKIP}" != "true" && "${session_event_owned}" != "true" ]]; then
     # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
     # per-marker Revenium calls with extended transaction-id and per-call v2
     # ledger writes. Else fall through to the legacy single-call path (T06
@@ -1773,7 +2093,7 @@ PY
         warn "Command: ${cmd[*]}"
       fi
     fi
-    fi # LEGACY_COMPLETIONS_SKIP guard (Phase 32 Plan 03, C-11/D-13)
+    fi # LEGACY_COMPLETIONS_SKIP + session_event_owned guard (Phase 32 Plan 03 C-11/D-13; quick-260817-tfe OWN-01)
   done <<< "${sessions}"
 
   # Phase 10: post-loop outcome stage — report each terminated arc exactly once.
@@ -1901,6 +2221,17 @@ PY
   # rather than trading the per-tick spam for total silence.
   if [[ "${fallback_tick_count}" -gt 0 ]]; then
     info "trace-type fallback: ${fallback_tick_count} session(s) resolved to the fallback this tick (per-session detail logged once per session+reason, not every tick)"
+  fi
+
+  # quick-260817-tfe (T-OWN-04): the same per-tick-aggregate discipline for
+  # the two ownership outcomes — one line when non-zero, silent when zero, and
+  # never a per-session line (an event-owned session stays in state.db
+  # forever, so a per-session line would grow without bound).
+  if [[ "${event_owned_skip_count}" -gt 0 ]]; then
+    info "legacy completions suppressed for ${event_owned_skip_count} session(s) this tick — the session ownership record names the event path"
+  fi
+  if [[ "${claim_unavailable_count}" -gt 0 ]]; then
+    warn "session ownership record unavailable for ${claim_unavailable_count} session(s) this tick — failing OPEN (legacy billed them, as it does today); check permissions on ${OWNERS_DIR}"
   fi
 
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="

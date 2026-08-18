@@ -263,6 +263,22 @@ class RepositoryTests(unittest.TestCase):
         # Phase 19: BUDGET_STATUS_FILE removed (clean break — D-12, ENF-03)
         self.assertNotIn('BUDGET_STATUS_FILE=', text)
         self.assertNotIn('budget-status.json', text)
+        # quick-260817-tfe (OWN-01/OWN-02): the durable session-ownership
+        # record's directory. Declared ONLY in common.sh, with the same
+        # env-override shape every neighbour uses.
+        self.assertIn('OWNERS_DIR=', text)
+        self.assertIn('/owners', text)
+        self.assertRegex(text, r'OWNERS_DIR="\$\{REVENIUM_OWNERS_DIR:-\$\{STATE_DIR\}/owners\}"')
+        # OWN-03: deliberately ABSENT from the eager mkdir -p (created lazily
+        # by the claim primitive, exactly as WARN_FLAGS_DIR is). An install
+        # with no event path in play must create no ownership state at all,
+        # and an eager mkdir would make that assertion impossible.
+        mkdir_lines = [ln for ln in text.splitlines() if ln.startswith('mkdir -p ')]
+        self.assertTrue(mkdir_lines, 'common.sh must still carry its eager mkdir -p line')
+        for ln in mkdir_lines:
+            self.assertNotIn('OWNERS_DIR', ln,
+                             'OWNERS_DIR must NOT be in the eager mkdir -p — it is created '
+                             'lazily by the claim so a no-event-path install creates nothing')
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
