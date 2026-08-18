@@ -946,6 +946,40 @@ def _clean(s, cap=128):
     return s[:cap]
 
 
+def _normalize_model(model):
+    # Mirror of legacy hermes-report.sh's clean_model transformation
+    # (the `clean_model=$(python3 -c ...)` block), statement for statement.
+    # Revenium's price catalog is keyed on the NORMALIZED name: the canary
+    # of 2026-08-17 shipped `accounts/fireworks/models/glm-5p2` from this
+    # path and got cost=0, while legacy shipped `fireworks/models/glm-5p2`
+    # for the same session in the same tick and got cost=0.009937.
+    #
+    # Two properties look like accidents and are not:
+    #  - split('/', 1) strips only the FIRST segment, so
+    #    `accounts/fireworks/models/glm-5p2` -> `fireworks/models/glm-5p2`,
+    #    not `glm-5p2`. Matching the catalog is the goal, not minimality.
+    #  - The prefix pass is SINGLE and the tuple is ORDERED. `global.` must
+    #    precede `anthropic.` or `global.anthropic.claude-...` only loses
+    #    `global.`. Do not sort this, and do not turn it into a set.
+    #
+    # No try/except: legacy's `|| echo "${model}"` fallback exists only
+    # because its `model = '${model}'` is SHELL-INTERPOLATED and a
+    # quote-bearing name yields invalid Python. Here the value comes from
+    # json.loads inside a quoted heredoc, so that failure mode cannot
+    # occur. Known benign divergence: on a quote-bearing model name legacy
+    # falls back to the RAW string while this returns the normalized one.
+    # Legacy is the lossy side and this change does not touch legacy.
+    #
+    # Kept in-process (no subprocess) deliberately — this runs per record.
+    model = model or ""
+    if "/" in model:
+        model = model.split("/", 1)[1]
+    for prefix in ("global.", "anthropic.", "openai.", "google.", "x-ai."):
+        if model.startswith(prefix):
+            model = model[len(prefix):]
+    return model
+
+
 def _infer_provider(model_lc):
     if "claude" in model_lc or "anthropic" in model_lc:
         return "anthropic"
@@ -1099,11 +1133,19 @@ try:
             else:
                 task_type, operation_type, trace_id, agentic_job_id = "unclassified", "CHAT", "", ""
 
+            # RAW response_model on purpose — legacy's provider heredoc reads
+            # raw ${model}, never clean_model. Do not "consistency-fix" this to
+            # _normalize_model(response_model): normalization must not be able
+            # to re-route a row's --provider into another vendor's bucket.
             provider_resolved = _resolve_provider(provider_raw, response_model)
             stop_reason = _stop_reason(r.get("finish_reason"))
 
             row = [
-                _clean(sid, 256), _clean(arid, 256), _clean(response_model, 256),
+                # _clean stays OUTSIDE: the 256-cap and the |/\n/\r scrub must
+                # run last so a normalized value can never gain a field
+                # separator at the row boundary.
+                _clean(sid, 256), _clean(arid, 256),
+                _clean(_normalize_model(response_model), 256),
                 _clean(provider_raw, 128), _clean(provider_resolved, 128),
                 str(input_tokens), str(output_tokens), str(cache_read_tokens),
                 str(cache_write_tokens), str(reasoning_tokens), str(total_tokens),
