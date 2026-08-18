@@ -110,8 +110,21 @@ A26 = f'{RACE}.test_late_replace_with_a_failed_ax21_reread_lowers_the_floor'
 # byte-for-byte argv comparison against the golden fixture).
 # ---------------------------------------------------------------------------
 
+#
+# quick-260818-jbl (E-11): _GUARD_IF's ORIGINAL search text
+# ('"${LEGACY_COMPLETIONS_SKIP}" == "true"') went stale when #57
+# (quick-260818-f1g) changed the takeover branch's guard from the
+# fleet-global LEGACY_COMPLETIONS_SKIP boolean to the per-session
+# sid_legacy_suppressed local. Measured this session: the old constant
+# occurred ZERO times in hermes-report.sh, so apply_mutation's
+# `count != 1` contract correctly hard-errored on rows AX-02/03/04/08/10
+# rather than silently reporting them as caught. mutation_verify_takeover.py
+# is deliberately NOT under `test_*.py` discovery (see its own module
+# docstring), so the 507-test baseline never caught the drift — only running
+# this file directly (or, as here, a later quick task re-extracting its own
+# anchors) surfaces it. Updated to the line as it exists in the source today.
 _GUARD_IF = ('if [[ "${EVENT_PATH_LIVE}" == "true" || '
-             '"${LEGACY_COMPLETIONS_SKIP}" == "true" ]]; then')
+             '"${sid_legacy_suppressed}" == "true" ]]; then')
 _FLOOR_IF = ('if [[ "${owner_baseline}" =~ ^[0-9]+$ && '
              '"${owner_baseline}" -gt 0 ]]; then')
 _MAX_LINE = 'new_baseline = max(requested, known, live_total, on_disk, 0)'

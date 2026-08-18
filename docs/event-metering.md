@@ -55,6 +55,22 @@ readable from the environment (highest precedence) or from
 unrecognised value falling back to the safe default and warning exactly
 once per run — a typo must never silently change what gets billed.
 
+**Independence is what makes one sequence unsupported (quick-260818-jbl,
+AX-Q16).** Do not set `REVENIUM_LEGACY_COMPLETIONS=disabled` while
+`REVENIUM_EVENT_METERING_MODE` is `shadow` (the default). With legacy
+suppressed and the event path not shipping, every brand-new session created
+while that combination holds is billed by **neither** path for as long as
+it holds — legacy correctly declines to claim a session it will never bill
+(see "Session ownership and the legacy-claim abstention" under Rollback
+below), but nothing is claiming it on the event side either, because
+`shadow` ships nothing. The drain gate cannot catch this: its refusal
+predicate reads `drained` only and has no view of the event metering mode.
+This is the same rule "Interaction with the legacy-disable switch" (below)
+already states for the **revert** direction — re-enable legacy before
+reverting the event-metering mode — generalised here to the **forward**
+direction: do not disable legacy before advancing the event-metering mode
+to `live`. A reader who lands on either paragraph should find both.
+
 | Setting | Env var | `config.json` key | Default | Values |
 |---|---|---|---|---|
 | Event metering mode | `REVENIUM_EVENT_METERING_MODE` | `eventMeteringMode` | `shadow` | `shadow` (ships nothing, writes no ledger line, produces a comparison readout) / `live` (ships for real) |
@@ -262,6 +278,78 @@ completions must **re-enable them before reverting the event-metering
 mode**, or the affected event-owned sessions simply stay un-taken-over —
 and, since the event path is also not shipping in `shadow`, un-billed —
 until legacy is re-enabled.
+
+**Session ownership and the legacy-claim abstention (quick-260818-jbl,
+CLAIM-01..05).** The claim block above assumes a session already has SOME
+ownership history to resolve. A brand-new session — rows in NEITHER the
+`HERMES:` nor the `API:` ledger — has none, and the claim's own default was
+written when legacy always billed: `claim_side="legacy"`. Since
+quick-260818-f1g, legacy completions can be suppressed **per session**
+while that claim still runs, so a brand-new session under suppression used
+to be claimed `legacy`, written durably, and then never billed by legacy
+(suppressed) — and never billed by the event path either, because its own
+ship predicate defers to any existing record whose first line is not the
+exact literal `event`. That is a silent, permanent under-bill for every new
+session created during the exact window CLAIM-01 describes.
+
+The fix is an **abstention**: legacy writes no ownership record at all when
+it is suppressed for a session AND neither ledger holds rows for it AND no
+record exists yet. With nothing claimed, whichever path is actually live
+claims the session atomically on its own next tick — under `cron.sh`'s
+fixed legacy-then-event stage order, this resolves inside the SAME tick
+whenever `REVENIUM_EVENT_METERING_MODE=live`. Abstaining was chosen over
+two rejected alternatives: claiming `event` on the event path's own behalf
+(false whenever the event path is not live, and self-locking — the
+mode-aware takeover above will not undo it while suppression holds), and
+teaching the event path that a zero-row `legacy` record is claimable
+(re-derives ownership from the peer's mutable, prunable billing ledger,
+exactly the mechanism PR #54 exists to delete).
+
+**The per-tick aggregate, and its two severities.** Exactly like the other
+ownership aggregates in this document, a single line fires once per tick
+when the count is non-zero and is silent at zero — never a per-session
+line. Its severity depends on whether the event path is live for THIS
+tick's legacy run:
+
+- **`info`** — the event path is live. Normal cutover flow: the sessions
+  named in the count are claimed and billed by the event path this same
+  tick.
+- **`warn`** — the event path is NOT live. Nobody will claim or bill these
+  sessions this tick. The line names both recovery routes (below) and both
+  remedies: flip `REVENIUM_EVENT_METERING_MODE=live`, or set
+  `REVENIUM_LEGACY_COMPLETIONS=enabled`. Do not wait on this warn — act on
+  one of the two remedies.
+
+**The recovery bound — both routes, both bounds (AX-Q16).** An earlier
+draft of this fix described abstention as "fully recoverable." That
+overstated it. There are two independent recovery routes, with two
+different bounds, and permanent loss requires BOTH closed:
+
+- **Route A — flip the event path to `live`.** Recovers from the session's
+  spool file (`EVENT_SPOOL_DIR/<sid>.jsonl`). Bounded by
+  `REVENIUM_MARKER_RETENTION_DAYS` (default 30) from the session's last
+  event, and only reachable when an operator actually runs the manual
+  `prune-markers.sh` (never wired into cron).
+- **Route B — set `REVENIUM_LEGACY_COMPLETIONS=enabled`.** Recovers from
+  the session's row in `state.db`, which this skill never writes and never
+  prunes, at a zero baseline (billing the full cumulative total exactly
+  once — correct-by-design for a baseline-0 claim, not an over-bill).
+  Bounded only by however long Hermes itself retains the session row.
+
+Once a session's sid leaves `state.db`, Route B closes on its own, and
+`prune-markers.sh`'s owners pass removes any stray ownership record for
+that sid too — the identical terminal state today's durable-`legacy`
+default would reach anyway. Abstention is never worse than the pre-fix
+behaviour on this axis; it is strictly better inside both recovery windows.
+
+**A pre-fix record left by the defect (AX-Q15).** A `legacy` owner record
+with no second line (no baseline) and zero rows in either billing ledger
+can only have been written by the defect this fix closes — a migration
+state, not something this fix produces going forward. Both paths stay off
+such a session (legacy because the record already names it; the event path
+because the record's first line is not `event`) until an operator applies
+the remedy: delete `owners/<sid>` while the event path is `live`, and the
+next event-path tick claims it fresh.
 
 **The liveness predicate's scope limit.** The guard resolves liveness from
 the SAME `REVENIUM_EVENT_METERING_MODE` / `eventMeteringMode` switch the
