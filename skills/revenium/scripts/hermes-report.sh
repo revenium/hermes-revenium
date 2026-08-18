@@ -10,6 +10,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # variable — see resolve_switch_setting's own comment in common.sh for why
 # this precedes `source common.sh`.
 _LEGACY_COMPLETIONS_ENV_RAW="${REVENIUM_LEGACY_COMPLETIONS:-}"
+# quick-260818-0in (MODE-04): captured BEFORE `source common.sh` for the
+# identical reason as _LEGACY_COMPLETIONS_ENV_RAW above — common.sh's own
+# "${REVENIUM_EVENT_METERING_MODE:-shadow}" declaration would destroy the
+# unset-versus-explicit distinction resolve_switch_setting needs to reach
+# config.json. This mirrors api-event-report.sh's own capture of the same
+# variable, byte-for-byte, so the two scripts' resolutions can only ever
+# diverge on the DATA each process's own startup sees (env/config.json at
+# two different instants), never on the CODE that resolves it.
+_EVENT_METERING_MODE_ENV_RAW="${REVENIUM_EVENT_METERING_MODE:-}"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/common.sh"
 
@@ -178,6 +187,40 @@ if [[ -s "${EVENT_LEDGER_FILE}" ]] \
   OWNERSHIP_PROTOCOL_ACTIVE="true"
 fi
 
+# quick-260818-0in (MODE-04): THE LIVENESS PREDICATE. Resolved ONCE per run,
+# through the IDENTICAL resolve_switch_setting call api-event-report.sh
+# makes at its own startup — same config key ("eventMeteringMode"), same
+# default ("shadow"), same two allowed literals ("shadow"/"live"). "Identical"
+# means identical CODE, not a shared read: each script calls
+# resolve_switch_setting at its OWN process startup, two sequential reads by
+# two processes. Under cron they can never race — cron.sh runs this script's
+# stage before api-event-report.sh's, both inside one cron.lock — so no
+# same-tick divergence is constructible for a cron-only deployment. A
+# config.json edit landing between two out-of-band invocations, or a
+# per-process environment override, remains a residual (AX-21), closed
+# separately by the takeover primitive's publish-instant re-read below.
+#
+# Gated on OWNERSHIP_PROTOCOL_ACTIVE (F-7): resolving this switch costs one
+# python3 spawn when the environment variable is unset and a config file
+# exists, and the reporter's measured no-marker spawn ceiling
+# (NO_MARKER_SPAWN_CEILING=13, tests/test_reporter_spawn_guards.py) is a
+# locked test constant a disengaged install must not move. A disengaged
+# install has no owners record, so no takeover branch below is reachable
+# regardless of this value — EVENT_PATH_LIVE simply stays false and unread.
+EVENT_PATH_LIVE="false"
+_event_metering_mode_resolved="shadow"
+if [[ "${OWNERSHIP_PROTOCOL_ACTIVE}" == "true" ]]; then
+  _event_metering_mode_resolution=$(resolve_switch_setting "${_EVENT_METERING_MODE_ENV_RAW}" "eventMeteringMode" "shadow" "shadow" "live")
+  _event_metering_mode_resolved=$(printf '%s' "${_event_metering_mode_resolution}" | sed -n '1p')
+  _event_metering_mode_invalid=$(printf '%s' "${_event_metering_mode_resolution}" | sed -n '2p')
+  if [[ "${_event_metering_mode_invalid}" == "true" ]]; then
+    warn "REVENIUM_EVENT_METERING_MODE/eventMeteringMode had an unrecognised value — falling back to 'shadow' (ships nothing)."
+  fi
+  if [[ "${_event_metering_mode_resolved}" == "live" ]]; then
+    EVENT_PATH_LIVE="true"
+  fi
+fi
+
 # quick-260817-tfe (OWN-01/OWN-04): the CLAIM PRIMITIVE. Establishes session
 # ownership with a create-and-exclusive open — atomic across processes, with
 # no lock held and none needed. That matters here specifically: flock is taken
@@ -303,6 +346,147 @@ except Exception:
 print(f"OWNER={side}")
 print("CLAIMED=true")
 print(f"BASELINE={baseline if baseline > 0 else ''}")
+PY
+}
+
+# quick-260818-0in (MODE-02/MODE-03/AX-21): the TAKEOVER PRIMITIVE. Flips an
+# event-owned record to `legacy`, ONE-WAY, recording a catch-up floor so the
+# legacy path bills forward without re-billing what the event path already
+# shipped. Mirrors _claim_session_owner's shape and output contract.
+#
+# Usage: _takeover_session_owner <sid> <requested-baseline> <known-baseline>
+#
+# (a) WHY REPLACE, NOT LINK. _claim_session_owner's os.link() publishes a NEW
+#     file and requires the target be ABSENT — exactly the create-exclusivity
+#     arbiter PR #54 needs. The takeover's target always EXISTS (an
+#     event-owned record). os.replace() is the one call that is atomic on
+#     POSIX and, like link, only ever makes the record observable WITH its
+#     final content (built off-path in a temp file, then swapped in). Confine
+#     os.replace to here; os.link remains the claim's sole publication
+#     primitive — #54's create-exclusivity arbiter is untouched.
+# (b) WHY IT NEVER RE-READS THE OWNERS RECORD. The claim that ran
+#     microseconds earlier in the same loop iteration already returned both
+#     the owner and the record's own baseline; those reach this primitive as
+#     positional arguments. One reader of those bytes, one decision point,
+#     no drift between two readers of the same file. This invariant is about
+#     owners/<sid> specifically — it says nothing about state.db, which (d)
+#     below reads for an entirely different reason.
+# (c) IT CAN ONLY EVER WRITE THE LITERAL "legacy" — there is no argument, no
+#     branch and no environment variable that reaches the other literal. A
+#     later shadow->live mode flip therefore cannot resurrect a second
+#     biller for this session (MODE-03): the event path's own total
+#     predicate (api-event-report.sh) defers forever once the record's first
+#     line is anything but the exact literal "event".
+# (d) WHY IT NEVERTHELESS DOES READ state.db (AX-21). owners/<sid> and
+#     state.db are two DIFFERENT files answering two DIFFERENT questions:
+#     the owners record says who owns the session; state.db says how many
+#     tokens it had at the publish instant. Reading (d) is not a
+#     contradiction of (b) — a reader who conflates the two files and
+#     "simplifies" this away reopens AX-21. The reporter's session snapshot
+#     is taken by ONE sqlite3 query at process start (main()'s `sessions=`
+#     assignment) and carried down the whole loop, so by the time a given
+#     session's takeover runs, that snapshot can be the entire run stale. An
+#     out-of-band `live` api-event-report.sh invocation can ship tokens into
+#     `sessions` during exactly that window. Re-reading immediately before
+#     the replace and folding the result into the floor's max() collapses
+#     that window down to the microseconds between this query and the
+#     replace (F-8 fact 4). ANY failure of this re-read — missing database,
+#     missing row, locked database, any exception — drops the term silently
+#     and proceeds: it can only ever RAISE the floor, so its failure
+#     degrades to the pre-AX-21 exposure and never to a worse one. It must
+#     never abort the takeover.
+_takeover_session_owner() {
+  OWNERS_DIR="${OWNERS_DIR}" \
+  STATE_DB="${STATE_DB}" \
+  TAKEOVER_SID="${1:-}" \
+  TAKEOVER_REQUESTED_BASELINE="${2:-0}" \
+  TAKEOVER_KNOWN_BASELINE="${3:-0}" \
+  python3 - <<'PY' 2>/dev/null
+import os
+import tempfile
+
+owners_dir = os.environ.get('OWNERS_DIR', '')
+state_db = os.environ.get('STATE_DB', '')
+sid = os.environ.get('TAKEOVER_SID', '')
+
+if not owners_dir or not sid:
+    raise SystemExit(0)
+
+# T-OWN-01's derivation, mirrored byte-for-byte — no second rule anywhere.
+name = sid.replace('/', '_').replace('\x00', '_')[:200]
+if not name:
+    raise SystemExit(0)
+path = os.path.join(owners_dir, name)
+
+
+def _nonneg_int(raw):
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return v if v > 0 else 0
+
+
+requested = _nonneg_int(os.environ.get('TAKEOVER_REQUESTED_BASELINE', '0'))
+known = _nonneg_int(os.environ.get('TAKEOVER_KNOWN_BASELINE', '0'))
+
+# AX-21: re-read this session's CURRENT cumulative total from state.db,
+# immediately before the replace, in the EXACT SAME two-column unit
+# hermes-report.sh's own total_tokens is composed from (input_tokens +
+# output_tokens; cache columns excluded — see this file's `total_tokens=`
+# assignment in main()). A floor computed in different units than the value
+# it is compared against is the F-8 fact-3 failure made concrete. Read-only
+# URI is mandatory, not stylistic: it keeps the repo's "pure consumer of
+# state.db" constraint mechanically true (never write, never create a
+# missing database as a side effect) and mirrors the exact idiom
+# api-event-report.sh already uses for its own read-only state.db access.
+# No shell-out to the sqlite3 CLI — this runs inside the heredoc that
+# already exists, so it adds no new process and no new tool precondition.
+live_total = 0
+try:
+    import sqlite3
+    if state_db and os.path.isfile(state_db):
+        uri = f"file:{state_db}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            row = conn.execute(
+                "SELECT COALESCE(input_tokens,0) + COALESCE(output_tokens,0) "
+                "FROM sessions WHERE id = ?",
+                (sid,),
+            ).fetchone()
+            if row is not None:
+                live_total = _nonneg_int(row[0])
+except Exception:
+    live_total = 0
+
+# The never-lower rule, stated exactly as it is stated at the floor
+# application site below: a MAXIMUM, never an assignment. The AX-21 re-read
+# composes as one more term rather than as a second mechanism.
+new_baseline = max(requested, known, live_total, 0)
+
+try:
+    _tfd, _tmp = tempfile.mkstemp(dir=owners_dir, prefix='.takeover.')
+    try:
+        with os.fdopen(_tfd, 'w') as _tfh:
+            _tfh.write("legacy\n")
+            _tfh.write(str(new_baseline) + "\n")
+        os.chmod(_tmp, 0o600)
+        # Atomic on POSIX; unlike os.link this REQUIRES the target to exist
+        # (an event-owned record always does) and, unlike a truncating open,
+        # is never observable without its final content.
+        os.replace(_tmp, path)
+    finally:
+        try:
+            os.unlink(_tmp)
+        except Exception:
+            # Expected on the success path: os.replace already consumed
+            # _tmp's inode at `path`, so there is nothing left to unlink.
+            pass
+except Exception:
+    raise SystemExit(0)
+
+print("OWNER=legacy")
+print("TOOK_OVER=true")
+print(f"BASELINE={new_baseline}")
 PY
 }
 
@@ -496,6 +680,10 @@ PY
   # days for one ungated per-tick warn.
   local event_owned_skip_count=0
   local claim_unavailable_count=0
+  # quick-260818-0in (MODE-01..05): the two mode-aware-takeover aggregates,
+  # declared here for the identical herestring reason as the pair above.
+  local takeover_count=0
+  local takeover_unavailable_count=0
 
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider; do
 
@@ -1185,12 +1373,78 @@ PY
         # the literal `event`. A corrupt, truncated or hostile record resolves
         # to "legacy bills, event defers" — today's behaviour, exactly one
         # biller. There is no third branch.
-        if [[ "${claim_owner}" == "event" ]]; then
-          session_event_owned="true"
-          ((event_owned_skip_count++)) || true
-        fi
         if [[ "${claim_baseline_out}" =~ ^[0-9]+$ ]]; then
           owner_baseline="${claim_baseline_out}"
+        fi
+        if [[ "${claim_owner}" == "event" ]]; then
+          # quick-260818-0in (MODE-01): the guard composes HERE, inside the
+          # existing owner-is-the-event-path branch, and nowhere else. The
+          # emission-side suppression below and the floor application just
+          # after it are reused UNCHANGED (D-10) — this only decides which
+          # literal `session_event_owned` ends up as.
+          #
+          #   EVENT_PATH_LIVE=true            -> defer, unchanged from #54.
+          #   EVENT_PATH_LIVE=false,
+          #     LEGACY_COMPLETIONS_SKIP=true   -> defer, no takeover (MODE-05).
+          #   EVENT_PATH_LIVE=false,
+          #     LEGACY_COMPLETIONS_SKIP=false  -> take over.
+          #
+          # WHY NO TAKEOVER WHILE LEGACY EMISSION IS DISABLED. If legacy is
+          # not emitting, flipping ownership bills nobody either way — but it
+          # converts a state that HEALS when the operator returns the mode to
+          # `live` (the event path resumes and bills the session) into one
+          # that cannot: the record would say `legacy`, the event path would
+          # defer forever, and legacy would be disabled. Preferring the
+          # reversible state is the same reasoning that makes clear-halt.sh
+          # the sole clearer of `halted`. A guard written only against the
+          # mode axis gets this wrong, which is why it has its own branch and
+          # its own axis (AX-08) rather than being folded into the mode check.
+          if [[ "${EVENT_PATH_LIVE}" == "true" || "${LEGACY_COMPLETIONS_SKIP}" == "true" ]]; then
+            session_event_owned="true"
+            ((event_owned_skip_count++)) || true
+          else
+            local takeover_output=""
+            takeover_output=$(_takeover_session_owner "${sid}" "${total_tokens}" "${owner_baseline:-0}") || takeover_output=""
+            if [[ -z "${takeover_output}" ]]; then
+              # MODE-02, AX-09: empty output -> defer, NOT bill. This is NOT
+              # a violation of OWN-04's fail-open: OWN-04 covers a claim that
+              # could not establish whether a record exists, where legacy
+              # billing from its own ledger baseline is today's correct
+              # behaviour. Here the record demonstrably names the event path
+              # and the floor was never written (F-2) — billing would start
+              # from a zero baseline and re-bill the session's entire
+              # cumulative history, a double-bill, which this repo treats as
+              # the load-bearing failure. Under-bill on doubt.
+              session_event_owned="true"
+              ((takeover_unavailable_count++)) || true
+            else
+              local takeover_owner takeover_took_over takeover_baseline_out
+              takeover_owner=$(printf '%s\n' "${takeover_output}" | sed -n 's/^OWNER=//p' | head -1)
+              takeover_took_over=$(printf '%s\n' "${takeover_output}" | sed -n 's/^TOOK_OVER=//p' | head -1)
+              takeover_baseline_out=$(printf '%s\n' "${takeover_output}" | sed -n 's/^BASELINE=//p' | head -1)
+              if [[ "${takeover_owner}" == "legacy" ]]; then
+                session_event_owned="false"
+                if [[ "${takeover_baseline_out}" =~ ^[0-9]+$ ]]; then
+                  owner_baseline="${takeover_baseline_out}"
+                fi
+                ((takeover_count++)) || true
+                # Gated on the primitive's OWN flag, exactly as the
+                # dual-ledger warn just below is gated on `claim_created` —
+                # a takeover is a permanent, operator-visible change of who
+                # bills a session and must stay findable, without becoming a
+                # per-tick warn (steady state never re-enters this branch:
+                # the record now says `legacy`, so claim_owner is never
+                # `event` again for this session).
+                if [[ "${takeover_took_over}" == "true" ]]; then
+                  local safe_takeover_sid="${sid//[^A-Za-z0-9_:.-]/_}"
+                  warn "session ownership taken over from the event path: session=${safe_takeover_sid} floor=${owner_baseline} mode=${_event_metering_mode_resolved} — legacy now bills this session forward from the recorded floor, never re-billing what the event path already shipped"
+                fi
+              else
+                session_event_owned="true"
+                ((event_owned_skip_count++)) || true
+              fi
+            fi
+          fi
         fi
 
         # Gated on the primitive's OWN created flag so it fires exactly ONCE
@@ -2258,6 +2512,16 @@ PY
   fi
   if [[ "${claim_unavailable_count}" -gt 0 ]]; then
     warn "session ownership record unavailable for ${claim_unavailable_count} session(s) this tick — failing OPEN (legacy billed them, as it does today); check permissions on ${OWNERS_DIR}"
+  fi
+
+  # quick-260818-0in (MODE-01..05): the same per-tick-aggregate discipline
+  # for the two mode-aware-takeover outcomes — one line when non-zero,
+  # silent when zero, never a per-session line.
+  if [[ "${takeover_count}" -gt 0 ]]; then
+    info "legacy took over ${takeover_count} session(s) this tick from the event path (event mode reverted; catch-up floor recorded, billing forward only)"
+  fi
+  if [[ "${takeover_unavailable_count}" -gt 0 ]]; then
+    warn "session ownership takeover unavailable for ${takeover_unavailable_count} session(s) this tick — deferring (fail-closed; an event-owned record with no floor must never be re-billed from a zero baseline); check permissions on ${OWNERS_DIR}"
   fi
 
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="

@@ -353,7 +353,15 @@ class OrderingPartitionTests(OwnershipTestBase):
                              f'event path must ship this session: {out}')
             self.assertEqual(self._owner_record(t)[0], 'event')
 
-            rc, out = self._run_legacy(t)
+            # quick-260818-0in (MODE-01/MODE-04): in real cron operation both
+            # scripts resolve REVENIUM_EVENT_METERING_MODE from the SAME
+            # config.json/env each tick, so a genuinely live event owner is
+            # observed as live by both sides. Propagate the same mode this
+            # test's _run_event call used, so this scenario models a
+            # self-consistent operator configuration rather than the event
+            # script running live while the legacy script independently
+            # resolves the hard "shadow" default and takes the session over.
+            rc, out = self._run_legacy(t, extra_env={'REVENIUM_EVENT_METERING_MODE': 'live'})
             self.assertEqual(rc, 0, out)
             self.assertEqual(self._legacy_completions(t), [],
                              'an event-owned session must never be billed by the legacy path')
@@ -421,7 +429,14 @@ class OrderingPartitionTests(OwnershipTestBase):
         try:
             self._seed_event_ledger(t, count=4)
 
-            rc, out = self._run_legacy(t)
+            # quick-260818-0in (MODE-01/MODE-04): API: ledger rows can only
+            # exist because api-event-report.sh actually shipped them, which
+            # only happens under EVENT_METERING_MODE=live (:1332's ledger
+            # write sits inside the live-only shipping branch) — so their
+            # presence is itself evidence the mode was live. Propagate that
+            # here so the backfill claim is evaluated under the same
+            # self-consistent configuration a real fleet host would have.
+            rc, out = self._run_legacy(t, extra_env={'REVENIUM_EVENT_METERING_MODE': 'live'})
             self.assertEqual(rc, 0, out)
 
             self.assertEqual(self._legacy_completions(t), [], out)
@@ -875,7 +890,14 @@ class AtomicClaimTests(OwnershipTestBase):
             with open(self._owners_path(t), 'rb') as f:
                 before = f.read()
 
-            rc, out = self._run_legacy(t)
+            # quick-260818-0in (MODE-01/MODE-04): this fixture asserts the
+            # atomicity property under a currently-live event owner (a
+            # pre-existing baseline is exactly what a live, dual-ledger-aware
+            # claim looks like) — propagate mode=live so the scenario models
+            # a self-consistent config rather than exercising the new
+            # mode-revert takeover this quick task adds (that behavior has
+            # its own dedicated coverage in test_mode_aware_legacy_takeover.py).
+            rc, out = self._run_legacy(t, extra_env={'REVENIUM_EVENT_METERING_MODE': 'live'})
             self.assertEqual(rc, 0, out)
 
             with open(self._owners_path(t), 'rb') as f:
@@ -912,7 +934,10 @@ class AtomicClaimTests(OwnershipTestBase):
 
             rc, out = self._run_event(t)
             self.assertEqual(rc, 0, out)
-            rc, out = self._run_legacy(t)
+            # quick-260818-0in (MODE-01/MODE-04): propagate the same live
+            # mode this test's _run_event call used — see the identical note
+            # on test_event_first_then_legacy_yields_exactly_one_event_completion.
+            rc, out = self._run_legacy(t, extra_env={'REVENIUM_EVENT_METERING_MODE': 'live'})
             self.assertEqual(rc, 0, out)
 
             self.assertEqual(sorted(os.listdir(t['owners_dir'])), [SID],
