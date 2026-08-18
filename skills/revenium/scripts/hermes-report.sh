@@ -792,6 +792,11 @@ PY
   # declared here for the identical herestring reason as the pair above.
   local takeover_count=0
   local takeover_unavailable_count=0
+  # quick-260818-jbl (CLAIM-01..05): the legacy-claim-abstention aggregate,
+  # declared here for the identical herestring reason as the pairs above —
+  # the loop body runs in THIS shell (fed by `done <<< "${sessions}"`), so
+  # this counter survives to the per-tick summary line below.
+  local claim_abstained_count=0
 
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider; do
 
@@ -1384,6 +1389,69 @@ PY
     local legacy_rows_present="false"
     [[ -n "${prev_line}" ]] && legacy_rows_present="true"
 
+    # quick-260818-jbl (CLAIM-01..05): HOISTED above the OWNERSHIP_PROTOCOL_ACTIVE
+    # guard below (it used to live inside it, recomputed on every claim). Hoisting
+    # instead of nesting a new `if` around the existing claim block is deliberate:
+    # nesting would re-indent ~45 lines and silently invalidate the exact-substring
+    # anchors tests/mutation_verify_takeover.py mutates (AX-09's two-line search,
+    # AX-16's dual_ledger/claim_side pair, _TAKEOVER_PATH_BLOCK) — an unapplied
+    # mutation row reports as a hard error, not as coverage, and this phase has
+    # already produced five instrumentation bugs that looked like results. The
+    # cost is one `[[ -s ]]` test on a disengaged install; the `-s` short-circuits
+    # before the grep and spawns no python3, so NO_MARKER_SPAWN_CEILING is
+    # untouched.
+    local event_rows_present="false"
+    if [[ -s "${EVENT_LEDGER_FILE}" ]] && grep -qF "|${sid}|" "${EVENT_LEDGER_FILE}" 2>/dev/null; then
+      event_rows_present="true"
+    fi
+
+    # THE ABSTENTION PREDICATE (CLAIM-01/CLAIM-02). Why this exists: the claim
+    # block's default (`claim_side="legacy"` below) was written when legacy
+    # always billed. Since quick-260818-f1g (#57), legacy emission can be
+    # SUPPRESSED per session while this claim still runs — so on a brand-new
+    # session (neither ledger has rows yet) legacy claimed `legacy`, wrote a
+    # durable record, and then never emitted a completion for it; the event
+    # path's own ship predicate (api-event-report.sh:1232) then deferred to
+    # that durable `legacy` record forever, and the session was billed by
+    # NEITHER path. Measured live: session 20260818_171928_2ba368 — owner
+    # `legacy`, 0 HERMES: rows, 0 API: rows.
+    #
+    # Why abstaining beats claiming `event` on the event path's own behalf
+    # (rejected alternative (ii)): that path only claims `event` in `live`
+    # mode (api-event-report.sh:1174 — "a shadow-mode claim would starve the
+    # legacy path of a session this path will never bill"), so a legacy-side
+    # `event` claim is false whenever the event path is shadow, off, or
+    # uninstalled, AND it is self-locking — the next tick's takeover branch
+    # (:1537, below) sees `sid_legacy_suppressed == "true"` and defers with NO
+    # takeover (MODE-05), so legacy can never undo its own false assertion
+    # while suppression holds. (ii) trades a durable wrong `legacy` for a
+    # durable wrong `event`; abstention writes nothing, so nothing wrong is
+    # durable.
+    #
+    # Why this restores no inference (rejected alternative (iii), teaching the
+    # event path that a zero-row `legacy` record is claimable): the record is
+    # still created atomically by the biller through the IDENTICAL
+    # _claim_session_owner primitive PR #54 introduced. "No record yet" is not
+    # a new state — it is the initial state of every session on every install,
+    # and the state OWNERSHIP_PROTOCOL_ACTIVE already describes for the
+    # overwhelming majority of them. This branch adds no read of any billing
+    # ledger to any decision and takes no lock, because it decides nothing
+    # beyond "do not write".
+    #
+    # Why this cannot leak a bill (checkable as a source property, AX-Q14):
+    # the predicate's first conjunct, sid_legacy_suppressed, is the SAME local
+    # (declared once at :817-819, one iteration of the loop opened at :796 and
+    # closed at :2519) the emission guard at :2219 reads
+    # (`[[ "${sid_legacy_suppressed}" != "true" && ... ]]`). On the abstain
+    # path that guard is false unconditionally — session_event_owned staying
+    # "false" and owner_baseline staying unread are unreachable consequences
+    # of that shared local, not latent hazards.
+    local claim_abstain="false"
+    if [[ "${sid_legacy_suppressed}" == "true" && "${legacy_rows_present}" == "false" && "${event_rows_present}" == "false" ]]; then
+      claim_abstain="true"
+      ((claim_abstained_count++)) || true
+    fi
+
     # =====================================================================
     # quick-260817-tfe (OWN-01/OWN-02/OWN-04): SESSION OWNERSHIP RESOLUTION.
     #
@@ -1436,11 +1504,11 @@ PY
     # =====================================================================
     local session_event_owned="false"
     local owner_baseline=""
-    if [[ "${OWNERSHIP_PROTOCOL_ACTIVE}" == "true" ]]; then
-      local event_rows_present="false"
-      if [[ -s "${EVENT_LEDGER_FILE}" ]] && grep -qF "|${sid}|" "${EVENT_LEDGER_FILE}" 2>/dev/null; then
-        event_rows_present="true"
-      fi
+    # quick-260818-jbl: `claim_abstain` composes HERE as a second conjunct on
+    # the existing OWNERSHIP_PROTOCOL_ACTIVE guard — event_rows_present is no
+    # longer (re)computed inside this block; it is hoisted above, alongside
+    # the abstention predicate, so there is exactly one computation to drift.
+    if [[ "${OWNERSHIP_PROTOCOL_ACTIVE}" == "true" && "${claim_abstain}" != "true" ]]; then
 
       # The resolution table, implemented identically in api-event-report.sh:
       #   neither ledger  -> the claiming side (here: legacy)
@@ -2664,6 +2732,38 @@ PY
   fi
   if [[ "${takeover_unavailable_count}" -gt 0 ]]; then
     warn "session ownership takeover unavailable for ${takeover_unavailable_count} session(s) this tick — deferring (fail-closed; an event-owned record with no floor must never be re-billed from a zero baseline); check permissions on ${OWNERS_DIR}"
+  fi
+
+  # quick-260818-jbl (CLAIM-01..05/AX-Q16/T-jbl-03/T-jbl-04/T-jbl-07): the
+  # same per-tick-aggregate discipline as the pairs above — one line when
+  # non-zero, silent when zero, never a per-session line (names counts only,
+  # never a sid, per T-jbl-05). This is the audit record for an abstention:
+  # without it, "abstained then claimed by the event path this same tick" and
+  # "abstained then nobody will ever claim it" are indistinguishable on disk.
+  #
+  # SEVERITY IS CONDITIONAL ON EVENT_PATH_LIVE (AX-Q16), read here and
+  # nowhere else in this branch — this branch must not add a fourth read of
+  # sid_legacy_suppressed, which would make AX-Q14's three-site-coupling
+  # extraction ambiguous for no benefit.
+  #   EVENT_PATH_LIVE=true  -> info. cron.sh runs the legacy stage before the
+  #     event stage, so the event path claims and bills these sessions in
+  #     THIS SAME TICK. Normal cutover flow.
+  #   EVENT_PATH_LIVE=false -> warn. Nobody will claim these sessions this
+  #     tick. Recovery is bounded, not silent, and has two independent
+  #     routes with two different bounds: (1) flip REVENIUM_EVENT_METERING_MODE
+  #     to "live" — recovers from the session's event spool file, which
+  #     prune-markers.sh removes REVENIUM_MARKER_RETENTION_DAYS (default 30)
+  #     after the session's last event, and only when an operator actually
+  #     runs that manual pruner; (2) set REVENIUM_LEGACY_COMPLETIONS=enabled —
+  #     recovers from the session's row in state.db, which this skill never
+  #     prunes, for as long as Hermes retains that row. Permanent loss needs
+  #     BOTH closed.
+  if [[ "${claim_abstained_count}" -gt 0 ]]; then
+    if [[ "${EVENT_PATH_LIVE}" == "true" ]]; then
+      info "legacy declined to claim ${claim_abstained_count} session(s) this tick — emission is suppressed for them and neither ledger holds rows; the event path is live and claims them this same tick"
+    else
+      warn "legacy declined to claim ${claim_abstained_count} session(s) this tick — emission is suppressed for them and neither ledger holds rows, and the event path is NOT live, so nobody will claim or bill them this tick. Recovery is bounded, not permanent: flip REVENIUM_EVENT_METERING_MODE=live (recovers from the event spool, bounded by REVENIUM_MARKER_RETENTION_DAYS from each session's last event, only when the manual pruner has been run) or set REVENIUM_LEGACY_COMPLETIONS=enabled (recovers from state.db, which this skill never prunes). Do not wait on this — act on one of the two remedies."
+    fi
   fi
 
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="
