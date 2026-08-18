@@ -133,12 +133,93 @@ still blocking the gate and why.
 
 Setting `REVENIUM_EVENT_METERING_MODE` back to `shadow` (or leaving it at
 its default) stops the event path from shipping immediately — it resumes
-constructing argv and discarding it. The legacy ledger was **frozen, never
-migrated** (a deliberate design choice — the two ledgers key on
-per-call `api_request_id` versus per-session-total identifiers that are
-not equivalent, so migrating between them risked retroactive
-double-metering), so re-enabling the legacy completions stage runs against
-an intact record exactly as if the event path had never shipped.
+constructing argv and discarding it.
+
+**What happens to a session the event path already owns.** Ownership is
+durable (quick-260817-tfe / PR #54): once a session's `owners/<sid>` record
+names `event`, the legacy path used to defer to it forever, regardless of
+whether the event path was still actually shipping. That was silently
+correct only while the mode stayed `live` — the instant an operator reverts
+to `shadow`, the event path stops shipping (by design) but the record still
+said `event`, so **before quick-260818-0in** the session's growth would
+have been billed by NEITHER path, permanently. This is now closed
+(mode-aware legacy takeover): the legacy path takes each event-owned
+session over on its NEXT tick after a revert, records a catch-up floor
+equal to the session's cumulative total at the takeover instant, and bills
+only growth above that floor going forward. The cost is a bounded, one-time
+under-bill covering the window between the event path's last shipped row
+and the takeover instant — the same direction (under-bill on doubt, never
+double-bill) this feature has taken everywhere else, accepted for the same
+reason: a double-bill is the worse failure.
+
+**The takeover is one-way.** Once a session's record is flipped to
+`legacy`, nothing flips it back. Returning a session to the event path is a
+deliberate operator action — delete its `owners/<sid>` record while the
+mode is `live` — not something that happens by flipping the mode switch
+back and forth. This is what makes a later `shadow`→`live` flip safe: the
+event path's own total predicate (`api-event-report.sh`) defers forever
+once the record's first line is anything but the exact literal `event`.
+
+**Interaction with the legacy-disable switch.** No takeover fires while
+legacy completions are disabled (`REVENIUM_LEGACY_COMPLETIONS=disabled`) —
+flipping ownership there would convert a state that heals when the mode
+returns to `live` (the event path resumes and bills) into one that cannot
+(the record would say `legacy`, the event path would defer forever, and
+legacy is disabled). An operator who has already disabled legacy
+completions must **re-enable them before reverting the event-metering
+mode**, or the affected event-owned sessions simply stay un-taken-over —
+and, since the event path is also not shipping in `shadow`, un-billed —
+until legacy is re-enabled.
+
+**The liveness predicate's scope limit.** The guard resolves liveness from
+the SAME `REVENIUM_EVENT_METERING_MODE` / `eventMeteringMode` switch the
+event shipper itself reads. There is deliberately no liveness heuristic —
+no "has the event ledger grown recently", no spool freshness, no
+cron-registration probe — because inferring liveness from a mutable
+artifact would re-import the exact order-dependence PR #54 exists to
+eliminate. Consequence: a profile whose config says `live` while
+`api-event-report.sh`'s cron stage is not actually scheduled to run is
+**not** covered by this guard — the legacy path will see
+`EVENT_PATH_LIVE=true` and keep deferring to a path that has, in fact,
+stopped shipping. This is the "uninstall the event path" case. Runbook
+step: before removing `api-event-report.sh`'s cron stage (or the plugin
+that spools its input), either revert `REVENIUM_EVENT_METERING_MODE` to
+`shadow` first — letting the next legacy tick take every event-owned
+session over normally — or clear the affected sessions' `owners/<sid>`
+records directly so the legacy path backfills them fresh.
+
+**A residual straddle exposure, and how to avoid it entirely.** The two
+scripts resolve the mode INDEPENDENTLY, at their own process startup — two
+sequential reads by two processes, never a shared read. Under cron this can
+never bite: `cron.sh` always runs the legacy stage before the event stage,
+both inside one `cron.lock`, so no same-tick race is constructible. The
+exposure opens only when `api-event-report.sh` is run BY HAND, out of
+band, while a revert is in progress: an out-of-band `live` invocation could
+invoice tokens for a session in the microseconds around the takeover. The
+takeover guards against this by re-reading the session's live `state.db`
+total immediately before publishing the floor, so anything the out-of-band
+shipment already recorded in `sessions` is floored out rather than
+re-billed. The residual — tokens not yet reflected in `sessions` at that
+instant, or shipped in the microseconds after the floor is published — is
+bounded and accepted, not fixed. The one instruction that removes it
+entirely: **do not run `api-event-report.sh` by hand while a revert is in
+progress — let the cron stages do it.**
+
+**Rollout ordering is unchanged (from PR #54).** The skew hazard is
+directional: an old legacy build racing a new event-aware build can
+double-bill. The skill update must reach EVERY profile, verified by
+**checksum, not presence** (a stale classifier can sit at a path that
+"looks" current — see the trace-type-uncategorized history for exactly
+this failure mode), before ANY profile flips `shadow`→`live`.
+
+The legacy ledger was **frozen, never migrated** (a deliberate design
+choice — the two ledgers key on per-call `api_request_id` versus
+per-session-total identifiers that are not equivalent, so migrating between
+them risked retroactive double-metering), so re-enabling the legacy
+completions stage for a session the event path never owned runs against an
+intact record exactly as before. For a session the event path DID own,
+"exactly as before" is no longer literally true — see the takeover
+behaviour above.
 
 **What rollback cannot undo:** any row the event path has already shipped
 to Revenium exists server-side under the `event:<api_request_id>`
@@ -273,6 +354,15 @@ rollout, not after.
   as the metering log.
 - `~/.hermes/state/revenium/drain-status.json` — the drain gate's
   atomically-written verdict, including the pending-session list.
+- `~/.hermes/state/revenium/owners/<sid>` — the durable, atomically-claimed
+  session ownership record (quick-260817-tfe / PR #54): a one-line file
+  naming which path bills a session (`legacy` or `event`), or two lines
+  when a catch-up baseline is present. Lifetime is keyed on presence in
+  `state.db`, not on either billing ledger's own retention —
+  `prune-markers.sh` removes a record only once its session is absent from
+  `state.db`, however old the record's own mtime is. quick-260818-0in adds
+  the mode-aware takeover, which flips this record's first line to
+  `legacy` one-way when the event path is not live; see Rollback above.
 
 ## Where to look if you build on this
 
