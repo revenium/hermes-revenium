@@ -309,7 +309,16 @@ class RetentionBoundaryNotTrackedTests(DrainGateTestBase):
 
     def test_open_session_older_than_retention_is_still_tracked_and_blocks(self):
         """The regression this class exists for: ledger age must not let a
-        live session slip past the gate."""
+        live session slip past the gate.
+
+        quick-260818-f1g: this test's fixture is 10 days old, which collides
+        with the staleness route's 7d default. Staleness is opted OUT here
+        (`REVENIUM_DRAIN_STALE_SECONDS=0`) so this class keeps testing the
+        axis it was written for -- RETENTION -- without a second, unrelated
+        feature deciding the outcome. Every assertion below is the original,
+        byte-for-byte. The staleness-on behaviour of this same shape is
+        asserted by its sibling below, deliberately as a separate test:
+        folding them into one would leave neither axis cleanly pinned."""
         tmpdir, hh, sd = self._setup_tree()
         try:
             sid = 'sess-ancient-but-open'
@@ -319,7 +328,10 @@ class RetentionBoundaryNotTrackedTests(DrainGateTestBase):
             # a long-lived gateway conversation, or one that resumed.
             self._write_state_db(hh, [(sid, None)])
 
-            rc, doc, out, err = self._run(hh, sd, extra_env={'REVENIUM_MARKER_RETENTION_DAYS': '1'})
+            rc, doc, out, err = self._run(hh, sd, extra_env={
+                'REVENIUM_MARKER_RETENTION_DAYS': '1',
+                'REVENIUM_DRAIN_STALE_SECONDS': '0',
+            })
             # C-11: exit 10 IS the not-drained verdict, not an error.
             self.assertEqual(rc, 10, f'stdout={out!r} stderr={err!r}')
             self.assertFalse(doc['drained'],
@@ -332,6 +344,91 @@ class RetentionBoundaryNotTrackedTests(DrainGateTestBase):
             self.assertEqual([p['sid'] for p in doc['pending']], [sid])
             self.assertFalse(doc['pending'][0]['terminal'],
                              'the pending entry must record it as non-terminal')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_open_session_older_than_stale_threshold_is_terminal_but_retained(self):
+        """The sibling of the test above, with staleness ENABLED — the same
+        on-disk shape, asserting the property rather than the mechanism.
+
+        The original test asserted `terminal is False`, and justified it as
+        'disabling legacy completions here would leave its usage billed by
+        neither reporter'. That JUSTIFICATION is the real invariant, and it
+        still holds — but it is now delivered by a different mechanism. The
+        session is terminal (it no longer blocks the gate), AND it appears in
+        `legacyRetainedSids`, so legacy metering is NOT suppressed for it and
+        its usage is still billed by exactly one reporter.
+
+        The distinction matters: blocking was never the point, not-being-
+        billed-by-nobody was. Pinning `terminal is False` pinned the old
+        implementation of the guarantee, not the guarantee. Recorded here so
+        it is not 'restored' by someone reading the old assertion as intent.
+
+        This fixture's `sessions` table has no `last_activity_at` column at
+        all, so there is no corroborating activity signal — which is exactly
+        the population the carve-out exists to protect."""
+        tmpdir, hh, sd = self._setup_tree()
+        try:
+            sid = 'sess-ancient-but-open'
+            old_ts = time.time() - (10 * 86400)
+            self._write_ledger(sd, [_ledger_line(sid, 1500, old_ts)])
+            self._write_state_db(hh, [(sid, None)])
+
+            rc, doc, out, err = self._run(hh, sd, extra_env={
+                'REVENIUM_MARKER_RETENTION_DAYS': '1',
+                'REVENIUM_DRAIN_STALE_SECONDS': str(7 * 86400),
+            })
+            self.assertEqual(doc['ledgerSessionsTracked'], 1,
+                             'staleness must not change tracking — an open session is '
+                             'still force-included past the retention filter')
+            self.assertIn(sid, doc.get('legacyRetainedSids', []),
+                          'THE SAFETY PROPERTY: a session declared stale with no '
+                          'corroborating activity signal must be carved out of legacy '
+                          'suppression, so it is never billed by neither reporter')
+            self.assertTrue(doc['pending'][0]['stale'],
+                            'the quiet open session is recognised as stale')
+            self.assertTrue(doc['pending'][0]['terminal'],
+                            'staleness grants terminal — this is what the original '
+                            'assertion pinned as False, and the deliberate change')
+            # NOT asserted here: drained / rc == 0. Reaching `drained` needs the
+            # quiet-tick conjunction on top of `terminal`, so a single run can
+            # never drain no matter how stale the session is (this run reports
+            # quietTicks=0). That conjunction is deliberately unchanged by
+            # quick-260818-f1g and is covered by its own tests; asserting it
+            # here would silently re-test a different axis and would have made
+            # this test fail for a reason unrelated to what it is pinning.
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_stale_session_reaching_drained_still_carries_its_retention(self):
+        """The carve-out must survive the quiet-tick conjunction, not just the
+        first tick. A stale session that accumulates enough quiet ticks to
+        actually flip `drained` must STILL be listed in `legacyRetainedSids` —
+        otherwise the carve-out evaporates at exactly the moment it starts to
+        matter, which is when an operator acts on `drained: true`."""
+        tmpdir, hh, sd = self._setup_tree()
+        try:
+            sid = 'sess-ancient-but-open'
+            old_ts = time.time() - (10 * 86400)
+            self._write_ledger(sd, [_ledger_line(sid, 1500, old_ts)])
+            self._write_state_db(hh, [(sid, None)])
+            env = {
+                'REVENIUM_MARKER_RETENTION_DAYS': '1',
+                'REVENIUM_DRAIN_STALE_SECONDS': str(7 * 86400),
+                'REVENIUM_DRAIN_QUIET_TICKS': '1',
+            }
+            # First run establishes the quiet baseline; the second satisfies
+            # the conjunction.
+            self._run(hh, sd, extra_env=env)
+            rc, doc, out, err = self._run(hh, sd, extra_env=env)
+            self.assertTrue(doc['drained'],
+                            f'expected drained once quiet ticks are satisfied; '
+                            f'stdout={out!r} stderr={err!r}')
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn(sid, doc.get('legacyRetainedSids', []),
+                          'THE SAFETY PROPERTY AT THE MOMENT IT MATTERS: the sid is '
+                          'still carved out of legacy suppression on the very run that '
+                          'reports drained: true')
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
