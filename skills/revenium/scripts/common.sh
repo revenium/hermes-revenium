@@ -166,6 +166,38 @@ REVENIUM_LEGACY_COMPLETIONS="${REVENIUM_LEGACY_COMPLETIONS:-enabled}"
 # session) required before that session is considered drained. Env-overridable
 # for an operator who wants a faster/slower cutover than the default.
 REVENIUM_DRAIN_QUIET_TICKS="${REVENIUM_DRAIN_QUIET_TICKS:-15}"
+# quick-260818-f1g (STALE-01..07): staleness threshold for drain-status.sh's
+# ONLY new terminal route, applied ONLY on the `ended_at IS NULL` branch (an
+# open session that legacy has stopped hearing from). Measured motivation:
+# 216 open sessions fleet-wide, across all ten profiles, have `ended_at IS
+# NULL` and will never close on their own -- the unconditionally-non-terminal
+# open branch means the drain gate can never report drained, so legacy
+# billing can never be disabled and the event path can never take over.
+#
+# The EFFECTIVE threshold is floored at REVENIUM_CRON_SETTLE_SECONDS + 86400
+# (drain-status.sh resolves this, not this file) -- REVENIUM_CRON_SETTLE_SECONDS
+# is the DELIBERATE metering-deferral term, so the floor keeps a session
+# inside that window from ever being judged stale. That floor is NOT a
+# general bound on ledger lag: a ledger line is appended only after a
+# SUCCESSFUL `revenium` CLI call, so a persistently-failing per-session
+# metering path withholds ledger progress indefinitely, with no upper bound
+# at all. No threshold value makes that safe by itself -- safety rests on
+# `legacyRetainedSids` (the per-session carve-out hermes-report.sh reads),
+# never on this number being "big enough".
+#
+# A value <= 0 disables the staleness route entirely and restores pre-change
+# behaviour exactly (the escape hatch is deliberately in the conservative
+# direction; there is no matching "go faster than the floor" escape hatch).
+#
+# `started_at` was considered as a `COALESCE` fallback and rejected: it would
+# judge a live, long-running session by when it BEGAN rather than by whether
+# it is still spending, reproducing the exact silent permanent under-bill
+# this tunable exists to avoid.
+#
+# This is a policy tunable, not a state path -- do not add it to the
+# `mkdir -p` list below, and do not reference it from any script other than
+# drain-status.sh.
+REVENIUM_DRAIN_STALE_SECONDS="${REVENIUM_DRAIN_STALE_SECONDS:-604800}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}"
 

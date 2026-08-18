@@ -80,6 +80,7 @@ COMPUTE_OUTPUT=$(
   DRAIN_STATUS_FILE="${DRAIN_STATUS_FILE}" \
   REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS}" \
   REVENIUM_DRAIN_QUIET_TICKS="${REVENIUM_DRAIN_QUIET_TICKS}" \
+  REVENIUM_DRAIN_STALE_SECONDS="${REVENIUM_DRAIN_STALE_SECONDS}" \
   MARKER_RETENTION_DAYS="${MARKER_RETENTION_DAYS}" \
   PENDING_CAP="50" \
   python3 - <<'PY'
@@ -115,8 +116,72 @@ try:
 except (TypeError, ValueError):
     pending_cap = 50
 
+# quick-260818-f1g (STALE-01..07): staleness threshold. A configured value
+# <= 0 disables the staleness route entirely (pre-change behaviour,
+# STALE-05's opt-out); otherwise the EFFECTIVE seconds are floored at
+# settle_seconds + 86400 so a session inside the deliberate metering-deferral
+# window can never be judged stale (STALE-05/AX-S19). Both the configured
+# and effective numbers are reported in the status document -- see
+# EXTRA_DOC_FIELDS below.
+# AX-S31: `float()` accepts 'nan' and 'inf', and neither is caught by the
+# ValueError path below. Both are silently corrosive rather than unsafe:
+#   - 'inf'  -> no finite session age ever exceeds the threshold, so the
+#              staleness route can never grant terminal;
+#   - 'nan'  -> EVERY comparison against it is False, with the same effect,
+#              and it serialises into the status document as the bare token
+#              `NaN`, which is a Python extension to JSON and not valid JSON
+#              for a stricter reader than our own.
+# Either way the gate silently cannot open through this route -- which is the
+# exact deadlock this change exists to remove, reintroduced by a typo and with
+# no diagnosis. So a non-finite value is treated as INVALID (fall back to the
+# default) rather than as a disable request: a disable has its own explicit
+# spelling (`<= 0`), and silently honouring a malformed value as "off" would
+# hide the misconfiguration instead of surviving it.
+_stale_raw = os.environ.get('REVENIUM_DRAIN_STALE_SECONDS', '604800')
+stale_seconds_invalid = False
+try:
+    stale_seconds_configured = float(_stale_raw)
+except (TypeError, ValueError):
+    stale_seconds_configured = 604800.0
+    stale_seconds_invalid = True
+if (stale_seconds_configured != stale_seconds_configured
+        or abs(stale_seconds_configured) == float('inf')):
+    # Deliberately import-free: `x != x` is the NaN test and
+    # `abs(x) == float('inf')` covers both signed infinities. `math` is NOT
+    # imported in this heredoc, and reaching for it here would raise
+    # NameError inside a block whose caller redirects stderr.
+    stale_seconds_configured = 604800.0
+    stale_seconds_invalid = True
+if stale_seconds_configured <= 0:
+    stale_enabled = False
+    stale_seconds_effective = 0.0
+else:
+    stale_enabled = True
+    stale_seconds_effective = max(stale_seconds_configured, settle_seconds + 86400.0)
+
 now = time.time()
 retention_cutoff_seconds = retention_days * 86400
+
+# quick-260818-f1g: additive status-document fields, populated progressively
+# as facts become known so an early fail-closed _finish() call carries
+# whatever was already established at that point -- never a stale/wrong
+# value, and the two early fail-closed paths (ledger unreadable, state.db
+# unreadable) end up with `legacyRetainedSids` ABSENT, since that key is
+# only ever set once the main per-session loop completes below (STALE-07:
+# "those paths report drained: false, so there is nothing to carve out of").
+# `_finish()` merges this dict in, guarded so it can never overwrite one of
+# the pre-existing document keys.
+EXTRA_DOC_FIELDS = {
+    'staleSecondsConfigured': stale_seconds_configured,
+    'staleSecondsEffective': stale_seconds_effective,
+    'staleEnabled': stale_enabled,
+    # AX-S31: surfaced so a malformed threshold is DIAGNOSABLE rather than a
+    # silent revert to the default. Reported in the document, not as a
+    # per-tick warn -- an ungated per-tick warn on this phase produced
+    # millions of log lines, and a misconfiguration that persists for weeks
+    # is exactly the shape that would do it again.
+    'staleSecondsInvalid': stale_seconds_invalid,
+}
 
 # C-11's muid shapes: a real muid is 13-hex-ms-ts + 20-hex-random = 33
 # lowercase hex chars (classifier.py's _muid); the zero-marker fallback
@@ -160,9 +225,14 @@ def _write_atomic(path, doc):
 
 
 def _parse_ledger_line(line):
-    """Return (sid, ts) for a HERMES: line, or None. Parses from the RIGHT so
-    a colon-bearing sid is never mis-split: the last field is either a v2
-    muid (matched by _MUID_RE, in which case the two fields before it are
+    """Return (sid, ts) for a HERMES: line, (sid, None) for a HERMES: line
+    whose sid split succeeded but whose timestamp field did not parse (route
+    1a -- attributable corruption, quick-260818-f1g STALE-06/AX-S26), or None
+    for the three UNATTRIBUTABLE rejection shapes (not HERMES:-prefixed, too
+    few fields to split a sid at all, or an empty sid) -- those three keep
+    resolving to "skip this line", unchanged. Parses from the RIGHT so a
+    colon-bearing sid is never mis-split: the last field is either a v2 muid
+    (matched by _MUID_RE, in which case the two fields before it are
     total_tokens and ts) or, for a v1 line (no muid) or an unrecognised
     trailing field, the last TWO fields are treated as total_tokens and ts
     and everything before them is the sid."""
@@ -182,7 +252,10 @@ def _parse_ledger_line(line):
     try:
         ts = float(ts_str)
     except ValueError:
-        return None
+        # The sid IS recoverable here -- the split already succeeded. Return
+        # it with ts=None so the caller can refuse staleness for exactly
+        # this sid (route 1a) rather than treating the line as unattributable.
+        return sid, None
     return sid, ts
 
 
@@ -201,6 +274,11 @@ def _finish(determined, drained, ledger_tracked, drained_count, pending_count,
     }
     if reason:
         doc['reason'] = reason
+    # quick-260818-f1g: additive-only merge -- never lets EXTRA_DOC_FIELDS
+    # overwrite one of the pre-existing keys above.
+    for _k, _v in EXTRA_DOC_FIELDS.items():
+        if _k not in doc:
+            doc[_k] = _v
     _write_atomic(status_file_path, doc)
     print(f"DETERMINED={'true' if determined else 'false'}")
     print(f"DRAINED={'true' if drained else 'false'}")
@@ -212,15 +290,32 @@ def _finish(determined, drained, ledger_tracked, drained_count, pending_count,
 
 try:
     # --- 1. Parse the frozen legacy ledger: per-sid MAX ts. ---------------
+    # quick-260818-f1g (STALE-06, AX-S11/AX-S26/AX-S27): ledger_unparsed_lines
+    # counts every REJECTED non-empty line (both the unattributable None
+    # shape and the attributable (sid, None) shape); ledger_ts_unparsed_sids
+    # collects only the attributable sids, which REFUSES staleness for
+    # exactly those sids in the terminal computation below (route 1a).
+    # Route 1b (unattributable corruption) does not refuse anything here --
+    # it widens the retention carve-out later, once ledger_unparsed_lines is
+    # known to be > 0.
     sid_max_ts = {}
+    ledger_unparsed_lines = 0
+    ledger_ts_unparsed_sids = set()
     try:
         with open(ledger_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.rstrip('\n')
+                if not line:
+                    continue
                 parsed = _parse_ledger_line(line)
                 if parsed is None:
+                    ledger_unparsed_lines += 1
                     continue
                 sid, ts = parsed
+                if ts is None:
+                    ledger_unparsed_lines += 1
+                    ledger_ts_unparsed_sids.add(sid)
+                    continue
                 if sid not in sid_max_ts or ts > sid_max_ts[sid]:
                     sid_max_ts[sid] = ts
     except FileNotFoundError:
@@ -230,6 +325,8 @@ try:
         # shape as an unreadable state.db -- never assume drained on doubt.
         _finish(False, False, 0, 0, 0, [], {}, {},
                 reason='legacy ledger unreadable')
+
+    EXTRA_DOC_FIELDS['ledgerUnparsedLines'] = ledger_unparsed_lines
 
     # Which legacy-owned sessions are STILL OPEN? This must be answered
     # BEFORE the retention filter below, not after.
@@ -251,14 +348,34 @@ try:
     # No `IN (...)` clause: open sessions are few while the historical ledger
     # is large, so selecting the open set outright is both cheaper and immune
     # to SQLite's bound-variable limit.
+    # quick-260818-f1g (STALE-06/AX-S08): the activity read rides INSIDE this
+    # SAME open-session query -- same connection, same read-only URI, no new
+    # file/process/query -- so test_drain_status_adds_a_cron_stage_but_no_request
+    # and test_cron_tick_request_bound stay untouched. `PRAGMA table_info`
+    # answers whether `last_activity_at` exists on THIS state.db; every
+    # fixture in this repo's test suite lacks the column (AX-S08's
+    # ledger-only branch), while a real Hermes state.db declares it REAL at
+    # ordinal 46.
     open_sids = set()
+    last_activity_by_sid = {}
+    activity_column_present = False
     if state_db and os.path.isfile(state_db):
         try:
             uri = f"file:{state_db}?mode=ro"
             with sqlite3.connect(uri, uri=True) as conn:
-                for row in conn.execute(
-                        'SELECT id FROM sessions WHERE ended_at IS NULL'):
-                    open_sids.add(str(row[0]))
+                cols = [r[1] for r in conn.execute('PRAGMA table_info(sessions)')]
+                activity_column_present = 'last_activity_at' in cols
+                if activity_column_present:
+                    for row in conn.execute(
+                            'SELECT id, last_activity_at FROM sessions WHERE ended_at IS NULL'):
+                        row_sid = str(row[0])
+                        open_sids.add(row_sid)
+                        if row[1] is not None:
+                            last_activity_by_sid[row_sid] = row[1]
+                else:
+                    for row in conn.execute(
+                            'SELECT id FROM sessions WHERE ended_at IS NULL'):
+                        open_sids.add(str(row[0]))
         except Exception:
             # A db that exists but cannot be queried leaves openness
             # indeterminate for every session. Never assume drained on doubt.
@@ -267,6 +384,8 @@ try:
                     [{'sid': sid, 'ageSeconds': round(now - ts, 1)}
                      for sid, ts in pending_preview],
                     {}, {}, reason='state.db unreadable')
+
+    EXTRA_DOC_FIELDS['activityColumnPresent'] = activity_column_present
 
     # C-11: a session whose newest ledger line is older than the retention
     # window is not tracked individually -- that keeps the quiet-tick map
@@ -328,7 +447,18 @@ try:
     session_last_seen_ts = {}
     pending = []
     drained_count = 0
+    stale_drained_count = 0
+    stale_without_activity_signal = 0
+    stale_granted_sids = set()
+    stale_granted_no_activity_sids = set()
 
+    # --- 4. Precedence: staleness applies to exactly ONE branch -----------
+    #   sid not in state.db at all  -> terminal = True             UNCHANGED
+    #   ended_at is not None        -> terminal = past settle       UNCHANGED
+    #   ended_at IS NULL            -> terminal = stale             THE ONLY
+    #                                                                NEW ROUTE
+    # (quick-260818-f1g STALE-01..07; the third branch was unconditionally
+    # False before this change -- drain-status.sh:350 in the pre-change file.)
     for sid, max_ts in tracked.items():
         prev_ts = prev_last_seen_ts.get(sid)
         prev_count = prev_quiet_ticks.get(sid, 0)
@@ -342,18 +472,58 @@ try:
         quiet_ticks[sid] = new_count
         session_last_seen_ts[sid] = max_ts
 
+        stale_route_hit = False
         if sid not in ended_at_by_sid:
             # Absent from state.db entirely -- terminal by the OR branch.
             terminal = True
         else:
             ended_at = ended_at_by_sid[sid]
-            terminal = ended_at is not None and (now - float(ended_at)) >= settle_seconds
+            if ended_at is not None:
+                # Staleness must NEVER override the settle window
+                # (STALE-03/AX-S14): a session that ended recently is
+                # governed exclusively by this branch, unchanged.
+                terminal = (now - float(ended_at)) >= settle_seconds
+            else:
+                # THE ONLY NEW ROUTE. last_seen = max(ledger_max_ts,
+                # last_activity_at), started_at excluded (see the plan's
+                # "Why this is a closure, not a narrowing"). Staleness is
+                # REFUSED for this sid when its activity value is present
+                # but unparseable (AX-S09), or when its own newest ledger
+                # line failed to parse a timestamp (route 1a, AX-S26). A
+                # future-dated activity or ledger value simply makes the age
+                # negative -- never stale, with no special-casing (AX-S10).
+                last_seen = max_ts
+                has_activity_signal = False
+                refused = sid in ledger_ts_unparsed_sids
+                if sid in last_activity_by_sid:
+                    try:
+                        activity_ts = float(last_activity_by_sid[sid])
+                        has_activity_signal = True
+                        if activity_ts > last_seen:
+                            last_seen = activity_ts
+                    except (TypeError, ValueError):
+                        refused = True
+                terminal = (
+                    stale_enabled
+                    and not refused
+                    and (now - last_seen) >= stale_seconds_effective
+                )
+                if terminal:
+                    stale_route_hit = True
+                    stale_granted_sids.add(sid)
+                    if not has_activity_signal:
+                        stale_without_activity_signal += 1
+                        stale_granted_no_activity_sids.add(sid)
 
+        # Quiet-tick composition is UNCHANGED: staleness grants `terminal`,
+        # never `drained` (STALE-01, AX-S18).
         is_drained = terminal and new_count >= quiet_ticks_required
         if is_drained:
             drained_count += 1
+            if stale_route_hit:
+                stale_drained_count += 1
         else:
-            pending.append((sid, max_ts, new_count, terminal))
+            pending.append((sid, max_ts, new_count, terminal, stale_route_hit))
 
     pending.sort(key=lambda t: t[1])
     pending_capped = pending[:pending_cap]
@@ -363,13 +533,32 @@ try:
             'ageSeconds': round(now - ts, 1),
             'quietTicks': qt,
             'terminal': term,
+            'stale': stale_flag,
         }
-        for sid, ts, qt, term in pending_capped
+        for sid, ts, qt, term, stale_flag in pending_capped
     ]
 
     ledger_tracked = len(tracked)
     pending_count = len(pending)
     drained = (pending_count == 0)
+
+    # --- 5. legacyRetainedSids: the per-session carve-out (STALE-07,
+    # AX-S25/S27/S28/S29/S30). Suppression defaults to APPLY; retention is
+    # the explicit carve-out -- a sid absent from this list (including one
+    # that has never appeared in the ledger at all) is still suppressed.
+    # Route 1b (unattributable ledger corruption): when ANY line failed to
+    # parse without a recoverable sid, EVERY staleness-granted sid is
+    # retained this run, widening the carve-out rather than closing the
+    # gate (STALE-06/AX-S27). Otherwise only the sids with no corroborating
+    # activity value are retained (AX-S07).
+    if ledger_unparsed_lines > 0:
+        legacy_retained_sids = sorted(stale_granted_sids)
+    else:
+        legacy_retained_sids = sorted(stale_granted_no_activity_sids)
+
+    EXTRA_DOC_FIELDS['staleDrainedCount'] = stale_drained_count
+    EXTRA_DOC_FIELDS['staleWithoutActivitySignal'] = stale_without_activity_signal
+    EXTRA_DOC_FIELDS['legacyRetainedSids'] = legacy_retained_sids
 
     _finish(True, drained, ledger_tracked, drained_count, pending_count,
             pending_list, quiet_ticks, session_last_seen_ts)
@@ -418,6 +607,39 @@ if [[ "${JSON_MODE}" == "true" ]]; then
   exit "${EXIT_CODE}"
 fi
 
+# quick-260818-f1g: banner-only enrichment, read from the JSON document
+# already written above rather than through a new `_finish` KEY=value line
+# (that channel's shape is contractual — drain-status.sh:391-407's bash-side
+# parsing must not move). Fail-open to zero/empty on any read error; this is
+# purely cosmetic and must never affect EXIT_CODE.
+STALE_DRAINED_COUNT=0
+STALE_RETAINED_COUNT=0
+STALE_SECONDS_EFFECTIVE_DAYS=""
+if [[ -f "${DRAIN_STATUS_FILE}" ]]; then
+  _stale_banner_output=$(DRAIN_STATUS_FILE="${DRAIN_STATUS_FILE}" python3 - <<'PY' 2>/dev/null
+import json, os
+try:
+    d = json.load(open(os.environ['DRAIN_STATUS_FILE']))
+except Exception:
+    print('SDC=0')
+    print('RETAINED=0')
+    print('EFF_DAYS=')
+else:
+    sdc = d.get('staleDrainedCount')
+    retained = d.get('legacyRetainedSids')
+    eff = d.get('staleSecondsEffective')
+    print(f"SDC={sdc if isinstance(sdc, int) else 0}")
+    print(f"RETAINED={len(retained) if isinstance(retained, list) else 0}")
+    print(f"EFF_DAYS={(eff / 86400.0):.1f}" if isinstance(eff, (int, float)) else "EFF_DAYS=")
+PY
+) || true
+  STALE_DRAINED_COUNT=$(printf '%s' "${_stale_banner_output}" | sed -n 's/^SDC=//p' | head -1)
+  STALE_RETAINED_COUNT=$(printf '%s' "${_stale_banner_output}" | sed -n 's/^RETAINED=//p' | head -1)
+  STALE_SECONDS_EFFECTIVE_DAYS=$(printf '%s' "${_stale_banner_output}" | sed -n 's/^EFF_DAYS=//p' | head -1)
+fi
+[[ "${STALE_DRAINED_COUNT}" =~ ^[0-9]+$ ]] || STALE_DRAINED_COUNT=0
+[[ "${STALE_RETAINED_COUNT}" =~ ^[0-9]+$ ]] || STALE_RETAINED_COUNT=0
+
 CHANGED=true
 if [[ "${DRAINED}" == "${PREV_DRAINED}" ]]; then
   CHANGED=false
@@ -434,6 +656,10 @@ else
   elif [[ "${DRAINED}" == "true" ]]; then
     echo "✓ drained — ${LEDGER_SESSIONS_TRACKED} tracked session(s), all ${DRAINED_COUNT} terminal and quiet."
     echo "  The legacy completions path may now be disabled (REVENIUM_LEGACY_COMPLETIONS=disabled)."
+    if [[ "${STALE_DRAINED_COUNT}" -gt 0 ]]; then
+      echo "  ${STALE_DRAINED_COUNT} of those reached terminal by staleness (no activity for ~${STALE_SECONDS_EFFECTIVE_DAYS:-?}d) rather than by ending; ${STALE_RETAINED_COUNT} of those stay on legacy."
+      echo "  drained means \"legacy is off for everything except the sessions it still owes\" — the retained list, not this verdict, is the real measure of cutover progress."
+    fi
   else
     echo "✗ not drained — ${PENDING_COUNT} of ${LEDGER_SESSIONS_TRACKED} tracked session(s) still pending."
     echo "  A disable request will be refused (and completions kept metering) until this reports drained."
