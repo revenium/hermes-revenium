@@ -561,3 +561,38 @@ rollout, not after.
 - `tests/fixtures/compat/meter-completion-event.golden.json` — the event
   path's own pinned argv shape; see `tests/fixtures/compat/README.md` for
   how it relates to (and stays separate from) the legacy v1.x contract.
+
+## Idempotency, proven live
+
+Proven by **forced re-run on a live host** on 2026-08-18, not inferred from the
+uniqueness of the idempotency key.
+
+A session was induced on a drained profile with the event path live and legacy
+completions disabled. It was claimed by the event path and shipped one row. The
+metering stages were then invoked **three times back to back**, each invocation
+evidenced by its own log lines rather than assumed — a run silently skipped on
+the cron lock would prove nothing.
+
+After three re-runs:
+
+- All **four** ledger surfaces were byte-identical to their pre-run snapshots —
+  the event ledger, the legacy completions ledger, the jobs ledger, and the
+  tool-events ledger.
+- The event shipper reported `duplicate-skipped-events=1` on every run, so the
+  record genuinely reached the **presence check** rather than being filtered
+  earlier at the ownership gate.
+- The spool file still held its record. This is the case the legacy path never
+  had: spool records are **not** consumed on ship, so every re-run necessarily
+  re-reads what it already shipped, and the ledger is the sole barrier to a
+  duplicate.
+- Server-side, the session still carried **exactly one** row.
+
+A negative control ruled out an inert shipper: one further session was induced
+and re-run once, and both the event ledger and the server gained **exactly one**
+row. Without it, a shipper broken so badly it sent nothing at all would have
+produced an identical clean result.
+
+Note on ordering: an earlier attempt at this proof was recorded as **not-run**
+because every candidate session was skipped at the ownership gate, upstream of
+the presence check. A byte-identical ledger is necessary but not sufficient —
+confirm the records under test actually reached the logic being tested.
