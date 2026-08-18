@@ -613,6 +613,40 @@ class OrderingPartitionTests(OwnershipTestBase):
         finally:
             self._teardown_tree(t)
 
+    def test_dual_ledger_claim_never_re_bills_the_tokens_the_event_path_metered(self):
+        """The same sequence, asserted ONLY on the total tokens billed across
+        it. Deliberately makes no claim about the number of completions: a
+        re-bill produces a perfectly ordinary-looking completion, and a
+        count-only assertion would pass while the money went out twice. What
+        distinguishes correct from re-billed is the TOKEN COUNT and nothing
+        else."""
+        t = self._setup_tree(session_kwargs={
+            'input_tokens': self.STALE_CLAIM_INPUT,
+            'output_tokens': self.STALE_CLAIM_OUTPUT,
+        })
+        try:
+            self._seed_legacy_ledger(t, totals=(self.STALE_LEDGER_TOTAL,))
+            self._seed_event_ledger(t, count=4)
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+            self._grow_state_db(t, input_tokens=self.STALE_GROWN_INPUT,
+                                output_tokens=self.STALE_GROWN_OUTPUT)
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            billed = sum(int(argv_to_flags(c).get('--total-tokens', '0'))
+                         for c in self._legacy_completions(t))
+            self.assertEqual(
+                billed, 5000,
+                'the legacy path must bill exactly the 5,000 tokens of growth that '
+                'occurred AFTER the claim. 15,000 means the 10,000-token overlap the '
+                'event path had already metered was re-billed — the original defect\'s '
+                'own class, reintroduced by the rule meant to close it. '
+                f'Completions: {self._legacy_completions(t)!r}')
+        finally:
+            self._teardown_tree(t)
+
     # --- OWN-03: an install with no event path at all ----------------------
 
     def test_disengaged_install_bills_once_and_creates_no_ownership_state(self):
@@ -772,6 +806,305 @@ class RetentionOwnershipTests(OwnershipTestBase):
                 're-billed — and specifically not from a zero baseline, which is what '
                 f'the derived partition did. Got: {self._legacy_completions(t)!r}')
             self.assertEqual(self._hermes_lines(t), [])
+        finally:
+            self._teardown_tree(t)
+
+
+# ============================================================================
+# Task 3 — ATOMICITY: the exclusive create is the sole arbiter
+# ============================================================================
+
+class AtomicClaimTests(OwnershipTestBase):
+    """The concurrency axis, driven DETERMINISTICALLY and never on real thread
+    timing.
+
+    A lost race and a pre-existing record are the SAME on-disk state: the
+    other claimant's file is already there when this claimant's exclusive
+    create runs. Pre-seeding the record is therefore a faithful simulation of
+    the other side winning between this side's precondition check and its own
+    claim — the interleaving the 2026-08-17 double-bill actually took.
+    """
+
+    def test_legacy_losing_the_race_ships_nothing(self):
+        """Both ledgers are EMPTY, so nothing but the record can stop the
+        legacy path. Its own precondition check would say "no event rows,
+        claim as legacy" — and the file wins anyway."""
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, owner='event')
+            self.assertEqual(self._hermes_lines(t), [], 'fixture: legacy ledger empty')
+            self.assertEqual(self._api_lines(t), [], 'fixture: event ledger empty')
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(self._legacy_completions(t), [],
+                             'the O_EXCL create is the SOLE arbiter — losing the race must '
+                             'suppress billing even when this side\'s own precondition '
+                             f'check says it should claim. Output: {out}')
+            self.assertEqual(self._hermes_lines(t), [])
+        finally:
+            self._teardown_tree(t)
+
+    def test_event_losing_the_race_ships_nothing(self):
+        """The legacy ledger is EMPTY, so the D-09 precondition passes and
+        only the record can stop the event path."""
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, owner='legacy')
+            self._seed_spool(t)
+            self._seed_ready(t)
+            self.assertEqual(self._hermes_lines(t), [], 'fixture: legacy ledger empty')
+
+            rc, out = self._run_event(t)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(self._event_completions(t), [],
+                             f'losing the race must suppress the event ship. Output: {out}')
+            self.assertEqual(self._api_lines(t), [])
+        finally:
+            self._teardown_tree(t)
+
+    def test_legacy_does_not_clobber_a_record_it_lost(self):
+        """A truncating open would silently rewrite the winner's record and
+        still pass every sequential case — this is the assertion that makes
+        the atomicity claim non-vacuous from the legacy side."""
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, owner='event', baseline=4242)
+            with open(self._owners_path(t), 'rb') as f:
+                before = f.read()
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            with open(self._owners_path(t), 'rb') as f:
+                after = f.read()
+            self.assertEqual(before, after,
+                             'the losing side must not rewrite, repair or truncate the '
+                             'winner\'s record')
+        finally:
+            self._teardown_tree(t)
+
+    def test_event_does_not_clobber_a_record_it_lost(self):
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, owner='legacy', baseline=4242)
+            self._seed_spool(t)
+            self._seed_ready(t)
+            with open(self._owners_path(t), 'rb') as f:
+                before = f.read()
+
+            rc, out = self._run_event(t)
+            self.assertEqual(rc, 0, out)
+
+            with open(self._owners_path(t), 'rb') as f:
+                after = f.read()
+            self.assertEqual(before, after)
+        finally:
+            self._teardown_tree(t)
+
+    def test_winner_uniqueness_event_first(self):
+        t = self._setup_tree()
+        try:
+            self._seed_spool(t)
+            self._seed_ready(t)
+
+            rc, out = self._run_event(t)
+            self.assertEqual(rc, 0, out)
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(sorted(os.listdir(t['owners_dir'])), [SID],
+                             'exactly one ownership record for one session')
+            self.assertEqual(self._owner_record(t)[0], 'event',
+                             'the record names whichever side ran first')
+            total = len(self._event_completions(t)) + len(self._legacy_completions(t))
+            self.assertEqual(total, 1,
+                             f'exactly ONE completion across both paths, got {total}')
+        finally:
+            self._teardown_tree(t)
+
+    def test_winner_uniqueness_legacy_first(self):
+        t = self._setup_tree()
+        try:
+            self._seed_spool(t)
+            self._seed_ready(t)
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+            rc, out = self._run_event(t)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(sorted(os.listdir(t['owners_dir'])), [SID])
+            self.assertEqual(self._owner_record(t)[0], 'legacy')
+            total = len(self._event_completions(t)) + len(self._legacy_completions(t))
+            self.assertEqual(total, 1,
+                             f'exactly ONE completion across both paths, got {total}')
+        finally:
+            self._teardown_tree(t)
+
+    def test_both_claim_sites_use_the_exclusive_create(self):
+        """Static, so the atomicity claim cannot be vacuously true. Comment
+        lines are stripped before matching — a flag combination that appears
+        only in prose proves nothing."""
+        for script in ('hermes-report.sh', 'api-event-report.sh'):
+            text = (SCRIPTS_DIR / script).read_text()
+            code = '\n'.join(ln for ln in text.splitlines()
+                             if not ln.lstrip().startswith('#'))
+            self.assertIn(
+                'os.O_CREAT | os.O_EXCL | os.O_WRONLY', code,
+                f'{script} must establish ownership with a create-and-exclusive open — '
+                'no lock is held anywhere on either shipper, so O_EXCL is the whole of '
+                'the cross-process atomicity')
+
+
+# ============================================================================
+# Task 3 — OWN-03 backward compatibility and OWN-04 fail direction
+# ============================================================================
+
+GOLDEN_SID = 'compat-sid-markerless-001'
+
+
+class FailOpenAndCompatTests(OwnershipTestBase):
+
+    def test_no_event_path_meters_byte_identically_to_the_markerless_golden(self):
+        """The overwhelming majority of installs. Checked against the EXISTING
+        markerless golden, which is not edited."""
+        t = self._setup_tree(sessions=[_session_row(sid=GOLDEN_SID)])
+        try:
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            completions = self._legacy_completions(t)
+            self.assertEqual(len(completions), 1, f'{completions!r}\n{out}')
+            assert_argv_matches_golden(
+                self, completions[0], load_golden('meter-completion-markerless.golden.json'))
+            self.assertEqual(len(self._hermes_lines(t, GOLDEN_SID)), 1)
+            self.assertFalse(os.path.exists(t['owners_dir']),
+                             'no ownership state may be created on a disengaged install')
+        finally:
+            self._teardown_tree(t)
+
+    def test_zero_byte_event_ledger_and_empty_spool_reach_the_same_outcome(self):
+        """Same outcome by a DIFFERENT route through the engagement gate: the
+        ledger exists but is zero-byte (so `-s` is false) and the spool
+        directory exists but holds no .jsonl (so the glob stays literal)."""
+        t = self._setup_tree(sessions=[_session_row(sid=GOLDEN_SID)])
+        try:
+            open(t['event_ledger'], 'w').close()
+            self.assertEqual(os.listdir(t['spool_dir']), [], 'fixture: empty spool dir')
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            completions = self._legacy_completions(t)
+            self.assertEqual(len(completions), 1, f'{completions!r}\n{out}')
+            assert_argv_matches_golden(
+                self, completions[0], load_golden('meter-completion-markerless.golden.json'))
+            self.assertFalse(os.path.exists(t['owners_dir']))
+        finally:
+            self._teardown_tree(t)
+
+    def test_a_decoy_event_row_for_another_session_does_not_suppress_billing(self):
+        """The match is on the pipe-delimited SESSION field, not a loose
+        substring. The decoy's api_request_id deliberately CONTAINS this
+        session's id — a bare `grep -q "${sid}"` would false-positive on it and
+        silently stop billing a session the event path never claimed."""
+        t = self._setup_tree()
+        try:
+            with open(t['event_ledger'], 'w', encoding='utf-8') as f:
+                f.write(f'API:{SID}-shadow:t1:api:1|other-session|1700000000.000\n')
+                f.write('API:unrelated:t1:api:1|unrelated-session|1700000001.000\n')
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            completions = self._legacy_completions(t)
+            self.assertEqual(len(completions), 1,
+                             f'a decoy row belonging to another session must not suppress '
+                             f'this one: {completions!r}\n{out}')
+            self.assertEqual(argv_to_flags(completions[0]).get('--transaction-id'),
+                             f'{SID}-150')
+            self.assertEqual(self._owner_record(t)[0], 'legacy')
+        finally:
+            self._teardown_tree(t)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root defeats mode bits')
+    def test_legacy_fails_open_when_the_owners_directory_is_unwritable(self):
+        t = self._setup_tree()
+        try:
+            # Engage the protocol without owning THIS session: a decoy row
+            # makes the event ledger non-empty, so the gate is true and the
+            # claim is genuinely attempted.
+            with open(t['event_ledger'], 'w', encoding='utf-8') as f:
+                f.write('API:decoy:t1:api:1|other-session|1700000000.000\n')
+            os.makedirs(t['owners_dir'], mode=0o700, exist_ok=True)
+            os.chmod(t['owners_dir'], 0o500)
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(len(self._legacy_completions(t)), 1,
+                             'OWN-04: the legacy path fails OPEN — an unusable sentinel '
+                             'must leave exactly one biller, and legacy is the incumbent '
+                             f'every install depends on. Output: {out}')
+            self.assertEqual(len(self._hermes_lines(t)), 1)
+            self.assertIn('session ownership record unavailable', self._log_text(t))
+        finally:
+            self._teardown_tree(t)
+
+    @unittest.skipIf(os.geteuid() == 0, 'root defeats mode bits')
+    def test_event_fails_closed_when_the_owners_directory_is_unwritable(self):
+        t = self._setup_tree()
+        try:
+            self._seed_spool(t)
+            self._seed_ready(t)
+            os.makedirs(t['owners_dir'], mode=0o700, exist_ok=True)
+            os.chmod(t['owners_dir'], 0o500)
+
+            rc, out = self._run_event(t)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(self._event_completions(t), [],
+                             'OWN-04: the event path fails CLOSED — deferring costs a '
+                             'delay, while failing open here alongside the legacy path\'s '
+                             'own fail-open would DOUBLE-bill under one shared directory '
+                             f'failure. Output: {out}')
+            self.assertEqual(self._api_lines(t), [])
+            self.assertIn('deferring this session (fail-closed)', self._log_text(t))
+        finally:
+            self._teardown_tree(t)
+
+    def test_a_corrupt_non_utf8_record_leaves_exactly_one_biller(self):
+        """Bytes that are not valid UTF-8 raise inside the EXISTS branch, not
+        the create — which is why that branch carries its own handler. It must
+        degrade to empty output rather than crash the heredoc, and neither
+        side may repair or overwrite a record it could not read."""
+        t = self._setup_tree()
+        try:
+            self._seed_spool(t)
+            self._seed_ready(t)
+            os.makedirs(t['owners_dir'], mode=0o700, exist_ok=True)
+            corrupt = b'\xff\xfe\x80\x00not-utf8\n\xc3\x28\n'
+            with open(self._owners_path(t), 'wb') as f:
+                f.write(corrupt)
+
+            rc_legacy, out_legacy = self._run_legacy(t)
+            rc_event, out_event = self._run_event(t)
+
+            self.assertEqual(rc_legacy, 0, out_legacy)
+            self.assertEqual(rc_event, 0, out_event)
+
+            self.assertEqual(len(self._legacy_completions(t)), 1,
+                             f'legacy fails OPEN on an unreadable record: {out_legacy}')
+            self.assertEqual(self._event_completions(t), [],
+                             f'the event path fails CLOSED on the same record: {out_event}')
+
+            with open(self._owners_path(t), 'rb') as f:
+                self.assertEqual(f.read(), corrupt,
+                                 'neither side may repair or overwrite a record it could '
+                                 'not read')
         finally:
             self._teardown_tree(t)
 
