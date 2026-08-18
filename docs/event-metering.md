@@ -83,8 +83,12 @@ finished with every session it owns?** It reads exactly two local sources
 — the frozen legacy ledger and `state.db` — and makes zero HTTP requests.
 A session is **drained** only when both hold:
 
-- **Terminal** — the session has ended and aged past the settle window, or
-  it is gone from `state.db` entirely.
+- **Terminal** — the session has ended and aged past the settle window, it
+  is gone from `state.db` entirely, **or** (quick-260818-f1g) it is still
+  open but has gone quiet for longer than `REVENIUM_DRAIN_STALE_SECONDS` —
+  see "Staleness" below. Staleness applies to exactly one of these three
+  branches: an open session with a live activity signal, or one that ended
+  recently, is governed by the other two branches unchanged.
 - **Quiet** — its legacy ledger timestamp has not moved across
   `REVENIUM_DRAIN_QUIET_TICKS` consecutive checks (default 15).
 
@@ -107,6 +111,94 @@ simply never reaches Revenium. If a disable flip appears not to take
 effect, run `drain-status.sh` (or `--json`) directly and look at its
 `pending` list; that is the authoritative account of which sessions are
 still blocking the gate and why.
+
+### Staleness (quick-260818-f1g)
+
+Before this addition, an OPEN session (`ended_at IS NULL`) was
+**unconditionally non-terminal** — the drain gate could never report
+drained while even one session stayed open, and a fleet with hundreds of
+sessions that will never close (a long-lived gateway conversation, or one
+Hermes' own retention never garbage-collects) could never disable legacy
+completions at all.
+
+An open session is now also judged terminal when it has gone quiet for
+longer than `REVENIUM_DRAIN_STALE_SECONDS` (default `604800`, 7 days).
+"Quiet" here is `now - last_seen >= threshold`, where `last_seen` is the
+**later** of the session's newest legacy-ledger timestamp and its
+`last_activity_at` column in `state.db` (when that column exists and is
+populated) — `started_at` is deliberately excluded, since a live
+long-running session should never be judged by when it began.
+
+**The effective threshold is floored** at
+`REVENIUM_CRON_SETTLE_SECONDS + 86400`, so a session still inside the
+deliberate metering-deferral window can never be judged stale. That floor
+is **not** a general bound on ledger lag — a ledger line is appended only
+after a *successful* `revenium` CLI call, so a persistently-failing
+per-session metering path withholds ledger progress indefinitely, with no
+upper bound at all. Safety therefore does not rest on the threshold being
+"big enough"; it rests on the per-session carve-out below. Setting
+`REVENIUM_DRAIN_STALE_SECONDS` to `0` or below disables the staleness
+route entirely and restores the pre-change behaviour exactly (the
+conservative direction — there is no corresponding "go faster than the
+floor" escape hatch).
+
+**The self-healing chain.** A stale-drained session's verdict is
+re-derived from live inputs on every tick, not decided once: if the
+session resumes, its ledger timestamp or `last_activity_at` moves,
+`last_seen` moves with it, staleness withdraws, `terminal` goes back to
+`false`, and `hermes-report.sh`'s next startup re-read of
+`drain-status.json` refuses the disable — legacy resumes billing that
+session on the very next cron tick.
+
+**The per-session carve-out — `legacyRetainedSids`.** A stale verdict
+being wrong has a real cost: a legacy-owned session is never picked up by
+the event path (`api-event-report.sh` only ships when a record's owner is
+exactly `event`), so suppressing legacy for a session it still owns bills
+that session by **neither** path, and because suppression freezes the
+session's own ledger, the wrong verdict **latches** — it never
+self-corrects. To make a wrong staleness verdict cost nothing rather than
+cost a permanently-unbilled session, `drain-status.sh` emits
+`legacyRetainedSids`: every tracked session whose terminality rests on
+staleness **alone**, with no corroborating `last_activity_at` value, plus
+— when any ledger line failed to parse this run — **every**
+staleness-granted session (corruption widens the carve-out; it never
+closes the gate). `hermes-report.sh` reads this list at startup and
+resolves suppression **per session**:
+
+```
+suppress(sid) = REVENIUM_LEGACY_COMPLETIONS=disabled
+                AND the drain gate reports drained
+                AND sid NOT IN legacyRetainedSids
+```
+
+**Polarity is the whole design: the default is suppress, retention is the
+carve-out.** A brand-new session that has never appeared in the legacy
+ledger is not tracked, so it is not retained, so it **is** suppressed —
+which is what lets the event path own it. A status document with no
+`legacyRetainedSids` key at all (an older `drain-status.sh`, or an
+early fail-closed run) suppresses every session exactly as it did before
+this change.
+
+**Retaining a session costs (close to) nothing.** The growth guard and
+zero-delta guard in `hermes-report.sh` both `continue` before any
+`revenium` invocation is built, so "legacy keeps metering a retained,
+quiet session" is a ledger comparison and a `continue` — zero HTTP
+requests, zero wire-shape impact. The carve-out changes **which**
+sessions emit; it never changes **what** they emit, so every golden argv
+fixture in `tests/fixtures/compat/` is unaffected by construction.
+
+**`drained: true` no longer means "legacy is off."** It means "legacy is
+off for everything except the sessions named in `legacyRetainedSids`." On
+a fleet with many long-lived sessions that structurally cannot be handed
+to the event path, the retained list — not the `drained` boolean — is the
+real measure of cutover progress. `drain-status.sh`'s own banner states
+both facts together whenever any session reached terminal by staleness.
+
+New `drain-status.json` fields (all additive, all optional for a reader
+still expecting the pre-this-change shape): `staleSecondsConfigured`,
+`staleSecondsEffective`, `staleEnabled`, `activityColumnPresent`,
+`ledgerUnparsedLines`, `staleDrainedCount`, `staleWithoutActivitySignal`,
+`legacyRetainedSids`. Each `pending` entry also gains a `stale` boolean.
 
 ## The known differences from the legacy path
 
@@ -353,7 +445,12 @@ rollout, not after.
   per-session comparison readout, bounded by the same rotation thresholds
   as the metering log.
 - `~/.hermes/state/revenium/drain-status.json` — the drain gate's
-  atomically-written verdict, including the pending-session list.
+  atomically-written verdict, including the pending-session list. Since
+  quick-260818-f1g also carries the staleness fields
+  (`staleSecondsConfigured`, `staleSecondsEffective`, `staleEnabled`,
+  `activityColumnPresent`, `ledgerUnparsedLines`, `staleDrainedCount`,
+  `staleWithoutActivitySignal`) and the per-session carve-out
+  (`legacyRetainedSids`) — see "Staleness" under "The drain gate" above.
 - `~/.hermes/state/revenium/owners/<sid>` — the durable, atomically-claimed
   session ownership record (quick-260817-tfe / PR #54): a one-line file
   naming which path bills a session (`legacy` or `event`), or two lines

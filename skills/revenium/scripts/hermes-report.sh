@@ -132,6 +132,14 @@ fi
 
 DRAIN_GATE_DRAINED="false"
 DRAIN_GATE_PENDING_COUNT=""
+# quick-260818-f1g (STALE-07): the per-session carve-out. A missing key, a
+# non-list value, or any parse failure below all resolve to the EMPTY set —
+# reproducing today's global suppression exactly (AX-S28). Newline-delimited
+# string with a leading AND trailing newline, membership tested via the
+# `case ... *$'\n'"${sid}"$'\n'*)` glob idiom this repo already runs on
+# api-event-report.sh's per-record hot path (:553,:1252) — bash 3.2 has no
+# associative arrays.
+LEGACY_RETAINED_SIDS=$'\n'
 if [[ -f "${DRAIN_STATUS_FILE}" ]]; then
   _drain_gate_output=$(DRAIN_STATUS_FILE="${DRAIN_STATUS_FILE}" python3 - <<'PY' 2>/dev/null
 import json, os
@@ -145,11 +153,20 @@ else:
     pending = doc.get('pendingCount')
     print(f"DRAINED={'true' if drained is True else 'false'}")
     print(f"PENDING={pending if isinstance(pending, int) else ''}")
+    retained = doc.get('legacyRetainedSids')
+    if isinstance(retained, list):
+        for _sid in retained:
+            if isinstance(_sid, str) and _sid:
+                print(f"RETAINED_SID={_sid}")
 PY
 )
   DRAIN_GATE_DRAINED=$(printf '%s' "${_drain_gate_output}" | sed -n 's/^DRAINED=//p' | head -1)
   DRAIN_GATE_PENDING_COUNT=$(printf '%s' "${_drain_gate_output}" | sed -n 's/^PENDING=//p' | head -1)
   [[ "${DRAIN_GATE_DRAINED}" == "true" ]] || DRAIN_GATE_DRAINED="false"
+  while IFS= read -r _retained_sid; do
+    [[ -z "${_retained_sid}" ]] && continue
+    LEGACY_RETAINED_SIDS="${LEGACY_RETAINED_SIDS}${_retained_sid}"$'\n'
+  done < <(printf '%s\n' "${_drain_gate_output}" | sed -n 's/^RETAINED_SID=//p')
 fi
 
 LEGACY_COMPLETIONS_SKIP="false"
@@ -781,6 +798,25 @@ PY
     local total_tokens=$((input_tokens + output_tokens))
     if [[ "${total_tokens}" -eq 0 ]]; then
       continue
+    fi
+
+    # quick-260818-f1g (STALE-07/AX-S25/AX-S28/AX-S29/AX-S30): resolve the
+    # per-session legacy-suppression predicate ONCE per session, from the
+    # LEGACY_RETAINED_SIDS set built at startup, and reuse this SAME local at
+    # BOTH consumer sites below (the takeover branch and the emission guard)
+    # so the two can never drift. Polarity: suppression is the DEFAULT — a
+    # sid must be NAMED on the retained list to escape it, so a brand-new
+    # session that has never appeared in the legacy ledger is suppressed
+    # exactly like every drained one (AX-S29), and a status document with no
+    # `legacyRetainedSids` key at all (LEGACY_RETAINED_SIDS stays empty)
+    # suppresses everyone exactly as before this change (AX-S28).
+    local sid_legacy_retained="false"
+    case "${LEGACY_RETAINED_SIDS}" in
+      *$'\n'"${sid}"$'\n'*) sid_legacy_retained="true" ;;
+    esac
+    local sid_legacy_suppressed="false"
+    if [[ "${LEGACY_COMPLETIONS_SKIP}" == "true" && "${sid_legacy_retained}" != "true" ]]; then
+      sid_legacy_suppressed="true"
     fi
 
     # Phase 22 (TRACE-02..05 / D-01): resolve root_sid ONCE per session for
@@ -1474,23 +1510,31 @@ PY
           # after it are reused UNCHANGED (D-10) — this only decides which
           # literal `session_event_owned` ends up as.
           #
-          #   EVENT_PATH_LIVE=true            -> defer, unchanged from #54.
+          #   EVENT_PATH_LIVE=true              -> defer, unchanged from #54.
           #   EVENT_PATH_LIVE=false,
-          #     LEGACY_COMPLETIONS_SKIP=true   -> defer, no takeover (MODE-05).
+          #     sid_legacy_suppressed=true        -> defer, no takeover (MODE-05).
           #   EVENT_PATH_LIVE=false,
-          #     LEGACY_COMPLETIONS_SKIP=false  -> take over.
+          #     sid_legacy_suppressed=false        -> take over.
           #
-          # WHY NO TAKEOVER WHILE LEGACY EMISSION IS DISABLED. If legacy is
-          # not emitting, flipping ownership bills nobody either way — but it
-          # converts a state that HEALS when the operator returns the mode to
-          # `live` (the event path resumes and bills the session) into one
-          # that cannot: the record would say `legacy`, the event path would
-          # defer forever, and legacy would be disabled. Preferring the
-          # reversible state is the same reasoning that makes clear-halt.sh
-          # the sole clearer of `halted`. A guard written only against the
-          # mode axis gets this wrong, which is why it has its own branch and
-          # its own axis (AX-08) rather than being folded into the mode check.
-          if [[ "${EVENT_PATH_LIVE}" == "true" || "${LEGACY_COMPLETIONS_SKIP}" == "true" ]]; then
+          # WHY NO TAKEOVER WHILE LEGACY EMISSION IS SUPPRESSED FOR THIS SID.
+          # If legacy is not emitting for this session, flipping ownership
+          # bills nobody either way — but it converts a state that HEALS when
+          # the operator returns the mode to `live` (the event path resumes
+          # and bills the session) into one that cannot: the record would say
+          # `legacy`, the event path would defer forever, and legacy would be
+          # suppressed. Preferring the reversible state is the same reasoning
+          # that makes clear-halt.sh the sole clearer of `halted`. A guard
+          # written only against the mode axis gets this wrong, which is why
+          # it has its own branch and its own axis (AX-08) rather than being
+          # folded into the mode check.
+          #
+          # quick-260818-f1g (STALE-07/AX-S30): `sid_legacy_suppressed` is
+          # the SAME per-session local the emission guard below reads —
+          # resolved once, used at both sites, so a sid on
+          # `legacyRetainedSids` (legacy IS still emitting for it) is
+          # correctly allowed to take over even while the fleet-global
+          # `LEGACY_COMPLETIONS_SKIP` boolean is true.
+          if [[ "${EVENT_PATH_LIVE}" == "true" || "${sid_legacy_suppressed}" == "true" ]]; then
             session_event_owned="true"
             ((event_owned_skip_count++)) || true
           else
@@ -2146,14 +2190,16 @@ PY
 
     # Phase 32 Plan 03 (C-11/D-13): the ENTIRE legacy completion-emission
     # block below (both the per-marker and zero-marker paths) is skipped for
-    # this session only when LEGACY_COMPLETIONS_SKIP was resolved true at
-    # startup (REVENIUM_LEGACY_COMPLETIONS=disabled AND the drain gate
-    # reports drained). This is the ONLY change this plan makes to the
-    # session loop — the jobs-create stage above (and the post-loop jobs
-    # outcome stage below) are OUTSIDE this guard and keep running in every
-    # configuration, because post_api_request carries no job lifecycle
-    # signal (D-10). The superseded code inside this guard is retained, not
-    # deleted — disabling it is a setting flip, not a revert (D-11).
+    # this session only when this session's own suppression predicate
+    # resolved true at loop-entry (REVENIUM_LEGACY_COMPLETIONS=disabled AND
+    # the drain gate reports drained AND — quick-260818-f1g STALE-07 — this
+    # sid is not on `legacyRetainedSids`). This is the ONLY change this plan
+    # makes to the session loop — the jobs-create stage above (and the
+    # post-loop jobs outcome stage below) are OUTSIDE this guard and keep
+    # running in every configuration, because post_api_request carries no job
+    # lifecycle signal (D-10). The superseded code inside this guard is
+    # retained, not deleted — disabling it is a setting flip, not a revert
+    # (D-11).
     #
     # quick-260817-tfe (OWN-01): the condition now requires BOTH gates clear.
     # The ownership SUPPRESSION composes HERE, and nowhere earlier, for a
@@ -2165,7 +2211,12 @@ PY
     # stage and the post-loop outcome stage OUTSIDE it. reported_count and
     # skipped_count are left untouched by the ownership suppression so the
     # existing summary keeps its meaning.
-    if [[ "${LEGACY_COMPLETIONS_SKIP}" != "true" && "${session_event_owned}" != "true" ]]; then
+    #
+    # quick-260818-f1g (STALE-07/AX-S25): `sid_legacy_suppressed` is resolved
+    # ONCE per session at loop-entry (above, near `total_tokens`) and reused
+    # here verbatim — the SAME local the takeover branch reads — so the two
+    # consumer sites of the carve-out cannot drift.
+    if [[ "${sid_legacy_suppressed}" != "true" && "${session_event_owned}" != "true" ]]; then
     # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
     # per-marker Revenium calls with extended transaction-id and per-call v2
     # ledger writes. Else fall through to the legacy single-call path (T06
