@@ -458,10 +458,42 @@ try:
 except Exception:
     live_total = 0
 
+# AX-14 (the race window, found by review of PR #56): `known` is the
+# baseline as it stood at the CLAIM, already seconds stale by the time we
+# reach the replace. hermes-report.sh takes no lock of its own (see the
+# flock note above — cron.sh holds cron.lock, an out-of-band invocation
+# holds nothing), so two reporters genuinely both observe owner=event and
+# both arrive here. Neither can bill on its own takeover tick (requested is
+# this run's own total_tokens, so the floor always suppresses it), but the
+# LOSER's replace lands LAST and would otherwise publish a floor computed
+# from its own older snapshot — LOWERING the floor the winner just recorded
+# and re-billing everything between them on the next tick. Demonstrated:
+# winner writes 300, loser's late replace drops it to 150, next tick ships
+# 150 already-shipped tokens.
+#
+# `live_total` does not close this on its own: it is read strictly later by
+# the loser, so it is normally >= the winner's — but it collapses to 0 on
+# ANY read failure (the except below), and that is exactly the case where
+# the stale `known` wins the max(). Re-reading the record itself here is
+# what makes the never-lower rule hold against the record, not merely
+# against this process's own inputs.
+on_disk = 0
+try:
+    with open(path) as _rfh:
+        _record_lines = _rfh.read().split("\n")
+    if len(_record_lines) > 1:
+        on_disk = _nonneg_int(_record_lines[1].strip())
+except Exception:
+    # Same fail-direction as live_total above: degrade to 0 and let the
+    # other terms carry the floor. A takeover that cannot read the record
+    # must never publish a LOWER floor than one that can.
+    on_disk = 0
+
 # The never-lower rule, stated exactly as it is stated at the floor
 # application site below: a MAXIMUM, never an assignment. The AX-21 re-read
-# composes as one more term rather than as a second mechanism.
-new_baseline = max(requested, known, live_total, 0)
+# and the AX-14 record re-read compose as further terms rather than as
+# separate mechanisms.
+new_baseline = max(requested, known, live_total, on_disk, 0)
 
 try:
     _tfd, _tmp = tempfile.mkstemp(dir=owners_dir, prefix='.takeover.')
