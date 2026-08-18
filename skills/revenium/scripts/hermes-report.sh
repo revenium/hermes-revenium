@@ -402,6 +402,7 @@ _takeover_session_owner() {
   TAKEOVER_REQUESTED_BASELINE="${2:-0}" \
   TAKEOVER_KNOWN_BASELINE="${3:-0}" \
   python3 - <<'PY' 2>/dev/null
+import fcntl
 import os
 import tempfile
 
@@ -417,6 +418,57 @@ name = sid.replace('/', '_').replace('\x00', '_')[:200]
 if not name:
     raise SystemExit(0)
 path = os.path.join(owners_dir, name)
+
+
+# MUTUAL EXCLUSION, not a narrower window.
+#
+# os.replace is atomic with respect to READERS, but the read-modify-write
+# around it is not atomic with respect to another WRITER. Two unlocked
+# reporters both reach here: A reads floor 150, B publishes 300, A replaces
+# with a max() computed from its stale 150 — and the floor goes BACKWARDS,
+# re-billing what the event path already shipped.
+#
+# This was fixed twice by narrowing the window (re-read state.db at publish
+# instant; then re-read the record itself "immediately before" the replace)
+# and review correctly rejected both: narrowing a TOCTOU window is not
+# closing it. Only exclusion closes it. Do not replace this lock with a
+# smaller gap.
+#
+# The lock is taken on the owners DIRECTORY fd, deliberately:
+#   - no new state path, so nothing to declare in common.sh and nothing new
+#     for prune-markers.sh to reason about;
+#   - the record FILE is the wrong target: os.replace swaps the inode, so two
+#     racers would each hold a lock on a different inode and both proceed.
+# Contention is a non-issue: takeovers are rare and the critical section is
+# two file operations.
+_lock_fd = None
+try:
+    _lock_fd = os.open(owners_dir, os.O_RDONLY)
+    fcntl.flock(_lock_fd, fcntl.LOCK_EX)
+except Exception:
+    # Fail CLOSED — defer the takeover rather than perform it unprotected.
+    # Deferring leaves the session event-owned for THIS tick and retries on
+    # the next one, so the cost is a one-tick delay, not a lost or duplicated
+    # bill. Proceeding without exclusion is the failure that cannot be
+    # undone, which is why the asymmetry points this way here.
+    if _lock_fd is not None:
+        try:
+            os.close(_lock_fd)
+        except Exception:
+            pass
+    raise SystemExit(0)
+
+
+def _release_lock():
+    if _lock_fd is not None:
+        try:
+            fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            os.close(_lock_fd)
+        except Exception:
+            pass
 
 
 def _nonneg_int(raw):
@@ -514,7 +566,14 @@ try:
             # _tmp's inode at `path`, so there is nothing left to unlink.
             pass
 except Exception:
+    # Release before exiting: a takeover that failed must not leave the next
+    # reporter blocked on a lock this process still holds.
+    _release_lock()
     raise SystemExit(0)
+
+# Everything from the on-disk floor read through the replace has now happened
+# under the lock, so no concurrent takeover could have published between them.
+_release_lock()
 
 print("OWNER=legacy")
 print("TOOK_OVER=true")

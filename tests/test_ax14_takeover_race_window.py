@@ -56,6 +56,45 @@ class TakeoverRaceWindowTests(OwnershipTestBase):
         os.chmod(path, 0o755)
         return path
 
+    def _install_replace_stall_shim(self, t, gate_path, release_path):
+        """python3 wrapper that stalls INSIDE the takeover primitive, between
+        its on-disk floor read and its os.replace — not before the primitive
+        as _install_python_stall_shim does.
+
+        This distinction is the whole point of the test below. A shim that
+        delays the WHOLE primitive cannot exercise the interleaving between
+        the floor read and the replace, so it cannot see a TOCTOU there; that
+        was the specific gap review identified in the first race test. Here a
+        sitecustomize module (imported automatically at interpreter startup)
+        monkeypatches os.replace to announce itself and wait, so the stall
+        lands exactly in the window under test."""
+        mod_dir = os.path.join(t['tmpdir'], 'stallmod')
+        os.makedirs(mod_dir, exist_ok=True)
+        with open(os.path.join(mod_dir, 'sitecustomize.py'), 'w') as f:
+            f.write(
+                'import os, time\n'
+                'if os.environ.get("TAKEOVER_SID") and os.environ.get("REPLACE_GATE"):\n'
+                '    _real = os.replace\n'
+                '    def _stalled(src, dst, *a, **k):\n'
+                '        open(os.environ["REPLACE_GATE"], "w").close()\n'
+                '        _rel = os.environ["REPLACE_RELEASE"]\n'
+                '        for _ in range(1200):\n'
+                '            if os.path.exists(_rel):\n'
+                '                break\n'
+                '            time.sleep(0.05)\n'
+                '        return _real(src, dst, *a, **k)\n'
+                '    os.replace = _stalled\n'
+            )
+        path = os.path.join(t['bin_dir'], 'python3')
+        with open(path, 'w') as f:
+            f.write(
+                '#!/usr/bin/env bash\n'
+                f'export PYTHONPATH={shlex.quote(mod_dir)}"${{PYTHONPATH:+:$PYTHONPATH}}"\n'
+                f'exec {shlex.quote(REAL_PYTHON)} "$@"\n'
+            )
+        os.chmod(path, 0o755)
+        return path
+
     def _run_legacy_with(self, t, meter_log, extra_env=None):
         env = self._base_env(t, meter_log, extra_env)
         return run_script(SCRIPTS_DIR / 'hermes-report.sh', env, t['inv_log'])
@@ -272,6 +311,77 @@ class TakeoverRaceWindowTests(OwnershipTestBase):
                              'the late replace LOWERED the floor the winner recorded')
             self.assertEqual(len(d_ships), 0,
                              'RE-BILL: tokens already shipped by the event path were billed again')
+        finally:
+            self._teardown_tree(t)
+
+    def test_a27_concurrent_takeovers_are_serialized_so_the_floor_never_drops(self):
+        """THE INNER WINDOW. Racer A is stalled between its on-disk floor read
+        and its os.replace. While A sits there, B takes over with a fresh,
+        higher snapshot. A then completes its replace using the value it read
+        BEFORE B published.
+
+        Without mutual exclusion this is a floor regression: A's stale write
+        lands last and the never-lower rule is violated across processes even
+        though each process individually honours it. Narrowing the gap (the
+        publish-instant state.db re-read, then the immediately-before record
+        re-read) does not close it -- both fixes still read, then wrote.
+
+        With the flock on the owners directory, B cannot publish while A holds
+        the lock, so the two takeovers serialize and the final floor is the
+        maximum of the two, whichever order they ran in."""
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, owner='event')
+            self._seed_event_ledger(t, count=2)
+            gate = os.path.join(t['tmpdir'], 'rgate')
+            release = os.path.join(t['tmpdir'], 'rrelease')
+            self._install_replace_stall_shim(t, gate, release)
+            res = {}
+
+            def run_a():
+                res['a'] = self._run_legacy_with(
+                    t, os.path.join(t['tmpdir'], 'r27a.log'),
+                    {'REPLACE_GATE': gate, 'REPLACE_RELEASE': release})
+
+            ta = threading.Thread(target=run_a)
+            ta.start()
+            deadline = time.time() + 40
+            while not os.path.exists(gate) and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(os.path.exists(gate),
+                            'inner window never opened -- the shim did not '
+                            'reach os.replace inside the takeover')
+
+            # A is now parked between its floor read and its replace.
+            self._grow_state_db(t, input_tokens=200, output_tokens=100)
+
+            def run_b():
+                res['b'] = self._run_legacy_with(
+                    t, os.path.join(t['tmpdir'], 'r27b.log'))
+
+            tb = threading.Thread(target=run_b)
+            tb.start()
+            # Give B a real chance to publish. Under the fix it blocks on the
+            # lock; unlocked, it races ahead and publishes 300 here.
+            time.sleep(1.5)
+            open(release, 'w').close()
+            ta.join(timeout=90)
+            tb.join(timeout=90)
+
+            owner, baseline = self._owner_record(t)
+            print('\n--- INNER WINDOW OBSERVATION ---')
+            print('final record      :', owner, baseline)
+            print('--- END ---')
+            self.assertEqual(owner, 'legacy')
+            # _owner_record returns the record's second line verbatim, i.e.
+            # a str — compare numerically so a future formatting change does
+            # not turn this into a silent pass or a spurious failure.
+            self.assertEqual(
+                int(baseline), 300,
+                'FLOOR REGRESSION: a takeover stalled between its floor read '
+                'and its replace overwrote a higher floor published '
+                'concurrently -- the never-lower rule does not hold across '
+                'processes without mutual exclusion')
         finally:
             self._teardown_tree(t)
 
