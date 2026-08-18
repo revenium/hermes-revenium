@@ -91,9 +91,12 @@ EVENT_SPOOL_DIR_PY="${EVENT_SPOOL_DIR}" \
 TOOL_EVENTS_DIR_PY="${TOOL_EVENTS_DIR}" \
 EVENT_LEDGER_FILE_PY="${EVENT_LEDGER_FILE}" \
 TOOL_EVENTS_LEDGER_FILE_PY="${TOOL_EVENTS_LEDGER_FILE}" \
+OWNERS_DIR_PY="${OWNERS_DIR}" \
+STATE_DB_PY="${STATE_DB}" \
 python3 - <<'PY' >"${prune_out}"
 import os
 import re
+import sqlite3
 import sys
 import time
 
@@ -533,6 +536,113 @@ def prune_event_ledger(ledger_path, spool_dir):
 
 if event_ledger_file_py:
     prune_event_ledger(event_ledger_file_py, event_spool_dir_py)
+
+# ---------------------------------------------------------------------------
+# quick-260817-tfe (OWN-02): fifth pass -- the session OWNERSHIP records
+# (OWNERS_DIR). Same idea as the passes above, with ONE deliberate difference
+# that is the entire point of this pass existing:
+#
+#   STALENESS IS PRESENCE IN state.db, AND NOTHING ELSE. cutoff_secs is NOT
+#   used here, and the coupling to MARKER_RETENTION_DAYS is deliberately
+#   ABSENT. An ownership record must outlive every billing row it partitions,
+#   for as long as the session it names can still accrue tokens. That is
+#   exactly P1-2: the ownership signal used to live in the API: ledger, which
+#   this script prunes at MARKER_RETENTION_DAYS (default 30), so ~30 days on a
+#   STILL-LIVE session erased its only ownership record and let the legacy
+#   path re-bill the session's entire cumulative token count from a zero
+#   baseline. A future reader "restoring consistency" by keying this pass on
+#   age would reintroduce that defect exactly.
+#
+# FAIL-SAFE, HARD. A missing state.db, an unreadable one, or ANY sqlite error
+# removes NOTHING and says why. Deleting an ownership record on doubt is how a
+# pruning change becomes a double-bill -- the same reasoning the event-ledger
+# pass above already carries for its own idempotency records.
+#
+# Note this script is MANUAL and deliberately not wired into cron (D-28), so
+# owners records accumulate between operator runs exactly as markers do.
+# ---------------------------------------------------------------------------
+
+def _owner_record_name(sid):
+    """The SAME filename derivation the claim primitive uses in both
+    hermes-report.sh and api-event-report.sh (separator and NUL to underscore,
+    200-character cap). Applied to every state.db id before comparing, so an
+    exotic session id compares against the right key on both sides."""
+    return sid.replace('/', '_').replace('\x00', '_')[:200]
+
+
+def prune_owners(owners_dir, state_db):
+    if not owners_dir:
+        return 0, 0, 0
+    try:
+        entries = sorted(os.listdir(owners_dir))
+    except FileNotFoundError:
+        return 0, 0, 0
+    except OSError as exc:
+        print('prune: owners pass skipped -- owners dir unreadable: ' + str(exc), flush=True)
+        return 0, 0, 0
+
+    if not state_db or not os.path.isfile(state_db):
+        print('prune: owners pass skipped -- state.db not found at ' + str(state_db) +
+              '; removing NOTHING (an ownership record deleted on doubt is a double-bill)',
+              flush=True)
+        return 0, 0, 0
+
+    live = set()
+    try:
+        # Read-only URI connection, the established stdlib-sqlite3 pattern
+        # drain-status.sh already uses -- this pass adds no new external-tool
+        # precondition, and a missing state.db is never created as a side effect.
+        uri = 'file:' + state_db + '?mode=ro'
+        with sqlite3.connect(uri, uri=True) as conn:
+            for (sid,) in conn.execute('SELECT id FROM sessions'):
+                if sid is None:
+                    continue
+                live.add(_owner_record_name(str(sid)))
+    except Exception as exc:
+        print('prune: owners pass skipped -- state.db unreadable (' + str(exc) +
+              '); removing NOTHING', flush=True)
+        return 0, 0, 0
+
+    o_scanned = o_kept = o_removed = 0
+    for fname in entries:
+        fpath = os.path.join(owners_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+
+        o_scanned += 1
+        if fname in live:
+            o_kept += 1
+            continue
+
+        action = 'dry-run, would remove' if dry_run else 'removed'
+        print(
+            'prune: ' + action +
+            ' dir=owners' +
+            ' sid=' + fname +
+            ' reason=absent_from_state_db',
+            flush=True,
+        )
+
+        if not dry_run:
+            try:
+                os.unlink(fpath)
+                o_removed += 1
+            except OSError as exc:
+                print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
+                sys.exit(1)
+        else:
+            o_removed += 1
+
+    print(
+        'prune: owners summary, scanned=' + str(o_scanned) +
+        ' kept=' + str(o_kept) +
+        ' removed=' + str(o_removed),
+        flush=True,
+    )
+    return o_scanned, o_kept, o_removed
+
+
+prune_owners(os.environ.get('OWNERS_DIR_PY', ''), os.environ.get('STATE_DB_PY', ''))
 PY
 prune_rc=$?
 set -e

@@ -639,5 +639,142 @@ class OrderingPartitionTests(OwnershipTestBase):
             self._teardown_tree(t)
 
 
+# ============================================================================
+# Task 2 — RETENTION: the record's lifetime is decoupled from the ledgers'
+# ============================================================================
+
+class RetentionOwnershipTests(OwnershipTestBase):
+    """P1-2's own proof. The ownership signal used to live in the API: ledger,
+    which prune-markers.sh prunes at MARKER_RETENTION_DAYS — so ~30 days on a
+    STILL-LIVE session erased the only record of who owned it and let the
+    legacy path re-bill its whole cumulative total from a zero baseline. The
+    owners record's staleness rule is presence in state.db and nothing else."""
+
+    def _run_prune(self, t, *args):
+        env = {
+            **os.environ,
+            'HOME': t['shim_home'],
+            'HERMES_HOME': t['hermes_home'],
+            'REVENIUM_STATE_DIR': t['state_dir'],
+            'PATH': t['bin_dir'] + os.pathsep + os.environ.get('PATH', ''),
+            'REVENIUM_MARKER_RETENTION_DAYS': '30',
+            'TZ': 'UTC',
+        }
+        return subprocess.run(
+            ['bash', str(SCRIPTS_DIR / 'prune-markers.sh'), *args],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+
+    @staticmethod
+    def _age_file(path, days):
+        old = time.time() - days * 86400
+        os.utime(path, (old, old))
+
+    def test_record_for_a_live_session_survives_however_old_it_is(self):
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, owner='event')
+            # 90 days — three times the default window, so ANY age-keyed rule
+            # would have removed it.
+            self._age_file(self._owners_path(t), 90)
+
+            r = self._run_prune(t)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(
+                os.path.exists(self._owners_path(t)),
+                'an ownership record whose session is still in state.db must survive '
+                'regardless of mtime — keying this pass on MARKER_RETENTION_DAYS is '
+                'exactly the P1-2 defect')
+            self.assertEqual(self._owner_record(t)[0], 'event')
+        finally:
+            self._teardown_tree(t)
+
+    def test_record_for_a_session_absent_from_state_db_is_removed(self):
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, sid='gone-from-state-db', owner='event')
+            self._seed_owner(t, sid=SID, owner='legacy')
+
+            r = self._run_prune(t)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertFalse(os.path.exists(self._owners_path(t, 'gone-from-state-db')),
+                             'a record whose session is absent from state.db must be removed')
+            self.assertTrue(os.path.exists(self._owners_path(t, SID)),
+                            'the live session\'s record must be untouched in the same run')
+            self.assertIn('absent_from_state_db', self._log_text(t))
+        finally:
+            self._teardown_tree(t)
+
+    def test_dry_run_removes_nothing(self):
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, sid='gone-from-state-db', owner='event')
+
+            r = self._run_prune(t, '--dry-run')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(os.path.exists(self._owners_path(t, 'gone-from-state-db')),
+                            '--dry-run must delete nothing')
+            self.assertIn('dry-run, would remove', self._log_text(t))
+        finally:
+            self._teardown_tree(t)
+
+    def test_missing_state_db_removes_nothing_and_says_so(self):
+        t = self._setup_tree(sessions=[])
+        try:
+            self.assertFalse(os.path.exists(t['state_db']), 'fixture: no state.db')
+            self._seed_owner(t, sid='would-look-orphaned', owner='event')
+            self._age_file(self._owners_path(t, 'would-look-orphaned'), 90)
+
+            r = self._run_prune(t)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(
+                os.path.exists(self._owners_path(t, 'would-look-orphaned')),
+                'a missing state.db must remove NOTHING — deleting an ownership record '
+                'on doubt is how a pruning change becomes a double-bill')
+            self.assertIn('owners pass skipped', self._log_text(t))
+        finally:
+            self._teardown_tree(t)
+
+    def test_unreadable_state_db_removes_nothing_and_says_so(self):
+        t = self._setup_tree()
+        try:
+            # Not a database: sqlite raises on the first query.
+            with open(t['state_db'], 'wb') as f:
+                f.write(b'not a sqlite database at all\n')
+            self._seed_owner(t, sid='would-look-orphaned', owner='event')
+
+            r = self._run_prune(t)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(os.path.exists(self._owners_path(t, 'would-look-orphaned')))
+            self.assertIn('owners pass skipped', self._log_text(t))
+        finally:
+            self._teardown_tree(t)
+
+    def test_post_prune_event_owned_session_is_still_not_billed_by_legacy(self):
+        """The exact post-prune state that broke P1-2: the session is still
+        live in state.db, the ownership record names the event path, and its
+        API: rows have already been pruned out of the event ledger. Assert the
+        ABSENCE of any completion rather than a particular token count, so the
+        test cannot pass on a re-bill that happens to differ in shape."""
+        t = self._setup_tree()
+        try:
+            self._seed_owner(t, owner='event')
+            # The event ledger exists but no longer carries this session's rows
+            # — precisely what the retention pass leaves behind.
+            open(t['event_ledger'], 'w').close()
+
+            rc, out = self._run_legacy(t)
+            self.assertEqual(rc, 0, out)
+
+            self.assertEqual(
+                self._legacy_completions(t), [],
+                'an event-owned session whose API: rows have been pruned must NOT be '
+                're-billed — and specifically not from a zero baseline, which is what '
+                f'the derived partition did. Got: {self._legacy_completions(t)!r}')
+            self.assertEqual(self._hermes_lines(t), [])
+        finally:
+            self._teardown_tree(t)
+
+
 if __name__ == '__main__':
     unittest.main()
