@@ -1446,8 +1446,32 @@ PY
     # path that guard is false unconditionally — session_event_owned staying
     # "false" and owner_baseline staying unread are unreachable consequences
     # of that shared local, not latent hazards.
+    # FOURTH CONJUNCT, found by this task's own mutation verifier
+    # (tests/mutation_verify_takeover.py's AX-08 row): abstention must only
+    # apply when NO owner record exists yet for this sid. Without this
+    # check, a session that already HAS a record (of any owner) but happens
+    # to have zero rows in EITHER billing ledger — e.g. the event path
+    # claimed it and then every one of its ship attempts failed, or a test
+    # fixture seeds a record directly — would skip the ENTIRE claim block,
+    # including the mode-aware takeover's own defensive guard (:1537,
+    # MODE-05), even though there is nothing left to CREATE and therefore
+    # nothing for abstention to prevent. That skip does not double-bill
+    # (sid_legacy_suppressed alone still blocks the emission guard at
+    # :2219), but it silently defeats reconciliation of an EXISTING record
+    # and undercounts the event_owned_skip_count/takeover aggregates — a
+    # regression this task's own AX-08 mutation row caught by observing the
+    # mutated inner guard become unreachable. The filename derivation below
+    # mirrors the claim primitive's own Python-side derivation
+    # (sid.replace('/', '_').replace('\x00', '_')[:200]) byte-for-byte; bash
+    # cannot hold a NUL byte in a variable so that half is a structural
+    # no-op, kept only for parity with the primitive it mirrors.
+    local claim_abstain_probe_name="${sid//\//_}"
+    claim_abstain_probe_name="${claim_abstain_probe_name:0:200}"
+    local owner_record_absent="true"
+    [[ -e "${OWNERS_DIR}/${claim_abstain_probe_name}" ]] && owner_record_absent="false"
+
     local claim_abstain="false"
-    if [[ "${sid_legacy_suppressed}" == "true" && "${legacy_rows_present}" == "false" && "${event_rows_present}" == "false" ]]; then
+    if [[ "${sid_legacy_suppressed}" == "true" && "${legacy_rows_present}" == "false" && "${event_rows_present}" == "false" && "${owner_record_absent}" == "true" ]]; then
       claim_abstain="true"
       ((claim_abstained_count++)) || true
     fi
