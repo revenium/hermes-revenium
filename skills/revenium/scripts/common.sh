@@ -114,6 +114,36 @@ REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-2097152}"
 # collide.
 EVENT_SPOOL_DIR="${REVENIUM_EVENT_SPOOL_DIR:-${STATE_DIR}/api-events}"
 EVENT_LEDGER_FILE="${REVENIUM_EVENT_LEDGER_FILE:-${STATE_DIR}/revenium-api-events.ledger}"
+# quick-260817-tfe (OWN-01/OWN-02): the durable session OWNERSHIP record —
+# one small file per owned session, whose first line is the literal `legacy`
+# or `event` and whose optional second line is the legacy delta path's
+# catch-up baseline. Written by an O_EXCL create from hermes-report.sh and
+# api-event-report.sh; read by both; pruned by prune-markers.sh.
+#
+# WHY A THIRD FILE, separate from both ledgers it partitions between. Before
+# this, ownership was DERIVED — each shipper grepped the other's BILLING
+# ledger at an arbitrary instant — which conflated two different facts and
+# produced two P1 defects: the partition was order-dependent (a real
+# production double-bill on 2026-08-17, see
+# .planning/phases/32-event-driven-metering-on-post-api-request/32-CANARY-EVIDENCE.md),
+# and it inherited the billing ledgers' RETENTION, so pruning an event-owned
+# session's API: rows at MARKER_RETENTION_DAYS erased its only ownership
+# record and let the legacy path re-bill the session's entire cumulative
+# total from a zero baseline. Ownership is a fact established ONCE; a billing
+# ledger is a mutable record of shipments. They need separate objects.
+#
+# WHY ITS LIFETIME IS state.db-KEYED, not retention-keyed. The record must
+# outlive every billing row it partitions, for as long as the session it
+# names can still accrue tokens — i.e. for as long as that session appears in
+# state.db. prune-markers.sh's owners pass keys on exactly that and never on
+# MARKER_RETENTION_DAYS; separating those two lifetimes is the whole point of
+# this path existing.
+#
+# DELIBERATELY ABSENT from the eager `mkdir -p` below — created lazily by the
+# claim primitive (mode 0700), exactly as WARN_FLAGS_DIR is created lazily by
+# its writer. That laziness is load-bearing for OWN-03: an install with no
+# event path in play never creates a single byte of ownership state.
+OWNERS_DIR="${REVENIUM_OWNERS_DIR:-${STATE_DIR}/owners}"
 # Phase 32 Plan 03 (C-9): the shadow-comparison readout, the drain-gate status
 # document, and the rollout switches that separate the event path's DEPLOY
 # (landing a hook + a shipper that are inert) from its BILLING FLIP (letting

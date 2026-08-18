@@ -161,6 +161,122 @@ fi
 # session it is asked about.
 _spool_dirs=("${EVENT_SPOOL_DIR}")
 
+# quick-260817-tfe (OWN-01/OWN-04): the CLAIM PRIMITIVE — the same contract
+# hermes-report.sh implements, in this file's own language. Deliberately
+# duplicated rather than hoisted into common.sh: this is the established
+# discipline for cross-process pairs in this repo (classifier.py vs
+# resolve-markers-dir.py), and it keeps the atomicity claim assertable against
+# THIS file's own source rather than a shared one.
+#
+# Establishes session ownership with a create-and-exclusive open — atomic
+# across processes, no lock held and none needed. That matters here: flock is
+# taken only by cron.sh (this script takes none, hermes-report.sh takes none),
+# so an out-of-band invocation — the exact pattern behind the 2026-08-17
+# double-bill — runs unlocked and can interleave with a cron tick.
+#
+# Usage: _claim_session_owner <sid> <legacy|event> <baseline-tokens>
+# Prints OWNER= / CLAIMED= / BASELINE= on success (the EXISTING record's first
+# line wins when the file was already there — the file is the arbiter), and
+# NOTHING on any I/O failure. Empty output is the contract for "sentinel
+# unavailable"; this script resolves it by DEFERRING the session (OWN-04
+# fail-closed), while hermes-report.sh fails open and bills. The asymmetry is
+# deliberate: symmetric fail-open would double-bill under a shared directory
+# failure. The EXISTS branch carries its OWN handler because a record whose
+# bytes are not valid UTF-8 raises there, not in the create.
+_claim_session_owner() {
+  OWNERS_DIR="${OWNERS_DIR}" \
+  CLAIM_SID="${1:-}" \
+  CLAIM_SIDE="${2:-}" \
+  CLAIM_BASELINE="${3:-0}" \
+  python3 - <<'PY' 2>/dev/null
+import os
+import tempfile
+
+owners_dir = os.environ.get('OWNERS_DIR', '')
+sid = os.environ.get('CLAIM_SID', '')
+side = os.environ.get('CLAIM_SIDE', '')
+
+if not owners_dir or not sid or side not in ('legacy', 'event'):
+    raise SystemExit(0)
+
+# T-OWN-01: the ONLY filename derivation, identical in hermes-report.sh and in
+# prune-markers.sh's owners pass. No separator survives the substitution, so a
+# traversal-shaped segment cannot escape OWNERS_DIR.
+name = sid.replace('/', '_').replace('\x00', '_')[:200]
+if not name:
+    raise SystemExit(0)
+path = os.path.join(owners_dir, name)
+
+try:
+    baseline = int(os.environ.get('CLAIM_BASELINE', '0') or '0')
+except (TypeError, ValueError):
+    baseline = 0
+if baseline < 0:
+    baseline = 0
+
+try:
+    os.makedirs(owners_dir, mode=0o700, exist_ok=True)
+    # quick-260817-tfe / PR #54 review (P1): publish the record ATOMICALLY.
+    # O_EXCL makes CREATION exclusive but leaves the file empty until the
+    # write lands. A concurrent reader inside that window reads an empty
+    # owner, resolves "not owned" (the total predicate's safe direction for
+    # a CORRUPT record, but wrong for a half-published one), and bills —
+    # while the creator finishes writing and bills too. That is the very
+    # double-bill this record exists to prevent, reintroduced in the gap
+    # between create and write.
+    #
+    # Build the record in a temp file and os.link() it into place instead:
+    # link() is atomic AND raises FileExistsError if the target exists, so
+    # it supplies exclusivity and content-at-publication in one step. The
+    # record is therefore never observable without its content. The
+    # FileExistsError propagates to the same handler the O_EXCL create used,
+    # so the reader half below is unchanged.
+    _payload = side + "\n"
+    if baseline > 0:
+        _payload += str(baseline) + "\n"
+    _tfd, _tmp = tempfile.mkstemp(dir=owners_dir, prefix='.claim.')
+    try:
+        with os.fdopen(_tfd, 'w') as _tfh:
+            _tfh.write(_payload)
+        os.chmod(_tmp, 0o600)
+        # A filesystem without hardlink support raises OSError (not
+        # FileExistsError); that falls to the outer `except Exception`, which
+        # prints nothing — the documented fail-open direction (legacy bills,
+        # event defers), never a crash.
+        os.link(_tmp, path)
+    finally:
+        try:
+            os.unlink(_tmp)
+        except Exception:
+            pass
+except FileExistsError:
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            existing_owner = fh.readline().strip()
+            existing_baseline_raw = fh.readline().strip()
+    except Exception:
+        raise SystemExit(0)
+    try:
+        existing_baseline = int(existing_baseline_raw)
+    except (TypeError, ValueError):
+        existing_baseline = None
+    if existing_baseline is not None and existing_baseline < 0:
+        existing_baseline = None
+    print(f"OWNER={existing_owner}")
+    print("CLAIMED=false")
+    print(f"BASELINE={existing_baseline if existing_baseline is not None else ''}")
+    raise SystemExit(0)
+except Exception:
+    raise SystemExit(0)
+
+# The record was written and published atomically above; nothing to do here.
+
+print(f"OWNER={side}")
+print("CLAIMED=true")
+print(f"BASELINE={baseline if baseline > 0 else ''}")
+PY
+}
+
 # C-6: the .ready directory that owns a resolved per-session markers
 # directory — mirrors hermes-report.sh's own belt: when the resolved
 # directory equals the process-level MARKERS_DIR, use the (possibly
@@ -646,6 +762,45 @@ PY
         session_gate="legacy_skip"
         info "shadow: ${sid} is legacy-owned (D-09) — computing would-be rows for comparison, shipping nothing"
       else
+        # quick-260817-tfe (OWN-01 migration): BACKFILL the durable ownership
+        # record before the existing skip. This is the migration path for the
+        # majority of pre-existing sessions, and it is already the correct
+        # outcome for the dual-ledger row of the resolution table, since
+        # legacy wins there too. Best-effort: a failure to write the record
+        # changes nothing here — the skip below is unconditional.
+        local _bf_dual="false"
+        local _bf_baseline=0
+        if [[ -s "${EVENT_LEDGER_FILE}" ]] && grep -qF "|${sid}|" "${EVENT_LEDGER_FILE}" 2>/dev/null; then
+          # Rows in BOTH ledgers — the incident session's own on-disk shape,
+          # and evidence of a past double-bill.
+          _bf_dual="true"
+          # The catch-up baseline, computed from the SAME quantity
+          # hermes-report.sh derives its total_tokens from (input + output in
+          # state.db), so the record this side writes is interchangeable with
+          # the one the legacy side would have written. Without it, a
+          # dual-ledger session claimed from THIS direction would leave the
+          # legacy path measuring its first post-claim delta from a stale
+          # HERMES: line and re-billing tokens the event path already metered
+          # — the exact defect the baseline exists to close, reachable
+          # whenever this script reaches the session first (an out-of-band
+          # invocation, or a tick whose legacy stage failed).
+          if [[ -f "${_env_map_file}" ]]; then
+            _bf_baseline=$(awk -F"${_MAP_SEP}" -v s="${sid}" '$1==s{print $5+$6; exit}' "${_env_map_file}" 2>/dev/null)
+          fi
+          [[ "${_bf_baseline}" =~ ^[0-9]+$ ]] || _bf_baseline=0
+        fi
+        local _bf_output=""
+        _bf_output=$(_claim_session_owner "${sid}" "legacy" "${_bf_baseline}") || _bf_output=""
+        local _bf_created
+        _bf_created=$(printf '%s\n' "${_bf_output}" | sed -n 's/^CLAIMED=//p' | head -1)
+        # Gated on the primitive's created flag so it fires exactly ONCE per
+        # record. A dual-ledger session is a PERMANENT on-disk state matching
+        # every tick forever; an ungated warn here is the unbounded per-tick
+        # warn this repo has already paid 9,039,937 lines for.
+        if [[ "${_bf_dual}" == "true" && "${_bf_created}" == "true" ]]; then
+          local _bf_safe_sid="${sid//[^A-Za-z0-9_:.-]/_}"
+          warn "dual-ledger session claimed for the legacy path: session=${_bf_safe_sid} baseline=${_bf_baseline} — rows exist in BOTH the HERMES: and API: ledgers (evidence of a past double-bill); legacy retains ownership and its delta baseline is reset to the session's current total, so the overlap is never re-billed"
+        fi
         info "skipping ${sid} — already owned by the legacy HERMES: ledger (D-09 partition)"
         continue
       fi
@@ -970,6 +1125,74 @@ PY
         _emit_shadow_row "${sid}" "no_valid_events" "${platform}" "" "${session_legacy_owned}"
       fi
       continue
+    fi
+
+    # =====================================================================
+    # quick-260817-tfe (OWN-01/OWN-04): SESSION OWNERSHIP CLAIM, live mode
+    # only. Shadow mode ships nothing and MUST NOT claim — a shadow-mode claim
+    # would starve the legacy path of a session this path will never bill.
+    #
+    # Placed AFTER the rows-empty exit and BEFORE the per-record ship loop, so
+    # a session that produced no shippable rows never claims, and the settle
+    # gate above has already run — this path never claims a session it is
+    # merely holding.
+    # =====================================================================
+    if [[ "${EVENT_METERING_MODE}" == "live" ]]; then
+      # The resolution table, implemented identically in hermes-report.sh.
+      # Consulting the LEGACY ledger before claiming as `event` is the
+      # mirror-image of that file's own-ledger check: a session reaching this
+      # point with legacy rows present is the dual-ledger case arriving from
+      # this direction, and it must resolve to `legacy` — never to a path with
+      # no delta baseline that may not even be enabled. (In practice the D-09
+      # precondition above already caught it; this is the same rule stated
+      # totally rather than by implication, so the two sites cannot drift.)
+      local claim_side="event"
+      local claim_baseline_in=0
+      local claim_dual="false"
+      if grep -q "^HERMES:${sid}:" "${LEDGER_FILE}" 2>/dev/null; then
+        claim_side="legacy"
+        if [[ -s "${EVENT_LEDGER_FILE}" ]] && grep -qF "|${sid}|" "${EVENT_LEDGER_FILE}" 2>/dev/null; then
+          claim_dual="true"
+          if [[ -f "${_env_map_file}" ]]; then
+            claim_baseline_in=$(awk -F"${_MAP_SEP}" -v s="${sid}" '$1==s{print $5+$6; exit}' "${_env_map_file}" 2>/dev/null)
+          fi
+          [[ "${claim_baseline_in}" =~ ^[0-9]+$ ]] || claim_baseline_in=0
+        fi
+      fi
+
+      local claim_output=""
+      claim_output=$(_claim_session_owner "${sid}" "${claim_side}" "${claim_baseline_in}") || claim_output=""
+
+      local safe_claim_sid="${sid//[^A-Za-z0-9_:.-]/_}"
+      if [[ -z "${claim_output}" ]]; then
+        # OWN-04, fail CLOSED: defer the whole session. Its spool file is
+        # retained and its records stay unledgered, so the next tick retries.
+        # Deferring costs a delay; failing open here would risk a second
+        # biller, and this path is the newcomer — legacy is the incumbent the
+        # goldens pin.
+        warn "session ownership record unavailable for ${safe_claim_sid} — deferring this session (fail-closed); retries next tick"
+        continue
+      fi
+
+      local claim_owner claim_created
+      claim_owner=$(printf '%s\n' "${claim_output}" | sed -n 's/^OWNER=//p' | head -1)
+      claim_created=$(printf '%s\n' "${claim_output}" | sed -n 's/^CLAIMED=//p' | head -1)
+
+      if [[ "${claim_dual}" == "true" && "${claim_created}" == "true" ]]; then
+        warn "dual-ledger session claimed for the legacy path: session=${safe_claim_sid} baseline=${claim_baseline_in} — rows exist in BOTH the HERMES: and API: ledgers (evidence of a past double-bill); legacy retains ownership and its delta baseline is reset to the session's current total, so the overlap is never re-billed"
+      fi
+
+      # THE SINGLE OWNERSHIP PREDICATE, total over every possible string: this
+      # path may ship if and only if the record's first line is exactly the
+      # literal `event`. A corrupt, truncated or hostile record resolves to
+      # "legacy bills, event defers" — exactly one biller, today's behaviour.
+      # There is no third branch.
+      if [[ "${claim_owner}" != "event" ]]; then
+        # One info line per session per tick, mirroring the D-09 skip line's
+        # shape and cadence above — this file's established convention.
+        info "skipping ${safe_claim_sid} — the session ownership record names the legacy path (quick-260817-tfe OWN-01)"
+        continue
+      fi
     fi
 
     local sid_r arid_r model_r provider_raw_r provider_resolved_r
