@@ -207,6 +207,7 @@ _claim_session_owner() {
   CLAIM_BASELINE="${3:-0}" \
   python3 - <<'PY' 2>/dev/null
 import os
+import tempfile
 
 owners_dir = os.environ.get('OWNERS_DIR', '')
 sid = os.environ.get('CLAIM_SID', '')
@@ -236,7 +237,42 @@ if baseline < 0:
 
 try:
     os.makedirs(owners_dir, mode=0o700, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    # quick-260817-tfe / PR #54 review (P1): publish the record ATOMICALLY.
+    # O_EXCL makes CREATION exclusive but leaves the file empty until the
+    # write lands. A concurrent reader inside that window reads an empty
+    # owner, resolves "not owned" (the total predicate's safe direction for a
+    # CORRUPT record, but wrong for a half-published one), and bills — while
+    # the creator finishes writing and bills too. That is the very double-bill
+    # this record exists to prevent, reintroduced in the gap between create
+    # and write.
+    #
+    # Build the record in a temp file and os.link() it into place instead:
+    # link() is atomic AND raises FileExistsError if the target exists, so it
+    # supplies exclusivity and content-at-publication in one step. The record
+    # is therefore never observable without its content. The FileExistsError
+    # propagates to the same handler the O_EXCL create used, so the reader
+    # half below is unchanged.
+    _payload = side + "\n"
+    # A second line is written ONLY for a real catch-up baseline. A record
+    # with no second line is "no floor" — which is what every non-dual-ledger
+    # claim wants, and what a record written by an older build degrades to.
+    if baseline > 0:
+        _payload += str(baseline) + "\n"
+    _tfd, _tmp = tempfile.mkstemp(dir=owners_dir, prefix='.claim.')
+    try:
+        with os.fdopen(_tfd, 'w') as _tfh:
+            _tfh.write(_payload)
+        os.chmod(_tmp, 0o600)
+        # A filesystem without hardlink support raises OSError (not
+        # FileExistsError); that falls to the outer `except Exception`, which
+        # prints nothing — the documented fail-open direction (legacy bills,
+        # event defers), never a crash.
+        os.link(_tmp, path)
+    finally:
+        try:
+            os.unlink(_tmp)
+        except Exception:
+            pass
 except FileExistsError:
     # The record already exists — it wins, always. Read only its FIRST line
     # (the owner) and SECOND line (the baseline); a multi-line file can
@@ -262,17 +298,7 @@ except FileExistsError:
 except Exception:
     raise SystemExit(0)
 
-try:
-    with os.fdopen(fd, 'w') as fh:
-        fh.write(side + "\n")
-        # A second line is written ONLY for a real catch-up baseline. A record
-        # with no second line is "no floor" — which is what every non-
-        # dual-ledger claim wants, and what a record written by an older build
-        # degrades to.
-        if baseline > 0:
-            fh.write(str(baseline) + "\n")
-except Exception:
-    raise SystemExit(0)
+# The record was written and published atomically above; nothing to do here.
 
 print(f"OWNER={side}")
 print("CLAIMED=true")

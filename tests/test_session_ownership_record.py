@@ -944,19 +944,47 @@ class AtomicClaimTests(OwnershipTestBase):
         finally:
             self._teardown_tree(t)
 
-    def test_both_claim_sites_use_the_exclusive_create(self):
+    def test_both_claim_sites_publish_the_record_atomically_with_its_content(self):
         """Static, so the atomicity claim cannot be vacuously true. Comment
-        lines are stripped before matching — a flag combination that appears
-        only in prose proves nothing."""
+        lines are stripped before matching — a primitive that appears only in
+        prose proves nothing.
+
+        This asserts the PROPERTY, not a mechanism. It previously pinned the
+        literal flags `os.O_CREAT | os.O_EXCL | os.O_WRONLY`, and PR #54's
+        review showed that mechanism to be insufficient: O_EXCL makes the
+        CREATE exclusive but leaves the file empty until the write lands, and a
+        concurrent reader inside that window reads an empty owner, resolves
+        "not owned", and bills — while the creator finishes writing and bills
+        too. A test that pins the weaker mechanism would have blocked its own
+        fix, which is this repo's recorded "test defending the current
+        behaviour rather than a property" trap.
+
+        The property that actually matters: a claim must be atomic, exclusive,
+        and never observable without its content — because no lock is held
+        anywhere on either shipper. `os.link()` supplies all three: it is
+        atomic, it raises FileExistsError if the target exists, and it
+        publishes a file that already has its payload.
+        """
         for script in ('hermes-report.sh', 'api-event-report.sh'):
             text = (SCRIPTS_DIR / script).read_text()
             code = '\n'.join(ln for ln in text.splitlines()
                              if not ln.lstrip().startswith('#'))
             self.assertIn(
-                'os.O_CREAT | os.O_EXCL | os.O_WRONLY', code,
-                f'{script} must establish ownership with a create-and-exclusive open — '
-                'no lock is held anywhere on either shipper, so O_EXCL is the whole of '
-                'the cross-process atomicity')
+                'os.link(', code,
+                f'{script} must publish the ownership record with an atomic '
+                'exclusive link — no lock is held on either shipper, so the '
+                'publish itself is the whole of the cross-process atomicity')
+            self.assertIn(
+                'tempfile.mkstemp(', code,
+                f'{script} must build the record out of line before publishing '
+                'it, so the record is never visible without its content')
+            link_at = code.index('os.link(')
+            write_at = code.index('_tfh.write(')
+            self.assertLess(
+                write_at, link_at,
+                f'{script} must write the payload BEFORE the link that '
+                'publishes it — publishing first reintroduces the empty-record '
+                'window that PR #54 review found')
 
 
 # ============================================================================
