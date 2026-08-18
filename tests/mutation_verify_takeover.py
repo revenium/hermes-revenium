@@ -96,6 +96,12 @@ A21 = f'{TRACER}.test_a21_disengaged_install_meters_byte_identically_and_creates
 A23 = f'{REGRESSION}.test_a23_own_04_claim_fail_direction_is_unchanged_by_the_takeover'
 A24 = f'{REGRESSION}.test_a24_the_takeover_primitive_can_only_ever_write_the_legacy_literal'
 A25 = f'{PROFILES}.test_a25_a_stale_snapshot_baseline_is_floored_out_by_the_publish_instant_reread'
+# The race window's own assertion. It lives in a separate module because it
+# needs a PATH shim to stall one racer between its OWNER=event observation
+# and its replace -- A18 cannot host it, since A18's whole method is to seed
+# the post-takeover state and avoid real thread timing.
+RACE = 'tests.test_ax14_takeover_race_window.TakeoverRaceWindowTests'
+A26 = f'{RACE}.test_late_replace_with_a_failed_ax21_reread_lowers_the_floor'
 
 # ---------------------------------------------------------------------------
 # The mutation table. One row per axis (per the runner contract), except
@@ -108,8 +114,9 @@ _GUARD_IF = ('if [[ "${EVENT_PATH_LIVE}" == "true" || '
              '"${LEGACY_COMPLETIONS_SKIP}" == "true" ]]; then')
 _FLOOR_IF = ('if [[ "${owner_baseline}" =~ ^[0-9]+$ && '
              '"${owner_baseline}" -gt 0 ]]; then')
-_MAX_LINE = 'new_baseline = max(requested, known, live_total, 0)'
+_MAX_LINE = 'new_baseline = max(requested, known, live_total, on_disk, 0)'
 _LEGACY_WRITE = '_tfh.write("legacy\\n")'
+_ONDISK_READ_OPEN = '    with open(path) as _rfh:'
 _TAKEOVER_PATH_BLOCK = (
     "sid = os.environ.get('TAKEOVER_SID', '')\n"
     "\n"
@@ -236,11 +243,29 @@ AX21_MUTATIONS = [
          tests=[A25], non_overlap_test=A18),
     dict(axis='AX-21b', description='drop the re-read from the max() while leaving the query in place',
          file=HERMES_REPORT, search=_MAX_LINE,
-         replace='new_baseline = max(requested, known, 0)',
+         replace='new_baseline = max(requested, known, on_disk, 0)',
          tests=[A25], non_overlap_test=A18),
     dict(axis='AX-21c', description='change the summed columns so the value is real but in the wrong units',
          file=HERMES_REPORT, search=_AX21_QUERY, replace=_AX21_QUERY_WRONG_UNITS,
          tests=[A25], non_overlap_test=A18),
+]
+
+# AX-14 (the race window) gained a real mutation surface when the race fix
+# landed. Before it, AX-14 was asserted only by A18 -- which seeds the
+# post-takeover state and runs ONE reporter, so it never opens the window.
+# These two rows target the on-disk record re-read specifically: 14a removes
+# the term from the max(), 14b keeps the term but breaks the read so it
+# always yields 0, which is the exact production failure mode (the except
+# branch) that lets a stale `known` win.
+AX14_RACE_MUTATIONS = [
+    dict(axis='AX-14a', description='drop the on-disk record re-read from the max() (loser republishes its stale floor)',
+         file=HERMES_REPORT, search=_MAX_LINE,
+         replace='new_baseline = max(requested, known, live_total, 0)',
+         tests=[A26], non_overlap_test=A18),
+    dict(axis='AX-14b', description='keep the term but make the record read always fail (exercises the except path)',
+         file=HERMES_REPORT, search=_ONDISK_READ_OPEN,
+         replace="    with open(path + '.nonexistent-for-mutation') as _rfh:",
+         tests=[A26], non_overlap_test=A18),
 ]
 
 STRUCTURAL_AXES = [
@@ -306,7 +331,15 @@ def apply_mutation(target: Path, search: str, replace: str):
 
 
 _RAN_RE = re.compile(r'^Ran (\d+) tests? in', re.MULTILINE)
-_TRAILING_OK_RE = re.compile(r'^OK$', re.MULTILINE)
+# unittest's success line is NOT always a bare 'OK': it becomes
+# 'OK (expected failures=1)' or 'OK (skipped=2)' as soon as the suite
+# contains a decorated test. A '^OK$' anchor silently reports a PASSING
+# suite as FAILED -- measured, not theorised: it did exactly that when
+# test_ax14_takeover_race_window's expectedFailure control landed. The
+# trailing-status contract is 'a line that STARTS with OK', with any
+# parenthesised qualifier; a genuine failure prints 'FAILED (...)' and
+# never starts with OK.
+_TRAILING_OK_RE = re.compile(r'^OK(?: \([^)]*\))?$', re.MULTILINE)
 _TRAILING_FAILED_RE = re.compile(r'^FAILED \(([^)]*)\)$', re.MULTILINE)
 _FAIL_HEADER_RE = re.compile(r'^(?:FAIL|ERROR): \S+ \(([\w.]+)\)\s*$', re.MULTILINE)
 
@@ -439,7 +472,7 @@ def print_table(rows):
 def main():
     backups = load_pristine_backups(TARGET_FILES)
 
-    all_rows = list(MUTATIONS) + list(AX21_MUTATIONS)
+    all_rows = list(MUTATIONS) + list(AX21_MUTATIONS) + list(AX14_RACE_MUTATIONS)
     results = []
     aborted = False
     for row in all_rows:
