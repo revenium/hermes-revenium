@@ -828,7 +828,19 @@ class RegressionGuardTests(OwnershipTestBase):
         legacy, plus a catch-up baseline and a once-per-record warn) is
         entirely #54's own code path and must never route through the new
         takeover branch — a regression here would mean the two features'
-        code paths have become entangled."""
+        code paths have become entangled.
+
+        The takeover-warn assertion below is load-bearing, not decorative:
+        a dual-ledger claim mistakenly resolved to `event` would land on
+        THIS module's own takeover branch in the SAME tick (mode defaults
+        to shadow) and get flipped back to `legacy` with the SAME baseline
+        — self-healing to an identical final owner/baseline/dual-warn
+        state that the three assertions above cannot distinguish from a
+        claim that resolved to `legacy` correctly the first time. Only the
+        ABSENCE of a takeover warn proves the claim went straight to
+        `legacy` without ever touching the takeover path — measured
+        directly while building tests/mutation_verify_takeover.py's AX-16
+        row, which would otherwise have silently passed."""
         t = self._setup_tree(session_kwargs={'input_tokens': 8608, 'output_tokens': 4000})
         try:
             self._seed_legacy_ledger(t, totals=(self.INCIDENT_TOTAL, self.INCIDENT_TOTAL))
@@ -841,6 +853,11 @@ class RegressionGuardTests(OwnershipTestBase):
             self.assertEqual(owner, 'legacy')
             self.assertEqual(baseline, str(self.INCIDENT_TOTAL))
             self.assertEqual(len(self._dual_ledger_warns(t)), 1)
+            self.assertEqual(
+                len(_takeover_warns(self._log_text(t))), 0,
+                'a correctly-resolved dual-ledger claim must go straight to `legacy` '
+                'and never touch the takeover branch at all — a takeover warn here '
+                'means the resolution table routed through `event` first')
         finally:
             self._teardown_tree(t)
 
