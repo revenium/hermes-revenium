@@ -123,10 +123,35 @@ except (TypeError, ValueError):
 # window can never be judged stale (STALE-05/AX-S19). Both the configured
 # and effective numbers are reported in the status document -- see
 # EXTRA_DOC_FIELDS below.
+# AX-S31: `float()` accepts 'nan' and 'inf', and neither is caught by the
+# ValueError path below. Both are silently corrosive rather than unsafe:
+#   - 'inf'  -> no finite session age ever exceeds the threshold, so the
+#              staleness route can never grant terminal;
+#   - 'nan'  -> EVERY comparison against it is False, with the same effect,
+#              and it serialises into the status document as the bare token
+#              `NaN`, which is a Python extension to JSON and not valid JSON
+#              for a stricter reader than our own.
+# Either way the gate silently cannot open through this route -- which is the
+# exact deadlock this change exists to remove, reintroduced by a typo and with
+# no diagnosis. So a non-finite value is treated as INVALID (fall back to the
+# default) rather than as a disable request: a disable has its own explicit
+# spelling (`<= 0`), and silently honouring a malformed value as "off" would
+# hide the misconfiguration instead of surviving it.
+_stale_raw = os.environ.get('REVENIUM_DRAIN_STALE_SECONDS', '604800')
+stale_seconds_invalid = False
 try:
-    stale_seconds_configured = float(os.environ.get('REVENIUM_DRAIN_STALE_SECONDS', '604800'))
+    stale_seconds_configured = float(_stale_raw)
 except (TypeError, ValueError):
     stale_seconds_configured = 604800.0
+    stale_seconds_invalid = True
+if (stale_seconds_configured != stale_seconds_configured
+        or abs(stale_seconds_configured) == float('inf')):
+    # Deliberately import-free: `x != x` is the NaN test and
+    # `abs(x) == float('inf')` covers both signed infinities. `math` is NOT
+    # imported in this heredoc, and reaching for it here would raise
+    # NameError inside a block whose caller redirects stderr.
+    stale_seconds_configured = 604800.0
+    stale_seconds_invalid = True
 if stale_seconds_configured <= 0:
     stale_enabled = False
     stale_seconds_effective = 0.0
@@ -150,6 +175,12 @@ EXTRA_DOC_FIELDS = {
     'staleSecondsConfigured': stale_seconds_configured,
     'staleSecondsEffective': stale_seconds_effective,
     'staleEnabled': stale_enabled,
+    # AX-S31: surfaced so a malformed threshold is DIAGNOSABLE rather than a
+    # silent revert to the default. Reported in the document, not as a
+    # per-tick warn -- an ungated per-tick warn on this phase produced
+    # millions of log lines, and a misconfiguration that persists for weeks
+    # is exactly the shape that would do it again.
+    'staleSecondsInvalid': stale_seconds_invalid,
 }
 
 # C-11's muid shapes: a real muid is 13-hex-ms-ts + 20-hex-random = 33

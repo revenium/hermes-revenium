@@ -53,6 +53,14 @@ SCRIPTS_DIR = ROOT / 'skills' / 'revenium' / 'scripts'
 STALE_SECONDS = 100000.0
 
 
+def _reject_json_constant(name):
+    """Passed as json.loads(parse_constant=...) so NaN/Infinity/-Infinity —
+    which json.loads otherwise accepts as a Python extension — raise instead
+    of silently parsing. Without this the strict-JSON assertion would pass on
+    a document no non-Python reader could load."""
+    raise AssertionError(f'non-strict JSON constant in the status document: {name}')
+
+
 def _ledger_line(sid, total_tokens, ts, muid=MUID):
     return f'HERMES:{sid}:{total_tokens}:{ts:.3f}:{muid}\n'
 
@@ -240,6 +248,88 @@ class ThresholdBoundaryTests(DrainStalenessTestBase):
 # ============================================================================
 # AX-S04..S06 -- resume / activity composition
 # ============================================================================
+
+class NonFiniteThresholdTests(DrainStalenessTestBase):
+    """AX-S31 (found by review of PR #57). `float()` accepts 'nan' and 'inf',
+    and the ValueError path does not catch either.
+
+    Both are silently corrosive rather than unsafe: 'inf' means no finite age
+    ever exceeds the threshold, and every comparison against 'nan' is False,
+    so in both cases the staleness route can never grant terminal -- the exact
+    deadlock this feature exists to remove, reintroduced by a typo and with no
+    diagnosis. 'nan' additionally serialises as the bare token `NaN`, a Python
+    extension to JSON that a stricter reader than ours would reject.
+
+    A non-finite value is INVALID (falls back to the default), not a disable
+    request: disabling has its own explicit spelling (`<= 0`), and honouring a
+    malformed value as 'off' would hide the misconfiguration rather than
+    survive it."""
+
+    def _probe(self, raw):
+        tmpdir, hh, sd = self._setup_tree()
+        try:
+            sid = 'sess-nonfinite'
+            old_ts = time.time() - (10 * 86400)
+            self._write_ledger(sd, [_ledger_line(sid, 100, old_ts)])
+            # No activity column: the population the carve-out protects.
+            self._write_state_db(hh, [{'id': sid, 'ended_at': None}], False)
+            _rc, doc, _out, _err = self._run(hh, sd, extra_env={
+                'REVENIUM_DRAIN_STALE_SECONDS': raw})
+            return doc
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ax_s31_nan_falls_back_to_the_default_and_is_flagged(self):
+        doc = self._probe('nan')
+        self.assertTrue(doc['staleEnabled'],
+                        'nan must not silently disable the route')
+        self.assertEqual(doc['staleSecondsConfigured'], 604800.0,
+                         'nan must fall back to the default, not propagate')
+        self.assertTrue(doc['staleSecondsInvalid'],
+                        'the misconfiguration must be DIAGNOSABLE in the document')
+
+    def test_ax_s31_positive_infinity_falls_back_and_is_flagged(self):
+        doc = self._probe('inf')
+        self.assertEqual(doc['staleSecondsConfigured'], 604800.0)
+        self.assertTrue(doc['staleSecondsInvalid'])
+        self.assertTrue(doc['staleEnabled'])
+
+    def test_ax_s31_negative_infinity_falls_back_rather_than_reading_as_disable(self):
+        """-inf is `<= 0` arithmetically, so without the finite check it would
+        be read as an explicit disable request. It is a malformed value, not a
+        deliberate opt-out, and must be reported as such."""
+        doc = self._probe('-inf')
+        self.assertEqual(doc['staleSecondsConfigured'], 604800.0)
+        self.assertTrue(doc['staleSecondsInvalid'])
+        self.assertTrue(doc['staleEnabled'],
+                        '-inf must NOT be honoured as the <= 0 opt-out')
+
+    def test_ax_s31_the_document_is_strict_json_under_nan(self):
+        """`json.loads` accepts `NaN` as a Python extension, so our own reader
+        would not have caught this. Assert the serialised bytes are valid
+        STRICT JSON, which is what a non-Python consumer would require."""
+        tmpdir, hh, sd = self._setup_tree()
+        try:
+            sid = 'sess-nonfinite-strict'
+            old_ts = time.time() - (10 * 86400)
+            self._write_ledger(sd, [_ledger_line(sid, 100, old_ts)])
+            self._write_state_db(hh, [{'id': sid, 'ended_at': None}], False)
+            self._run(hh, sd, extra_env={'REVENIUM_DRAIN_STALE_SECONDS': 'nan'})
+            raw = open(os.path.join(sd, 'drain-status.json')).read()
+            self.assertNotIn('NaN', raw,
+                             'the bare token NaN is not valid JSON for a strict reader')
+            json.loads(raw, parse_constant=_reject_json_constant)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ax_s31_explicit_zero_still_disables(self):
+        """The opt-out must survive the new validation — a regression here
+        would remove the documented escape hatch."""
+        doc = self._probe('0')
+        self.assertFalse(doc['staleEnabled'])
+        self.assertFalse(doc['staleSecondsInvalid'],
+                         '0 is a deliberate opt-out, NOT a misconfiguration')
+
 
 class ResumeAndActivityCompositionTests(DrainStalenessTestBase):
     def test_ax_s04_resume_via_activity_withdraws_drained_verdict(self):
