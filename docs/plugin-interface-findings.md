@@ -208,9 +208,9 @@ Two consequences for `pre_tool_call.sh`:
 
 ## Corrections
 
-**The gateway session-reset root cause recorded on 2026-08-13 was wrong.**
+**The gateway `session_reset` root cause recorded on 2026-08-13 was wrong.**
 
-The original note asserted that a fresh v0.20.1 defaults its session-reset policy
+The original note asserted that a fresh v0.20.1 defaults its `session_reset` policy
 to a mode of `none`, making gateway sessions continuous so `on_session_end`
 structurally never fires. **That explanation does not hold** — the root
 configuration actually sets that policy to a mode of `both`. The *observation*
@@ -223,14 +223,23 @@ send a future reader to change a config knob that is not the problem — and
 changing that particular knob has a real cost, since forcing a reset policy makes
 conversations lose context. Rejecting that change is a standing decision in this
 repository, pinned by a repository-scoped test
-(`tests/test_phase29_no_session_reset_change.py`) that fails if the setting's key
-appears anywhere in the shipped tree.
+(`tests/test_phase29_no_session_reset_change.py`) that fails if `session_reset`
+appears in shipped CODE.
 
-**Note on spelling.** This section deliberately writes the setting's name in prose
-("session-reset policy") rather than as its literal underscored config key. That
-guard scans every shipped file for the key, and it should stay absolute — a
-documentation file is not a reason to add an exclusion to it. If you are editing
-this paragraph, do not "correct" the hyphen back; you will turn the suite red.
+**Note on spelling — revised 2026-08-19 (PR #62).** This section previously wrote
+the setting's name in prose ("session-reset policy") rather than as its literal
+underscored config key, because the guard then scanned every shipped file for the
+bare token and a documentation file was not considered a reason to add an
+exclusion. That was the wrong trade: it also forced two production docstrings in
+`revenium-classifier/__init__.py` to name a key that does not exist, which made
+the design rationale unfindable by grep for the thing it is about.
+
+The guard is now positional rather than textual — it scans CODE only, skipping
+comments, Python docstrings, and prose-only files (`.md`, `.txt`). Documentation
+is free to name `session_reset` directly, and this paragraph now does. Code may
+not touch the key at all; reads are in scope on purpose, because this skill
+references it nowhere today and any code reference would be a deliberate change
+worth a conversation.
 
 ## Disposition of the proposals this work produced
 
