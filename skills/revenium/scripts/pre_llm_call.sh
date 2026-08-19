@@ -15,10 +15,14 @@ ensure_path
 # MUST be the first executable statement after ensure_path — Hermes pipes the JSON
 # payload and waits for stdin to be consumed before reading stdout. An early exit
 # without reading stdin hangs the hook (RESEARCH.md Pitfall 1).
-# The pre_llm_call hook does not parse the payload — drain and discard it.
+# Captured rather than discarded since 2026-08-19: the warn-band sentinel is keyed
+# on (session, rule), and the payload is the only authoritative source of
+# session_id. pre_tool_call.sh:17 has always done this; this hook scanned the
+# sessions dir instead and silently degraded whenever that scan came up empty.
+# `payload="$(cat -)"` drains stdin exactly as fully as `cat - >/dev/null` did.
 # WARNING: Do NOT move this line. Moving it will cause the hook to hang in production
 # because Hermes blocks on stdin before reading stdout (Pitfall 1 mitigation).
-cat - >/dev/null
+payload="$(cat -)"
 
 # Read guardrail status — multi-value extraction (halted + haltedRule in one call).
 # Fail-open: any exception prints HALTED=false (HOOK-04).
@@ -62,8 +66,35 @@ except Exception:
   if [[ -n "${WARN_INFO}" ]]; then
     # Resolve session_id for rate-limit sentinel (mirrors pre_tool_call.sh:51-64 pattern).
     # Pitfall 4: session_id is often empty in the hook payload; scan newest non-cron session file.
-    SESSION_ID=$(HERMES_HOME="${HERMES_HOME}" python3 -c "
-import os, time
+    # REVENIUM_HOOK_PAYLOAD passes the payload through the ENVIRONMENT rather than
+    # interpolating it into the quoted heredoc. pre_tool_call.sh interpolates
+    # ('''${payload}'''), which a payload carrying a quote or a triple-quote can
+    # break; the env route cannot be broken by payload content at all.
+    SESSION_ID=$(HERMES_HOME="${HERMES_HOME}" REVENIUM_HOOK_PAYLOAD="${payload}" python3 -c "
+import json, os
+# The sentinel that rate-limits this warn is keyed on (session, rule), so an
+# UNRESOLVABLE session must still yield a STABLE key. It used to return
+# 'unknown-' + int(time.time()), which changes every second: the sentinel never
+# matched, the warn fired on EVERY call, and one flag file leaked per call.
+# Measured 2026-08-19 during the Phase 19 SC-8 real-breach run — 4 calls, 4 warn
+# lines, 4 files. That is exactly the unbounded-warn failure WARN_FLAGS_DIR
+# exists to prevent. A constant under-warns (one line per rule per install
+# instead of per session) and that is the correct direction to err.
+UNRESOLVED_SID = 'unresolved-session'
+
+# Payload first — it is authoritative when present. Only fall back to scanning
+# the sessions dir (which picks the newest file, not necessarily THIS session)
+# when the payload carries no usable id.
+try:
+    _sid = (json.loads(os.environ.get('REVENIUM_HOOK_PAYLOAD') or '{}') or {}).get('session_id') or ''
+    if _sid and '/' not in _sid and '..' not in _sid:
+        print(_sid)
+        raise SystemExit(0)
+except SystemExit:
+    raise
+except Exception:
+    pass
+
 sessions_dir = os.path.join(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes')), 'sessions')
 try:
     candidates = [f for f in os.listdir(sessions_dir)
@@ -76,12 +107,12 @@ try:
         if '/' not in sid and '..' not in sid:
             print(sid)
         else:
-            print('unknown-' + str(int(time.time())))
+            print(UNRESOLVED_SID)
     else:
-        print('unknown-' + str(int(time.time())))
+        print(UNRESOLVED_SID)
 except Exception:
-    print('unknown-' + str(int(time.time())))
-" 2>/dev/null || echo "unknown-$$")
+    print(UNRESOLVED_SID)
+" 2>/dev/null || echo "unresolved-session")
 
     while IFS= read -r warn_line; do
       [[ -z "${warn_line}" ]] && continue

@@ -56,7 +56,7 @@ except Exception:
   if [[ -n "${WARN_INFO}" ]]; then
     # Resolve session_id: try payload first, then scan sessions dir (Pitfall 2).
     SESSION_ID=$(HERMES_HOME="${HERMES_HOME}" python3 -c "
-import json, os, time
+import json, os
 payload_str = '''${payload}'''
 try:
     payload_obj = json.loads(payload_str)
@@ -66,6 +66,15 @@ try:
         raise SystemExit(0)
 except Exception:
     pass
+# The sentinel that rate-limits this warn is keyed on (session, rule), so an
+# UNRESOLVABLE session must still yield a STABLE key. It used to return
+# 'unknown-' + int(time.time()), which changes every second: the sentinel never
+# matched, the warn fired on EVERY call, and one flag file leaked per call.
+# Measured 2026-08-19 during the Phase 19 SC-8 real-breach run — 4 calls, 4 warn
+# lines, 4 files. That is exactly the unbounded-warn failure WARN_FLAGS_DIR
+# exists to prevent. A constant under-warns (one line per rule per install
+# instead of per session) and that is the correct direction to err.
+UNRESOLVED_SID = 'unresolved-session'
 sessions_dir = os.path.join(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes')), 'sessions')
 try:
     candidates = [f for f in os.listdir(sessions_dir)
@@ -75,10 +84,10 @@ try:
         newest = max(candidates, key=lambda f: os.path.getmtime(os.path.join(sessions_dir, f)))
         print(newest[len('session_'):-len('.json')])
     else:
-        print('unknown-' + str(int(time.time())))
+        print(UNRESOLVED_SID)
 except Exception:
-    print('unknown-' + str(int(time.time())))
-" 2>/dev/null || echo "unknown-$$")
+    print(UNRESOLVED_SID)
+" 2>/dev/null || echo "unresolved-session")
 
     while IFS= read -r warn_line; do
       [[ -z "${warn_line}" ]] && continue

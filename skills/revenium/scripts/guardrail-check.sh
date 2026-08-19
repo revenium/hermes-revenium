@@ -223,6 +223,10 @@ for r in api_rules:
         'hardLimit': r.get('threshold', 0),       # API: threshold -> schema: hardLimit
         'state': state,
         'shadowMode': bool(r.get('shadowMode', False)),
+        # windowKey (e.g. 'DAILY:2026-08-19') is what makes a manual clear
+        # expire on its own: an acknowledgement is scoped to the window it was
+        # made in, and stops applying the moment the window rolls.
+        'windowKey': r.get('windowKey', ''),
         'lastChecked': now,
     })
 
@@ -235,10 +239,64 @@ except Exception:
 prev_halted = bool(prev.get('halted', False))
 prev_halted_at = prev.get('haltedAt')
 
+# --- Manual-clear acknowledgement (SC-8 defect 2) -------------------------
+# The halt string tells the operator "To resume: clear-halt.sh". Before this,
+# that bought exactly one tick: the rule was still over its limit, so the very
+# next run re-derived block and re-halted. Measured 2026-08-19 during the
+# Phase 19 SC-8 real-breach run.
+#
+# clear-halt.sh now records the windowKey it cleared each rule in. A rule whose
+# CURRENT windowKey still matches its acknowledgement is suppressed here: it
+# keeps state 'block' so dashboards and the warn band still see the truth, but
+# it is excluded from the halt decision below.
+#
+# This does NOT set halted back to false — clear-halt.sh remains the only thing
+# that does. It prevents this run from setting it back to TRUE for a breach the
+# operator has already acknowledged in this window.
+#
+# The acknowledgement expires by itself: when the window rolls, windowKey
+# changes, the entry stops matching, and the rule halts again. Entries that no
+# longer match any current rule window are dropped rather than accumulating.
+cleared_windows = {}
+try:
+    raw_cleared = prev.get('clearedWindows') or {}
+    if isinstance(raw_cleared, dict):
+        cleared_windows = {str(k): str(v) for k, v in raw_cleared.items() if k and v}
+except Exception:
+    cleared_windows = {}
+
+acknowledged = set()
+seen_windows = {}
+for r in new_rules:
+    rid = r.get('ruleId') or ''
+    wk = r.get('windowKey') or ''
+    if not rid:
+        continue
+    if wk:
+        seen_windows[rid] = wk
+    if wk and cleared_windows.get(rid) == wk and r['state'] == 'block':
+        acknowledged.add(rid)
+
+# Prune ONLY on positive evidence that the window rolled — i.e. the rule is
+# present in THIS response and reports a different windowKey. An entry whose
+# rule is missing from the response is carried forward untouched.
+#
+# The earlier version kept only entries confirmed by the current response, which
+# meant a transient API failure or a partial page silently erased the operator's
+# acknowledgement; the rule would come back breached inside the same window and
+# re-halt, which is the exact defect this whole mechanism exists to fix. Absence
+# of evidence is not evidence the window rolled. Caught in review of PR #65.
+cleared_windows = {
+    rid: wk for rid, wk in cleared_windows.items()
+    if rid not in seen_windows or seen_windows[rid] == wk
+}
+
 # Top-level halted derivation — shadow-mode rules are excluded from the halt
 # decision (quick-260528-gve) so they record signal without blocking traffic.
 any_blocked = any(
-    r['state'] == 'block' and not r.get('shadowMode', False)
+    r['state'] == 'block'
+    and not r.get('shadowMode', False)
+    and (r.get('ruleId') or '') not in acknowledged
     for r in new_rules
 )
 new_halted = autonomous and any_blocked
@@ -259,7 +317,9 @@ halted_rule = None
 if new_halted:
     blocked = [
         r for r in new_rules
-        if r['state'] == 'block' and not r.get('shadowMode', False)
+        if r['state'] == 'block'
+        and not r.get('shadowMode', False)
+        and (r.get('ruleId') or '') not in acknowledged
     ]
     if blocked:
         first = blocked[0]
@@ -300,6 +360,9 @@ for nr in new_rules:
 data = {
     'halted': new_halted,
     'autonomousMode': autonomous,
+    # Carried forward, pruned to windows that are still current. Written even
+    # when empty so the key's absence never has to be distinguished from {}.
+    'clearedWindows': cleared_windows,
     'lastChecked': now,
     'rules': new_rules,
 }
