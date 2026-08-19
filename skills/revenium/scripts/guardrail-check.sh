@@ -223,6 +223,10 @@ for r in api_rules:
         'hardLimit': r.get('threshold', 0),       # API: threshold -> schema: hardLimit
         'state': state,
         'shadowMode': bool(r.get('shadowMode', False)),
+        # windowKey (e.g. 'DAILY:2026-08-19') is what makes a manual clear
+        # expire on its own: an acknowledgement is scoped to the window it was
+        # made in, and stops applying the moment the window rolls.
+        'windowKey': r.get('windowKey', ''),
         'lastChecked': now,
     })
 
@@ -235,10 +239,49 @@ except Exception:
 prev_halted = bool(prev.get('halted', False))
 prev_halted_at = prev.get('haltedAt')
 
+# --- Manual-clear acknowledgement (SC-8 defect 2) -------------------------
+# The halt string tells the operator "To resume: clear-halt.sh". Before this,
+# that bought exactly one tick: the rule was still over its limit, so the very
+# next run re-derived block and re-halted. Measured 2026-08-19 during the
+# Phase 19 SC-8 real-breach run.
+#
+# clear-halt.sh now records the windowKey it cleared each rule in. A rule whose
+# CURRENT windowKey still matches its acknowledgement is suppressed here: it
+# keeps state 'block' so dashboards and the warn band still see the truth, but
+# it is excluded from the halt decision below.
+#
+# This does NOT set halted back to false — clear-halt.sh remains the only thing
+# that does. It prevents this run from setting it back to TRUE for a breach the
+# operator has already acknowledged in this window.
+#
+# The acknowledgement expires by itself: when the window rolls, windowKey
+# changes, the entry stops matching, and the rule halts again. Entries that no
+# longer match any current rule window are dropped rather than accumulating.
+cleared_windows = {}
+try:
+    raw_cleared = prev.get('clearedWindows') or {}
+    if isinstance(raw_cleared, dict):
+        cleared_windows = {str(k): str(v) for k, v in raw_cleared.items() if k and v}
+except Exception:
+    cleared_windows = {}
+
+acknowledged = set()
+live_cleared = {}
+for r in new_rules:
+    rid = r.get('ruleId') or ''
+    wk = r.get('windowKey') or ''
+    if rid and wk and cleared_windows.get(rid) == wk:
+        live_cleared[rid] = wk
+        if r['state'] == 'block':
+            acknowledged.add(rid)
+cleared_windows = live_cleared
+
 # Top-level halted derivation — shadow-mode rules are excluded from the halt
 # decision (quick-260528-gve) so they record signal without blocking traffic.
 any_blocked = any(
-    r['state'] == 'block' and not r.get('shadowMode', False)
+    r['state'] == 'block'
+    and not r.get('shadowMode', False)
+    and (r.get('ruleId') or '') not in acknowledged
     for r in new_rules
 )
 new_halted = autonomous and any_blocked
@@ -259,7 +302,9 @@ halted_rule = None
 if new_halted:
     blocked = [
         r for r in new_rules
-        if r['state'] == 'block' and not r.get('shadowMode', False)
+        if r['state'] == 'block'
+        and not r.get('shadowMode', False)
+        and (r.get('ruleId') or '') not in acknowledged
     ]
     if blocked:
         first = blocked[0]
@@ -300,6 +345,9 @@ for nr in new_rules:
 data = {
     'halted': new_halted,
     'autonomousMode': autonomous,
+    # Carried forward, pruned to windows that are still current. Written even
+    # when empty so the key's absence never has to be distinguished from {}.
+    'clearedWindows': cleared_windows,
     'lastChecked': now,
     'rules': new_rules,
 }

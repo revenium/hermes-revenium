@@ -59,6 +59,26 @@ else:
         r['state'] = 'ok'
     print(f'Cleared {len(cleared)} blocked rule(s). The agent may now resume operations.')
 
+# Record the acknowledgement (SC-8 defect 2). Each rule cleared here is stamped
+# with the windowKey it was cleared IN, so guardrail-check.sh can tell "the
+# operator already accepted this breach" from "a fresh breach". Without it, the
+# next tick re-halted on the same still-over-limit rule and the halt string's
+# "To resume: clear-halt.sh" bought about one tick.
+#
+# Scoped to the window on purpose: when the window rolls, windowKey changes, the
+# entry stops matching, and enforcement resumes with no manual step. A rule with
+# no windowKey (older status file) is simply not recorded — it degrades to the
+# previous behaviour rather than suppressing forever.
+cleared_windows = data.get('clearedWindows')
+if not isinstance(cleared_windows, dict):
+    cleared_windows = {}
+for r in (cleared if not rule_id else [target]):
+    rid = r.get('ruleId') or ''
+    wk = r.get('windowKey') or ''
+    if rid and wk:
+        cleared_windows[rid] = wk
+data['clearedWindows'] = cleared_windows
+
 # Recompute top-level halted
 any_blocked = any(r.get('state') == 'block' for r in rules)
 new_halted = autonomous and any_blocked
