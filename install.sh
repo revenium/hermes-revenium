@@ -88,6 +88,9 @@ else
 fi
 
 JOB_TAXONOMY_DEST="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR_DEFAULT}/job-taxonomy.json}"
+# Independently overridable via REVENIUM_JOB_TAXONOMY_FILE, so it may live in a
+# different directory than TAXONOMY_DEST — prepare its own parent.
+mkdir -p "$(dirname "${JOB_TAXONOMY_DEST}")"
 if [[ ! -f "${JOB_TAXONOMY_DEST}" ]]; then
   cp "${REPO_ROOT}/skills/revenium/job-taxonomy.json" "${JOB_TAXONOMY_DEST}"
   echo "Seeded ${JOB_TAXONOMY_DEST}"
