@@ -27,6 +27,15 @@ WARN_FLAGS_DIR="${REVENIUM_WARN_FLAGS_DIR:-${MARKERS_DIR}/.warn}"
 # classification re-warned once per minute forever -- 9,039,937 lines
 # fleet-wide, 98.2% of one 646 MB log, in 27 days.
 FALLBACK_WARN_FLAGS_DIR="${REVENIUM_FALLBACK_WARN_FLAGS_DIR:-${MARKERS_DIR}/.fallback-warn}"
+
+# Third sentinel directory in the same family as WARN_FLAGS_DIR and
+# FALLBACK_WARN_FLAGS_DIR: one zero-byte flag per (subcommand, flag) whose
+# capability probe came back INDETERMINATE — the probe command failed, or
+# succeeded while printing nothing. supports_flag still resolves those to
+# "unsupported" (fail open), but warns once so the condition is visible
+# instead of silently stripping a dimension off every row in the tick.
+# Created lazily by its writer, deliberately absent from the eager mkdir -p.
+PROBE_WARN_FLAGS_DIR="${REVENIUM_PROBE_WARN_FLAGS_DIR:-${MARKERS_DIR}/.probe-warn}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 MARKER_RETENTION_DAYS="${REVENIUM_MARKER_RETENTION_DAYS:-30}"
 PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
@@ -374,8 +383,43 @@ supports_flag() {
   # under `pipefail` that surfaces as exit 141 and the probe would report
   # "unsupported" nondeterministically. The trailing `|| true` makes explicit
   # that this assignment's own exit status is deliberately not consulted.
+  local probe_rc=0
   # shellcheck disable=SC2086
-  help_text="$(revenium ${1} --help 2>&1)" || true
+  help_text="$(revenium ${1} --help 2>&1)" || probe_rc=$?
+
+  # INDETERMINATE vs NEGATIVE. A probe has three possible outcomes, and this
+  # function used to collapse them into two:
+  #
+  #   non-empty help, flag not present  -> the flag is genuinely absent
+  #   non-empty help, flag present      -> supported
+  #   command failed, or said nothing   -> WE DO NOT KNOW
+  #
+  # The third was silently reported as "absent". Because every caller fails
+  # open, that costs the metered row its optional dimensions
+  # (--agentic-job-id / --trace-type / --squad-*) with no signal at all: the
+  # output is byte-indistinguishable from a legitimate older-CLI install.
+  # Measured 2026-08-19 across 8 instrumented full-suite runs: of 513 negative
+  # probes per run, 123 returned rc=0 with ZERO bytes and 9 returned a
+  # non-zero rc. Those 132 were not answers.
+  #
+  # The RESOLUTION stays fail-open on purpose — assuming "supported" here
+  # would hand an old CLI a flag it rejects, which fails the whole meter call
+  # rather than one dimension. What changes is that an indeterminate probe is
+  # no longer SILENT. Rate-limited per (subcommand, flag) through the same
+  # sentinel-directory pattern the warn band uses, because this runs in a
+  # per-minute cron and an ungated warn here is how the log grew to millions
+  # of lines before.
+  if [[ ${probe_rc} -ne 0 || -z "${help_text}" ]]; then
+    local probe_key flag_dir
+    probe_key="$(printf '%s %s' "${1}" "${2}" | tr -c 'A-Za-z0-9._-' '_')"
+    flag_dir="${PROBE_WARN_FLAGS_DIR}"
+    if mkdir -p "${flag_dir}" 2>/dev/null \
+       && [[ ! -e "${flag_dir}/${probe_key}" ]]; then
+      : > "${flag_dir}/${probe_key}" 2>/dev/null || true
+      warn "capability probe for '${2}' on 'revenium ${1}' was INDETERMINATE (exit ${probe_rc}, ${#help_text} bytes of help) — treating the flag as unsupported, so rows from this run omit it. This is not a confirmed absence."
+    fi
+    return 1
+  fi
   # The capture above only moved the SIGPIPE off `revenium`; it did NOT remove
   # it. `printf ... | grep -q` reproduced the identical defect one level down —
   # grep exits on the first match and SIGPIPEs `printf`, and under `pipefail`
