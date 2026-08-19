@@ -105,14 +105,22 @@ fi
 # --- Capability probes (once per run; fail open — a negative probe simply
 # omits the flag, metering exactly as an older CLI always has). ---
 
+# Both flag probes go through supports_flag (common.sh), matching the squad and
+# reasoning-token probes below. The raw `--help | grep -q` idiom they inherited
+# from hermes-report.sh has two faults that fail open and therefore silently:
+# grep -q's early exit can SIGPIPE the upstream revenium process (exit 141 under
+# pipefail -> "unsupported" NONDETERMINISTICALLY), and an unanchored match lets a
+# short flag match a longer sibling. On this path a false negative costs the
+# event row its job/trace attribution. The `revenium jobs --help` half stays raw:
+# it probes SUBCOMMAND existence, not flag support.
 JOBS_CLI_CAPABLE=false
 if revenium jobs --help >/dev/null 2>&1 && \
-   revenium meter completion --help 2>&1 | grep -q -- '--agentic-job-id'; then
+   supports_flag "meter completion" "--agentic-job-id"; then
   JOBS_CLI_CAPABLE=true
 fi
 
 TRACE_TYPE_CLI_CAPABLE=false
-if revenium meter completion --help 2>&1 | grep -q -- '--trace-type'; then
+if supports_flag "meter completion" "--trace-type"; then
   TRACE_TYPE_CLI_CAPABLE=true
 fi
 
