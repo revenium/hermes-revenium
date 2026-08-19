@@ -145,7 +145,7 @@ def _on_session_finalize(
     on_session_finalize fires from three production sites — gateway shutdown
     (reason="shutdown"), session expiry (reason="session_expired"), and a
     user-initiated slash-command reset (reason="new_session") — and requires
-    no session-reset configuration, unlike on_session_end which only ever
+    no session_reset configuration, unlike on_session_end which only ever
     fires from _session_expiry_watcher. This hook carries NO `completed` and
     NO `interrupted` kwarg (confirmed by direct source read, see
     29-RESEARCH.md / <hook_signature_contract>); it MUST NOT reuse
@@ -374,7 +374,7 @@ def register(ctx) -> None:
       run_conversation() exit (gateway-served + CLI + interactive + ACP +
       cron-spawned) — but only when _session_expiry_watcher actually runs.
     - _on_session_finalize against on_session_finalize, which fires from
-      three production sites and needs no session-reset configuration, so
+      three production sites and needs no session_reset configuration, so
       it is the one that classifies a session at its boundary (shutdown,
       expiry, or reset) regardless of whether anything classified it
       earlier (Phase 29 / HOOK-01).
