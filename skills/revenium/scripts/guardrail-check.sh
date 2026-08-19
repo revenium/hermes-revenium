@@ -266,15 +266,30 @@ except Exception:
     cleared_windows = {}
 
 acknowledged = set()
-live_cleared = {}
+seen_windows = {}
 for r in new_rules:
     rid = r.get('ruleId') or ''
     wk = r.get('windowKey') or ''
-    if rid and wk and cleared_windows.get(rid) == wk:
-        live_cleared[rid] = wk
-        if r['state'] == 'block':
-            acknowledged.add(rid)
-cleared_windows = live_cleared
+    if not rid:
+        continue
+    if wk:
+        seen_windows[rid] = wk
+    if wk and cleared_windows.get(rid) == wk and r['state'] == 'block':
+        acknowledged.add(rid)
+
+# Prune ONLY on positive evidence that the window rolled — i.e. the rule is
+# present in THIS response and reports a different windowKey. An entry whose
+# rule is missing from the response is carried forward untouched.
+#
+# The earlier version kept only entries confirmed by the current response, which
+# meant a transient API failure or a partial page silently erased the operator's
+# acknowledgement; the rule would come back breached inside the same window and
+# re-halt, which is the exact defect this whole mechanism exists to fix. Absence
+# of evidence is not evidence the window rolled. Caught in review of PR #65.
+cleared_windows = {
+    rid: wk for rid, wk in cleared_windows.items()
+    if rid not in seen_windows or seen_windows[rid] == wk
+}
 
 # Top-level halted derivation — shadow-mode rules are excluded from the halt
 # decision (quick-260528-gve) so they record signal without blocking traffic.

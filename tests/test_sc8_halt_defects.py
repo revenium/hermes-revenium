@@ -272,6 +272,39 @@ class ClearHaltSurvivesTheNextTickTests(unittest.TestCase):
             self.assertEqual({}, doc.get('clearedWindows'),
                              'the stale acknowledgement must be pruned, not accumulated')
 
+
+    def test_transient_empty_response_does_not_erase_the_acknowledgement(self):
+        """Greptile review of PR #65. Pruning must require POSITIVE evidence the
+        window rolled. An API failure or partial page that omits the rule used to
+        erase the operator's clear, and the rule re-halted inside the same window
+        — the exact defect this mechanism exists to fix."""
+        with tempfile.TemporaryDirectory(prefix='gsd-sc8-transient-') as tmp:
+            home, state = self._setup(tmp, 'DAILY:2026-08-19')
+            self._tick(home, state)
+            subprocess.run(['bash', str(SCRIPTS / 'clear-halt.sh')],
+                           env=_env(home, state), capture_output=True, text=True, timeout=30)
+            self._tick(home, state)
+            self.assertFalse(self._halted(state)['halted'])
+            self.assertEqual({'RULE01': 'DAILY:2026-08-19'},
+                             self._halted(state).get('clearedWindows'))
+
+            # Transient: the API returns no rules at all this tick.
+            _make_revenium_stub(os.path.join(home, '.local', 'bin'),
+                                json.dumps({'rules': []}))
+            self._tick(home, state)
+            self.assertEqual(
+                {'RULE01': 'DAILY:2026-08-19'},
+                self._halted(state).get('clearedWindows'),
+                'a response that omits the rule must NOT erase its acknowledgement')
+
+            # Rule returns, still breached, same window -> must stay suppressed.
+            _make_revenium_stub(os.path.join(home, '.local', 'bin'),
+                                _rules_payload('DAILY:2026-08-19'))
+            self._tick(home, state)
+            self.assertFalse(
+                self._halted(state)['halted'],
+                'acknowledgement must survive a transient gap in the same window')
+
     def test_unacknowledged_breach_still_halts_normally(self):
         """Control: suppression must not weaken a fresh breach."""
         with tempfile.TemporaryDirectory(prefix='gsd-sc8-ctl-') as tmp:
