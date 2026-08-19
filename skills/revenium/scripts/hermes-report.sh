@@ -48,9 +48,17 @@ fi
 # Phase 9 (D-05): probe both CLI capabilities once at startup; cache result for
 # the whole cron tick. Both probes must pass for job work to proceed (D-06).
 # A negative probe fails open — metering continues byte-identical to v1.0 (D-07).
+# The flag half goes through supports_flag (common.sh) rather than the raw
+# `--help | grep -q` idiom this probe used through Phase 31: grep -q's early
+# exit can SIGPIPE the upstream revenium process, surfacing as exit 141 under
+# pipefail so the probe reports "unsupported" NONDETERMINISTICALLY, and the
+# unanchored match let a short flag match a longer sibling. Both faults fail
+# open and therefore silently — the row just loses its job attribution. The
+# `revenium jobs --help` half stays a raw check on purpose: it asks whether the
+# SUBCOMMAND exists, which is a different question from flag support.
 JOBS_CLI_CAPABLE=false
 if revenium jobs --help >/dev/null 2>&1 && \
-   revenium meter completion --help 2>&1 | grep -q -- '--agentic-job-id'; then
+   supports_flag "meter completion" "--agentic-job-id"; then
   JOBS_CLI_CAPABLE=true
 else
   warn "revenium jobs/--agentic-job-id not available — job work skipped; metering continues as v1.0."
@@ -61,8 +69,11 @@ fi
 # on its own and cache for the whole tick. A negative probe fails open SILENTLY:
 # older installs simply omit --trace-type and meter byte-identically to today
 # (backward-compat constraint). No warn — flag absence is not an error.
+# supports_flag for the same two reasons as the jobs probe above. No warn here
+# is deliberate and unchanged: flag absence on an older CLI is the supported
+# configuration, and a per-minute cron must not warn every tick for it.
 TRACE_TYPE_CLI_CAPABLE=false
-if revenium meter completion --help 2>&1 | grep -q -- '--trace-type'; then
+if supports_flag "meter completion" "--trace-type"; then
   TRACE_TYPE_CLI_CAPABLE=true
 fi
 

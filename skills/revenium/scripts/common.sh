@@ -376,11 +376,24 @@ supports_flag() {
   # that this assignment's own exit status is deliberately not consulted.
   # shellcheck disable=SC2086
   help_text="$(revenium ${1} --help 2>&1)" || true
+  # The capture above only moved the SIGPIPE off `revenium`; it did NOT remove
+  # it. `printf ... | grep -q` reproduced the identical defect one level down —
+  # grep exits on the first match and SIGPIPEs `printf`, and under `pipefail`
+  # this function then returned 141 and reported a supported flag as absent.
+  # Measured 2026-08-19: with help text past the pipe buffer and a match on
+  # line 1, the pipeline form failed 200/200; the here-string form 0/200. That
+  # is the mechanism behind the ~1-in-4 full-suite flake in the page-size probe
+  # tests — it only reproduced under load because a small `--help` normally
+  # fits the buffer before grep exits.
+  #
+  # A here-string is a temp FILE, not a pipe, so there is no reader to
+  # disappear and no SIGPIPE to race. This CLOSES the window rather than
+  # narrowing it; do not "simplify" it back into a pipeline.
   # The `([^A-Za-z0-9-]|$)` trailing boundary stops a probe for "--page" from
   # matching "--page-size". Without it, any CLI that advertises --page-size
   # (which includes every pre-v1.3.0 CLI this skill already calls today) would
   # false-positive as supporting --page.
-  printf '%s\n' "${help_text}" | grep -qE -- "${2}([^A-Za-z0-9-]|\$)"
+  grep -qE -- "${2}([^A-Za-z0-9-]|\$)" <<< "${help_text}"
 }
 
 # Phase 32 Plan 03 (C-9/T-32-15): resolve a closed two-literal switch with
