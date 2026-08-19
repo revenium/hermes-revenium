@@ -381,10 +381,15 @@ supports_flag() {
   # grep exits on the first match and SIGPIPEs `printf`, and under `pipefail`
   # this function then returned 141 and reported a supported flag as absent.
   # Measured 2026-08-19: with help text past the pipe buffer and a match on
-  # line 1, the pipeline form failed 200/200; the here-string form 0/200. That
-  # is the mechanism behind the ~1-in-4 full-suite flake in the page-size probe
-  # tests — it only reproduced under load because a small `--help` normally
-  # fits the buffer before grep exits.
+  # line 1, the pipeline form failed 200/200; the here-string form 0/200.
+  #
+  # This defect was LATENT, not active: a real `--help` fits the 64KB pipe
+  # buffer today, so the writer finishes before grep exits. It becomes reachable
+  # as the CLI's help grows. It therefore does NOT explain the ~1-in-4
+  # full-suite flake in the page-size probe tests — that shim emits ~150 bytes,
+  # far below the buffer — and PATH leakage to the real CLI is ruled out too
+  # (v1.3.0 advertises --page on both probed subcommands). THAT FLAKE IS STILL
+  # OPEN AND UNDIAGNOSED; do not read this fix as having closed it.
   #
   # A here-string is a temp FILE, not a pipe, so there is no reader to
   # disappear and no SIGPIPE to race. This CLOSES the window rather than
