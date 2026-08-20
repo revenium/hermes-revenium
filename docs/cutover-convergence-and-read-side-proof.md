@@ -302,6 +302,7 @@ Dimension table, each CONFIRMED against the quoted response above:
 | `transactionId` | `event:<sid>:<uuid>:<hash>:api:N` shape, quoted below |
 | per-call attribution | two rows, one session (`<sid-B>`), `:api:1` and `:api:2` |
 | `agenticJobId` | **RESOLVED-ABSENT** — never reaches a metered row on the event path; see `## Findings` → "agenticJobId — resolved absent, by design" |
+| multi-model attribution | **RESOLVED — mechanism-verified, no intra-session occurrence found in a bounded 26-trace search** (NOT structurally impossible); see `## Findings` → "Multi-model attribution — mechanism verified, trigger unfired within a single trace" |
 
 Quoted row (`<sid-A>`, playtester — re-confirmed live in this plan's own
 query, not merely copied from the tracer):
@@ -668,10 +669,68 @@ the marker join, or some other design — is a decision for a later phase, not
 this one. This document's job is to make the fact legible, not to propose or
 implement a fix.
 
-### Multi-model attribution — see below
+### Multi-model attribution — mechanism verified, trigger unfired within a single trace
 
-*Resolved in this same `## Findings` section, by Task 2 — see "Multi-model
-attribution — mechanism verified, trigger unfired" below.*
+**Resolved: the mechanism to produce two distinct models under one `traceId`
+is verified fleet-wide and demonstrably live for two profiles, but a bounded
+26-trace search found no trace where it fired within a single trace — this
+is mechanism-verified/trigger-unfired, and it is explicitly NOT the same
+claim as "structurally cannot be recorded," which the fleet-wide mechanism
+evidence below refutes.**
+
+**The mechanism.** All ten profiles' `config.yaml` declare a
+`fallback_providers` block (grepped live on the fleet host, 2026-08-20):
+every profile names a `provider`/`model` primary plus one or more fallback
+`provider`/`model` pairs (`zai/glm-4.6`, `fireworks/...glm-5p2`, one or more
+`openrouter/...` entries, varying per profile). If the primary provider
+fails mid-session, Hermes serves subsequent calls in the SAME session from a
+fallback. `post_api_request` fires per API call carrying the actually-serving
+model and forwards it per-call on the event path (`api-event-report.sh`'s
+per-marker construction), so a session that experiences a fallback would
+legitimately show two distinct `model` values under one `traceId` — this is
+a real, falsifiable path, not a hypothetical one. `post_api_request` does
+NOT fire for auxiliary calls (compression, title-gen, `approval`), so
+auxiliary traffic is excluded as a possible multi-model source on this path.
+
+**The bounded search.** `revenium squads list` returns one row per squad
+LABEL (aggregated across every trace sharing that label), not one row per
+trace, so it cannot answer a per-trace question directly. `revenium squads
+executions` (the flat, no-groupId form) DOES enumerate individual traces.
+Two calls: `--period TWENTY_FOUR_HOURS` (8 traces, all Hermes-shaped) and
+`--period SEVEN_DAYS` (20 traces returned; the CLI declines `--page` for
+this verb — confirmed via `--help` and a live `unknown flag: --page` error —
+so only the first of an internally-reported "4 pages" is retrievable; this
+is a genuine CLI limitation, not an omitted retry). After removing 2
+overlaps, **26 unique traces were examined with `revenium squads get <id>
+--output json`**, reading the top-level `models` array on each: **25
+succeeded, all with a single-element `models` array — zero of 26 traces
+show `len(models) >= 2`.** One trace errored with a reproducible HTTP 500 on
+two consecutive attempts; its own listing showed a `duration` of ~5 days
+versus every other trace's 20-300 seconds, a genuine outlier plausibly
+responsible for a server-side rollup failure — recorded as the finding,
+not retried a third time or chased further (T-33-05 budget discipline). The
+7-day period's start (`2026-08-14T08:02Z` earliest observed) is well before
+the write-loss interval; none of the 26 examined traces' lifetimes overlap
+`2026-08-19T18:25:00Z`–`2026-08-20T01:24:00Z` (all either end before it or
+start after it, per each trace's own `startTime`/`endTime`).
+
+**The pattern that came closest, and why it still isn't the proof.**
+`marketing` and `cfo` are both configured with `zai/glm-4.6` as PRIMARY, yet
+every one of their sampled traces (11 for marketing, 6 for cfo, across both
+periods examined) used `fireworks/...glm-5p2` — their own first-listed
+FALLBACK, never their configured primary. This is real, corroborating
+evidence that the fallback trigger is currently live for these two profiles,
+not merely configured-and-dormant — it directly refutes a "the trigger has
+simply never fired" reading. But every one of those traces still shows only
+ONE model; none straddles the primary and a fallback (or two fallbacks)
+within the same trace's own transactions. The mechanism has fired at the
+session-to-session boundary; it has not yet been caught firing mid-session
+in any of the 26 traces this search examined.
+
+**No provider was failed, no session was induced, and no config was changed
+to produce or search for this evidence** — every command in this search was
+`revenium squads executions`/`squads get`/`squads list` (read verbs) plus a
+`grep`/`cat` of each profile's own `config.yaml` on the fleet host.
 
 ## Reproducing this measurement
 
@@ -722,11 +781,18 @@ produced a usable result:
 | 9 | 33-03 Task 1 | `revenium jobs transactions <job-A> --output json` | point lookup, same job | `{"totalCount": 0}` | success | outside — clean, not ambiguous |
 | 10 | 33-03 Task 1 | `revenium jobs get <job-B> --output json` | point lookup, `created=2026-08-20T01:54:39.627Z` | 1 job resource | success | outside (30m39s after `01:24:00Z`) |
 | 11 | 33-03 Task 1 | `revenium jobs transactions <job-B> --output json` | point lookup, same job | `{"totalCount": 0}` | success | outside — clean, not ambiguous |
+| 12 | 33-03 Task 2 | `revenium squads executions --period TWENTY_FOUR_HOURS --output json` | `TWENTY_FOUR_HOURS` period | 8 executions | success | overlapping (period contains the write-loss window) — used only to enumerate trace ids, never cited as row-level evidence |
+| 13 | 33-03 Task 2 | `revenium squads executions --period SEVEN_DAYS --output json` | `SEVEN_DAYS` period, page 1 of an unreachable 4 (CLI declines `--page` for this verb) | 20 executions | success | overlapping — same caveat as row 12 |
+| 14 | 33-03 Task 2 | `revenium squads get <id> --output json` × 26 (24h ∪ 7d sets, 2 overlaps removed) | 26 individual trace lifetimes, earliest `2026-08-14T08:02:06Z` | 25 × 1 squad detail | 25 success, 1 HTTP 500 (reproducible, retried once) | each trace's own lifetime checked individually; none overlaps the write-loss window |
+| 15 | 33-03 Task 2 | `grep`/`cat` of all ten profiles' `config.yaml` `fallback_providers` block | n/a (local file read, not an API call) | 10 configs | success | n/a — not an HTTP request |
 
-20 total HTTP requests across these 11 distinct CLI invocations (row 2 pages
-0–3 = 4 requests, row 4 pages 0–6 = 7 requests, rows 8-11 and the rest are
-single point lookups) — auditable total request volume, per T-33-05's
-mitigation.
+47 total HTTP requests across these 15 distinct CLI invocations (row 2 pages
+0–3 = 4 requests, row 4 pages 0–6 = 7 requests, row 14 = 26 requests — one of
+which 500'd — rows 8-11 and the rest are single point lookups; row 15 is a
+local file read, not an HTTP request) — auditable total request volume, per
+T-33-05's mitigation. Row 14 is, by a wide margin, the highest-volume single
+operation in this phase, which is exactly why its cap (26 traces) is stated
+explicitly here rather than left implicit.
 
 **Zero-row rule, stated once:** a zero-row result (row 1 above) is never
 treated as confirmation of anything. It is equally compatible with a
@@ -742,13 +808,21 @@ identical in shape to row 2's, which worked). Full three-cause analysis is
 in `## Findings` → "Tracer read-side query — narrow window returned zero
 Hermes rows".
 
-**Errors, stated once:** zero API errors, timeouts, or non-200 responses
-were encountered across any of the 16 HTTP requests in this ledger, in
-either plan. Every call returned success on its first attempt; none was
-retried, and no small-`--page-size` auto-pagination symptom (Pitfall 1) was
-triggered, since every `metrics ai` call in both plans passed an explicit
-`--page` alongside `--page-size 200`. This absence of errors is itself the
-recorded observation for this phase, not an omitted topic.
+**Errors, stated once:** across 33-01 and 33-02's 16 HTTP requests, zero API
+errors, timeouts, or non-200 responses were encountered — every call
+returned success on its first attempt, none was retried, and no
+small-`--page-size` auto-pagination symptom (Pitfall 1) was triggered, since
+every `metrics ai` call in both plans passed an explicit `--page` alongside
+`--page-size 200`. **One genuine error was hit in 33-03** (ledger row 14):
+one of the 26 `squads get` calls in the multi-model search returned a
+reproducible HTTP 500 (`"Revenium API error. Try again later or contact
+support."`) on two consecutive attempts, against a trace whose own
+`duration` (~5 days) was a stark outlier versus every other examined
+trace's 20-300 seconds. It was not retried a third time or treated as
+resolved — it is recorded here as a genuine, currently-open server-side
+anomaly for that one trace, distinct from every other successful call in
+this document, and it played no role in the multi-model verdict (the error
+prevented reading `models` on that one trace; it did not reveal one).
 
 ## Independent confirmation
 
