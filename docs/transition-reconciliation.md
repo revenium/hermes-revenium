@@ -794,6 +794,13 @@ real, reproducible CLI/API behavior," not "this is the full extent of its effect
 
 ## Reproducing this measurement
 
+Every command below is read-only and generically parameterised — substitute a real
+profile name, session id, or ISO-8601 timestamp for the placeholder and it runs as
+written. Placeholders in this section are single hyphen-free tokens (`<profile>`, `<sid>`,
+`<from>`, `<to>`, `<N>`), never the hyphenated redaction placeholders used elsewhere in
+this document (`<canary-sid>`, `<gtm-B-sid>`, etc.) — those resolve only via
+`34-EVIDENCE.md`'s map, per this phase's own naming convention.
+
 **Boundary derivation (per profile):**
 ```bash
 ssh <fleet-host> \
@@ -804,16 +811,67 @@ ssh <fleet-host> \
      /home/ubuntu/.hermes/profiles/<profile>/state/revenium/revenium-hermes.ledger | wc -l'
 ```
 
-**Legacy per-session total (last line, never a sum):**
+**Verb family — the `owners/` two-line sweep, per profile:**
 ```bash
+d=~/.hermes/profiles/<profile>/state/revenium/owners
+for f in "$d"/*; do n=$(wc -l < "$f"); [ "$n" -ge 2 ] && echo "DUAL $(basename "$f") $(tr '\n' '|' < "$f")"; done
+```
+A `>= 2`-line file is a CANDIDATE, never a confirmed overlap by itself — the two-line shape
+is also produced by `_takeover_session_owner`, a double-bill PREVENTION mechanism, not
+evidence one occurred. Disambiguate with the ledger `comm -12` intersection below and the
+log-line check before concluding anything.
+
+**Verb family — the two-ledger sid extraction and `comm -12` intersection (the check on
+the checker; the raw evidence the `owners/` sweep alone cannot supply):**
+```bash
+grep -oE '^HERMES:[^:]+' revenium-hermes.ledger | sed 's/^HERMES://' | sort -u > /tmp/legacy_sids
+awk -F'|' '{print $2}' revenium-api-events.ledger | sort -u > /tmp/event_sids
+comm -12 /tmp/legacy_sids /tmp/event_sids
+```
+
+**Disambiguating a signal-1-only hit: is it a genuine dual-ledger claim, or an ownership
+takeover?**
+```bash
+grep "<sid>" revenium-metering.log | grep -i "ownership taken over\|dual-ledger"
+grep "^HERMES:<sid>:" revenium-hermes.ledger   # empty => never legacy-billed, not an overlap
+```
+
+**Verb family — the legacy last-line-per-sid token read:**
+```bash
+# CUMULATIVE, NOT ADDITIVE: the 3rd colon-delimited field is this sid's RUNNING TOTAL as of
+# THIS report, never a delta. Summing every line for a sid multiply-counts its early
+# growth — always take the LAST line only, exactly as below. This warning travels with the
+# command itself: a reader who copies only the command, not the surrounding prose, must
+# still see it.
 grep "^HERMES:<sid>:" revenium-hermes.ledger | tail -1 | cut -d: -f3
 ```
 
-**Read-side total and row-level split:**
+**Verb family — the paged `revenium metrics ai` walk:**
 ```bash
-revenium squads get <root_sid> --output json      # top-level totalTokens
-revenium squads timeline <root_sid> --output json  # per-row; classify id by event: prefix
+revenium metrics ai --from <from> --to <to> --output json --page-size 200 --page <N>
 ```
+This verb has **no server-side filter** — request `--page-size 200`, walk `--page 0, 1, 2,
+...` (the server's actual page size is 100 regardless of the requested value — a short page,
+under 100 rows, is the walk's own termination signal), and filter the returned array
+**client-side** on `agent == "Hermes-<profile>"` (or on `transactionId`/`id` starting with
+`event:` to isolate the event path from the legacy path). `--from`/`--to` filter on each
+row's own `requestTime`, **not** `created` — for a legacy delta-report row, `requestTime` is
+the delta period's own start and can predate `created` by hours to weeks, so a bulk walk
+windowed strictly after a cutoff can silently omit a row genuinely reported inside that
+window (see `## Known limitations and exclusions` and `## Findings`). Cross-confirm any
+profile-level sum this walk produces against `squads get` for that profile's own session
+ids before trusting it.
+
+**Verb family — the `revenium squads get` / `revenium squads timeline` pair:**
+```bash
+revenium squads get <sid> --output json       # top-level totalTokens, squadName, agents[]
+revenium squads timeline <sid> --output json  # per-row events; classify id by event: prefix
+```
+Rows returned by `squads timeline` are ordered by their **own** `startTime` field (mirroring
+`requestTime`/`created` on `metrics ai`) — **never** by array position. A trace with more
+than one event must be re-sorted on its own timestamp field before any "first
+event"/"last event" claim is made from it; do not assume the API's return order is
+chronological order.
 
 **Overlap-detector integrity, per profile:**
 ```bash
@@ -823,32 +881,103 @@ test -s ~/.hermes/profiles/<profile>/state/revenium/revenium-api-events.ledger &
 grep 'prune:' ~/.hermes/profiles/<profile>/state/revenium/revenium-metering.log
 ```
 
-**Overlap enumeration, three independent signals, per profile (34-02):**
-```bash
-# Signal 1: owners/ two-line sweep
-d=~/.hermes/profiles/<profile>/state/revenium/owners
-for f in "$d"/*; do n=$(wc -l < "$f"); [ "$n" -ge 2 ] && echo "DUAL $(basename "$f") $(tr '\n' '|' < "$f")"; done
+Every command above is a read verb. Reproducing this measurement requires no write of any
+kind — no `revenium meter`, no `jobs create`/`outcome`, no `guardrails` mutation, and no
+write to any profile's `env`, `config.json`, `drain-status.json`, `owners/` record, or
+ledger.
 
-# Signal 2: raw ledger comm -12 cross-check (the check on the checker)
-grep -oE '^HERMES:[^:]+' revenium-hermes.ledger | sed 's/^HERMES://' | sort -u > /tmp/legacy_sids
-awk -F'|' '{print $2}' revenium-api-events.ledger | sort -u > /tmp/event_sids
-comm -12 /tmp/legacy_sids /tmp/event_sids
+### Query ledger (34-01 + 34-02 + 34-03 + 34-04)
 
-# Signal 3: the dual-ledger warn line, corroboration only
-grep -c "dual-ledger session claimed for the legacy path" revenium-metering.log
+Every `revenium` CLI read-verb call issued by any plan in this phase, in the order issued,
+so the method — including what returned empty and what errored — is auditable rather than
+only the queries that produced a usable result. Local `ssh`-only reads (the boundary
+derivation, the `owners/` sweeps, the ledger `comm -12` intersections, the `env`/
+`drain-status.json` re-reads) are not HTTP requests against Revenium and are excluded from
+this table; they are fully logged in `34-EVIDENCE.md` instead.
 
-# Disambiguating a signal-1-only hit: is it a genuine dual-ledger claim, or a takeover?
-grep "<sid>" revenium-metering.log | grep -i "ownership taken over\|dual-ledger"
-grep "^HERMES:<sid>:" revenium-hermes.ledger   # empty => never legacy-billed, not an overlap
-```
+| # | Plan/Task | Command | Window / scope | Result | Outcome |
+|---|---|---|---|---|---|
+| 1 | 34-01 Task 1 | `squads get <sid-T>` | point lookup | `totalTokens: 13634` | success |
+| 2 | 34-01 Task 1 | `squads timeline <sid-T>` | point lookup | 1 event | success |
+| 3 | 34-01 Task 1 | `metrics ai --from 2026-08-20T01:24:01Z --to 2026-08-20T02:10:00Z --page-size 200 --page 0..3` | `01:24:01Z`–`02:10:00Z` | 256 rows total, 1 Hermes-playtester | success |
+| 4 | 34-01 Task 1 | `squads get <sid-B>` | point lookup | — | **error — 404 Resource not found** (the write-loss casualty itself, not a query defect) |
+| 5 | 34-02 Task 2 | `squads get <canary-sid>` | point lookup | `totalTokens: 37296` | success |
+| 6 | 34-02 Task 2 | `squads timeline <canary-sid>` | point lookup | 6 events | success |
+| 7 | 34-02 Task 2 | `squads get <qa-dual-sid-1>` | point lookup | `totalTokens: 13914` | success |
+| 8 | 34-02 Task 2 | `squads get <qa-dual-sid-2>` | point lookup | `totalTokens: 14028` | success |
+| 9 | 34-02 Task 2 | `squads get <cfo-dual-sid-1>` | point lookup | `totalTokens: 13015` | success |
+| 10 | 34-03 Task 1 | `squads get <mkt-B-sid>` | point lookup | — | **error — 404 Resource not found** (marketing's own write-loss casualty) |
+| 11 | 34-03 Task 2 | `metrics ai --from 2026-08-20T01:24:01Z --to 2026-08-20T23:59:59Z --page-size 200 --page 0` (first attempt) | `01:24:01Z`–`23:59:59Z` | — | **error — HTTP 502**, retried ~30s later |
+| 12 | 34-03 Task 2 | `metrics ai --from 2026-08-20T01:24:01Z --to 2026-08-20T23:59:59Z --page-size 200 --page 0..14` (retry, full walk) | `01:24:01Z`–`23:59:59Z` | 1,455 rows total (14×100 + 55), 18 Hermes-owned | success |
+| 13 | 34-03 Task 2 | `squads get <gtm-B-sid>` | point lookup | `totalTokens: 13557` | success |
+| 14 | 34-03 Task 2 | `squads get <mkt-C1-sid>` | point lookup | `totalTokens: 37216` | success |
+| 15 | 34-03 Task 2 | `squads get <mkt-C2-sid>` | point lookup | `totalTokens: 17745` | success |
+| 16 | 34-03 Task 2 | `squads get <mkt-C3-sid>` | point lookup | `totalTokens: 36664` | success |
+| 17 | 34-03 Task 2 | `squads get <coder-B1-sid>` | point lookup | `totalTokens: 53950` | success |
+| 18 | 34-03 Task 2 | `squads get <cfo-B-sid>` | point lookup | `totalTokens: 221231` | success |
+| 19 | 34-03 Task 2 | `metrics ai --from 2026-08-20T15:50:00Z --to 2026-08-20T15:56:00Z --page-size 200 --page 0` (broad, no `--squad-id`) | `15:50:00Z`–`15:56:00Z` | 0 rows | success, **empty** |
+| 20 | 34-03 Task 2 | `metrics ai --from 2026-08-20T15:50:00Z --to 2026-08-20T15:56:00Z --squad-id <gtm-legacy-sid> --page-size 200 --page 0` | `15:50:00Z`–`15:56:00Z`, narrowed | 0 rows | success, **empty** (brackets `created`, excludes `requestTime`) |
+| 21 | 34-03 Task 2 | `metrics ai --from 2026-08-19T16:45:00Z --to 2026-08-19T16:55:00Z --squad-id <gtm-legacy-sid> --page-size 200 --page 0` | `2026-08-19T16:45:00Z`–`16:55:00Z`, narrowed | 1 row, `totalTokenCount: 112601` | success (brackets `requestTime`, resolves the bisection) |
+| 22 | 34-03 Task 2 | `squads get <gtm-legacy-sid>` | point lookup, no date window | `totalTokens: 225606` | success (corroboration) |
+| 23 | 34-03 Task 2 | `squads timeline <gtm-legacy-sid>` | point lookup, no date window | 2 events | success (corroboration) |
+| 24 | 34-04 Task 1 | `squads get <sid-T>` (re-query, independent confirmation) | point lookup | `totalTokens: 13634` — **identical to row 1** | success |
 
-*A replayable template per verb family this whole phase used is 34-04 Task 1's own
-acceptance criterion — the above covers only what Task 1/2 of this plan used.*
+24 distinct `revenium` CLI read-verb invocations across all four plans. Rows 3 and 12 each
+fan out into multiple HTTP page requests (row 3 = 4 pages, row 12 = 15 pages) — 41 total
+HTTP requests across all 24 rows (24 − 2 single-request-equivalents + 4 + 15). **Two
+errors, both recorded rather than retried away silently:** rows 4 and 10 are this phase's
+own quantified write-loss evidence (both live `404`s on sessions with local evidence of a
+successful ship), not query defects; row 11's 502 was a transient server error that
+succeeded on an identical retry ~30 seconds later (`## Findings` → "`metrics ai` transient
+502"). **Two empty results, both explained, neither treated as confirmation of anything on
+their own:** rows 19 and 20 are the two halves of the `requestTime`-vs-`created` bisection
+that produced this phase's own CLI-behavior finding — an empty result from a
+`created`-bracketing window is the expected, diagnostic outcome that row 21's
+`requestTime`-bracketing window then resolves, not an unexplained gap.
 
 ## Independent confirmation
 
-*Filled in by 34-04 — re-runs of this plan's own queries, plus the fleet-wide sweeps' own
-independent-confirmation rounds.*
+**Second run of the two local signals from 34-02, this document's own re-run of its own
+method — 2026-08-20T17:09:51Z, 1h15m02s after the first run's start
+(`2026-08-20T15:54:49Z`).** Same two signals (the `owners/` `>=2`-line sweep, the raw
+ledger `comm -12` intersection) re-issued verbatim across all ten profiles, over the same
+read-only SSH access used throughout this phase.
+
+| Profile | Owners total (1st → 2nd) | 2-line hits (1st → 2nd) | Legacy sid count (1st → 2nd) | Event sid count (1st → 2nd) | `comm -12` intersection (1st → 2nd) |
+|---|---|---|---|---|---|
+| gtm | 57 → 57 | 0 → 0 | 56 → 56 | 1 → 1 | 0 → 0 |
+| marketing | 235 → 236 (+1) | 0 → 0 | 231 → 231 | 4 → 5 (+1) | 0 → 0 |
+| devops | UNDETERMINED (dir absent, both runs) | — | 1939 → 1939 | 0 → 0 | 0 → 0 (trivial) |
+| qa | 22 → 22 | 2 → 2 (same two sids) | 20 → 20 | 2 → 2 | 0 → 0 |
+| coder | 227 → 227 | 1 → 1 (the canary) | 225 → 225 | 3 → 3 | 1 → 1 (the canary) |
+| playtester | 7 → 7 | 0 → 0 | 5 → 5 | 2 → 2 | 0 → 0 |
+| cfo | 42 → 42 | 1 → 1 | 40 → 40 | 2 → 2 | 0 → 0 |
+| pm | UNDETERMINED (dir absent, both runs) | — | 25 → 25 | 0 → 0 | 0 → 0 (trivial) |
+| community | 3 → 3 | 0 → 0 | 3 → 3 | 0 → 0 | 0 → 0 |
+| lorekeeper | 33 → 33 | 0 → 0 | 33 → 33 | 0 → 0 | 0 → 0 |
+
+**Result: the hit set is IDENTICAL between the two runs, fleet-wide, on every signal.** The
+sole nonzero `comm -12` intersection is still exactly one session (the canary, `coder`),
+unchanged. The two-line-owner-record count is still exactly four fleet-wide (the canary
+plus the three confirmed ownership-takeover non-overlaps), unchanged, on the same four
+sids — `qa`'s two and `cfo`'s one are the identical sids re-confirmed, not a new pair.
+**Only one profile's swept totals grew at all between the two runs: `marketing` gained one
+`owners/` entry and one distinct event sid** (consistent with marketing's own ongoing
+post-cutover event-path traffic, the same profile whose post-boundary CLEAN table in
+`## Results` already shows multiple sessions), **and that growth produced neither a new
+`comm -12` hit nor a new two-line owner record.** A growing corpus with an unchanged hit
+set is stronger evidence than an unchanged corpus would have been: the sweep is not
+returning the same answer only because nothing happened between runs — new activity
+genuinely occurred, and it still did not surface a second overlap. The hit set did not
+change, so there is nothing to add to `## Findings` from this re-run.
+
+**One representative session's read-side total, re-queried and compared.** `<sid-T>`
+(playtester's own clean tracer session, `## Results` → "Tracer"): first queried
+`2026-08-20T15:28Z`, `totalTokens: 13634`. Re-queried this task, `2026-08-20T17:10:10Z`
+(1h42m10s later): `totalTokens: 13634` — **identical, no difference to explain.** A
+completed, closed session's read-side total does not drift once Revenium has durably
+recorded it; this is the expected result for a CLEAN session outside the write-loss
+window, not a coincidence.
 
 ## Verified against
 
