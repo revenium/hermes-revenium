@@ -49,6 +49,19 @@ asks before anything else.
 
 ## The switches
 
+**`REVENIUM_EVENT_METERING_MODE=live` alone does not cut over.** With
+`REVENIUM_LEGACY_COMPLETIONS` still `enabled` (the default), the legacy path's
+own D-09 partition check claims every session before the event path gets a
+chance to — logging `skipping <sid> — already owned by the legacy HERMES:
+ledger (D-09 partition)` for each one — and the event path defers
+indefinitely. Legacy wins because `cron.sh` runs the legacy stage before the
+event stage inside a single tick under one `cron.lock`, and both paths gate a
+session's readiness on the same settle/sentinel condition, so they become
+ready on the same tick and ordering decides. **`REVENIUM_LEGACY_COMPLETIONS=disabled`
+is required** for the event path to actually bill anything. This was proven by
+inducing a session on a profile at `mode=live, legacy=enabled` post-flip: it
+went entirely to legacy, 0 event rows.
+
 Two independent, reversible settings control the rollout. Both are
 readable from the environment (highest precedence) or from
 `config.json` (checked when the environment variable is unset), with an
