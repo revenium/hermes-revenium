@@ -148,7 +148,88 @@ write-loss interval's close.
 
 ### CUT-01 — ten-profile convergence table
 
-*Filled in Task 2 of this plan.*
+Sampled at three rounds, spaced well beyond the five-minute minimum (Round
+1→2: 5m59s; Round 2→3: 9m46s — both exceed the five-minute floor this task
+requires, and both comfortably exceed one cron tick, so each round reflects
+an independently computed drain-gate verdict, not the same tick read
+twice):
+
+| Round | Timestamp (UTC) |
+|---|---|
+| 1 | 2026-08-20T03:42:06Z |
+| 2 | 2026-08-20T03:48:05Z |
+| 3 | 2026-08-20T03:57:51Z |
+
+| Profile | R1 `drained`/`pendingCount` | R2 | R3 | Status |
+|---|---|---|---|---|
+| gtm | false / 5 | false / 5 | false / 5 | **PENDING** — see `## Findings` |
+| marketing | true / 0 | true / 0 | true / 0 | **CONVERGED** |
+| devops | true / 0 | true / 0 | true / 0 | **CONVERGED** |
+| qa | true / 0 | true / 0 | true / 0 | **CONVERGED** |
+| coder | true / 0 | true / 0 | true / 0 | **CONVERGED** |
+| playtester | true / 0 | true / 0 | true / 0 | **CONVERGED** |
+| cfo | true / 0 | true / 0 | true / 0 | **CONVERGED** |
+| pm | true / 0 | true / 0 | true / 0 | **CONVERGED** |
+| community | false / 1 | false / 1 | false / 1 | **PENDING** — see `## Findings` |
+| lorekeeper | false / 5 | false / 5 | false / 5 | **PENDING** — see `## Findings` |
+
+**7 of 10 converged, unforced, with zero disagreement across all three
+rounds of this observation window.** No profile flipped `drained` state
+between rounds here — contrast with `33-RESEARCH.md`'s earlier observation
+of `coder` flapping drained→un-drained→drained across a *different, wider*
+window on 2026-08-19/20, which is why this task samples repeatedly rather
+than trusting one reading (the gate is known to flap in general; it simply
+did not flap during these particular three rounds).
+
+**First-observed-drained, scoped to this cutover.** Every converged
+profile's `revenium-metering.log` was searched for its FIRST occurrence of
+the `hermes-report.sh:187` line at or after `2026-08-19T21:12:00Z` — the
+documented start of the fleet-wide cutover flip — rather than the file's
+absolute first occurrence. This scoping matters: two profiles (`qa`, `cfo`)
+carry a `:187` line from **2026-08-18**, a full day before this cutover,
+almost certainly a residue of earlier per-profile probing (e.g. the SC-8
+disposable-rule run, the catalog probes — both recorded in
+`.planning/STATE.md` as touching specific profiles' `env`/config before the
+fleet-wide flip). Reporting that earlier line as "first observed drained"
+would misattribute a different event to this cutover; the cutover-scoped
+value is the one that answers CUT-01.
+
+| Profile | First-observed-drained (cutover-scoped, obs.-bounded) | Immediately preceding `refusing to disable` line |
+|---|---|---|
+| devops | `2026-08-19T21:34:25Z` | none found in the 21:12–22:00Z window — already drained at the first post-flip check |
+| qa | `2026-08-19T21:34:24Z` | none found in the 21:12–22:00Z window — already drained at the first post-flip check |
+| playtester | `2026-08-19T21:34:48Z` | none found in the 21:12–22:00Z window — already drained at the first post-flip check |
+| pm | `2026-08-19T21:35:14Z` | none found in the 21:12–22:00Z window — already drained at the first post-flip check |
+| cfo | `2026-08-19T21:36:42Z` | `2026-08-19T21:34:51Z`, pending=2 |
+| marketing | `2026-08-19T21:37:27Z` | `2026-08-19T21:35:28Z`, pending=1 |
+| coder | `2026-08-19T21:38:33Z` | `2026-08-19T21:34:35Z`, pending=3 |
+
+**These timestamps are a sampling-cadence artifact, not the true
+convergence instant** — the cron ticks roughly once a minute, so the true
+transition for each profile happened somewhere between its last
+`refusing`/absent-refusal check and the quoted `:187` line, an interval on
+the order of the tick spacing shown above (under two minutes in every case
+here). No claim is made that these exact timestamps would reproduce on a
+re-run of this same query.
+
+**Env-mtime evidence for unforced convergence (gathered once, not per
+round — an mtime does not change between samples unless the file is
+written again).** All ten profiles' `state/revenium/env` files carry the
+identical modification timestamp `2026-08-19T21:33:57.9xxxxxxxx +0000`
+(sub-second offsets differ, whole-second value identical across all ten) —
+squarely inside the documented `21:12–21:40Z` cutover flip window, and nine
+of ten register within the same 21:33:57 second. **No profile's `env` file
+carries a modification time later than the cutover flip.** This is the
+closest thing to positive evidence for the absence of a later manual
+write, and its limit is stated plainly: an mtime proves the file was not
+*rewritten*, not that no other kind of manual action (a `clear-halt.sh`
+run, a gateway restart, a direct ledger edit) occurred — no evidence of any
+of those was found either, but absence of evidence for an unlogged action
+is not the same class of proof as a file timestamp.
+
+### CUT-02 — read-side dimension confirmation (task type, operation type, trace id/type, agentic job id, squad, per-call, multi-model)
+
+*Filled by plan 33-02.*
 
 ### CUT-02 — read-side dimension confirmation (task type, operation type, trace id/type, agentic job id, squad, per-call, multi-model)
 
@@ -211,14 +292,23 @@ this verb — down to rows whose `agent` starts with `Hermes` or whose
 
 ## Independent confirmation
 
-Not yet performed as of this task. CUT-01's own gate is known to flap (a
-profile can show `drained: true`, then `false`, then `true` again across
-consecutive ticks, per `33-RESEARCH.md`'s live observation of `coder`), so
-a single reading — including this tracer's own single `playtester`
-sample above — is deliberately not treated as sufficient independent
-confirmation on its own. Task 2 of this plan performs the required
-independent confirmation for CUT-01: at least three samples per profile,
-spaced at least five minutes apart, across real wall-clock time.
+**CUT-01: performed (Task 2 of this plan).** All ten profiles were sampled
+three times, at real wall-clock intervals of 5m59s and 9m46s (both exceed
+the five-minute floor and both exceed one cron tick), on 2026-08-20 between
+03:42:06Z and 03:57:51Z. Every profile's `drained`/`pendingCount` reading
+was identical across all three rounds — zero disagreement, and therefore
+nothing to mark as a later-authoritative override in this observation
+window (see `## Results` → CUT-01 table for the full per-round data).
+CUT-01's own gate is known to flap over a wider window (per
+`33-RESEARCH.md`'s live observation of `coder` flipping drained→un-drained→
+drained on 2026-08-19/20) — this task's three-round discipline exists
+specifically to catch that, and in this window it confirmed stability
+rather than instability. A single reading (including this document's own
+Task 1 tracer sample on `playtester`) is never, on its own, treated as
+sufficient confirmation; the repeated sampling above is what makes the
+CUT-01 verdict independently confirmed rather than a lucky snapshot.
+
+**CUT-02:** not yet performed — see plan 33-02.
 
 ## Verified against
 
