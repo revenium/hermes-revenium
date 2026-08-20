@@ -17,6 +17,40 @@ canary is the only permitted pre-existing overlap") is an OPEN QUESTION for 34-0
 resolve, not a settled fact this document can currently affirm. See `## Results` →
 "Overlap-detector integrity" for the finding and `34-EVIDENCE.md` for their identifiers.**
 
+**34-02 resolves the open question above: the canary remains the ONLY genuine
+pre-existing overlap.** All ten profiles were swept fleet-wide, full ledger history, by
+three independent signals (the `owners/` two-line-record sweep, a raw `comm -12`
+cross-check of the two ledgers' distinct sid sets, and a grep of every retained
+`revenium-metering.log` for the dual-ledger warn string). 626 owner records, 2,577
+distinct legacy sids, and 14 distinct event sids were swept; exactly ONE session
+(`<canary-sid>`, redacted per this document's own convention) was found in BOTH ledgers by
+the independent raw cross-check. **The three additional two-line
+`owners/` records this plan's own predecessor flagged (two on `qa`, one on `cfo`) are
+confirmed NOT overlaps** — direct per-sid drill-down shows the legacy ledger has ZERO
+lines for all three, ever; the second line on their owner files was written by a
+structurally different mechanism (`_takeover_session_owner`, a pre-cutover
+shadow-mode ownership handoff that explicitly floors legacy's baseline so it "never
+re-bills what the event path already shipped") than the canary's own dual-ledger claim
+(`_claim_session_owner`'s dual-ledger branch). Both mechanisms happen to write a 2-line
+owner file, which is why the durable-record signal alone flagged all four — the raw
+ledger cross-check and the exact log-string match are what correctly separate the one
+real overlap from the three false positives. See `## Results` → "Overlap enumeration —
+three independent signals" and `## Findings` for the full per-session enumeration this
+finding rests on.
+
+**A second, independent finding from re-deriving the canary's own numbers live rather
+than copying them forward: the canary's total metered footprint is larger than previously
+computed.** `32-CANARY-EVIDENCE.md` recorded the legacy-side total (12,608 tokens, 2 rows)
+but explicitly marked read-side confirmation of the event side "not-run". Live re-derivation
+via `squads get`/`squads timeline` finds the event path's own 4 rows sum to 24,688 tokens —
+legitimate cache-inclusive per-call accounting for a 4-turn tool-use loop, not a second
+overcount (the underlying real input+output usage, 12,608 tokens, is identical whichever
+path's own accounting is read). The trace's true combined total, both paths summed, is
+37,296 tokens with zero residual against the read side's own aggregate. This does not
+change the overlap COUNT (it is still one session), but it corrects the previously
+incomplete magnitude on record for that one session. See `## Findings` → the canary's own
+subsection for the full row-level breakdown.
+
 **The reconciliation method works as designed, on real data, in both directions of the
 write-loss partition.** One profile (`playtester`) had its cutover boundary derived from
 its own local evidence — its first post-flip event-path report — and separately, the
@@ -35,10 +69,11 @@ of two-line `owners/` records elsewhere in this phase's later work will mean any
 See `## Results` for the per-profile currency, engagement, and prune-history table, and
 `## Known limitations and exclusions` for every qualification those checks produced.
 
-**Not yet answered by this document:** the fleet-wide overlap enumeration (34-02), the
-ten-profile boundary-plus-arithmetic reconciliation (34-03), and the final verdict with
-its independent-confirmation re-runs (34-04). Every section below that those plans own
-carries a single italic placeholder line naming the plan that fills it.
+**Not yet answered by this document:** the ten-profile boundary-plus-arithmetic
+reconciliation (34-03), and the final verdict with its independent-confirmation re-runs
+(34-04). The fleet-wide overlap enumeration (34-02) is now CLOSED — see above and
+`## Findings`. Every section below that 34-03/34-04 own carries a single italic
+placeholder line naming the plan that fills it.
 
 ## Why this document exists
 
@@ -133,6 +168,22 @@ also found two-line records on `qa` (2) and `cfo` (1), all dated 2026-08-18 — 
 pre-cutover era as the canary. This plan does not investigate them further; 34-02 must
 treat this as its starting evidence, not discover it independently and not assume the
 canary is the only pre-existing overlap without first accounting for these three.
+**RESOLVED by 34-02: confirmed NOT overlaps** — see `## Verdict` and `## Findings`.
+
+**A two-line `owners/` record is NOT, by itself, proof of a double-bill (correction to
+this document's own earlier framing, landed by 34-02).** Two structurally different
+primitives both write a 2-line owner file: `_claim_session_owner`'s dual-ledger branch
+(fired when BOTH ledgers already had rows for a session at claim time — genuine evidence
+of a past double-bill, the canary's own mechanism) and `_takeover_session_owner` (fired
+when legacy takes over an event-owned record during pre-cutover shadow mode, writing a
+floor specifically so it will NEVER re-bill what the event path already shipped — a
+double-bill PREVENTION mechanism, not evidence one occurred). The two write byte-similar
+files and, in the takeover case, a log line with different wording
+(`"session ownership taken over from the event path... mode=..."`) than the dual-ledger
+claim's (`"dual-ledger session claimed for the legacy path..."`). Any later phase reading
+`owners/` two-line records as a pre-computed overlap list must additionally check the
+raw ledger `comm -12` intersection or the exact log string — the durable record alone
+over-reports.
 
 ## Results
 
@@ -266,12 +317,130 @@ not start its enumeration from an unexamined "canary is the only one" assumption
 finding alone means CUT-03 criterion 3 ("the canary is the only permitted pre-existing
 overlap") cannot yet be affirmed — it is 34-02's open question, not this plan's.**
 
-*Fleet-wide overlap enumeration (34-02), per-profile boundaries and arithmetic (34-03), and
-independent confirmation re-runs (34-04) are filled in by those plans.*
+### Overlap enumeration — three independent signals, all ten profiles, full ledger history (34-02 Task 1)
+
+Scope: the WHOLE retained history of every profile's `owners/` directory and both
+ledgers — not a post-cutover window. Every one of the ten logs' first surviving line
+predates `REVENIUM_LOG_MAX_BYTES` (50 MiB) rotation ever triggering (each log is 11.7–26.7
+MB, well under the ceiling), so "swept the whole retained history" is not a sampled claim.
+
+| Profile | Owners swept (total) | Owners 2+-line hits | Legacy sid-set size | Event sid-set size | `comm -12` intersection | Dual-ledger warn hits | Earliest surviving log line |
+|---|---:|---:|---:|---:|---:|---:|---|
+| gtm | 57 | 0 | 56 | 1 | 0 | 0 | 2026-07-18T00:02:36Z |
+| marketing | 235 | 0 | 231 | 4 | 0 | 0 | 2026-07-18T00:02:44Z |
+| devops | UNDETERMINED (dir absent) | UNDETERMINED | 1939 | 0 | 0 (trivial) | 0 (trivial) | 2026-07-18T00:03:03Z |
+| qa | 22 | **2** | 20 | 2 | 0 | 0 | 2026-07-18T00:07:08Z |
+| coder | 227 | **1** (the canary) | 225 | 3 | **1** (the canary) | **1** (the canary) | 2026-07-18T00:07:10Z |
+| playtester | 7 | 0 | 5 | 2 | 0 | 0 | 2026-07-18T03:41:15Z |
+| cfo | 42 | **1** | 40 | 2 | 0 | 0 | 2026-07-19T23:42:30Z |
+| pm | UNDETERMINED (dir absent) | UNDETERMINED | 25 | 0 | 0 (trivial) | 0 (trivial) | 2026-07-20T04:39:20Z |
+| community | 3 | 0 | 3 | 0 | 0 | 0 | 2026-07-28T22:37:23Z |
+| lorekeeper | 33 | 0 | 33 | 0 | 0 | 0 | 2026-07-28T22:37:24Z |
+| **Sum (engaged profiles)** | **626** | **4** | **2,577** (all ten) | **14** (all ten) | **1** | **1** | — |
+
+**`devops`/`pm` marked UNDETERMINED for signal 1, and their signal-2/3 zeros are TRIVIAL,
+not clean** — carried forward from 34-01's own integrity table: neither profile has ever
+engaged the ownership protocol (`owners/` directory does not exist; `test -d` confirmed
+absence, not mere emptiness), both show a genuinely non-zero legacy sid history (1,939 and
+25 sessions respectively — real pre-cutover legacy-only usage) alongside a genuinely
+EMPTY event sid set (0 — no event-path activity has EVER occurred on either profile). A
+`comm -12` intersection of 0 against an empty set proves nothing about overlap; it proves
+only that nothing has happened yet for the detector to evaluate. If either profile
+acquires its first post-flip session before this phase closes, this row must be
+re-swept, not assumed to still read UNDETERMINED.
+
+**Every partial detection explained, not merely listed:**
+
+- **`qa` (2 hits) and `cfo` (1 hit): signal 1 (owners two-line record) found them; signal
+  2 (raw ledger `comm -12`) and signal 3 (exact dual-ledger warn string) did NOT.**
+  Direct per-sid drill-down (not inference) rules out the tidier-sounding explanation —
+  pruning of a since-removed event-ledger line — because the event ledger's line for all
+  three sids is still present, unpruned, right now. The real cause, confirmed from source
+  (`hermes-report.sh:426-471, 1640-1679`) and corroborated by each profile's own
+  contemporaneous log line at the owner file's exact mtime: all three two-line records
+  were written by `_takeover_session_owner` (quick-260818-0in/MODE-01), a ONE-WAY
+  ownership handoff from the event path to legacy that fires only while the fleet ran
+  pre-cutover `shadow` mode — structurally different from `_claim_session_owner`'s
+  dual-ledger branch (the canary's own mechanism), and NOT evidence of a double-bill: the
+  legacy ledger has zero lines for all three sids, confirmed directly, so legacy never
+  actually billed anything for them despite "owning" the record. Full per-session detail
+  in `## Findings` below.
+- **`coder`'s canary: found by all three signals, in full agreement.** This is the one
+  genuine cross-signal confirmation in the sweep, and it is the ONLY session the raw,
+  assumption-free `comm -12` cross-check independently finds in both ledgers, fleet-wide.
+- **All other profiles (gtm, marketing, playtester, community, lorekeeper): zero hits on
+  all three signals, in full agreement.** No partial detections to explain.
+
+**Candidate set (union of anything any signal found): 4 sessions — 1 genuine overlap (the
+canary) + 3 confirmed non-overlaps (ownership takeovers).** See `## Findings` for the
+full per-session enumeration, including the three non-overlaps, so the audit trail is
+complete rather than silently dropping the candidates the signals disagreed on.
+
+*Per-profile boundaries and reconciliation arithmetic (34-03), and independent
+confirmation re-runs (34-04), are filled in by those plans.*
 
 ## Findings
 
-*Filled in by 34-02 (overlap enumeration) and extended by 34-03/34-04.*
+### `<canary-sid>` — the one confirmed pre-existing overlap
+
+**Profile:** `coder`. **Row counts:** 2 legacy, 4 event. **Token totals, re-derived live**
+(not copied from `REQUIREMENTS.md`/`32-CANARY-EVIDENCE.md`): legacy-class sum (the two
+`squads timeline` rows whose `id` carries no `event:` prefix) = **12,608** — exactly
+matches the ledger's last-line value and the previously-recorded figure. Event-class sum
+(the four `event:`-prefixed rows) = **24,688** — a figure `32-CANARY-EVIDENCE.md` §7
+explicitly marked "not-run" and never previously computed; this document is its first
+live confirmation. Combined = **37,296**, matching `squads get`'s own top-level
+`totalTokens` exactly, zero residual. **The two figures are not double-counting the same
+tokens twice over**: the underlying real input+output usage (12,608) is identical whether
+read from the legacy path's `state.db`-derived split or summed from the event path's own
+four per-call records; the event side's larger total (24,688) is legitimate
+cache-inclusive per-call accounting for a 4-turn tool-use loop (turns 2 and 3 re-process
+5,997 and 6,083 cached context tokens respectively — visible in the still-unpruned spool
+file, which corroborates the read side byte-for-byte). **Claim timestamp:**
+`2026-08-18T03:04:27Z` (dual-ledger warn line; the owner file's own mtime matches to the
+sub-second, corroborating rather than substituting). **Confirmed pre-existing:** the
+canary's own activity (`2026-08-17T21:31:01Z`–`21:33:28Z`) and its claim
+(`2026-08-18T03:04:27Z`) both predate the fleet's cutover flip
+(`2026-08-19T21:12Z`–`21:40Z`) by more than a day — this is a date comparison against
+live-confirmed timestamps, not an assertion. **Named cause:** the D-09 partition's
+ordering-dependent defect (`32-CANARY-EVIDENCE.md` §2) — a session whose first
+event-shipper pass preceded its first legacy pass, before the mutual-ownership protocol
+existed to prevent it.
+
+### `<qa-dual-sid-1>` — NOT an overlap (ownership takeover)
+
+**Profile:** `qa`. **Row counts:** 0 legacy (no `HERMES:` line, ever — confirmed by
+direct grep, not inferred from the `comm -12` miss alone), 1 event
+(`squads get` confirms `transactionCount: 1`). **Token totals:** legacy — no such line,
+the absence is the expected finding, not a failed read. Event — **13,914** (read side,
+matches the still-unpruned spool file's own `total_tokens` exactly: `input_tokens=13843,
+output_tokens=21, cache_read_tokens=50`). The owner file's recorded floor (`13864`) is 50
+tokens lower than this — exactly the call's `cache_read_tokens` value — a small, separate
+finding about `hermes-report.sh`'s `state.db`-derived `total_tokens` not including
+cache-read tokens the same way the event path's own shipped total does; it does not
+change the "zero legacy rows, not an overlap" conclusion. **Claim/takeover timestamp:**
+`2026-08-18T21:21:26Z` (log line, strong provenance). **Named cause:**
+`_takeover_session_owner` (quick-260818-0in/MODE-01) — legacy took over ownership from an
+event-owned record while the fleet ran pre-cutover `shadow` mode, but its own growth
+guard never fired because legacy had nothing new to bill; the session was billed exactly
+once, by the event path.
+
+### `<qa-dual-sid-2>` — NOT an overlap (ownership takeover)
+
+**Profile:** `qa`. **Row counts:** 0 legacy, 1 event. **Token totals:** legacy — no such
+line. Event — **14,028** (read side; spool: `input_tokens=13893, output_tokens=135,
+cache_read_tokens=0` — the owner file's floor, `14028`, matches exactly since this call
+has no cache-read component). **Claim/takeover timestamp:** `2026-08-18T21:21:26Z` — the
+same cron tick as `<qa-dual-sid-1>`, both takeovers landing together. **Named cause:**
+identical to `<qa-dual-sid-1>`.
+
+### `<cfo-dual-sid-1>` — NOT an overlap (ownership takeover)
+
+**Profile:** `cfo`. **Row counts:** 0 legacy, 1 event. **Token totals:** legacy — no such
+line. Event — **13,015** (read side; spool: `input_tokens=13009, output_tokens=6,
+cache_read_tokens=0` — floor `13015` matches exactly). **Claim/takeover timestamp:**
+`2026-08-18T16:51:36Z`. **Named cause:** identical mechanism to the two `qa` sessions,
+independently confirmed on a third profile.
 
 ## Reproducing this measurement
 
@@ -304,6 +473,25 @@ test -s ~/.hermes/profiles/<profile>/state/revenium/revenium-api-events.ledger &
 grep 'prune:' ~/.hermes/profiles/<profile>/state/revenium/revenium-metering.log
 ```
 
+**Overlap enumeration, three independent signals, per profile (34-02):**
+```bash
+# Signal 1: owners/ two-line sweep
+d=~/.hermes/profiles/<profile>/state/revenium/owners
+for f in "$d"/*; do n=$(wc -l < "$f"); [ "$n" -ge 2 ] && echo "DUAL $(basename "$f") $(tr '\n' '|' < "$f")"; done
+
+# Signal 2: raw ledger comm -12 cross-check (the check on the checker)
+grep -oE '^HERMES:[^:]+' revenium-hermes.ledger | sed 's/^HERMES://' | sort -u > /tmp/legacy_sids
+awk -F'|' '{print $2}' revenium-api-events.ledger | sort -u > /tmp/event_sids
+comm -12 /tmp/legacy_sids /tmp/event_sids
+
+# Signal 3: the dual-ledger warn line, corroboration only
+grep -c "dual-ledger session claimed for the legacy path" revenium-metering.log
+
+# Disambiguating a signal-1-only hit: is it a genuine dual-ledger claim, or a takeover?
+grep "<sid>" revenium-metering.log | grep -i "ownership taken over\|dual-ledger"
+grep "^HERMES:<sid>:" revenium-hermes.ledger   # empty => never legacy-billed, not an overlap
+```
+
 *A replayable template per verb family this whole phase used is 34-04 Task 1's own
 acceptance criterion — the above covers only what Task 1/2 of this plan used.*
 
@@ -314,27 +502,36 @@ independent-confirmation rounds.*
 
 ## Verified against
 
-Date: 2026-08-20. Method (this plan only): read-only SSH access to the fleet host
-(`revenium-metering.log`, `revenium-hermes.ledger`, `revenium-api-events.ledger`, the
+Date: 2026-08-20. Method (34-01, tracer + integrity): read-only SSH access to the fleet
+host (`revenium-metering.log`, `revenium-hermes.ledger`, `revenium-api-events.ledger`, the
 `api-events/` spool directory, `env` file mtimes, `owners/` directories, deployed script
 `sha256sum`s) plus the `revenium` CLI's read verbs (`squads get`, `squads timeline`,
-`metrics ai`) against the live Revenium dev tenant. Population for this plan's tracer:
-one profile (`playtester`) and two of its sessions. Population for the integrity checks:
-all ten fleet profiles (gtm, marketing, devops, qa, coder, playtester, cfo, pm, community,
-lorekeeper).
+`metrics ai`) against the live Revenium dev tenant. Population for the tracer: one
+profile (`playtester`) and two of its sessions. Population for the integrity checks: all
+ten fleet profiles.
+
+**Method (34-02, overlap enumeration), same read-only discipline, re-confirmed
+connectivity live (`2026-08-20T15:54:49Z`, same host, `tableforone-agents`):** the same
+SSH/`revenium` read surface, extended with `comm -12` (raw ledger cross-check) and
+per-sid `grep` drill-downs. Population: all ten fleet profiles' full ledger/owner-record
+history (no time-window restriction — see `## Results` for the swept totals), plus
+`squads get`/`squads timeline` re-derivation for all four candidate sessions found by any
+signal.
 
 **Deliberately omitted from this file, on every page, in every task:** the fleet host's
 address, the SSH key filename, every remote login string, and every raw session, trace,
-`api_request_id`, and composite `transactionId` — including the three incidentally-found
-dual-ledger sessions, quoted above only in aggregate (profile + count + date), never by
-raw id. These live only in this repository's local, gitignored evidence artifact
+`api_request_id`, and composite `transactionId` — including the three confirmed-non-overlap
+sessions and the canary's own event-side identifiers, quoted above only via placeholder or
+in aggregate (profile + count + date + token figures), never by raw id. These live only in
+this repository's local, gitignored evidence artifact
 (`.planning/phases/34-transition-reconciliation/34-EVIDENCE.md`), resolved via the stable
 placeholders used above (`<sid-B>`, `<hash-B>`, `<sid-T>`, `<hash-T>`, `<canary-sid>`,
-`<profile-state-dir>`) plus three placeholders reserved but not yet dereferenced in THIS
-document's own prose (`<qa-dual-sid-1>`, `<qa-dual-sid-2>`, `<cfo-dual-sid-1>` — mapped in
-`34-EVIDENCE.md` for 34-02's use).
+`<qa-dual-sid-1>`, `<qa-dual-sid-2>`, `<cfo-dual-sid-1>`, `<profile-state-dir>`) — the
+three qa/cfo placeholders 34-01 reserved but did not yet dereference are now used
+throughout `## Results` and `## Findings` above.
 
-**Retained, deliberately:** profile role labels (`playtester`, `coder`, `gtm`, etc.),
-every aggregate figure (token counts, timestamps, hash-match verdicts), and the deploy
-commit `f13bdf6` — none of these are session, trace, or host identifiers, and the
-per-profile reading throughout this document depends on them.
+**Retained, deliberately:** profile role labels (`playtester`, `coder`, `qa`, `cfo`,
+`gtm`, etc.), every aggregate figure (token counts, timestamps, hash-match verdicts, row
+counts, swept totals), and the deploy commit `f13bdf6` — none of these are session,
+trace, or host identifiers, and the per-profile reading throughout this document depends
+on them.
