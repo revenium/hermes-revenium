@@ -70,9 +70,11 @@ CONFIRMED read-side, quoted verbatim from live `revenium metrics ai` /
 `traceId`, `traceType`, `agent`, `squadId`, `model`, `provider`,
 `transactionId`, `squadName`, and per-call attribution. Both clauses ROADMAP
 success criterion 4 named as open are now RESOLVED: **`agenticJobId`
-RESOLVED-ABSENT** — never reaches a metered row on the event path, for a
-root session by permanent construction (`classifier.py:999`) and for a
-subagent session as the normal outcome of dispatch ordering, confirmed live
+RESOLVED-ABSENT** — for a root session it can never reach a metered row, by
+permanent construction (`classifier.py:999`); for a subagent session it is
+absent as the normal (not edge-case) outcome of dispatch ordering, which is
+a strong tendency and NOT a structural guarantee — see `## Findings` for the
+ordering condition under which a subagent row could carry it. Confirmed live
 via two independent `revenium jobs transactions` calls both returning
 `totalCount: 0`. **Multi-model attribution RESOLVED as mechanism-verified,
 trigger-unfired-within-a-single-trace** — `fallback_providers` is configured
@@ -384,7 +386,7 @@ Dimension table, each CONFIRMED against the quoted response above:
 | `provider` | `fireworks` |
 | `transactionId` | `event:<sid>:<uuid>:<hash>:api:N` shape, quoted below |
 | per-call attribution | two rows, one session (`<sid-B>`), `:api:1` and `:api:2` |
-| `agenticJobId` | **RESOLVED-ABSENT** — never reaches a metered row on the event path; see `## Findings` → "agenticJobId — resolved absent, by design" |
+| `agenticJobId` | **RESOLVED-ABSENT** — structurally impossible for a root session, absent as the normal outcome of dispatch ordering for a subagent session (a tendency, not a guarantee); see `## Findings` → "agenticJobId — resolved absent, by design" |
 | multi-model attribution | **RESOLVED — mechanism-verified, no intra-session occurrence found in a bounded 26-trace search** (NOT structurally impossible); see `## Findings` → "Multi-model attribution — mechanism verified, trigger unfired within a single trace" |
 
 Quoted row (`<sid-A>`, playtester — re-confirmed live in this plan's own
@@ -738,15 +740,18 @@ require answering.
 
 ### agenticJobId — resolved absent, by design
 
-**`agenticJobId` never reaches a metered row on the event path, for a root
-session by permanent construction and for a subagent session as the normal
-(not edge-case) outcome of dispatch ordering — resolved on two independent
-methods, both agreeing.**
+**`agenticJobId` does not reach a metered row on the event path — for a root
+session by permanent construction, and for a subagent session as the normal
+(not edge-case) outcome of dispatch ordering. These two halves do not carry
+equal weight: the root-session half is a structural impossibility, the
+subagent half is a strong ordering tendency with a stated condition under
+which it does not hold. Resolved on two independent methods, both agreeing,
+and stated here at the weaker of the two strengths.**
 
 **Method 1 — live read-side result.** Two jobs, each with a `created` line
 followed by an `outcome` line in their profile's `revenium-jobs.ledger` (one
-from `marketing`, `SUCCESS`; one from `coder`,
-`dispatch_pong_subagent_probe_e519`, `CANCELLED` — the same induced probe
+from `marketing`, `SUCCESS`; one from `coder`, `<job-B>`, `CANCELLED` —
+the same induced probe
 STATE.md's Probe 2 recorded, re-queried live for this plan rather than
 copy-forwarded). `revenium jobs get <id> --output json` confirms both job
 resources exist server-side with a real `executionStatus` and `created`
@@ -786,12 +791,22 @@ classification — typically at the root's end/finalize boundary, which is
 after a mid-session subagent has already finished and been classified. The
 ordering hazard is the normal case here, not an edge case.
 
-Separately, and regardless of either finding above: the event path's marker
-join excludes `kind:"job"` records outright. `api-event-report.sh:1006-1022`
-requires `all(k in m for k in REQUIRED)` where `REQUIRED = ("muid", "ts",
-"sid", "task_type", "operation_type")` and separately skips any record where
-`m.get("kind") is not None` — a job marker fails this filter and is never in
-the join set `_attribution_for` (`api-event-report.sh:1046-1057`) reads from.
+**What does NOT close the subagent case, stated so nobody mistakes it for a
+closer.** The event path's marker join does exclude `kind:"job"` records
+outright: `api-event-report.sh:1006-1022` skips any record where
+`m.get("kind") is not None`, then requires `all(k in m for k in REQUIRED)`
+where `REQUIRED = ("muid", "ts", "sid", "task_type", "operation_type")`, so a
+job marker is never in the join set. That is true, and it is NOT an argument
+that a subagent row cannot carry the field — the carrier is not the job
+marker. It is the subagent's own ordinary `CHAT`/`GUARDRAIL` marker, which
+passes that filter, and `_attribution_for` reads `agentic_job_id` straight
+off it (`api-event-report.sh:1056`) and returns it; the reporter then ships
+`--agentic-job-id` whenever that value is non-empty and the CLI is capable
+(`api-event-report.sh:1268-1269`). So the subagent half of this finding rests
+on the dispatch-ordering argument above and on nothing else. If the root's
+`kind:"job"` marker did exist before a subagent was classified, that
+subagent's row would carry the field, and this document would be wrong about
+it. That path was not observed here; it was also not ruled out.
 
 **The legacy-versus-event asymmetry, recorded, not fixed.** The legacy path
 resolves this differently and CAN attach a root session's own job id:
@@ -898,6 +913,43 @@ revenium metrics ai --from <ISO> --to <ISO> --output json --page-size 200 --page
 Filter the returned array client-side — there is no server-side filter on
 this verb — down to rows whose `agent` starts with `Hermes` or whose
 `label` starts with `event:`.
+
+Trace-level rollup and the two-call join (`squadName`, `traceType`, and the
+per-trace `models` set). `<sid>` is the raw root session id — resolve it from
+the placeholder map in the gitignored evidence artifact:
+
+```bash
+revenium squads get <sid> --output json       # squad detail: squadName, traceType, models
+revenium squads timeline <sid> --output json  # per-call events within the one trace
+```
+
+Job resource and its linked AI-metric transactions (the `agenticJobId`
+probe — a job that exists server-side while `totalCount` stays `0` is the
+result this document reports):
+
+```bash
+revenium jobs get <job-id> --output json
+revenium jobs transactions <job-id> --output json
+```
+
+Bounded multi-model search. Enumerate trace ids over a period, then read each
+trace's own `models` set and count the traces with two or more distinct
+models. `--page` is declined by this verb, so the period is the only knob and
+the reachable set is capped — state the cap with the result:
+
+```bash
+revenium squads executions --period TWENTY_FOUR_HOURS --output json
+revenium squads executions --period SEVEN_DAYS --output json
+# then, per enumerated id:
+revenium squads get <id> --output json   # inspect len(models) >= 2
+```
+
+Every call above is a read verb. Reproducing this measurement requires no
+write of any kind — no `revenium meter`, no `jobs create`/`outcome`, no
+`guardrails` mutation, and no write to any profile's `env`, `config.json`,
+`drain-status.json`, or ledger. The convergence result in particular is only
+valid if nothing was touched; see `## Known limitations and exclusions` for
+what this phase could and could not establish on that point.
 
 ### Query ledger (33-01 + 33-02 + 33-03)
 
