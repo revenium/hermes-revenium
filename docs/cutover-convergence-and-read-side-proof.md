@@ -14,11 +14,15 @@ been touched but doesnt matter if so" — and declined to name a profile. The
 mechanical evidence below is real and stands on its own, but it does not
 cover the full span between the 2026-08-19 cutover flip and this phase's
 first observation, and this document therefore reports CUT-01 as CLOSED AT
-8/10 WITH AN UNATTESTED QUALIFIER, not as a clean unforced pass. CUT-02 is
-fully resolved: every non-cost dimension ROADMAP success criterion 3 names
-is confirmed read-side, and both clauses left open at scope time
-(`agenticJobId`, multi-model attribution) are now resolved either way with
-evidence, per ROADMAP success criterion 4.**
+8/10 WITH AN UNATTESTED QUALIFIER, not as a clean unforced pass. CUT-02
+closes: every non-cost dimension ROADMAP success criterion 3 names is
+confirmed read-side, and both clauses left open at scope time
+(`agenticJobId`, multi-model attribution) are resolved either way with
+evidence, per ROADMAP success criterion 4 — with one scope limit stated here
+rather than buried: `agenticJobId`'s resolution is structural for ROOT
+sessions and merely OBSERVATIONAL for SUBAGENT sessions, where the mechanism
+in fact favours presence. That half is labelled UNVERIFIED throughout and is
+the one item this phase hands forward.**
 
 **CUT-01, final state as of 2026-08-20T05:12-05:13Z (Task 3 of this
 plan, qualifier added at Task 4):** 8 of 10 converged (unforced by this
@@ -69,14 +73,19 @@ CONFIRMED read-side, quoted verbatim from live `revenium metrics ai` /
 `jobs get` / `jobs transactions` responses: `taskType`, `operationType`,
 `traceId`, `traceType`, `agent`, `squadId`, `model`, `provider`,
 `transactionId`, `squadName`, and per-call attribution. Both clauses ROADMAP
-success criterion 4 named as open are now RESOLVED: **`agenticJobId`
-RESOLVED-ABSENT** — for a root session it can never reach a metered row, by
-permanent construction (`classifier.py:999`); for a subagent session it is
-absent as the normal (not edge-case) outcome of dispatch ordering, which is
-a strong tendency and NOT a structural guarantee — see `## Findings` for the
-ordering condition under which a subagent row could carry it. Confirmed live
-via two independent `revenium jobs transactions` calls both returning
-`totalCount: 0`. **Multi-model attribution RESOLVED as mechanism-verified,
+success criterion 4 named as open are now RESOLVED, one of them with a
+narrower scope than an earlier draft claimed: **`agenticJobId`
+RESOLVED-ABSENT FOR ROOT SESSIONS, UNVERIFIED FOR SUBAGENT SESSIONS.** For a
+root session it can never reach a metered row, by permanent construction
+(`classifier.py:999`) — that half is structural and settled. For a subagent
+session, absence is only an OBSERVATION over the rows this phase sampled,
+confirmed live via two independent `revenium jobs transactions` calls both
+returning `totalCount: 0`. It is not a mechanism result: per-turn
+classification (Phase 29's `post_llm_call` hook) normally writes the root's
+job marker on the root's FIRST completed turn, so a subagent dispatched after
+that inherits the field and its row would carry it. See `## Findings` — the
+ordering argument an earlier draft rested this half on was backwards, and is
+corrected there rather than quietly dropped. **Multi-model attribution RESOLVED as mechanism-verified,
 trigger-unfired-within-a-single-trace** — `fallback_providers` is configured
 on all ten profiles and demonstrably live for two of them (marketing and
 cfo run every sampled trace on their fallback model, never their
@@ -386,7 +395,7 @@ Dimension table, each CONFIRMED against the quoted response above:
 | `provider` | `fireworks` |
 | `transactionId` | `event:<sid>:<uuid>:<hash>:api:N` shape, quoted below |
 | per-call attribution | two rows, one session (`<sid-B>`), `:api:1` and `:api:2` |
-| `agenticJobId` | **RESOLVED-ABSENT** — structurally impossible for a root session, absent as the normal outcome of dispatch ordering for a subagent session (a tendency, not a guarantee); see `## Findings` → "agenticJobId — resolved absent, by design" |
+| `agenticJobId` | **RESOLVED-ABSENT (root) / UNVERIFIED (subagent)** — structurally impossible for a root session; for a subagent session, absent in every row sampled here but NOT shown impossible, and the mechanism in fact favours presence once the root has completed a turn; see `## Findings` → "agenticJobId — absent for root sessions by construction, unverified for subagents" |
 | multi-model attribution | **RESOLVED — mechanism-verified, no intra-session occurrence found in a bounded 26-trace search** (NOT structurally impossible); see `## Findings` → "Multi-model attribution — mechanism verified, trigger unfired within a single trace" |
 
 Quoted row (`<sid-A>`, playtester — re-confirmed live in this plan's own
@@ -738,15 +747,14 @@ whether the exact string it resolves to matches what was sent is a separate
 question CUT-02's own wording ("confirmed on the read side") does not
 require answering.
 
-### agenticJobId — resolved absent, by design
+### agenticJobId — absent for root sessions by construction, unverified for subagents
 
-**`agenticJobId` does not reach a metered row on the event path — for a root
-session by permanent construction, and for a subagent session as the normal
-(not edge-case) outcome of dispatch ordering. These two halves do not carry
-equal weight: the root-session half is a structural impossibility, the
-subagent half is a strong ordering tendency with a stated condition under
-which it does not hold. Resolved on two independent methods, both agreeing,
-and stated here at the weaker of the two strengths.**
+**`agenticJobId` did not appear on any metered row this phase examined. The
+two halves of that result are not equally strong and must not be quoted as
+one: for a ROOT session, absence is a structural impossibility and settled;
+for a SUBAGENT session, absence is an empirical observation over a small
+sample, and the mechanism actually favours presence. Stated here at the
+weaker of the two strengths, with the subagent half labelled UNVERIFIED.**
 
 **Method 1 — live read-side result.** Two jobs, each with a `created` line
 followed by an `outcome` line in their profile's `revenium-jobs.ledger` (one
@@ -783,30 +791,50 @@ outcome as a deliberate design choice: "Top-level sessions emit trace_id ==
 sid ... and OMIT agentic_job_id." **This is permanent and applies to every
 root session, not a timing artifact — no probe sequencing changes it.**
 
-For a subagent session, the field CAN be present, but only if the root's own
-`kind:"job"` marker already exists at the moment the subagent is classified.
-Job inference (`classifier.py:1112`, `root_sid == session_id`) is scoped to
-root sessions only and runs as the last step of the root's own
-classification — typically at the root's end/finalize boundary, which is
-after a mid-session subagent has already finished and been classified. The
-ordering hazard is the normal case here, not an edge case.
+**For a subagent session there is no mechanism argument at all, and an
+earlier draft of this document was wrong to offer one.** The field is present
+on a subagent's marker whenever the root's own `kind:"job"` marker already
+exists at the moment the subagent is classified. A draft reviewed on
+2026-08-20 asserted that job inference "runs as the last step of the root's
+own classification — typically at the root's end/finalize boundary, which is
+after a mid-session subagent has already finished and been classified," and
+called that ordering the normal case. **That is backwards.** Job inference is
+Step 7 of `run_classification_async` (`classifier.py:1104-1112`) and its own
+comment states it "runs unconditionally on every reachable path" — and since
+Phase 29 (HOOK-02) one of those paths is `post_llm_call`, which fires once per
+COMPLETED turn. The plugin's own module docstring
+(`plugins/revenium-classifier/__init__.py`) states the intent plainly: the
+hook exists for "making an ordinary session produce a classified job on its
+first turn", and "classifying on the first completed turn is what makes an
+ordinary prompt produce a job without waiting for a session boundary." So for
+any root that completes one turn before dispatching a subagent — the ordinary
+shape of agentic work — the root's job marker exists FIRST, and that
+subagent's marker inherits `agentic_job_id` via `classifier.py:999-1010`.
+Presence is the expected case there, not the exception.
 
-**What does NOT close the subagent case, stated so nobody mistakes it for a
-closer.** The event path's marker join does exclude `kind:"job"` records
+**What that leaves the subagent half resting on: observation, and nothing
+else.** Every Hermes-owned row examined in this phase lacked the field, and
+both `revenium jobs transactions` calls returned `totalCount: 0`. That is a
+real, reproducible read-side result and it is all this document claims. It is
+NOT a demonstration that a subagent row cannot carry the field. The most
+likely explanation for the observation is the mundane one — the sampled
+window contained no subagent session dispatched after its root's first turn —
+and this phase's read-only constraint forbids inducing one to find out.
+Anyone extending this finding should treat "subagent rows carry no
+`agenticJobId`" as UNVERIFIED and design a probe for it: dispatch a subagent
+from a root that has already completed a turn, then read that subagent's row.
+
+**What does NOT close the subagent case either, stated so nobody mistakes it
+for a closer.** The event path's marker join does exclude `kind:"job"` records
 outright: `api-event-report.sh:1006-1022` skips any record where
 `m.get("kind") is not None`, then requires `all(k in m for k in REQUIRED)`
 where `REQUIRED = ("muid", "ts", "sid", "task_type", "operation_type")`, so a
-job marker is never in the join set. That is true, and it is NOT an argument
-that a subagent row cannot carry the field — the carrier is not the job
-marker. It is the subagent's own ordinary `CHAT`/`GUARDRAIL` marker, which
-passes that filter, and `_attribution_for` reads `agentic_job_id` straight
-off it (`api-event-report.sh:1056`) and returns it; the reporter then ships
-`--agentic-job-id` whenever that value is non-empty and the CLI is capable
-(`api-event-report.sh:1268-1269`). So the subagent half of this finding rests
-on the dispatch-ordering argument above and on nothing else. If the root's
-`kind:"job"` marker did exist before a subagent was classified, that
-subagent's row would carry the field, and this document would be wrong about
-it. That path was not observed here; it was also not ruled out.
+job marker is never in the join set. True, and irrelevant to this question —
+the carrier is not the job marker. It is the subagent's own ordinary
+`CHAT`/`GUARDRAIL` marker, which passes that filter, and `_attribution_for`
+reads `agentic_job_id` straight off it (`api-event-report.sh:1056`) and
+returns it; the reporter then ships `--agentic-job-id` whenever that value is
+non-empty and the CLI is capable (`api-event-report.sh:1268-1269`).
 
 **The legacy-versus-event asymmetry, recorded, not fixed.** The legacy path
 resolves this differently and CAN attach a root session's own job id:
@@ -1044,9 +1072,14 @@ meant to confirm rather than a lucky first read. The `squadName` mismatch
 finding (`gtm-fleet` returned for two different profiles' traces, neither of
 which sent that string per their own argv) is itself corroborated by two
 independent `squads get` calls against two different `squadId`s (`<sid-A>`,
-`<sid-B>`), not one lookup taken on faith. `agenticJobId` was independently
-confirmed absent via two unrelated jobs (`marketing`, `coder`), not one —
-both return `{"totalCount": 0}` from `revenium jobs transactions`. Multi-model
+`<sid-B>`), not one lookup taken on faith. `agenticJobId`'s ABSENCE was
+independently observed via two unrelated jobs (`marketing`, `coder`), not one
+— both return `{"totalCount": 0}` from `revenium jobs transactions`. Note
+what two agreeing observations do and do not buy: they corroborate that the
+field was absent from what was sampled; they do not turn the subagent half
+into a mechanism result, and neither job's session is known to be a subagent
+dispatched after its root's first turn — the one shape that would actually
+test it. Multi-model
 attribution's own independent-confirmation device IS its search bound: 26
 separate `squads get` calls against 26 different traces spanning two
 non-overlapping enumeration periods (`TWENTY_FOUR_HOURS`, `SEVEN_DAYS`) is
