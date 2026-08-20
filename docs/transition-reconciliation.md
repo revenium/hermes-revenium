@@ -185,6 +185,32 @@ claim's (`"dual-ledger session claimed for the legacy path..."`). Any later phas
 raw ledger `comm -12` intersection or the exact log string — the durable record alone
 over-reports.
 
+**Pruned-spool bucket (event-side local evidence unavailable, one-way-checkable only):
+`0` sessions, `0` tokens (34-03 Task 2/3).** For every post-boundary event-path session
+on the five profiles that had reached a boundary at this document's writing, the
+`api-events/<sid>.jsonl` spool file was checked and found present and readable — none had
+been garbage-collected by `prune-markers.sh`'s manual-only owners pass. This bucket is
+therefore empty by direct check, not by assumption, for this reconciliation's own window.
+Had any spool file been pruned, that session's event-side local total would have been
+unavailable — checkable only from Revenium's read side, with no local figure to compare
+it against — and would have been placed in this bucket with its own session count and
+token total (where the read side supplies one) rather than assumed zero or dropped from
+the arithmetic. The mechanism remains a live risk for any later phase: `prune-markers.sh`
+is manual-only today, but nothing prevents a future run from pruning a spool file whose
+session has not yet been read-side-reconciled.
+
+**`metrics ai --from`/`--to` filters by `requestTime`, not `created` — a CLI-behavior
+limitation on any date-windowed bulk query against this verb (34-03 Task 2).** For a
+legacy delta-report row, `requestTime` is the START of the delta period (the previous
+report's own timestamp), which can predate the row's `created` timestamp (when Revenium
+actually recorded it) by hours to weeks. A bulk `metrics ai` walk windowed strictly after
+the write-loss window will silently exclude such a row even though it was genuinely
+reported, and would be counted as CLEAN, safely inside the window. See `## Findings` for
+the full live bisection and `## Results` → gtm's own table for the one confirmed
+instance and its corrected figures. This is a limitation of the bulk-query aggregation
+method, not evidence of a metering gap — every instance found this phase was confirmed
+present via a direct, date-window-free `squads get`/`squads timeline` query.
+
 ## Results
 
 ### Tracer — one profile, one session, one reconciliation (Task 1 of this plan)
@@ -567,6 +593,82 @@ None contribute a SUSPECT, CLEAN, READ, or RESIDUAL figure to the fleet sums bel
 absent boundary is not a boundary at time zero, and reporting a zero here would
 misrepresent "nothing observed yet" as "reconciled clean."
 
+### Fleet totals — the sum of the ten tables above, and every residual's disposition (34-03 Task 3)
+
+**Fleet totals are the stated sum of the ten per-profile summands above — shown here, not
+just the result, so a reader can add the column themselves.** Five profiles contribute a
+zero/empty summand (devops, qa, pm, community, lorekeeper — no boundary yet, per the
+table above); the other five contribute the figures from their own tables.
+
+| Symbol | gtm | marketing | coder | playtester | cfo | (5 empty) | **Fleet sum** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| SUSPECT | 0 | 37,066 | 0 | 13,665 | 0 | 0 | **50,731** |
+| CLEAN | 126,160 | 91,625 | 53,950 | 13,634 | 221,231 | 0 | **506,600** |
+| READ (literal bulk-walk) | 13,557 | 91,625 | 53,950 | 13,634 | 221,231 | 0 | **393,997** |
+| READ_event | 13,557 | 91,625 | 53,950 | 13,634 | 221,231 | 0 | **393,997** |
+| READ_legacy (literal bulk-walk) | 0 | 0 | 0 | 0 | 0 | 0 | **0** |
+| RESIDUAL (literal bulk-walk) | 112,603 | 0 | 0 | 0 | 0 | 0 | **112,603** |
+
+**Every non-zero residual, disposed one at a time — no third option, no rounding away.**
+The fleet's entire literal-bulk-walk residual (`112,603`) is `gtm`'s own residual; every
+other profile's residual is exactly `0`. It is given TWO named causes, not left
+unexplained, and NEITHER is the write-loss window (`W`) — this delta happened, and was
+recorded by Revenium, deep inside the CLEAN period, nowhere near `W`:
+
+1. **`112,601` tokens — the `metrics ai --from`/`--to` requestTime-vs-created filtering
+   behavior** (`## Findings` → the dedicated subsection above). The row
+   (`<gtm-legacy-sid>-1056131`) is confirmed present on
+   Revenium's read side — `squads get`, `squads timeline`, and a `--squad-id`-narrowed
+   `metrics ai` call (no date filter, or a window bracketing `requestTime` instead of
+   `created`) all return it, in full agreement with the local ledger's own recorded
+   growth. **This is not a metering gap — the tokens were never lost, only omitted by
+   this one aggregation method's date-filter semantics.** Once counted via its
+   read-confirmed value, the corrected fleet `READ = 393,997 + 112,601 = 506,598`, and
+   the corrected fleet `RESIDUAL = 506,600 − 506,598 = 2`.
+2. **`2` tokens — delta-scaling rounding.** `112,603` (local, raw cumulative
+   subtraction: `1,056,131 − 943,528`) vs `112,601` (read side, Revenium's own recorded
+   value for the same delta report) differ by 2 tokens, consistent with
+   `hermes-report.sh:1752-1773`'s proportional split of one delta across
+   input/output/cache buckets introducing sub-token rounding on each split. This 2-token
+   residual is what remains once cause 1 above is accounted for, and it is the fleet's
+   own genuinely irreducible residual: **`2` tokens, unattributed to any window, named to
+   its exact mechanism.**
+
+**Zero tokens are unexplained, fleet-wide.** Every non-zero residual — the full
+`112,603` under the literal definition, or the `2` that remains once the CLI-behavior
+gap is corrected for — carries a named cause pointing at specific evidence (a
+transaction ID, a timestamp, a code citation), not a plausibility argument. No residual
+anywhere in this reconciliation is attributed to the write-loss window, because none of
+them fall inside it — the window's own effect is captured entirely by SUSPECT, below.
+
+**SUSPECT — Revenium's own quantified data loss for this fleet across the cutover,
+`50,731` tokens, reported as a number, not an excluded region.** This is `marketing`'s
+`37,066` (`<mkt-B-sid>`, live `404`) plus `playtester`'s `13,665` (`<sid-B>`, live `404`,
+established by 34-01). Both are locally-reported, spool-corroborated activity that
+Revenium's own tenant discarded during the write-loss window. **This is not a metering
+gap and was not chased as one** — it is stated plainly as the size of the outage's own
+damage, and it is **explicitly excluded from RESIDUAL**: SUSPECT tokens never appear in
+READ (Revenium genuinely has nothing for either session — confirmed by a live `404`, not
+inferred), so they cannot create a residual against a total that never counted them.
+
+**The gap claim and the double-count claim, stated separately, each with its own figures
+and its own scope:**
+
+- **No-gap claim:** across the five profiles with post-boundary activity, CLEAN local
+  evidence (`506,600`) matches Revenium's own read-side total to within `2` tokens
+  (`506,598` once the one confirmed CLI-behavior gap is corrected for by direct
+  per-session query) — a rounding artifact with a named mechanism, not an unexplained
+  shortfall. No tokens billed locally and reported cleanly (outside `W`) are missing from
+  Revenium's own records.
+- **No-double-count claim:** the `50,731` SUSPECT tokens (write-loss casualties) were
+  billed locally exactly once and never landed in Revenium at all — confirmed by a live
+  `404` on both sessions, not merely absent from a time-windowed query. They are counted
+  in neither READ nor RESIDUAL; the only place they appear in this document's arithmetic
+  is as SUSPECT, exactly once, per profile.
+
+`## Verdict` is not rewritten by this task beyond what 34-02 left there — the closing
+disposition of these figures, and the milestone's own verdict on CUT-03, is 34-04's.
+
 ## Findings
 
 ### `<canary-sid>` — the one confirmed pre-existing overlap
@@ -766,6 +868,19 @@ history (no time-window restriction — see `## Results` for the swept totals), 
 `squads get`/`squads timeline` re-derivation for all four candidate sessions found by any
 signal.
 
+**Method (34-03, boundaries and reconciliation arithmetic), same read-only discipline,
+re-confirmed connectivity live (`2026-08-20T16:27:51Z`, same host,
+`tableforone-agents`):** the same SSH/`revenium` read surface, extended with per-profile
+`env`-mtime and `drain-status.json` re-reads, an `awk`-filtered legacy-ledger sweep
+keyed on each profile's own boundary epoch, per-session spool-file summation, a 15-page
+`metrics ai` bulk walk (1,455 rows, `--from`/`--to` both on the local workstation and
+cross-confirmed against the fleet host's own CLI installation, same tenant), and a live
+bisection of the `metrics ai` date-filter's field semantics (`--squad-id`-narrowed calls
+with disjoint windows). Population: the five profiles that had reached their own boundary
+at this document's writing (gtm, marketing, coder, playtester, cfo) plus a full
+five-profile "not yet reached" determination (devops, qa, pm, community, lorekeeper) —
+every ten profiles' `env` flip and `drain-status.json` re-read live, not sampled.
+
 **Deliberately omitted from this file, on every page, in every task:** the fleet host's
 address, the SSH key filename, every remote login string, and every raw session, trace,
 `api_request_id`, and composite `transactionId` — including the three confirmed-non-overlap
@@ -774,9 +889,11 @@ in aggregate (profile + count + date + token figures), never by raw id. These li
 this repository's local, gitignored evidence artifact
 (`.planning/phases/34-transition-reconciliation/34-EVIDENCE.md`), resolved via the stable
 placeholders used above (`<sid-B>`, `<hash-B>`, `<sid-T>`, `<hash-T>`, `<canary-sid>`,
-`<qa-dual-sid-1>`, `<qa-dual-sid-2>`, `<cfo-dual-sid-1>`, `<profile-state-dir>`) — the
-three qa/cfo placeholders 34-01 reserved but did not yet dereference are now used
-throughout `## Results` and `## Findings` above.
+`<qa-dual-sid-1>`, `<qa-dual-sid-2>`, `<cfo-dual-sid-1>`, `<profile-state-dir>`,
+`<gtm-B-sid>`, `<gtm-legacy-sid>`, `<mkt-B-sid>`, `<mkt-C1-sid>`, `<mkt-C2-sid>`,
+`<mkt-C3-sid>`, `<coder-B1-sid>`, `<coder-B2-sid>`, `<cfo-B-sid>`) — the three qa/cfo
+placeholders 34-01 reserved but did not yet dereference are now used throughout
+`## Results` and `## Findings` above; the nine 34-03 placeholders are new to this plan.
 
 **Retained, deliberately:** profile role labels (`playtester`, `coder`, `qa`, `cfo`,
 `gtm`, etc.), every aggregate figure (token counts, timestamps, hash-match verdicts, row
