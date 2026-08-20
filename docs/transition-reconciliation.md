@@ -669,10 +669,14 @@ recorded by Revenium, deep inside the CLEAN period, nowhere near `W`:
    own genuinely irreducible residual: **`2` tokens, unattributed to any window, named to
    its exact mechanism.**
 
-**Zero tokens are unexplained, fleet-wide.** Every non-zero residual — the full
-`112,603` under the literal definition, or the `2` that remains once the CLI-behavior
-gap is corrected for — carries a named cause pointing at specific evidence (a
-transaction ID, a timestamp, a code citation), not a plausibility argument. No residual
+**Zero tokens are unexplained — across the five profiles a reconciliation exists
+for.** That scope qualifier is load-bearing and is not a formality: the other five
+profiles (devops, qa, pm, community, lorekeeper) have no reconciliation at all, so they
+contribute neither an explained nor an unexplained token, and this claim says nothing
+whatever about them. Within the five, every non-zero residual — the full `112,603` under
+the literal definition, or the `2` that remains once the CLI-behavior gap is corrected
+for — carries a named cause pointing at specific evidence (a transaction ID, a timestamp,
+a code citation), not a plausibility argument. No residual
 anywhere in this reconciliation is attributed to the write-loss window, because none of
 them fall inside it — the window's own effect is captured entirely by SUSPECT, below.
 
@@ -1111,7 +1115,7 @@ placeholders used above (`<sid-B>`, `<hash-B>`, `<sid-T>`, `<hash-T>`, `<canary-
 `<mkt-C3-sid>`, `<coder-B1-sid>`, `<coder-B2-sid>`, `<cfo-B-sid>`, `<host-name>`) — the
 three qa/cfo placeholders 34-01 reserved but did not yet dereference are used throughout
 `## Results` and `## Findings` above; the nine 34-03 placeholders and `<host-name>` are new
-to this document as of this plan. This list (18 redaction placeholders, all hyphenated per
+to this document as of this plan. This list (19 redaction placeholders, all hyphenated per
 convention) was itself verified against the document above, not merely asserted — see the
 "Redaction proof" paragraph and `34-EVIDENCE.md` for the checked results.
 
