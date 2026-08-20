@@ -803,13 +803,19 @@ this document (`<canary-sid>`, `<gtm-B-sid>`, etc.) — those resolve only via
 
 **Boundary derivation (per profile):**
 ```bash
-ssh <fleet-host> \
+ssh <fleethost> \
   'grep -n "Reported: sid=.*api_request_id=" \
-     /home/ubuntu/.hermes/profiles/<profile>/state/revenium/revenium-metering.log | head -1'
-ssh <fleet-host> \
+     <profile-state-dir>/revenium-metering.log | head -1'
+ssh <fleethost> \
   'grep "^HERMES:<sid>:" \
-     /home/ubuntu/.hermes/profiles/<profile>/state/revenium/revenium-hermes.ledger | wc -l'
+     <profile-state-dir>/revenium-hermes.ledger | wc -l'
 ```
+(`<profile-state-dir>` is the same redaction placeholder used in `## Results` → "Tracer" —
+resolve it via `34-EVIDENCE.md`'s map, not by hand. `<fleethost>` is deliberately
+hyphen-free, matching the other generic template parameters above — the hyphen is what the
+map-coverage gate uses to decide a token needs its own map row, and a substitutable
+template parameter
+must never carry one.)
 
 **Verb family — the `owners/` two-line sweep, per profile:**
 ```bash
@@ -990,7 +996,7 @@ profile (`playtester`) and two of its sessions. Population for the integrity che
 ten fleet profiles.
 
 **Method (34-02, overlap enumeration), same read-only discipline, re-confirmed
-connectivity live (`2026-08-20T15:54:49Z`, same host, `tableforone-agents`):** the same
+connectivity live (`2026-08-20T15:54:49Z`, same host, `<host-name>`):** the same
 SSH/`revenium` read surface, extended with `comm -12` (raw ledger cross-check) and
 per-sid `grep` drill-downs. Population: all ten fleet profiles' full ledger/owner-record
 history (no time-window restriction — see `## Results` for the swept totals), plus
@@ -999,7 +1005,7 @@ signal.
 
 **Method (34-03, boundaries and reconciliation arithmetic), same read-only discipline,
 re-confirmed connectivity live (`2026-08-20T16:27:51Z`, same host,
-`tableforone-agents`):** the same SSH/`revenium` read surface, extended with per-profile
+`<host-name>`):** the same SSH/`revenium` read surface, extended with per-profile
 `env`-mtime and `drain-status.json` re-reads, an `awk`-filtered legacy-ledger sweep
 keyed on each profile's own boundary epoch, per-session spool-file summation, a 15-page
 `metrics ai` bulk walk (1,455 rows, `--from`/`--to` both on the local workstation and
@@ -1010,22 +1016,72 @@ at this document's writing (gtm, marketing, coder, playtester, cfo) plus a full
 five-profile "not yet reached" determination (devops, qa, pm, community, lorekeeper) —
 every ten profiles' `env` flip and `drain-status.json` re-read live, not sampled.
 
+**Method (34-04, independent confirmation, reproduction templates, redaction proof, and
+verdict), same read-only discipline, re-confirmed connectivity live
+(`2026-08-20T17:09:40Z`, same host, `<host-name>`):** the same SSH/`revenium` read
+surface, re-issued rather than extended — a second run of 34-02's own owners/`comm -12`
+sweep across all ten profiles, one `squads get` re-query of a representative closed
+session, and the three-check redaction audit below. No new command shape was needed for
+this plan's own confirmation work. Observation window for this document's own live
+queries, earliest precisely-timestamped command to last: `2026-08-20T15:28Z` (34-01's
+first `squads get`, its own read-side visibility check a few minutes earlier is recorded
+only as `~15:2xZ` in `34-EVIDENCE.md` and is not used here to avoid false precision)
+through `2026-08-20T17:10:16Z` (34-04's own last `squads get`) — roughly 1h42m spanning
+all four plans' own live queries against the fleet host and the Revenium dev tenant.
+Population: all ten fleet profiles, re-swept in full a second time by 34-04 Task 1; one
+representative session re-queried.
+
+**Redaction proof (34-04 Task 2) — three independent checks, not one regex.** (1)
+Map completeness: every placeholder appearing in this document was enumerated and checked
+against `34-EVIDENCE.md`'s map; two gaps were found and closed before this section was
+written — a template parameter (`<fleethost>`, this document's `## Reproducing this
+measurement` SSH target) was previously spelled with a hyphen, making it indistinguishable
+from a redacted identifier awaiting a map row, and was renamed to the hyphen-free form
+this phase's own naming convention requires; and that same section quoted the fleet host's
+own per-profile state directory in full rather than using the `<profile-state-dir>`
+placeholder already defined for exactly that path, and was corrected to use it. Every
+other placeholder had exactly one map row; none was dead. (2) The bijection, checked one
+entry at a time: for all 18 mapped placeholders, the raw value's verbatim absence and the
+placeholder's presence were confirmed independently and both held for all 18 — recorded
+per-entry in `34-EVIDENCE.md`. (3) The sweep for identifier shapes outside the regex
+gate's four patterns found one genuine leak: the fleet host's own hostname, quoted raw,
+twice, in this section's own 34-02/34-03 method paragraphs above — not an IPv4 address, an
+SSH key filename, a login string, or a session-id shape, so the file-wide regex gate never
+saw it, exactly the shape of gap that gate is not sufficient to close on its own. Redacted
+behind a new placeholder, `<host-name>`, with its own map row added to `34-EVIDENCE.md`.
+Two further hits from the same sweep — `quick-260817-tfe` and
+`quick-260818-0in` — were evaluated and retained: both are this project's own internal
+change-ticket labels for prior code changes (paired with the public GitHub PR numbers that
+cite them), not a fleet session, trace, host, or job identifier; they identify a code
+change, not a person, session, or machine, and fall outside every category this document's
+redaction covers. No other candidate token — hex strings, `cron_`-prefixed tokens,
+UUID-shaped strings, `api_request_id`-shaped strings, standalone squad ids — was found
+raw anywhere in this file outside an already-redacted placeholder. Full per-entry results
+for all three checks are in `34-EVIDENCE.md`; this paragraph states only that the checks
+ran, what they covered, and what they found, per this task's own instruction not to
+duplicate the evidence artifact's detail here.
+
 **Deliberately omitted from this file, on every page, in every task:** the fleet host's
-address, the SSH key filename, every remote login string, and every raw session, trace,
-`api_request_id`, and composite `transactionId` — including the three confirmed-non-overlap
-sessions and the canary's own event-side identifiers, quoted above only via placeholder or
-in aggregate (profile + count + date + token figures), never by raw id. These live only in
-this repository's local, gitignored evidence artifact
+address AND its own hostname, the SSH key filename, every remote login string, and every
+raw session, trace, `api_request_id`, and composite `transactionId` — including the three
+confirmed-non-overlap sessions and the canary's own event-side identifiers, quoted above
+only via placeholder or in aggregate (profile + count + date + token figures), never by
+raw id. These live only in this repository's local, gitignored evidence artifact
 (`.planning/phases/34-transition-reconciliation/34-EVIDENCE.md`), resolved via the stable
 placeholders used above (`<sid-B>`, `<hash-B>`, `<sid-T>`, `<hash-T>`, `<canary-sid>`,
 `<qa-dual-sid-1>`, `<qa-dual-sid-2>`, `<cfo-dual-sid-1>`, `<profile-state-dir>`,
 `<gtm-B-sid>`, `<gtm-legacy-sid>`, `<mkt-B-sid>`, `<mkt-C1-sid>`, `<mkt-C2-sid>`,
-`<mkt-C3-sid>`, `<coder-B1-sid>`, `<coder-B2-sid>`, `<cfo-B-sid>`) — the three qa/cfo
-placeholders 34-01 reserved but did not yet dereference are now used throughout
-`## Results` and `## Findings` above; the nine 34-03 placeholders are new to this plan.
+`<mkt-C3-sid>`, `<coder-B1-sid>`, `<coder-B2-sid>`, `<cfo-B-sid>`, `<host-name>`) — the
+three qa/cfo placeholders 34-01 reserved but did not yet dereference are used throughout
+`## Results` and `## Findings` above; the nine 34-03 placeholders and `<host-name>` are new
+to this document as of this plan. This list (18 redaction placeholders, all hyphenated per
+convention) was itself verified against the document above, not merely asserted — see the
+"Redaction proof" paragraph and `34-EVIDENCE.md` for the checked results.
 
 **Retained, deliberately:** profile role labels (`playtester`, `coder`, `qa`, `cfo`,
 `gtm`, etc.), every aggregate figure (token counts, timestamps, hash-match verdicts, row
-counts, swept totals), and the deploy commit `f13bdf6` — none of these are session,
-trace, or host identifiers, and the per-profile reading throughout this document depends
-on them.
+counts, swept totals), the deploy commit `f13bdf6`, and the two internal change-ticket
+labels `quick-260817-tfe` / `quick-260818-0in` — none of these are session, trace, host,
+or job identifiers (the deploy commit and change-ticket labels identify a code change, not
+a machine or a session), and the per-profile reading throughout this document depends on
+them.
