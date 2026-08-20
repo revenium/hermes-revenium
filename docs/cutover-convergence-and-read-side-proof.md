@@ -250,7 +250,116 @@ is not the same class of proof as a file timestamp.
 
 ### CUT-02 — read-side dimension confirmation (task type, operation type, trace id/type, agentic job id, squad, per-call, multi-model)
 
-*Filled by plan 33-02.*
+**Row-level dimensions and per-call attribution (Task 1 of this plan, queried
+2026-08-20T04:12Z).** Query:
+
+```
+revenium metrics ai --from 2026-08-20T01:24:01Z --to 2026-08-20T04:12:00Z \
+  --output json --page-size 200 --page N   # N = 0..6
+```
+
+This window starts one second after the write-loss interval's closed upper
+bound (`2026-08-19T18:25:00Z`–`2026-08-20T01:24:00Z`) and ends at query time —
+entirely outside it. 635 total rows across all 7 pages; 4 Hermes-owned
+(filtered client-side on `agent` starting with `Hermes` or `label` starting
+with `event:` — there is still no server-side filter on this verb). All 4 are
+the same rows the plan 33-01 tracer found in its own, narrower post-outage
+window nearly three hours earlier — an independent re-query run for this
+plan finds nothing new and nothing missing, which is exactly the stability a
+repeat query is meant to demonstrate rather than a copy-forward of the
+earlier numbers.
+
+Dimension table, each CONFIRMED against the quoted response above:
+
+| Dimension | Value(s) confirmed |
+|---|---|
+| `taskType` | `post_fix_probe`, `subagent_ping_test`, `ping_pong_check` |
+| `operationType` | `CHAT` |
+| `traceId` | `<sid-A>` (playtester), `<sid-B>` (coder root + its subagent share this traceId) |
+| `traceType` | `smoke_test`, `canary_probe_check` |
+| `agent` | `Hermes-playtester`, `Hermes-coder` |
+| `squadId` | equals `traceId` in every row observed |
+| `model` | `accounts/fireworks/models/glm-5p2` (all four rows — the fleet's current single primary model) |
+| `provider` | `fireworks` |
+| `transactionId` | `event:<sid>:<uuid>:<hash>:api:N` shape, quoted below |
+| per-call attribution | two rows, one session (`<sid-B>`), `:api:1` and `:api:2` |
+
+Quoted row (`<sid-A>`, playtester — re-confirmed live in this plan's own
+query, not merely copied from the tracer):
+
+| Field | Value |
+|---|---|
+| `taskType` | `post_fix_probe` |
+| `operationType` | `CHAT` |
+| `traceId` | `<sid-A>` |
+| `traceType` | `smoke_test` |
+| `agent` | `Hermes-playtester` |
+| `squadId` | `<sid-A>` |
+| `model` | `accounts/fireworks/models/glm-5p2` |
+| `provider` | `fireworks` |
+| `transactionId` | `event:<sid-A>:<sid-A>:<hash-A>:api:1` |
+| `totalTokenCount` | `13634` |
+| `totalCost` | `0` — **$0 by operator decision (BACK-2676 out of scope), not a metering defect** |
+
+**Per-call attribution — two rows, one session, quoted in full.** `<sid-B>`
+(coder root session) emitted two rows sharing the same session/uuid/hash
+prefix and differing only in the `:api:N` ordinal:
+
+Row `:api:1`:
+
+| Field | Value |
+|---|---|
+| `taskType` | `subagent_ping_test` |
+| `operationType` | `CHAT` |
+| `traceId` | `<sid-B>` |
+| `traceType` | `canary_probe_check` |
+| `agent` | `Hermes-coder` |
+| `squadId` | `<sid-B>` |
+| `model` | `accounts/fireworks/models/glm-5p2` |
+| `provider` | `fireworks` |
+| `transactionId` / `label` / `spanId` | `event:<sid-B>:<uuid-B>:<hash-B>:api:1` |
+| `requestTime` | `2026-08-20T01:52:40Z` |
+| `totalTokenCount` | `20879` |
+| `totalCost` | `0` — **$0 by operator decision (BACK-2676 out of scope), not a metering defect** |
+
+Row `:api:2`:
+
+| Field | Value |
+|---|---|
+| `taskType` | `subagent_ping_test` |
+| `operationType` | `CHAT` |
+| `traceId` | `<sid-B>` |
+| `traceType` | `canary_probe_check` |
+| `agent` | `Hermes-coder` |
+| `squadId` | `<sid-B>` |
+| `model` | `accounts/fireworks/models/glm-5p2` |
+| `provider` | `fireworks` |
+| `transactionId` / `label` / `spanId` | `event:<sid-B>:<uuid-B>:<hash-B>:api:2` |
+| `requestTime` | `2026-08-20T01:52:44Z` |
+| `totalTokenCount` | `21212` |
+| `totalCost` | `0` — **$0 by operator decision (BACK-2676 out of scope), not a metering defect** |
+
+**The `:api:N` ordinal — not response order, not page order — is what
+proves the ordering, demonstrated rather than merely asserted.** Within the
+single raw response page these two rows both landed on, the `:api:2` row
+appears at array index 79 and the `:api:1` row appears LATER, at index 83 —
+the API returned the second call before the first. The `created` timestamps
+resolve the true order (`:api:1` = `...27.944Z`, `:api:2` = `...28.045Z`,
+`:api:1` earlier), but a reader trusting response position alone would get
+it backwards. This is the concrete, observed case for why the `:api:N`
+ordinal embedded in `transactionId`/`label`/`spanId` — never `metrics ai`
+response or page order — is the load-bearing proof of per-call ordering in
+this document.
+
+**Subagent row, same trace, different session id.** A third Hermes-owned row
+shares `<sid-B>`'s `traceId`/`squadId` but belongs to its own session
+(`<sid-C>`, the dispatched subagent): `taskType=ping_pong_check`,
+`transactionId=event:<sid-C>:<uuid-C>:<hash-C>:api:1`,
+`totalTokenCount=11859`, `totalCost=0` — **$0 by operator decision (BACK-2676
+out of scope), not a metering defect**. This reconfirms live, rather than
+merely assuming, the subagent-rolls-up-to-the-root-`traceId`-without-
+fragmenting behavior REQUIREMENTS.md's "Known open at scope time" section
+already credited to pre-Phase-33 work.
 
 ## Findings
 
