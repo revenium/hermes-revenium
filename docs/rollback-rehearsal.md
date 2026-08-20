@@ -163,13 +163,91 @@ be read as unqualified good news on its own.
 
 ## Results
 
-*Filled by 35-03 (the round trip itself, step by step) and finalized by 35-04 (the
-restoration proof).*
+**The round trip did not complete both legs.** Leg 1 (the rollback leg, `env.bak2-*`
+restored + induction A) ran to completion and produced a result — but that result
+**falsified Prediction A**, and the falsification's own evidence made Task 3's own
+precondition (a confirmed `HERMES:` ledger line for induction A) impossible to satisfy by
+further waiting. Per the plan's own halt discipline, Task 3 (the restore leg + induction
+B) was **not started**; `env` was nonetheless returned to the cutover state as an
+emergency-recovery action, which `<halt_and_recover>` requires independent of which task
+performs it.
+
+| Step | What was attempted | Artifact | Outcome |
+|---|---|---|---|
+| 1. Snapshot | `cp` live `env` to `env.pre-rehearsal-<stamp>` | sha256 match between snapshot and live `env` (`6ec48b84...9ddd4a`, both) | Done |
+| 2. Rollback restore | `cp env.bak2-20260819-213357` over `env` | Read-back `env` sha256 `8bef65b2...b997e601`, matching `env.bak2-*`'s own sha256; write timestamped `2026-08-20T23:23:21Z` | Done |
+| 3. Rollback took effect | Poll `revenium-metering.log` for a post-write tick | Tick at `2026-08-20T23:24:21Z`-`23:24:26Z`, strictly later than the write; the `legacy completions path disabled` line, present at every prior tick, absent from this one (corroboration) | Done |
+| 4. Induce session A | `hermes chat` on `devops` | New session id (redacted `<induced-sid-legacy>`); `.ready/<induced-sid-legacy>` sentinel present within 30s | Done |
+| 5. Legacy claims A (Prediction A) | Poll `revenium-hermes.ledger` for `HERMES:<induced-sid-legacy>:` | No such line appeared after 600s of polling, nor at any point afterward (see Findings) | **FALSIFIED** — the event path claimed A instead |
+| 6. Event path defers on A (Prediction A, corroborating half) | Poll for the D-09 skip line | No D-09 skip line appears anywhere in the post-rollback log | **Also contrary to the predicted shape** — see Findings for why the D-09 mechanism was never the deciding factor here |
+| 7. Restore leg (env, Task 3) | `cp env.pre-rehearsal-<stamp>` back over `env` | Diff empty, sha256 `6ec48b84...9ddd4a` matches both the snapshot and the pre-rehearsal capture; write timestamped `2026-08-20T23:40:38Z` | Done, **as an emergency-recovery action**, not as Task 3's normal completion |
+| 8. Induce session B (Task 3) | — | — | **Not performed.** Task 3 was never entered; its own precondition (A's `HERMES:` line) could not be satisfied |
+| 9. Post-restore tick confirms restore took effect | — | — | **Deferred to 35-04.** The first tick to run entirely under the restored env had not completed when this plan's execution stopped (a legacy cycle was still mid-run) |
+
+Full raw evidence, including the source-level investigation into why the claimed
+mechanism did not hold, is in `35-EVIDENCE.md`.
 
 ## Findings
 
-*Filled by 35-03 — one named subsection per induced session, with its exact log line and
-ledger line.*
+### Induced session `<induced-sid-legacy>` (rollback leg) — Prediction A: **FALSIFIED**
+
+**Prediction (quoted from the committed `47ecabf` block above, unchanged):** "the legacy
+path claims it... a new `HERMES:<induced-sid-legacy>:...` line appended to
+`revenium-hermes.ledger`, and a `Reported: session=` log line... the event path's own
+D-09 skip line for the same sid... no `API:` line... and any `Reported: sid=` log line
+for it [should not appear]."
+
+**Observation:** No `HERMES:` line for `<induced-sid-legacy>` ever appeared in
+`revenium-hermes.ledger` (fresh full-file `grep`, not a tail sample), and no
+`Reported: session=` log line for it ever appeared. Instead, an `API:` line appeared in
+`revenium-api-events.ledger`, and the log recorded:
+```
+[2026-08-20T23:30:39Z] [INFO ] [revenium] Reported: sid=<induced-sid-legacy> api_request_id=<induced-sid-legacy>:<uuid>:<hash>:api:1 model=glm-4.6 task_type=liveness_check operation_type=CHAT
+```
+`owners/<induced-sid-legacy>` holds exactly one line, `event` — the event path claimed
+sole, permanent ownership of this session. No D-09 skip line appears anywhere in the log
+for the whole post-rollback window — the D-09 partition check was never the deciding
+mechanism, because a different guard resolved the outcome first (below).
+
+**Named cause, confirmed by reading the deployed `hermes-report.sh` source, not merely
+inferred from timing:** the completion-emission block that would write a `HERMES:` line
+is guarded by `sid_legacy_suppressed != true AND session_event_owned != true`.
+`session_event_owned` is read from the `owners/<sid>` file — once either path claims a
+sid, the other is permanently locked out, independent of `REVENIUM_LEGACY_COMPLETIONS`.
+`devops` carries the fleet's largest legacy-tracked backlog (886 sessions), and its own
+per-cycle legacy walk takes roughly 5-6 minutes end to end. The legacy cycle that was
+running at the moment of induction had already fixed its own work list ~38 seconds
+*before* the induced session existed, so that cycle could not see it. By the time the
+*next* legacy cycle reached this session — confirmed by that cycle's own pre-guard jobs
+scan, which did create a job for it — the much-faster event-path stage had already
+claimed ownership three seconds earlier in the tail of the prior cycle. Legacy's
+emission guard therefore deferred permanently, not provisionally.
+
+**This inverts the assumption Prediction A was built on** — that "cron.sh runs the legacy
+stage before the event stage inside one tick" gives legacy first refusal on every session
+while it is enabled. That ordering claim does not hold for a session created *during* an
+already-in-progress legacy cycle on a profile whose legacy walk is slow relative to the
+event path's own pass — here, specifically, because `devops`'s legacy backlog size makes
+its own cycle duration long enough to create the race. This is a genuine, reproducible
+mechanism difference from the documented one, not a timing fluke: a second full legacy
+cycle ran, specifically enumerated this session, and still could not bill it, because
+ownership rather than stage order governs the outcome.
+
+**No double-bill occurred.** `owners/<induced-sid-legacy>` has exactly one line. A
+subsequent event-path run correctly reported `duplicate-skipped-events=1` for this sid,
+confirming idempotency held even though the outcome diverged from prediction.
+
+### Induced session B (restore leg) — not performed
+
+Task 3, which would induce and observe a second session under the restored cutover
+state, was never started. Its own `<precondition>` requires a confirmed `HERMES:` ledger
+line for induction A before Task 3 may begin; per the finding above, that line will never
+appear (the guard that determines it resolved, permanently, at `2026-08-20T23:23:21Z` +
+~7 minutes, well inside the plan's own 600-second settle budget for a single poll but past
+the point where continued waiting could change the outcome). No second `hermes chat`
+session was induced. `env` was returned to the cutover state as the `<halt_and_recover>`
+block requires regardless of which task performs the restore, and that restoration is
+recorded in `## Results` above and confirmed with an empty `diff` and a matching sha256.
 
 ## Reproducing this measurement
 
