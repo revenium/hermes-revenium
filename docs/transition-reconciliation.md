@@ -376,8 +376,196 @@ canary) + 3 confirmed non-overlaps (ownership takeovers).** See `## Findings` fo
 full per-session enumeration, including the three non-overlaps, so the audit trail is
 complete rather than silently dropping the candidates the signals disagreed on.
 
-*Per-profile boundaries and reconciliation arithmetic (34-03), and independent
-confirmation re-runs (34-04), are filled in by those plans.*
+### Per-profile cutover boundaries, each from its own evidence (34-03 Task 1)
+
+**Env flip re-confirmed uniform across all ten profiles, live, not assumed.** `stat` on
+every profile's own `env` file returns the identical mtime **`2026-08-19T21:33:57Z`**
+(sub-second offsets `.914`–`.958` only, from a single `install-hooks.sh`-driven write),
+matching Phase 33's own finding exactly — re-confirmed rather than carried forward.
+
+Each profile's boundary is the timestamp of its earliest `Reported: sid=...
+api_request_id=...` line (`api-event-report.sh:1301`) at or after the flip, paired with
+confirmation that the same sid has zero `HERMES:` lines in that profile's own legacy
+ledger — the pairing that makes the claim, per this plan's own method, not the fleet-wide
+flip instant used as a stand-in. Where no such line exists at all, the profile has not
+started billing through the event path and its boundary is recorded as not yet reached,
+with its own reason.
+
+| Profile | Boundary | Boundary check (log line + legacy-line absence) | Read-side visibility lower bound | Gap | Attribution |
+|---|---|---|---|---|---|
+| gtm | **2026-08-20T14:03:28Z** | `<gtm-B-sid>`; `grep "^HERMES:<gtm-B-sid>:"` → 0 lines | 2026-08-20T14:03:28.543Z | ~0.5s | Clean — boundary sits well after W's close; the sub-second gap is ordinary reporting latency, not the outage. |
+| marketing | **2026-08-19T22:46:28Z** | `<mkt-B-sid>`; 0 `HERMES:` lines | 2026-08-20T04:47:44.696Z — a **later, different** session, `<mkt-C1-sid>` | **6h01m16.696s** | Write-loss window swallowed the true boundary session. Confirmed live: `revenium squads get <mkt-B-sid>` → `{"error": "Resource not found.", "exit_code": 3, "status": 404}` — the same shape as the tracer's own suspect exemplar (`<sid-B>`), demonstrated on a second, independent casualty. |
+| devops | **not yet reached** | 0 `Reported: sid=...api_request_id=` lines in the whole retained log | n/a — 0 `Hermes-devops` rows in the post-`01:24:01Z` read-side query | n/a | Genuinely cut over (`drained=true, pendingCount=0`, live) but zero new sessions since the flip — nothing for the event path to claim yet (carried forward from 34-01's own finding). |
+| qa | **not yet reached** | 0 post-flip lines. The log's only 2 `Reported:` lines ever are pre-cutover (`2026-08-18T21:18:58Z` / `21:20:24Z`, sids `<qa-dual-sid-1>` / `<qa-dual-sid-2>` — the SAME two sessions 34-02 already confirmed are ownership takeovers, not overlaps) | n/a — 0 rows | n/a | Drained (`drained=true, pendingCount=0`, live) but zero new sessions since the flip. |
+| coder | **2026-08-20T01:53:27Z** | `<coder-B1-sid>` (co-occurring sibling `<coder-B2-sid>`, a subagent-shaped session claimed the same instant); 0 `HERMES:` lines for either | 2026-08-20T01:53:27.944Z | ~0.9s | Clean — this is coder's own **POST-cutover** boundary, distinct from the pre-cutover canary (`<canary-sid>`, `2026-08-17`, 34-02's confirmed sole overlap); the boundary sits 29m27s after W's close. |
+| playtester | **2026-08-19T21:38:39Z** — established by 34-01, cited here, not re-derived | `<sid-B>`; 0 `HERMES:` lines | 2026-08-20T01:48:46.521Z — established by 34-01 | **4h10m07s** — established by 34-01 | Write-loss window — established by 34-01; repeated here only so the ten-row table is complete. |
+| cfo | **2026-08-20T09:08:00Z** | `<cfo-B-sid>`; 0 `HERMES:` lines | 2026-08-20T09:08:01.016Z | ~1.0s | Clean — boundary sits over 7h after W's close. |
+| pm | **not yet reached** | 0 `Reported:` lines, ever | n/a — 0 rows | n/a | Genuinely cut over (`drained=true, pendingCount=0`, live) but zero new sessions since the flip. |
+| community | **not yet reached** | 0 `Reported:` lines, ever | n/a — 0 rows | n/a | Still draining — `drained=false, pendingCount=1`, unchanged since Phase 33's close (see live re-read below). |
+| lorekeeper | **not yet reached** | 0 `Reported:` lines, ever, in the whole retained log | n/a — 0 rows | n/a | Drained (`drained=true, pendingCount=0`, live) but zero new sessions since the flip; its 33 `owners/` entries and 2 spool files (34-01's own integrity table) are all dated on or before `2026-07-31`/`2026-08-17` — pre-cutover, corroborating "no post-flip activity" independently of the log check. |
+
+**Why a still-pending profile is not a double-bill risk, stated once.** The
+mutual-exclusion ownership protocol defers the event path for any sid the ownership
+record still assigns to legacy. `gtm`'s own remaining 2 pending sessions (both opened
+before the cutover, still billing via legacy under the protocol's per-**session**, not
+per-**profile**, claim) are direct proof of this: `gtm` is NOT fully drained, yet it
+independently reached its own boundary via `<gtm-B-sid>`, a genuinely new session created
+after the flip and claimed by the event path the instant it started. The risk window
+closes, rather than opens, once a still-pending session finishes draining — while a
+session remains open, the protocol guarantees it stays on whichever path claimed it
+first, so no double-bill can occur for gtm's or community's remaining open sessions.
+
+**`gtm` and `community` re-read live, compared against Phase 33's own recorded
+estimates — neither carried forward as still current.**
+
+- **`gtm`:** `drained=false, pendingCount=2, lastChecked=2026-08-20T16:28:34Z,
+  staleSecondsEffective=87000.0` (live). Phase 33's close recorded 5 pending → 2 pending
+  (partial convergence — three of five sessions had closed) with an earliest-full-
+  convergence estimate of `≈2026-08-20T16:59:12Z`, bounded by its slowest remaining sid.
+  This read (`16:28:34Z`) is BEFORE that estimate and shows the SAME `pendingCount` (2)
+  Phase 33's own close already recorded. **Verdict: gtm has NOT fully converged since
+  Phase 33's close** — consistent with, not contradicting, the estimate not yet having
+  arrived. gtm nonetheless has its own boundary (row above), because the ownership
+  protocol operates per-session, not per-profile.
+- **`community`:** `drained=false, pendingCount=1, lastChecked=2026-08-20T16:28:41Z,
+  staleSecondsEffective=87000.0` (live). Phase 33 recorded 1 pending, unchanged, with an
+  earliest-full-convergence estimate of `≈2026-08-20T21:33:13Z`. This read is also BEFORE
+  that estimate and shows the SAME `pendingCount` (1). **Verdict: community has NOT
+  converged since Phase 33's close** — and, unlike gtm, has ALSO not reached its own
+  event-path boundary yet (0 `Reported:` lines ever anywhere in its retained log) — its
+  post-boundary reconciliation table below is therefore empty, not zero.
+
+### Per-profile reconciliation — clean against read-side, suspect carved out and counted (34-03 Task 2)
+
+**Local evidence, per profile, following `<reconciliation_arithmetic>` exactly.** For
+each of the five profiles with a boundary, every legacy ledger sid with a line
+timestamped at or after that boundary was found (`awk` on the ledger's fourth,
+Unix-epoch field), and its LAST such line's cumulative total was read — never summed.
+Every event-path sid was found the same way from the profile's own `api-events/` spool
+directory (every file present; none pruned — see the pruned-spool bucket below), and its
+per-record `total_tokens` fields summed. Four of the five profiles (marketing, coder,
+cfo, playtester) had **no** post-boundary legacy ledger growth at all — post-cutover
+activity on those profiles is 100% event-path. `gtm` is the one exception (below).
+
+**Read side, walked per `<reconciliation_arithmetic>`'s own definition.** `revenium
+metrics ai --from 2026-08-20T01:24:01Z --to 2026-08-20T23:59:59Z --output json
+--page-size 200 --page N`, `N` = 0 through 14, terminated at page 14's short return (55
+rows, after fourteen 100-row pages — the server's actual page size is 100 regardless of
+the requested 200; see the CLI-behavior finding below). **1,455 total rows, 1,455 unique
+`id`s, zero duplicates** — the walk is exhaustive and non-duplicating for what it
+returns. `--from`/`--to` both sit strictly after `2026-08-20T01:24:00Z`, asserted
+non-overlapping with the write-loss window `2026-08-19T18:25:00Z`–`2026-08-20T01:24:00Z`
+in this same paragraph. Rows are attributed to a profile by `agent == "Hermes-<profile>"`
+(client-side; no server-side filter exists on this verb) and to a path by whether
+`transactionId` starts with `event:`. One query in this walk (`page=0`, first attempt,
+`2026-08-20T16:30:03Z`) returned `{"error": "Revenium API error...", "status": 502}`;
+recorded under `## Findings` with its exact call before the retry that succeeded.
+
+**A second, more consequential CLI-behavior finding, load-bearing for `gtm`'s own table:
+`--from`/`--to` on `metrics ai` filters by each row's `requestTime`, not its `created`
+timestamp.** For an event-path row, `requestTime` and `created` sit seconds to minutes
+apart (the CLI ships the call and Revenium ingests it almost immediately), so this never
+mattered for any event-path session in this phase. For a LEGACY delta-report row,
+`requestTime` is the **start of the delta period** — the previous report's own
+timestamp — which can predate the row's `created` (when the delta was actually shipped)
+by hours, days, or (for a slow-ticking session) weeks. A profile-wide bulk walk
+`--from`'d strictly after the write-loss window therefore silently excludes any legacy
+delta row whose delta period began before that cutoff, even though the row's own
+`created` timestamp — when Revenium actually recorded it — falls safely inside the
+window. This is exactly what happened to `gtm`'s one post-boundary legacy row; see its
+own table entry below and `## Findings` for the full evidence trail (bisected live: a
+window bracketing only `requestTime` returns the row, a window bracketing only `created`
+returns none, even with `--squad-id` narrowing to the exact session).
+
+**Pruned-spool bucket (event-side local evidence unavailable): 0 sessions, 0 tokens.**
+Every post-boundary event-path sid's spool file, on all five profiles with a boundary,
+was found present and readable — none had been garbage-collected. This bucket is stated
+as empty by direct check, not assumed.
+
+#### gtm
+
+| Symbol | Value | Source |
+|---|---|---|
+| SUSPECT | 0 | No post-boundary local evidence (legacy or event) falls inside W; boundary itself sits >12h after W's close. |
+| CLEAN | **126,160** = 112,603 (legacy) + 13,557 (event) | Legacy: last ledger line `1056131` minus the pre-boundary last line `943528` = `112603`, line timestamp `2026-08-20T15:53:10.870Z` (`<gtm-legacy-sid>`). Event: `api-events/<gtm-B-sid>.jsonl`, 2 records, `total_tokens` summed = `13557`. |
+| READ | **13,557** (bulk walk, `agent="Hermes-gtm"`, literal `<reconciliation_arithmetic>` definition) | `metrics ai` walk above; 2 rows, both `event:`-prefixed, for `<gtm-B-sid>`. |
+| READ_event | 13,557 | Same 2 rows. |
+| READ_legacy | **0** (bulk walk) — see below for the read-confirmed true value | The bulk walk returned zero `Hermes-gtm` rows with a legacy-shaped `transactionId` in this window — the CLI-behavior finding above, not a lost row. |
+| RESIDUAL | **112,603** against the literal bulk-walk READ; **2** against the read-confirmed true value | See disposition below — NOT attributed to the write-loss window; a named, evidenced, different cause. |
+
+**Residual disposition, gtm.** The literal bulk-walk `RESIDUAL(gtm)` (`126,160 − 13,557 =
+112,603`) is fully explained, not unexplained: `revenium squads get <gtm-legacy-sid>` /
+`squads timeline <gtm-legacy-sid>` / `metrics ai --squad-id <gtm-legacy-sid>` (no date
+window on the first two; a wide window bracketing `requestTime` on the third) all agree
+the row exists, with `created: 2026-08-20T15:53:10.878Z` (inside the stated query window)
+and `totalTokenCount: 112601`. **The tokens are not lost — Revenium has the row; the
+profile-wide bulk walk's date filter, keyed to `requestTime` rather than `created`,
+simply does not surface it**, because this row's `requestTime`
+(`2026-08-19T16:49:12Z`, the previous report's own timestamp under legacy's cumulative
+delta model) predates the walk's `--from`. Once the row is counted via its
+read-confirmed value, `126,160 − (112,601 + 13,557) = 2` — a small, separately-named
+residual: `112,603` (local, raw cumulative subtraction) vs `112,601` (read side) differs
+by 2 tokens, consistent with `hermes-report.sh:1752-1773`'s proportional delta-scaling
+across input/output/cache buckets introducing sub-token rounding on each split. Neither
+figure (`112,603` local nor `2` residual) is attributed to the write-loss window — both
+sit deep in the CLEAN period, nowhere near `W`.
+
+#### marketing
+
+| Symbol | Value | Source |
+|---|---|---|
+| SUSPECT | **37,066** | `<mkt-B-sid>` spool total (1 record) — the profile's true boundary session, timestamped `2026-08-19T22:46:28Z`, inside W. |
+| CLEAN | **91,625** = 37,216 + 17,745 + 36,664 | Three spool totals: `<mkt-C1-sid>` (2 records), `<mkt-C2-sid>` (1 record), `<mkt-C3-sid>` (2 records) — all strictly after W's close (`04:47`, `08:01`, `10:46` on 2026-08-20). No post-boundary legacy ledger growth on marketing. |
+| READ | **91,625** | Bulk walk sum for `agent="Hermes-marketing"`, cross-confirmed exactly by `squads get` on each of the three sids (`37216 + 17745 + 36664 = 91625`). |
+| READ_event | 91,625 | All three rows carry `event:`-prefixed `transactionId`s. |
+| READ_legacy | 0 | No legacy-path rows for marketing in the window. |
+| RESIDUAL | **0** | CLEAN and READ agree exactly — the expected shape for a session with no suspect local activity. |
+
+`SUSPECT(marketing)` is reported here, never inside the residual: `37,066` tokens of
+locally-reported, spool-corroborated activity for `<mkt-B-sid>` that Revenium's own
+tenant discarded during the write-loss window (live-confirmed `404`, above) — the
+quantified size of that one casualty, not a metering gap.
+
+#### coder
+
+| Symbol | Value | Source |
+|---|---|---|
+| SUSPECT | 0 | Boundary sits 29m27s after W's close; no post-boundary local evidence falls inside W. |
+| CLEAN | **53,950** = 42,091 + 11,859 | `<coder-B1-sid>` spool (2 records, `total_tokens` `20879 + 21212 = 42091`) + `<coder-B2-sid>` spool (1 record, `11859`). No post-boundary legacy ledger growth on coder. |
+| READ | **53,950** | Bulk walk sum for `agent="Hermes-coder"`, cross-confirmed exactly by `squads get <coder-B1-sid>` (`53950`, the combined trace total — `<coder-B2-sid>` is a same-instant subagent dispatch under the same trace). |
+| READ_event | 53,950 | Both sessions carry `event:`-prefixed `transactionId`s. |
+| READ_legacy | 0 | No legacy-path rows for coder in the window. |
+| RESIDUAL | **0** | Agrees exactly — the expected shape for a session with no suspect local activity. |
+
+#### playtester
+
+Carried forward from 34-01's own tracer, not re-derived: CLEAN = READ = **13,634**
+(`<sid-T>`), RESIDUAL = **0**. SUSPECT = **13,665** (`<sid-B>`, the profile's own true
+boundary session — local evidence of a successfully-shipped call: an `API:` idempotency
+ledger line plus its still-unpruned spool file, `total_tokens: 13665`, timestamped inside
+W), reported separately, never inside the residual, exactly as 34-01's own tracer
+demonstrated with a live `404` on `<sid-B>`.
+
+#### cfo
+
+| Symbol | Value | Source |
+|---|---|---|
+| SUSPECT | 0 | Boundary sits over 7h after W's close; no post-boundary local evidence falls inside W. |
+| CLEAN | **221,231** | `<cfo-B-sid>` spool, 7 records, `total_tokens` summed = `221231`. No post-boundary legacy ledger growth on cfo. |
+| READ | **221,231** | Bulk walk sum for `agent="Hermes-cfo"`, cross-confirmed exactly by `squads get <cfo-B-sid>` (`221231`). |
+| READ_event | 221,231 | All 7 rows carry `event:`-prefixed `transactionId`s. |
+| READ_legacy | 0 | No legacy-path rows for cfo in the window. |
+| RESIDUAL | **0** | Agrees exactly. |
+
+#### devops, qa, pm, community, lorekeeper
+
+**No boundary yet (see the boundary table above) → empty by construction, not a row of
+zeros.** Each of these five profiles' post-boundary reconciliation table has nothing to
+fill: `devops`/`pm`/`qa`/`lorekeeper` because zero new sessions have occurred since the
+flip for either path to claim, and `community` because it has not yet finished draining.
+None contribute a SUSPECT, CLEAN, READ, or RESIDUAL figure to the fleet sums below — an
+absent boundary is not a boundary at time zero, and reporting a zero here would
+misrepresent "nothing observed yet" as "reconciled clean."
 
 ## Findings
 
@@ -441,6 +629,66 @@ line. Event — **13,015** (read side; spool: `input_tokens=13009, output_tokens
 cache_read_tokens=0` — floor `13015` matches exactly). **Claim/takeover timestamp:**
 `2026-08-18T16:51:36Z`. **Named cause:** identical mechanism to the two `qa` sessions,
 independently confirmed on a third profile.
+
+### `metrics ai` transient 502, one occurrence (34-03 Task 2)
+
+**Timestamp:** `2026-08-20T16:30:03Z` (first attempt of the fleet-wide bulk walk).
+**Exact call:** `revenium metrics ai --from 2026-08-20T01:24:01Z --to
+2026-08-20T23:59:59Z --output json --page-size 200 --page 0`. **Result:** `{"error":
+"Revenium API error. Try again later or contact support.", "exit_code": 1, "status":
+502}`. Retried ~30 seconds later with the identical call — succeeded, returned the same
+first page later confirmed against the walk's own cross-checks (`squads get` sums match
+the bulk-walk sums exactly for every session verified). Recorded per this phase's own
+discipline (the write-loss outage's root cause is unknown and could recur, so any 5xx is
+a finding in its own right, not a transient to retry away silently) — no further
+occurrence in the remaining 14 pages of the same walk.
+
+### `metrics ai --from`/`--to` filters by `requestTime`, not `created` — a CLI-behavior finding with direct arithmetic consequences (34-03 Task 2)
+
+**What was found.** A profile-wide `metrics ai` walk windowed strictly after the
+write-loss window's close (`--from 2026-08-20T01:24:01Z`) silently omitted a legacy
+delta-report row (`<gtm-legacy-sid>`, `112,601` tokens) whose own `created` timestamp
+(`2026-08-20T15:53:10.878Z` — when Revenium actually recorded it) sits **comfortably
+inside** the queried window. The row is not missing from Revenium: `squads get
+<gtm-legacy-sid>`, `squads timeline <gtm-legacy-sid>`, and a `--squad-id`-narrowed
+`metrics ai` call with a window wide enough to bracket its `requestTime`
+(`2026-08-19T16:49:12Z`) all return it, in full agreement on every field.
+
+**Bisection, live, both directions:**
+- `--from 2026-08-20T15:50:00Z --to 2026-08-20T15:56:00Z` (brackets `created`, excludes
+  `requestTime`), with `--squad-id <gtm-legacy-sid>` narrowing to the exact session: **0
+  rows.**
+- `--from 2026-08-19T16:45:00Z --to 2026-08-19T16:55:00Z` (brackets `requestTime`,
+  excludes `created`), same `--squad-id`: **1 row** — the same row, full detail,
+  `created: 2026-08-20T15:53:10.878Z`, `requestTime: 2026-08-19T16:49:12Z`,
+  `totalTokenCount: 112601`.
+
+**Why this happens, and why it matters beyond this one row.** For an event-path
+completion, `requestTime` and `created` sit seconds to minutes apart — the CLI ships the
+call and Revenium ingests it almost immediately — so the choice of filter field never
+mattered for any event-path session this phase measured. For a LEGACY delta-report row,
+`requestTime` is populated as the **start of the delta period** (the previous report's
+own timestamp, per `hermes-report.sh`'s delta computation), which for a slow-ticking or
+long-running session can predate the row's `created` by hours, days, or weeks — here,
+almost a full day (`2026-08-19T16:49:12Z` vs `2026-08-20T15:53:10.878Z`). **Any
+profile-wide bulk walk `--from`'d strictly after the write-loss window will silently
+exclude a legacy delta row whose delta period began before that cutoff, even though the
+row was actually reported — and would actually be counted as CLEAN local evidence —
+safely inside the window.** This is a genuine gap in the bulk-walk aggregation method,
+not a token that Revenium lost; it is documented here, quantified (one row, `112,601`
+tokens, `gtm` only, among the five profiles this plan established a boundary for) rather
+than silently absorbed, per criterion 6. `## Results` → gtm's own table shows both the
+literal bulk-walk figure and the read-confirmed corrected figure side by side, with the
+residual this finding explains named rather than left as "unexplained."
+
+**Scope of this finding.** Checked directly against all five boundary-established
+profiles' local evidence (the only systematic way to find an instance of this): exactly
+one row, on one profile (`gtm`), was affected — the only post-boundary legacy delta
+report among the five. Whether this is the only such case fleet-wide, or whether other
+profiles' own future legacy delta reports (once gtm's remaining 2 pending sessions or
+community's 1 pending session eventually report) will exhibit the same gap, was not
+determined beyond this one confirmed instance — a single occurrence supports "this is a
+real, reproducible CLI/API behavior," not "this is the full extent of its effect."
 
 ## Reproducing this measurement
 
