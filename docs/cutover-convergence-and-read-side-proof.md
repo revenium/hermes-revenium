@@ -2,56 +2,66 @@
 
 ## Verdict
 
-**CUT-01: 7 of 10 fleet profiles converged unforced as of 2026-08-20T03:57:51Z
-(marketing, devops, qa, coder, playtester, cfo, pm). The remaining 3 (gtm,
-community, lorekeeper) have not converged, and each carries a named,
-source-grounded cause — never a forced open.**
+**Both requirements are satisfied, with one honest shortfall stated up
+front: CUT-01 closes at 8 of 10 profiles converged unforced, not 10 of 10.
+The remaining 2 (gtm, community) have NOT converged as of this document's
+close, and neither was forced — each carries the same named,
+source-grounded cause diagnosed at scope time, unchanged and re-confirmed
+1h15m later. CUT-02 is fully resolved: every non-cost dimension ROADMAP
+success criterion 3 names is confirmed read-side, and both clauses left open
+at scope time (`agenticJobId`, multi-model attribution) are now resolved
+either way with evidence, per ROADMAP success criterion 4.**
 
-No profile was written to, restarted, or otherwise touched to produce this
-result. All ten `env` files carry an identical modification time inside the
-documented 2026-08-19T21:12–21:40Z cutover flip window, and none is later.
-Every converged profile's verdict is corroborated by both its
-`drain-status.json` `drained: true` reading AND a matching
-`hermes-report.sh:187` log line — neither alone was treated as sufficient.
-Every reading was confirmed stable across three samples spaced 5m59s and
-9m46s apart (both exceeding the required five-minute floor), with zero
-disagreement in this observation window.
+**CUT-01, final state as of 2026-08-20T05:12-05:13Z (Task 3 of this
+plan):** 8 of 10 converged unforced — marketing, devops, qa, coder,
+playtester, cfo, pm (converged by 33-01's Round 3, `03:57:51Z`, still
+converged 1h15m later) plus **lorekeeper**, which fully converged between
+Round 3 and this final sample, right on the earliest-possible bound Round 3
+itself computed (`≈2026-08-20T05:01:59Z`, observed `05:12:21Z`). **gtm**
+(5 pending → 2 pending, partial progress — its two slowest sessions remain,
+cause unchanged: open in `state.db`, staleness route, earliest full
+convergence `≈2026-08-20T16:59:12Z`) and **community** (1 pending,
+unchanged — same session, cause unchanged, earliest convergence
+`≈2026-08-20T21:33:13Z`) are the two profiles CUT-01 does not close for.
+Neither was forced: no profile's `env`/`config.json`/`drain-status.json`/
+ledger was written, no halt was cleared, no gateway was restarted, across
+the whole observation window from 33-01's Task 1 tracer (`03:36Z`) through
+this final sample (`05:13Z`), 1h37m of continuous read-only observation. All
+ten `env` files carry an identical modification time inside the documented
+`2026-08-19T21:12–21:40Z` cutover flip window, and none is later.
 
-The three pending profiles are not stalled without explanation: all eleven
-of their pending sessions are OPEN per Hermes' own `state.db`
-(`ended_at` NULL) and sit on `drain-status.sh`'s staleness route, bounded
-by the observed `staleSecondsEffective = 87000.0` seconds (~24.17h,
-computed as `max(86400, 600 + 86400)`, not the nominally-configured 24h).
-Their earliest-possible full convergence times, computed from the slowest
-pending session in each profile: **lorekeeper ≈ 2026-08-20T05:01:59Z**
-(~1 hour out at the time of the Round 3 sample), **gtm ≈
-2026-08-20T16:59:11Z** (~13 hours out), **community ≈ 2026-08-20T21:33:13Z**
-(~17.6 hours out) — each of these bounds assumes no earlier natural session
-end, which would instead route that session through the much faster
-600-second settle window. If CUT-01 is re-checked after any of these
-times, expect that profile (or, if all its pending sessions closed first,
-possibly sooner) to have converged on its own, with no action taken by
-this phase or any other.
+**CUT-02, final state as of 2026-08-20 (Tasks 1–2 of plan 33-02, Tasks 1–2
+of this plan):** every dimension ROADMAP success criterion 3 names is
+CONFIRMED read-side, quoted verbatim from live `revenium metrics ai` /
+`squads get` / `squads timeline` / `squads list` / `squads executions` /
+`jobs get` / `jobs transactions` responses: `taskType`, `operationType`,
+`traceId`, `traceType`, `agent`, `squadId`, `model`, `provider`,
+`transactionId`, `squadName`, and per-call attribution. Both clauses ROADMAP
+success criterion 4 named as open are now RESOLVED: **`agenticJobId`
+RESOLVED-ABSENT** — never reaches a metered row on the event path, for a
+root session by permanent construction (`classifier.py:999`) and for a
+subagent session as the normal outcome of dispatch ordering, confirmed live
+via two independent `revenium jobs transactions` calls both returning
+`totalCount: 0`. **Multi-model attribution RESOLVED as mechanism-verified,
+trigger-unfired-within-a-single-trace** — `fallback_providers` is configured
+on all ten profiles and demonstrably live for two of them (marketing and
+cfo run every sampled trace on their fallback model, never their
+configured primary), but a bounded 26-trace search found no trace where two
+distinct models co-occur under one `traceId`. This is explicitly NOT
+"structurally cannot be recorded" — the mechanism-verified, fleet-wide
+evidence refutes that framing, which STATE.md and the ROADMAP both carried
+at scope time and this document corrects. `squadName` remains CONFIRMED
+present with one still-open, honestly-recorded finding (its value does not
+match either sampled profile's own `--squad-name` argv) — CUT-02's own
+wording ("confirmed on the read side") does not require that mismatch to be
+resolved, only the dimension's presence, which it is.
 
-**CUT-02: partially confirmed as of 2026-08-20T04:12Z (Plan 33-02).** Every
-dimension this plan set out to confirm is confirmed read-side, quoted
-verbatim from live `revenium metrics ai` / `squads get` / `squads timeline`
-/ `squads list` responses: `taskType`, `operationType`, `traceId`,
-`traceType`, `agent`, `squadId`, `model`, `provider`, `transactionId`, and
-per-call attribution (two rows, one session, `:api:1`/`:api:2`, proven by
-the ordinal rather than response order — the API itself returned the two
-rows out of chronological sequence in this plan's own query). `squadName` is
-likewise CONFIRMED present via the two-call join, though its value
-(`gtm-fleet`) does not match either sampled profile's own `--squad-name`
-argv and is recorded as an open finding, not a resolved defect. **Two
-clauses remain open, unchanged from scope time and NOT addressed by this
-plan:** `agenticJobId` (structurally absent from every root row by design;
-timing-dependent on subagent rows) and multi-model attribution (mechanism
-verified fleet-wide via `fallback_providers`, no natural occurrence yet
-observed) — both are Plan 33-03's work, and CUT-02 is not reported closed
-here.
+Every `$0` cost figure quoted anywhere in this document is captioned
+**operator decision (BACK-2676 out of scope), not a metering defect** at
+the point it is quoted — see `## Known limitations and exclusions`.
 
-Date this section was last written: 2026-08-20 (Task 3 of plan 33-02).
+Date this section was last written: 2026-08-20 (Task 3 of plan 33-03,
+closing the observation window).
 
 ## Why this document exists
 
@@ -220,6 +230,15 @@ window on 2026-08-19/20, which is why this task samples repeatedly rather
 than trusting one reading (the gate is known to flap in general; it simply
 did not flap during these particular three rounds).
 
+**This table reflects Round 1-3 only (33-01, `03:42-03:57Z`) and is left
+unchanged here.** The observation window continued past Round 3; a fourth,
+final re-sample closes it in `## Independent confirmation` →
+"CUT-01 — final re-sample, closing the observation window" (Task 3 of plan
+33-03), which is authoritative for the phase's CUT-01 count (8 of 10 by
+that point — lorekeeper converged, gtm partially converged). This table is
+kept exactly as 33-01 wrote it, not edited to match the later reading, so
+the progression between rounds stays visible.
+
 **First-observed-drained, scoped to this cutover.** Every converged
 profile's `revenium-metering.log` was searched for its FIRST occurrence of
 the `hermes-report.sh:187` line at or after `2026-08-19T21:12:00Z` — the
@@ -297,7 +316,7 @@ Dimension table, each CONFIRMED against the quoted response above:
 | `traceType` | `smoke_test`, `canary_probe_check` |
 | `agent` | `Hermes-playtester`, `Hermes-coder` |
 | `squadId` | equals `traceId` in every row observed |
-| `model` | `accounts/fireworks/models/glm-5p2` (all four rows — the fleet's current single primary model) |
+| `model` | `accounts/fireworks/models/glm-5p2` (all four rows in this narrow sample — NOT the fleet's single primary model: `playtester`/`coder` are configured with `fireworks/glm-5p2` as primary, but `marketing`/`cfo`/`gtm`/etc. are configured with `zai/glm-4.6` as primary; see `## Findings` → "Multi-model attribution" for the fleet-wide `fallback_providers` picture this narrow four-row sample doesn't show) |
 | `provider` | `fireworks` |
 | `transactionId` | `event:<sid>:<uuid>:<hash>:api:N` shape, quoted below |
 | per-call attribution | two rows, one session (`<sid-B>`), `:api:1` and `:api:2` |
@@ -564,6 +583,16 @@ lorekeeper is the closest of the three pending profiles to full
 convergence — its slowest pending sid is roughly one hour out from the
 Round 3 sample, versus gtm's ~13 hours and community's ~17.6 hours.
 
+**Update (Task 3 of plan 33-03): lorekeeper fully converged** at the
+observation window's close, right on this section's own predicted bound —
+see `## Independent confirmation` → "CUT-01 — final re-sample, closing the
+observation window" for the final reading. **gtm partially converged**
+(its 3 fastest sids above, `<gtm-sid-1..3>`, closed; `<gtm-sid-4>` and
+`<gtm-sid-5>` remain, unchanged cause). **community did not converge**
+within this window — same sid, same cause, throughout. This subsection's
+own per-sid tables are left as 33-01 wrote them (a Round-3 snapshot), not
+edited to match the later reading.
+
 **No undetermined causes.** All eleven pending sessions across the three
 profiles fit cleanly into the single applicable bucket (open per
 `state.db`, on the staleness route, not yet past the floor) — none needed
@@ -617,10 +646,10 @@ timestamp. `revenium jobs transactions <id> --output json` returns
 transactions are linked to either job anywhere in Revenium. Both `created`
 timestamps (`2026-08-20T04:46:32.956Z` and `2026-08-20T01:54:39.627Z`) fall
 entirely outside the write-loss interval
-(`2026-08-19T18:25:00Z`–`2026-08-20T01:24:00Z`, closed at both ends — the
-second job's creation is 30m39s after the interval's close) — neither zero
-is ambiguous between a by-design absence and Revenium's silent write loss;
-both are clean.
+(`2026-08-19T18:25:00Z`–`2026-08-20T01:24:00Z`, per the convention stated in
+`## Known limitations and exclusions` — the second job's creation is 30m39s
+after the interval's close) — neither zero is ambiguous between a by-design
+absence and Revenium's silent write loss; both are clean.
 
 `revenium jobs transactions <id>` — not `revenium metrics ai` — is the only
 verb capable of answering this question. `metrics ai` rows carry no
@@ -761,7 +790,7 @@ Filter the returned array client-side — there is no server-side filter on
 this verb — down to rows whose `agent` starts with `Hermes` or whose
 `label` starts with `event:`.
 
-### Query ledger (33-01 + 33-02)
+### Query ledger (33-01 + 33-02 + 33-03)
 
 Every `revenium` CLI read-verb call issued by either plan in this phase, in
 the order issued, so the method — including what returned nothing and what
@@ -786,13 +815,14 @@ produced a usable result:
 | 14 | 33-03 Task 2 | `revenium squads get <id> --output json` × 26 (24h ∪ 7d sets, 2 overlaps removed) | 26 individual trace lifetimes, earliest `2026-08-14T08:02:06Z` | 25 × 1 squad detail | 25 success, 1 HTTP 500 (reproducible, retried once) | each trace's own lifetime checked individually; none overlaps the write-loss window |
 | 15 | 33-03 Task 2 | `grep`/`cat` of all ten profiles' `config.yaml` `fallback_providers` block | n/a (local file read, not an API call) | 10 configs | success | n/a — not an HTTP request |
 
-47 total HTTP requests across these 15 distinct CLI invocations (row 2 pages
-0–3 = 4 requests, row 4 pages 0–6 = 7 requests, row 14 = 26 requests — one of
-which 500'd — rows 8-11 and the rest are single point lookups; row 15 is a
-local file read, not an HTTP request) — auditable total request volume, per
-T-33-05's mitigation. Row 14 is, by a wide margin, the highest-volume single
-operation in this phase, which is exactly why its cap (26 traces) is stated
-explicitly here rather than left implicit.
+48 total HTTP requests across rows 1-14 (14 distinct CLI invocations; row 2
+pages 0–3 = 4 requests, row 4 pages 0–6 = 7 requests, row 14 = 26 requests —
+one of which 500'd — rows 8-13 and the rest are single point lookups/calls).
+Row 15 is a local file read (`grep`/`cat` on the fleet host), not an HTTP
+request, and is excluded from this count. Auditable total request volume,
+per T-33-05's mitigation. Row 14 is, by a wide margin, the highest-volume
+single operation in this phase, which is exactly why its cap (26 traces) is
+stated explicitly here rather than left implicit.
 
 **Zero-row rule, stated once:** a zero-row result (row 1 above) is never
 treated as confirmation of anything. It is equally compatible with a
@@ -842,36 +872,114 @@ Task 1 tracer sample on `playtester`) is never, on its own, treated as
 sufficient confirmation; the repeated sampling above is what makes the
 CUT-01 verdict independently confirmed rather than a lucky snapshot.
 
-**CUT-02: performed, partially (Tasks 1–2 of plan 33-02).** The row-level
-dimension query was independently re-run in this plan roughly 2.5 hours
-after the 33-01 tracer's own query, using a wider window
-(`2026-08-20T01:24:01Z`–`04:12:00Z` vs. the tracer's `...–03:41:00Z`) and
-found the identical four Hermes-owned rows with identical field values —
+**CUT-02: performed (Tasks 1–2 of plan 33-02, extended by Tasks 1–2 of plan
+33-03).** The row-level dimension query was independently re-run in plan
+33-02 roughly 2.5 hours after the 33-01 tracer's own query, using a wider
+window (`2026-08-20T01:24:01Z`–`04:12:00Z` vs. the tracer's `...–03:41:00Z`)
+and found the identical four Hermes-owned rows with identical field values —
 nothing new landed in the additional window, and nothing earlier
 disappeared, which is exactly the stability a second independent query is
 meant to confirm rather than a lucky first read. The `squadName` mismatch
 finding (`gtm-fleet` returned for two different profiles' traces, neither of
 which sent that string per their own argv) is itself corroborated by two
 independent `squads get` calls against two different `squadId`s (`<sid-A>`,
-`<sid-B>`), not one lookup taken on faith. `agenticJobId` and multi-model
-attribution are not addressed by this plan; independent confirmation for
-those two clauses is plan 33-03's job.
+`<sid-B>`), not one lookup taken on faith. `agenticJobId` was independently
+confirmed absent via two unrelated jobs (`marketing`, `coder`), not one —
+both return `{"totalCount": 0}` from `revenium jobs transactions`. Multi-model
+attribution's own independent-confirmation device IS its search bound: 26
+separate `squads get` calls against 26 different traces spanning two
+non-overlapping enumeration periods (`TWENTY_FOUR_HOURS`, `SEVEN_DAYS`) is
+itself the repeated-measurement discipline this section otherwise asks a
+second query to provide — a single trace's `models` array was never treated
+as sufficient on its own.
+
+### CUT-01 — final re-sample, closing the observation window (Task 3 of this plan)
+
+All ten profiles' `drain-status.json` were re-sampled once more, well beyond
+the required 30-minute gap: 33-01's Round 3 was `2026-08-20T03:57:51Z`; this
+sample was taken at `2026-08-20T05:12-05:13Z`, **1h15m later**.
+
+| Profile | 33-01 Round 3 (`03:57:51Z`) | This re-sample (`~05:12-05:13Z`) | Changed? |
+|---|---|---|---|
+| gtm | `false` / 5 | `false` / **2** | **Yes — 3 sessions converged** (the three fastest of the original five: gaps ~31-36min at Round 3) |
+| marketing | `true` / 0 | `true` / 0 | No |
+| devops | `true` / 0 | `true` / 0 | No |
+| qa | `true` / 0 | `true` / 0 | No |
+| coder | `true` / 0 | `true` / 0 | No |
+| playtester | `true` / 0 | `true` / 0 | No |
+| cfo | `true` / 0 | `true` / 0 | No |
+| pm | `true` / 0 | `true` / 0 | No |
+| community | `false` / 1 | `false` / 1 | No — same `sid` (`<community-sid-1>`), `ended_at` still NULL in `state.db` |
+| lorekeeper | `false` / 5 | **`true` / 0** | **Yes — fully converged**, right on the Round-3-computed earliest bound (`≈2026-08-20T05:01:59Z`; observed `05:12:21Z`, 10m22s after the lower bound, as expected for a bound that assumes the very next tick after the threshold crosses) |
+
+**No reading was averaged or replaced with a more favourable one — the later
+reading is authoritative for the verdict, and the earlier reading stays on
+the page above, unchanged.** Two profiles moved: **lorekeeper fully
+converged** (its `first-observed-drained` timestamp is now bounded to
+somewhere in `(2026-08-20T03:57:51Z, 2026-08-20T05:12:21Z]`, the interval
+between the last two samples — no tighter bound is claimable without a
+sample in between), and **gtm partially converged** (5 pending → 2 pending,
+its two SLOWEST original sessions per the Round-3 gap computation — `<gtm-sid-4>`
+and `<gtm-sid-5>`, confirming the original per-sid ordering was correct).
+`community` shows zero change: same single pending `sid`, `ended_at` still
+`NULL` in `state.db` (re-queried at this sample), consistent with its own
+Round-3 earliest-possible bound (`≈2026-08-20T21:33:13Z`) being far outside
+this observation window.
+
+**gtm and community re-diagnosis, re-run against current `pending[]`:** both
+remaining gtm sids and the sole community sid are confirmed still `ended_at
+IS NULL` in their respective `state.db`s (re-queried at this sample,
+identical query shape to 33-01 Task 3's) — the cause has NOT changed for
+either: both are still open sessions on the staleness route, not sessions
+that closed and are now waiting on a different floor. Recomputing each
+sid's gap to `staleSecondsEffective` from this sample's own `ageSeconds`
+and `lastChecked` reproduces the SAME earliest-possible-convergence
+timestamps 33-01 computed from Round 3, within one second
+(`<gtm-sid-4>`: `2026-08-20T08:13:12Z` → recomputed `08:13:13Z`;
+`<gtm-sid-5>`: `2026-08-20T16:59:11Z` → recomputed `16:59:12Z`;
+`<community-sid-1>`: `2026-08-20T21:33:13Z` → recomputed `21:33:13Z`,
+exact) — the bound was correct and stable across 1h15m of real elapsed
+time, not a one-off estimate. gtm's own earliest-possible FULL convergence
+remains bounded by `<gtm-sid-5>` (`≈2026-08-20T16:59:12Z`, unchanged), since
+`<gtm-sid-4>` converges first but gtm needs both closed.
+
+**CUT-01 count at close of window: 8 of 10 converged unforced** (the
+original 7 — marketing, devops, qa, coder, playtester, cfo, pm — plus
+lorekeeper, converged since Round 3). gtm and community remain pending with
+the same, unchanged, source-grounded cause as 33-01 diagnosed; neither was
+touched.
 
 ## Verified against
 
-Date: 2026-08-20 (Task 1 of plan 33-01, extended by Tasks 1–3 of plan
-33-02). Method: read-only SSH access to the fleet host plus the `revenium`
-CLI's read verbs against the live Revenium dev tenant. Host address, SSH key
-filename, remote login string, and every raw session/trace identifier are
-deliberately omitted from this file and live only in this repository's
-local, gitignored evidence artifact
+Date: 2026-08-20. Method: read-only SSH access to the fleet host (all ten
+profiles' `drain-status.json`, `revenium-metering.log`, `state.db` via a
+read-only URI connection, and `config.yaml`) plus the `revenium` CLI's read
+verbs (`metrics ai`, `jobs get`/`transactions`, `squads
+get`/`list`/`timeline`/`executions`, `config show`) against the live
+Revenium dev tenant, across three plans (33-01, 33-02, 33-03) and a
+1h37m observation window from the first tracer sample (`2026-08-20T03:36Z`)
+to the final re-sample (`2026-08-20T05:13Z`). Population: the ten fleet
+profiles cut over on 2026-08-19 (`gtm, marketing, devops, qa, coder,
+playtester, cfo, pm, community, lorekeeper`).
+
+**Deliberately omitted from this file, on every page, in every task:** the
+fleet host's address, the SSH key filename, every remote login string, and
+every raw session, trace, and job identifier. These live only in this
+repository's local, gitignored evidence artifact
 (`.planning/phases/33-convergence-and-read-side-proof/33-EVIDENCE.md`),
 resolved via the stable placeholders used above (`<sid-A>`, `<hash-A>`,
 `<sid-B>`, `<uuid-B>`, `<hash-B>`, `<sid-C>`, `<uuid-C>`, `<hash-C>`,
-`<job-A>`, `<job-B>`, `<profile-state-dir>`). Profile role labels
-(`playtester`, `coder`, etc.)
-are retained because the per-profile reading in this document depends on
-them. `gtm-fleet` (a squad label value, not a session/trace/host
-identifier) is quoted directly rather than placeholder-redacted — it falls
-outside every category this document's redaction gate covers (IPv4
-addresses, SSH key filenames, remote login strings, the session-id shape).
+`<job-A>`, `<job-B>`, `<profile-state-dir>`). The 26 squad-execution ids
+examined in the multi-model search (Task 2 of this plan) are not even
+placeholder-mapped, since none of them is quoted — that finding is reported
+only in aggregate (`25/26`, `0` with `len(models) >= 2`) directly in
+`## Findings`.
+
+**Retained, deliberately:** profile role labels (`playtester`, `coder`,
+`marketing`, `cfo`, etc.) and every aggregate figure (counts, timestamps,
+gap computations, `totalCount` values) — the per-profile and per-clause
+reading throughout this document depends on them. `gtm-fleet` (a squad
+label value, not a session/trace/host identifier) is quoted directly rather
+than placeholder-redacted — it falls outside every category this document's
+redaction gate covers (IPv4 addresses, SSH key filenames, remote login
+strings, the session-id shape).
