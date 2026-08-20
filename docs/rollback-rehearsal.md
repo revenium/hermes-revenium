@@ -59,6 +59,72 @@ under `set -o allexport` on every invocation, and the fleet's crontab runs the p
 cron wrapper every minute (D-5) — an `env` edit takes effect on the very next tick, with no
 `systemctl` step anywhere in the sequence.
 
+**Both inductions' predicted outcomes, committed here ahead of either induction actually
+running (D-3's prediction-before-induction discipline, Phase 30's own D-12 pattern reused
+verbatim).** This ordering is the mechanism, not a formality: a prediction that landed in
+the same commit as its result would not be a prediction, and this phase's likeliest
+failure mode is a surprise retrofitted into one after the fact. 35-03's own `<verify>`
+re-asserts that this block already exists at `HEAD` before its first induction runs.
+
+### Prediction A — the rollback leg (`legacy=enabled`, `mode=live`)
+
+Once `env` is rolled back to `env.bak2-20260819-213357` and the first induced session
+lands, the legacy path claims it — because `cron.sh` runs the legacy stage before the
+event stage inside one tick, and the D-09 partition check (`api-event-report.sh:744-812`)
+is session-level and runs before the settle gate, so legacy always gets first refusal on
+every session while it is enabled.
+
+- **Positive evidence:** a new `HERMES:<induced-sid-legacy>:...` line appended to
+  `revenium-hermes.ledger`, and a `Reported: session=` log line from one of
+  `hermes-report.sh`'s two emit paths (`hermes-report.sh:2518` marker path or `:2615`
+  markerless path) naming that sid.
+- **Corroborating evidence:** the event path's own D-09 skip line for the same sid —
+  `skipping <sid> — already owned by the legacy HERMES: ledger (D-09 partition)`
+  (`api-event-report.sh:812`).
+- **What should NOT appear:** any `API:` line in `revenium-api-events.ledger` for that
+  sid, and any `Reported: sid=` (`api-event-report.sh:1301`) log line for it.
+- **Falsifier:** if the induced session instead produces an `API:` ledger line, a
+  `Reported: sid=` log line, or no D-09 skip line at all, Prediction A is wrong — the
+  ordering/partition mechanism this rehearsal is meant to demonstrate does not hold as
+  described, and that is a defect finding for `## Findings`, not something to smooth over.
+
+### Prediction B — the restore leg (`legacy=disabled`, `mode=live`)
+
+Once `env` is restored to its pre-rehearsal snapshot and the second induced session
+lands, the event path claims it.
+
+- **Positive evidence:** a new `API:<api_request_id>|<induced-sid-event>|...` line
+  appended to `revenium-api-events.ledger`, and a `Reported: sid=` log line
+  (`api-event-report.sh:1301`) naming that sid and its `api_request_id`.
+- **What should NOT appear:** any `HERMES:` line for that sid, and no D-09 skip line
+  (`skipping <sid> — already owned by the legacy HERMES: ledger (D-09 partition)`) for it.
+- **A precondition worth stating, not routing around:** `hermes-report.sh:184-190`'s
+  legacy-suppression path only engages (logging `legacy completions path disabled — drain
+  gate reports drained; skipping legacy completion emission this run.`) when the drain
+  gate reports drained. The profile's own pre-state (`35-EVIDENCE.md`) already shows
+  `drained=true`, so this is expected to hold — but if induction #1 somehow leaves the
+  profile un-drained at the moment of the restore, that is itself a
+  predicted-and-observable outcome to record in `## Findings`, not a blocker to route
+  around.
+- **Falsifier:** if the induced session instead produces a `HERMES:` ledger line, a
+  `Reported: session=` log line, or the D-09 skip line, Prediction B is wrong — the
+  restored cutover is not actually billing through the event path as designed.
+
+### The ownership prediction — the no-double-ship half
+
+Each induced sid is brand new and has never existed before, so each is expected to
+receive an ordinary **one-line** `owners/<sid>` record — `legacy` for induction A's sid,
+`event` for induction B's sid. A **two-line** record for either induced sid is the
+positive signature of a double-bill (`_claim_session_owner`'s dual branch, per
+`34-RESEARCH.md`'s already-settled overlap mechanics, reused here rather than re-derived)
+and would be a defect finding, not an expected outcome.
+
+`_takeover_session_owner` **cannot fire** during this rehearsal, by construction — it
+requires the event-metering mode to have reverted to `shadow`, and this rehearsal never
+touches that switch (`REVENIUM_EVENT_METERING_MODE` stays `live` throughout, per above).
+This is recorded here as a **designed non-event**, so a reader does not mistake its
+absence for an untested code path.
+
 ## Known limitations and exclusions
 
 **The write-loss window is history, not live risk, and this rehearsal runs entirely
@@ -82,6 +148,19 @@ anything the rehearsal surfaces. No file under `skills/` is touched by this phas
 Whether to delete the retained legacy metering path once rollback is no longer needed is a
 later, separate operator call — out of scope here.
 
+**`devops`'s idleness is a trade-off, not unqualified good news — state both halves
+separately.** Idleness makes the **pre-existing-safety** half of this proof unusually
+STRONG: a profile with zero `owners/` records and zero event-ledger lines has nothing to
+accidentally re-bill or drop, so a byte-identical ledger prefix across the whole round
+trip is a strong guarantee here, not a weak one. Idleness makes the
+**mechanism-demonstration** half entirely DEPENDENT on the two induced sessions —
+"legacy resumed" and "the event path deferred" are claims about behaviour on new activity,
+and an idle profile has none of its own. Without the two induced sessions above, this
+rehearsal would prove only that nothing happened on `devops`, which is equally true
+whether or not the rollback mechanism actually works — this is why D-3 authorizes real
+traffic rather than passive observation, and why the "zero owners records" fact must not
+be read as unqualified good news on its own.
+
 ## Results
 
 *Filled by 35-03 (the round trip itself, step by step) and finalized by 35-04 (the
@@ -94,7 +173,74 @@ ledger line.*
 
 ## Reproducing this measurement
 
-*Filled below, by this plan's own Task 2, before either induction runs.*
+Every command below is generically parameterised — substitute a real profile name,
+session id, or timestamp for the placeholder and it runs as written. Placeholders in this
+section are single hyphen-free tokens (`<profile>`, `<sid>`, `<stamp>`, `<fleethost>`,
+`<from>`, `<to>`), never the hyphenated redaction placeholders used elsewhere in this
+document (`<induced-sid-legacy>`, `<profile-state-dir>`, etc.) — those resolve only via
+`35-EVIDENCE.md`'s map, per this phase's own naming convention.
+
+**Read this preamble before running any of the commands below.**
+
+- **The restore target for the rollback leg is `env.bak2-<stamp>`, NEVER `env.bak-<stamp>`
+  (no "2").** The `bak2` backup keeps `REVENIUM_EVENT_METERING_MODE=live`; the plain
+  `bak` backup ALSO reverts `mode` to `shadow`, which would drag in the mode-aware
+  takeover and abstention hazard chain `docs/event-metering.md` documents at length —
+  none of which this rehearsal has any reason to exercise. Confirm the target file's own
+  content before restoring it (`cat`, not `ls`); never restore by filename pattern alone.
+- **No gateway restart step exists anywhere below, deliberately.** `cron.sh` sources
+  `ENV_FILE` fresh every tick under `set -o allexport`, and the fleet's crontab runs every
+  minute (D-5) — an `env` edit takes effect on the very next tick. Adding a `systemctl`
+  restart would introduce a real, avoidable disruption this rehearsal did not ask for, and
+  a second variable that makes the timing evidence ambiguous (was the effect from the env
+  change, or the restart?).
+
+**Step 1 — snapshot the LIVE cutover state. This is the literal first command of the
+whole rehearsal, before any other read or write.**
+```bash
+d="<profile-state-dir>"
+ssh <fleethost> "cp \"$d/env\" \"$d/env.pre-rehearsal-<stamp>\""
+```
+
+**Step 2 — rollback leg: restore `env.bak2-*` (mode stays `live`, legacy re-enabled).**
+```bash
+ssh <fleethost> "cat \"$d/env.bak2-<stamp>\""   # confirm content before restoring
+ssh <fleethost> "cp \"$d/env.bak2-<stamp>\" \"$d/env\""
+```
+
+**Step 3 — induce one session, wait for a cron tick (up to
+`REVENIUM_CRON_SETTLE_SECONDS`=600s worst case if the classifier sentinel lags), then
+observe against Prediction A.**
+```bash
+ssh <fleethost> "HERMES_HOME=<profile-home-dir> bash -lc \
+  'hermes chat -Q --max-turns 2 -q \"Reply with the single word PONG. Do no other work.\"'"
+ssh <fleethost> "tail -f \"$d/revenium-metering.log\""   # observe, then interrupt
+ssh <fleethost> "grep '^HERMES:<sid>:' \"$d/revenium-hermes.ledger\""
+ssh <fleethost> "grep '<sid>' \"$d/revenium-metering.log\" | grep 'D-09 partition'"
+ssh <fleethost> "grep '<sid>' \"$d/revenium-api-events.ledger\""   # must be empty
+```
+
+**Step 4 — cutover leg: restore `env` from the STEP-1 SNAPSHOT (never by retyping literal
+values), confirm the restore, then induce the second session and observe against
+Prediction B.**
+```bash
+ssh <fleethost> "cp \"$d/env.pre-rehearsal-<stamp>\" \"$d/env\""
+ssh <fleethost> "diff \"$d/env\" \"$d/env.pre-rehearsal-<stamp>\""   # must be empty
+ssh <fleethost> "HERMES_HOME=<profile-home-dir> bash -lc \
+  'hermes chat -Q --max-turns 2 -q \"Reply with the single word PONG. Do no other work.\"'"
+ssh <fleethost> "grep 'Reported: sid=<sid>' \"$d/revenium-metering.log\""
+ssh <fleethost> "grep '<sid>' \"$d/revenium-api-events.ledger\""
+ssh <fleethost> "grep '<sid>' \"$d/revenium-hermes.ledger\""   # must be empty
+```
+
+**The confirming `diff`, restated as its own step because G-7 requires it be an explicit,
+separately-invoked action rather than assumed:**
+```bash
+ssh <fleethost> "diff \"$d/env\" \"$d/env.pre-rehearsal-<stamp>\""
+```
+An empty `diff` here covers the `env` file only — it is not, by itself, the full
+pre-versus-post comparison G-7 requires. `## Independent confirmation` (35-04) extends
+this to every other state file the rehearsal could plausibly have touched.
 
 ## Independent confirmation
 
