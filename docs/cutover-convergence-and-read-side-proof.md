@@ -301,6 +301,7 @@ Dimension table, each CONFIRMED against the quoted response above:
 | `provider` | `fireworks` |
 | `transactionId` | `event:<sid>:<uuid>:<hash>:api:N` shape, quoted below |
 | per-call attribution | two rows, one session (`<sid-B>`), `:api:1` and `:api:2` |
+| `agenticJobId` | **RESOLVED-ABSENT** — never reaches a metered row on the event path; see `## Findings` → "agenticJobId — resolved absent, by design" |
 
 Quoted row (`<sid-A>`, playtester — re-confirmed live in this plan's own
 query, not merely copied from the tracer):
@@ -596,13 +597,81 @@ whether the exact string it resolves to matches what was sent is a separate
 question CUT-02's own wording ("confirmed on the read side") does not
 require answering.
 
-### CUT-02 — `agenticJobId` and multi-model resolutions
+### agenticJobId — resolved absent, by design
 
-*Deferred to plan 33-03.* This plan (33-02) confirmed row-level dimensions,
-`squadName`, and per-call attribution only, per its own task scope — it does
-not touch `agenticJobId` or multi-model attribution, which remain the two
-open clauses named in REQUIREMENTS.md's "Known open at scope time" section
-and are unchanged by this plan's execution.
+**`agenticJobId` never reaches a metered row on the event path, for a root
+session by permanent construction and for a subagent session as the normal
+(not edge-case) outcome of dispatch ordering — resolved on two independent
+methods, both agreeing.**
+
+**Method 1 — live read-side result.** Two jobs, each with a `created` line
+followed by an `outcome` line in their profile's `revenium-jobs.ledger` (one
+from `marketing`, `SUCCESS`; one from `coder`,
+`dispatch_pong_subagent_probe_e519`, `CANCELLED` — the same induced probe
+STATE.md's Probe 2 recorded, re-queried live for this plan rather than
+copy-forwarded). `revenium jobs get <id> --output json` confirms both job
+resources exist server-side with a real `executionStatus` and `created`
+timestamp. `revenium jobs transactions <id> --output json` returns
+`{"totalCount": 0, "transactions": []}` for both — zero AI-metric
+transactions are linked to either job anywhere in Revenium. Both `created`
+timestamps (`2026-08-20T04:46:32.956Z` and `2026-08-20T01:54:39.627Z`) fall
+entirely outside the write-loss interval
+(`2026-08-19T18:25:00Z`–`2026-08-20T01:24:00Z`, closed at both ends — the
+second job's creation is 30m39s after the interval's close) — neither zero
+is ambiguous between a by-design absence and Revenium's silent write loss;
+both are clean.
+
+`revenium jobs transactions <id>` — not `revenium metrics ai` — is the only
+verb capable of answering this question. `metrics ai` rows carry no
+job-related key anywhere in their 63-key schema (verified this phase, live
+JSON dump); `--agentic-job-id` sent at meter time would be invisible on that
+endpoint even if present. An absence in a row dump is not evidence in either
+direction, and this is the only place in this document that needs to say so.
+
+**Method 2 — source-level mechanism, independently agreeing.** For a root
+session, the marker never carries the field. `classifier.py:999` computes
+`root_aid = _root_agentic_job_id_for(root_sid, paths=p) if root_sid != sid
+else ""` — for a root session `root_sid == sid`, so `root_aid` is
+unconditionally `""`, and the conditional assignment at `classifier.py:1010`
+(`if root_aid: rec["agentic_job_id"] = root_aid`) never fires.
+`_write_marker_pair`'s own docstring (`classifier.py:975`) states this
+outcome as a deliberate design choice: "Top-level sessions emit trace_id ==
+sid ... and OMIT agentic_job_id." **This is permanent and applies to every
+root session, not a timing artifact — no probe sequencing changes it.**
+
+For a subagent session, the field CAN be present, but only if the root's own
+`kind:"job"` marker already exists at the moment the subagent is classified.
+Job inference (`classifier.py:1112`, `root_sid == session_id`) is scoped to
+root sessions only and runs as the last step of the root's own
+classification — typically at the root's end/finalize boundary, which is
+after a mid-session subagent has already finished and been classified. The
+ordering hazard is the normal case here, not an edge case.
+
+Separately, and regardless of either finding above: the event path's marker
+join excludes `kind:"job"` records outright. `api-event-report.sh:1006-1022`
+requires `all(k in m for k in REQUIRED)` where `REQUIRED = ("muid", "ts",
+"sid", "task_type", "operation_type")` and separately skips any record where
+`m.get("kind") is not None` — a job marker fails this filter and is never in
+the join set `_attribution_for` (`api-event-report.sh:1046-1057`) reads from.
+
+**The legacy-versus-event asymmetry, recorded, not fixed.** The legacy path
+resolves this differently and CAN attach a root session's own job id:
+`hermes-report.sh:2470-2474`'s per-marker `cmd` construction —
+`if [[ "${root_sid}" == "${sid}" && -n "${m_owning_job_id}" ]]; then
+cmd+=(--agentic-job-id "${m_owning_job_id}") ...` — ships the root's own
+`m_owning_job_id`, something the event path structurally cannot do for a
+root session (its `root_aid` is unconditionally empty by `classifier.py:999`
+above). **The event path has strictly less capability here than the legacy
+path for root sessions.** Whether this asymmetry should be closed — by
+having the event path resolve a root session's own job id independently of
+the marker join, or some other design — is a decision for a later phase, not
+this one. This document's job is to make the fact legible, not to propose or
+implement a fix.
+
+### Multi-model attribution — see below
+
+*Resolved in this same `## Findings` section, by Task 2 — see "Multi-model
+attribution — mechanism verified, trigger unfired" below.*
 
 ## Reproducing this measurement
 
@@ -649,10 +718,15 @@ produced a usable result:
 | 5 | 33-02 Task 2 | `revenium squads get <sid-A> --output json` | trace lifetime `01:47:47Z`–`01:47:49Z` | 1 squad detail | success | outside |
 | 6 | 33-02 Task 2 | `revenium squads get <sid-B> --output json` | trace lifetime `01:52:40Z`–`01:52:47Z` | 1 squad detail | success | outside |
 | 7 | 33-02 Task 2 | `revenium squads timeline <sid-B> --output json` | trace lifetime `01:52:40Z`–`01:52:47Z` | 3 events | success | outside |
+| 8 | 33-03 Task 1 | `revenium jobs get <job-A> --output json` | point lookup, `created=2026-08-20T04:46:32.956Z` | 1 job resource | success | outside (well after `01:24:00Z`) |
+| 9 | 33-03 Task 1 | `revenium jobs transactions <job-A> --output json` | point lookup, same job | `{"totalCount": 0}` | success | outside — clean, not ambiguous |
+| 10 | 33-03 Task 1 | `revenium jobs get <job-B> --output json` | point lookup, `created=2026-08-20T01:54:39.627Z` | 1 job resource | success | outside (30m39s after `01:24:00Z`) |
+| 11 | 33-03 Task 1 | `revenium jobs transactions <job-B> --output json` | point lookup, same job | `{"totalCount": 0}` | success | outside — clean, not ambiguous |
 
-16 total HTTP requests across these 7 distinct CLI invocations (row 2 pages
-0–3 = 4 requests, row 4 pages 0–6 = 7 requests, the rest are single point
-lookups) — auditable total request volume, per T-33-05's mitigation.
+20 total HTTP requests across these 11 distinct CLI invocations (row 2 pages
+0–3 = 4 requests, row 4 pages 0–6 = 7 requests, rows 8-11 and the rest are
+single point lookups) — auditable total request volume, per T-33-05's
+mitigation.
 
 **Zero-row rule, stated once:** a zero-row result (row 1 above) is never
 treated as confirmation of anything. It is equally compatible with a
@@ -720,7 +794,8 @@ local, gitignored evidence artifact
 (`.planning/phases/33-convergence-and-read-side-proof/33-EVIDENCE.md`),
 resolved via the stable placeholders used above (`<sid-A>`, `<hash-A>`,
 `<sid-B>`, `<uuid-B>`, `<hash-B>`, `<sid-C>`, `<uuid-C>`, `<hash-C>`,
-`<profile-state-dir>`). Profile role labels (`playtester`, `coder`, etc.)
+`<job-A>`, `<job-B>`, `<profile-state-dir>`). Profile role labels
+(`playtester`, `coder`, etc.)
 are retained because the per-profile reading in this document depends on
 them. `gtm-fleet` (a squad label value, not a session/trace/host
 identifier) is quoted directly rather than placeholder-redacted — it falls
