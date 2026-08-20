@@ -361,6 +361,82 @@ merely assuming, the subagent-rolls-up-to-the-root-`traceId`-without-
 fragmenting behavior REQUIREMENTS.md's "Known open at scope time" section
 already credited to pre-Phase-33 work.
 
+**`squadName` — the two-call join (Task 2 of this plan, queried
+2026-08-20T04:1xZ).** `metrics ai` rows carry `squadId` only; none of the 635
+rows fetched this session carries a `squadName` key at all — that absence is
+the correct schema, not missing data. `squadName` lives on the Squad
+resource, reached only via `revenium squads get <squadId> --output json`.
+Two independent lookups, one per traceId confirmed above:
+
+`revenium squads get <sid-A> --output json` (playtester trace, whole
+lifetime `startTime=2026-08-20T01:47:47Z`–`endTime=2026-08-20T01:47:49Z`,
+both after the write-loss window's close — clean):
+
+| Field | Value |
+|---|---|
+| `squadName` | `gtm-fleet` |
+| `models` | `["accounts/fireworks/models/glm-5p2"]` |
+| `providers` | `["fireworks"]` |
+| `agents` | one entry: `agent=Hermes-playtester`, `role=root`, `transactionCount=1` |
+| `transactionCount` | `1` |
+| `traceCount` | `1` |
+
+`revenium squads get <sid-B> --output json` (coder trace, whole lifetime
+`startTime=2026-08-20T01:52:40Z`–`endTime=2026-08-20T01:52:47Z`, both after
+the write-loss window's close — clean):
+
+| Field | Value |
+|---|---|
+| `squadName` | `gtm-fleet` |
+| `models` | `["accounts/fireworks/models/glm-5p2"]` |
+| `providers` | `["fireworks"]` |
+| `agents` | one entry: `agent=Hermes-coder`, `role=root`, `transactionCount=3` |
+| `transactionCount` | `3` |
+| `traceCount` | `1` |
+
+Both traces resolve `squadName` to the SAME string, `gtm-fleet`, despite
+belonging to different profiles (`playtester` vs `coder`) whose own
+`--squad-name` argv (per `api-event-report.sh`'s
+`--squad-name "${REVENIUM_SQUAD_NAME:-${REVENIUM_AGENT_NAME}}"`, with
+`REVENIUM_SQUAD_NAME` confirmed unset in every one of the ten profiles'
+`env` files) would differ — `Hermes-playtester` vs `Hermes-coder`.
+`squadName` is CONFIRMED present and non-empty on the Squad resource, and the
+two-call join works exactly as documented — but the value returned does not
+match what either profile's own argv would send, and no local config source
+accounts for `gtm-fleet` on either profile. See `## Findings` for this
+mismatch, recorded there rather than resolved further, since diagnosing why
+Revenium's server assigns this particular label is outside CUT-02's
+read-side-confirmation scope.
+
+`revenium squads timeline <sid-B> --output json`: three chronological
+events (root `:api:1` at `startTime=01:52:40Z`, subagent `:api:1` at
+`startTime=01:52:44Z`, root `:api:2` at `startTime=01:52:44Z`). The
+subagent's event and the root's `:api:2` event share the same whole-second
+`startTime`, and the timeline lists the subagent's event first despite the
+root's `:api:2` ending later — the same ordinal-over-order lesson from a
+second, independent angle (a different session's `:api:1` sorts ahead of
+this session's own `:api:2` in server-returned order). The timeline's own
+chronological ordering of `<sid-B>`'s two ROOT events (`:api:1` then
+`:api:2`) agrees with the `:api:N` ordinals quoted above — no disagreement
+to report for the ordinals actually being compared.
+
+`revenium squads list --period TWENTY_FOUR_HOURS --output json`: **one**
+squad entity in the period, `label=gtm-fleet` (matching both `squads get`
+results above), `agentCount=20`, `executionCount=20`, `traceCount=20`,
+`firstExecutionTime=2026-08-19T04:08:48Z`,
+`lastExecutionTime=2026-08-20T01:52:47Z`. This period is annotated
+**partially suspect**: `2026-08-19T04:08:48Z`–`2026-08-20T01:52:47Z` fully
+contains the write-loss window `2026-08-19T18:25:00Z`–`2026-08-20T01:24:00Z`,
+so the aggregate `executionCount`/`transactionCount`/`totalCost` figures
+cannot be trusted as complete — any writes dropped during the outage are
+invisible to this rollup, though the two point-lookup `squads get` calls
+above are each individually clean (their own trace lifetimes fall entirely
+outside the outage). Zero squads in the period carry a label distinguishable
+per-profile (a `Hermes-<profile>`-shaped `label`) — every squad this tenant
+has produced for the Hermes event path in this period shares the single
+`gtm-fleet` value, consistent with (but not proof of) the two-trace mismatch
+above.
+
 ## Findings
 
 ### Tracer read-side query — narrow window returned zero Hermes rows
@@ -474,9 +550,41 @@ profiles fit cleanly into the single applicable bucket (open per
 the fourth "data does not distinguish" fallback this task's own guidance
 allows for.
 
+### squadName resolves to a tenant-wide label, not either sampled profile's own `--squad-name` value
+
+Both `<sid-A>` (playtester) and `<sid-B>` (coder) resolve to
+`squadName: "gtm-fleet"` via `revenium squads get`, and `revenium squads
+list --period TWENTY_FOUR_HOURS` shows exactly one squad label active in the
+tenant during that period — also `gtm-fleet`. Per
+`skills/revenium/scripts/api-event-report.sh`'s own argv construction
+(`--squad-name "${REVENIUM_SQUAD_NAME:-${REVENIUM_AGENT_NAME}}"`) and the
+confirmed-unset `REVENIUM_SQUAD_NAME` in all ten profiles' `env` files, the
+value each profile's event path actually sends should be
+`Hermes-<profile>` (`Hermes-playtester`, `Hermes-coder`) — not `gtm-fleet`.
+No local source accounts for `gtm-fleet`: it is absent from every profile's
+`env`, `state/revenium/config.json` (`organizationName` reads `None` on
+every profile checked), and `config.yaml`. `revenium config show` reports a
+Team ID and a Tenant ID, neither of which is `gtm-fleet` either.
+
+This is recorded as an open finding, not resolved further: it is consistent
+with (though not proof of) a server-side default squad label the Revenium
+API assigns per-team independent of the client's `--squad-name` argument —
+a behavior this read-only observation phase has no means to test further
+without either a server-side config change (out of scope) or sending a
+deliberately different `--squad-name` value to see whether it is echoed (a
+mutating write G-2 forbids). The dimension itself is CONFIRMED present,
+non-empty, and resolvable via the two-call join documented in `## Results`;
+whether the exact string it resolves to matches what was sent is a separate
+question CUT-02's own wording ("confirmed on the read side") does not
+require answering.
+
 ### CUT-02 — `agenticJobId` and multi-model resolutions
 
-*Filled by plan 33-02.*
+*Deferred to plan 33-03.* This plan (33-02) confirmed row-level dimensions,
+`squadName`, and per-call attribution only, per its own task scope — it does
+not touch `agenticJobId` or multi-model attribution, which remain the two
+open clauses named in REQUIREMENTS.md's "Known open at scope time" section
+and are unchanged by this plan's execution.
 
 ## Reproducing this measurement
 
