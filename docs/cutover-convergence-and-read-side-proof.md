@@ -1,19 +1,29 @@
-# Fleet Cutover Convergence and Read-Side Proof — Observed Unforced, Diagnosed Where Pending
+# Fleet Cutover Convergence and Read-Side Proof — 8/10 Converged, Attestation Not Given, Read-Side Confirmed
 
 ## Verdict
 
-**Both requirements are satisfied, with one honest shortfall stated up
-front: CUT-01 closes at 8 of 10 profiles converged unforced, not 10 of 10.
-The remaining 2 (gtm, community) have NOT converged as of this document's
-close, and neither was forced — each carries the same named,
-source-grounded cause diagnosed at scope time, unchanged and re-confirmed
-1h15m later. CUT-02 is fully resolved: every non-cost dimension ROADMAP
-success criterion 3 names is confirmed read-side, and both clauses left open
-at scope time (`agenticJobId`, multi-model attribution) are now resolved
-either way with evidence, per ROADMAP success criterion 4.**
+**Both requirements close, with two honest shortfalls stated up front, not
+one: CUT-01 closes at 8 of 10 profiles converged, not 10 of 10 — gtm and
+community have NOT converged as of this document's close, each carrying the
+same named, source-grounded cause diagnosed at scope time. SEPARATELY, and
+more consequentially: the "unforced" half of CUT-01's claim is qualified,
+not proven. At this plan's Task 4 blocking checkpoint the operator was
+asked to attest that no profile was manually touched during the observation
+window; the operator did NOT give that attestation — verbatim: "It may have
+been touched but doesnt matter if so" — and declined to name a profile. The
+mechanical evidence below is real and stands on its own, but it does not
+cover the full span between the 2026-08-19 cutover flip and this phase's
+first observation, and this document therefore reports CUT-01 as CLOSED AT
+8/10 WITH AN UNATTESTED QUALIFIER, not as a clean unforced pass. CUT-02 is
+fully resolved: every non-cost dimension ROADMAP success criterion 3 names
+is confirmed read-side, and both clauses left open at scope time
+(`agenticJobId`, multi-model attribution) are now resolved either way with
+evidence, per ROADMAP success criterion 4.**
 
 **CUT-01, final state as of 2026-08-20T05:12-05:13Z (Task 3 of this
-plan):** 8 of 10 converged unforced — marketing, devops, qa, coder,
+plan, qualifier added at Task 4):** 8 of 10 converged (unforced by this
+phase's own hand; NOT independently attested — see below) — marketing,
+devops, qa, coder,
 playtester, cfo, pm (converged by 33-01's Round 3, `03:57:51Z`, still
 converged 1h15m later) plus **lorekeeper**, which fully converged between
 Round 3 and this final sample, right on the earliest-possible bound Round 3
@@ -23,12 +33,34 @@ cause unchanged: open in `state.db`, staleness route, earliest full
 convergence `≈2026-08-20T16:59:12Z`) and **community** (1 pending,
 unchanged — same session, cause unchanged, earliest convergence
 `≈2026-08-20T21:33:13Z`) are the two profiles CUT-01 does not close for.
-Neither was forced: no profile's `env`/`config.json`/`drain-status.json`/
-ledger was written, no halt was cleared, no gateway was restarted, across
-the whole observation window from 33-01's Task 1 tracer (`03:36Z`) through
-this final sample (`05:13Z`), 1h37m of continuous read-only observation. All
-ten `env` files carry an identical modification time inside the documented
-`2026-08-19T21:12–21:40Z` cutover flip window, and none is later.
+
+**PROVEN, mechanically, no attestation needed:** all ten `env` files carry
+one identical modification timestamp inside the documented
+`2026-08-19T21:12–21:40Z` cutover flip window, and none is later — this
+rules out an `env` edit on any profile at any point through this document's
+close. Separately, no plan in phase 33 issued any side-effecting command
+against the fleet host or the Revenium tenant across this phase's own
+1h37m observation window (`03:36Z`–`05:13Z`, from 33-01's Task 1 tracer
+through this final sample): no `revenium meter`, no `jobs create`/`outcome`,
+no `guardrails ... create`/`update`/`delete`, no write to any profile's
+`config.json`/`drain-status.json`/ledger, no `clear-halt.sh`, no gateway
+restart, no `rsync` to the host — every command this phase itself issued is
+enumerated in the query ledger below.
+
+**NOT ESTABLISHED:** an operator attestation of non-intervention was
+requested at this plan's Task 4 blocking checkpoint and was NOT given. The
+operator's verbatim response: **"It may have been touched but doesnt matter
+if so."** No profile was named as touched, and none was named as clear of
+suspicion either. A `clear-halt.sh` run, a gateway restart, or a
+`drain-status.json`/ledger edit by a human or an out-of-band process
+therefore CANNOT be excluded by anything in this document. Most of the
+cutover→convergence span — 2026-08-19 ~21:12Z (the flip) through 33-01's
+first observation at `03:36Z` on 2026-08-20, roughly 6.5 hours — predates
+any observation by this phase entirely, so the mechanical evidence above
+covers only part of the window CUT-01's "without manual intervention"
+language spans. This gap is reported, not chased: the phase's observation
+window is closed, and this document does not go back to the host to try to
+settle it after the fact.
 
 **CUT-02, final state as of 2026-08-20 (Tasks 1–2 of plan 33-02, Tasks 1–2
 of this plan):** every dimension ROADMAP success criterion 3 names is
@@ -60,8 +92,8 @@ Every `$0` cost figure quoted anywhere in this document is captioned
 **operator decision (BACK-2676 out of scope), not a metering defect** at
 the point it is quoted — see `## Known limitations and exclusions`.
 
-Date this section was last written: 2026-08-20 (Task 3 of plan 33-03,
-closing the observation window).
+Date this section was last written: 2026-08-20 (Task 4 of plan 33-03,
+after the blocking checkpoint's operator response).
 
 ## Why this document exists
 
@@ -92,13 +124,18 @@ Method, for both halves of this phase:
   `revenium` CLI read verbs only (`metrics ai`, `jobs get`/`transactions`,
   `squads get`/`list`, `config show`) against the live Revenium dev tenant.
 
-Every command issued on the host was one of: `ssh`, `cat`, `head`, `tail`,
-`grep`, `stat`, `ls`, `python3` (reading JSON), `sqlite3` in read-only URI
-mode, and the `revenium` CLI's read subcommands. No `revenium meter`, no
-`jobs create`/`outcome`, no `guardrails ... create`/`update`/`delete`, no
-write to any profile's `env`/`config.json`/`drain-status.json`/ledger, no
-`clear-halt.sh`, no gateway restart, no `rsync` to the host. A profile was
-never touched to make it converge.
+Every command issued BY THIS PHASE on the host was one of: `ssh`, `cat`,
+`head`, `tail`, `grep`, `stat`, `ls`, `python3` (reading JSON), `sqlite3` in
+read-only URI mode, and the `revenium` CLI's read subcommands. No `revenium
+meter`, no `jobs create`/`outcome`, no `guardrails ... create`/`update`/
+`delete`, no write to any profile's `env`/`config.json`/`drain-status.json`/
+ledger, no `clear-halt.sh`, no gateway restart, no `rsync` to the host, was
+issued by any of this phase's three plans. **This is a claim about what
+this phase itself did, not a claim about the whole cutover→convergence
+span.** Whether any profile was touched by a human or an out-of-band
+process outside this phase's own commands is NOT established — see
+`## Verdict` and `## Findings` for the Task 4 checkpoint's outcome, where
+the operator declined to attest to non-intervention.
 
 ## Known limitations and exclusions
 
@@ -123,6 +160,22 @@ reconciliation (no-gap/no-double-count across the cutover boundary), the
 `docs/event-metering.md` correction, rollback demonstration, and the
 BACK-2676 cost prerequisite are Phase 34/35 work and are not addressed
 here.
+
+**The unforced-convergence attestation was requested and NOT given — a
+named, first-class limitation on CUT-01, not a footnote.** This plan's
+Task 4 was a blocking checkpoint asking the operator to attest that no
+fleet profile was manually touched during the observation window. The
+operator's verbatim response: **"It may have been touched but doesnt
+matter if so."** No profile was named as touched. Offered the choice
+between qualifying the claim or failing CUT-01 for an unnamed profile, the
+operator chose to qualify: keep CUT-01 closing at 8/10, but stop asserting
+an absence nobody confirmed. This document therefore separates what is
+mechanically PROVEN (this phase's own commands were all reads; all ten
+`env` files share one identical pre-flip modification time) from what is
+NOT ESTABLISHED (whether any profile was touched by a human or an
+out-of-band process, particularly across the ~6.5 hours between the
+2026-08-19 cutover flip and this phase's first observation). See
+`## Verdict` and `## Findings` for the full statement.
 
 ## Results
 
@@ -222,22 +275,29 @@ twice):
 | community | false / 1 | false / 1 | false / 1 | **PENDING** | 1 open session, staleness route; earliest full convergence ≈ 2026-08-20T21:33:13Z |
 | lorekeeper | false / 5 | false / 5 | false / 5 | **PENDING** | 5 open sessions, staleness route; earliest full convergence ≈ 2026-08-20T05:01:59Z |
 
-**7 of 10 converged, unforced, with zero disagreement across all three
-rounds of this observation window.** No profile flipped `drained` state
-between rounds here — contrast with `33-RESEARCH.md`'s earlier observation
-of `coder` flapping drained→un-drained→drained across a *different, wider*
-window on 2026-08-19/20, which is why this task samples repeatedly rather
-than trusting one reading (the gate is known to flap in general; it simply
-did not flap during these particular three rounds).
+**7 of 10 converged, with zero disagreement across all three rounds of
+this observation window; no `drained` state flip between rounds.** Contrast
+with `33-RESEARCH.md`'s earlier observation of `coder` flapping
+drained→un-drained→drained across a *different, wider* window on
+2026-08-19/20, which is why this task samples repeatedly rather than
+trusting one reading (the gate is known to flap in general; it simply did
+not flap during these particular three rounds). The word "unforced" here
+describes what this document can mechanically show — this task's own
+commands never wrote to any profile — not a settled fact about the whole
+cutover→convergence span; see `## Verdict` and `## Known limitations and
+exclusions` for why "unforced" carries a qualifier as of Task 4's
+checkpoint.
 
 **This table reflects Round 1-3 only (33-01, `03:42-03:57Z`) and is left
 unchanged here.** The observation window continued past Round 3; a fourth,
 final re-sample closes it in `## Independent confirmation` →
 "CUT-01 — final re-sample, closing the observation window" (Task 3 of plan
 33-03), which is authoritative for the phase's CUT-01 count (8 of 10 by
-that point — lorekeeper converged, gtm partially converged). This table is
-kept exactly as 33-01 wrote it, not edited to match the later reading, so
-the progression between rounds stays visible.
+that point — lorekeeper converged, gtm partially converged) — **closed WITH
+the unattested-intervention qualifier stated in `## Verdict`, not as a
+clean unforced pass.** This table is kept exactly as 33-01 wrote it, not
+edited to match the later reading, so the progression between rounds stays
+visible.
 
 **First-observed-drained, scoped to this cutover.** Every converged
 profile's `revenium-metering.log` was searched for its FIRST occurrence of
@@ -281,9 +341,13 @@ carries a modification time later than the cutover flip.** This is the
 closest thing to positive evidence for the absence of a later manual
 write, and its limit is stated plainly: an mtime proves the file was not
 *rewritten*, not that no other kind of manual action (a `clear-halt.sh`
-run, a gateway restart, a direct ledger edit) occurred — no evidence of any
-of those was found either, but absence of evidence for an unlogged action
-is not the same class of proof as a file timestamp.
+run, a gateway restart, a direct ledger edit) occurred. This limit is no
+longer merely theoretical: at Task 4's blocking checkpoint the operator was
+explicitly asked to attest to the absence of exactly this kind of action
+and declined — "It may have been touched but doesnt matter if so" — so the
+gap this paragraph flags is not an abstract caveat, it is the specific gap
+Task 4 found unfilled. See `## Verdict` and `## Known limitations and
+exclusions`.
 
 ### CUT-02 — read-side dimension confirmation (task type, operation type, trace id/type, agentic job id, squad, per-call, multi-model)
 
@@ -477,6 +541,51 @@ has produced for the Hermes event path in this period shares the single
 above.
 
 ## Findings
+
+### Task 4 checkpoint outcome — unforced-convergence attestation requested, not given
+
+**This is the audit trail for CUT-01's "unforced" qualifier, for anyone
+replaying this evidence later.**
+
+This plan's Task 4 was a blocking `checkpoint:human-verify` (`gate=
+"blocking"`) asking the operator to attest, from their own knowledge of
+what was done on the fleet host, that no profile was manually touched
+across the observation window — or to name the profile that was, in which
+case CUT-01 would be recorded as failed for it.
+
+**Attestation requested:** confirm no `env`/`config.json` edit, no
+`clear-halt.sh` run, no gateway restart, no `drain-status.json`/ledger edit
+occurred on any profile, matching the ten `env` modification times this
+document records as the mechanical (but partial) evidence.
+
+**Operator's verbatim response:** *"It may have been touched but doesnt
+matter if so."*
+
+**What this response is, precisely:** neither the unforced attestation nor
+a named touched profile. The operator explicitly declined to affirm the
+absence of manual intervention, and explicitly declined to name a profile
+— both of the plan's own two anticipated exits. Offered the choice between
+(a) qualifying the claim as unattested while keeping CUT-01 at 8/10, or (b)
+recording CUT-01 as failed for an unnamed profile, the operator chose (a):
+**qualify it as unattested.**
+
+**Scope of the resulting claim, stated precisely:** CUT-01 closes at 8 of
+10 profiles converged as of this document's close. The "without manual
+intervention" language in CUT-01's own requirement text is satisfied ONLY
+for the portion of the cutover→convergence span this phase itself directly
+observed and controlled (`03:36Z`–`05:13Z` on 2026-08-20, 1h37m, during
+which this phase's own commands are exhaustively enumerated in the query
+ledger and none was side-effecting) — NOT for the roughly 6.5 hours between
+the 2026-08-19 ~21:12Z cutover flip and this phase's first observation, and
+NOT as an attested fact for any span, since the one party positioned to
+attest to it declined. This gap is not chased further: the observation
+window is closed, and re-opening it to interrogate the host after the fact
+would itself be a new action this phase's own read-only mandate does not
+license.
+
+**CUT-01 is NOT recorded as failed.** The operator explicitly rejected that
+outcome. CUT-01 closes at 8/10 with this qualifier attached, per the
+operator's own choice.
 
 ### Tracer read-side query — narrow window returned zero Hermes rows
 
@@ -943,11 +1052,16 @@ time, not a one-off estimate. gtm's own earliest-possible FULL convergence
 remains bounded by `<gtm-sid-5>` (`≈2026-08-20T16:59:12Z`, unchanged), since
 `<gtm-sid-4>` converges first but gtm needs both closed.
 
-**CUT-01 count at close of window: 8 of 10 converged unforced** (the
-original 7 — marketing, devops, qa, coder, playtester, cfo, pm — plus
-lorekeeper, converged since Round 3). gtm and community remain pending with
-the same, unchanged, source-grounded cause as 33-01 diagnosed; neither was
-touched.
+**CUT-01 count at close of window: 8 of 10 converged** (the original 7 —
+marketing, devops, qa, coder, playtester, cfo, pm — plus lorekeeper,
+converged since Round 3). gtm and community remain pending with the same,
+unchanged, source-grounded cause as 33-01 diagnosed. This phase's own
+commands never touched any profile — but whether any profile was touched
+by anything outside this phase's own commands is NOT established; the
+operator declined to attest to that at Task 4's checkpoint. See
+`## Verdict` and `## Findings` → "Task 4 checkpoint outcome" for the full
+statement — CUT-01 closes at 8/10 WITH that qualifier, not as a clean
+unforced pass.
 
 ## Verified against
 
