@@ -33,7 +33,25 @@ times, expect that profile (or, if all its pending sessions closed first,
 possibly sooner) to have converged on its own, with no action taken by
 this phase or any other.
 
-Date this section was last written: 2026-08-20 (Task 3 of this plan).
+**CUT-02: partially confirmed as of 2026-08-20T04:12Z (Plan 33-02).** Every
+dimension this plan set out to confirm is confirmed read-side, quoted
+verbatim from live `revenium metrics ai` / `squads get` / `squads timeline`
+/ `squads list` responses: `taskType`, `operationType`, `traceId`,
+`traceType`, `agent`, `squadId`, `model`, `provider`, `transactionId`, and
+per-call attribution (two rows, one session, `:api:1`/`:api:2`, proven by
+the ordinal rather than response order — the API itself returned the two
+rows out of chronological sequence in this plan's own query). `squadName` is
+likewise CONFIRMED present via the two-call join, though its value
+(`gtm-fleet`) does not match either sampled profile's own `--squad-name`
+argv and is recorded as an open finding, not a resolved defect. **Two
+clauses remain open, unchanged from scope time and NOT addressed by this
+plan:** `agenticJobId` (structurally absent from every root row by design;
+timing-dependent on subagent rows) and multi-model attribution (mechanism
+verified fleet-wide via `fallback_providers`, no natural occurrence yet
+observed) — both are Plan 33-03's work, and CUT-02 is not reported closed
+here.
+
+Date this section was last written: 2026-08-20 (Task 3 of plan 33-02).
 
 ## Why this document exists
 
@@ -615,6 +633,49 @@ Filter the returned array client-side — there is no server-side filter on
 this verb — down to rows whose `agent` starts with `Hermes` or whose
 `label` starts with `event:`.
 
+### Query ledger (33-01 + 33-02)
+
+Every `revenium` CLI read-verb call issued by either plan in this phase, in
+the order issued, so the method — including what returned nothing and what
+was never re-issued — is auditable rather than only the queries that
+produced a usable result:
+
+| # | Plan/Task | Command | Window / period | Rows returned | Outcome | Window vs. write-loss interval |
+|---|---|---|---|---|---|---|
+| 1 | 33-01 Task 1 | `revenium metrics ai --from 2026-08-20T02:00:00Z --to 2026-08-20T03:40:00Z --output json --page-size 200 --page 0` | `02:00:00Z`–`03:40:00Z` | 100 total, **0 Hermes-owned** | success, empty Hermes-filtered set | outside (entirely after `01:24:00Z`) |
+| 2 | 33-01 Task 1 | `revenium metrics ai --from 2026-08-20T01:24:01Z --to 2026-08-20T03:41:00Z --output json --page-size 200 --page N` (N=0..3) | `01:24:01Z`–`03:41:00Z` | 400 total, 4 Hermes-owned | success | outside (starts 1s after `01:24:00Z`) |
+| 3 | 33-02 Task 1 precondition + Task 2 | `revenium squads list --period TWENTY_FOUR_HOURS --output json` (one call, reused for both purposes — not re-issued) | `TWENTY_FOUR_HOURS` period (≈`2026-08-19T04:08Z`–`2026-08-20T04:08Z`) | 1 squad entity | success, HTTP 200 | **overlapping** — period fully contains `18:25:00Z`–`01:24:00Z`; used to confirm API reachability for the precondition gate and for the period-level squad check, never cited as row-level dimension evidence |
+| 4 | 33-02 Task 1 | `revenium metrics ai --from 2026-08-20T01:24:01Z --to 2026-08-20T04:12:00Z --output json --page-size 200 --page N` (N=0..6) | `01:24:01Z`–`04:12:00Z` | 635 total, 4 Hermes-owned | success | outside (starts 1s after `01:24:00Z`) |
+| 5 | 33-02 Task 2 | `revenium squads get <sid-A> --output json` | trace lifetime `01:47:47Z`–`01:47:49Z` | 1 squad detail | success | outside |
+| 6 | 33-02 Task 2 | `revenium squads get <sid-B> --output json` | trace lifetime `01:52:40Z`–`01:52:47Z` | 1 squad detail | success | outside |
+| 7 | 33-02 Task 2 | `revenium squads timeline <sid-B> --output json` | trace lifetime `01:52:40Z`–`01:52:47Z` | 3 events | success | outside |
+
+16 total HTTP requests across these 7 distinct CLI invocations (row 2 pages
+0–3 = 4 requests, row 4 pages 0–6 = 7 requests, the rest are single point
+lookups) — auditable total request volume, per T-33-05's mitigation.
+
+**Zero-row rule, stated once:** a zero-row result (row 1 above) is never
+treated as confirmation of anything. It is equally compatible with a
+perfectly healthy metering path (nothing Hermes-owned happened to land in
+that particular 100-minute slice, on a tenant dominated by non-Hermes
+traffic) and with a fully broken one — only corroborating evidence
+distinguishes the two. Here, that evidence is row 2: the very next query,
+over a window that fully contains row 1's window plus more, returned real
+Hermes rows — supporting cause (a) "nothing Hermes-owned was metered in that
+specific slice" over causes (b) write-loss overlap (row 1's window is
+entirely outside the outage) or (c) mis-scoping (the query and filter are
+identical in shape to row 2's, which worked). Full three-cause analysis is
+in `## Findings` → "Tracer read-side query — narrow window returned zero
+Hermes rows".
+
+**Errors, stated once:** zero API errors, timeouts, or non-200 responses
+were encountered across any of the 16 HTTP requests in this ledger, in
+either plan. Every call returned success on its first attempt; none was
+retried, and no small-`--page-size` auto-pagination symptom (Pitfall 1) was
+triggered, since every `metrics ai` call in both plans passed an explicit
+`--page` alongside `--page-size 200`. This absence of errors is itself the
+recorded observation for this phase, not an omitted topic.
+
 ## Independent confirmation
 
 **CUT-01: performed (Task 2 of this plan).** All ten profiles were sampled
@@ -633,16 +694,35 @@ Task 1 tracer sample on `playtester`) is never, on its own, treated as
 sufficient confirmation; the repeated sampling above is what makes the
 CUT-01 verdict independently confirmed rather than a lucky snapshot.
 
-**CUT-02:** not yet performed — see plan 33-02.
+**CUT-02: performed, partially (Tasks 1–2 of plan 33-02).** The row-level
+dimension query was independently re-run in this plan roughly 2.5 hours
+after the 33-01 tracer's own query, using a wider window
+(`2026-08-20T01:24:01Z`–`04:12:00Z` vs. the tracer's `...–03:41:00Z`) and
+found the identical four Hermes-owned rows with identical field values —
+nothing new landed in the additional window, and nothing earlier
+disappeared, which is exactly the stability a second independent query is
+meant to confirm rather than a lucky first read. The `squadName` mismatch
+finding (`gtm-fleet` returned for two different profiles' traces, neither of
+which sent that string per their own argv) is itself corroborated by two
+independent `squads get` calls against two different `squadId`s (`<sid-A>`,
+`<sid-B>`), not one lookup taken on faith. `agenticJobId` and multi-model
+attribution are not addressed by this plan; independent confirmation for
+those two clauses is plan 33-03's job.
 
 ## Verified against
 
-Date: 2026-08-20 (Task 1 of this plan). Method: read-only SSH access to
-the fleet host plus the `revenium` CLI's read verbs against the live
-Revenium dev tenant. Host address, SSH key filename, remote login string,
-and every raw session/trace identifier are deliberately omitted from this
-file and live only in this repository's local, gitignored evidence
-artifact (`.planning/phases/33-convergence-and-read-side-proof/33-EVIDENCE.md`),
+Date: 2026-08-20 (Task 1 of plan 33-01, extended by Tasks 1–3 of plan
+33-02). Method: read-only SSH access to the fleet host plus the `revenium`
+CLI's read verbs against the live Revenium dev tenant. Host address, SSH key
+filename, remote login string, and every raw session/trace identifier are
+deliberately omitted from this file and live only in this repository's
+local, gitignored evidence artifact
+(`.planning/phases/33-convergence-and-read-side-proof/33-EVIDENCE.md`),
 resolved via the stable placeholders used above (`<sid-A>`, `<hash-A>`,
-`<profile-state-dir>`). Profile role labels (`playtester`, etc.) are
-retained because the per-profile reading in this document depends on them.
+`<sid-B>`, `<uuid-B>`, `<hash-B>`, `<sid-C>`, `<uuid-C>`, `<hash-C>`,
+`<profile-state-dir>`). Profile role labels (`playtester`, `coder`, etc.)
+are retained because the per-profile reading in this document depends on
+them. `gtm-fleet` (a squad label value, not a session/trace/host
+identifier) is quoted directly rather than placeholder-redacted — it falls
+outside every category this document's redaction gate covers (IPv4
+addresses, SSH key filenames, remote login strings, the session-id shape).
