@@ -252,10 +252,6 @@ is not the same class of proof as a file timestamp.
 
 *Filled by plan 33-02.*
 
-### CUT-02 — read-side dimension confirmation (task type, operation type, trace id/type, agentic job id, squad, per-call, multi-model)
-
-*Filled by plan 33-02.*
-
 ## Findings
 
 ### Tracer read-side query — narrow window returned zero Hermes rows
@@ -368,10 +364,6 @@ profiles fit cleanly into the single applicable bucket (open per
 `state.db`, on the staleness route, not yet past the floor) — none needed
 the fourth "data does not distinguish" fallback this task's own guidance
 allows for.
-
-### CUT-02 — `agenticJobId` and multi-model resolutions
-
-*Filled by plan 33-02.*
 
 ### CUT-02 — `agenticJobId` and multi-model resolutions
 
