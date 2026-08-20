@@ -102,11 +102,13 @@ of two-line `owners/` records elsewhere in this phase's later work will mean any
 See `## Results` for the per-profile currency, engagement, and prune-history table, and
 `## Known limitations and exclusions` for every qualification those checks produced.
 
-**Not yet answered by this document:** the ten-profile boundary-plus-arithmetic
-reconciliation (34-03), and the final verdict with its independent-confirmation re-runs
-(34-04). The fleet-wide overlap enumeration (34-02) is now CLOSED — see above and
-`## Findings`. Every section below that 34-03/34-04 own carries a single italic
-placeholder line naming the plan that fills it.
+**Answered in full, as of this document's current state.** The fleet-wide overlap
+enumeration (34-02) is CLOSED — see above and `## Findings`. The ten-profile
+boundary-plus-arithmetic reconciliation (34-03) is CLOSED — see `## Results`, five
+profiles reconciled, five not yet reached, per the first paragraph above. The final
+verdict, with its independent-confirmation re-runs (34-04), is the first paragraph above
+— RECONCILED WITH NAMED, QUANTIFIED SHORTFALLS, not a clean unqualified close. No section
+of this document carries an unfilled placeholder any longer.
 
 ## Why this document exists
 
@@ -699,8 +701,10 @@ and its own scope:**
   in neither READ nor RESIDUAL; the only place they appear in this document's arithmetic
   is as SUSPECT, exactly once, per profile.
 
-`## Verdict` is not rewritten by this task beyond what 34-02 left there — the closing
-disposition of these figures, and the milestone's own verdict on CUT-03, is 34-04's.
+`## Verdict` was not rewritten by this task (34-03) beyond what 34-02 left there at the
+time — the closing disposition of these figures, and the milestone's own verdict on
+CUT-03, was 34-04's own work, and is now written into `## Verdict`'s first paragraph
+above.
 
 ## Findings
 
