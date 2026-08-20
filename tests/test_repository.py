@@ -161,6 +161,8 @@ class RepositoryTests(unittest.TestCase):
             # Phase 35 — cutover convergence and read-side proof (Phase 33), committed so
             # it survives deletion of the gitignored planning tree (CUT-07)
             ROOT / 'docs' / 'cutover-convergence-and-read-side-proof.md',
+            # Phase 35 — transition reconciliation (Phase 34), same reason (CUT-07)
+            ROOT / 'docs' / 'transition-reconciliation.md',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

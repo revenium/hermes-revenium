@@ -171,6 +171,17 @@ route entirely and restores the pre-change behaviour exactly (the
 conservative direction — there is no corresponding "go faster than the
 floor" escape hatch).
 
+**At this fleet's current settings** (`REVENIUM_CRON_SETTLE_SECONDS=600`,
+`REVENIUM_DRAIN_STALE_SECONDS=86400`), the effective floor is `87000` seconds
+≈ **24.17 hours**. This is the minimum time an open, quiet session can take to
+reach the staleness route to terminal — and therefore the floor on how fast a
+profile whose only remaining pending sessions are long-lived-but-quiet can
+converge. A profile whose pending sessions end normally converges via the
+faster 600-second settle path instead; the floor applies only to the
+staleness route. Phase 33 observed this directly: `lorekeeper` converged
+"right on the Round-3-computed earliest bound," roughly 24h after its slowest
+pending session went quiet.
+
 **The self-healing chain.** A stale-drained session's verdict is
 re-derived from live inputs on every tick, not decided once: if the
 session resumes, its ledger timestamp or `last_activity_at` moves,
