@@ -2,17 +2,38 @@
 
 ## Verdict
 
-**Status: IN PROGRESS — Task 1 of 3 (this plan) landed.** The tracer proof
-below establishes that every layer this phase needs — SSH read, drain-gate
-JSON parse, reporter log-line corroboration, a paged read-side Revenium
-query, redaction, and the split git-tracked/gitignored write — works
-end-to-end on one profile (`playtester`) and one metered event row. The
-full ten-profile convergence table (Task 2) and the named-cause diagnosis
-for every profile that has not converged (Task 3) are recorded below this
-statement as they land, and this section is rewritten once with the final
-CUT-01 outcome at the close of Task 3 of this plan.
+**CUT-01: 7 of 10 fleet profiles converged unforced as of 2026-08-20T03:57:51Z
+(marketing, devops, qa, coder, playtester, cfo, pm). The remaining 3 (gtm,
+community, lorekeeper) have not converged, and each carries a named,
+source-grounded cause — never a forced open.**
 
-Date this section was first written: 2026-08-20.
+No profile was written to, restarted, or otherwise touched to produce this
+result. All ten `env` files carry an identical modification time inside the
+documented 2026-08-19T21:12–21:40Z cutover flip window, and none is later.
+Every converged profile's verdict is corroborated by both its
+`drain-status.json` `drained: true` reading AND a matching
+`hermes-report.sh:187` log line — neither alone was treated as sufficient.
+Every reading was confirmed stable across three samples spaced 5m59s and
+9m46s apart (both exceeding the required five-minute floor), with zero
+disagreement in this observation window.
+
+The three pending profiles are not stalled without explanation: all eleven
+of their pending sessions are OPEN per Hermes' own `state.db`
+(`ended_at` NULL) and sit on `drain-status.sh`'s staleness route, bounded
+by the observed `staleSecondsEffective = 87000.0` seconds (~24.17h,
+computed as `max(86400, 600 + 86400)`, not the nominally-configured 24h).
+Their earliest-possible full convergence times, computed from the slowest
+pending session in each profile: **lorekeeper ≈ 2026-08-20T05:01:59Z**
+(~1 hour out at the time of the Round 3 sample), **gtm ≈
+2026-08-20T16:59:11Z** (~13 hours out), **community ≈ 2026-08-20T21:33:13Z**
+(~17.6 hours out) — each of these bounds assumes no earlier natural session
+end, which would instead route that session through the much faster
+600-second settle window. If CUT-01 is re-checked after any of these
+times, expect that profile (or, if all its pending sessions closed first,
+possibly sooner) to have converged on its own, with no action taken by
+this phase or any other.
+
+Date this section was last written: 2026-08-20 (Task 3 of this plan).
 
 ## Why this document exists
 
@@ -160,18 +181,18 @@ twice):
 | 2 | 2026-08-20T03:48:05Z |
 | 3 | 2026-08-20T03:57:51Z |
 
-| Profile | R1 `drained`/`pendingCount` | R2 | R3 | Status |
-|---|---|---|---|---|
-| gtm | false / 5 | false / 5 | false / 5 | **PENDING** — see `## Findings` |
-| marketing | true / 0 | true / 0 | true / 0 | **CONVERGED** |
-| devops | true / 0 | true / 0 | true / 0 | **CONVERGED** |
-| qa | true / 0 | true / 0 | true / 0 | **CONVERGED** |
-| coder | true / 0 | true / 0 | true / 0 | **CONVERGED** |
-| playtester | true / 0 | true / 0 | true / 0 | **CONVERGED** |
-| cfo | true / 0 | true / 0 | true / 0 | **CONVERGED** |
-| pm | true / 0 | true / 0 | true / 0 | **CONVERGED** |
-| community | false / 1 | false / 1 | false / 1 | **PENDING** — see `## Findings` |
-| lorekeeper | false / 5 | false / 5 | false / 5 | **PENDING** — see `## Findings` |
+| Profile | R1 `drained`/`pendingCount` | R2 | R3 | Status | Cause if pending (see `## Findings`) |
+|---|---|---|---|---|---|
+| gtm | false / 5 | false / 5 | false / 5 | **PENDING** | 5 open sessions, staleness route; earliest full convergence ≈ 2026-08-20T16:59:11Z |
+| marketing | true / 0 | true / 0 | true / 0 | **CONVERGED** | — |
+| devops | true / 0 | true / 0 | true / 0 | **CONVERGED** | — |
+| qa | true / 0 | true / 0 | true / 0 | **CONVERGED** | — |
+| coder | true / 0 | true / 0 | true / 0 | **CONVERGED** | — |
+| playtester | true / 0 | true / 0 | true / 0 | **CONVERGED** | — |
+| cfo | true / 0 | true / 0 | true / 0 | **CONVERGED** | — |
+| pm | true / 0 | true / 0 | true / 0 | **CONVERGED** | — |
+| community | false / 1 | false / 1 | false / 1 | **PENDING** | 1 open session, staleness route; earliest full convergence ≈ 2026-08-20T21:33:13Z |
+| lorekeeper | false / 5 | false / 5 | false / 5 | **PENDING** | 5 open sessions, staleness route; earliest full convergence ≈ 2026-08-20T05:01:59Z |
 
 **7 of 10 converged, unforced, with zero disagreement across all three
 rounds of this observation window.** No profile flipped `drained` state
@@ -255,7 +276,102 @@ broken query.
 
 ### CUT-01 — named cause per non-converged profile
 
-*Filled in Task 3 of this plan.*
+**The staleness boundary, stated once with its citation:** `drain-status.sh:509`
+computes `terminal = stale_enabled and not refused and (now - last_seen) >=
+stale_seconds_effective` — an inclusive `>=` comparison, so a pending
+session whose age exactly equals `staleSecondsEffective` is INSIDE the
+stale route (already terminal, not one tick away from it). The same
+inclusive rule governs the settle-window terminal test at
+`drain-status.sh:485` (`terminal = (now - float(ended_at)) >= settle_seconds`)
+for sessions that HAVE ended. `staleSecondsEffective` itself is
+`max(staleSecondsConfigured, settleSeconds + 86400)`
+(`drain-status.sh:160`): the fleet's configured value is `86400` and its
+`REVENIUM_CRON_SETTLE_SECONDS` is the default `600`, so the floor computes
+to `max(86400, 600 + 86400) = 87000` — exactly the `87000.0` observed on
+every profile's `drain-status.json` across all three rounds. **The
+configured `86400` (24h) is not the operative number; the observed
+`87000` (24.17h) is**, because the settle-window addend floors it upward.
+
+**A refinement to this task's own anticipated bucket taxonomy, found while
+diagnosing, not assumed going in.** `drain-status.sh`'s three textual
+buckets for "not yet drained" (its own header comment,
+`drain-status.sh:24-26`) are: still open, still within the (600s) settle
+window, or terminal-but-not-yet-quiet. Reading the actual terminal-decision
+code (`drain-status.sh:475-517`) shows these are not independent
+possibilities for the SAME session — they are mutually exclusive branches
+selected by whether `state.db`'s `ended_at` is set: a session with
+`ended_at` NOT NULL (closed) is governed exclusively by the FAST 600-second
+settle window; a session with `ended_at` NULL (still open, in Hermes' own
+bookkeeping) is governed exclusively by the slow ~24.17h staleness route.
+There is no "closed session waiting on the 24h floor" state in this code —
+closed sessions converge in ten minutes. **Every one of the eleven pending
+sessions found below is OPEN per `state.db` (`ended_at` NULL), so every one
+of them is on the slow staleness route, not the fast settle route** — this
+is the honest, source-grounded finding, not a forced fit into the plan's
+original three-way guess.
+
+**Cross-reference method:** each pending sid's `ended_at`/`end_reason`/
+`started_at` was read from that profile's own `state.db` via a read-only
+URI connection (`file:<path>?mode=ro`), once after Round 1 and again after
+Round 3 — identical both times, confirming no session closed during this
+observation window.
+
+#### gtm — 5 pending, all open, staleness route (earliest full convergence ≈ 2026-08-20T16:59:11Z)
+
+| sid (placeholder) | ageSeconds (R3, `lastChecked=03:57:33Z`) | quietTicks | terminal | stale | `ended_at` | Gap to `staleSecondsEffective` | Earliest-possible convergence |
+|---|---|---|---|---|---|---|---|
+| `<gtm-sid-1>` | 85109.2 | 1417 | false | false | NULL (open) | 1890.8s (~31.5min) | 2026-08-20T04:29:03Z |
+| `<gtm-sid-2>` | 84810.4 | 1412 | false | false | NULL (open) | 2189.6s (~36.5min) | 2026-08-20T04:34:02Z |
+| `<gtm-sid-3>` | 84809.5 | 1412 | false | false | NULL (open) | 2190.5s (~36.5min) | 2026-08-20T04:34:03Z |
+| `<gtm-sid-4>` | 71660.1 | 1194 | false | false | NULL (open) | 15339.9s (~4.26h) | 2026-08-20T08:13:12Z |
+| `<gtm-sid-5>` | 40101.6 | 668 | false | false | NULL (open) | 46898.4s (~13.03h) | **2026-08-20T16:59:11Z** |
+
+Every one of gtm's five pending sids is a session Hermes' own `state.db`
+still considers open (`ended_at` NULL, real `started_at` values on
+record). Quiet-tick counts (668–1417) are already far past the
+`REVENIUM_DRAIN_QUIET_TICKS=15` requirement — meaning once the staleness
+threshold is crossed for a sid, that sid converges within the SAME tick, no
+further waiting on quietness. The profile's OWN earliest-possible full
+convergence is bounded by its SLOWEST pending sid (`<gtm-sid-5>`, gap
+~13.03h at the time of the Round 3 sample) — **assuming none of the five
+sessions genuinely ends first**, which would instead route that sid through
+the fast 600-second settle window and could converge it far sooner.
+
+#### community — 1 pending, open, staleness route (earliest full convergence ≈ 2026-08-20T21:33:13Z)
+
+| sid (placeholder) | ageSeconds (R3, `lastChecked=03:57:36Z`) | quietTicks | terminal | stale | `ended_at` | Gap to `staleSecondsEffective` | Earliest-possible convergence |
+|---|---|---|---|---|---|---|---|
+| `<community-sid-1>` | 23662.4 | 374 | false | false | NULL (open) | 63337.6s (~17.59h) | **2026-08-20T21:33:13Z** |
+
+community's single pending session is the youngest (by ledger last-seen
+age) of all eleven pending sids across the fleet, and consequently has the
+longest remaining wait via the staleness route of any single-pending
+profile. Same caveat as gtm: this bound assumes the session does not end
+first via natural termination.
+
+#### lorekeeper — 5 pending, all open, staleness route (earliest full convergence ≈ 2026-08-20T05:01:59Z)
+
+| sid (placeholder) | ageSeconds (R3, `lastChecked=03:57:42Z`) | quietTicks | terminal | stale | `ended_at` | Gap to `staleSecondsEffective` | Earliest-possible convergence |
+|---|---|---|---|---|---|---|---|
+| `<lorekeeper-sid-1>` | 83622.7 | 1254 | false | false | NULL (open) | 3377.3s (~56.3min) | 2026-08-20T04:53:59Z |
+| `<lorekeeper-sid-2>` | 83622.1 | 1254 | false | false | NULL (open) | 3377.9s (~56.3min) | 2026-08-20T04:53:59Z |
+| `<lorekeeper-sid-3>` | 83556.6 | 1252 | false | false | NULL (open) | 3443.4s (~57.4min) | 2026-08-20T04:55:05Z |
+| `<lorekeeper-sid-4>` | 83229.8 | 1247 | false | false | NULL (open) | 3770.2s (~62.8min) | 2026-08-20T05:00:32Z |
+| `<lorekeeper-sid-5>` | 83142.8 | 1246 | false | false | NULL (open) | 3857.2s (~64.3min) | **2026-08-20T05:01:59Z** |
+
+lorekeeper is the closest of the three pending profiles to full
+convergence — its slowest pending sid is roughly one hour out from the
+Round 3 sample, versus gtm's ~13 hours and community's ~17.6 hours.
+
+**No undetermined causes.** All eleven pending sessions across the three
+profiles fit cleanly into the single applicable bucket (open per
+`state.db`, on the staleness route, not yet past the floor) — none needed
+the fourth "data does not distinguish" fallback this task's own guidance
+allows for.
+
+### CUT-02 — `agenticJobId` and multi-model resolutions
+
+*Filled by plan 33-02.*
 
 ### CUT-02 — `agenticJobId` and multi-model resolutions
 
