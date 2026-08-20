@@ -1,12 +1,45 @@
-# Cutover Transition Reconciliation — Canary Confirmed the Only Overlap Fleet-Wide; Per-Profile Boundaries and Arithmetic Pending
+# Cutover Transition Reconciliation — Sole Overlap Confirmed Fleet-Wide; Arithmetic Closes for 5/10 Profiles (Residual 2 Corrected / 112,603 Literal), 50,731 Tokens Confirmed Write-Loss
 
 ## Verdict
 
-**Provisional — this section is finalized by 34-04.** This document's structural shape is
-now final (all nine sections below) and its underlying method is proven end-to-end on one
-profile and one session, but the fleet-wide claims CUT-03 asks for — every dual-billed
-session enumerated, all ten profiles' boundaries and arithmetic, the closing verdict — are
-not yet written. What follows is what this plan (34-01) actually closes:
+**RECONCILED, WITH NAMED AND QUANTIFIED SHORTFALLS — read this paragraph in full before
+any other section.** Across three independent signals swept over the full ledger history
+of all ten fleet profiles, the known 12,608-token canary is confirmed the ONLY session
+ever billed by both paths — no second overlap exists anywhere in the fleet — and where the
+reconciliation arithmetic runs, it closes to within 2 tokens. Stated without softening,
+alongside that result: **(1)** that arithmetic covers only 5 of the fleet's 10 profiles
+(gtm, marketing, coder, playtester, cfo) — the other five (devops, qa, pm, community,
+lorekeeper) have no reconciliation at all because none has reached a cutover boundary yet,
+and two of those five (devops, pm) have an absence of `owners/` overlap evidence that is
+NON-PROBATIVE, not clean: neither has had a single new session since the flip for the
+detector to evaluate, so "no record" there means "nothing was there to check yet," never
+"no overlap found." **(2)** 50,731 tokens (marketing 37,066 + playtester 13,665) are
+Revenium's OWN confirmed write-loss inside the cutover's write-loss window — each verified
+live via a `404` against locally-reported, spool-corroborated activity that Revenium's
+tenant silently discarded; real, permanent, and by design excluded from the residual
+rather than chased as a metering gap. **(3)** the residual is **112,603 tokens under the
+literal, as-defined bulk-walk measurement** — the number a reader gets by running this
+document's own method exactly as written, before any correction. **(4)** that literal
+residual shrinks to **2 tokens only once corrected** for one confirmed `metrics ai`
+date-filter behavior (it keys off `requestTime`, the start of a legacy delta period, not
+`created`, when Revenium actually recorded the row) — and this correction's scope is
+**UNDETERMINED beyond the single gtm instance it was confirmed on**: whether the same gap
+recurs on any other profile's future legacy delta report was not determined, so 2 tokens
+is a corrected result for one confirmed case, not a fleet-wide guarantee. **(5)** one
+transient Revenium API error (HTTP 502) occurred on the bulk walk's first attempt,
+resolved by an identical retry ~30 seconds later. **(6)** two of the five
+boundary-established profiles, gtm and community, had not fully converged (fully drained)
+as of this document's own last live read — gtm's already-reached boundary is unaffected,
+since the ownership protocol operates per-session, not per-profile, but neither profile's
+drain is complete. **(7)** the pruned-spool bucket is empty (0 sessions, 0 tokens) by
+direct check today, but remains a live risk for any later phase: `prune-markers.sh`'s
+manual-only prune pass could remove a session's spool file before that session's tokens
+are confirmed on the read side. **(8)** this document's own redaction-proof sweep found
+and fixed one genuine identifier leak that the file-wide regex gate alone did not catch —
+the fleet host's own hostname, quoted raw twice in `## Verified against` — now redacted;
+closed, but it is direct evidence that the regex gate is a floor for this document's
+redaction discipline, not a guarantee, the same lesson Phase 33's own review drew on this
+document's sibling.
 
 **Headline, stated up front rather than buried: this plan's own integrity sweep
 (Task 2) incidentally found THREE two-line, dual-ledger `owners/` records beyond the
