@@ -1082,9 +1082,17 @@ this phase's own naming convention requires; and that same section quoted the fl
 own per-profile state directory in full rather than using the `<profile-state-dir>`
 placeholder already defined for exactly that path, and was corrected to use it. Every
 other placeholder had exactly one map row; none was dead. (2) The bijection, checked one
-entry at a time: for all 18 mapped placeholders, the raw value's verbatim absence and the
-placeholder's presence were confirmed independently and both held for all 18 — recorded
-per-entry in `34-EVIDENCE.md`. (3) The sweep for identifier shapes outside the regex
+entry at a time: for all 18 placeholders mapped AT THE TIME THIS CHECK RAN, the raw
+value's verbatim absence and the placeholder's presence were confirmed independently, and
+both held for all 18 — recorded per-entry in `34-EVIDENCE.md`. **Why this says 18 while
+the closing inventory says 19, which is not a contradiction:** Check 3 below had not yet
+run, and it is Check 3 that minted the 19th placeholder (`<host-name>`) by redacting a
+leak this check could not have covered, because the leak was still un-redacted and
+un-mapped while this check was executing. The 19th was verified separately after Check 3
+redacted it — its raw value is verbatim-absent from this document and its placeholder
+appears in it — so the bijection now holds 19/19 in both directions, but this check as
+executed covered 18, and it is reported at the count it actually covered rather than
+back-dated to the final total. (3) The sweep for identifier shapes outside the regex
 gate's four patterns found one genuine leak: the fleet host's own hostname, quoted raw,
 twice, in this section's own 34-02/34-03 method paragraphs above — not an IPv4 address, an
 SSH key filename, a login string, or a session-id shape, so the file-wide regex gate never
