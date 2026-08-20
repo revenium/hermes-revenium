@@ -1,4 +1,4 @@
-# Cutover Transition Reconciliation — Method Proven End-to-End, THREE Additional Pre-Cutover Overlaps Found Beyond the Canary, Fleet-Wide Enumeration Pending
+# Cutover Transition Reconciliation — Canary Confirmed the Only Overlap Fleet-Wide; Per-Profile Boundaries and Arithmetic Pending
 
 ## Verdict
 
