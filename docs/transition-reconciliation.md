@@ -1,4 +1,4 @@
-# Cutover Transition Reconciliation — Method Proven End-to-End on One Session, Fleet-Wide Enumeration Pending
+# Cutover Transition Reconciliation — Method Proven End-to-End, THREE Additional Pre-Cutover Overlaps Found Beyond the Canary, Fleet-Wide Enumeration Pending
 
 ## Verdict
 
@@ -6,7 +6,16 @@
 now final (all nine sections below) and its underlying method is proven end-to-end on one
 profile and one session, but the fleet-wide claims CUT-03 asks for — every dual-billed
 session enumerated, all ten profiles' boundaries and arithmetic, the closing verdict — are
-not yet written. What follows is what this plan's tracer task (34-01 Task 1) closes:
+not yet written. What follows is what this plan (34-01) actually closes:
+
+**Headline, stated up front rather than buried: this plan's own integrity sweep
+(Task 2) incidentally found THREE two-line, dual-ledger `owners/` records beyond the
+known canary — two on `qa`, one on `cfo`, all dated 2026-08-18 (the same pre-cutover era
+as the canary itself). This plan does NOT enumerate, read-side-confirm, or diagnose them —
+that is 34-02's explicit charter — but their raw existence means CUT-03 criterion 3 ("the
+canary is the only permitted pre-existing overlap") is an OPEN QUESTION for 34-02 to
+resolve, not a settled fact this document can currently affirm. See `## Results` →
+"Overlap-detector integrity" for the finding and `34-EVIDENCE.md` for their identifiers.**
 
 **The reconciliation method works as designed, on real data, in both directions of the
 write-loss partition.** One profile (`playtester`) had its cutover boundary derived from
@@ -21,11 +30,15 @@ report (ledger idempotency line, spool file, log line) against a `404 Resource n
 found` on Revenium's read side, demonstrating the write-loss branch of the partition on a
 real casualty, not a hypothetical one.
 
-**Not yet answered by this document:** the overlap-detector integrity checks (34-01
-Task 2), the fleet-wide overlap enumeration (34-02), the ten-profile boundary-plus-
-arithmetic reconciliation (34-03), and the final verdict with its independent-confirmation
-re-runs (34-04). Every section below that those plans/tasks own carries a single italic
-placeholder line naming the plan that fills it.
+**The overlap-detector integrity checks (Task 2, this plan) establish whether an absence
+of two-line `owners/` records elsewhere in this phase's later work will mean anything.**
+See `## Results` for the per-profile currency, engagement, and prune-history table, and
+`## Known limitations and exclusions` for every qualification those checks produced.
+
+**Not yet answered by this document:** the fleet-wide overlap enumeration (34-02), the
+ten-profile boundary-plus-arithmetic reconciliation (34-03), and the final verdict with
+its independent-confirmation re-runs (34-04). Every section below that those plans own
+carries a single italic placeholder line naming the plan that fills it.
 
 ## Why this document exists
 
@@ -99,8 +112,27 @@ metered. Every `totalCost: 0` figure quoted in this document carries this captio
 correction, the repository pin for this document (`tests/test_repository.py`), and the
 BACK-2676 cost prerequisite are Phase 35 (CUT-04/CUT-07) work and are not addressed here.
 
-*The overlap-detector integrity checks (34-01 Task 2) and their qualifications are filled
-in next, in this same plan.*
+**Deployed-versus-checkout drift: none found.** All four scripts this phase's exact-string
+greps depend on (`hermes-report.sh`, `api-event-report.sh`, `common.sh`,
+`prune-markers.sh`) match the checkout at the fleet's pinned deploy commit `f13bdf6`
+byte-for-byte. No qualification carried forward from this check.
+
+**Two profiles' overlap-detector coverage is non-probative, not clean.** `devops` and `pm`
+have NOT engaged the ownership protocol as of this observation — their `owners/`
+directories do not exist yet (not merely empty), because neither profile has had a single
+new session since the 2026-08-19 cutover flip for the event path to claim. Both ARE
+genuinely cut over (`drain-status.json: drained=true`). **34-02 and 34-03 must not read
+"no owners records on devops/pm" as "no overlap on devops/pm" — it is "nothing was there
+to check yet."** If either profile gets its first post-flip session before this phase
+closes, this qualification should be re-evaluated against fresh data, not assumed to still
+hold.
+
+**Three additional two-line `owners/` records exist beyond the canary, unenumerated by
+this plan.** Task 2's per-profile listing (gathered to confirm the canary's own record)
+also found two-line records on `qa` (2) and `cfo` (1), all dated 2026-08-18 — the same
+pre-cutover era as the canary. This plan does not investigate them further; 34-02 must
+treat this as its starting evidence, not discover it independently and not assume the
+canary is the only pre-existing overlap without first accounting for these three.
 
 ## Results
 
@@ -161,9 +193,81 @@ exit code), but Revenium's tenant retains nothing for this session now. Both bra
 the partition — clean (`<sid-T>`, agrees exactly) and suspect (`<sid-B>`, local evidence
 of 13,665 tokens shipped, read side shows nothing) — are demonstrated, not asserted.
 
-*Overlap-detector integrity (34-01 Task 2), fleet-wide overlap enumeration (34-02),
-per-profile boundaries and arithmetic (34-03), and independent confirmation re-runs
-(34-04) are filled in next, by those tasks/plans.*
+### Overlap-detector integrity (Task 2 of this plan)
+
+| Profile | Deployed-vs-checkout hash (4 files) | Event ledger | `owners/` entries | Spool files | Engagement gate | Prune-history |
+|---|---|---:|---:|---:|---|---|
+| gtm | match (all 4) | 278 B | 57 | 14 | **engaged** (ledger) | no evidence of a run |
+| marketing | match (all 4) | 973 B | 235 | 21 | **engaged** (ledger) | no evidence of a run |
+| devops | match (all 4) | 0 B | 0 (dir absent) | 0 | **NOT engaged** | no evidence of a run |
+| qa | match (all 4) | 206 B | 22 | 2 | **engaged** (ledger) | no evidence of a run |
+| coder | match (all 4) | 796 B | 227 | 5 | **engaged** (ledger) | no evidence of a run |
+| playtester | match (all 4) | 206 B | 7 | 3 | **engaged** (ledger) | no evidence of a run |
+| cfo | match (all 4) | 1076 B | 42 | 7 | **engaged** (ledger) | no evidence of a run |
+| pm | match (all 4) | 0 B | 0 (dir absent) | 0 | **NOT engaged** | no evidence of a run |
+| community | match (all 4) | 0 B | 3 | 1 | **engaged** (owners/spool) | no evidence of a run |
+| lorekeeper | match (all 4) | 0 B | 33 | 2 | **engaged** (owners/spool) | no evidence of a run |
+
+**Currency.** `sha256sum` of the deployed `hermes-report.sh`, `api-event-report.sh`,
+`common.sh`, `prune-markers.sh` under `~/.hermes/skills/revenium/scripts/`, compared
+against this checkout at the fleet's pinned deploy commit `f13bdf6` — all four files
+match byte-for-byte. The scripts are deployed ONCE per host and shared by all ten
+profiles (confirmed via `crontab -l`: a single `cron-fleet.sh` invocation carries all ten
+profile names and repoints `HERMES_HOME` internally, per profile, at runtime — there is no
+per-profile copy of the script files themselves), so one comparison per file covers all
+ten profiles' rows above identically. No qualification needed for the exact-string greps
+34-02 will run.
+
+**Engagement — NOT uniform, and this matters.** The ownership protocol
+(`hermes-report.sh:192-200`'s OWN-03 gate) is active only when SOME event-path artifact
+exists: a non-empty `revenium-api-events.ledger`, any entry under `owners/`, or any spool
+file. **Eight of ten profiles are engaged. `devops` and `pm` are NOT** — both have a
+zero-byte event ledger, an `owners/` directory that does not even EXIST yet (confirmed
+with `test -d`, not just "empty"; `OWNERS_DIR` is created lazily by the claim primitive,
+so its absence proves no claim has ever been attempted), and zero spool files. Both ARE
+genuinely cut over (`drain-status.json`: `drained: true, pendingCount: 0` on both, sampled
+2026-08-20T15:4xZ) and both show **zero** `Reported: sid=...api_request_id=...` lines in
+their whole retained log — i.e. no new session has occurred on either profile since the
+flip for the event path to have anything to claim, not a failure of the mechanism. **An
+absent `owners/` directory on devops or pm is therefore non-probative for "no overlap" —
+there was nothing for the detector to evaluate yet, and 34-02/34-03 must not read their
+silence as a clean result.** Two profiles (`community`, `lorekeeper`) are engaged via the
+owners/spool disjuncts despite an empty event ledger — their `owners/` counts (3, 33) and
+spool counts (1, 2) are real and non-zero even though the ledger itself reads 0 bytes; the
+gate correctly treats any one of the three signals as sufficient.
+
+**Prune history.** `prune-markers.sh`'s owners pass is manual-only (never wired into cron,
+per `CLAUDE.md`'s "Metering ledger semantics" and the commands block). No profile's
+`revenium-metering.log` shows a `prune:` line (the exact string `prune_owners()` emits),
+and no `prune.lock` file exists on any profile. Every profile's log retains data back to
+somewhere between 2026-07-18 and 2026-07-28 — before the ownership protocol shipped
+(quick-260817-tfe, 2026-08-17) — so this is a real "no evidence of a run" finding for all
+ten, not an inconclusive one truncated by log rotation.
+
+**Canary — PRESENT, and its baseline matches exactly.** `owners/<canary-sid>` under
+`coder`'s `owners/` directory: found, a genuine two-line record —
+`legacy` / `12608`. The baseline (`12608`) matches the independently-documented canary
+figure (12,608 tokens; `REQUIREMENTS.md`, `32-CANARY-EVIDENCE.md`) EXACTLY. This is
+corroboration, not the primary source — the canary's history is independently documented
+regardless — but the exact match is strong additional evidence the record is genuine, not
+a coincidence. File mtime: `2026-08-18T03:04Z` (the day after the canary event
+`2026-08-17T21:30:57Z`, the same day quick-260817-tfe / PR #54 merged).
+
+**INCIDENTAL FINDING — additional two-line (dual-ledger) owner records exist beyond the
+canary.** While confirming the canary's own record, this task's per-profile `owners/`
+listing (already gathered for the engagement table above) was also checked for line count
+on every engaged profile. Result: **three additional two-line records, all dated
+2026-08-18 (pre-cutover, same era as the canary) — two on `qa`, one on `cfo`.** This task
+does NOT enumerate, read-side-confirm, or diagnose these — that is 34-02's explicit
+charter (S-2: "the overlap ENUMERATION... covers the FULL ledger history on every
+profile... the only way to answer 'is the canary the only one'"). Recording their
+existence here, with their raw identifiers preserved in `34-EVIDENCE.md`, so 34-02 does
+not start its enumeration from an unexamined "canary is the only one" assumption. **This
+finding alone means CUT-03 criterion 3 ("the canary is the only permitted pre-existing
+overlap") cannot yet be affirmed — it is 34-02's open question, not this plan's.**
+
+*Fleet-wide overlap enumeration (34-02), per-profile boundaries and arithmetic (34-03), and
+independent confirmation re-runs (34-04) are filled in by those plans.*
 
 ## Findings
 
@@ -192,8 +296,16 @@ revenium squads get <root_sid> --output json      # top-level totalTokens
 revenium squads timeline <root_sid> --output json  # per-row; classify id by event: prefix
 ```
 
+**Overlap-detector integrity, per profile:**
+```bash
+sha256sum ~/.hermes/skills/revenium/scripts/{hermes-report,api-event-report,common,prune-markers}.sh
+ls ~/.hermes/profiles/<profile>/state/revenium/owners/ 2>&1
+test -s ~/.hermes/profiles/<profile>/state/revenium/revenium-api-events.ledger && echo non-empty
+grep 'prune:' ~/.hermes/profiles/<profile>/state/revenium/revenium-metering.log
+```
+
 *A replayable template per verb family this whole phase used is 34-04 Task 1's own
-acceptance criterion — the above covers only what Task 1 of this plan used.*
+acceptance criterion — the above covers only what Task 1/2 of this plan used.*
 
 ## Independent confirmation
 
@@ -202,21 +314,27 @@ independent-confirmation rounds.*
 
 ## Verified against
 
-Date: 2026-08-20. Method (this task only): read-only SSH access to the fleet host
+Date: 2026-08-20. Method (this plan only): read-only SSH access to the fleet host
 (`revenium-metering.log`, `revenium-hermes.ledger`, `revenium-api-events.ledger`, the
-`api-events/` spool directory, `env` file mtime) plus the `revenium` CLI's read verbs
-(`squads get`, `squads timeline`, `metrics ai`) against the live Revenium dev tenant.
-Population: one profile (`playtester`) and two of its sessions.
+`api-events/` spool directory, `env` file mtimes, `owners/` directories, deployed script
+`sha256sum`s) plus the `revenium` CLI's read verbs (`squads get`, `squads timeline`,
+`metrics ai`) against the live Revenium dev tenant. Population for this plan's tracer:
+one profile (`playtester`) and two of its sessions. Population for the integrity checks:
+all ten fleet profiles (gtm, marketing, devops, qa, coder, playtester, cfo, pm, community,
+lorekeeper).
 
 **Deliberately omitted from this file, on every page, in every task:** the fleet host's
 address, the SSH key filename, every remote login string, and every raw session, trace,
-`api_request_id`, and composite `transactionId`. These live only in this repository's
-local, gitignored evidence artifact
+`api_request_id`, and composite `transactionId` — including the three incidentally-found
+dual-ledger sessions, quoted above only in aggregate (profile + count + date), never by
+raw id. These live only in this repository's local, gitignored evidence artifact
 (`.planning/phases/34-transition-reconciliation/34-EVIDENCE.md`), resolved via the stable
-placeholders used above (`<sid-B>`, `<hash-B>`, `<sid-T>`, `<hash-T>`,
-`<profile-state-dir>`).
+placeholders used above (`<sid-B>`, `<hash-B>`, `<sid-T>`, `<hash-T>`, `<canary-sid>`,
+`<profile-state-dir>`) plus three placeholders reserved but not yet dereferenced in THIS
+document's own prose (`<qa-dual-sid-1>`, `<qa-dual-sid-2>`, `<cfo-dual-sid-1>` — mapped in
+`34-EVIDENCE.md` for 34-02's use).
 
 **Retained, deliberately:** profile role labels (`playtester`, `coder`, `gtm`, etc.),
-every aggregate figure (token counts, timestamps), and read-side query results — none of
-these are session, trace, or host identifiers, and the per-profile reading throughout this
-document depends on them.
+every aggregate figure (token counts, timestamps, hash-match verdicts), and the deploy
+commit `f13bdf6` — none of these are session, trace, or host identifiers, and the
+per-profile reading throughout this document depends on them.
