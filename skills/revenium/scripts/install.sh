@@ -6,10 +6,13 @@
 # entry, or a manual copy):
 #
 #   1. Preflight required tools (revenium, sqlite3, python3).
-#   2. Configure ALL FOUR Revenium credentials (key, team-id, tenant-id,
-#      owner-id) — prompting for any that are missing. This is the step the
-#      manual flow skipped: a config with only an API key meters fine but
-#      fails every guardrails/jobs create with "teamId is required".
+#   2. Confirm the `revenium` CLI config — api-url, key, team-id, tenant-id,
+#      owner-id. Every run shows the current value and takes Enter to keep it,
+#      so a stale api-url (pointing at the wrong environment) or a truncated
+#      key is visible at install time instead of surfacing later as an opaque
+#      HTTP 403 on rule creation. All four ids are required: a config with only
+#      an API key meters fine but fails every guardrails/jobs create with
+#      "teamId is required".
 #   3. Install the on_session_end classifier plugin.
 #   4. Register the pre/post hooks in config.yaml.
 #   5. Create the Revenium guardrails budget rules.
@@ -39,8 +42,8 @@
 #   --skip-cron        Skip installing the metering cron.
 #   --non-interactive  Never prompt; take creds from REVENIUM_* env vars and
 #                      fail if any required value is missing.
-#   --reconfigure      Re-prompt for all four credentials even if already set
-#                      (fixes a wrong/truncated API key — Enter keeps current).
+#   --reconfigure      Accepted for backward compatibility and ignored —
+#                      re-prompting is now the default in interactive runs.
 #   --no-restart       Do not restart the Hermes gateway at the end.
 #   --all-profiles     Fleet install: wire the default home AND every
 #                      ~/.hermes/profiles/<name>/ home. Each profile gets its own
@@ -119,7 +122,114 @@ for tool in revenium sqlite3 python3; do
 done
 
 # ---------------------------------------------------------------------------
-# 1b. BUG-3 fleet dispatch — wire every selected profile home.
+# 1b. Credentials — confirm the whole `revenium` CLI config, every run
+# ---------------------------------------------------------------------------
+configure_credentials() {
+step "Configuring Revenium credentials"
+
+# The value revenium config show prints for a label, ANSI-stripped, with the
+# literal "(not set)" placeholder normalized to empty. Anchored at line start so
+# "API URL" cannot also match the "Analytics API URL" line below it.
+config_field_value() {
+  local label="$1" esc val
+  esc=$(printf '\033')
+  val=$(revenium config show 2>/dev/null \
+        | sed "s/${esc}\[[0-9;]*m//g" \
+        | sed -n "s/^[[:space:]]*${label}:[[:space:]]*//p" \
+        | head -1 \
+        | sed 's/[[:space:]]*$//')
+  [[ "${val}" == "(not set)" ]] && val=""
+  printf '%s' "${val}"
+}
+
+config_field_set() { [[ -n "$(config_field_value "$1")" ]]; }
+
+# Ensure a single credential is PERSISTED into the revenium config.
+# $1 = human label, $2 = `revenium config set` key, $3 = env var name,
+# $4 = "optional" to allow an empty answer (default: required).
+#
+# Critical: a REVENIUM_* env var must be *persisted*, not merely trusted. The
+# cron runs without the operator's install-time environment, so a value that
+# lives only in env (and that `revenium config show` reflects) would vanish the
+# moment install.sh exits — leaving the cron with no teamId. So when the env var
+# is set we always `revenium config set` it.
+ensure_cred() {
+  local label="$1" key="$2" envvar="$3" required="${4:-required}" val="" current=""
+  # Indirect read of $envvar with an unset-safe default. `${!envvar:-}` (indirect
+  # `!` combined with `:-`) raises "invalid indirect expansion" under set -u when
+  # the target is unset; eval of a normal expansion is the bash 3.2-portable form.
+  eval "val=\"\${${envvar}:-}\""
+  if [[ -n "${val}" ]]; then
+    revenium config set "${key}" "${val}" >/dev/null 2>&1 \
+      && ok "${label} set (from ${envvar})" \
+      || die "Failed to set ${label} via 'revenium config set ${key}'."
+    return 0
+  fi
+
+  current="$(config_field_value "${label}")"
+
+  # Two paths never prompt. --non-interactive by contract. A fleet child because
+  # the credentials are global to the `revenium` CLI rather than per-profile, so
+  # confirming them once per profile would mean N identical prompts for one
+  # value — the parent already confirmed them before fanning out.
+  if [[ "${NON_INTERACTIVE}" == "true" || "${REVENIUM_FLEET_CHILD:-}" == "1" ]]; then
+    if [[ -n "${current}" ]]; then ok "${label} already configured"; return 0; fi
+    [[ "${required}" == "optional" ]] && return 0
+    die "${label} not configured and ${envvar} is unset (--non-interactive)."
+  fi
+
+  # Interactive: ALWAYS show the current value and let the operator confirm or
+  # replace it. Silently accepting whatever was already configured is what let a
+  # stale api-url (a dev host) survive an install untouched and surface much
+  # later as an opaque HTTP 403 on rule creation — the operator was never shown
+  # the value, so there was nothing to notice. Enter keeps it.
+  local prompt
+  if [[ -n "${current}" ]]; then
+    prompt="  Revenium ${label} [${current}]: "
+  elif [[ "${required}" == "optional" ]]; then
+    prompt="  Revenium ${label} (optional, Enter to skip): "
+  else
+    prompt="  Revenium ${label}: "
+  fi
+  read -r -p "${prompt}" val
+
+  if [[ -z "${val}" ]]; then
+    if [[ -n "${current}" ]]; then ok "${label} kept (${current})"; return 0; fi
+    [[ "${required}" == "optional" ]] && return 0
+    die "${label} is required."
+  fi
+  revenium config set "${key}" "${val}" >/dev/null 2>&1 \
+    && ok "${label} set" \
+    || die "Failed to set ${label} via 'revenium config set ${key}'."
+}
+
+# API URL first: it decides WHICH environment the other four belong to, so
+# confirming it before the ids is the order that catches a dev/prod mix-up.
+# Optional because the CLI carries a working default for it; the other four have
+# no default and every one of them is load-bearing.
+ensure_cred "API URL"   "api-url"   "REVENIUM_API_URL" optional
+ensure_cred "API Key"   "key"       "REVENIUM_API_KEY"
+ensure_cred "Team ID"   "team-id"   "REVENIUM_TEAM_ID"
+ensure_cred "Tenant ID" "tenant-id" "REVENIUM_TENANT_ID"
+ensure_cred "Owner ID"  "owner-id"  "REVENIUM_OWNER_ID"
+
+# Hard verify all four before doing any work that depends on them. API URL is
+# not in this list — it is allowed to fall back to the CLI's own default.
+for f in "API Key" "Team ID" "Tenant ID" "Owner ID"; do
+  config_field_set "${f}" || die "${f} still not configured — aborting."
+done
+ok "All four credentials present"
+}
+
+# Credentials are global to the `revenium` CLI (they live in
+# ~/.config/revenium/config.yaml, not under any HERMES_HOME), so they are
+# confirmed ONCE here — before the fleet fan-out — rather than by whichever
+# child profile happened to run first. Children re-enter this function and take
+# its no-prompt path.
+configure_credentials
+
+# ---------------------------------------------------------------------------
+# 1c. BUG-3 fleet dispatch — wire every selected profile home.
 # ---------------------------------------------------------------------------
 # When --all-profiles / --profile is given we re-exec THIS script once per
 # profile home with HERMES_HOME / REVENIUM_STATE_DIR / REVENIUM_AGENT_NAME set to
@@ -127,8 +237,8 @@ done
 # per-profile marker), and a distinct AGENT dimension. REVENIUM_FLEET_CHILD
 # guards against infinite recursion; REVENIUM_FLEET_PROFILE tells the child to
 # install its cron under the per-profile marker (install-cron.sh --profile).
-# Credentials are global to the `revenium` CLI, so the first child configures
-# them and the rest find them already set (idempotent).
+# Credentials were already confirmed and persisted above (they are global to the
+# `revenium` CLI), so each child finds them set and never re-prompts.
 if [[ "${REVENIUM_FLEET_CHILD:-}" != "1" ]] \
    && { [[ "${ALL_PROFILES}" == "true" ]] || (( ${#SELECTED_PROFILES[@]} > 0 )); }; then
   step "Fleet install across Hermes profiles"
@@ -140,7 +250,6 @@ if [[ "${REVENIUM_FLEET_CHILD:-}" != "1" ]] \
   [[ "${SHADOW_MODE}" == "true" ]] && child_flags+=(--shadow-mode)
   [[ -n "${ORGANIZATION_NAME}" ]] && child_flags+=(--organization-name "${ORGANIZATION_NAME}")
   [[ "${NON_INTERACTIVE}" == "true" ]] && child_flags+=(--non-interactive)
-  [[ "${RECONFIGURE}" == "true" ]] && child_flags+=(--reconfigure)
   [[ "${SKIP_CRON}" == "true" ]] && child_flags+=(--skip-cron)
   # Per-profile guardrails only run non-interactively (a fleet must not prompt N
   # times). Without --hard-limit/--period, skip guardrails per child and tell the
@@ -209,85 +318,8 @@ if [[ "${REVENIUM_FLEET_CHILD:-}" != "1" ]] \
   echo "✅ Fleet install complete."
   exit "${fleet_rc}"
 fi
-
 # ---------------------------------------------------------------------------
-# 2. Credentials — ensure ALL FOUR are configured
-# ---------------------------------------------------------------------------
-step "Configuring Revenium credentials"
-
-# A config field is "set" when revenium config show prints a value that is
-# neither empty nor the literal "(not set)" placeholder. ANSI-stripped.
-config_field_set() {
-  local label="$1" esc val
-  esc=$(printf '\033')
-  val=$(revenium config show 2>/dev/null \
-        | sed "s/${esc}\[[0-9;]*m//g" \
-        | sed -n "s/.*${label}:[[:space:]]*//p" \
-        | head -1 \
-        | sed 's/[[:space:]]*$//')
-  [[ -n "${val}" && "${val}" != "(not set)" ]]
-}
-
-# Ensure a single credential is PERSISTED into the revenium config.
-# $1 = human label, $2 = `revenium config set` key, $3 = env var name.
-#
-# Critical: a REVENIUM_* env var must be *persisted*, not merely trusted. The
-# cron runs without the operator's install-time environment, so a value that
-# lives only in env (and that `revenium config show` reflects) would vanish the
-# moment install.sh exits — leaving the cron with no teamId. So when the env var
-# is set we always `revenium config set` it. config_field_set is only the
-# decision-maker when no env var is present (then `config show` reflects the
-# persisted config accurately).
-ensure_cred() {
-  local label="$1" key="$2" envvar="$3" val=""
-  # Indirect read of $envvar with an unset-safe default. `${!envvar:-}` (indirect
-  # `!` combined with `:-`) raises "invalid indirect expansion" under set -u when
-  # the target is unset; eval of a normal expansion is the bash 3.2-portable form.
-  eval "val=\"\${${envvar}:-}\""
-  if [[ -n "${val}" ]]; then
-    revenium config set "${key}" "${val}" >/dev/null 2>&1 \
-      && ok "${label} set (from ${envvar})" \
-      || die "Failed to set ${label} via 'revenium config set ${key}'."
-    return 0
-  fi
-  # --reconfigure forces a re-prompt even when a value is already configured —
-  # the escape hatch for a wrong/truncated key (a bad key surfaces downstream as
-  # HTTP 403 on rule creation, which the "already configured" shortcut would
-  # otherwise make un-fixable through the installer).
-  if [[ "${RECONFIGURE}" != "true" ]] && config_field_set "${label}"; then
-    ok "${label} already configured"
-    return 0
-  fi
-  if [[ "${NON_INTERACTIVE}" == "true" ]]; then
-    die "${label} not configured and ${envvar} is unset (--non-interactive)."
-  fi
-  local prompt_suffix=""
-  config_field_set "${label}" && prompt_suffix=" (press Enter to keep current)"
-  read -r -p "  Revenium ${label}${prompt_suffix}: " val
-  # On --reconfigure, an empty answer keeps the currently-configured value.
-  if [[ -z "${val}" ]] && config_field_set "${label}"; then
-    ok "${label} kept"
-    return 0
-  fi
-  [[ -z "${val}" ]] && die "${label} is required."
-  revenium config set "${key}" "${val}" >/dev/null 2>&1 \
-    && ok "${label} set" \
-    || die "Failed to set ${label} via 'revenium config set ${key}'."
-}
-
-ensure_cred "API Key"   "key"       "REVENIUM_API_KEY"
-ensure_cred "Team ID"   "team-id"   "REVENIUM_TEAM_ID"
-ensure_cred "Tenant ID" "tenant-id" "REVENIUM_TENANT_ID"
-ensure_cred "Owner ID"  "owner-id"  "REVENIUM_OWNER_ID"
-
-# Hard verify all four before doing any work that depends on them.
-for f in "API Key" "Team ID" "Tenant ID" "Owner ID"; do
-  config_field_set "${f}" || die "${f} still not configured — aborting."
-done
-ok "All four credentials present"
-
-# ---------------------------------------------------------------------------
-# 2b. Seed the runtime taxonomies
+# 2. Seed the runtime taxonomies
 #
 # quick-260817-l6o: the classifier reads ${TAXONOMY_FILE} in the STATE dir, not
 # the copy that ships in the skill dir. Only the repo-clone entry point

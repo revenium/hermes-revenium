@@ -60,8 +60,9 @@ guardrails need all **four** credentials (API Key, Team ID, Tenant ID, Owner ID)
 
 ```sh
 revenium config show     # confirm all four are non-empty
-# re-run the installer; it prompts for any missing value and persists it:
-bash ~/.hermes/skills/revenium/scripts/install.sh --reconfigure
+# re-run the installer; it walks every field (api-url included), showing the
+# current value as the default — Enter keeps it, typing replaces it:
+bash ~/.hermes/skills/revenium/scripts/install.sh
 ```
 
 ---
