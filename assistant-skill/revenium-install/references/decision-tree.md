@@ -28,15 +28,25 @@ git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-
 
 ## `hermes skills install` refuses with a `CAUTION` / scanner verdict
 
-**Cause:** the scanner flags the cron `persistence` and `os.environ` reads in
-Python heredocs — both are expected, disclosed behavior (the metering loop and
-the documented data-passing pattern), not real threats.
+**This is not the expected path.** As of 2026-08-21 the skill scans `SAFE` and
+installs with no flags — see "What the security scanner reports" in the README.
+The scan does surface `MEDIUM` findings (cron `persistence`, a documented
+`git clone` under `supply_chain`); those are expected and do not block an install
+on their own.
 
-**Fix:** pass `--force`:
+**Cause, if you do hit a refusal:** the scanner's verdict is produced by Hermes,
+not by this repo, so it can change on their side. A `CAUTION` verdict here means
+the scan graded findings more severely than the version observed above did.
+
+**Fix:** confirm the findings are the expected ones before bypassing anything —
+`--force` should be a considered decision, not a reflex:
 
 ```sh
 hermes skills install revenium/hermes-revenium/skills/revenium --force
 ```
+
+Please also [open an issue](https://github.com/revenium/hermes-revenium/issues)
+with the verdict and findings — a change from `SAFE` is worth knowing about.
 
 ---
 

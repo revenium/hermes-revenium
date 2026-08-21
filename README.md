@@ -41,11 +41,11 @@ Every metered completion carries a meaningful `--task-type` drawn from a control
 1. **Install the skill and run setup:**
 
    ```bash
-   hermes skills install revenium/hermes-revenium/skills/revenium --force
+   hermes skills install revenium/hermes-revenium/skills/revenium
    bash ~/.hermes/skills/revenium/references/bootstrap.sh
    ```
 
-   The first command installs the skill via Hermes' native install path. `--force` is required because the scanner returns a `CAUTION` verdict — see [Why `--force` is required](#why---force-is-required) for what the findings are and why they are expected.
+   The first command installs the skill via Hermes' native install path. The scanner returns a `SAFE` verdict, so no `--force` is needed — see [What the security scanner reports](#what-the-security-scanner-reports) for the findings it does surface and why they are expected.
 
    > **Why the bootstrap?** `hermes skills install` fetches only `SKILL.md` + `references/` — it does **not** ship `scripts/` or `plugins/`. `references/bootstrap.sh` clones the repo, drops those two directories into `~/.hermes/skills/revenium/`, and then hands off to `scripts/install.sh`. If your `hermes skills install` didn't even fetch `references/`, clone and install directly instead: `git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium && bash /tmp/hermes-revenium/install.sh`.
 
@@ -83,20 +83,38 @@ python3 --version
 ### Option 1: `hermes skills install` (recommended)
 
 ```bash
-hermes skills install revenium/hermes-revenium/skills/revenium --force
+hermes skills install revenium/hermes-revenium/skills/revenium
 bash ~/.hermes/skills/revenium/references/bootstrap.sh
 ```
 
 The first command installs the skill via Hermes' native install path. `hermes skills install` fetches only `SKILL.md` + `references/`, so the bootstrap fetches the missing `scripts/` + `plugins/` into `~/.hermes/skills/revenium/` and then completes setup — credentials, plugin, hooks, guardrail rule, cron, and gateway restart. See [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks) for what `install.sh` covers and the flags it accepts.
 
-#### Why `--force` is required
+#### What the security scanner reports
 
-The skill receives a **`CAUTION`** verdict from Hermes' security scanner. For community-source skills, `CAUTION` blocks the install unless `--force` is passed. There are two categories of findings — both are expected behavior, not actual threats:
+The skill scans **`SAFE`** and installs without `--force`. Hermes still shows its
+standard third-party disclaimer and asks you to confirm — that prompt applies to every
+external skill, not to this one specifically.
 
-- **`MEDIUM persistence`** — the scanner correctly detects `crontab` references in the cron scripts. This is the skill's load-bearing per-minute metering loop. It is intentional, fully disclosed, and cannot be removed without breaking the skill's core function.
-- **`HIGH exfiltration`** — the scanner flags `os.environ` reads in Python heredocs as potential credential dumps. These are the skill's documented data-passing pattern: Bash scripts set explicit environment variables to pass file paths and computed values to inline Python; the variables being read are paths and deltas, not credentials.
+The scan does surface `MEDIUM` findings. They are expected, and both categories describe
+behaviour the skill genuinely has:
 
-Neither finding reflects a real threat. Review [`skills/revenium/scripts/`](skills/revenium/scripts/) before installing if you want to verify the behavior yourself.
+- **`persistence`** — `crontab` references in the cron scripts and setup docs. This is the
+  load-bearing per-minute metering loop; it is intentional, fully disclosed, and cannot be
+  removed without breaking the skill's core function.
+- **`supply_chain`** — a `git clone` line in the documented install path.
+
+An earlier `HIGH exfiltration` finding — the scanner reading `os.environ` in Python
+heredocs as a potential credential dump — was cleared in v1.1 and no longer appears. Those
+heredocs pass file paths and computed deltas, never credentials.
+
+> Observed 2026-08-21 against scanner `skills-guard-v1` (rules `git_clone`,
+> `persistence_cron`). The verdict is produced by Hermes' scanner, not by this repo, so it
+> can change independently of anything here. If you get a `CAUTION` or `DANGEROUS` verdict,
+> please [open an issue](https://github.com/revenium/hermes-revenium/issues) — that is a
+> difference worth knowing about.
+
+Review [`skills/revenium/scripts/`](skills/revenium/scripts/) before installing if you want
+to verify the behaviour yourself.
 
 ### Option 2: Local development (for contributors)
 
@@ -266,7 +284,7 @@ ssh <user>@<host> 'bash ~/.hermes/skills/revenium/scripts/install.sh'
 
 ```bash
 ssh <host>
-hermes skills install revenium/hermes-revenium/skills/revenium --force   # re-fetch the skill
+hermes skills install revenium/hermes-revenium/skills/revenium   # re-fetch the skill
 bash ~/.hermes/skills/revenium/scripts/install.sh                        # complete setup
 ```
 
