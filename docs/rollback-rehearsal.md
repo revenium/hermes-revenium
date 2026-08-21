@@ -595,7 +595,9 @@ than one line) confirms none exists.
 
 **`_takeover_session_owner`'s unreachability, stated with its condition and cited:** this
 mechanism fires only when a session's owner already reads `event` AND the event-metering
-mode has reverted to `shadow` (`hermes-report.sh` :1537, MODE-05). `REVENIUM_EVENT_METERING_MODE`
+mode has reverted to `shadow` — the `else` branch at `hermes-report.sh:1644-1645`, reached
+only when neither `EVENT_PATH_LIVE` nor `sid_legacy_suppressed` holds (MODE-05, the
+condition at `hermes-report.sh:1609-1645`). `REVENIUM_EVENT_METERING_MODE`
 stayed `live` throughout every leg of this rehearsal — the rollback leg only ever moved
 `REVENIUM_LEGACY_COMPLETIONS`. A live grep of the full post-rehearsal log for `takeover`
 and for the dual-ledger warn string returns nothing, confirming the mechanism never fired,

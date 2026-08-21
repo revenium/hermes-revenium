@@ -63,12 +63,10 @@ race's winner is not fixed by stage order alone.** `cron.sh` does run the
 legacy stage strictly before the event stage inside one invocation (see
 "A residual straddle exposure" under Rollback below) — but the legacy
 stage's own per-session work list is fixed once, at that stage's own start,
-before it begins walking it. A profile whose legacy-tracked session count
-is small walks that list in well under a minute, so a brand-new session
-created around the same tick is rare and, when it happens, the very next
-tick's legacy stage reliably reaches it before anything else does. A
-profile carrying a large legacy backlog (hundreds of tracked sessions) can
-take five to six minutes just to walk its own fixed list — long enough that
+before it begins walking it. How long that walk takes therefore decides how
+wide the window is. **One measurement, and one inference, kept distinct:**
+the measured case is a profile carrying an 886-session legacy backlog, whose
+stage took five to six minutes to walk its own fixed list — long enough that
 a session created *after* the list was assembled is invisible to that
 list, even though the invoking tick has not finished. By the time that same
 invocation's event stage runs, minutes later, it takes its OWN fresh read
@@ -76,8 +74,16 @@ and finds the new session unowned, and claims it — still within the SAME
 tick's invocation, still with legacy running "first" in stage order, but
 never having seen the session at all. The following tick's legacy stage
 does then enumerate the session (it now exists), but finds ownership
-already claimed and defers permanently. Both
-outcomes are observed, live, on the real fleet: inducing a session on a
+already claimed and defers permanently.
+
+The inference, marked as one: a profile whose legacy-tracked session count is
+small presumably walks its list fast enough that this window is narrow or
+closed, which would explain why the low-backlog observation below went to
+legacy. **That walk duration was never measured**, on any profile, and no
+threshold backlog size at which the behaviour flips has been established.
+Do not read "small backlog" as "safe" — read it as "not measured here".
+
+Both outcomes are observed, live, on the real fleet: inducing a session on a
 low-backlog profile at `mode=live, legacy=enabled` post-flip sent it entirely
 to legacy (0 event rows) — the outcome this document previously described as
 the *only* one. Inducing a session on a profile with an 886-session legacy
