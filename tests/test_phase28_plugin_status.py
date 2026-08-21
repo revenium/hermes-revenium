@@ -568,17 +568,39 @@ class Phase28PluginStatusTests(unittest.TestCase):
         `command -v hermes` probe is present at all, it must be paired with
         that exact dispatch, never with a repair-oriented invocation.
         Comment lines are filtered out first so a header comment explaining
-        this invariant cannot itself trip the assertion. `echo` lines are
-        filtered for the same reason: the invariant is that the script never
-        PERFORMS a repair, and printing remediation advice for a human to run
-        is not performing it. Telling an operator which process to restart is
-        the script's whole job in the stalled branch — the alert-only posture
-        (D-05) is about what the script does, not about what it is allowed to
-        say. Anything in a command position still trips the assertions below."""
+        this invariant cannot itself trip the assertion. Lines that are purely
+        an `echo` of a string literal are filtered for the same reason: the
+        invariant is that the script never PERFORMS a repair, and printing
+        remediation for a human to run is not performing it. Telling an
+        operator which process to restart is the stalled branch's whole job —
+        the alert-only posture (D-05) governs what the script does, not what it
+        is allowed to say.
+
+        The filter is deliberately narrow (Greptile P2 on PR #79). Dropping
+        every line merely STARTING with `echo` would also hide an executable
+        suffix or a command substitution — `echo done && hermes gateway restart`
+        and `echo "$(hermes gateway restart)"` both begin with `echo`. A line is
+        exempt only when it is one complete double-quoted literal and nothing
+        else: no trailing operators, no `$(`, no backticks. Anything that can
+        execute stays in the scanned text.
+        """
         text = (SKILL / 'scripts' / 'plugin-status.sh').read_text()
+
+        def is_pure_echo_text(line):
+            s = line.strip()
+            if not s.startswith('echo "'):
+                return False
+            if not s.endswith('"'):
+                return False          # something follows the closing quote
+            if s.count('"') != 2:
+                return False          # more than one literal -> not a plain echo
+            if '$(' in s or '`' in s:
+                return False          # command substitution can execute
+            return True
+
         code_lines = [
             line for line in text.splitlines()
-            if not line.strip().startswith('#') and not line.strip().startswith('echo ')
+            if not line.strip().startswith('#') and not is_pure_echo_text(line)
         ]
         code_text = '\n'.join(code_lines)
         self.assertNotIn('hermes gateway', code_text)
