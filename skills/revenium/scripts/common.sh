@@ -10,7 +10,11 @@ SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${REVENIUM_STATE_DIR}"
 CONFIG_FILE="${STATE_DIR}/config.json"
 LEDGER_FILE="${STATE_DIR}/revenium-hermes.ledger"
-LOG_FILE="${STATE_DIR}/revenium-metering.log"
+# Overridable like every other state path here. diagnose.sh points it at
+# /dev/null when it shells out to the status scripts, so running a
+# diagnostic does not interleave its own lines into the metering log the
+# operator is trying to read.
+LOG_FILE="${REVENIUM_LOG_FILE:-${STATE_DIR}/revenium-metering.log}"
 ENV_FILE="${STATE_DIR}/env"
 STATE_DB="${HERMES_HOME}/state.db"
 TAXONOMY_FILE="${REVENIUM_TAXONOMY_FILE:-${STATE_DIR}/task-taxonomy.json}"
