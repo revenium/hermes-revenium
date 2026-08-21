@@ -11,15 +11,16 @@ Work top to bottom — earlier entries are more common and cheaper to check.
 
 ## `hermes skills install` "succeeded" but `scripts/install.sh` is missing
 
-**Cause:** `hermes skills install` fetches only `SKILL.md` + `references/`, never
-`scripts/` or `plugins/`.
+**Cause:** `hermes skills install` ships `SKILL.md` plus only the support files
+`SKILL.md` names as bundle-relative paths, from an allowlist of directories that
+excludes `plugins/` entirely. It never ships `scripts/` or `plugins/`.
 
 **Fix:** run the bootstrap (it clones the repo, drops the missing dirs in, and
 hands off to the installer):
 
 ```sh
 bash ~/.hermes/skills/revenium/references/bootstrap.sh
-# or, if references/ didn't come down either:
+# or, if bootstrap.sh didn't come down either:
 git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium \
   && bash /tmp/hermes-revenium/install.sh
 ```

@@ -47,7 +47,7 @@ Every metered completion carries a meaningful `--task-type` drawn from a control
 
    The first command installs the skill via Hermes' native install path. The scanner returns a `SAFE` verdict, so no `--force` is needed — see [What the security scanner reports](#what-the-security-scanner-reports) for the findings it does surface and why they are expected.
 
-   > **Why the bootstrap?** `hermes skills install` fetches only `SKILL.md` + `references/` — it does **not** ship `scripts/` or `plugins/`. `references/bootstrap.sh` clones the repo, drops those two directories into `~/.hermes/skills/revenium/`, and then hands off to `scripts/install.sh`. If your `hermes skills install` didn't even fetch `references/`, clone and install directly instead: `git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium && bash /tmp/hermes-revenium/install.sh`.
+   > **Why the bootstrap?** `hermes skills install` does not ship a skill's whole directory. It ships `SKILL.md` plus only the support files `SKILL.md` names as bundle-relative paths, and only from an allowlist of directories — `references/`, `scripts/`, `templates/`, `assets/`, `examples/`. `plugins/` is not on that allowlist at all, so the classifier plugin can never arrive this way. `references/bootstrap.sh` is on the manifest, and it clones the repo, drops `scripts/` + `plugins/` into `~/.hermes/skills/revenium/`, and hands off to `scripts/install.sh`. If `references/bootstrap.sh` didn't come down either, clone and install directly instead: `git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium && bash /tmp/hermes-revenium/install.sh`.
 
    The bootstrap then completes setup: verifies your four Revenium credentials (**API key, team-id, tenant-id, owner-id**, prompting for any that are missing), installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rule, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run.
 
@@ -87,7 +87,7 @@ hermes skills install revenium/hermes-revenium/skills/revenium
 bash ~/.hermes/skills/revenium/references/bootstrap.sh
 ```
 
-The first command installs the skill via Hermes' native install path. `hermes skills install` fetches only `SKILL.md` + `references/`, so the bootstrap fetches the missing `scripts/` + `plugins/` into `~/.hermes/skills/revenium/` and then completes setup — credentials, plugin, hooks, guardrail rule, cron, and gateway restart. See [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks) for what `install.sh` covers and the flags it accepts.
+The first command installs the skill via Hermes' native install path. That path ships `SKILL.md` plus only the support files `SKILL.md` names as bundle-relative paths — `references/bootstrap.sh` among them — and never `plugins/`, which Hermes disallows in a skill bundle outright. So the bootstrap fetches the missing `scripts/` + `plugins/` into `~/.hermes/skills/revenium/` and then completes setup — credentials, plugin, hooks, guardrail rule, cron, and gateway restart. See [Required: set up guardrails, cron, and hooks](#required-set-up-guardrails-cron-and-hooks) for what `install.sh` covers and the flags it accepts.
 
 #### What the security scanner reports
 
