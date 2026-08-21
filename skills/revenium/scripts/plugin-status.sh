@@ -352,16 +352,24 @@ for sid_row, first_ts in turn_sessions.items():
 
 fresh_markers = sessions_with_marker
 
-if recent_ended == 0:
-    # Sessions produced turns, at least one of them long enough ago to have been
-    # classified, and NOT ONE of them has a marker: the plugin is not running,
-    # whatever the registration check says.
-    if settled_turn_sessions > 0 and sessions_with_marker == 0:
-        liveness = 'stalled'
-    else:
-        liveness = 'idle'
-elif missing_settled > 0:
+# The turn-vs-marker check is evaluated on EVERY path, not only when nothing
+# ended. Gating it behind `recent_ended == 0` left a false-clear door open: a
+# single session ending inside the grace window makes missing_settled 0, which
+# used to fall straight through to 'firing' while zero markers existed. Observed
+# live, one line after the other in the same report:
+#
+#   2 session(s) produced turns in the window; 0 of them have a marker
+#   ✓ classifier is firing — every settled session has its own sentinel
+#
+# on a host whose serving process was nine days stale and had classified
+# nothing. "Every settled session has its own sentinel" is trivially true when
+# no session has settled; it is not evidence the classifier ran.
+turns_without_markers = settled_turn_sessions > 0 and sessions_with_marker == 0
+
+if turns_without_markers or missing_settled > 0:
     liveness = 'stalled'
+elif recent_ended == 0:
+    liveness = 'idle'
 else:
     liveness = 'firing'
 
@@ -414,7 +422,7 @@ PY
       # Two distinct stall shapes reach this verdict and they need different
       # sentences: sessions that ended without a sentinel, and (on a host whose
       # sessions never end) turns that ran without a marker.
-      if [[ "${recent_ended}" -gt 0 ]]; then
+      if [[ "${missing_settled}" -gt 0 ]]; then
         echo "    ✗ classifier NOT firing — ${missing_settled} session(s) aged past the settle window with no sentinel of their own"
       else
         echo "    ✗ classifier NOT firing — ${recent_turns} session(s) produced turns and NOT ONE has a marker"
@@ -611,7 +619,7 @@ if [[ "${registered}" != "true" ]]; then
   EXIT_CODE=1
 elif [[ "${liveness}" == "stalled" ]]; then
   echo "✗ Plugin is registered but the classifier is NOT firing (stalled)."
-  if [[ "${recent_ended}" -gt 0 ]]; then
+  if [[ "${missing_settled}" -gt 0 ]]; then
     echo "  ${recent_ended} session(s) ended in the last ${window_seconds}s with zero sentinel activity."
   else
     echo "  ${recent_turns} session(s) produced turns in the last $(( window_seconds * 2 ))s and none has a marker."
@@ -620,7 +628,15 @@ elif [[ "${liveness}" == "stalled" ]]; then
     echo "  reports exactly this."
   fi
   echo "  Human remediation (this script never repairs automatically, D-05):"
-  echo "    1. Restart the Hermes gateway so it reloads ${PLUGIN_NAME}."
+  echo "    1. Restart whatever process SERVES this profile so it reloads ${PLUGIN_NAME}."
+  echo "       The plugin is loaded once at process start, so a running server keeps"
+  echo "       using the code it started with. Identify the right process first:"
+  echo "         ps -axo pid,lstart,command | grep -E 'hermes.*(serve|gateway run)' | grep -v grep"
+  echo "       - 'gateway run'          -> hermes gateway restart (or hermes-gateways restart)"
+  echo "       - '--profile <p> serve'  -> spawned by the Hermes DESKTOP app; quit and"
+  echo "                                   reopen the app. Restarting the gateway does"
+  echo "                                   NOT touch these, and on a desktop host the"
+  echo "                                   gateway usually serves only the default home."
   echo "    2. Re-run: bash ${SCRIPT_DIR}/install-plugin.sh"
   EXIT_CODE=2
 else
@@ -667,7 +683,7 @@ if [[ "${PLUGIN_BROKEN_TRANSITION}" == "true" ]]; then
   else
     VERDICT_DESC="registered but not firing (liveness=${liveness})"
   fi
-  NOTIFY_MSG="Revenium classifier plugin health check FAILED — ${VERDICT_DESC}. Restart the Hermes gateway, then re-run: bash ${SCRIPT_DIR}/install-plugin.sh"
+  NOTIFY_MSG="Revenium classifier plugin health check FAILED — ${VERDICT_DESC}. Restart the process serving this profile (gateway, or the Hermes desktop app if it spawned a '--profile <p> serve'), then re-run: bash ${SCRIPT_DIR}/install-plugin.sh"
 
   if [[ -n "${NOTIFY_CHANNEL}" && -n "${NOTIFY_TARGET}" ]]; then
     if command -v hermes >/dev/null 2>&1; then

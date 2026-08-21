@@ -142,7 +142,11 @@ if (( tool_msgs > 0 )); then
     echo "      To skip approvals entirely, set 'hooks_auto_accept: true' in"
     echo "      ${HOOKS_CONFIG_FILE}."
   else
-    echo "    → restart Hermes so it re-reads ${HOOKS_CONFIG_FILE}, and verify"
+    echo "    → restart the process SERVING this profile so it re-reads ${HOOKS_CONFIG_FILE}."
+    echo "      Find it first — the gateway is often not the one:"
+    echo "        ps -axo pid,lstart,command | grep -E 'hermes.*(serve|gateway run)' | grep -v grep"
+    echo "      A '--profile <p> serve' process is spawned by the Hermes desktop app;"
+    echo "      quit and reopen the app. 'hermes gateway restart' will not affect it."
     echo "      the hooks haven't been disabled per-tool via 'security.acked_advisories'."
   fi
   exit 2
