@@ -163,29 +163,42 @@ be read as unqualified good news on its own.
 
 ## Results
 
-**The round trip did not complete both legs.** Leg 1 (the rollback leg, `env.bak2-*`
-restored + induction A) ran to completion and produced a result — but that result
-**falsified Prediction A**, and the falsification's own evidence made Task 3's own
+**The round trip ran as two legs, on two different days of execution, with one falsified
+prediction and one confirmed prediction.** Leg 1 (the rollback leg, `env.bak2-*` restored
++ induction A, 35-03) ran to completion and produced a result — but that result
+**falsified Prediction A**, and the falsification's own evidence made 35-03's Task 3
 precondition (a confirmed `HERMES:` ledger line for induction A) impossible to satisfy by
-further waiting. Per the plan's own halt discipline, Task 3 (the restore leg + induction
-B) was **not started**; `env` was nonetheless returned to the cutover state as an
-emergency-recovery action, which `<halt_and_recover>` requires independent of which task
-performs it.
+further waiting, so 35-03 restored `env` to the cutover state as an emergency-recovery
+action and stopped there. **This plan (35-04) ran leg 2 directly against that
+already-restored cutover state** — no further env write was needed, since `env` was
+already `legacy=disabled`/`mode=live` when this plan began — and induced a second session
+(B) to test Prediction B on its own terms. **Prediction B was CONFIRMED, cleanly.**
 
 | Step | What was attempted | Artifact | Outcome |
 |---|---|---|---|
-| 1. Snapshot | `cp` live `env` to `env.pre-rehearsal-<stamp>` | sha256 match between snapshot and live `env` (`6ec48b84...9ddd4a`, both) | Done |
-| 2. Rollback restore | `cp env.bak2-20260819-213357` over `env` | Read-back `env` sha256 `8bef65b2...b997e601`, matching `env.bak2-*`'s own sha256; write timestamped `2026-08-20T23:23:21Z` | Done |
-| 3. Rollback took effect | Poll `revenium-metering.log` for a post-write tick | Tick at `2026-08-20T23:24:21Z`-`23:24:26Z`, strictly later than the write; the `legacy completions path disabled` line, present at every prior tick, absent from this one (corroboration) | Done |
-| 4. Induce session A | `hermes chat` on `devops` | New session id (redacted `<induced-sid-legacy>`); `.ready/<induced-sid-legacy>` sentinel present within 30s | Done |
-| 5. Legacy claims A (Prediction A) | Poll `revenium-hermes.ledger` for `HERMES:<induced-sid-legacy>:` | No such line appeared after 600s of polling, nor at any point afterward (see Findings) | **FALSIFIED** — the event path claimed A instead |
-| 6. Event path defers on A (Prediction A, corroborating half) | Poll for the D-09 skip line | No D-09 skip line appears anywhere in the post-rollback log | **Also contrary to the predicted shape** — see Findings for why the D-09 mechanism was never the deciding factor here |
-| 7. Restore leg (env, Task 3) | `cp env.pre-rehearsal-<stamp>` back over `env` | Diff empty, sha256 `6ec48b84...9ddd4a` matches both the snapshot and the pre-rehearsal capture; write timestamped `2026-08-20T23:40:38Z` | Done, **as an emergency-recovery action**, not as Task 3's normal completion |
-| 8. Induce session B (Task 3) | — | — | **Not performed.** Task 3 was never entered; its own precondition (A's `HERMES:` line) could not be satisfied |
-| 9. Post-restore tick confirms restore took effect | — | — | **Deferred to 35-04.** The first tick to run entirely under the restored env had not completed when this plan's execution stopped (a legacy cycle was still mid-run) |
+| 1. Snapshot | `cp` live `env` to `env.pre-rehearsal-<stamp>` | sha256 match between snapshot and live `env` (`6ec48b84...9ddd4a`, both) | Done (35-03) |
+| 2. Rollback restore | `cp env.bak2-20260819-213357` over `env` | Read-back `env` sha256 `8bef65b2...b997e601`, matching `env.bak2-*`'s own sha256; write timestamped `2026-08-20T23:23:21Z` | Done (35-03) |
+| 3. Rollback took effect | Poll `revenium-metering.log` for a post-write tick | Tick at `2026-08-20T23:24:21Z`-`23:24:26Z`, strictly later than the write; the `legacy completions path disabled` line, present at every prior tick, absent from this one (corroboration) | Done (35-03) |
+| 4. Induce session A | `hermes chat` on `devops` | New session id (redacted `<induced-sid-legacy>`); `.ready/<induced-sid-legacy>` sentinel present within 30s | Done (35-03) |
+| 5. Legacy claims A (Prediction A) | Poll `revenium-hermes.ledger` for `HERMES:<induced-sid-legacy>:` | No such line appeared after 600s of polling, nor at any point afterward (see Findings) | **FALSIFIED** — the event path claimed A instead (35-03) |
+| 6. Event path defers on A (Prediction A, corroborating half) | Poll for the D-09 skip line | No D-09 skip line appears anywhere in the post-rollback log | **Also contrary to the predicted shape** — see Findings for why the D-09 mechanism was never the deciding factor here (35-03) |
+| 7. Restore leg (env, emergency recovery) | `cp env.pre-rehearsal-<stamp>` back over `env` | Diff empty, sha256 `6ec48b84...9ddd4a` matches both the snapshot and the pre-rehearsal capture; write timestamped `2026-08-20T23:40:38Z` | Done, **as an emergency-recovery action** (35-03), not as a scripted restore-leg step |
+| 8. Confirm `env` still at cutover state at the start of this plan | `cat`/`sha256sum` `env` | `6ec48b84...9ddd4a` — identical to 35-02's original capture and the 35-03 snapshot | Done (35-04) |
+| 9. Induce session B | `hermes chat` on `devops`, same command as induction A | New session id (redacted `<induced-sid-event>`); `.ready/<induced-sid-event>` sentinel present within seconds | Done (35-04) |
+| 10. Event path claims B (Prediction B) | Poll `revenium-api-events.ledger` and the log for `Reported: sid=<induced-sid-event>` | `API:` line and `Reported: sid=` line both appeared ~4 minutes after induction; no `HERMES:` line, no `Reported: session=` line, no D-09 skip line, ever | **CONFIRMED** — exactly as predicted (35-04) |
+| 11. Post-restore tick confirms the cutover state stayed in effect throughout | Poll ticks across both this plan's induction and the POST-state capture | Multiple ticks ran, all under `legacy=disabled`/`mode=live`, ending with the same `env` sha256 the round trip started from | Done (35-04) |
+| 12. POST-state capture, IDENTICAL command set to 35-02's | Re-ran 35-02's own replayable block verbatim | See `## Independent confirmation` | Done (35-04) |
+
+**A fourth, unplanned finding surfaced during the POST-state capture: `owners/` now holds
+1,941 records, not 2.** The 2 induced sessions (A, B) account for 2 of them; the other
+1,939 are a backfill side effect of the ~17-minute window `env` spent at `legacy=enabled`
+(35-03's rollback leg) on a profile with a large legacy backlog. See `## Findings` →
+"The `owners/` backfill — a fourth difference category" for the full investigation; see
+`## Independent confirmation` for why this means ROADMAP criterion 7 is **not met as
+written**.
 
 Full raw evidence, including the source-level investigation into why the claimed
-mechanism did not hold, is in `35-EVIDENCE.md`.
+mechanism did not hold and the `owners/` backfill investigation, is in `35-EVIDENCE.md`.
 
 ## Findings
 
@@ -237,17 +250,100 @@ ownership rather than stage order governs the outcome.
 subsequent event-path run correctly reported `duplicate-skipped-events=1` for this sid,
 confirming idempotency held even though the outcome diverged from prediction.
 
-### Induced session B (restore leg) — not performed
+### Induced session `<induced-sid-event>` (leg B, this plan) — Prediction B: **CONFIRMED**
 
-Task 3, which would induce and observe a second session under the restored cutover
-state, was never started. Its own `<precondition>` requires a confirmed `HERMES:` ledger
-line for induction A before Task 3 may begin; per the finding above, that line will never
-appear (the guard that determines it resolved, permanently, at `2026-08-20T23:23:21Z` +
-~7 minutes, well inside the plan's own 600-second settle budget for a single poll but past
-the point where continued waiting could change the outcome). No second `hermes chat`
-session was induced. `env` was returned to the cutover state as the `<halt_and_recover>`
-block requires regardless of which task performs the restore, and that restoration is
-recorded in `## Results` above and confirmed with an empty `diff` and a matching sha256.
+**Prediction (quoted from the committed `47ecabf` block above, unchanged):** "the event
+path claims it... a new `API:<api_request_id>|<induced-sid-event>|...` line appended to
+`revenium-api-events.ledger`, and a `Reported: sid=` log line... naming that sid and its
+`api_request_id`... any `HERMES:` line... [and] no D-09 skip line... [should not appear]."
+
+**Observation:** exactly as predicted, with no falsifier condition triggered. No
+`HERMES:` line for `<induced-sid-event>` ever appeared in `revenium-hermes.ledger`
+(fresh full-file `grep`), and no `Reported: session=` log line for it ever appeared. The
+event path claimed it cleanly, ~4 minutes after induction:
+```
+[2026-08-21T00:22:25Z] [INFO ] [revenium] Reported: sid=<induced-sid-event> api_request_id=<induced-sid-event>:<uuid>:<hash>:api:1 model=glm-4.6 task_type=liveness_check operation_type=CHAT
+```
+`owners/<induced-sid-event>` holds exactly one line, `event`. No D-09 skip line appears
+anywhere in the log for the whole leg-B window — expected, since legacy's per-session loop
+never ran for this sid at all (it is globally short-circuited by the
+`legacy completions path disabled` suppression while `env` reads `legacy=disabled`, the
+same short-circuit responsible for `owners/` being ABSENT before 35-03's rollback leg ever
+began).
+
+**The question this leg was authorised to settle, answered directly: this profile cannot
+discriminate its two env states from a freshly-induced session's own artifacts.** Leg A
+(under the ownership race, `legacy=enabled` but too slow to win) and leg B (under a clean
+`legacy=disabled`) produced **identical output shapes** — `API:` line present, `HERMES:`
+line absent, `Reported: sid=` present, `Reported: session=` absent, D-09 skip line absent,
+one-line `owners/<sid>=event` record, both claimed within minutes of induction. The only
+way to tell the two mechanisms apart was reading the deployed source
+(`hermes-report.sh`'s `session_event_owned` guard); nothing in the ledgers or the log
+distinguishes "legacy was cleanly disabled" from "legacy was enabled but lost a race
+against a slow backlog." See `35-EVIDENCE.md`'s side-by-side comparison table for the full
+enumeration. This is the single largest qualifier on what this rehearsal demonstrates: a
+smaller-backlog profile (most of the fleet's other nine) would very plausibly show leg A
+actually claimed by legacy, as Prediction A originally assumed — `devops`'s own 886+
+session legacy backlog is what created the race window this document's mechanism finding
+depends on.
+
+**No double-bill.** `owners/<induced-sid-event>` has exactly one line. The confirming
+`Reported 0, ... duplicate-skipped-events=1` line in the same tick's summary refers to sid
+A being correctly re-recognised as already-ledgered — not sid B, which is the tick's own
+`Reported 1`.
+
+### The `owners/` backfill — a fourth difference category (not induced-session traffic)
+
+**`owners/` holds 1,941 records where G-7's three permitted categories account for only
+2.** The two induced sessions (A, B) each hold one `event`-content record — squarely
+category 2, "the two induced sessions' own consequential records." **The other 1,939
+records, all `legacy`-content, are a genuinely new, fourth category — a consequence of
+35-03's rollback leg leaving `env` at `legacy=enabled` for ~17 minutes on a profile
+carrying a large pre-existing legacy backlog, not a consequence of anything induced.**
+
+**What wrote them, read from the deployed `hermes-report.sh` source, not inferred:**
+`hermes-report.sh`'s per-session SESSION OWNERSHIP RESOLUTION (quick-260817-tfe,
+OWN-01/OWN-02/OWN-04) runs once per session, on any tick the global
+`legacy completions path disabled` short-circuit does NOT engage — i.e. any tick where
+`env` reads `legacy` as something other than cleanly disabled-and-drained. During the
+~17 minutes `env` read `legacy=enabled` (`23:23:21Z`–`23:40:38Z`), two full legacy cycles
+ran, and for every one of the 1,939 sessions already present in `revenium-hermes.ledger`
+with no corresponding row in `revenium-api-events.ledger`, the resolution table (the same
+table `api-event-report.sh` implements identically) resolved to `legacy` — a durable
+one-line backfill record, not a new bill.
+
+**Benign, checked exhaustively rather than assumed:** the legacy ledger's sha256 is
+byte-identical before and after (`c56ff9467c1ae3c3df7770ad623fb20e7e60bbe077c5bc982e42da8c359f6815`,
+both) — no new `HERMES:` line accompanies any of the 1,939 records. Every one of the 1,939
+`legacy`-owner sids has a pre-existing `HERMES:` ledger line (checked by exhaustive set
+difference against the ledger's 1,939 distinct sids — the difference is empty); none is a
+new, un-backfilled claim. Zero owner records anywhere on the profile hold more than one
+line — the double-bill signature is absent everywhere, not just among the 1,939.
+
+**Forward effect, investigated read-only:** for a `legacy`-owned sid whose ledger history
+is closed and unchanging (the overwhelming majority of the 1,939), owner=`legacy` changes
+nothing going forward, because neither stage's per-session loop evaluates a dormant sid
+again regardless (legacy stays globally short-circuited while `env` reads
+`legacy=disabled`+drained; the event-side loop only evaluates sids with fresh
+`post_api_request` events). For the theoretical case of one of these sids resuming
+activity, the practical outcome does not depend on whether this rehearsal ran: both
+stages' resolution tables read the SAME unchanged ledger content, so the first evaluation
+of that sid's ownership — whenever it happened, rehearsal or no rehearsal — would resolve
+to `legacy` identically. The staleness self-healing chain (`docs/event-metering.md`'s
+`### Staleness` → "The self-healing chain") that re-admits a resumed session to legacy
+billing operates on `drain-status.sh`'s own `legacyRetainedSids` carve-out, independent of
+`owners/`. **This is a read-only, source-grounded finding, not an exhaustive proof that no
+host-specific edge case exists** — stated at this strength deliberately, per the plan's own
+instruction to report "undetermined" rather than overclaim where the read-only method
+cannot fully settle a question.
+
+**Disposition: ROADMAP criterion 7 ("post state matches pre state") is NOT MET AS
+WRITTEN.** Exactly three difference categories were permitted; a fourth exists, is real,
+and is written up here as the criterion's own text requires rather than absorbed into a
+caption or explained away. It is benign by every check this document ran, and its forward
+effect is null by the same read-only investigation — but "benign" is not "permitted," and
+this document does not soften that distinction. See `## Verdict` for how this shortfall is
+carried forward.
 
 ## Reproducing this measurement
 
@@ -322,8 +418,79 @@ this to every other state file the rehearsal could plausibly have touched.
 
 ## Independent confirmation
 
-*Filled by 35-04 — the byte-identical `diff` between the pre-rehearsal snapshot and the
-finally-restored `env`, plus the full pre-versus-post state comparison G-7 requires.*
+**The post-state was captured by re-running 35-02's own replayable command block
+verbatim** — identical commands, identical order, identical profile — reproduced in full
+in `35-EVIDENCE.md`. What follows is the itemised pre-versus-post comparison G-7 requires:
+every item the pre-state captured, one row per item, marked IDENTICAL or carrying a named
+difference and its cause.
+
+| Item | Pre-state (35-02, 2026-08-20) | Post-state (35-04, 2026-08-21) | Comparison |
+|---|---|---|---|
+| `env` content | `mode=live`, `legacy=disabled`, `stale=86400` | identical | **IDENTICAL** |
+| `env` sha256 | `6ec48b84...9ddd4a` | `6ec48b84...9ddd4a` | **IDENTICAL** — compared against 35-02's own originally captured value directly, not only against the 35-03 snapshot file |
+| `env.bak-20260819-211250` content + sha256 | `mode=shadow`, `legacy=enabled`; `cf7f9767...30e02ad` | identical | **IDENTICAL** |
+| `env.bak2-20260819-213357` content + sha256 | `mode=live`, `legacy=enabled`; `8bef65b2...b997e601` | identical | **IDENTICAL** |
+| `env.pre-rehearsal-20260820-232301` | did not exist | present, 106 bytes, matches `env`'s pre-rehearsal sha256 | **Category 1 (permitted)** — the retained snapshot file, kept rather than deleted because nothing reads `env.*` except `env` itself and the host already carries two backups by the same naming convention; a real difference from the pre-state listing, declared rather than omitted |
+| `revenium-hermes.ledger` line count | 2285 | 2285 | **IDENTICAL** |
+| `revenium-hermes.ledger` sha256 | `c56ff946...c359f6815` | `c56ff946...c359f6815` | **IDENTICAL, byte-for-byte** — the strongest form of "nothing rewritten, reordered, or dropped"; not merely a prefix match, an exact match |
+| `revenium-api-events.ledger` line count | 0 | 2 | **Category 2 (permitted)** — the two induced sessions' own ledger lines |
+| `revenium-api-events.ledger` sha256 | `e3b0c442...b7852b855` (well-known empty-file hash) | `74fcdae3...c237c05bd20` | **Category 2** — pre-state content (empty) is trivially a complete prefix of post-state content; on a profile with zero pre-existing event-ledger lines this prefix guarantee is total, not merely strong |
+| `owners/` directory | ABSENT | EXISTS, 1,941 entries | **Split across categories 2 and 4** — see below |
+| `state.db` session count | 1977 | 1979 | **Category 2** — exactly `+2`, the two induced sessions, individually enumerated below |
+| `revenium-metering.log` size | 12,134,129 bytes | 12,176,864 bytes | **Category 3 (permitted)** — log growth; the pre-state's last recorded line (`2026-08-20T21:24:36Z`) is the boundary separating pre-existing lines from this phase's own |
+| `drain-status.json` (`drainedCount`, `legacyRetainedSids`) | `886`, 8 entries | `857`, 0 entries | **Dynamic recomputed state, not a durable record** — `drain-status.sh` re-derives this file from live inputs every tick regardless of this rehearsal (`docs/event-metering.md`'s own "self-healing chain"); the ~3h elapsed between captures is enough for ordinary session-lifecycle aging to move sessions between the gate's own retained/drained accounting, independent of any switch this rehearsal flipped. Not counted as a fifth category because it is neither retained nor durable — the same reasoning that places `revenium-metering.log`'s own growth outside the three-category count |
+| `revenium-jobs.ledger` size | 31,331 bytes | 31,491 bytes | **Category 2** — two new `JOB:` lines for the two induced sessions' own agentic-job records |
+| `task-taxonomy.json` / `job-taxonomy.json` size | 1,397 / 399 bytes | 1,522 / 534 bytes | **Category 2** — new task-type/job-type vocabulary entries the classifier minted for the two induced sessions' own classifications |
+| All other state-directory files (`config.json`, `guardrail-status.json`, `plugin-status.json`, `revenium-tool-events.ledger`, the three `.lock` files, `cron.lock`) | present | present, unchanged | **IDENTICAL** |
+
+**`owners/` itself, enumerated:** 1,941 total records — 2 hold `event` (the two induced
+sessions, category 2) and 1,939 hold `legacy` (a backfill side effect of 35-03's
+~17-minute `legacy=enabled` window on a profile with a large pre-existing legacy backlog
+— **category 4, permitted by none of the three named categories**). See `## Findings` →
+"The `owners/` backfill" for the full investigation (what wrote them, why they are
+benign, and why their forward effect is null by read-only source inspection).
+
+**Disposition, stated plainly rather than redefined to fit:** three of the four
+differences found are exactly the three G-7 permits, each named with its cause above. The
+fourth — 1,939 `legacy`-content `owners/` records — is not one of them, and this document
+does not fold it into category 2 to make the count come out clean. **ROADMAP criterion 7
+("post state matches pre state") is therefore NOT MET AS WRITTEN.** The profile was
+returned to its pre-rehearsal `env` configuration, byte-for-byte, and its pre-existing
+billing ledger is byte-identical — but a fourth kind of state (durable ownership
+metadata for 1,939 sessions this rehearsal did not touch, did not bill, and did not
+double-bill) now exists where none did before. That is a real difference from "the profile
+was returned to exactly its pre-rehearsal state," not a technicality.
+
+**No-data-loss / no-double-ship enumeration, to Phase 34's standard — named sessions, not
+counts:**
+
+| Sid | `owners/<sid>` | In `revenium-hermes.ledger`? | In `revenium-api-events.ledger`? | Double-ship? |
+|---|---|---|---|---|
+| `<induced-sid-legacy>` (induction A, 35-03) | 1 line, `event` | No (fresh full-file grep) | Yes — 1 line | **No** — exactly one path shipped it |
+| `<induced-sid-event>` (induction B, 35-04) | 1 line, `event` | No (fresh full-file grep) | Yes — 1 line | **No** — exactly one path shipped it |
+
+Both induced sids were checked against BOTH ledgers individually. Neither appears in both.
+The pre-existing legacy ledger's byte-identical sha256 (above) additionally confirms that
+none of the 2,285 pre-existing lines were rewritten, reordered, or duplicated, and the
+1,939-record `owners/` backfill (above) carries no ledger line of its own — a `legacy`
+owner record with no accompanying `HERMES:` append cannot be a double-ship signature by
+construction, and the direct check (zero owner files anywhere on the profile hold more
+than one line) confirms none exists.
+
+**`_takeover_session_owner`'s unreachability, stated with its condition and cited:** this
+mechanism fires only when a session's owner already reads `event` AND the event-metering
+mode has reverted to `shadow` (`hermes-report.sh` :1537, MODE-05). `REVENIUM_EVENT_METERING_MODE`
+stayed `live` throughout every leg of this rehearsal — the rollback leg only ever moved
+`REVENIUM_LEGACY_COMPLETIONS`. A live grep of the full post-rehearsal log for `takeover`
+and for the dual-ledger warn string returns nothing, confirming the mechanism never fired,
+by construction, exactly as `## What was measured`'s ownership prediction stated in
+advance. Its absence here is a designed non-event, not an untested code path.
+
+**Token figures, captioned per G-8's own asymmetry rule:** no token total is read out of
+or inferred from `revenium-api-events.ledger` anywhere in this document — that ledger's
+lines carry no token field. Any token figure this document states for an event-billed
+session, where one appears, is sourced from Revenium's own read side or a not-yet-pruned
+spool file, named as such.
 
 ## Verified against
 
