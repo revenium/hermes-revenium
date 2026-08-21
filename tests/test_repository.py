@@ -230,6 +230,79 @@ class RepositoryTests(unittest.TestCase):
                 'it is one of four hooks and does not fire for gateway sessions',
             )
 
+    def test_skill_bundle_ships_bootstrap_script(self):
+        r"""SKILL.md must name `references/bootstrap.sh` as a bundle-relative path.
+
+        `hermes skills install` does NOT ship the whole `references/` directory. It
+        ships SKILL.md plus only the support files SKILL.md *mentions* as
+        bundle-relative paths. From Hermes' `tools/skills_hub.py`:
+
+            _ALLOWED_SUPPORT_DIRS = frozenset(
+                {"references", "templates", "scripts", "assets", "examples"})
+            _LOCAL_LINK_RE = re.compile(
+                r"(?:\]\(|`|(?:^|[\s\"\']))"
+                r"((?:references|templates|scripts|assets|examples)/[^\s)`\"\'<>]+)",
+                re.MULTILINE)
+
+        `_referenced_support_paths()` feeds `GitHubSource.fetch()`, which every install
+        route funnels through — `hermes skills install` (skills.sh delegates to it) and
+        `hermes skills tap add` alike.
+
+        The regression this pins: every path in SKILL.md used to be written
+        host-absolute (`~/.hermes/skills/revenium/references/bootstrap.sh`). The char
+        before `references/` is then `/`, which matches none of the required prefixes,
+        so bootstrap.sh was never fetched and the documented post-install command died
+        with "No such file or directory" on every host. `test_expected_files_exist`
+        could not catch it — the file was always present in the *repo*; it just never
+        reached the *bundle*.
+
+        `plugins/` is not in `_ALLOWED_SUPPORT_DIRS`, so the bootstrap clone remains
+        genuinely required. This test only guarantees the bootstrap is reachable.
+        """
+        local_link_re = re.compile(
+            r"(?:\]\(|`|(?:^|[\s\"\']))"
+            r"((?:references|templates|scripts|assets|examples)/[^\s)`\"\'<>]+)",
+            re.MULTILINE,
+        )
+        # A `..` anywhere in a support-dir path makes Hermes reject the ENTIRE bundle
+        # (traversal guard returns None), not just that one path.
+        traversal_re = re.compile(
+            r"(?:references|templates|scripts|assets|examples)/"
+            r"(?:[^\s)`\"\'<>]*/)?\.\.(?:/|$)"
+        )
+        text = (SKILL / 'SKILL.md').read_text().replace('\\', '/')
+
+        self.assertIsNone(
+            traversal_re.search(text),
+            'SKILL.md contains a support-dir path with ".." — Hermes\' traversal guard '
+            'rejects the whole bundle, so NOTHING installs',
+        )
+
+        referenced = {m.group(1).rstrip('.,;:') for m in local_link_re.finditer(text)}
+
+        self.assertIn(
+            'references/bootstrap.sh', referenced,
+            'SKILL.md must mention `references/bootstrap.sh` as a bundle-relative path '
+            '(backticked, or as a markdown link target) or `hermes skills install` will '
+            'not ship it — and step 0 tells every user to run exactly that file. '
+            'A host-absolute mention (~/.hermes/skills/revenium/references/bootstrap.sh) '
+            'does NOT count: the extractor requires the path to be preceded by a '
+            'backtick, "](", whitespace, a quote, or start-of-line. '
+            f'Currently extracted: {sorted(referenced)}',
+        )
+
+        # Everything the extractor promises to fetch must actually exist at this
+        # revision — Hermes aborts the whole fetch on a missing referenced file
+        # ("Referenced skill support file is missing" -> return None), which would
+        # break `hermes skills install` outright rather than degrade it.
+        for rel in sorted(referenced):
+            self.assertTrue(
+                (SKILL / rel).is_file(),
+                f'SKILL.md references {rel!r} but it does not exist in skills/revenium/ '
+                '— Hermes aborts the entire bundle fetch on a missing referenced file, '
+                'so `hermes skills install` would fail with no skill installed at all',
+            )
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning

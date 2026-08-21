@@ -47,9 +47,10 @@ will prompt for it (or take `REVENIUM_*` env vars with `--non-interactive`).
 
 ### 1. Bootstrap (only needed after `hermes skills install`)
 
-`hermes skills install` fetches only `SKILL.md` + `references/` — **not**
-`scripts/` or `plugins/`. If `~/.hermes/skills/revenium/scripts/install.sh` does
-not exist yet, fetch the missing pieces:
+`hermes skills install` ships `SKILL.md` plus only the support files `SKILL.md`
+names as bundle-relative paths — **not** `scripts/`, and never `plugins/`, which
+Hermes disallows in a skill bundle. If `~/.hermes/skills/revenium/scripts/install.sh`
+does not exist yet, fetch the missing pieces:
 
 ```sh
 bash ~/.hermes/skills/revenium/references/bootstrap.sh          # single host
@@ -57,7 +58,7 @@ bash ~/.hermes/skills/revenium/references/bootstrap.sh          # single host
 bash ~/.hermes/skills/revenium/references/bootstrap.sh --all-profiles
 ```
 
-If even `references/` didn't come down, clone and install directly:
+If `references/bootstrap.sh` didn't come down either, clone and install directly:
 
 ```sh
 git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium \
