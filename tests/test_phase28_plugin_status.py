@@ -57,6 +57,39 @@ def seed_state_db(hermes_home, ended_ats):
     return db_path
 
 
+def seed_messages(hermes_home, assistant_turns, age_seconds=30, session_id=None):
+    """Add a `messages` table to <hermes_home>/state.db with N recent
+    role='assistant' rows. Models a host that is actively serving turns."""
+    db_path = os.path.join(hermes_home, 'state.db')
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            'CREATE TABLE IF NOT EXISTS messages '
+            '(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, timestamp REAL)'
+        )
+        ts = time.time() - age_seconds
+        for i in range(assistant_turns):
+            conn.execute(
+                'INSERT INTO messages (session_id, role, timestamp) VALUES (?, ?, ?)',
+                (session_id or f'sess-open-{i}', 'assistant', ts),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def write_marker(markers_dir, sid, age_seconds=30):
+    """Write a <sid>.jsonl marker file with a deterministic mtime."""
+    os.makedirs(markers_dir, exist_ok=True)
+    path = os.path.join(markers_dir, f'{sid}.jsonl')
+    with open(path, 'w') as fh:
+        fh.write('{"muid":"m1","sid":"%s","task_type":"demo"}\n' % sid)
+    ts = time.time() - age_seconds
+    os.utime(path, (ts, ts))
+    return path
+
+
 def write_hermes_shim(bin_dir):
     """Write an argv-logging fake `hermes` binary into bin_dir. Returns the
     path to the argv log the shim appends to (one line per invocation, the
@@ -97,6 +130,189 @@ def touch_sentinel(markers_ready_dir, name, age_seconds):
 
 
 class Phase28PluginStatusTests(unittest.TestCase):
+    def _registered_home(self, tmp):
+        """A fully-registered plugin tree: dir present + listed in config.yaml."""
+        hermes_home = os.path.join(tmp, '.hermes')
+        scripts_dir = setup_skill_tree(hermes_home)
+        os.makedirs(os.path.join(hermes_home, 'plugins', 'revenium-classifier'),
+                    exist_ok=True)
+        with open(os.path.join(hermes_home, 'config.yaml'), 'w') as f:
+            f.write('plugins:\n  enabled:\n    - revenium-classifier\n')
+        return hermes_home, scripts_dir
+
+    def _run(self, hermes_home, scripts_dir, state_dir, status_file):
+        env = {
+            **os.environ,
+            'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'REVENIUM_PLUGIN_STATUS_FILE': status_file,
+            'REVENIUM_CRON_SETTLE_SECONDS': str(SETTLE_SECONDS),
+        }
+        return subprocess.run(
+            ['bash', os.path.join(scripts_dir, 'plugin-status.sh')],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+
+    def test_open_sessions_with_no_markers_is_stalled_not_idle(self):
+        """Turns ran, nothing ended, no markers written -> stalled, not idle.
+
+        The regression this pins, observed live: the liveness scan selects
+        `WHERE ended_at IS NOT NULL`, so on a host whose sessions never end it
+        counted zero ended sessions and returned `idle` == healthy. That host
+        had 310 token-bearing sessions, 101 tool calls in the hour, and had
+        never written a single marker — the classifier plugin was registered in
+        config.yaml but the running gateway had never loaded it. The check that
+        exists to catch a registration outage reported an all-clear through the
+        entire outage.
+
+        Gateway sessions stay open for hours, so "nothing ended" and "nothing
+        happened" are completely different states and must not share a verdict.
+        `post_llm_call` classifies every completed turn and writes its marker
+        (while deliberately writing no sentinel), so marker files are the
+        proof-of-life available on a host with no session boundaries.
+        """
+        tmp = tempfile.mkdtemp(prefix='gsd-plugstat-open-sessions-')
+        try:
+            hermes_home, scripts_dir = self._registered_home(tmp)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            # Sessions exist but NONE have ended; turns are actively completing.
+            seed_state_db(hermes_home, [None, None, None])
+            # Older than SETTLE_SECONDS: a session mid-first-turn is not yet evidence.
+            seed_messages(hermes_home, assistant_turns=12,
+                          age_seconds=SETTLE_SECONDS + 30)
+            # No marker files written at all.
+            r = self._run(hermes_home, scripts_dir, state_dir, status_file)
+
+            data = json.loads(Path(status_file).read_text())
+            self.assertEqual(
+                data['liveness'], 'stalled',
+                f'open sessions + completed turns + zero markers must be stalled, '
+                f'got {data["liveness"]!r}\n{r.stdout}',
+            )
+            self.assertFalse(data['healthy'],
+                             'a stalled classifier must not report healthy')
+            self.assertEqual(r.returncode, 2,
+                             f'stalled must exit 2, got {r.returncode}\n{r.stdout}')
+            self.assertIn('NOT ONE has a marker', r.stdout,
+                          'the stall message must name the real reason rather than '
+                          'talking about sentinels that were never expected')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_open_sessions_with_markers_stays_healthy(self):
+        """Same shape, but markers ARE being written -> alive, exit 0.
+
+        Guards the other direction: the new check must not turn every
+        long-running-session host into a false alarm.
+        """
+        tmp = tempfile.mkdtemp(prefix='gsd-plugstat-open-ok-')
+        try:
+            hermes_home, scripts_dir = self._registered_home(tmp)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            seed_state_db(hermes_home, [None, None])
+            seed_messages(hermes_home, assistant_turns=12, session_id='sess-live',
+                          age_seconds=SETTLE_SECONDS + 30)
+            # Marker written once at turn 1 and never rewritten — the classifier's
+            # permanent per-session latch means its mtime ages while the session
+            # stays healthy. Deliberately older than the whole lookback window.
+            write_marker(os.path.join(state_dir, 'markers'), 'sess-live',
+                         age_seconds=SETTLE_SECONDS * 10)
+
+            r = self._run(hermes_home, scripts_dir, state_dir, status_file)
+            data = json.loads(Path(status_file).read_text())
+            self.assertEqual(data['liveness'], 'idle',
+                             f'markers present means alive\n{r.stdout}')
+            self.assertTrue(data['healthy'])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn('classifier is alive', r.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_stale_marker_on_live_session_is_not_a_stall(self):
+        """A healthy long-lived session whose marker has aged out is NOT stalled.
+
+        Greptile P1 on PR #76. The classifier holds a permanent
+        already-classified latch per session: the marker is written once at
+        turn 1 and never rewritten. A session that keeps producing turns for
+        hours therefore has a marker whose mtime is arbitrarily old while the
+        classifier is working perfectly.
+
+        Keying the check on marker FRESHNESS turned every such session into a
+        false stall — exit 2, unhealthy status, and a "restart your gateway"
+        instruction for a gateway that is fine. Per-session correspondence
+        (does this session have a marker at all) is immune to the latch.
+        """
+        tmp = tempfile.mkdtemp(prefix='gsd-plugstat-stale-marker-')
+        try:
+            hermes_home, scripts_dir = self._registered_home(tmp)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            seed_state_db(hermes_home, [None])
+            # Turns are recent; the marker is ancient. Exactly the latch's shape.
+            seed_messages(hermes_home, assistant_turns=40, session_id='sess-long',
+                          age_seconds=SETTLE_SECONDS + 10)
+            write_marker(os.path.join(state_dir, 'markers'), 'sess-long',
+                         age_seconds=SETTLE_SECONDS * 100)
+
+            r = self._run(hermes_home, scripts_dir, state_dir, status_file)
+            data = json.loads(Path(status_file).read_text())
+            self.assertEqual(
+                data['liveness'], 'idle',
+                f'a stale marker on a live session is the latch working as '
+                f'designed, not a stall\n{r.stdout}',
+            )
+            self.assertTrue(data['healthy'])
+            self.assertEqual(r.returncode, 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_first_turn_grace_is_not_a_stall(self):
+        """A session whose first turn just landed has not had time to classify.
+
+        Turn-1 classification makes a real auxiliary-LLM call, so a session
+        younger than the settle window having no marker yet is normal. Only
+        settled sessions count as evidence.
+        """
+        tmp = tempfile.mkdtemp(prefix='gsd-plugstat-grace-')
+        try:
+            hermes_home, scripts_dir = self._registered_home(tmp)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            seed_state_db(hermes_home, [None])
+            # Turn landed 1 second ago; no marker yet. Not evidence of anything.
+            seed_messages(hermes_home, assistant_turns=1, session_id='sess-new',
+                          age_seconds=1)
+
+            r = self._run(hermes_home, scripts_dir, state_dir, status_file)
+            data = json.loads(Path(status_file).read_text())
+            self.assertEqual(data['liveness'], 'idle',
+                             f'a just-started session must not trip the stall '
+                             f'check\n{r.stdout}')
+            self.assertEqual(r.returncode, 0)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_genuinely_idle_host_stays_idle(self):
+        """No turns and no ended sessions -> still idle. A quiet host is not broken."""
+        tmp = tempfile.mkdtemp(prefix='gsd-plugstat-quiet-')
+        try:
+            hermes_home, scripts_dir = self._registered_home(tmp)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            seed_state_db(hermes_home, [])
+            seed_messages(hermes_home, assistant_turns=0)
+
+            r = self._run(hermes_home, scripts_dir, state_dir, status_file)
+            data = json.loads(Path(status_file).read_text())
+            self.assertEqual(data['liveness'], 'idle', r.stdout)
+            self.assertTrue(data['healthy'])
+            self.assertEqual(r.returncode, 0)
+            self.assertIn('idle host', r.stdout)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_plugin_status_sh_unregistered_missing_dir(self):
         """Exits 1 when the plugin destination directory is absent, even if
         config.yaml lists the plugin in plugins.enabled."""

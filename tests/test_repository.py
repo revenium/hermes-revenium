@@ -591,6 +591,232 @@ exit 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_guardrail_status_is_scoped_to_this_installs_rules(self):
+        """A profile's guardrail-status.json describes only that profile's rules.
+
+        Reproduces a live two-profile host. Both profiles ran setup-guardrails,
+        which named each rule after the HOST, so both rules are called
+        "Hermes Daily Budget - somehost" while having different ids and very
+        different spend. Two independent defects then compounded:
+
+        1. `enforcement-rules get` returns every rule on the TEAM and nothing
+           filtered by config.json::ruleIds, so each profile's status file
+           accumulated the other profile's rules — meaning another profile's
+           breach could halt this agent.
+        2. The name -> string-id join is last-write-wins, so two rules sharing a
+           name collapsed onto ONE id. The observed file had the same ruleId
+           twice with currentValue 7.635922 and 296.941875 — the second
+           profile's number wearing the first profile's identity.
+
+        After the fix this install sees exactly its own rule, once, with its own
+        value.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+        shared_name = 'Hermes Daily Budget - somehost'
+
+        # Two real rules, same name, different ids and values — as the API returns them.
+        enforcement_json = json.dumps({'rules': [
+            {'ruleId': 11, 'name': shared_name, 'metricType': 'TOTAL_COST',
+             'periodType': 'DAILY', 'groupBy': 'AGENT', 'currentValue': 7.635922,
+             'warnThreshold': 800.0, 'threshold': 1000.0,
+             'breached': False, 'warnBreached': False, 'shadowMode': False},
+            {'ruleId': 22, 'name': shared_name, 'metricType': 'TOTAL_COST',
+             'periodType': 'DAILY', 'groupBy': 'AGENT', 'currentValue': 296.941875,
+             'warnThreshold': 800.0, 'threshold': 1000.0,
+             'breached': False, 'warnBreached': False, 'shadowMode': False},
+        ]})
+        budget_rules_json = json.dumps([
+            {'id': 'ruleDEFAULT', 'name': shared_name},
+            {'id': 'ruleENT', 'name': shared_name},
+        ])
+        events_json = json.dumps([{'created': '2026-08-21T15:00:00Z',
+                                   'rawDetails': 'within limits'}])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-scope-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json,
+                                     budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['ruleENT'], 'autonomousMode': False}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = os.path.join(state_dir, 'revenium-metering.log')
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            r = subprocess.run(['bash', guardrail_check], env=env,
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0,
+                             f'stdout={r.stdout!r} stderr={r.stderr!r}')
+            with open(status_path) as f:
+                data = json.load(f)
+
+            ids = [x['ruleId'] for x in data['rules']]
+            self.assertEqual(
+                len(ids), len(set(ids)),
+                f'guardrail-status.json must never list one ruleId twice — a '
+                f'lookup by id becomes first-wins and clear-halt --rule-id would '
+                f'clear entries it never inspected. Got {ids}',
+            )
+            self.assertNotIn(
+                'ruleDEFAULT', ids,
+                "this install's status file must not carry another profile's "
+                "rule — that rule's breach would halt this agent",
+            )
+
+    def test_budget_label_is_unique_per_profile(self):
+        """setup-guardrails names rules distinctly per profile, but identically
+        to before for the default profile.
+
+        The rule NAME is the only stable join key guardrail-check.sh has between
+        the enforcement-rules payload (integer ids) and budget-rules list (string
+        hashes). Two rules sharing a name therefore collapse onto one id — see
+        test_guardrail_status_is_scoped_to_this_installs_rules. Naming after the
+        host alone guaranteed that collision on any multi-profile machine.
+
+        The default-profile case must stay byte-identical: a changed name there
+        would make a re-run mint a second rule beside the one the host already
+        enforces, instead of adopting it.
+        """
+        import os
+        import subprocess
+
+        script = str(SKILL / 'scripts' / 'setup-guardrails.sh')
+        harness = (
+            "set -u\n"
+            f"eval \"$(sed -n '/^short_host()/,/^}}$/p' {script})\"\n"
+            f"eval \"$(sed -n '/^budget_label()/,/^}}$/p' {script})\"\n"
+            "budget_label\n"
+        )
+
+        def label(**env_over):
+            env = {**os.environ, 'HOSTNAME': 'testhost'}
+            env.pop('REVENIUM_AGENT_NAME', None)
+            env.pop('REVENIUM_BUDGET_LABEL', None)
+            env.update(env_over)
+            r = subprocess.run(['bash', '-c', harness], env=env,
+                               capture_output=True, text=True, timeout=15)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return r.stdout.strip()
+
+        default_label = label(REVENIUM_AGENT_NAME='Hermes')
+        ent_label = label(REVENIUM_AGENT_NAME='Hermes-ent')
+        qa_label = label(REVENIUM_AGENT_NAME='Hermes-qa')
+
+        self.assertEqual(
+            default_label, label(),
+            'the default profile (agent "Hermes") must produce the SAME label as '
+            'an unset agent — changing it would mint a duplicate rule beside the '
+            'one existing installs already enforce',
+        )
+        for other in (ent_label, qa_label):
+            self.assertNotEqual(
+                default_label, other,
+                'each profile must produce a distinct rule name; identical names '
+                'collapse onto one ruleId in guardrail-check.sh',
+            )
+        self.assertNotEqual(ent_label, qa_label)
+        self.assertIn('Hermes-ent', ent_label)
+
+        # An explicit operator label still wins outright.
+        self.assertEqual(
+            label(REVENIUM_AGENT_NAME='Hermes-ent', REVENIUM_BUDGET_LABEL='mine'),
+            'mine',
+        )
+
+    def test_partial_name_join_never_drops_a_configured_rule(self):
+        """A rule whose id could not be resolved stays visible and enforcing.
+
+        Greptile P1 on PR #76. Scoping to config.json::ruleIds originally fell
+        open only when the scoped list came out completely empty. When ONE rule
+        resolved into the configured namespace and another fell back to its API
+        integer id, the partial match was non-empty — so the unresolved rule was
+        silently dropped. A breach on it then never reached `any_blocked`, and
+        the agent kept running straight through a configured guardrail.
+
+        Dropping a rule must require positive evidence it belongs to someone
+        else: its id resolved into the configured namespace AND is absent from
+        this install's list. An unidentified rule is kept.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        # 'Mine' joins cleanly. 'Ambiguous' has two ids, so it resolves to
+        # neither and falls back to its API integer id — and it is BREACHED.
+        enforcement_json = json.dumps({'rules': [
+            {'ruleId': 1, 'name': 'Mine', 'metricType': 'TOTAL_COST',
+             'periodType': 'DAILY', 'groupBy': 'AGENT', 'currentValue': 5.0,
+             'warnThreshold': 80.0, 'threshold': 100.0,
+             'breached': False, 'warnBreached': False, 'shadowMode': False},
+            {'ruleId': 2, 'name': 'Ambiguous', 'metricType': 'TOTAL_COST',
+             'periodType': 'DAILY', 'groupBy': 'AGENT', 'currentValue': 999.0,
+             'warnThreshold': 80.0, 'threshold': 100.0,
+             'breached': True, 'warnBreached': True, 'shadowMode': False},
+        ]})
+        budget_rules_json = json.dumps([
+            {'id': 'mineId', 'name': 'Mine'},
+            {'id': 'ambigA', 'name': 'Ambiguous'},
+            {'id': 'ambigB', 'name': 'Ambiguous'},
+        ])
+        events_json = json.dumps([{'created': '2026-08-21T15:00:00Z',
+                                   'rawDetails': 'breached'}])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-partial-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json,
+                                     budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['mineId'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = os.path.join(state_dir, 'revenium-metering.log')
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            r = subprocess.run(['bash', guardrail_check], env=env,
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, f'{r.stdout!r} {r.stderr!r}')
+            with open(status_path) as f:
+                data = json.load(f)
+
+            names = sorted(x['name'] for x in data['rules'])
+            self.assertIn(
+                'Ambiguous', names,
+                f'an unresolved rule must not be dropped by scoping — its breach '
+                f'would stop reaching any_blocked and the agent would run '
+                f'straight through a configured guardrail. Got {names}',
+            )
+            self.assertTrue(
+                data['halted'],
+                'the breached rule must still halt the agent after scoping',
+            )
+            # The published contract carries no private scoping fields.
+            for rule in data['rules']:
+                self.assertNotIn('_idIsConfiguredSpace', rule)
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning
@@ -9864,16 +10090,29 @@ exit 0
                         f'order, not budget-rules list order: {rule_names!r}',
                     )
 
-    def test_duplicate_rule_names_resolve_to_last_listed_id(self):
-        """PAGE-02 adjacency edge (plan 26-03): when budget-rules list returns
-        two entries sharing one `name` with different `id` values, the
-        name-to-string-id map resolves to the LAST entry's id — today's
-        silent last-write-wins behavior. This test pins that behavior rather
-        than changing it: it exists so a pagination change (which alters what
-        the list returns and in what order) cannot quietly flip which id
-        wins, NOT as an endorsement that last-write-wins is the correct
-        collision policy. A future phase wanting a different policy should
-        edit this test as its declaration of that change.
+    def test_duplicate_rule_names_resolve_to_neither_id(self):
+        """When budget-rules list returns two entries sharing one `name` with
+        different `id` values, the name -> string-id join resolves to NEITHER.
+
+        This is the policy change the previous version of this test invited: it
+        pinned silent last-write-wins while stating that was "NOT an endorsement
+        that last-write-wins is the correct collision policy," and that a phase
+        wanting a different policy "should edit this test as its declaration of
+        that change." This is that declaration.
+
+        Last-write-wins was actively harmful, not merely arbitrary. On a live
+        two-profile host both profiles had minted a rule named after the shared
+        HOSTNAME, so two real rules with different ids and very different spend
+        collapsed onto one id — producing a status file with the same ruleId
+        twice, one entry carrying the other profile's currentValue. Picking one
+        of two real rules by list order is a coin flip on which profile's budget
+        this agent enforces.
+
+        Refusing the join is the safe outcome: the rule falls back to the API's
+        own integer id, which matches no configured string hash, so the scope
+        filter's fail-open keeps it VISIBLE (over-reporting is recoverable;
+        silently dropping every guardrail is not) while never claiming to be a
+        rule it might not be.
         """
         import json
         import os
@@ -9936,10 +10175,15 @@ exit 0
                 data = json.load(f)
             rules = data.get('rules', [])
             self.assertEqual(len(rules), 1, f'expected exactly one rule: {rules!r}')
+            self.assertNotIn(
+                rules[0]['ruleId'], ('idFirst', 'idLast'),
+                f"an ambiguous name must resolve to NEITHER candidate id — "
+                f"picking one by list order silently binds this install to a "
+                f"rule that may belong to another profile: {rules!r}",
+            )
             self.assertEqual(
-                rules[0]['ruleId'], 'idLast',
-                f"duplicate-name collision must resolve to the LAST listed "
-                f"entry's id: {rules!r}",
+                rules[0]['ruleId'], '7',
+                f"unresolvable name should fall back to the API's own ruleId: {rules!r}",
             )
 
     def test_zero_rule_install_writes_empty_status(self):
