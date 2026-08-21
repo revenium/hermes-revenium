@@ -49,6 +49,55 @@ asks before anything else.
 
 ## The switches
 
+**`REVENIUM_EVENT_METERING_MODE=live` alone does not cut over.** With
+`REVENIUM_LEGACY_COMPLETIONS` still `enabled` (the default), which path bills a
+given session is decided by an **ownership record**
+(`owners/<sid>`, `session_event_owned` in `hermes-report.sh`), not by which
+stage `cron.sh` happens to run first. Both stages implement the identical
+resolution table — neither ledger has rows yet → the claiming stage wins;
+legacy-only rows → legacy (backfill); event-only rows → event (backfill);
+both → legacy, with a warn — and once either stage writes that record for a
+sid, the other is locked out of it permanently, independent of stage order.
+**This means the outcome for a brand-new session depends on a race, and the
+race's winner is not fixed by stage order alone.** `cron.sh` does run the
+legacy stage strictly before the event stage inside one invocation (see
+"A residual straddle exposure" under Rollback below) — but the legacy
+stage's own per-session work list is fixed once, at that stage's own start,
+before it begins walking it. How long that walk takes therefore decides how
+wide the window is. **One measurement, and one inference, kept distinct:**
+the measured case is a profile carrying an 886-session legacy backlog, whose
+stage took five to six minutes to walk its own fixed list — long enough that
+a session created *after* the list was assembled is invisible to that
+list, even though the invoking tick has not finished. By the time that same
+invocation's event stage runs, minutes later, it takes its OWN fresh read
+and finds the new session unowned, and claims it — still within the SAME
+tick's invocation, still with legacy running "first" in stage order, but
+never having seen the session at all. The following tick's legacy stage
+does then enumerate the session (it now exists), but finds ownership
+already claimed and defers permanently.
+
+The inference, marked as one: a profile whose legacy-tracked session count is
+small presumably walks its list fast enough that this window is narrow or
+closed, which would explain why the low-backlog observation below went to
+legacy. **That walk duration was never measured**, on any profile, and no
+threshold backlog size at which the behaviour flips has been established.
+Do not read "small backlog" as "safe" — read it as "not measured here".
+
+Both outcomes are observed, live, on the real fleet: inducing a session on a
+low-backlog profile at `mode=live, legacy=enabled` post-flip sent it entirely
+to legacy (0 event rows) — the outcome this document previously described as
+the *only* one. Inducing a session on a profile with an 886-session legacy
+backlog, also at `mode=live, legacy=enabled`, sent it entirely to the event
+path instead (0 legacy rows) — the backlog size, not anything about the
+switches themselves, is what differs between the two runs.
+**`REVENIUM_LEGACY_COMPLETIONS=disabled` is still required** for the event
+path to bill reliably — not because leaving legacy enabled always fails (it
+frequently does not), but because leaving it enabled makes the outcome for
+any given session depend on a race this operator does not control and
+cannot predict from the switches alone. A billing decision that depends on
+which of two background loops happens to finish first is not a state to
+cut over from.
+
 Two independent, reversible settings control the rollout. Both are
 readable from the environment (highest precedence) or from
 `config.json` (checked when the environment variable is unset), with an
@@ -157,6 +206,17 @@ upper bound at all. Safety therefore does not rest on the threshold being
 route entirely and restores the pre-change behaviour exactly (the
 conservative direction — there is no corresponding "go faster than the
 floor" escape hatch).
+
+**At this fleet's current settings** (`REVENIUM_CRON_SETTLE_SECONDS=600`,
+`REVENIUM_DRAIN_STALE_SECONDS=86400`), the effective floor is `87000` seconds
+≈ **24.17 hours**. This is the minimum time an open, quiet session can take to
+reach the staleness route to terminal — and therefore the floor on how fast a
+profile whose only remaining pending sessions are long-lived-but-quiet can
+converge. A profile whose pending sessions end normally converges via the
+faster 600-second settle path instead; the floor applies only to the
+staleness route. Phase 33 observed this directly: `lorekeeper` converged
+"right on the Round-3-computed earliest bound," roughly 24h after its slowest
+pending session went quiet.
 
 **The self-healing chain.** A stale-drained session's verdict is
 re-derived from live inputs on every tick, not decided once: if the

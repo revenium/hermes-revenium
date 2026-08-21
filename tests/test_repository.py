@@ -158,6 +158,14 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
+            # Phase 35 — cutover convergence and read-side proof (Phase 33), committed so
+            # it survives deletion of the gitignored planning tree (CUT-07)
+            ROOT / 'docs' / 'cutover-convergence-and-read-side-proof.md',
+            # Phase 35 — transition reconciliation (Phase 34), same reason (CUT-07)
+            ROOT / 'docs' / 'transition-reconciliation.md',
+            # Phase 35 Plan 04 — rollback rehearsal verdict, committed so it survives
+            # deletion of the gitignored planning tree (CUT-05, CUT-07)
+            ROOT / 'docs' / 'rollback-rehearsal.md',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
