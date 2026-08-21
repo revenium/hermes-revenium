@@ -3,6 +3,8 @@
 ![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)
 ![Status: Beta](https://img.shields.io/badge/status-beta%20(best--effort)-f0a020?style=for-the-badge)
 
+<img src="assets/revenium-labs.png" alt="Revenium Labs — Track. Control. Prove." width="180" align="right">
+
 > ### 🧪 This is a Revenium Labs project
 > **Revenium Labs** projects are field-developed, best-effort solutions. They are working,
 > beta-quality software, built to solve real customer problems and shared in the open. They are
@@ -193,7 +195,7 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 
 The shell hooks register `pre_llm_call`, `pre_tool_call`, and `post_tool_call` handlers in `~/.hermes/config.yaml`. They are inert until you approve them on first `hermes chat`. Without the hooks, structural budget enforcement and tool-event capture are inactive.
 
-### Install the on_session_end classifier plugin
+### Install the classifier plugin
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
@@ -264,9 +266,54 @@ For non-interactive/CI upgrades, `install.sh --non-interactive` takes credential
 
 ### Token metering with task-type classification
 
-A background cron runs every minute and reports token usage (`hermes-report.sh`): it reads token deltas from `~/.hermes/state.db`, then ships one `revenium meter completion` per marker. Each completion carries `--task-type` and `--operation-type` drawn from the task taxonomy, and job-owning markers also receive `--agentic-job-id`. The idempotency ledger key is `HERMES:<session_id>:<total_tokens>` so re-running the cron never double-reports.
+A background cron runs every minute and executes six stages under one lock —
+`plugin-status.sh`, `hermes-report.sh`, `guardrail-check.sh`,
+`tool-event-report.sh`, `api-event-report.sh`, and `drain-status.sh`. The token
+reporter (`hermes-report.sh`): it reads token deltas from `~/.hermes/state.db`, then ships one `revenium meter completion` per marker. Each completion carries `--task-type` and `--operation-type` drawn from the task taxonomy, and job-owning markers also receive `--agentic-job-id`. Ledger lines are `HERMES:<session_id>:<total_tokens>:<unix_ts>:<muid>`, and a session is skipped when its `(sid, total_tokens)` pair is already present, so re-running the cron never double-reports.
 
-Task-type and agentic-job inference is performed by the deterministic `revenium-classifier` plugin (`skills/revenium/plugins/revenium-classifier/`) at `on_session_end`. It reads session data directly — it does not rely on the agent voluntarily classifying its own turns. Sessions with no markers fall back to `--task-type unclassified`.
+Task-type and agentic-job inference is performed by the deterministic `revenium-classifier` plugin (`skills/revenium/plugins/revenium-classifier/`). It reads session data directly — it does not rely on the agent voluntarily classifying its own turns. Sessions with no markers fall back to `--task-type unclassified`.
+
+The plugin registers **four** hooks, because no single one covers every session shape: `on_session_end`, `on_session_finalize`, `post_llm_call`, and `post_api_request`. `on_session_end` fires only from the session-expiry watcher, so gateway-served sessions would never be classified by it alone; `on_session_finalize` covers shutdown, expiry, and reset boundaries, and `post_llm_call` fires once per completed turn so an ordinary prompt produces a classified job on its **first** turn rather than waiting for a session boundary. A single guard (`_session_already_classified`) makes "exactly one classification per session" hold regardless of which hook fires first. `post_api_request` carries no classification concern at all — it is the event-metering seam described below.
+
+### Event-driven metering (the v1.5 path)
+
+Alongside the delta-based reporter above, a second path meters **each API call
+individually**. The `post_api_request` hook fires once per call and appends a
+compact record to a per-session spool — no network call, no LLM, no database
+read on that path — and the cron's `api-event-report.sh` stage ships each record
+as its own row, keyed on the provider's own `api_request_id`. Where
+`hermes-report.sh` reports a session's token *delta* and divides it across that
+session's markers, the event path reports what each call actually used.
+
+**Two switches control it, and the difference between them is the thing to get
+right:**
+
+| Variable | Default | Effect |
+|---|---|---|
+| `REVENIUM_EVENT_METERING_MODE` | `shadow` | `shadow` computes rows without shipping; `live` ships them. |
+| `REVENIUM_LEGACY_COMPLETIONS` | `enabled` | `enabled` keeps the delta reporter billing; `disabled` stands it down. |
+
+**Setting `MODE=live` alone does not cut over.** With legacy still enabled, which
+path bills a given session is decided by an ownership record, and the outcome
+depends on a race you cannot predict from the switches — see
+[`docs/event-metering.md`](docs/event-metering.md) for the mechanism and the
+evidence behind it. A real cutover requires `REVENIUM_LEGACY_COMPLETIONS=disabled`.
+
+Setting it fleet-wide is safe: profiles whose sessions have drained cut over
+immediately, and the rest keep billing through the legacy path until they drain,
+then cut over on their own. The `drain-status.sh` cron stage maintains that gate.
+A session's effective stale threshold is
+`max(REVENIUM_DRAIN_STALE_SECONDS, REVENIUM_CRON_SETTLE_SECONDS + 86400)`, and it
+sets the floor on how fast a profile can converge. **Check yours before planning
+a cutover — the default is not the fast case.** At the stock default
+(`REVENIUM_DRAIN_STALE_SECONDS=604800`) a quiet open session takes **seven days**
+to clear. Lowering it to `86400` puts the `settle + 86400` term on top, giving
+`87000` seconds ≈ **24.17 hours** — the figure quoted in
+[`docs/event-metering.md`](docs/event-metering.md), which reflects one fleet's
+tuned configuration rather than the default.
+
+Rollback is the reverse and is demonstrated, not assumed:
+[`docs/rollback-rehearsal.md`](docs/rollback-rehearsal.md).
 
 ### Agentic job tracking
 
@@ -298,8 +345,8 @@ The full halt/exceed contract — including the exact halt response string the a
 Run `/revenium` at any time inside a Hermes session to:
 
 - **View budget status** — current spend, threshold, percent used, halt state.
-- **Reset** — recreate the alert with the same settings (zeroes current spend).
-- **Reconfigure** — update API key, budget amount, or period (deletes the old alert and creates a new one).
+- **Reset** — recreate the budget rule with the same settings (zeroes current spend).
+- **Reconfigure** — update API key, budget amount, or period (deletes the old budget rule and creates a new one).
 
 ## Configuration
 
@@ -360,7 +407,7 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 # Remove the shell hooks
 bash ~/.hermes/skills/revenium/scripts/uninstall-hooks.sh
 
-# Install the revenium-classifier on_session_end plugin into ~/.hermes/plugins/
+# Install the revenium-classifier plugin into ~/.hermes/plugins/
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 
 # Diagnose whether the hooks are registered AND firing

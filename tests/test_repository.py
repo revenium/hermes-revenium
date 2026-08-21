@@ -166,6 +166,9 @@ class RepositoryTests(unittest.TestCase):
             # Phase 35 Plan 04 — rollback rehearsal verdict, committed so it survives
             # deletion of the gitignored planning tree (CUT-05, CUT-07)
             ROOT / 'docs' / 'rollback-rehearsal.md',
+            # Referenced by README.md's Revenium Labs callout; pinned so deleting it
+            # fails the suite instead of silently rendering a broken image on GitHub.
+            ROOT / 'assets' / 'revenium-labs.png',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -176,6 +179,56 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('metadata:', text)
         self.assertIn('hermes:', text)
         self.assertIn('category: devops', text)
+
+    def test_readme_documents_the_current_metering_surface(self):
+        """README must describe the surface operators actually run.
+
+        Added after v1.5 shipped with a README last touched the day before
+        event-driven metering landed: it documented classification as happening
+        at `on_session_end` (a hook that never fires for gateway-served
+        sessions, which is precisely why Phase 29 added the other three), and
+        made no mention of the event path, either switch, or the drain gate.
+        Nothing caught it — `test_expected_files_exist` pins README's existence,
+        not its contents.
+
+        This guard is deliberately narrow: it asserts the presence of the
+        identifiers an operator needs in order to run or debug the current
+        system, and one absence — the bare `on_session_end`-only claim. It does
+        not police prose. If a name below genuinely goes away, delete its line
+        here in the same commit that removes it.
+        """
+        text = (ROOT / 'README.md').read_text(errors='ignore')
+
+        required = [
+            # the two switches, and the fact that mode alone is not a cutover
+            'REVENIUM_EVENT_METERING_MODE',
+            'REVENIUM_LEGACY_COMPLETIONS',
+            # the cron stages that exist but predate no README mention
+            'api-event-report',
+            'drain-status',
+            # the hooks that actually carry classification
+            'on_session_finalize',
+            'post_llm_call',
+            'post_api_request',
+            # the evidence docs a reader is pointed at
+            'docs/event-metering.md',
+        ]
+        missing = [name for name in required if name not in text]
+        self.assertEqual(
+            [], missing,
+            'README.md no longer documents part of the metering surface: '
+            + ', '.join(missing),
+        )
+
+        # The specific wrong claim this guard exists to prevent recurring:
+        # attributing classification to on_session_end alone. Mentioning the
+        # hook is fine (it is one of four); calling it *the* classifier is not.
+        for wrong in ('on_session_end classifier', 'plugin at `on_session_end`'):
+            self.assertNotIn(
+                wrong, text,
+                'README.md attributes classification to on_session_end alone; '
+                'it is one of four hooks and does not fire for gateway sessions',
+            )
 
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
