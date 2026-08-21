@@ -302,9 +302,15 @@ evidence behind it. A real cutover requires `REVENIUM_LEGACY_COMPLETIONS=disable
 Setting it fleet-wide is safe: profiles whose sessions have drained cut over
 immediately, and the rest keep billing through the legacy path until they drain,
 then cut over on their own. The `drain-status.sh` cron stage maintains that gate.
-A session's stale-threshold floor is `settle + 86400` seconds, which on the
-default configuration means a quiet open session can take roughly 24 hours to
-clear — that floor sets how fast a profile can converge.
+A session's effective stale threshold is
+`max(REVENIUM_DRAIN_STALE_SECONDS, REVENIUM_CRON_SETTLE_SECONDS + 86400)`, and it
+sets the floor on how fast a profile can converge. **Check yours before planning
+a cutover — the default is not the fast case.** At the stock default
+(`REVENIUM_DRAIN_STALE_SECONDS=604800`) a quiet open session takes **seven days**
+to clear. Lowering it to `86400` puts the `settle + 86400` term on top, giving
+`87000` seconds ≈ **24.17 hours** — the figure quoted in
+[`docs/event-metering.md`](docs/event-metering.md), which reflects one fleet's
+tuned configuration rather than the default.
 
 Rollback is the reverse and is demonstrated, not assumed:
 [`docs/rollback-rehearsal.md`](docs/rollback-rehearsal.md).
