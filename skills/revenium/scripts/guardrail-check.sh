@@ -176,6 +176,7 @@ except Exception:
 # that do NOT match config.json::ruleIds (string hashes). The only stable join key
 # between the two is the rule `name` field.
 name_to_string_id = {}
+ambiguous_names = set()
 try:
     br_data = json.loads(budget_rules_json)
     # budget-rules list returns a JSON array; each entry has {id: "<string-hash>", name: "..."}
@@ -183,10 +184,25 @@ try:
         for br in br_data:
             n = br.get('name')
             sid = br.get('id')   # string-hash ID, e.g. "d5jng5"
-            if n and sid:
+            if not (n and sid):
+                continue
+            # Two DIFFERENT rules can share a name — setup-guardrails names rules
+            # after the host, so every profile on one machine mints the same
+            # "Hermes <Period> Budget — <host>". Last-write-wins here silently
+            # mapped both rules onto ONE id, so a profile's status file reported
+            # another profile's currentValue under its own ruleId. Observed live:
+            # two entries, same ruleId, currentValue 7.63 and 296.94 — the second
+            # profile's number wearing the first profile's identity.
+            if n in name_to_string_id and name_to_string_id[n] != sid:
+                ambiguous_names.add(n)
+            else:
                 name_to_string_id[n] = sid
 except Exception:
     pass
+# An ambiguous name resolves to nothing: guessing between two real rules is
+# worse than falling back to the API's own id.
+for n in ambiguous_names:
+    name_to_string_id.pop(n, None)
 
 # Build per-rule state list (ENF-04 schema)
 # state derivation: breached -> 'block', warnBreached -> 'warn', else 'ok'
@@ -229,6 +245,35 @@ for r in api_rules:
         'windowKey': r.get('windowKey', ''),
         'lastChecked': now,
     })
+
+# Scope the status file to the rules THIS install is configured to enforce.
+# enforcement-rules returns every rule on the team, and nothing filtered them,
+# so each profile's guardrail-status.json accumulated every other profile's
+# rules too — which meant another profile's breach could halt this agent.
+if rule_ids_order:
+    configured = set(rule_ids_order)
+    scoped = [r for r in new_rules if r.get('ruleId') in configured]
+    # Fail-open: if the name join degraded to API integer ids, NOTHING matches
+    # the configured string hashes and scoping would silently empty the rule
+    # list — i.e. disable enforcement. Keep the unscoped list in that case;
+    # over-reporting is recoverable, silently dropping all guardrails is not.
+    if scoped or not new_rules:
+        new_rules = scoped
+    else:
+        print('WARN_SCOPE_FELL_OPEN=1')
+
+# Last-resort de-dup: one entry per ruleId. Anything still colliding here is a
+# join the code above could not disambiguate; keep the most severe state so the
+# fallback errs toward enforcing rather than toward ignoring a breach.
+_severity = {'block': 2, 'warn': 1, 'ok': 0}
+_by_id = {}
+for r in new_rules:
+    prev_r = _by_id.get(r['ruleId'])
+    if prev_r is None or _severity.get(r['state'], 0) > _severity.get(prev_r['state'], 0):
+        _by_id[r['ruleId']] = r
+if len(_by_id) != len(new_rules):
+    print('WARN_DUPLICATE_RULE_IDS=1')
+    new_rules = [r for r in new_rules if r is _by_id.get(r['ruleId'])]
 
 # Load previous state (fail-open)
 prev = {}

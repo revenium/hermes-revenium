@@ -696,11 +696,29 @@ short_host() {
   printf 'unknown'
 }
 
+# The rule NAME is the only stable join key guardrail-check.sh has between the
+# enforcement-rules payload (integer ids) and budget-rules list (string hashes),
+# so two rules sharing a name are not cosmetic — they collapse onto one id and a
+# profile ends up reporting another profile's spend under its own ruleId.
+# The host alone is not unique on a multi-profile machine: every profile minted
+# "Hermes Daily Budget — <host>". Qualify with the agent whenever this install
+# is scoped to one, which is exactly what makes the names distinct per profile
+# (REVENIUM_AGENT_NAME is Hermes-<profile> for a profile install).
 budget_label() {
   if [[ -n "${REVENIUM_BUDGET_LABEL:-}" ]]; then
     printf '%s' "${REVENIUM_BUDGET_LABEL}"
+    return
+  fi
+  local host agent
+  host="$(short_host)"
+  agent="${REVENIUM_AGENT_NAME:-}"
+  # Bare "Hermes" is the default-profile identity and adds nothing to the host
+  # name; keep those names byte-identical to what pre-existing installs already
+  # created, so a re-run adopts the existing rule instead of minting a twin.
+  if [[ -n "${agent}" && "${agent}" != "Hermes" ]]; then
+    printf '%s/%s' "${host}" "${agent}"
   else
-    short_host
+    printf '%s' "${host}"
   fi
 }
 
