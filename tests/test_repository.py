@@ -110,6 +110,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'guardrail-check.sh',
             # Phase 28 — plugin-registration health check (D-01, D-06)
             SKILL / 'scripts' / 'plugin-status.sh',
+            SKILL / 'scripts' / 'diagnose.sh',      # read-only end-to-end metering triage
             # Phase 28 — cron-side markers-directory resolver sidecar (TRACE-03),
             # generalized in Phase 32 (EVT-03) to resolve any per-session state
             # subdirectory (markers, api-events) through one code path.
@@ -441,6 +442,152 @@ esac
                                  f'{label} must never prompt for credentials')
                 self.assertIn('already configured', r.stdout,
                               f'{label} should report values as already configured')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_diagnose_sh_reports_every_section_and_redacts_the_key(self):
+        """diagnose.sh runs end to end against a broken install and still reports.
+
+        Three properties matter, and each has burned someone:
+
+        1. It never leaks the API key. The output is meant to be pasted into an
+           issue or a chat, so a `config show` line reaching stdout unmasked
+           would publish a live credential.
+        2. It prints EVERY section even when stages are broken. The script runs
+           without `-e` on purpose: the install being diagnosed is by definition
+           broken, and a report that stops at the first failure is the report
+           nobody can act on. This drives it against a sandbox with no cron, no
+           log, no ledgers and no state.db — the worst case — and requires all
+           nine headers anyway.
+        3. It stays read-only without --tick. A diagnostic that mutates the
+           state it is diagnosing destroys the evidence.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        stub = """#!/usr/bin/env bash
+if [ "$1 $2" = "config show" ]; then
+  echo "API Key:    sk-SUPERSECRET-DO-NOT-LEAK"
+  echo "API URL:    https://api.dev.example.invalid/profitstream"
+  echo "Team ID:    TEAM1"
+  echo "Analytics API URL: https://analytics.example.invalid"
+fi
+exit 0
+"""
+        tmp = tempfile.mkdtemp(prefix='gsd-diagnose-')
+        try:
+            home = os.path.join(tmp, 'home')
+            bindir = os.path.join(home, '.local', 'bin')
+            hermes_home = os.path.join(home, '.hermes')
+            scripts = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(bindir)
+            shutil.copytree(SKILL / 'scripts', scripts)
+
+            stub_path = os.path.join(bindir, 'revenium')
+            with open(stub_path, 'w') as fh:
+                fh.write(stub)
+            os.chmod(stub_path, 0o755)
+
+            state = os.path.join(hermes_home, 'state', 'revenium')
+            env = {
+                'HOME': home,
+                'PATH': f'{bindir}:/usr/bin:/bin:/usr/sbin:/sbin',
+                'HERMES_HOME': hermes_home,
+                'HERMES_DEFAULT_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state,
+            }
+            r = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh')],
+                env=env, capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(r.returncode, 0,
+                             f'diagnose.sh must always exit 0 — it is a report, '
+                             f'not a gate.\nstderr={r.stderr}')
+            self.assertNotIn(
+                'SUPERSECRET', r.stdout + r.stderr,
+                'diagnose.sh leaked the API key — its output is meant to be pasted '
+                'into issues and chat, so the config-show line must stay redacted',
+            )
+            for n, title in (
+                (0, 'WHICH ENVIRONMENT'), (1, 'CRON REGISTERED'), (2, 'CRON LOG'),
+                (3, 'LEDGERS'), (4, 'ANYTHING TO METER'), (5, 'SETTLE GATE'),
+                (6, 'PLUGIN + HOOKS'), (7, 'CONFIG'), (8, 'PROFILES'),
+            ):
+                self.assertIn(
+                    f'{n}. ', r.stdout,
+                    f'section {n} ({title}) missing — diagnose.sh runs without -e so '
+                    f'that a broken stage never truncates the rest of the report.\n'
+                    f'stdout={r.stdout}',
+                )
+            self.assertIn('===== done =====', r.stdout,
+                          'the report must reach its own end marker')
+
+            # Read-only without --tick: no ledger, no log, no shipped data.
+            for artifact in ('revenium-hermes.ledger', 'revenium-metering.log'):
+                self.assertFalse(
+                    os.path.exists(os.path.join(state, artifact)),
+                    f'diagnose.sh created {artifact} — a diagnostic must not mutate '
+                    'the state it is diagnosing',
+                )
+
+            # --help exits 0 without touching anything; a bad flag exits 2.
+            h = subprocess.run(['bash', os.path.join(scripts, 'diagnose.sh'), '--help'],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(h.returncode, 0, h.stderr)
+            self.assertIn('--tick', h.stdout)
+            b = subprocess.run(['bash', os.path.join(scripts, 'diagnose.sh'), '--bogus'],
+                               env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(b.returncode, 2, 'an unknown flag must exit 2')
+
+            # Greptile P1 #1 on PR #75: sourcing common.sh eagerly mkdir -p's the
+            # state tree, so a naive report both CREATES state on a never-installed
+            # host and loses the "this never existed" signal — which is a different
+            # diagnosis from "exists but empty". The counts must come from a
+            # pre-source probe and say so.
+            self.assertIn(
+                'did not exist before this run', r.stdout,
+                'on a host with no state tree, diagnose.sh must report that the '
+                'tree was absent — common.sh creates it at source time, so an '
+                'unqualified "0 markers" reads as installed-and-idle',
+            )
+            self.assertIn('marker files:   (absent)', r.stdout,
+                          'marker counts must come from the pre-source probe, not '
+                          'from the directories common.sh just created')
+
+            # Greptile P1 #3: "default" is the name section 8 prints for the base
+            # home, but the default profile does NOT live at profiles/default.
+            d = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh'), '--profile', 'default'],
+                env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(d.returncode, 0, d.stderr)
+            self.assertIn(f'HERMES_HOME = {hermes_home}\n', d.stdout,
+                          '--profile default must resolve to the base home, not '
+                          'profiles/default, which does not exist')
+            n = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh'), '--profile', 'nope'],
+                env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(n.returncode, 2,
+                             'an unknown profile must fail loudly — an all-absent '
+                             'report for an invented tree reads as a broken install')
+            self.assertIn('Known profiles:', n.stderr)
+
+            # Greptile P1 #2: plugin-status.sh REWRITES plugin-status.json, which
+            # is itself evidence the cron maintains and hermes-report.sh reads.
+            status_file = os.path.join(state, 'plugin-status.json')
+            os.makedirs(state, exist_ok=True)
+            with open(status_file, 'w') as fh:
+                fh.write('{"sentinel":"written-by-the-cron"}')
+            subprocess.run(['bash', os.path.join(scripts, 'diagnose.sh')],
+                           env=env, capture_output=True, text=True, timeout=120)
+            with open(status_file) as fh:
+                self.assertIn(
+                    'written-by-the-cron', fh.read(),
+                    'diagnose.sh overwrote plugin-status.json — the live status '
+                    'file is evidence, so the child must be redirected to scratch',
+                )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

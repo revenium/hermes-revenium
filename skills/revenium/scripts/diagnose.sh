@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+set -uo pipefail
+# diagnose.sh — read-only triage for "the skill installed but no traffic reaches
+# Revenium". Prints one report covering every stage of the pipeline, ordered by
+# how often each stage is the actual cause.
+#
+# No -e: a broken stage must still print its own error and let the REST of the
+# report run. A report that stops at section 2 is exactly the report nobody can
+# act on.
+#
+# Read-only by default: it changes nothing and ships nothing unless --tick is
+# passed. It never prints the API key — `revenium config show` masks it and the
+# line is redacted again here, so the output is safe to paste into an issue.
+#
+# Usage:
+#   bash diagnose.sh                # read-only report
+#   bash diagnose.sh --tick         # ALSO run one real cron tick (SHIPS data)
+#   bash diagnose.sh --profile qa   # inspect the 'qa' profile home instead
+#
+# Exit is always 0 — this is a report, not a gate. The findings are in the text.
+
+TICK="false"
+PROFILE=""
+usage() { sed -n '3,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+# Args are parsed BEFORE common.sh is sourced: common.sh resolves every state
+# path from HERMES_HOME at source time, so --profile has to redirect it first.
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tick) TICK="true"; shift ;;
+    --profile) PROFILE="${2:?--profile requires a name}"; shift 2 ;;
+    --profile=*) PROFILE="${1#--profile=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "ERROR: unknown flag: $1 (try --help)" >&2; exit 2 ;;
+  esac
+done
+
+_BASE_HOME="${HERMES_DEFAULT_HOME:-${HOME}/.hermes}"
+if [[ -n "${PROFILE}" ]]; then
+  # "default" is the name section 8 prints for the base home, so an operator
+  # copying a name out of that table will type it. The default profile does NOT
+  # live at profiles/default — hermes_profile_homes emits the base home under
+  # that label — so mapping it there would report an invented, all-absent tree
+  # and read as a broken install.
+  if [[ "${PROFILE}" == "default" ]]; then
+    export HERMES_HOME="${_BASE_HOME}"
+  else
+    export HERMES_HOME="${_BASE_HOME}/profiles/${PROFILE}"
+    if [[ ! -d "${HERMES_HOME}" ]]; then
+      echo "ERROR: no profile '${PROFILE}' at ${HERMES_HOME}" >&2
+      echo "Known profiles:" >&2
+      echo "  default" >&2
+      if [[ -d "${_BASE_HOME}/profiles" ]]; then
+        for _d in "${_BASE_HOME}/profiles"/*/; do
+          [[ -d "${_d}" ]] && echo "  $(basename "${_d}")" >&2
+        done
+      fi
+      # Exiting non-zero here rather than reporting on a directory that does not
+      # exist: an all-absent report for an invented tree is worse than no report.
+      exit 2
+    fi
+  fi
+  # Let common.sh re-derive STATE_DIR under the new home rather than inheriting
+  # an ambient one that points at the default profile.
+  unset REVENIUM_STATE_DIR
+fi
+
+hr()    { echo ""; echo "===== $* ====="; }
+# "(absent)" rather than 0 — a missing file and an empty one mean different
+# things here (never ran vs ran and found nothing).
+count() { [[ -e "$1" ]] && { ls -1 "$1" 2>/dev/null | wc -l | tr -d ' '; } || echo "(absent)"; }
+lines() { [[ -f "$1" ]] && { wc -l < "$1" | tr -d ' '; } || echo "(absent)"; }
+mtime() { [[ -e "$1" ]] && { date -r "$1" 2>/dev/null || echo "(unknown)"; } || echo "(absent)"; }
+
+# Probe the state tree BEFORE sourcing common.sh, which eagerly `mkdir -p`s
+# STATE_DIR, markers/, markers/.ready/ and tool-events/ at source time. After
+# that runs, "this directory does not exist" is no longer observable — and it is
+# a materially different diagnosis from "exists but empty" (never installed vs
+# installed and idle). Sourcing would also CREATE the tree on a host that never
+# had one, which is both a read-only violation and the destruction of the single
+# clearest piece of evidence.
+#
+# This is the one place a state path is recomputed outside common.sh. The
+# duplication is deliberate: observing the tree pre-source is impossible any
+# other way. Keep the expression in sync with common.sh's STATE_DIR default.
+_probe_state="${REVENIUM_STATE_DIR:-${HERMES_HOME:-${HOME}/.hermes}/state/revenium}"
+PRE_STATE_EXISTED="true"; [[ -d "${_probe_state}" ]] || PRE_STATE_EXISTED="false"
+PRE_MARKERS="$(count "${_probe_state}/markers")"
+PRE_READY="$(count "${_probe_state}/markers/.ready")"
+PRE_TOOL_EVENTS="$(count "${_probe_state}/tool-events")"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/common.sh"
+
+ensure_path
+
+echo "revenium diagnose  $(date -u +%Y-%m-%dT%H:%M:%SZ)  host=$(hostname -s 2>/dev/null)"
+echo "HERMES_HOME = ${HERMES_HOME}"
+echo "STATE_DIR   = ${STATE_DIR}"
+[[ -n "${PROFILE}" ]] && echo "PROFILE     = ${PROFILE}"
+
+# ---------------------------------------------------------------------------
+hr "0. WHICH ENVIRONMENT IS THIS METERING INTO"
+# The most common silent cause. An api-url on a dev host while the operator
+# watches the prod dashboard makes every other section below look perfectly
+# healthy while the data lands somewhere they are not looking.
+if command -v revenium >/dev/null 2>&1; then
+  revenium config show 2>&1 | sed -E 's/(Key:[[:space:]]*).*/\1<redacted>/'
+  echo ""
+  echo "NOTE: compare 'API URL' against the environment whose dashboard you are"
+  echo "      watching. A dev api-url meters successfully into the wrong tenant."
+else
+  echo "!! revenium CLI not on PATH — nothing can ship."
+  echo "   Fix: brew install revenium/tap/revenium"
+fi
+
+# ---------------------------------------------------------------------------
+hr "1. CRON REGISTERED"
+if crontab -l 2>/dev/null | grep hermes-revenium-metering; then
+  :
+else
+  echo "!! NO metering cron line — nothing ever ships on its own."
+  echo "   Fix: bash ${SKILL_DIR}/scripts/install-cron.sh"
+fi
+
+# ---------------------------------------------------------------------------
+hr "2. CRON LOG"
+if [[ -f "${LOG_FILE}" ]]; then
+  echo "(last modified: $(mtime "${LOG_FILE}"))"
+  echo "--- last 40 lines ---"
+  tail -40 "${LOG_FILE}"
+else
+  echo "!! no log at ${LOG_FILE} — the cron has never run."
+fi
+
+# ---------------------------------------------------------------------------
+hr "3. LEDGERS (what has already shipped)"
+printf '%-30s %s lines\n' "revenium-hermes.ledger"      "$(lines "${LEDGER_FILE}")"
+printf '%-30s %s lines\n' "revenium-jobs.ledger"        "$(lines "${JOBS_LEDGER_FILE}")"
+printf '%-30s %s lines\n' "revenium-tool-events.ledger" "$(lines "${TOOL_EVENTS_LEDGER_FILE}")"
+echo "--- last 3 completion ledger lines ---"
+tail -3 "${LEDGER_FILE}" 2>/dev/null || echo "(none)"
+
+# ---------------------------------------------------------------------------
+hr "4. IS THERE ANYTHING TO METER"
+# Mirrors hermes-report.sh's own predicate. There is no total_tokens column;
+# the reporter selects on input_tokens/output_tokens and ships DELTAS, so a
+# session already at its last-reported total is skipped by design, not by fault.
+if [[ -f "${STATE_DB}" ]]; then
+  printf 'sessions with tokens: '
+  sqlite3 "${STATE_DB}" \
+    "SELECT COUNT(*) FROM sessions WHERE input_tokens > 0 OR output_tokens > 0;" 2>&1
+  echo "--- 8 most recent ---"
+  sqlite3 -header -column "${STATE_DB}" \
+    "SELECT substr(id,1,26) AS sid, input_tokens AS in_tok, output_tokens AS out_tok,
+            datetime(started_at,'unixepoch') AS started
+     FROM sessions
+     WHERE input_tokens > 0 OR output_tokens > 0
+     ORDER BY started_at DESC LIMIT 8;" 2>&1
+else
+  echo "!! no state.db at ${STATE_DB} — Hermes has not run here."
+fi
+
+# ---------------------------------------------------------------------------
+hr "5. CLASSIFIER SETTLE GATE"
+# A session with no .ready sentinel is deferred for the whole settle window
+# before it is metered at all. Sentinels never appearing at all means the
+# plugin is not loaded — usually the gateway was never restarted after install.
+# Counts are the PRE-SOURCE snapshot — see the probe above.
+echo "marker files:   ${PRE_MARKERS}"
+echo ".ready files:   ${PRE_READY}"
+echo "tool-events:    ${PRE_TOOL_EVENTS}"
+echo "settle seconds: ${REVENIUM_CRON_SETTLE_SECONDS}"
+echo ""
+if [[ "${PRE_STATE_EXISTED}" == "false" ]]; then
+  echo "!! ${STATE_DIR} did not exist before this run."
+  echo "   Nothing has ever written state here — the skill has not run on this host."
+  echo "   (The directories exist now only because loading common.sh creates them.)"
+  echo ""
+fi
+echo "NOTE: a session with no .ready sentinel waits out the full settle window."
+echo "      Zero .ready files ever = the classifier plugin is not loaded."
+
+# ---------------------------------------------------------------------------
+hr "6. PLUGIN + HOOKS"
+# REVENIUM_LOG_FILE=/dev/null on both children: they use the shared log
+# helpers, and a diagnostic must not interleave its own lines into the metering
+# log that section 2 above is displaying.
+if [[ -f "${SKILL_DIR}/scripts/plugin-status.sh" ]]; then
+  # plugin-status.sh REWRITES plugin-status.json (and takes a .lock beside it).
+  # That file is itself evidence — the cron maintains it, and hermes-report.sh
+  # reads it to tell a registration outage apart from a genuinely unclassified
+  # session. Redirecting it to a scratch path keeps the live one intact while
+  # still running the real check. Redirecting the file moves its lock too.
+  _ps_tmp="$(mktemp -t revenium-plugin-status.XXXXXX 2>/dev/null || echo /dev/null)"
+  REVENIUM_LOG_FILE=/dev/null REVENIUM_PLUGIN_STATUS_FILE="${_ps_tmp}" \
+    bash "${SKILL_DIR}/scripts/plugin-status.sh" 2>&1 | head -25
+  [[ "${_ps_tmp}" != "/dev/null" ]] && rm -f "${_ps_tmp}" "${_ps_tmp}.lock"
+  echo "--- stored plugin-status.json (written by the cron, not by this run) ---"
+  cat "${PLUGIN_STATUS_FILE}" 2>/dev/null || echo "(absent — the cron has not run a health check yet)"
+else
+  echo "(plugin-status.sh absent — stale skill tree; re-run references/bootstrap.sh)"
+fi
+echo ""
+if [[ -f "${SKILL_DIR}/scripts/hooks-status.sh" ]]; then
+  REVENIUM_LOG_FILE=/dev/null bash "${SKILL_DIR}/scripts/hooks-status.sh" 2>&1 | head -25
+else
+  echo "(hooks-status.sh absent — stale skill tree; re-run references/bootstrap.sh)"
+fi
+echo ""
+echo "NOTE: unapproved hooks cost you tool-events only, never completions."
+
+# ---------------------------------------------------------------------------
+hr "7. CONFIG + GUARDRAIL STATUS"
+echo "--- config.json ---"
+cat "${CONFIG_FILE}" 2>/dev/null || echo "!! missing — setup-guardrails.sh has not run"
+echo "--- guardrail-status.json ---"
+cat "${GUARDRAIL_STATUS_FILE}" 2>/dev/null || echo "(absent — cron has not evaluated rules yet)"
+
+# ---------------------------------------------------------------------------
+hr "8. PROFILES ON THIS HOST"
+# A single-profile view hides a fleet where only some profiles went stale.
+while IFS=$'\t' read -r pname phome; do
+  [[ -z "${pname}" ]] && continue
+  pstate="${phome}/state/revenium"
+  printf '%-16s ledger=%-10s log=%s\n' \
+    "${pname}" \
+    "$(lines "${pstate}/revenium-hermes.ledger")" \
+    "$(mtime "${pstate}/revenium-metering.log")"
+done < <(hermes_profile_homes)
+echo ""
+echo "(re-run with --profile <name> to inspect one of these in full)"
+
+# ---------------------------------------------------------------------------
+if [[ "${TICK}" == "true" ]]; then
+  hr "9. ONE REAL CRON TICK — THIS SHIPS DATA"
+  bash "${SKILL_DIR}/scripts/cron.sh" 2>&1 | tail -40
+  echo "--- log after the tick ---"
+  tail -25 "${LOG_FILE}" 2>/dev/null || echo "(no log)"
+fi
+
+echo ""
+echo "===== done ====="
+exit 0

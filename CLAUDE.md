@@ -38,6 +38,7 @@ bash ~/.hermes/skills/revenium/scripts/install-plugin.sh    # classifier plugin 
 bash ~/.hermes/skills/revenium/scripts/install-hooks.sh     # register the three shell hooks in config.yaml
 bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive  # create the budget rules
 bash ~/.hermes/skills/revenium/scripts/install-cron.sh      # per-minute crontab line
+bash ~/.hermes/skills/revenium/scripts/diagnose.sh          # read-only end-to-end metering triage (--tick, --profile)
 bash ~/.hermes/skills/revenium/scripts/plugin-status.sh     # is the classifier registered and current?
 bash ~/.hermes/skills/revenium/scripts/hooks-status.sh      # are the hooks registered and live?
 bash ~/.hermes/skills/revenium/scripts/uninstall-hooks.sh

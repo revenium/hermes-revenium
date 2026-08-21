@@ -36,7 +36,22 @@ bash ~/.hermes/skills/revenium/scripts/clear-halt.sh
 
 ## No data appearing in Revenium
 
-Check the Hermes reporter log:
+Start here — one read-only report covering every stage of the pipeline, ordered
+by how often each stage is the actual cause:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/diagnose.sh
+```
+
+It changes nothing and ships nothing unless you add `--tick` (which runs one
+real cron tick). It never prints the API key, so the output is safe to paste
+into an issue. Add `--profile <name>` to inspect one profile home of a fleet.
+
+The section to read first is **0. WHICH ENVIRONMENT**: an `api-url` pointing at
+one environment while you watch another environment's dashboard makes every
+other stage look healthy while the data lands where you are not looking.
+
+For the raw log on its own:
 
 ```bash
 tail -f ~/.hermes/state/revenium/revenium-metering.log
