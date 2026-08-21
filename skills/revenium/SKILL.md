@@ -117,6 +117,8 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium \
      && bash /tmp/hermes-revenium/install.sh
    ```
+   If `scripts/` is already present the bootstrap skips the fetch — pass `--update` to re-pull the latest over an existing install (host-only scripts are preserved).
+
    `install.sh` runs the whole setup below for you (credentials, plugin, hooks, guardrails, cron, restart). For a fleet of profiles, add `--all-profiles` (or `--profile <name>`). The manual steps below are the equivalent if you prefer to run them one at a time.
 
 1. **Verify the Revenium CLI is configured.** Run:
