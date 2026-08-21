@@ -49,7 +49,7 @@ Every metered completion carries a meaningful `--task-type` drawn from a control
 
    > **Why the bootstrap?** `hermes skills install` does not ship a skill's whole directory. It ships `SKILL.md` plus only the support files `SKILL.md` names as bundle-relative paths, and only from an allowlist of directories — `references/`, `scripts/`, `templates/`, `assets/`, `examples/`. `plugins/` is not on that allowlist at all, so the classifier plugin can never arrive this way. `references/bootstrap.sh` is on the manifest, and it clones the repo, drops `scripts/` + `plugins/` into `~/.hermes/skills/revenium/`, and hands off to `scripts/install.sh`. If `references/bootstrap.sh` didn't come down either, clone and install directly instead: `git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium && bash /tmp/hermes-revenium/install.sh`.
 
-   The bootstrap then completes setup: verifies your four Revenium credentials (**API key, team-id, tenant-id, owner-id**, prompting for any that are missing), installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rule, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run.
+   The bootstrap then completes setup: walks your `revenium` CLI config (**api-url, API key, team-id, tenant-id, owner-id**), showing each current value as the default so you can confirm or correct it, installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rule, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run.
 
    Flags pass straight through to `install.sh`:
    - `--hard-limit 50 --period MONTHLY` — set the budget non-interactively (otherwise you're prompted).
@@ -183,7 +183,7 @@ If you'd rather run the steps yourself (or need to customize one), the individua
 
 ### Credentials (all four required)
 
-`install.sh` verifies that **API key, Team ID, Tenant ID, and Owner ID** are all configured, prompting for any that are missing and persisting them with `revenium config set`. This matters: a config with only an API key meters completions fine but fails every `guardrails`/`jobs create` with `HTTP 400: teamId is required` — the API key alone is not enough. To set them manually:
+`install.sh` walks the whole `revenium` CLI config — **API URL, API key, Team ID, Tenant ID, and Owner ID** — on every interactive run, showing each current value in brackets as the default. Enter keeps it; typing replaces it; the result is persisted with `revenium config set`. Confirming rather than silently skipping is deliberate: an API URL left pointing at the wrong environment is invisible otherwise, and only shows up later as an opaque `HTTP 403` on guardrail-rule creation. All four ids matter: a config with only an API key meters completions fine but fails every `guardrails`/`jobs create` with `HTTP 400: teamId is required` — the API key alone is not enough. To set them manually:
 
 ```bash
 revenium config show                         # check what's configured

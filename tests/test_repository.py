@@ -303,6 +303,147 @@ class RepositoryTests(unittest.TestCase):
                 'so `hermes skills install` would fail with no skill installed at all',
             )
 
+    def test_install_sh_always_confirms_revenium_cli_config(self):
+        """install.sh re-prompts for every `revenium` CLI field on each interactive run,
+        offering the current value as the default.
+
+        The regression: `ensure_cred` used to short-circuit on "already configured"
+        unless --reconfigure was passed. An operator who had configured the CLI at
+        some point in the past never saw those values again, so a stale `api-url`
+        (e.g. a dev host) survived every subsequent install untouched and only
+        surfaced much later as an opaque HTTP 403 on guardrail-rule creation — a
+        failure with no visible connection to its cause.
+
+        Pins five behaviours:
+          1. interactive + already configured -> prompts, shows the CURRENT value,
+             and a bare Enter keeps it (nothing rewritten)
+          2. the api-url is among the confirmed fields, and is read from the
+             "API URL" line rather than the "Analytics API URL" line below it
+          3. a typed answer replaces the stored value
+          4. --non-interactive still never prompts
+          5. a fleet child (REVENIUM_FLEET_CHILD=1) never prompts — credentials are
+             global to the CLI, so N profiles must not mean N identical prompts
+
+        The `revenium` stub goes in $HOME/.local/bin because `ensure_path` prepends
+        that directory LAST, making it the highest-precedence PATH entry. Anywhere
+        else and the host's real brew-installed `revenium` shadows the stub and the
+        test would drive the live API.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        stub = r"""#!/usr/bin/env bash
+CFG="${HOME}/.stubcfg"
+touch "$CFG"
+get() { grep "^$1=" "$CFG" 2>/dev/null | tail -1 | cut -d= -f2-; }
+case "$1 $2" in
+  "config show")
+    echo "API Key:    $( [ -n "$(get key)" ] && echo '****abcd' || echo '(not set)')"
+    echo "API URL:    $( [ -n "$(get api-url)" ] && get api-url || echo '(not set)')"
+    echo "Team ID:    $( [ -n "$(get team-id)" ] && get team-id || echo '(not set)')"
+    echo "Tenant ID:  $( [ -n "$(get tenant-id)" ] && get tenant-id || echo '(not set)')"
+    echo "Owner ID:   $( [ -n "$(get owner-id)" ] && get owner-id || echo '(not set)')"
+    echo "Analytics API URL: https://analytics.example.invalid"
+    ;;
+  "config set") echo "$3=$4" >> "$CFG" ;;
+  *) exit 0 ;;
+esac
+"""
+        # A dev-pointing api-url is the exact shape of the bug this guards.
+        seed = ('key=REAL\n'
+                'api-url=https://api.dev.example.invalid/profitstream\n'
+                'team-id=TEAM_OLD\ntenant-id=TEN_OLD\nowner-id=OWN_OLD\n')
+
+        tmp = tempfile.mkdtemp(prefix='gsd-install-creds-')
+        try:
+            home = os.path.join(tmp, 'home')
+            bindir = os.path.join(home, '.local', 'bin')
+            hermes_home = os.path.join(home, '.hermes')
+            skill_dst = os.path.join(hermes_home, 'skills', 'revenium')
+            os.makedirs(bindir)
+            shutil.copytree(SKILL / 'scripts', os.path.join(skill_dst, 'scripts'))
+            shutil.copytree(SKILL / 'plugins', os.path.join(skill_dst, 'plugins'))
+            for seed_file in ('task-taxonomy.json', 'job-taxonomy.json'):
+                shutil.copy(SKILL / seed_file, skill_dst)
+
+            stub_path = os.path.join(bindir, 'revenium')
+            with open(stub_path, 'w') as fh:
+                fh.write(stub)
+            os.chmod(stub_path, 0o755)
+
+            cfg = os.path.join(home, '.stubcfg')
+
+            def read_cfg():
+                with open(cfg) as fh:
+                    return fh.read()
+            installer = os.path.join(skill_dst, 'scripts', 'install.sh')
+
+            def run(stdin, extra_env=None, flags=()):
+                with open(cfg, 'w') as fh:
+                    fh.write(seed)
+                env = {
+                    'HOME': home,
+                    'PATH': f'{bindir}:/usr/bin:/bin:/usr/sbin:/sbin',
+                    'HERMES_HOME': hermes_home,
+                    'REVENIUM_STATE_DIR': os.path.join(hermes_home, 'state', 'revenium'),
+                }
+                env.update(extra_env or {})
+                return subprocess.run(
+                    ['bash', installer, '--skip-guardrails', '--skip-cron',
+                     '--no-restart', *flags],
+                    env=env, input=stdin, capture_output=True, text=True, timeout=120,
+                )
+
+            # --- 1 + 2: interactive, all set -> prompts and shows current values ---
+            r = run('\n\n\n\n\n')
+            self.assertEqual(r.returncode, 0, f'stdout={r.stdout}\nstderr={r.stderr}')
+            for label, value in (
+                ('API URL', 'https://api.dev.example.invalid/profitstream'),
+                ('API Key', '****abcd'),
+                ('Team ID', 'TEAM_OLD'),
+                ('Tenant ID', 'TEN_OLD'),
+                ('Owner ID', 'OWN_OLD'),
+            ):
+                self.assertIn(
+                    f'{label} kept ({value})', r.stdout,
+                    f'install.sh must show the current {label} and keep it on a bare '
+                    f'Enter — silently skipping it is what hid a stale api-url.\n'
+                    f'stdout={r.stdout}',
+                )
+            self.assertNotIn(
+                'analytics.example.invalid', r.stdout,
+                'the "API URL" lookup matched the "Analytics API URL" line — the '
+                'config-show matcher must be anchored at line start',
+            )
+            # A bare Enter must not rewrite anything.
+            self.assertEqual(read_cfg(), seed,
+                             'keeping a value must not re-persist it')
+
+            # --- 3: a typed answer replaces the stored value ---
+            r = run('https://api.prod.example.invalid/profitstream\n\n\n\n\n')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn('API URL set', r.stdout)
+            self.assertIn('api-url=https://api.prod.example.invalid/profitstream',
+                          read_cfg())
+
+            # --- 4 + 5: neither --non-interactive nor a fleet child may prompt ---
+            for label, kwargs in (
+                ('--non-interactive', {'flags': ('--non-interactive',)}),
+                ('fleet child', {'extra_env': {'REVENIUM_FLEET_CHILD': '1'}}),
+            ):
+                # Stdin carries a value that must never be consumed: if either path
+                # prompts, it lands in the config and the assertion below fires.
+                r = run('LEAKED\n' * 5, **kwargs)
+                self.assertEqual(r.returncode, 0, f'{label}: {r.stderr}')
+                self.assertNotIn('LEAKED', read_cfg(),
+                                 f'{label} must never prompt for credentials')
+                self.assertIn('already configured', r.stdout,
+                              f'{label} should report values as already configured')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning

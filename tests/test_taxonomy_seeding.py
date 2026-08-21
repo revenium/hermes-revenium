@@ -23,9 +23,20 @@ ROOT_INSTALLER = ROOT / 'install.sh'
 def _extract_seed_block(path: Path) -> str:
     """Pull the seeding section out of the shipped installer."""
     text = path.read_text()
-    m = re.search(r'# 2b\. Seed the runtime taxonomies.*?\n(step "Seeding runtime taxonomies".*?done)\n',
+    # Anchored on the section TITLE, not its number. The number moved once
+    # already (2b -> 2, when the credential step was hoisted ahead of the fleet
+    # fan-out) and silently emptied every block below, turning three real
+    # assertions into assertions about an empty string.
+    m = re.search(r'#\s*[\w.]*\s*Seed the runtime taxonomies.*?\n(step "Seeding runtime taxonomies".*?done)\n',
                   text, re.DOTALL)
-    return m.group(1) if m else ''
+    if not m:
+        raise AssertionError(
+            f'could not locate the taxonomy-seeding block in {path} — the section '
+            'header or the `step "Seeding runtime taxonomies"` line moved. Fix the '
+            'pattern above rather than letting this return an empty block, which '
+            'would make every caller assert against nothing.'
+        )
+    return m.group(1)
 
 
 class TaxonomySeedingTests(unittest.TestCase):
