@@ -4,10 +4,10 @@
 
 ```bash
 hermes skills tap add revenium/hermes-revenium
-hermes skills install revenium/hermes-revenium/skills/revenium --force
+hermes skills install revenium/hermes-revenium/skills/revenium
 ```
 
-The `--force` flag is required because the scanner returns a `CAUTION` verdict for this skill: it flags the crontab installer as persistence (`MEDIUM`, expected — the cron is the skill's load-bearing metering loop) and the Python heredoc `os.environ` reads as potential exfiltration (`HIGH`, false-positive — the skill's documented data-passing pattern, not credential access). Both findings are expected. `CAUTION` + `--force` is allowed for community-source installs. See the "About the security scan" callout in the [README](../README.md) for the full breakdown.
+No `--force` is needed: the skill scans **`SAFE`**. The scan does report `MEDIUM` findings — `persistence` for the crontab installer (expected; the cron is the skill's load-bearing metering loop) and `supply_chain` for a documented `git clone` line. An earlier `HIGH exfiltration` finding, the scanner reading `os.environ` in Python heredocs as credential access, was cleared in v1.1 and no longer appears. Hermes still shows its standard third-party disclaimer and y/N confirm, as it does for every external skill. See [What the security scanner reports](../README.md#what-the-security-scanner-reports) in the README for the full breakdown and the observation's provenance.
 
 Hermes discovers custom taps by scanning the repo's `skills/` directory. This repository intentionally places the skill at:
 
