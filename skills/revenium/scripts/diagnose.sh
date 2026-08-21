@@ -35,18 +35,35 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+_BASE_HOME="${HERMES_DEFAULT_HOME:-${HOME}/.hermes}"
 if [[ -n "${PROFILE}" ]]; then
-  export HERMES_HOME="${HERMES_DEFAULT_HOME:-${HOME}/.hermes}/profiles/${PROFILE}"
+  # "default" is the name section 8 prints for the base home, so an operator
+  # copying a name out of that table will type it. The default profile does NOT
+  # live at profiles/default — hermes_profile_homes emits the base home under
+  # that label — so mapping it there would report an invented, all-absent tree
+  # and read as a broken install.
+  if [[ "${PROFILE}" == "default" ]]; then
+    export HERMES_HOME="${_BASE_HOME}"
+  else
+    export HERMES_HOME="${_BASE_HOME}/profiles/${PROFILE}"
+    if [[ ! -d "${HERMES_HOME}" ]]; then
+      echo "ERROR: no profile '${PROFILE}' at ${HERMES_HOME}" >&2
+      echo "Known profiles:" >&2
+      echo "  default" >&2
+      if [[ -d "${_BASE_HOME}/profiles" ]]; then
+        for _d in "${_BASE_HOME}/profiles"/*/; do
+          [[ -d "${_d}" ]] && echo "  $(basename "${_d}")" >&2
+        done
+      fi
+      # Exiting non-zero here rather than reporting on a directory that does not
+      # exist: an all-absent report for an invented tree is worse than no report.
+      exit 2
+    fi
+  fi
   # Let common.sh re-derive STATE_DIR under the new home rather than inheriting
   # an ambient one that points at the default profile.
   unset REVENIUM_STATE_DIR
 fi
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=/dev/null
-source "${SCRIPT_DIR}/common.sh"
-
-ensure_path
 
 hr()    { echo ""; echo "===== $* ====="; }
 # "(absent)" rather than 0 — a missing file and an empty one mean different
@@ -54,6 +71,29 @@ hr()    { echo ""; echo "===== $* ====="; }
 count() { [[ -e "$1" ]] && { ls -1 "$1" 2>/dev/null | wc -l | tr -d ' '; } || echo "(absent)"; }
 lines() { [[ -f "$1" ]] && { wc -l < "$1" | tr -d ' '; } || echo "(absent)"; }
 mtime() { [[ -e "$1" ]] && { date -r "$1" 2>/dev/null || echo "(unknown)"; } || echo "(absent)"; }
+
+# Probe the state tree BEFORE sourcing common.sh, which eagerly `mkdir -p`s
+# STATE_DIR, markers/, markers/.ready/ and tool-events/ at source time. After
+# that runs, "this directory does not exist" is no longer observable — and it is
+# a materially different diagnosis from "exists but empty" (never installed vs
+# installed and idle). Sourcing would also CREATE the tree on a host that never
+# had one, which is both a read-only violation and the destruction of the single
+# clearest piece of evidence.
+#
+# This is the one place a state path is recomputed outside common.sh. The
+# duplication is deliberate: observing the tree pre-source is impossible any
+# other way. Keep the expression in sync with common.sh's STATE_DIR default.
+_probe_state="${REVENIUM_STATE_DIR:-${HERMES_HOME:-${HOME}/.hermes}/state/revenium}"
+PRE_STATE_EXISTED="true"; [[ -d "${_probe_state}" ]] || PRE_STATE_EXISTED="false"
+PRE_MARKERS="$(count "${_probe_state}/markers")"
+PRE_READY="$(count "${_probe_state}/markers/.ready")"
+PRE_TOOL_EVENTS="$(count "${_probe_state}/tool-events")"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/common.sh"
+
+ensure_path
 
 echo "revenium diagnose  $(date -u +%Y-%m-%dT%H:%M:%SZ)  host=$(hostname -s 2>/dev/null)"
 echo "HERMES_HOME = ${HERMES_HOME}"
@@ -127,11 +167,18 @@ hr "5. CLASSIFIER SETTLE GATE"
 # A session with no .ready sentinel is deferred for the whole settle window
 # before it is metered at all. Sentinels never appearing at all means the
 # plugin is not loaded — usually the gateway was never restarted after install.
-echo "marker files:   $(count "${MARKERS_DIR}")"
-echo ".ready files:   $(count "${MARKERS_READY_DIR}")"
-echo "tool-events:    $(count "${TOOL_EVENTS_DIR}")"
+# Counts are the PRE-SOURCE snapshot — see the probe above.
+echo "marker files:   ${PRE_MARKERS}"
+echo ".ready files:   ${PRE_READY}"
+echo "tool-events:    ${PRE_TOOL_EVENTS}"
 echo "settle seconds: ${REVENIUM_CRON_SETTLE_SECONDS}"
 echo ""
+if [[ "${PRE_STATE_EXISTED}" == "false" ]]; then
+  echo "!! ${STATE_DIR} did not exist before this run."
+  echo "   Nothing has ever written state here — the skill has not run on this host."
+  echo "   (The directories exist now only because loading common.sh creates them.)"
+  echo ""
+fi
 echo "NOTE: a session with no .ready sentinel waits out the full settle window."
 echo "      Zero .ready files ever = the classifier plugin is not loaded."
 
@@ -141,7 +188,17 @@ hr "6. PLUGIN + HOOKS"
 # helpers, and a diagnostic must not interleave its own lines into the metering
 # log that section 2 above is displaying.
 if [[ -f "${SKILL_DIR}/scripts/plugin-status.sh" ]]; then
-  REVENIUM_LOG_FILE=/dev/null bash "${SKILL_DIR}/scripts/plugin-status.sh" 2>&1 | head -25
+  # plugin-status.sh REWRITES plugin-status.json (and takes a .lock beside it).
+  # That file is itself evidence — the cron maintains it, and hermes-report.sh
+  # reads it to tell a registration outage apart from a genuinely unclassified
+  # session. Redirecting it to a scratch path keeps the live one intact while
+  # still running the real check. Redirecting the file moves its lock too.
+  _ps_tmp="$(mktemp -t revenium-plugin-status.XXXXXX 2>/dev/null || echo /dev/null)"
+  REVENIUM_LOG_FILE=/dev/null REVENIUM_PLUGIN_STATUS_FILE="${_ps_tmp}" \
+    bash "${SKILL_DIR}/scripts/plugin-status.sh" 2>&1 | head -25
+  [[ "${_ps_tmp}" != "/dev/null" ]] && rm -f "${_ps_tmp}" "${_ps_tmp}.lock"
+  echo "--- stored plugin-status.json (written by the cron, not by this run) ---"
+  cat "${PLUGIN_STATUS_FILE}" 2>/dev/null || echo "(absent — the cron has not run a health check yet)"
 else
   echo "(plugin-status.sh absent — stale skill tree; re-run references/bootstrap.sh)"
 fi

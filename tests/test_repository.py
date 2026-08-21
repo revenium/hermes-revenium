@@ -541,6 +541,53 @@ exit 0
             b = subprocess.run(['bash', os.path.join(scripts, 'diagnose.sh'), '--bogus'],
                                env=env, capture_output=True, text=True, timeout=30)
             self.assertEqual(b.returncode, 2, 'an unknown flag must exit 2')
+
+            # Greptile P1 #1 on PR #75: sourcing common.sh eagerly mkdir -p's the
+            # state tree, so a naive report both CREATES state on a never-installed
+            # host and loses the "this never existed" signal — which is a different
+            # diagnosis from "exists but empty". The counts must come from a
+            # pre-source probe and say so.
+            self.assertIn(
+                'did not exist before this run', r.stdout,
+                'on a host with no state tree, diagnose.sh must report that the '
+                'tree was absent — common.sh creates it at source time, so an '
+                'unqualified "0 markers" reads as installed-and-idle',
+            )
+            self.assertIn('marker files:   (absent)', r.stdout,
+                          'marker counts must come from the pre-source probe, not '
+                          'from the directories common.sh just created')
+
+            # Greptile P1 #3: "default" is the name section 8 prints for the base
+            # home, but the default profile does NOT live at profiles/default.
+            d = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh'), '--profile', 'default'],
+                env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(d.returncode, 0, d.stderr)
+            self.assertIn(f'HERMES_HOME = {hermes_home}\n', d.stdout,
+                          '--profile default must resolve to the base home, not '
+                          'profiles/default, which does not exist')
+            n = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh'), '--profile', 'nope'],
+                env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(n.returncode, 2,
+                             'an unknown profile must fail loudly — an all-absent '
+                             'report for an invented tree reads as a broken install')
+            self.assertIn('Known profiles:', n.stderr)
+
+            # Greptile P1 #2: plugin-status.sh REWRITES plugin-status.json, which
+            # is itself evidence the cron maintains and hermes-report.sh reads.
+            status_file = os.path.join(state, 'plugin-status.json')
+            os.makedirs(state, exist_ok=True)
+            with open(status_file, 'w') as fh:
+                fh.write('{"sentinel":"written-by-the-cron"}')
+            subprocess.run(['bash', os.path.join(scripts, 'diagnose.sh')],
+                           env=env, capture_output=True, text=True, timeout=120)
+            with open(status_file) as fh:
+                self.assertIn(
+                    'written-by-the-cron', fh.read(),
+                    'diagnose.sh overwrote plugin-status.json — the live status '
+                    'file is evidence, so the child must be redirected to scratch',
+                )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
