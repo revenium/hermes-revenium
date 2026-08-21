@@ -461,6 +461,7 @@ ssh <fleethost> "cp \"$d/env\" \"$d/env.pre-rehearsal-<stamp>\""
 
 **Step 2 — rollback leg: restore `env.bak2-*` (mode stays `live`, legacy re-enabled).**
 ```bash
+d="<profile-state-dir>"   # set in EVERY block: each is meant to be runnable alone
 ssh <fleethost> "cat \"$d/env.bak2-<stamp>\""   # confirm content before restoring
 ssh <fleethost> "cp \"$d/env.bak2-<stamp>\" \"$d/env\""
 ```
@@ -469,6 +470,7 @@ ssh <fleethost> "cp \"$d/env.bak2-<stamp>\" \"$d/env\""
 `REVENIUM_CRON_SETTLE_SECONDS`=600s worst case if the classifier sentinel lags), then
 observe against Prediction A.**
 ```bash
+d="<profile-state-dir>"   # set in EVERY block: each is meant to be runnable alone
 ssh <fleethost> "HERMES_HOME=<profile-home-dir> bash -lc \
   'hermes chat -Q --max-turns 2 -q \"Reply with the single word PONG. Do no other work.\"'"
 ssh <fleethost> "tail -f \"$d/revenium-metering.log\""   # observe, then interrupt
@@ -481,6 +483,7 @@ ssh <fleethost> "grep '<sid>' \"$d/revenium-api-events.ledger\""   # must be emp
 values), confirm the restore, then induce the second session and observe against
 Prediction B.**
 ```bash
+d="<profile-state-dir>"   # set in EVERY block: each is meant to be runnable alone
 ssh <fleethost> "cp \"$d/env.pre-rehearsal-<stamp>\" \"$d/env\""
 ssh <fleethost> "diff \"$d/env\" \"$d/env.pre-rehearsal-<stamp>\""   # must be empty
 ssh <fleethost> "HERMES_HOME=<profile-home-dir> bash -lc \
@@ -493,6 +496,7 @@ ssh <fleethost> "grep '<sid>' \"$d/revenium-hermes.ledger\""   # must be empty
 **The confirming `diff`, restated as its own step because G-7 requires it be an explicit,
 separately-invoked action rather than assumed:**
 ```bash
+d="<profile-state-dir>"   # set in EVERY block: each is meant to be runnable alone
 ssh <fleethost> "diff \"$d/env\" \"$d/env.pre-rehearsal-<stamp>\""
 ```
 An empty `diff` here covers the `env` file only — it is not, by itself, the full
@@ -502,6 +506,7 @@ to every other state file the rehearsal could plausibly have touched.
 **Step 5 — read a session's ownership record**, the single file that decides which path a
 given sid will be billed by, going forward, on every subsequent tick.
 ```bash
+d="<profile-state-dir>"   # set in EVERY block: each is meant to be runnable alone
 ssh <fleethost> "cat \"$d/owners/<sid>\""            # exactly one line: 'legacy' or 'event'
 ssh <fleethost> "wc -l \"$d/owners/<sid>\""           # must be 1 — a 2-line file is the double-bill signature
 ```
