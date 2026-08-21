@@ -45,6 +45,12 @@ Every metered completion carries a meaningful `--task-type` drawn from a control
    bash ~/.hermes/skills/revenium/references/bootstrap.sh
    ```
 
+   > **Running more than one Hermes profile?** Add `--profile <name>` (repeatable) or
+   > `--all-profiles`. Every command below is scoped to **one** Hermes home, and the
+   > default home is not a superset of the others — a profile that is never named
+   > gets no plugin, no hooks and no cron, and meters nothing. See
+   > [Multi-profile / fleet installs](#multi-profile--fleet-installs).
+
    The first command installs the skill via Hermes' native install path. The scanner returns a `SAFE` verdict, so no `--force` is needed — see [What the security scanner reports](#what-the-security-scanner-reports) for the findings it does surface and why they are expected.
 
    > **Why the bootstrap?** `hermes skills install` does not ship a skill's whole directory. It ships `SKILL.md` plus only the support files `SKILL.md` names as bundle-relative paths, and only from an allowlist of directories — `references/`, `scripts/`, `templates/`, `assets/`, `examples/`. `plugins/` is not on that allowlist at all, so the classifier plugin can never arrive this way. `references/bootstrap.sh` is on the manifest, and it clones the repo, drops `scripts/` + `plugins/` into `~/.hermes/skills/revenium/`, and hands off to `scripts/install.sh`. If `references/bootstrap.sh` didn't come down either, clone and install directly instead: `git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium && bash /tmp/hermes-revenium/install.sh`.
@@ -169,6 +175,40 @@ This wires plugin + hooks + cron once per profile home, each with:
 - **`hooks_auto_accept: true`** — headless profile gateways never show the hook-approval prompt, so hooks stay inert without this. Fleet installs set it automatically (`install-hooks.sh --auto-accept`). Use `install-hooks.sh --metering-only` to register only `post_tool_call` for shadow/metering-only profiles.
 - **One shared SQUAD identity across the fleet (optional)** — set `REVENIUM_SQUAD_NAME` to group every profile's completions under one squad name, distinct from the per-profile AGENT. See [`references/setup.md`](skills/revenium/references/setup.md) → **Squad grouping across the fleet** for the resolution order and the fleet recipe.
 
+### Per-profile facts that bite
+
+- **A gateway restart is required before a profile's plugin actually loads.**
+  Plugin discovery is per-profile and the classifier is *copied* into
+  `~/.hermes/profiles/<name>/plugins/`, so a running gateway keeps serving the
+  code it started with. Until it restarts the profile meters normally but
+  classifies nothing: no markers, no jobs, and `traceType: uncategorized` on
+  every completion. `install.sh` restarts for you; if you skipped it with
+  `--no-restart`, run `hermes-gateways restart` (or `hermes gateway restart`).
+- **"Registered" is not "loaded".** `plugin-status.sh` reports registration from
+  `config.yaml`; that a plugin is listed says nothing about whether the live
+  gateway has it. Confirm with markers, not with registration.
+- **Upgrades must name the profiles again** — see
+  [Upgrading on a remote host](#upgrading-on-a-remote-host).
+- **Fleet mode never prompts, so it skips guardrail creation** unless you pass
+  both `--hard-limit` and `--period`. Without them each profile is wired for
+  metering with no budget rule, and the installer says so at the end.
+- **Dashboards must filter on the per-profile agent.** Spend for profile `ent`
+  arrives as agent `Hermes-ent`, so a rule or view scoped to `Hermes` will not
+  show it and a budget rule filtered `AGENT:IS:Hermes` will never match it.
+- **State is per-profile too.** Ledgers, markers, `config.json` and
+  `guardrail-status.json` all live under
+  `~/.hermes/profiles/<name>/state/revenium/`. Point diagnostics at the profile
+  you mean:
+
+  ```bash
+  bash ~/.hermes/skills/revenium/scripts/diagnose.sh --profile ent
+  ```
+
+  `diagnose.sh` with no flag reads the **default** profile — the single easiest
+  way to conclude "nothing is being metered" while looking at the wrong home.
+  Its last section lists every profile's ledger size and last cron run, which is
+  the fastest way to spot one profile that has gone quiet.
+
 Both deployment modes work: one-process-per-profile and the multiplexed single gateway (`gateway.multiplex_profiles: true`, where the classifier resolves the owning profile's home/state.db/markers **per session** from the `agent:<profile>:…` namespace). Size `REVENIUM_CRON_SETTLE_SECONDS` (default **600s**) above worst-case job-inference latency. See [`references/setup.md`](skills/revenium/references/setup.md) → **Multi-profile / fleet installs** for the full operational guide.
 
 ## Required: set up guardrails, cron, and hooks
@@ -262,6 +302,14 @@ Setup is atomic — if any step fails, no partial config is written. The full st
 
 Re-running `install.sh` **is** the upgrade — it is idempotent (already-configured steps are skipped, no duplicate rules or cron lines). Two things matter on every upgrade: get the new bytes onto the host, and re-sync the **plugin** (updating only `~/.hermes/skills/` leaves the active plugin at `~/.hermes/plugins/` stale). `install.sh` handles the plugin for you.
 
+> **On a multi-profile host, repeat `--profile` / `--all-profiles` on every upgrade.**
+> The skill tree at `~/.hermes/skills/revenium/` is shared, so refreshing it updates
+> the *scripts* for every profile at once — but the classifier is `cp -R`'d into each
+> profile's own `plugins/` dir, and nothing copies over it unless that profile is named
+> again. An upgrade that omits the flag leaves every profile running the old classifier
+> while the shared scripts move on, with no error and no warning. Restart the gateway
+> afterwards or the refreshed plugin still will not load.
+
 ### Option A — host has the repo (or internet access)
 
 ```bash
@@ -273,12 +321,18 @@ bash install.sh                           # re-copies skill+plugin, re-runs hook
 ### Option B — push from your machine via rsync
 
 ```bash
-# from the repo root locally
-rsync -av --delete -e ssh skills/revenium/ <user>@<host>:~/.hermes/skills/revenium/
+# from the repo root locally — NOTE: no --delete, see the warning below
+rsync -av -e ssh skills/revenium/ <user>@<host>:~/.hermes/skills/revenium/
 
 # then on the host, re-run the installer (skips creds already in 'revenium config show')
+# add --profile <name> / --all-profiles on a multi-profile host
 ssh <user>@<host> 'bash ~/.hermes/skills/revenium/scripts/install.sh'
 ```
+
+> **Do not add `--delete`.** Operators keep host-only scripts beside the shipped ones —
+> a fleet cron wrapper, for instance — that exist in no clone. `--delete` removes them,
+> and if the crontab invokes one, metering across every profile stops silently. Sync
+> without it, or use Option D, which overlays by design.
 
 > On hosts where `revenium`/`hermes` aren't on the bare login `PATH` (e.g. Linuxbrew installs), prefix the remote command: `PATH="/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$PATH" bash ~/.hermes/skills/revenium/scripts/install.sh`.
 
@@ -290,11 +344,46 @@ hermes skills install revenium/hermes-revenium/skills/revenium   # re-fetch the 
 bash ~/.hermes/skills/revenium/scripts/install.sh                        # complete setup
 ```
 
+### Option D — `bootstrap.sh --update` (no repo, no rsync)
+
+The native path refreshes `SKILL.md` and `references/` but never `scripts/` or
+`plugins/`, and the bootstrap **skips the fetch** whenever `scripts/` already exists —
+so on a host that installed once, re-running it silently hands off to the *old*
+installer. `--update` forces the re-fetch:
+
+```bash
+bash ~/.hermes/skills/revenium/references/bootstrap.sh --update                  # default profile
+bash ~/.hermes/skills/revenium/references/bootstrap.sh --update --profile ent    # one profile
+bash ~/.hermes/skills/revenium/references/bootstrap.sh --update --all-profiles   # whole fleet
+```
+
+`--update` is consumed by the bootstrap; every other flag passes straight through to
+`install.sh`. The refresh **overlays** rather than replacing, so host-only scripts
+survive — which is why this is safer than `git clone && bash install.sh`, whose root
+installer does `rm -rf` on the skill directory first.
+
+If the host's own `bootstrap.sh` predates `--update` it will reject the flag; refresh
+that one file first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/revenium/hermes-revenium/main/skills/revenium/references/bootstrap.sh \
+  -o ~/.hermes/skills/revenium/references/bootstrap.sh
+```
+
 ### After any upgrade
 
 - If you copied only the skill (not via `install.sh`), run `bash ~/.hermes/skills/revenium/scripts/install-plugin.sh` so `~/.hermes/plugins/revenium-classifier/` gets the new version and the gateway restarts.
 - **Don't leave `.bak` copies** of the skill under `~/.hermes/skills/` — plugin discovery scans their bundled `plugins/` dirs and a stale duplicate can shadow the real one.
-- Verify: `bash ~/.hermes/skills/revenium/scripts/hooks-status.sh` and `crontab -l | grep hermes-revenium-metering`.
+- **Restart the gateway.** A refreshed plugin on disk is not a loaded plugin — the
+  running gateway keeps serving what it started with. `install.sh` does this unless
+  you passed `--no-restart`.
+- Verify: `bash ~/.hermes/skills/revenium/scripts/diagnose.sh` — one read-only report
+  covering credentials, cron, ledgers, the settle gate, plugin/hook state and a
+  per-profile summary. Add `--profile <name>` for a fleet member; without it you are
+  reading the default home. `hooks-status.sh` and
+  `crontab -l | grep hermes-revenium-metering` remain available for a narrower check.
+- On a fleet, confirm one crontab line **per profile** (`# hermes-revenium-metering-<profile>`),
+  not just the bare `# hermes-revenium-metering` of the default home.
 
 For non-interactive/CI upgrades, `install.sh --non-interactive` takes credentials from the `REVENIUM_API_KEY` / `REVENIUM_TEAM_ID` / `REVENIUM_TENANT_ID` / `REVENIUM_OWNER_ID` env vars.
 

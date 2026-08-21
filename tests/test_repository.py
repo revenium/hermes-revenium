@@ -910,6 +910,70 @@ exit 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_readme_documents_multi_profile_operation(self):
+        """README pins the multi-profile facts that silently cost real time.
+
+        Each assertion below corresponds to a failure that actually happened on a
+        live host, where the symptom pointed nowhere near the cause:
+
+        - A profile that is never named gets no plugin, hooks or cron and meters
+          nothing, but the default profile keeps working, so the host looks fine.
+        - Per-profile plugin copies go stale on upgrade unless the profile is
+          named AGAIN: the skill tree is shared, but the classifier is cp -R'd
+          into each profile's own plugins/ dir.
+        - A refreshed plugin on disk is not a loaded plugin. Until the gateway
+          restarts, the profile meters normally and classifies nothing —
+          markers, jobs and traceType all empty, with no error anywhere.
+        - `rsync --delete` removes host-only scripts that exist in no clone (a
+          fleet cron wrapper), which stops metering across every profile.
+        - Spend arrives under agent `Hermes-<profile>`, so a dashboard or budget
+          rule scoped to `Hermes` never shows it.
+
+        These are documentation claims, so nothing else in the suite protects
+        them; the guidance can drift back to wrong at any edit without a test.
+        """
+        text = (ROOT / 'README.md').read_text(errors='ignore')
+
+        required = [
+            # profiles are discoverable from the Quick Start, not only from a
+            # section 100+ lines down that a reader has to already know exists
+            ('--all-profiles', 'Quick Start must surface fleet installs'),
+            # upgrade must re-name profiles
+            ('repeat `--profile` / `--all-profiles` on every upgrade',
+             'upgrades silently leave per-profile plugin copies stale otherwise'),
+            # restart requirement
+            ('gateway restart is required before a profile',
+             'a copied-but-unloaded plugin is the exact silent failure mode'),
+            # the destructive rsync flag is called out
+            ('Do not add `--delete`',
+             '--delete removes host-only scripts and stops fleet metering'),
+            # the refresh path exists and is documented
+            ('bootstrap.sh --update',
+             'without --update the bootstrap hands off to the OLD installer'),
+            # fleet mode + guardrails
+            ('skips guardrail creation',
+             'fleet mode never prompts, so rules are silently not created'),
+            # per-profile diagnosis
+            ('diagnose.sh --profile',
+             'diagnosing the default home while meaning a profile is the easiest '
+             'way to conclude "nothing is metered"'),
+            # dashboards must filter on the per-profile agent
+            ('Hermes-ent', 'the per-profile AGENT must appear concretely'),
+        ]
+        for needle, why in required:
+            self.assertIn(
+                needle, text,
+                f'README.md no longer documents: {needle!r} — {why}',
+            )
+
+        # The destructive form must not reappear as a recommendation.
+        self.assertNotIn(
+            'rsync -av --delete', text,
+            'README recommends `rsync --delete` again — it deletes host-only '
+            'scripts (a fleet cron wrapper) that exist in no clone, silently '
+            'stopping metering across every profile',
+        )
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning
