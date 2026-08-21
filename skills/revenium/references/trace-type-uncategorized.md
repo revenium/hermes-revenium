@@ -48,7 +48,19 @@ and failed before reaching the marker write. A registration outage — the plugi
 Hermes at all — is the specific failure that produced a live nine-day fleet-wide incident, and it
 is the one the check below is built to catch.
 
-**Fix.** Run the registration-level health check this skill ships, from the installed scripts
+**Fix.** First confirm which process actually serves this profile — the plugin is loaded once
+at process start, and on a desktop-app host the gateway is usually not the owner:
+
+```bash
+ps -axo pid,lstart,command | grep -E 'hermes.*(serve|gateway run)' | grep -v grep
+```
+
+A `--profile <name> serve` process is spawned by the Hermes desktop app: quit and reopen the
+app to reload it. `hermes gateway restart` will not affect it, and a gateway whose
+`HERMES_HOME` is the default home never touches a profile at all. Compare each process's start
+time against the plugin's mtime — a server older than the plugin cannot have loaded it.
+
+Then run the registration-level health check this skill ships, from the installed scripts
 directory:
 
 ```bash

@@ -942,8 +942,12 @@ exit 0
             ('repeat `--profile` / `--all-profiles` on every upgrade',
              'upgrades silently leave per-profile plugin copies stale otherwise'),
             # restart requirement
-            ('gateway restart is required before a profile',
+            ('must restart before its plugin loads',
              'a copied-but-unloaded plugin is the exact silent failure mode'),
+            # ...and the README must not send the reader at the gateway when a
+            # desktop-app `serve` process is what actually owns the profile.
+            ('--profile <name> serve',
+             'on a desktop host the gateway is often not the serving process'),
             # the destructive rsync flag is called out
             ('Do not add `--delete`',
              '--delete removes host-only scripts and stops fleet metering'),

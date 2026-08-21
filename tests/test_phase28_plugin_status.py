@@ -294,6 +294,83 @@ class Phase28PluginStatusTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_turns_without_markers_beat_a_grace_window_ended_session(self):
+        """One session ending inside the grace window must not mask a stall.
+
+        Observed live, two consecutive lines of one real report:
+
+            2 session(s) produced turns in the window; 0 of them have a marker
+            ✓ classifier is firing — every settled session has its own sentinel
+
+        on a host whose serving process was nine days stale and had classified
+        nothing at all. The turn-vs-marker check was gated behind
+        `recent_ended == 0`, so a single ended session inside the grace window
+        (missing_settled == 0) fell straight through to 'firing'.
+
+        "Every settled session has its own sentinel" is trivially true when no
+        session has settled — it is not evidence the classifier ran. The
+        turn-vs-marker signal now applies on every path.
+        """
+        tmp = tempfile.mkdtemp(prefix='gsd-plugstat-grace-mask-')
+        try:
+            hermes_home, scripts_dir = self._registered_home(tmp)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+
+            # Exactly the live shape: one session ended seconds ago (inside the
+            # grace window, so missing_settled stays 0) while other sessions have
+            # been producing turns for far longer with no marker to show for it.
+            seed_state_db(hermes_home, [time.time() - 5])
+            seed_messages(hermes_home, assistant_turns=20, session_id='sess-busy',
+                          age_seconds=SETTLE_SECONDS + 60)
+
+            r = self._run(hermes_home, scripts_dir, state_dir, status_file)
+            data = json.loads(Path(status_file).read_text())
+
+            self.assertEqual(
+                data['liveness'], 'stalled',
+                f'a grace-window session must not mask turns-without-markers; '
+                f'got {data["liveness"]!r}\n{r.stdout}',
+            )
+            self.assertFalse(data['healthy'])
+            self.assertEqual(r.returncode, 2)
+            self.assertNotIn(
+                'classifier is firing', r.stdout,
+                'the report contradicted itself: it cannot claim firing on the '
+                'line after reporting zero markers',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_remediation_names_the_serving_process_not_just_the_gateway(self):
+        """The stall advice must not send an operator at the wrong process.
+
+        Every remediation string said "restart the Hermes gateway". On a
+        desktop-app host the profile is served by a `--profile <name> serve`
+        process the desktop app spawned, and the gateway commonly runs with
+        HERMES_HOME pointing at the default home — so it never touches the
+        profile. Following that advice restarts something irrelevant and leaves
+        the outage in place, which is precisely what happened.
+        """
+        tmp = tempfile.mkdtemp(prefix='gsd-plugstat-remediation-')
+        try:
+            hermes_home, scripts_dir = self._registered_home(tmp)
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            status_file = os.path.join(state_dir, 'plugin-status.json')
+            seed_state_db(hermes_home, [None])
+            seed_messages(hermes_home, assistant_turns=5, session_id='sess-x',
+                          age_seconds=SETTLE_SECONDS + 60)
+
+            r = self._run(hermes_home, scripts_dir, state_dir, status_file)
+            self.assertEqual(r.returncode, 2, r.stdout)
+            self.assertIn('serve', r.stdout,
+                          'remediation must mention the `serve` process shape')
+            self.assertIn('desktop', r.stdout.lower(),
+                          'remediation must name the Hermes desktop app as the '
+                          'thing to restart for a --profile serve process')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_genuinely_idle_host_stays_idle(self):
         """No turns and no ended sessions -> still idle. A quiet host is not broken."""
         tmp = tempfile.mkdtemp(prefix='gsd-plugstat-quiet-')
@@ -491,11 +568,17 @@ class Phase28PluginStatusTests(unittest.TestCase):
         `command -v hermes` probe is present at all, it must be paired with
         that exact dispatch, never with a repair-oriented invocation.
         Comment lines are filtered out first so a header comment explaining
-        this invariant cannot itself trip the assertion."""
+        this invariant cannot itself trip the assertion. `echo` lines are
+        filtered for the same reason: the invariant is that the script never
+        PERFORMS a repair, and printing remediation advice for a human to run
+        is not performing it. Telling an operator which process to restart is
+        the script's whole job in the stalled branch — the alert-only posture
+        (D-05) is about what the script does, not about what it is allowed to
+        say. Anything in a command position still trips the assertions below."""
         text = (SKILL / 'scripts' / 'plugin-status.sh').read_text()
         code_lines = [
             line for line in text.splitlines()
-            if not line.strip().startswith('#')
+            if not line.strip().startswith('#') and not line.strip().startswith('echo ')
         ]
         code_text = '\n'.join(code_lines)
         self.assertNotIn('hermes gateway', code_text)

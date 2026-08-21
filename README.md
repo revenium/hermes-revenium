@@ -177,13 +177,27 @@ This wires plugin + hooks + cron once per profile home, each with:
 
 ### Per-profile facts that bite
 
-- **A gateway restart is required before a profile's plugin actually loads.**
-  Plugin discovery is per-profile and the classifier is *copied* into
-  `~/.hermes/profiles/<name>/plugins/`, so a running gateway keeps serving the
-  code it started with. Until it restarts the profile meters normally but
-  classifies nothing: no markers, no jobs, and `traceType: uncategorized` on
-  every completion. `install.sh` restarts for you; if you skipped it with
-  `--no-restart`, run `hermes-gateways restart` (or `hermes gateway restart`).
+- **The process serving the profile must restart before its plugin loads —
+  and that is often NOT the gateway.** Plugin discovery is per-profile and the
+  classifier is *copied* into `~/.hermes/profiles/<name>/plugins/`, so whatever
+  process serves the profile keeps running the code it started with. Until it
+  restarts the profile meters normally but classifies nothing: no markers, no
+  jobs, `traceType: uncategorized`, and no tool-events. Find the real owner
+  before restarting anything:
+
+  ```bash
+  ps -axo pid,lstart,command | grep -E 'hermes.*(serve|gateway run)' | grep -v grep
+  ```
+
+  - `gateway run` → `hermes gateway restart` (or `hermes-gateways restart`).
+    Check its `HERMES_HOME`: on a desktop host it commonly serves only the
+    default home and touches no profile at all.
+  - `--profile <name> serve` → spawned by the Hermes **desktop app**. Quit and
+    reopen the app; restarting the gateway does nothing for these. Seen live
+    with a `serve` process nine days old still answering while a freshly
+    restarted gateway sat beside it classifying nothing.
+
+  `install.sh` restarts the gateway for you, which covers the gateway case only.
 - **"Registered" is not "loaded".** `plugin-status.sh` reports registration from
   `config.yaml`; that a plugin is listed says nothing about whether the live
   gateway has it. Confirm with markers, not with registration.
