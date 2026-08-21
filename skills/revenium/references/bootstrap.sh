@@ -34,7 +34,22 @@ mkdir -p "${DEST}"
 
 echo "▸ Revenium skill bootstrap → ${DEST}"
 
-need_fetch=false
+# --update / --refresh re-fetches even when the tree is already populated.
+# Without it, the presence check below is a permanent latch: a host installed
+# once keeps running whatever scripts/ it got that day, and every later
+# `hermes skills install` + bootstrap silently hands off to the OLD installer.
+# Nothing errors, so a stale host is indistinguishable from a current one.
+FORCE_FETCH=false
+PASSTHRU=()
+for arg in "$@"; do
+  case "${arg}" in
+    --update|--refresh) FORCE_FETCH=true ;;
+    *) PASSTHRU+=("${arg}") ;;
+  esac
+done
+set -- ${PASSTHRU+"${PASSTHRU[@]}"}
+
+need_fetch="${FORCE_FETCH}"
 [[ -f "${DEST}/scripts/install.sh" ]] || need_fetch=true
 [[ -d "${DEST}/plugins/revenium-classifier" ]] || need_fetch=true
 
@@ -60,19 +75,27 @@ if ${need_fetch}; then
   [[ -d "${src}/scripts" && -d "${src}/plugins" ]] \
     || { echo "ERROR: cloned repo missing scripts/ or plugins/ at ${src}" >&2; exit 1; }
 
-  # Copy the missing pieces into the installed skill dir. references/ + SKILL.md
-  # are already present from `hermes skills install`; only add what's missing.
-  cp -R "${src}/scripts" "${DEST}/scripts"
-  cp -R "${src}/plugins" "${DEST}/plugins"
+  # Copy in. references/ + SKILL.md are already present from
+  # `hermes skills install`; only scripts/ and plugins/ are added here.
+  #
+  # cp -R over the existing dirs rather than rm -rf + copy: operators keep
+  # host-only scripts alongside the shipped ones (a fleet cron wrapper, for
+  # instance) that exist in no clone, and blowing the directory away to
+  # "refresh" it silently deletes them — taking the fleet's metering with it.
+  # Overlaying updates every shipped file and leaves anything else untouched.
+  mkdir -p "${DEST}/scripts" "${DEST}/plugins"
+  cp -R "${src}/scripts/." "${DEST}/scripts/"
+  cp -R "${src}/plugins/." "${DEST}/plugins/"
   for seed in task-taxonomy.json job-taxonomy.json; do
     [[ -f "${src}/${seed}" ]] && cp -f "${src}/${seed}" "${DEST}/${seed}"
   done
   # Drop any __pycache__ carried by cp -R so a stale .pyc can't shadow source.
   find "${DEST}" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
   chmod +x "${DEST}/scripts/"*.sh 2>/dev/null || true
-  echo "  ✓ Populated scripts/ and plugins/"
+  echo "  ✓ Populated scripts/ and plugins/ (host-only files preserved)"
 else
   echo "  ✓ scripts/ and plugins/ already present — skipping fetch."
+  echo "    (re-run with --update to pull the latest from ${REPO})"
 fi
 
 echo "▸ Handing off to scripts/install.sh"

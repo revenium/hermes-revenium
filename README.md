@@ -49,6 +49,8 @@ Every metered completion carries a meaningful `--task-type` drawn from a control
 
    > **Why the bootstrap?** `hermes skills install` does not ship a skill's whole directory. It ships `SKILL.md` plus only the support files `SKILL.md` names as bundle-relative paths, and only from an allowlist of directories — `references/`, `scripts/`, `templates/`, `assets/`, `examples/`. `plugins/` is not on that allowlist at all, so the classifier plugin can never arrive this way. `references/bootstrap.sh` is on the manifest, and it clones the repo, drops `scripts/` + `plugins/` into `~/.hermes/skills/revenium/`, and hands off to `scripts/install.sh`. If `references/bootstrap.sh` didn't come down either, clone and install directly instead: `git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium && bash /tmp/hermes-revenium/install.sh`.
 
+   **Updating an existing install?** Add `--update`: `bash ~/.hermes/skills/revenium/references/bootstrap.sh --update`. Without it the bootstrap sees a populated `scripts/` and skips the fetch, so a host that installed once keeps running the scripts it got that day. `--update` re-pulls and overlays, leaving any host-only scripts in place.
+
    The bootstrap then completes setup: walks your `revenium` CLI config (**api-url, API key, team-id, tenant-id, owner-id**), showing each current value as the default so you can confirm or correct it, installs the `revenium-classifier` plugin, registers the shell hooks, creates the guardrail budget rule, installs the per-minute metering cron, and restarts the Hermes gateway. It is **idempotent** — safe to re-run.
 
    Flags pass straight through to `install.sh`:

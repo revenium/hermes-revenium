@@ -817,6 +817,99 @@ exit 0
             for rule in data['rules']:
                 self.assertNotIn('_idIsConfiguredSpace', rule)
 
+    def test_bootstrap_update_refreshes_a_stale_tree(self):
+        """bootstrap.sh --update refreshes an existing install; bare does not.
+
+        The presence check (`scripts/install.sh` exists -> skip fetch) is a
+        permanent latch on any host that has installed once: every later
+        `hermes skills install` + bootstrap hands off to whatever installer is
+        already on disk. Nothing errors, so a host running months-old scripts is
+        indistinguishable from a current one. `hermes skills install` itself
+        cannot compensate — it resolves the repo's DEFAULT BRANCH and only ships
+        SKILL.md plus referenced files, never scripts/ or plugins/.
+
+        The refresh must also be non-destructive. Operators keep host-only
+        scripts beside the shipped ones (a fleet cron wrapper exists in no
+        clone), so refreshing by rm -rf + copy would silently delete them and
+        take the fleet's metering with them. Overlay, don't replace.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-bootstrap-update-')
+        try:
+            dest = os.path.join(tmp, 'dest')
+            origin = os.path.join(tmp, 'origin', 'skills', 'revenium')
+            os.makedirs(os.path.join(dest, 'scripts'))
+            os.makedirs(os.path.join(dest, 'plugins', 'revenium-classifier'))
+            os.makedirs(os.path.join(dest, 'references'))
+            os.makedirs(os.path.join(origin, 'scripts'))
+            os.makedirs(os.path.join(origin, 'plugins', 'revenium-classifier'))
+
+            def write(path, content, mode=None):
+                with open(path, 'w') as fh:
+                    fh.write(content)
+                if mode:
+                    os.chmod(path, mode)
+
+            # Stale install, plus a host-only script that exists in no clone.
+            write(os.path.join(dest, 'scripts', 'install.sh'), 'echo STALE\n')
+            write(os.path.join(dest, 'scripts', 'cron-fleet.sh'), 'HOST_ONLY\n')
+            shutil.copy(SKILL / 'references' / 'bootstrap.sh',
+                        os.path.join(dest, 'references'))
+
+            # The "remote" carrying a newer installer and a brand-new script.
+            write(os.path.join(origin, 'scripts', 'install.sh'),
+                  '#!/usr/bin/env bash\necho FRESH\n')
+            write(os.path.join(origin, 'scripts', 'newly-added.sh'), 'NEW\n')
+            write(os.path.join(origin, 'plugins', 'revenium-classifier',
+                               'plugin.yaml'), 'name: revenium-classifier\n')
+            repo_root = os.path.join(tmp, 'origin')
+            for cmd in (['git', 'init', '-q'], ['git', 'add', '-A'],
+                        ['git', '-c', 'user.email=t@t', '-c', 'user.name=t',
+                         'commit', '-qm', 'seed']):
+                subprocess.run(cmd, cwd=repo_root, check=True,
+                               capture_output=True)
+
+            boot = os.path.join(dest, 'references', 'bootstrap.sh')
+            env = {**os.environ, 'REVENIUM_SKILL_REPO': repo_root}
+
+            def installer():
+                with open(os.path.join(dest, 'scripts', 'install.sh')) as fh:
+                    return fh.read()
+
+            # Bare run: must NOT refresh, and must say how to.
+            r = subprocess.run(['bash', boot], env=env, capture_output=True,
+                               text=True, timeout=60)
+            self.assertIn('STALE', installer(),
+                          'a bare run must keep the existing tree')
+            self.assertIn('--update', r.stdout,
+                          'skipping the fetch must tell the operator how to '
+                          'force one — a silent skip is why stale hosts persist')
+
+            # --update: refreshes, and preserves the host-only file.
+            r = subprocess.run(['bash', boot, '--update'], env=env,
+                               capture_output=True, text=True, timeout=60)
+            self.assertIn('FRESH', installer(),
+                          f'--update must overwrite the stale installer\n{r.stdout}')
+            self.assertTrue(
+                os.path.isfile(os.path.join(dest, 'scripts', 'newly-added.sh')),
+                'a script added upstream must arrive on --update',
+            )
+            with open(os.path.join(dest, 'scripts', 'cron-fleet.sh')) as fh:
+                self.assertIn(
+                    'HOST_ONLY', fh.read(),
+                    'the refresh deleted a host-only script — on a fleet host '
+                    'that is the cron wrapper, and deleting it stops all metering',
+                )
+            # --update is consumed, never forwarded to install.sh (which would
+            # reject it as an unknown flag and abort the whole setup).
+            self.assertNotIn('unknown flag', (r.stdout + r.stderr))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning
