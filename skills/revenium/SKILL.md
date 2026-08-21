@@ -108,11 +108,11 @@ Note: `config.json` may carry a legacy `alertId` field from a v1.2 install — t
 
 Follow these steps in order. If any step fails, STOP and explain the failure. Do NOT prompt the user for budget details yourself, and do NOT write any IDs into `config.json` yourself.
 
-0. **Bootstrap the runtime files if they are missing.** `hermes skills install revenium/hermes-revenium/skills/revenium` fetches ONLY `SKILL.md` + `references/` — it does **not** ship `scripts/` or `plugins/`. If `~/.hermes/skills/revenium/scripts/install.sh` does not exist, run the bootstrap (it clones the repo, drops `scripts/` + `plugins/` into place, and hands off to the installer):
+0. **Bootstrap the runtime files if they are missing.** `hermes skills install revenium/hermes-revenium/skills/revenium` ships `SKILL.md` plus only the support files this file names as bundle-relative paths — `references/bootstrap.sh`, `references/setup.md`, `references/task-classification.md`, `references/job-declaration.md`, and `references/troubleshooting.md`. It never ships `plugins/`, which Hermes does not allow in a skill bundle at all, and it does not ship `scripts/`. If `~/.hermes/skills/revenium/scripts/install.sh` does not exist, run the bootstrap (it clones the repo, drops `scripts/` + `plugins/` into place, and hands off to the installer):
    ```
    bash ~/.hermes/skills/revenium/references/bootstrap.sh
    ```
-   If even `references/` did not come down, clone and install directly (this works from a bare host):
+   If `references/bootstrap.sh` did not come down either, clone and install directly (this works from a bare host):
    ```
    git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-revenium \
      && bash /tmp/hermes-revenium/install.sh
