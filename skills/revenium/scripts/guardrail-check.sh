@@ -222,6 +222,10 @@ for r in api_rules:
     # enforcement-events fetch will likely 422 on this path, and the script gracefully
     # degrades to rule-level data only per AUDIT-02).
     resolved_rule_id = name_to_string_id.get(rule_name)
+    # Whether the id is in the same namespace as config.json::ruleIds. A
+    # fallback id is an API integer, which can never match a configured string
+    # hash — so its absence from `configured` proves nothing about ownership.
+    id_is_configured_space = bool(resolved_rule_id)
     if not resolved_rule_id:
         resolved_rule_id = str(r.get('ruleId', '')) if r.get('ruleId') is not None else ''
     # Map API field names to ENF-04 schema field names (RESEARCH.md Section 1)
@@ -229,6 +233,7 @@ for r in api_rules:
     # breach but is excluded from any_blocked and haltedRule below, so the agent does
     # not halt. The signal stays visible in the per-rule entry for dashboards.
     new_rules.append({
+        '_idIsConfiguredSpace': id_is_configured_space,   # stripped before write
         'ruleId': resolved_rule_id,              # REVISED: string-hash ID via name join
         'name': rule_name,
         'metricType': r.get('metricType', ''),
@@ -252,15 +257,23 @@ for r in api_rules:
 # rules too — which meant another profile's breach could halt this agent.
 if rule_ids_order:
     configured = set(rule_ids_order)
-    scoped = [r for r in new_rules if r.get('ruleId') in configured]
-    # Fail-open: if the name join degraded to API integer ids, NOTHING matches
-    # the configured string hashes and scoping would silently empty the rule
-    # list — i.e. disable enforcement. Keep the unscoped list in that case;
-    # over-reporting is recoverable, silently dropping all guardrails is not.
-    if scoped or not new_rules:
-        new_rules = scoped
-    else:
-        print('WARN_SCOPE_FELL_OPEN=1')
+    # Fail-open PER RULE, not all-or-nothing. Dropping a rule requires positive
+    # evidence it belongs to someone else: its id resolved into the configured
+    # namespace and is not in this install's list. A rule whose id fell back to
+    # the API integer is simply unidentified — excluding it on that basis would
+    # hide a real breach (it would drop out of any_blocked and the agent would
+    # keep running through it). An all-or-nothing filter got this wrong whenever
+    # one rule resolved and another did not.
+    dropped = 0
+    kept = []
+    for r in new_rules:
+        if r.get('_idIsConfiguredSpace') and r.get('ruleId') not in configured:
+            dropped += 1
+            continue
+        kept.append(r)
+    new_rules = kept
+    if dropped:
+        print('SCOPE_DROPPED=%d' % dropped)
 
 # Last-resort de-dup: one entry per ruleId. Anything still colliding here is a
 # join the code above could not disambiguate; keep the most severe state so the
@@ -274,6 +287,11 @@ for r in new_rules:
 if len(_by_id) != len(new_rules):
     print('WARN_DUPLICATE_RULE_IDS=1')
     new_rules = [r for r in new_rules if r is _by_id.get(r['ruleId'])]
+
+# Private scoping marker never reaches guardrail-status.json — the file is a
+# published contract and test_guardrail_check_writes_status_file pins its keys.
+for r in new_rules:
+    r.pop('_idIsConfiguredSpace', None)
 
 # Load previous state (fail-open)
 prev = {}

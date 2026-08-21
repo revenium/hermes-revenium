@@ -736,6 +736,87 @@ exit 0
             'mine',
         )
 
+    def test_partial_name_join_never_drops_a_configured_rule(self):
+        """A rule whose id could not be resolved stays visible and enforcing.
+
+        Greptile P1 on PR #76. Scoping to config.json::ruleIds originally fell
+        open only when the scoped list came out completely empty. When ONE rule
+        resolved into the configured namespace and another fell back to its API
+        integer id, the partial match was non-empty — so the unresolved rule was
+        silently dropped. A breach on it then never reached `any_blocked`, and
+        the agent kept running straight through a configured guardrail.
+
+        Dropping a rule must require positive evidence it belongs to someone
+        else: its id resolved into the configured namespace AND is absent from
+        this install's list. An unidentified rule is kept.
+        """
+        import json
+        import os
+        import subprocess
+        import tempfile
+
+        guardrail_check = str(SKILL / 'scripts' / 'guardrail-check.sh')
+
+        # 'Mine' joins cleanly. 'Ambiguous' has two ids, so it resolves to
+        # neither and falls back to its API integer id — and it is BREACHED.
+        enforcement_json = json.dumps({'rules': [
+            {'ruleId': 1, 'name': 'Mine', 'metricType': 'TOTAL_COST',
+             'periodType': 'DAILY', 'groupBy': 'AGENT', 'currentValue': 5.0,
+             'warnThreshold': 80.0, 'threshold': 100.0,
+             'breached': False, 'warnBreached': False, 'shadowMode': False},
+            {'ruleId': 2, 'name': 'Ambiguous', 'metricType': 'TOTAL_COST',
+             'periodType': 'DAILY', 'groupBy': 'AGENT', 'currentValue': 999.0,
+             'warnThreshold': 80.0, 'threshold': 100.0,
+             'breached': True, 'warnBreached': True, 'shadowMode': False},
+        ]})
+        budget_rules_json = json.dumps([
+            {'id': 'mineId', 'name': 'Mine'},
+            {'id': 'ambigA', 'name': 'Ambiguous'},
+            {'id': 'ambigB', 'name': 'Ambiguous'},
+        ])
+        events_json = json.dumps([{'created': '2026-08-21T15:00:00Z',
+                                   'rawDetails': 'breached'}])
+
+        with tempfile.TemporaryDirectory(prefix='gsd-gc-partial-') as tmp:
+            scripts_dir = os.path.join(tmp, 'scripts')
+            os.makedirs(scripts_dir)
+            self._make_revenium_stub(scripts_dir, enforcement_json,
+                                     budget_rules_json, events_json)
+
+            state_dir = os.path.join(tmp, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700, exist_ok=True)
+            with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                json.dump({'ruleIds': ['mineId'], 'autonomousMode': True}, f)
+
+            status_path = os.path.join(state_dir, 'guardrail-status.json')
+            env = dict(os.environ)
+            env['HERMES_HOME'] = tmp
+            env['REVENIUM_STATE_DIR'] = state_dir
+            env['GUARDRAIL_STATUS_FILE'] = status_path
+            env['LOG_FILE'] = os.path.join(state_dir, 'revenium-metering.log')
+            env['PATH'] = scripts_dir + os.pathsep + env.get('PATH', '')
+
+            r = subprocess.run(['bash', guardrail_check], env=env,
+                               capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, f'{r.stdout!r} {r.stderr!r}')
+            with open(status_path) as f:
+                data = json.load(f)
+
+            names = sorted(x['name'] for x in data['rules'])
+            self.assertIn(
+                'Ambiguous', names,
+                f'an unresolved rule must not be dropped by scoping — its breach '
+                f'would stop reaching any_blocked and the agent would run '
+                f'straight through a configured guardrail. Got {names}',
+            )
+            self.assertTrue(
+                data['halted'],
+                'the breached rule must still halt the agent after scoping',
+            )
+            # The published contract carries no private scoping fields.
+            for rule in data['rules']:
+                self.assertNotIn('_idIsConfiguredSpace', rule)
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning

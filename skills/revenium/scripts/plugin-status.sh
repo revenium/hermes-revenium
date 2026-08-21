@@ -306,44 +306,60 @@ for row in rows:
 # at the kind:"job" records inside them. Presence of a marker proves the plugin
 # RAN; job contents would conflate a registration outage with a classification
 # failure, the distinction TRACE-04 exists to preserve.
-recent_turns = 0
+# Per-session correspondence, NOT marker freshness. The classifier holds a
+# permanent already-classified latch per session, so a long-lived session's
+# marker is written once at turn 1 and never rewritten — its mtime ages out of
+# any window while the session stays perfectly healthy. Keying on freshness
+# would report every healthy long-running session as stalled. Ask instead
+# whether each session that produced turns has a marker AT ALL.
+turn_sessions = {}
 if state_db and os.path.isfile(state_db):
     try:
         conn = sqlite3.connect(state_db)
         try:
             cur = conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE role='assistant' "
-                "AND timestamp >= strftime('%s','now') - ?",
+                "SELECT session_id, MIN(timestamp) FROM messages "
+                "WHERE role='assistant' AND timestamp >= strftime('%s','now') - ? "
+                "GROUP BY session_id",
                 (lookback_seconds,),
             )
-            recent_turns = int(cur.fetchone()[0] or 0)
+            for sid_row, first_ts in cur.fetchall():
+                if sid_row:
+                    try:
+                        turn_sessions[sid_row] = float(first_ts)
+                    except (TypeError, ValueError):
+                        turn_sessions[sid_row] = now
         finally:
             conn.close()
     except Exception:
-        recent_turns = 0
+        turn_sessions = {}
 
-fresh_markers = 0
-try:
-    if not process_markers_dir:
-        raise ValueError('no markers dir')
-    cutoff = now - lookback_seconds
-    for entry in Path(process_markers_dir).iterdir():
-        # Skip the sibling sentinel/warn directories (.ready, .warn,
-        # .fallback-warn) — only <sid>.jsonl files are classifier output.
-        if entry.name.startswith('.') or entry.suffix != '.jsonl':
-            continue
-        try:
-            if entry.stat().st_mtime >= cutoff:
-                fresh_markers += 1
-        except OSError:
-            continue
-except Exception:
-    fresh_markers = 0
+recent_turns = len(turn_sessions)
+sessions_with_marker = 0
+settled_turn_sessions = 0
+for sid_row, first_ts in turn_sessions.items():
+    try:
+        has_marker = bool(process_markers_dir) and (
+            Path(process_markers_dir) / (str(sid_row) + '.jsonl')).exists()
+    except OSError:
+        has_marker = False
+    if has_marker:
+        sessions_with_marker += 1
+    # Turn-1 classification is not instant, so a session whose first turn only
+    # just landed is not yet evidence of anything.
+    if (now - first_ts) >= settle_seconds:
+        settled_turn_sessions += 1
+
+fresh_markers = sessions_with_marker
 
 if recent_ended == 0:
-    # Turns completed but not one marker written: the plugin is not running,
+    # Sessions produced turns, at least one of them long enough ago to have been
+    # classified, and NOT ONE of them has a marker: the plugin is not running,
     # whatever the registration check says.
-    liveness = 'stalled' if (recent_turns > 0 and fresh_markers == 0) else 'idle'
+    if settled_turn_sessions > 0 and sessions_with_marker == 0:
+        liveness = 'stalled'
+    else:
+        liveness = 'idle'
 elif missing_settled > 0:
     liveness = 'stalled'
 else:
@@ -381,12 +397,12 @@ PY
   echo "    ${recent_ended} session(s) with ended_at inside the last $(( window_seconds * 2 ))s (state.db)"
   echo "    ${fresh_sentinels} of them have their own sentinel"
   echo "    ${missing_settled} aged past ${window_seconds}s with no sentinel; ${missing_pending} still within the grace window"
-  echo "    ${recent_turns} assistant turn(s) and ${fresh_markers} fresh marker file(s) in the same window"
+  echo "    ${recent_turns} session(s) produced turns in the window; ${fresh_markers} of them have a marker"
 
   case "${liveness}" in
     idle)
       if [[ "${recent_turns}" -gt 0 ]]; then
-        echo "    ℹ no sessions ended in the window, but ${recent_turns} turn(s) ran and produced ${fresh_markers} marker(s) — classifier is alive"
+        echo "    ℹ no sessions ended in the window, but ${fresh_markers}/${recent_turns} active session(s) have markers — classifier is alive"
       else
         echo "    ℹ idle host — no sessions ended in the window, nothing for the classifier to have missed"
       fi
@@ -401,7 +417,7 @@ PY
       if [[ "${recent_ended}" -gt 0 ]]; then
         echo "    ✗ classifier NOT firing — ${missing_settled} session(s) aged past the settle window with no sentinel of their own"
       else
-        echo "    ✗ classifier NOT firing — ${recent_turns} turn(s) completed in the window and NOT ONE marker was written"
+        echo "    ✗ classifier NOT firing — ${recent_turns} session(s) produced turns and NOT ONE has a marker"
         echo "      (no session ended, so the sentinel check above cannot see this; long-lived"
         echo "       gateway sessions stay open for hours and never reach a session boundary)"
       fi
@@ -598,7 +614,7 @@ elif [[ "${liveness}" == "stalled" ]]; then
   if [[ "${recent_ended}" -gt 0 ]]; then
     echo "  ${recent_ended} session(s) ended in the last ${window_seconds}s with zero sentinel activity."
   else
-    echo "  ${recent_turns} assistant turn(s) ran in the last $(( window_seconds * 2 ))s and produced no markers."
+    echo "  ${recent_turns} session(s) produced turns in the last $(( window_seconds * 2 ))s and none has a marker."
     echo "  'Registered' means present in config.yaml — it does NOT mean the running"
     echo "  gateway has loaded it. A gateway started before the plugin was installed"
     echo "  reports exactly this."
