@@ -1,9 +1,25 @@
+<div align="center">
+
+<img src="assets/hermes-revenium.png" alt="Hermes × Revenium — Revenium Labs" width="620">
+
 # Hermes Revenium Skill
+
+**Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event
+metering for [Hermes Agent](https://hermes-agent.nousresearch.com), on the
+[Revenium](https://www.revenium.ai) platform.**
 
 ![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)
 ![Status: Beta](https://img.shields.io/badge/status-beta%20(best--effort)-f0a020?style=for-the-badge)
 
-<img src="assets/revenium-labs.png" alt="Revenium Labs — Track. Control. Prove." width="180" align="right">
+[Quick Start](#quick-start) ·
+[Installation](#installation) ·
+[Setup](#required-set-up-guardrails-cron-and-hooks) ·
+[How it works](#how-it-works) ·
+[Configuration](#configuration) ·
+[Diagnostics](#status--diagnostics) ·
+[Discord](https://discord.gg/J2DbmjZ2nA)
+
+</div>
 
 > ### 🧪 This is a Revenium Labs project
 > **Revenium Labs** projects are field-developed, best-effort solutions. They are working,
@@ -18,7 +34,7 @@
 >
 > → **[What is Revenium Labs?](https://github.com/revenium/.github/blob/main/LABS.md)**
 
-Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event metering for [Hermes Agent](https://hermes-agent.nousresearch.com) using the [Revenium](https://www.revenium.ai) platform. Every metered completion carries a meaningful `--task-type` drawn from a controlled vocabulary so Revenium analytics show *what the agent was doing* — not just an undifferentiated session total. Discrete task arcs are reported as Revenium agentic jobs with immutable once-only outcomes, and every Hermes tool call is metered via `revenium meter tool-event` — all while budget guardrails halt the agent structurally before it can overspend.
+Every metered completion carries a meaningful `--task-type` drawn from a controlled vocabulary so Revenium analytics show *what the agent was doing* — not just an undifferentiated session total. Discrete task arcs are reported as Revenium agentic jobs with immutable once-only outcomes, and every Hermes tool call is metered via `revenium meter tool-event` — all while budget guardrails halt the agent structurally before it can overspend.
 
 ## Quick Start
 

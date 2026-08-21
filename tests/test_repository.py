@@ -166,9 +166,9 @@ class RepositoryTests(unittest.TestCase):
             # Phase 35 Plan 04 — rollback rehearsal verdict, committed so it survives
             # deletion of the gitignored planning tree (CUT-05, CUT-07)
             ROOT / 'docs' / 'rollback-rehearsal.md',
-            # Referenced by README.md's Revenium Labs callout; pinned so deleting it
-            # fails the suite instead of silently rendering a broken image on GitHub.
-            ROOT / 'assets' / 'revenium-labs.png',
+            # The README's hero banner; pinned so deleting it fails the suite instead
+            # of silently rendering a broken image on GitHub.
+            ROOT / 'assets' / 'hermes-revenium.png',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
