@@ -1,12 +1,84 @@
-# Rollback Rehearsal on `devops` — Setup Complete, Both Predictions Committed; Round Trip Not Yet Performed (PROVISIONAL — disposition finalized by 35-04)
+# Rollback Rehearsal on `devops` — One Falsified, Root-Caused Prediction and One Confirmed Prediction; Restoration Proof Finds a Fourth, Benign Difference Category (ROADMAP Criterion 7 Not Met As Written)
 
 ## Verdict
 
-*This section is filled by 35-04, once the round trip (35-03) has run and the restoration
-proof is complete. As of this plan (35-02), no fleet mutation has occurred — this document
-currently records only the rehearsal's setup: live candidacy re-verification, the
-pre-rehearsal state capture, this document's own skeleton, and both inductions'
-predictions, committed ahead of either induction actually running.*
+**MIXED RESULT — MECHANISM DEMONSTRATED, RESTORATION NOT CLEAN, READ THIS PARAGRAPH IN
+FULL BEFORE ANY OTHER SECTION.** This rehearsal ran one round trip on one profile
+(`devops`, one of the fleet's ten) with two inductions, each testing its own committed
+prediction. **Prediction A was FALSIFIED**: the induced session was claimed by the event
+path, not legacy — root-caused, by reading the deployed `hermes-report.sh` source, to an
+ownership guard (`session_event_owned`) rather than the stage-order mechanism
+`docs/event-metering.md`'s own "The switches" paragraph previously claimed; that paragraph
+has been rewritten in this phase to state the real mechanism, because this rehearsal's own
+evidence falsified the shipped-product-doc's prior explanation. **Prediction B was
+CONFIRMED**, cleanly and exactly as written — but its confirmation carries a sharp
+qualifier stated nowhere as clearly as here: **leg A and leg B produced identical
+observable artifacts** (same ledger-line shapes, same log-line shapes, same one-line
+`owners/` record), so `devops`, specifically, **cannot discriminate its two env states
+from a freshly-induced session's own output** — only reading source code could tell the
+two mechanisms apart. **The restoration proof — the criterion this phase can fail on its
+own — is NOT MET AS WRITTEN**: `env` returned byte-for-byte to its pre-rehearsal content
+and the pre-existing legacy ledger is byte-identical, but the enumerated pre-versus-post
+comparison found a **fourth difference category** G-7 does not permit — 1,939 durable
+`owners/` "legacy" backfill records, a side effect of the ~17 minutes `env` spent at
+`legacy=enabled` on a profile carrying an unusually large legacy backlog. That fourth
+category is investigated at length in this document and found benign (the legacy ledger
+did not move; every one of the 1,939 records backfills a session this ledger already
+billed; zero double-bill signatures exist anywhere) with a forward effect this document's
+own read-only method finds to be null — but benign is not the same as permitted, and this
+document does not redefine criterion 7 to make the count come out clean.
+
+**Every shortfall this document's body records, enumerated here, checked in both
+directions against `## Results`, `## Findings`, and `## Known limitations and
+exclusions`:**
+
+1. **The mechanism half of this proof rests entirely on two induced sessions on an
+   otherwise-idle profile.** `devops` had zero organic sessions since the 2026-08-19
+   cutover flip; every claim this document makes about which path claims a session rests
+   on artificial traffic this rehearsal itself created, not on anything that happened on
+   its own.
+2. **The pre-existing-safety half of the proof is strong for the opposite reason**: a
+   profile with zero `owners/` records and zero event-ledger lines before this rehearsal
+   had nothing pre-existing to accidentally re-bill or drop, so the byte-identical legacy
+   ledger and the clean per-sid enumeration are strong guarantees precisely because there
+   was nothing at risk. The two halves of this proof have opposite dependencies on the
+   same fact (idleness), and this document states both rather than only the flattering
+   one.
+3. **One profile of ten.** A rollback mechanism proven — and falsified, and root-caused —
+   on `devops` is evidence about the mechanism, not a fleet-wide guarantee. The other nine
+   profiles were never rolled back and are not claimed to have been.
+4. **`devops`'s own large legacy backlog (886+ tracked sessions, ~5-6 minute legacy
+   cycles) is precisely what made this profile behave differently from a smaller-backlog
+   profile like `community`** (whose own earlier post-flip probe went entirely to legacy,
+   as the original mechanism claim predicted). A profile whose legacy cycle completes
+   faster than a session can be induced mid-cycle would very plausibly show Prediction A
+   confirmed, not falsified — this rehearsal's finding is a real, source-confirmed
+   mechanism (ownership, not stage order, decides), but the RACE that made it visible on
+   `devops` specifically is a backlog-size artifact, not something every profile shares.
+5. **One round trip. Not repeated, not sampled.** Leg A ran once; leg B ran once. Neither
+   leg was re-run to check whether the observed outcome is the profile's consistent
+   behaviour or one instance of a race whose result could differ on a re-run.
+6. **The two induced sessions' metered rows (A and B) are permanent** and cannot be
+   un-sent (the same D-08 constraint that made Phase 30's probe rows permanent) — the
+   profile was returned to its pre-rehearsal `env` configuration, not to a state in which
+   the rehearsal never happened.
+7. **A fourth, unpermitted difference category exists** — the 1,939-record `owners/`
+   backfill, investigated above and found benign with a null forward effect by read-only
+   source inspection, but ROADMAP criterion 7 is not met as written because of it. See
+   `## Independent confirmation`'s own disposition paragraph.
+8. **Cost is `$0` throughout, by operator decision (G-5/CUT-08), not a defect** — no
+   dollar figure in this document supports any claim about billing correctness; `BACK-2676`
+   remains the prerequisite for a production tenant to show non-zero cost for either path.
+
+**None of the above changes the phase's headline result: the round trip did happen, live,
+on the real fleet, with real induced traffic — and it found something the plan did not
+anticipate finding (the ownership-race mechanism, and the `owners/` backfill) rather than
+merely confirming what was already assumed. A rehearsal that falsifies its own prediction,
+root-causes the falsification against deployed source, corrects a shipped operator
+document as a direct result, and then finds and fully investigates an unplanned side
+effect is a stronger outcome than a rehearsal that quietly confirmed two predictions and
+stopped looking. This document states the shortfalls above precisely so that strength is
+not mistaken for an unqualified pass.**
 
 ## Why this document exists
 
@@ -19,11 +91,12 @@ an untracked directory is a verdict that did not happen.
 
 ## What was measured
 
-**This rehearsal is the milestone's first deliberate write to the live fleet, and as of
-this plan (35-02) it has not yet been performed.** What follows is the setup that makes
-the eventual round trip provable: which profile, from which exact backup, and what the
-four-step sequence will be — plus, added by this plan's Task 2 below, both inductions'
-predicted outcomes, committed before either induction runs.
+**This rehearsal was the milestone's first deliberate write to the live fleet.** What
+follows is the setup that made the round trip provable — which profile, from which exact
+backup, and the planned sequence — followed, in `## Results` and `## Findings` below, by
+what the round trip actually found once it ran (35-03's rollback leg, this plan's leg B).
+Both inductions' predicted outcomes were committed here, ahead of either induction
+actually running (see below), exactly as this section originally described.
 
 **Profile: `devops`** (D-2). Chosen from the converged-and-idle candidate set {`qa`,
 `lorekeeper`, `devops`, `pm`} after live reconnaissance in `35-RESEARCH.md`, and
@@ -45,14 +118,19 @@ both during the rollback leg and the restore leg. This is what keeps
 `_takeover_session_owner` out of scope for this rehearsal by construction (see the
 ownership prediction below).
 
-**The four-step sequence, planned but not yet executed:**
+**The four-step sequence, as planned and as actually run** (`## Results` has the full
+step-by-step outcome; this is the plan the round trip followed):
 1. Snapshot the live `env` to `env.pre-rehearsal-<stamp>` — the literal first command,
-   before any other write.
+   before any other write. Ran 35-03.
 2. Restore `env.bak2-20260819-213357` over `env` — the rollback leg (`legacy=enabled`,
-   `mode=live`).
-3. Induce one session; observe legacy resume and the event path defer.
+   `mode=live`). Ran 35-03.
+3. Induce one session; observe which path claims it. Ran 35-03 (induction A) — the event
+   path claimed it, falsifying Prediction A (see `## Findings`).
 4. Restore `env` from the step-1 snapshot — the cutover leg — and induce a second
-   session; observe the event path resume.
+   session; observe the event path resume. The restore ran 35-03, as an emergency-recovery
+   action rather than this step's own scripted completion (see `## Results`); the second
+   induction ran this plan (35-04), against the already-restored state, and confirmed
+   Prediction B.
 
 **No gateway restart is part of this sequence.** `cron.sh:32-36` sources `ENV_FILE` fresh
 under `set -o allexport` on every invocation, and the fleet's crontab runs the per-profile
@@ -130,9 +208,10 @@ absence for an untested code path.
 **The write-loss window is history, not live risk, and this rehearsal runs entirely
 outside it.** Revenium's own confirmed write-loss window is `2026-08-19T18:25:00Z` through
 `2026-08-20T01:24:00Z` (Phase 34, `docs/transition-reconciliation.md`), a closed interval
-at both ends. This rehearsal's own live work in this plan executed no earlier than
-2026-08-20T21:00Z, and the round trip itself (35-03) runs later still — well after the
-window closed. Any pre-existing ledger or read-side figure this document draws on that
+at both ends. This rehearsal's own live work began no earlier than 2026-08-20T21:00Z, and
+the round trip itself (35-03's leg, this plan's leg B) ran later still, into
+2026-08-21T00:22Z — well after the window closed. Any pre-existing ledger or read-side
+figure this document draws on that
 falls inside that window is labelled suspect, exactly as Phase 34 did, and never chased as
 a metering defect caused by this rehearsal.
 
@@ -140,8 +219,8 @@ a metering defect caused by this rehearsal.
 `totalCost: 0` figure this rehearsal's evidence shows carries this caption: cost is `$0`
 by operator decision in this pre-prod tenant (CUT-08); **BACK-2676** (Revenium-side
 provider-slug drift) remains the prerequisite before a production tenant would show
-non-zero cost for these completions. The two induced sessions this rehearsal creates will
-themselves produce `$0` rows; that is expected and captioned, not a finding.
+non-zero cost for these completions. The two induced sessions this rehearsal created
+themselves produced `$0` rows; that is expected and captioned, not a finding.
 
 **Scope boundary.** This document reports what the rehearsal found; it does not fix
 anything the rehearsal surfaces. No file under `skills/` is touched by this phase (G-1).
@@ -154,12 +233,16 @@ STRONG: a profile with zero `owners/` records and zero event-ledger lines has no
 accidentally re-bill or drop, so a byte-identical ledger prefix across the whole round
 trip is a strong guarantee here, not a weak one. Idleness makes the
 **mechanism-demonstration** half entirely DEPENDENT on the two induced sessions —
-"legacy resumed" and "the event path deferred" are claims about behaviour on new activity,
-and an idle profile has none of its own. Without the two induced sessions above, this
-rehearsal would prove only that nothing happened on `devops`, which is equally true
-whether or not the rollback mechanism actually works — this is why D-3 authorizes real
-traffic rather than passive observation, and why the "zero owners records" fact must not
-be read as unqualified good news on its own.
+"which path claims a freshly-created session" is a claim about behaviour on new activity,
+and an idle profile has none of its own. **This dependency is exactly what played out**:
+induction A's own timing (created 38 seconds into an already-running legacy cycle) is what
+produced the falsified Prediction A finding — a passive-observation rehearsal on this same
+idle profile would have found nothing, neither confirming nor falsifying anything, because
+there would have been no fresh session for either path to race over. Without the two
+induced sessions, this rehearsal would have proven only that nothing happened on `devops`,
+which is equally true whether or not the rollback mechanism actually works — this is why
+D-3 authorizes real traffic rather than passive observation, and why the "zero owners
+records" fact must not be read as unqualified good news on its own.
 
 ## Results
 
@@ -313,8 +396,8 @@ table `api-event-report.sh` implements identically) resolved to `legacy` — a d
 one-line backfill record, not a new bill.
 
 **Benign, checked exhaustively rather than assumed:** the legacy ledger's sha256 is
-byte-identical before and after (`c56ff9467c1ae3c3df7770ad623fb20e7e60bbe077c5bc982e42da8c359f6815`,
-both) — no new `HERMES:` line accompanies any of the 1,939 records. Every one of the 1,939
+byte-identical before and after (`c56ff946...c359f6815`, both) — no new `HERMES:` line
+accompanies any of the 1,939 records. Every one of the 1,939
 `legacy`-owner sids has a pre-existing `HERMES:` ledger line (checked by exhaustive set
 difference against the ledger's 1,939 distinct sids — the difference is empty); none is a
 new, un-backfilled claim. Zero owner records anywhere on the profile hold more than one
@@ -413,8 +496,41 @@ separately-invoked action rather than assumed:**
 ssh <fleethost> "diff \"$d/env\" \"$d/env.pre-rehearsal-<stamp>\""
 ```
 An empty `diff` here covers the `env` file only — it is not, by itself, the full
-pre-versus-post comparison G-7 requires. `## Independent confirmation` (35-04) extends
-this to every other state file the rehearsal could plausibly have touched.
+pre-versus-post comparison G-7 requires. `## Independent confirmation` below extends this
+to every other state file the rehearsal could plausibly have touched.
+
+**Step 5 — read a session's ownership record**, the single file that decides which path a
+given sid will be billed by, going forward, on every subsequent tick.
+```bash
+ssh <fleethost> "cat \"$d/owners/<sid>\""            # exactly one line: 'legacy' or 'event'
+ssh <fleethost> "wc -l \"$d/owners/<sid>\""           # must be 1 — a 2-line file is the double-bill signature
+```
+
+**Step 6 — the full pre/post state-capture set**, run identically before and after any
+mutation to produce a comparable pair (this is 35-02's own replayable block, reused
+verbatim by this document for the post-state capture above):
+```bash
+ssh <fleethost> "
+  d=<profile-state-dir>
+  echo '=== cat env ==='; cat \"\$d/env\"
+  echo '=== sha256sum env ==='; sha256sum \"\$d/env\"
+  echo '=== env.bak* filenames ==='; ls -la \"\$d\"/env.bak* 2>&1
+  echo '=== env.bak* content + sha256 ==='
+  for f in \"\$d\"/env.bak*; do echo \"--- \$f ---\"; cat \"\$f\"; sha256sum \"\$f\"; done
+  echo '=== full ls -la of state dir ==='; ls -la \"\$d\"
+  echo '=== ledger line counts + sha256 ==='
+  wc -l \"\$d\"/revenium-hermes.ledger \"\$d\"/revenium-api-events.ledger
+  sha256sum \"\$d\"/revenium-hermes.ledger \"\$d\"/revenium-api-events.ledger
+  echo '=== owners dir ==='; [ -d \"\$d\"/owners ] && ls -la \"\$d\"/owners || echo ABSENT
+  echo '=== drain-status.json full ==='; cat \"\$d\"/drain-status.json
+  echo '=== state.db session count ==='
+  sqlite3 -readonly <profile-home-dir>/state.db 'select count(*) from sessions;'
+  echo '=== tail revenium-metering.log (20 lines) ==='; tail -20 \"\$d\"/revenium-metering.log
+"
+```
+Re-running this exact block, before and after, and diffing the two outputs item by item is
+what `## Independent confirmation` below is built from — not a summary, the literal
+command pair.
 
 ## Independent confirmation
 
@@ -494,6 +610,69 @@ spool file, named as such.
 
 ## Verified against
 
-*Filled by 35-04 — a consolidated date, method, and redaction-proof statement covering
-all of 35-02, 35-03 and 35-04's own live work, following the same pattern
-`docs/transition-reconciliation.md`'s own closing section used.*
+**Date and method.** Live SSH reconnaissance and read-only state capture on 2026-08-20
+(35-02), the live rollback leg and induction A on 2026-08-20 (35-03), and leg B, the
+POST-state capture, and the `owners/` backfill investigation on 2026-08-20/21 (this plan).
+All read commands were `cat`, `ls`, `wc`, `sha256sum`, `sqlite3 -readonly`, `grep`,
+`python3` reading JSON, and `awk`; all write commands were exactly the four G-2-permitted
+writes (the snapshot `cp`, the rollback-restore `cp`, the cutover-restore `cp`, and the two
+`hermes chat` inductions) — no `systemctl`, no `crontab`, no `rsync`, no mutating
+`revenium` verb, anywhere across all three plans.
+
+**Host discipline (redacted).** All live work ran against one fleet host (identity
+redacted per G-6/G-3) over SSH with a named private key (redacted), targeting exactly one
+profile, `devops`, of the fleet's ten. No other profile was read or written by this phase.
+
+**What is deliberately redacted, and why.** Two induced raw session ids
+(`<induced-sid-legacy>`, `<induced-sid-event>`) are redacted throughout, because a raw sid
+is directly correlatable to a real, billed Hermes session and its own transcript. The
+fleet host's IPv4 address, its SSH key filename, and its login-user prefix in the SSH
+target string are redacted per G-3/G-6, because together they are sufficient to connect to
+the host. Two
+profile filesystem paths (`<profile-state-dir>`, `<profile-home-dir>`) are redacted
+because each embeds the host's own directory layout alongside the profile name. Composite
+values that embed a raw sid (an `api_request_id`, or the `event:<api_request_id>`
+transaction id it would become in Revenium) are never quoted whole; where their SHAPE
+matters, generic non-identifying template tokens (`<uuid>`, `<hash>`) stand in for the
+non-sid segments, reusing the already-redacted sid placeholder for the sid segment. sha256
+hashes of file content (`env`, the two ledgers) are quoted directly, truncated for
+brevity, and are NOT treated as identifiers requiring a map entry — a content fingerprint
+does not name a session, a host, or a person, and truncating them (rather than redacting
+them) follows the same convention 35-02 and 35-03 already established for this document.
+
+**The four-part redaction proof, run now, counts recorded:**
+
+1. **Map completeness.** Every raw identifier this phase's live work touched — both
+   induced sids, both `api_request_id` composites, the profile state-directory and
+   home-directory paths, the fleet host's address/key/login string, the fleet host's own
+   `hostname` output — has a row in `35-EVIDENCE.md`'s placeholder map (10 rows total
+   across 35-02's original map and this plan's additions; 2 rows reserved/not-yet-deployed
+   for future use, `<induced-sid-event>` moved from reserved to USED by this plan).
+2. **Per-entry absence**, each raw value from `35-EVIDENCE.md`'s map searched
+   individually against this document, not by one combined pattern: both induced sids,
+   the profile home-directory path prefix, the fleet host's own `hostname` output, the
+   fleet host's IPv4 address, and the SSH key filename each returned zero hits, checked
+   one at a time (six individual `grep -c` invocations, six zero counts — the literal raw
+   values are intentionally not reproduced in this section, since quoting them here would
+   itself be the leak this check exists to rule out).
+3. **Per-entry presence**, each hyphenated placeholder actually appearing in the tracked
+   document confirmed to have a map row: `<induced-sid-legacy>`, `<induced-sid-event>`,
+   `<profile-state-dir>`, `<profile-home-dir>` — **4 distinct placeholders**, all four
+   present in `35-EVIDENCE.md`'s map, checked individually. One further placeholder
+   remains reserved in the map for the fleet host's own `hostname` output but is not
+   deployed anywhere in this document, by design — nothing in the tracked prose currently
+   needs it.
+4. **Shape sweep outside the regex gate's four patterns** — UUIDs, long hex runs,
+   `<label>_<hex>` job-style strings, bare hostnames — run against the finished document:
+   zero UUID-shaped hits; one long-hex-run hit, the legacy ledger's own truncated sha256
+   (a content fingerprint, not an identifier, per the redaction convention stated above);
+   zero `<label>_<hex>` job-style strings; zero bare hostname hits.
+
+**Placeholder count, derived from the document at the moment of writing, not carried
+forward from an earlier wave:** `grep -oE '<[a-z][a-z-]*-[a-z-]*>' docs/rollback-rehearsal.md | sort -u`
+finds **4** distinct hyphenated redaction placeholders in the finished document.
+
+**The file-wide regex gate** (an IPv4 shape, the SSH key filename shape, the login-prefix
+shape used in the SSH target string, and the raw-sid timestamp shape) produces zero
+matches on the finished document — run as a screen, not accepted as the proof; the four
+checks above are the proof.

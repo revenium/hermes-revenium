@@ -50,17 +50,47 @@ asks before anything else.
 ## The switches
 
 **`REVENIUM_EVENT_METERING_MODE=live` alone does not cut over.** With
-`REVENIUM_LEGACY_COMPLETIONS` still `enabled` (the default), the legacy path's
-own D-09 partition check claims every session before the event path gets a
-chance to — logging `skipping <sid> — already owned by the legacy HERMES:
-ledger (D-09 partition)` for each one — and the event path defers
-indefinitely. Legacy wins because `cron.sh` runs the legacy stage before the
-event stage inside a single tick under one `cron.lock`, and both paths gate a
-session's readiness on the same settle/sentinel condition, so they become
-ready on the same tick and ordering decides. **`REVENIUM_LEGACY_COMPLETIONS=disabled`
-is required** for the event path to actually bill anything. This was proven by
-inducing a session on a profile at `mode=live, legacy=enabled` post-flip: it
-went entirely to legacy, 0 event rows.
+`REVENIUM_LEGACY_COMPLETIONS` still `enabled` (the default), which path bills a
+given session is decided by an **ownership record**
+(`owners/<sid>`, `session_event_owned` in `hermes-report.sh`), not by which
+stage `cron.sh` happens to run first. Both stages implement the identical
+resolution table — neither ledger has rows yet → the claiming stage wins;
+legacy-only rows → legacy (backfill); event-only rows → event (backfill);
+both → legacy, with a warn — and once either stage writes that record for a
+sid, the other is locked out of it permanently, independent of stage order.
+**This means the outcome for a brand-new session depends on a race, and the
+race's winner is not fixed by stage order alone.** `cron.sh` does run the
+legacy stage strictly before the event stage inside one invocation (see
+"A residual straddle exposure" under Rollback below) — but the legacy
+stage's own per-session work list is fixed once, at that stage's own start,
+before it begins walking it. A profile whose legacy-tracked session count
+is small walks that list in well under a minute, so a brand-new session
+created around the same tick is rare and, when it happens, the very next
+tick's legacy stage reliably reaches it before anything else does. A
+profile carrying a large legacy backlog (hundreds of tracked sessions) can
+take five to six minutes just to walk its own fixed list — long enough that
+a session created *after* the list was assembled is invisible to that
+list, even though the invoking tick has not finished. By the time that same
+invocation's event stage runs, minutes later, it takes its OWN fresh read
+and finds the new session unowned, and claims it — still within the SAME
+tick's invocation, still with legacy running "first" in stage order, but
+never having seen the session at all. The following tick's legacy stage
+does then enumerate the session (it now exists), but finds ownership
+already claimed and defers permanently. Both
+outcomes are observed, live, on the real fleet: inducing a session on a
+low-backlog profile at `mode=live, legacy=enabled` post-flip sent it entirely
+to legacy (0 event rows) — the outcome this document previously described as
+the *only* one. Inducing a session on a profile with an 886-session legacy
+backlog, also at `mode=live, legacy=enabled`, sent it entirely to the event
+path instead (0 legacy rows) — the backlog size, not anything about the
+switches themselves, is what differs between the two runs.
+**`REVENIUM_LEGACY_COMPLETIONS=disabled` is still required** for the event
+path to bill reliably — not because leaving legacy enabled always fails (it
+frequently does not), but because leaving it enabled makes the outcome for
+any given session depend on a race this operator does not control and
+cannot predict from the switches alone. A billing decision that depends on
+which of two background loops happens to finish first is not a state to
+cut over from.
 
 Two independent, reversible settings control the rollout. Both are
 readable from the environment (highest precedence) or from
