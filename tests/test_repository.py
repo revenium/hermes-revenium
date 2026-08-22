@@ -75,6 +75,8 @@ class RepositoryTests(unittest.TestCase):
     def test_expected_files_exist(self):
         expected = [
             ROOT / 'README.md',
+            ROOT / 'LICENSE',
+            ROOT / 'CONTRIBUTING.md',
             ROOT / 'docs' / 'installation.md',
             # The split doc set: README.md is a landing page that links here,
             # so a missing page is a broken link on the front door.
@@ -190,6 +192,36 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('metadata:', text)
         self.assertIn('hermes:', text)
         self.assertIn('category: devops', text)
+
+    def test_skill_declared_license_matches_the_license_file(self):
+        """SKILL.md's frontmatter license must be backed by a LICENSE file.
+
+        SKILL.md shipped `license: MIT` from the beginning, and every host that
+        installed the skill read that declaration -- but the repo carried no
+        LICENSE file at all until 2026-08-22, so the claim was unbacked for the
+        first three months. This pins the two together in both directions: the
+        frontmatter cannot claim a license the repo does not grant, and the
+        LICENSE file cannot be swapped without the frontmatter following.
+        """
+        frontmatter = (SKILL / 'SKILL.md').read_text().split('---')[1]
+        declared = [
+            line.split(':', 1)[1].strip()
+            for line in frontmatter.splitlines()
+            if line.startswith('license:')
+        ]
+        self.assertEqual(
+            1, len(declared),
+            'SKILL.md must declare exactly one `license:` in its frontmatter',
+        )
+
+        license_text = (ROOT / 'LICENSE').read_text()
+        self.assertIn(
+            f'{declared[0]} License', license_text,
+            f'SKILL.md declares license: {declared[0]!r}, which does not match '
+            'the LICENSE file at the repo root',
+        )
+        # The copyright line is the part a rename or a fork silently gets wrong.
+        self.assertIn('Revenium, Inc.', license_text)
 
     def test_docs_document_the_current_metering_surface(self):
         """The operator docs must describe the surface operators actually run.

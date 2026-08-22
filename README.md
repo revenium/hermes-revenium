@@ -124,6 +124,11 @@ Engineering evidence — rehearsals, reconciliations, and milestone closeouts �
 Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how the repo is
 laid out, the invariants the test suite enforces, and what to run before opening a PR.
 
+## License
+
+[MIT](LICENSE) — the same license as [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+itself, and the one `skills/revenium/SKILL.md` already declares in its frontmatter.
+
 ## Support
 
 Questions, bugs, or feature requests? Join us on [Discord](http://discord.gg/J2DbmjZ2nA).

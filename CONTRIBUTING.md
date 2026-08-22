@@ -114,3 +114,8 @@ skill was forked from, and one fails on any `budget-check` / `budget-status` ref
 - Run the full suite before opening the PR, and say in the description what you ran.
 - If you changed the halt block in `SKILL.md`, also run the manual survivability runbook at
   `skills/revenium/references/halt-survivability.md`.
+
+## License
+
+This project is [MIT licensed](LICENSE). By contributing, you agree that your
+contributions will be licensed the same way.
