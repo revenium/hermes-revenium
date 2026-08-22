@@ -317,6 +317,36 @@ class SkillAttributionEventTests(unittest.TestCase):
             all_flags[0].get('--skill-name'), 'alpha-skill',
             'the skill in force at the event was evicted by newer, irrelevant rows')
 
+    def test_truncated_window_withholds_rather_than_guesses(self):
+        """A known-incomplete timeline must produce silence, not a stale skill.
+
+        When more skill calls land between two events in one spool file than
+        the query keeps, the dropped rows are the earlier event's predecessors.
+        Handing that event the pre-window skill would attribute the call to
+        something already superseded when it ran — a confidently wrong billing
+        dimension, which is worse than an absent one. The later event, whose
+        predecessor did survive, must still be attributed normally.
+
+        Raised as P1 by review on PR #82.
+        """
+        wall = [('skill_view', json.dumps({'name': f'noise-{i}'}),
+                 SWITCH_TS + i * 0.1) for i in range(600)]
+        by_txn, all_flags, _out = self._run(
+            events=[_event(ARID_A, EVENT_A_TS, EVENT_A_END),
+                    _event(ARID_B, EVENT_B_TS, EVENT_B_END)],
+            skill_rows=[('skill_view', json.dumps({'name': 'alpha-skill'}), EARLY_TS)] + wall)
+        self.assertEqual(len(all_flags), 2, 'both completions must still ship')
+        a = by_txn[f'event:{ARID_A}']
+        b = by_txn[f'event:{ARID_B}']
+        for f in SKILL_FLAGS:
+            self.assertNotIn(
+                f, a,
+                f'{f} emitted from a timeline known to be missing this event\'s '
+                f'predecessor — silence is the only honest answer here')
+        self.assertEqual(
+            b.get('--skill-name'), 'noise-599',
+            'the later event\'s predecessor survived the window and must still attribute')
+
     # --- Property 6 -------------------------------------------------------
     def test_malformed_newest_payload_falls_through(self):
         """A payload that will not parse must not win and must not abort."""

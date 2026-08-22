@@ -702,6 +702,7 @@ event_file = os.environ.get("EVENT_FILE", "")
 sid = ""
 count = 0
 min_ts = None
+max_ts = None
 platform = ""
 try:
     with open(event_file, "r", encoding="utf-8") as fh:
@@ -736,19 +737,26 @@ try:
                 continue
             if min_ts is None or ts < min_ts:
                 min_ts = ts
+            # The file's NEWEST event ts, upper edge of the skill-timeline
+            # window below. Without it a bounded query spends its whole row
+            # budget on skill calls made AFTER every event in this file.
+            if max_ts is None or ts > max_ts:
+                max_ts = ts
 except OSError:
     pass
 print(f"SID={sid}")
 print(f"COUNT={count}")
 print(f"MIN_TS={min_ts if min_ts is not None else ''}")
+print(f"MAX_TS={max_ts if max_ts is not None else ''}")
 print(f"PLATFORM={platform}")
 PY
     )
 
-    local sid count min_ts platform
+    local sid count min_ts max_ts platform
     sid=$(echo "${peek}" | sed -n 's/^SID=//p' | head -1)
     count=$(echo "${peek}" | sed -n 's/^COUNT=//p' | head -1)
     min_ts=$(echo "${peek}" | sed -n 's/^MIN_TS=//p' | head -1)
+    max_ts=$(echo "${peek}" | sed -n 's/^MAX_TS=//p' | head -1)
     platform=$(echo "${peek}" | sed -n 's/^PLATFORM=//p' | head -1)
 
     [[ -z "${sid}" ]] && continue
@@ -952,6 +960,7 @@ PY
       SID="${sid}" \
       SKILL_CAPABLE="${SKILL_CLI_CAPABLE}" \
       MIN_EVENT_TS="${min_ts}" \
+      MAX_EVENT_TS="${max_ts}" \
       SKILL_LOCK_FILE="${HERMES_HOME}/skills/.hub/lock.json" \
       STATE_DB="${STATE_DB}" \
       python3 - <<'PY' 2>/dev/null
@@ -1112,11 +1121,21 @@ if os.environ.get("SKILL_CAPABLE") == "true":
     # MIN_EVENT_TS comes from the peek pass that already walked this file. If
     # it is absent or unparseable the query falls back to the unbounded form:
     # fail open to today's behaviour, never to no timeline at all.
+    # Set only when the in-window query hit its LIMIT: below this timestamp
+    # the timeline is known-incomplete and attribution is withheld.
+    _window_floor_ts = None
     _min_event_ts = None
     try:
         _min_event_ts = float(os.environ.get("MIN_EVENT_TS") or "")
     except (TypeError, ValueError):
         _min_event_ts = None
+    _max_event_ts = None
+    try:
+        _max_event_ts = float(os.environ.get("MAX_EVENT_TS") or "")
+    except (TypeError, ValueError):
+        _max_event_ts = None
+    if _min_event_ts is not None and _max_event_ts is None:
+        _max_event_ts = _min_event_ts
     if _db and _sid and os.path.isfile(_db):
         _sel = ("SELECT tool_name, COALESCE(content, tool_calls), timestamp "
                 "FROM messages WHERE session_id = ? AND tool_name IN "
@@ -1128,10 +1147,29 @@ if os.environ.get("SKILL_CAPABLE") == "true":
                         _sel + "ORDER BY timestamp DESC LIMIT 500", (_sid,)
                     ).fetchall()
                 else:
+                    # BOTH edges, not just the lower one: rows newer than the
+                    # file's last event can never be selected by any event in
+                    # it, so leaving them in the window would spend the row
+                    # budget on rows that cannot matter — the same eviction
+                    # the lower bound exists to prevent, from the other side.
                     _raw = _conn.execute(
-                        _sel + "AND timestamp >= ? ORDER BY timestamp DESC LIMIT 500",
-                        (_sid, _min_event_ts),
+                        _sel + "AND timestamp >= ? AND timestamp <= ? "
+                        "ORDER BY timestamp DESC LIMIT 500",
+                        (_sid, _min_event_ts, _max_event_ts),
                     ).fetchall()
+                    # If the window itself is truncated, the rows that were
+                    # dropped are the OLDEST in-window ones — precisely the
+                    # predecessors of this file's earlier events. Those events
+                    # would otherwise bisect onto the anchor and be attributed
+                    # to a skill that was already superseded when they ran.
+                    # Record the boundary so `_skill_for` can return silence
+                    # for them instead: an absent dimension is recoverable, a
+                    # confidently wrong one is not.
+                    if len(_raw) == 500:
+                        try:
+                            _window_floor_ts = float(_raw[-1][2])
+                        except (TypeError, ValueError, IndexError):
+                            _window_floor_ts = None
                     # Appended AFTER the window rows so `_raw` stays globally
                     # DESC — the `reversed()` below is what makes skill_ts
                     # ascending, which bisect requires.
@@ -1207,6 +1245,11 @@ def _skill_for(ts):
     # skill opened AFTER a call did not influence it, so an event preceding
     # every skill row resolves to no skill and the flags are omitted.
     if not skill_ts:
+        return "", "", "", ""
+    # Known-incomplete timeline below the floor: the row that would have been
+    # this call's predecessor may have been dropped by the LIMIT, so the
+    # nearest surviving row is not trustworthy. Withhold rather than guess.
+    if _window_floor_ts is not None and ts < _window_floor_ts:
         return "", "", "", ""
     idx = bisect.bisect_right(skill_ts, ts) - 1
     if idx < 0:
