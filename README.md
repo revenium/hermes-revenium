@@ -2,11 +2,12 @@
 
 <img src="assets/hermes-revenium.png" alt="Hermes × Revenium — Revenium Labs" width="620">
 
-# Hermes Revenium Skill
+# Hermes Revenium
 
 **Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event
 metering for [Hermes Agent](https://hermes-agent.nousresearch.com), on the
-[Revenium](https://www.revenium.ai) platform.**
+[Revenium](https://www.revenium.ai) platform. Ships as a Hermes skill bundle; the work is
+done by a plugin, three shell hooks, and a cron.**
 
 ![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)
 ![Status: Beta](https://img.shields.io/badge/status-beta%20(best--effort)-f0a020?style=for-the-badge)
@@ -38,9 +39,9 @@ metering for [Hermes Agent](https://hermes-agent.nousresearch.com), on the
 > → **[What is Revenium Labs?](https://github.com/revenium/.github/blob/main/LABS.md)**
 
 Hermes reports token totals per session. That tells you what you spent and nothing about
-what you bought. This skill closes that gap: it labels every metered completion with what
-the agent was actually doing, tracks each task arc as a billable job, meters every tool
-call, and halts the agent structurally when a budget rule blocks.
+what you bought. This closes that gap: every metered completion is labelled with what the
+agent was actually doing, each task arc is tracked as a billable job, every tool call is
+metered, and the agent is halted structurally when a budget rule blocks.
 
 ## What you get
 
@@ -50,6 +51,24 @@ call, and halts the agent structurally when a budget rule blocks.
 | **Agentic job tracking** | Discrete task arcs become Revenium jobs with immutable, once-only outcomes, and their transactions are linked back via `--agentic-job-id`. |
 | **Tool-event metering** | Every Hermes tool call is metered — name, duration, success, error — through `revenium meter tool-event`. |
 | **Structural budget guardrails** | Hermes shell hooks read a local guardrail snapshot before every LLM call and every tool call, so enforcement does not depend on the agent choosing to comply. |
+
+## What's actually installed
+
+"Skill" is how this is packaged and installed, not what does the work. Four pieces land on
+the host, and only one of them is the skill:
+
+| Piece | What Hermes calls it | Where it lives | What it does |
+|---|---|---|---|
+| `revenium-classifier` | **plugin** — Python, `register(ctx)`, four lifecycle hooks | `~/.hermes/plugins/` | All classification, and the per-API-call event spool |
+| `pre_llm_call`, `pre_tool_call`, `post_tool_call` | **shell hooks** registered in `config.yaml` | `~/.hermes/skills/revenium/scripts/` | All budget enforcement, and tool-call capture |
+| `cron.sh` and its six stages | **cron job**, out of process | `~/.hermes/skills/revenium/scripts/` | Everything that talks to the Revenium API |
+| `SKILL.md` | **skill** — markdown loaded into the agent's context | `~/.hermes/skills/revenium/` | A halt-check backstop, by its own description defense-in-depth only |
+
+This matters operationally. Hermes loads plugins from `~/.hermes/plugins/` and skills from
+`~/.hermes/skills/` — different roots, different loaders — and `hermes skills install`
+carries only the second. That is why installing the skill is not enough on its own, and why
+the bootstrap exists. It is also why a stale plugin copy is the most common silent failure
+on a multi-profile host: the skill tree is shared, the plugin is not.
 
 ## Quick start
 

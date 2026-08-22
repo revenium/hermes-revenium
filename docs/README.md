@@ -2,6 +2,11 @@
 
 [← Back to the project README](../README.md)
 
+Packaged as a Hermes skill bundle, but the working parts are a plugin, three shell hooks,
+and a cron; `SKILL.md` is only a halt-check backstop. The README's
+[What's actually installed](../README.md#whats-actually-installed) has the breakdown, and
+[How it works](how-it-works.md) has the mechanism.
+
 ## Getting started
 
 - **[Installation](installation.md)** — the four install paths, the four credentials,

@@ -2,9 +2,15 @@
 
 [← Documentation index](README.md)
 
-Installing has two halves: get the skill onto the host, then wire it into Hermes.
+Installing has two halves: get the files onto the host, then wire them into Hermes.
 Option 1 does both. The other three do only the first, and you finish with
 [Set up guardrails, cron, and hooks](#set-up-guardrails-cron-and-hooks).
+
+The second half is not optional bookkeeping. `hermes skills install` delivers the *skill* —
+`SKILL.md` and the support files it names — and nothing else. The classifier **plugin**,
+the **shell hooks**, and the **cron** are what actually classify, enforce, and meter, and
+each is installed separately. See
+[What's actually installed](../README.md#whats-actually-installed).
 
 ## Install paths
 
@@ -165,8 +171,8 @@ bash ~/.hermes/skills/revenium/scripts/install-cron.sh
 The cron meters `~/.hermes/state.db` into Revenium and refreshes
 `~/.hermes/state/revenium/guardrail-status.json`. Hermes cannot add crontab entries
 itself, so this step stays manual. Skip it and the agent reports "Guardrail status not yet
-available" before every operation, which is the skill correctly detecting that the cron
-never ran.
+available" before every operation, which is the halt-check backstop correctly detecting
+that the cron never ran.
 
 Where 60 seconds is too slow — a demo, a live dashboard — install a sub-minute interval.
 The cron still fires once a minute; the pipeline loops inside each tick.

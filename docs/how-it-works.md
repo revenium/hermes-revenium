@@ -2,18 +2,23 @@
 
 [← Documentation index](README.md)
 
-The skill has three parts, and they never call each other. The only coupling is files under
-`~/.hermes/state/revenium/`.
+This ships as a Hermes skill bundle, but the skill itself — `SKILL.md` — only carries a
+halt-check backstop. The work is done by a plugin, three shell hooks, and a cron. See
+[What's actually installed](../README.md#whats-actually-installed) for the split.
 
-1. **In-session.** A classifier plugin labels what each session was doing and writes marker
-   files. Three shell hooks enforce guardrails and capture tool calls. None of this makes a
-   network call.
+Those pieces fall into three parts, and they never call each other. The only coupling is
+files under `~/.hermes/state/revenium/`.
+
+1. **In-session.** The `revenium-classifier` **plugin** — Python that Hermes loads from
+   `~/.hermes/plugins/` and calls at four lifecycle hooks — labels what each session was
+   doing and writes marker files. Three **shell hooks**, registered in `config.yaml`,
+   enforce guardrails and capture tool calls. None of this makes a network call.
 2. **State files.** `config.json`, `guardrail-status.json`, the markers, the ledgers, the
    taxonomies. Every process re-reads what it needs; there is no shared memory and no IPC.
 3. **The cron pipeline.** Once a minute, out of process, under one lock. This is the only
    part that talks to Revenium.
 
-That separation is deliberate. A broken skill degrades to "no enforcement, no
+That separation is deliberate. A broken install degrades to "no enforcement, no
 classification" — never to "agent blocked".
 
 ## Token metering with task-type classification
