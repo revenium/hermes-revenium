@@ -2,6 +2,11 @@
 
 [← Back to the project README](../README.md)
 
+Packaged as a Hermes skill bundle, but the working parts are a plugin, three shell hooks,
+and a cron; `SKILL.md` is only a halt-check backstop. The README's
+[What's actually installed](../README.md#whats-actually-installed) has the breakdown, and
+[How it works](how-it-works.md) has the mechanism.
+
 ## Getting started
 
 - **[Installation](installation.md)** — the four install paths, the four credentials,
@@ -38,9 +43,7 @@ skill rather than here:
 - [`references/config-schema.md`](../skills/revenium/references/config-schema.md) — `config.json` schema
 - [`references/halt-survivability.md`](../skills/revenium/references/halt-survivability.md) — the manual halt-check runbook
 
-## Engineering evidence
+## Release history
 
-[`internal/`](internal/) holds rehearsals, reconciliations, live-host verifications, and
-milestone closeouts. They are committed because the planning tree they came from is
-gitignored, and they record why the system has the shape it does. They are not operator
-documentation — nothing here requires reading them.
+[CHANGELOG.md](../CHANGELOG.md) — new functionality and fixes, release by release.
+
