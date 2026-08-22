@@ -296,6 +296,27 @@ still expecting the pre-this-change shape): `staleSecondsConfigured`,
   served the call, which is a strictly better input than the legacy
   path's session-level `model` column for a session that changed models
   mid-stream.
+- **Skill attribution is resolved per call, not per delta window.** Both
+  paths ship the CLI 1.4.0 skill dimension (`--skill-name`,
+  `--skill-invocation-trigger`, and, when the hub lockfile records the
+  skill, `--skill-source` / `--skill-marketplace-name`). They differ in
+  what "the skill in force" means: the legacy path picks the most recent
+  skill opened at-or-before the *delta window end*, because a delta spans
+  an unknown range of turns; the event path knows each call's own
+  timestamp and attributes the skill open at **that call**. Two calls in
+  one session that straddle a skill switch therefore carry different
+  skills on the event path and the same one on the legacy path. Neither
+  path extends backward — a skill opened after a call did not influence
+  it, so the flags are simply absent. Neither path ever sends
+  `--skill-kind` or `--skill-plugin-name`: what Revenium expects in them
+  is unknown, and a guessed value poisons a dimension worse than an
+  absent one leaves it. `meter tool-event` has no skill flags at all, so
+  tool-event rows are unaffected.
+  - *Caveat, shared by both paths:* the session DB is resolved at
+    process level, so on a multiplexed gateway a session owned by a
+    different profile's home resolves to no skill rows and the flags are
+    omitted. Skill coverage on a multiplex host tracks whichever
+    `HERMES_HOME` the cron stage runs under.
 
 ## Rollback
 
