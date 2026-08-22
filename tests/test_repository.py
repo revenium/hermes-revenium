@@ -76,6 +76,14 @@ class RepositoryTests(unittest.TestCase):
         expected = [
             ROOT / 'README.md',
             ROOT / 'docs' / 'installation.md',
+            # The split doc set: README.md is a landing page that links here,
+            # so a missing page is a broken link on the front door.
+            ROOT / 'docs' / 'README.md',
+            ROOT / 'docs' / 'configuration.md',
+            ROOT / 'docs' / 'fleet.md',
+            ROOT / 'docs' / 'how-it-works.md',
+            ROOT / 'docs' / 'operations.md',
+            ROOT / 'docs' / 'upgrading.md',
             # CUT-07: milestone evidence must survive in git — .planning/ is gitignored
             ROOT / 'docs' / 'internal' / 'milestone-v1.4-closeout.md',
             ROOT / 'install.sh',
@@ -183,55 +191,66 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn('hermes:', text)
         self.assertIn('category: devops', text)
 
-    def test_readme_documents_the_current_metering_surface(self):
-        """README must describe the surface operators actually run.
+    def test_docs_document_the_current_metering_surface(self):
+        """The operator docs must describe the surface operators actually run.
 
         Added after v1.5 shipped with a README last touched the day before
         event-driven metering landed: it documented classification as happening
         at `on_session_end` (a hook that never fires for gateway-served
         sessions, which is precisely why Phase 29 added the other three), and
         made no mention of the event path, either switch, or the drain gate.
-        Nothing caught it — `test_expected_files_exist` pins README's existence,
-        not its contents.
+        Nothing caught it — `test_expected_files_exist` pins file existence,
+        not file contents.
 
-        This guard is deliberately narrow: it asserts the presence of the
-        identifiers an operator needs in order to run or debug the current
-        system, and one absence — the bare `on_session_end`-only claim. It does
-        not police prose. If a name below genuinely goes away, delete its line
-        here in the same commit that removes it.
+        The guard was written against README.md when the README carried this
+        material. It now lives in docs/how-it-works.md, so the guard follows the
+        content — it protects the knowledge, not the filename.
+
+        Deliberately narrow: it asserts the presence of the identifiers an
+        operator needs in order to run or debug the current system, and one
+        absence — the bare `on_session_end`-only claim. It does not police
+        prose. If a name below genuinely goes away, delete its line here in the
+        same commit that removes it.
         """
-        text = (ROOT / 'README.md').read_text(errors='ignore')
+        page = ROOT / 'docs' / 'how-it-works.md'
+        text = page.read_text(errors='ignore')
 
         required = [
             # the two switches, and the fact that mode alone is not a cutover
             'REVENIUM_EVENT_METERING_MODE',
             'REVENIUM_LEGACY_COMPLETIONS',
-            # the cron stages that exist but predate no README mention
+            # the cron stages that would otherwise go unmentioned
             'api-event-report',
             'drain-status',
             # the hooks that actually carry classification
             'on_session_finalize',
             'post_llm_call',
             'post_api_request',
-            # the evidence docs a reader is pointed at
-            'docs/event-metering.md',
+            # the deep-dive a reader is pointed at (a sibling link from docs/)
+            'event-metering.md',
         ]
         missing = [name for name in required if name not in text]
         self.assertEqual(
             [], missing,
-            'README.md no longer documents part of the metering surface: '
-            + ', '.join(missing),
+            'docs/how-it-works.md no longer documents part of the metering '
+            'surface: ' + ', '.join(missing),
         )
 
         # The specific wrong claim this guard exists to prevent recurring:
         # attributing classification to on_session_end alone. Mentioning the
         # hook is fine (it is one of four); calling it *the* classifier is not.
-        for wrong in ('on_session_end classifier', 'plugin at `on_session_end`'):
-            self.assertNotIn(
-                wrong, text,
-                'README.md attributes classification to on_session_end alone; '
-                'it is one of four hooks and does not fire for gateway sessions',
-            )
+        # Checked across every operator-facing page, since any of them could
+        # reintroduce it.
+        pages = [ROOT / 'README.md'] + sorted((ROOT / 'docs').glob('*.md'))
+        for candidate in pages:
+            body = candidate.read_text(errors='ignore')
+            for wrong in ('on_session_end classifier', 'plugin at `on_session_end`'):
+                self.assertNotIn(
+                    wrong, body,
+                    f'{candidate.relative_to(ROOT)} attributes classification to '
+                    'on_session_end alone; it is one of four hooks and does not '
+                    'fire for gateway sessions',
+                )
 
     def test_skill_bundle_ships_bootstrap_script(self):
         r"""SKILL.md must name `references/bootstrap.sh` as a bundle-relative path.
@@ -912,8 +931,8 @@ exit 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_readme_documents_multi_profile_operation(self):
-        """README pins the multi-profile facts that silently cost real time.
+    def test_docs_document_multi_profile_operation(self):
+        """The docs pin the multi-profile facts that silently cost real time.
 
         Each assertion below corresponds to a failure that actually happened on a
         live host, where the symptom pointed nowhere near the cause:
@@ -933,52 +952,63 @@ exit 0
 
         These are documentation claims, so nothing else in the suite protects
         them; the guidance can drift back to wrong at any edit without a test.
-        """
-        text = (ROOT / 'README.md').read_text(errors='ignore')
 
+        Each needle is pinned to the page that owns it. The README keeps only
+        the one an arriving reader has to see without clicking through — that a
+        fleet needs `--all-profiles` at all; the rest live in the fleet and
+        upgrade guides.
+        """
         required = [
-            # profiles are discoverable from the Quick Start, not only from a
-            # section 100+ lines down that a reader has to already know exists
-            ('--all-profiles', 'Quick Start must surface fleet installs'),
+            # profiles must be discoverable from the landing page, not only from
+            # a guide the reader has to already know exists
+            ('README.md', '--all-profiles',
+             'the landing page must surface fleet installs'),
             # upgrade must re-name profiles
-            ('repeat `--profile` / `--all-profiles` on every upgrade',
+            ('docs/upgrading.md',
+             'repeat `--profile` / `--all-profiles` on every upgrade',
              'upgrades silently leave per-profile plugin copies stale otherwise'),
             # restart requirement
-            ('must restart before its plugin loads',
+            ('docs/fleet.md', 'must restart before its plugin loads',
              'a copied-but-unloaded plugin is the exact silent failure mode'),
-            # ...and the README must not send the reader at the gateway when a
+            # ...and the docs must not send the reader at the gateway when a
             # desktop-app `serve` process is what actually owns the profile.
-            ('--profile <name> serve',
+            ('docs/fleet.md', '--profile <name> serve',
              'on a desktop host the gateway is often not the serving process'),
             # the destructive rsync flag is called out
-            ('Do not add `--delete`',
+            ('docs/upgrading.md', 'Do not add `--delete`',
              '--delete removes host-only scripts and stops fleet metering'),
             # the refresh path exists and is documented
-            ('bootstrap.sh --update',
+            ('docs/upgrading.md', 'bootstrap.sh --update',
              'without --update the bootstrap hands off to the OLD installer'),
             # fleet mode + guardrails
-            ('skips guardrail creation',
+            ('docs/fleet.md', 'skips guardrail creation',
              'fleet mode never prompts, so rules are silently not created'),
             # per-profile diagnosis
-            ('diagnose.sh --profile',
+            ('docs/fleet.md', 'diagnose.sh --profile',
              'diagnosing the default home while meaning a profile is the easiest '
              'way to conclude "nothing is metered"'),
             # dashboards must filter on the per-profile agent
-            ('Hermes-ent', 'the per-profile AGENT must appear concretely'),
+            ('docs/fleet.md', 'Hermes-ent',
+             'the per-profile AGENT must appear concretely'),
         ]
-        for needle, why in required:
+        for relpath, needle, why in required:
+            page = ROOT / relpath
+            self.assertTrue(page.exists(), f'missing {relpath}')
             self.assertIn(
-                needle, text,
-                f'README.md no longer documents: {needle!r} — {why}',
+                needle, page.read_text(errors='ignore'),
+                f'{relpath} no longer documents: {needle!r} — {why}',
             )
 
-        # The destructive form must not reappear as a recommendation.
-        self.assertNotIn(
-            'rsync -av --delete', text,
-            'README recommends `rsync --delete` again — it deletes host-only '
-            'scripts (a fleet cron wrapper) that exist in no clone, silently '
-            'stopping metering across every profile',
-        )
+        # The destructive form must not reappear as a recommendation, on any
+        # operator-facing page.
+        pages = [ROOT / 'README.md'] + sorted((ROOT / 'docs').glob('*.md'))
+        for candidate in pages:
+            self.assertNotIn(
+                'rsync -av --delete', candidate.read_text(errors='ignore'),
+                f'{candidate.relative_to(ROOT)} recommends `rsync --delete` again '
+                '— it deletes host-only scripts (a fleet cron wrapper) that exist '
+                'in no clone, silently stopping metering across every profile',
+            )
 
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
