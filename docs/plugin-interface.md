@@ -23,7 +23,7 @@ was involved and no production data appears here.
 | ID | Finding | Status |
 |---|---|---|
 | E1 | Registered prompt sections **cannot** carry live halt state — they freeze at session start | **Load-bearing negative.** Do not move live state into a prompt section. |
-| E2 | `post_api_request` is a complete real-time metering event, with a natural idempotency key | Basis for the event-driven metering phase |
+| E2 | `post_api_request` is a complete real-time metering event, with a natural idempotency key | **Shipped.** The basis for event-driven metering in v1.5. |
 | E3 | `ctx.state` and an out-of-process cron can safely share state under `fcntl` | Viable, with a named coupling risk |
 | E4 | `exit 2` and `fail_closed` both work in the hook dispatcher | `fail_closed` is a policy decision, not a free win |
 
@@ -74,7 +74,7 @@ sections. Only the main loop does.
 |---|---|
 | CLI query (`-z`) | `on_session_start`, `pre`/`post_llm_call`, `pre`/`post_tool_call`, `pre`/`post_api_request`, **`on_session_end`** all fire |
 | Cron (`hermes cron run`) | **identical full lifecycle**, including `on_session_end`; session id shaped `cron_<job>_<ts>` |
-| Gateway | **not driven live** — no messaging credentials on the probe machine. See the caveat below. |
+| Gateway | not driven live *by this probe* — no messaging credentials on the probe machine. Answered separately since; see the caveat below. |
 
 `pre`/`post_llm_call` fire **once per turn**; `pre`/`post_api_request` fire **once
 per API call** (2 calls in the tool-call session). **That distinction is the
@@ -137,9 +137,17 @@ Two things follow:
    silently drops usage and cost for **every gateway turn**. Fall back to the
    `usage` summary dict.
 
-**Gateway caveat — the honest limit of this work.** The gateway surface was never
-driven live. **Whether `post_api_request` fires on gateway turns at all is
-unproven and must be verified on a real gateway** before anything depends on it.
+**Gateway caveat — resolved after this document was written.** This probe never
+drove the gateway surface, so as of 2026-08-13 it was unproven whether
+`post_api_request` fires on gateway turns at all. **It does.** The v1.5 shadow
+stage answered it live: a continuously-open gateway-served conversation produced
+spooled events with exact per-call agreement against `state.db`, corroborated by
+the owning profile's gateway-service configuration. See
+[Event metering](event-metering.md) → *The gateway question is answered*.
+
+One detail from that verification matters when writing code against this hook:
+**the `platform` value on a gateway turn is the channel name, not the literal
+string `gateway`.** Do not match on `"gateway"`.
 
 ## E3 — `ctx.state` and an out-of-process cron can safely share state
 
