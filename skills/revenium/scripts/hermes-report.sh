@@ -93,6 +93,113 @@ if supports_flag "meter completion" "--squad-id"; then
   SQUAD_CLI_CAPABLE=true
 fi
 
+# Skill attribution (revenium CLI 1.4.0). Same supports_flag posture as the
+# squad probe above and for the same reason: a negative probe is a LIVE
+# configuration, not an error — the fleet host still runs a CLI without these
+# flags, and a session metered there must produce argv byte-identical to what
+# the golden fixtures pin. Probed on --skill-name because it is the flag the
+# feature is worthless without; the others ship or omit with it as one family.
+SKILL_CLI_CAPABLE=false
+if supports_flag "meter completion" "--skill-name"; then
+  SKILL_CLI_CAPABLE=true
+fi
+
+# Resolve the skill a session was working with, if any.
+#
+# Signal: Hermes records skill tool calls as ordinary `messages` rows —
+# tool_name in (skill_view, skill_manage, skills_list) — whose payload is JSON
+# carrying {"name": "<skill>"}. `.usage.json` was rejected as a source: it is
+# per-skill aggregate with no session linkage, so it cannot attribute a skill
+# to a completion.
+#
+# Policy: MOST RECENT at-or-before the window end. --skill-name is singular on
+# the wire while sessions routinely open several skills (19 of 30 skill-bearing
+# sessions on one sampled profile), so a choice is unavoidable; the most recent
+# one is what the session was working with while these tokens burned.
+#
+# Emits "name|trigger" on stdout, or nothing at all. Every failure — no rows, a
+# payload that will not parse, no `name` key, sqlite3 itself failing — resolves
+# to silence, which callers treat as "no skill" and omit the flags. Skill
+# attribution is enrichment; it must never cost a completion its metering.
+resolve_session_skill() {
+  local sid="$1" window_end="$2"
+  SID="${sid}" WINDOW_END="${window_end}" STATE_DB="${STATE_DB}" python3 - <<'SKILLPY' 2>/dev/null || true
+import json
+import os
+import sqlite3
+
+db = os.environ.get('STATE_DB', '')
+sid = os.environ.get('SID', '')
+try:
+    window_end = float(os.environ.get('WINDOW_END') or 0) or None
+except (TypeError, ValueError):
+    window_end = None
+if not (db and sid and os.path.isfile(db)):
+    raise SystemExit(0)
+
+sql = ("SELECT tool_name, COALESCE(content, tool_calls) FROM messages "
+       "WHERE session_id = ? AND tool_name IN "
+       "('skill_view','skill_manage','skills_list') ")
+args = [sid]
+if window_end:
+    sql += "AND timestamp <= ? "
+    args.append(window_end)
+sql += "ORDER BY timestamp DESC LIMIT 25"
+
+try:
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+except Exception:
+    raise SystemExit(0)
+
+for tool_name, payload in rows:
+    if not payload:
+        continue
+    try:
+        name = json.loads(payload).get('name')
+    except Exception:
+        continue          # unparseable payload: fall through to the next-most-recent
+    if isinstance(name, str) and name.strip():
+        # Pipe and newline are the field/record separators the caller reads
+        # with; a skill name carrying either would desync that read.
+        clean = name.strip().replace('|', '_').replace('\n', ' ')[:128]
+        trigger = (tool_name or '').replace('|', '_')[:64]
+        print(clean + "|" + trigger)
+        break
+SKILLPY
+}
+
+# Look up a skill's provenance in the hub lockfile. Emits "source|marketplace",
+# or nothing when the skill is not recorded there (locally authored, or
+# installed before the hub tracked it). Omitting is deliberate: an invented
+# provenance is worse than an absent one.
+resolve_skill_provenance() {
+  local skill_name="$1"
+  SKILL_NAME="${skill_name}" LOCK_FILE="${HERMES_HOME}/skills/.hub/lock.json" python3 - <<'PROVPY' 2>/dev/null || true
+import json
+import os
+
+lock = os.environ.get('LOCK_FILE', '')
+name = os.environ.get('SKILL_NAME', '')
+if not (lock and name and os.path.isfile(lock)):
+    raise SystemExit(0)
+try:
+    entry = (json.load(open(lock)).get('installed') or {}).get(name) or {}
+except Exception:
+    raise SystemExit(0)
+
+source = str(entry.get('source') or '').replace('|', '_')[:64]
+# The marketplace is the source when the source IS one. "official" means it
+# shipped with Hermes — a source, but not a marketplace.
+marketplace = source if source and source not in ('official', 'builtin', 'local') else ''
+if source:
+    print(source + "|" + marketplace)
+PROVPY
+}
+
 # quick-260605: resolve teamId once for the whole tick. jobs create/outcome require
 # it; absent, the CLI returns HTTP 400 / exit 4 which the cron's 409-only success
 # check treats as a generic failure — stranding every outcome in permanent
@@ -2504,6 +2611,37 @@ PY
           fi
         fi
 
+        # Skill attribution (CLI 1.4.0), gated on one capability probe and
+        # appended identically at both emit paths, exactly as the squad flags
+        # above. Flag order (--skill-name, --skill-invocation-trigger,
+        # --skill-source, --skill-marketplace-name) is part of the argv
+        # contract the tests assert — keep it identical at both sites.
+        #
+        # --skill-kind and --skill-plugin-name are deliberately NEVER emitted:
+        # we do not know what Revenium expects in them, and a guessed value
+        # poisons a dimension worse than an absent one leaves it.
+        #
+        # A session with no skill signal appends NOTHING — that is the common
+        # case (3-36% of token-bearing sessions carry a skill), and its argv
+        # must stay byte-identical to the golden fixtures.
+        if [[ "${SKILL_CLI_CAPABLE}" == "true" ]]; then
+          local skill_pair skill_name skill_trigger prov_pair skill_source skill_marketplace
+          skill_pair="$(resolve_session_skill "${sid}" "${ended_at:-}")"
+          if [[ -n "${skill_pair}" ]]; then
+            skill_name="${skill_pair%%|*}"
+            skill_trigger="${skill_pair#*|}"
+            cmd+=(--skill-name "${skill_name}")
+            [[ -n "${skill_trigger}" ]] && cmd+=(--skill-invocation-trigger "${skill_trigger}")
+            prov_pair="$(resolve_skill_provenance "${skill_name}")"
+            if [[ -n "${prov_pair}" ]]; then
+              skill_source="${prov_pair%%|*}"
+              skill_marketplace="${prov_pair#*|}"
+              [[ -n "${skill_source}" ]] && cmd+=(--skill-source "${skill_source}")
+              [[ -n "${skill_marketplace}" ]] && cmd+=(--skill-marketplace-name "${skill_marketplace}")
+            fi
+          fi
+        fi
+
         local cmd_output cmd_exit
         cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 
@@ -2595,6 +2733,37 @@ PY
           cmd+=(--squad-role "root")
         else
           cmd+=(--squad-role "subagent")
+        fi
+      fi
+
+      # Skill attribution (CLI 1.4.0), gated on one capability probe and
+      # appended identically at both emit paths, exactly as the squad flags
+      # above. Flag order (--skill-name, --skill-invocation-trigger,
+      # --skill-source, --skill-marketplace-name) is part of the argv
+      # contract the tests assert — keep it identical at both sites.
+      #
+      # --skill-kind and --skill-plugin-name are deliberately NEVER emitted:
+      # we do not know what Revenium expects in them, and a guessed value
+      # poisons a dimension worse than an absent one leaves it.
+      #
+      # A session with no skill signal appends NOTHING — that is the common
+      # case (3-36% of token-bearing sessions carry a skill), and its argv
+      # must stay byte-identical to the golden fixtures.
+      if [[ "${SKILL_CLI_CAPABLE}" == "true" ]]; then
+        local skill_pair skill_name skill_trigger prov_pair skill_source skill_marketplace
+        skill_pair="$(resolve_session_skill "${sid}" "${ended_at:-}")"
+        if [[ -n "${skill_pair}" ]]; then
+          skill_name="${skill_pair%%|*}"
+          skill_trigger="${skill_pair#*|}"
+          cmd+=(--skill-name "${skill_name}")
+          [[ -n "${skill_trigger}" ]] && cmd+=(--skill-invocation-trigger "${skill_trigger}")
+          prov_pair="$(resolve_skill_provenance "${skill_name}")"
+          if [[ -n "${prov_pair}" ]]; then
+            skill_source="${prov_pair%%|*}"
+            skill_marketplace="${prov_pair#*|}"
+            [[ -n "${skill_source}" ]] && cmd+=(--skill-source "${skill_source}")
+            [[ -n "${skill_marketplace}" ]] && cmd+=(--skill-marketplace-name "${skill_marketplace}")
+          fi
         fi
       fi
 
