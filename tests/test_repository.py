@@ -86,6 +86,11 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'docs' / 'fleet.md',
             ROOT / 'docs' / 'how-it-works.md',
             ROOT / 'docs' / 'operations.md',
+            # Contributor reference for Hermes' plugin surface. Pinned because
+            # shipped code cites it: api_event_spool.py parses the E2 payload
+            # contract, and E1 forbids a change that would silently break halt
+            # enforcement. It was briefly untracked with the evidence tree.
+            ROOT / 'docs' / 'plugin-interface.md',
             ROOT / 'docs' / 'upgrading.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',

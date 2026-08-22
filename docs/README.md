@@ -32,6 +32,12 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 - **[AGENT dimension migration](migration-agent-dimension.md)** — the per-profile agent name
   and its no-observable-change guarantee.
 
+## For contributors
+
+- **[Hermes plugin interface](plugin-interface.md)** — what the plugin surface
+  actually does, measured against a live v0.20.1 install. Shipped code depends on
+  it; [CONTRIBUTING.md](../CONTRIBUTING.md) has the rest of the workflow.
+
 ## Inside the skill bundle
 
 These ship to `~/.hermes/skills/revenium/` and are read at runtime, so they live with the
