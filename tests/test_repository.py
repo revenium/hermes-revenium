@@ -77,6 +77,7 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'README.md',
             ROOT / 'LICENSE',
             ROOT / 'CONTRIBUTING.md',
+            ROOT / 'CHANGELOG.md',
             ROOT / 'docs' / 'installation.md',
             # The split doc set: README.md is a landing page that links here,
             # so a missing page is a broken link on the front door.
@@ -222,6 +223,38 @@ class RepositoryTests(unittest.TestCase):
         )
         # The copyright line is the part a rename or a fork silently gets wrong.
         self.assertIn('Revenium, Inc.', license_text)
+
+    def test_changelog_separates_the_two_version_namespaces(self):
+        """CHANGELOG.md must warn that tags and milestones reuse the same numbers.
+
+        Git tags are product releases; the milestone documents under docs/internal/
+        are planning cycles. They collide numerically and mean different things --
+        release v1.5's own tag note records that it delivered planning milestone
+        v1.4, phases 33-35. A reader who takes milestone-v1.4-closeout.md for the
+        v1.4 release notes gets a materially wrong picture, and now that the docs
+        link to both, that misreading is one click away.
+
+        Pinned because it is a documentation claim: nothing else in the suite
+        protects it, and a tidying edit would drop it without a signal.
+        """
+        text = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
+        self.assertIn(
+            'planning cycles', text,
+            'CHANGELOG.md no longer distinguishes product releases (git tags) '
+            'from planning milestones (docs/internal/), which reuse the same '
+            'version numbers',
+        )
+        self.assertIn('docs/internal/', text)
+
+        # Every released tag needs an entry. Read the tags from the link-reference
+        # block at the bottom rather than from git, since CI checks out without
+        # tags and this must not depend on fetch depth.
+        for version in ('v1.0', 'v1.1', 'v1.2', 'v1.3', 'v1.3.1',
+                        'v1.4', 'v1.4.1', 'v1.5', 'v1.6'):
+            self.assertIn(
+                f'## [{version}]', text,
+                f'CHANGELOG.md has no section for released tag {version}',
+            )
 
     def test_docs_document_the_current_metering_surface(self):
         """The operator docs must describe the surface operators actually run.

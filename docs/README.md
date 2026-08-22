@@ -38,6 +38,10 @@ skill rather than here:
 - [`references/config-schema.md`](../skills/revenium/references/config-schema.md) — `config.json` schema
 - [`references/halt-survivability.md`](../skills/revenium/references/halt-survivability.md) — the manual halt-check runbook
 
+## Release history
+
+[CHANGELOG.md](../CHANGELOG.md) — product releases, drawn from the annotated git tags.
+
 ## Engineering evidence
 
 [`internal/`](internal/) holds rehearsals, reconciliations, live-host verifications, and

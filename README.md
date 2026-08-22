@@ -124,6 +124,12 @@ Engineering evidence — rehearsals, reconciliations, and milestone closeouts �
 Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how the repo is
 laid out, the invariants the test suite enforces, and what to run before opening a PR.
 
+## Changelog
+
+Release history is in [CHANGELOG.md](CHANGELOG.md). Note that the git tags there are
+*product releases*; the milestone documents under [`docs/internal/`](docs/internal/) are
+*planning cycles* that reuse the same numbers with different meanings.
+
 ## License
 
 [MIT](LICENSE) — the same license as [Hermes Agent](https://github.com/NousResearch/hermes-agent)
