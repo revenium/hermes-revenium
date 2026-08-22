@@ -224,7 +224,7 @@ class RepositoryTests(unittest.TestCase):
         """
         text = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
         for version in ('v1.0', 'v1.1', 'v1.2', 'v1.3', 'v1.3.1',
-                        'v1.4', 'v1.4.1', 'v1.5', 'v1.6'):
+                        'v1.4', 'v1.4.1', 'v1.5', 'v1.6', 'v1.7'):
             self.assertIn(
                 f'## [{version}]', text,
                 f'CHANGELOG.md has no section for released tag {version}',
