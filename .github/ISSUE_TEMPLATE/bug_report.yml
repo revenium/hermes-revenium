@@ -1,0 +1,66 @@
+name: Bug report
+description: Something isn't metering, halting, or classifying the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing, please run the read-only diagnostic — it covers most of what we'd
+        ask for anyway:
+
+        ```bash
+        bash ~/.hermes/skills/revenium/scripts/diagnose.sh
+        # on a multi-profile host, add --profile <name>
+        ```
+
+        Redact API keys, team/tenant/owner IDs, and anything else you'd rather not publish.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnose
+    attributes:
+      label: diagnose.sh output
+      description: Redacted.
+      render: text
+
+  - type: input
+    id: version
+    attributes:
+      label: Skill version or commit
+      placeholder: v1.6, or a commit SHA
+
+  - type: input
+    id: hermes
+    attributes:
+      label: Hermes version
+      placeholder: hermes --version
+
+  - type: input
+    id: cli
+    attributes:
+      label: revenium CLI version
+      placeholder: revenium --version
+
+  - type: dropdown
+    id: profiles
+    attributes:
+      label: Profile layout
+      options:
+        - Single (default profile only)
+        - Multi-profile, one process per profile
+        - Multi-profile, multiplexed single gateway
+        - Not sure
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: From ~/.hermes/state/revenium/revenium-metering.log
+      render: text
