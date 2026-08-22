@@ -146,6 +146,9 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 — post_api_request spool writer, kept as its own module
             # so the metering seam stays visible (D-02, EVT-01/EVT-02/EVT-03)
             SKILL / 'plugins' / 'revenium-classifier' / 'api_event_spool.py',
+            # Phase 36 — the outcome-value evaluator seam (ROI-03), kept as its
+            # own module so the evaluation boundary is a file boundary.
+            SKILL / 'plugins' / 'revenium-classifier' / 'evaluators.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
