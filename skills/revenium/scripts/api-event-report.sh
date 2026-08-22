@@ -951,6 +951,7 @@ PY
       JOIN_MODE="${join_mode}" \
       SID="${sid}" \
       SKILL_CAPABLE="${SKILL_CLI_CAPABLE}" \
+      MIN_EVENT_TS="${min_ts}" \
       SKILL_LOCK_FILE="${HERMES_HOME}/skills/.hub/lock.json" \
       STATE_DB="${STATE_DB}" \
       python3 - <<'PY' 2>/dev/null
@@ -1100,16 +1101,51 @@ if os.environ.get("SKILL_CAPABLE") == "true":
     _db = os.environ.get("STATE_DB", "")
     _sid = os.environ.get("SID", "")
     _raw = []
+    # The LIMIT is bounded RELATIVE TO THIS SPOOL FILE, not to the session's
+    # newest rows. A blanket "newest 500 in the session" silently drops the
+    # skill that was in force for an OLDER event still awaiting retry — the
+    # whole file then resolves to no attribution once 500 skill calls pile up
+    # behind it. So: the newest 500 rows at-or-after this file's oldest event,
+    # plus one ANCHOR row — the last skill opened BEFORE that event — which is
+    # what every event preceding the first in-window row bisects onto.
+    #
+    # MIN_EVENT_TS comes from the peek pass that already walked this file. If
+    # it is absent or unparseable the query falls back to the unbounded form:
+    # fail open to today's behaviour, never to no timeline at all.
+    _min_event_ts = None
+    try:
+        _min_event_ts = float(os.environ.get("MIN_EVENT_TS") or "")
+    except (TypeError, ValueError):
+        _min_event_ts = None
     if _db and _sid and os.path.isfile(_db):
+        _sel = ("SELECT tool_name, COALESCE(content, tool_calls), timestamp "
+                "FROM messages WHERE session_id = ? AND tool_name IN "
+                "('skill_view','skill_manage','skills_list') ")
         try:
             with sqlite3.connect(f"file:{_db}?mode=ro", uri=True) as _conn:
-                _raw = _conn.execute(
-                    "SELECT tool_name, COALESCE(content, tool_calls), timestamp "
-                    "FROM messages WHERE session_id = ? AND tool_name IN "
-                    "('skill_view','skill_manage','skills_list') "
-                    "ORDER BY timestamp DESC LIMIT 500",
-                    (_sid,),
-                ).fetchall()
+                if _min_event_ts is None:
+                    _raw = _conn.execute(
+                        _sel + "ORDER BY timestamp DESC LIMIT 500", (_sid,)
+                    ).fetchall()
+                else:
+                    _raw = _conn.execute(
+                        _sel + "AND timestamp >= ? ORDER BY timestamp DESC LIMIT 500",
+                        (_sid, _min_event_ts),
+                    ).fetchall()
+                    # Appended AFTER the window rows so `_raw` stays globally
+                    # DESC — the `reversed()` below is what makes skill_ts
+                    # ascending, which bisect requires.
+                    #
+                    # 25 anchor rows, not 1: the newest row before the window
+                    # may carry a payload that will not parse, and a depth-1
+                    # anchor would then resolve the whole file to no skill
+                    # rather than falling through to the next-most-recent.
+                    # 25 is the same fall-through depth hermes-report.sh's
+                    # resolver uses on the legacy path.
+                    _raw.extend(_conn.execute(
+                        _sel + "AND timestamp < ? ORDER BY timestamp DESC LIMIT 25",
+                        (_sid, _min_event_ts),
+                    ).fetchall())
         except Exception:
             # Missing table, locked db, sqlite error — every one of these is a
             # normal install, not a fault. No timeline, no flags, row still ships.

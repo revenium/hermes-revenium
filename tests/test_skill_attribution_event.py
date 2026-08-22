@@ -297,6 +297,26 @@ class SkillAttributionEventTests(unittest.TestCase):
                 f, all_flags[0],
                 f'{f} emitted for a call that finished before the skill was opened')
 
+    def test_old_event_keeps_its_skill_behind_a_wall_of_newer_rows(self):
+        """The query bound is relative to THIS spool file, not to the session.
+
+        A session that keeps accumulating skill calls while one event waits for
+        retry would, under a blanket "newest N rows in the session" query, push
+        that event's predecessor out of the window — and the whole file then
+        resolves to no attribution. The anchor row (last skill opened BEFORE
+        the file's oldest event) is what makes that impossible.
+
+        Reported by review on PR #82. Fails on the pre-fix query.
+        """
+        wall = [('skill_view', json.dumps({'name': f'noise-{i}'}), LATE_TS + i)
+                for i in range(600)]
+        _by_txn, all_flags, _out = self._run(
+            skill_rows=[('skill_view', json.dumps({'name': 'alpha-skill'}), EARLY_TS)] + wall)
+        self.assertEqual(len(all_flags), 1, 'the completion must still ship')
+        self.assertEqual(
+            all_flags[0].get('--skill-name'), 'alpha-skill',
+            'the skill in force at the event was evicted by newer, irrelevant rows')
+
     # --- Property 6 -------------------------------------------------------
     def test_malformed_newest_payload_falls_through(self):
         """A payload that will not parse must not win and must not abort."""
