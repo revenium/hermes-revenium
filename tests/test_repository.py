@@ -76,6 +76,8 @@ class RepositoryTests(unittest.TestCase):
         expected = [
             ROOT / 'README.md',
             ROOT / 'docs' / 'installation.md',
+            # CUT-07: milestone evidence must survive in git — .planning/ is gitignored
+            ROOT / 'docs' / 'milestone-v1.4-closeout.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
