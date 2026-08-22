@@ -4,8 +4,8 @@
 
 ## Getting started
 
-- **[Installation](installation.md)** — the four install paths, the credentials all four
-  of them, guardrail rules, cron, hooks, the classifier plugin, and how to verify the result.
+- **[Installation](installation.md)** — the four install paths, the four credentials,
+  guardrail rules, cron, hooks, the classifier plugin, and how to verify the result.
 - **[Configuration](configuration.md)** — `config.json` fields, where credentials live, and
   the two switches that control event-driven metering.
 

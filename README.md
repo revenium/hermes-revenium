@@ -11,6 +11,9 @@ metering for [Hermes Agent](https://hermes-agent.nousresearch.com), on the
 ![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)
 ![Status: Beta](https://img.shields.io/badge/status-beta%20(best--effort)-f0a020?style=for-the-badge)
 
+[![Tests](https://github.com/revenium/hermes-revenium/actions/workflows/tests.yml/badge.svg)](https://github.com/revenium/hermes-revenium/actions/workflows/tests.yml)
+[![Secret Scan](https://github.com/revenium/hermes-revenium/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/revenium/hermes-revenium/actions/workflows/secret-scan.yml)
+
 [Quick start](#quick-start) ·
 [Install](docs/installation.md) ·
 [How it works](docs/how-it-works.md) ·
@@ -115,6 +118,11 @@ Engineering evidence — rehearsals, reconciliations, and milestone closeouts �
   `~/.hermes/skills/revenium/`. Don't mix the two.
 - This repo is Hermes-only by design — no legacy runtime assumptions carried over from the
   skill it was forked from.
+
+## Contributing
+
+Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how the repo is
+laid out, the invariants the test suite enforces, and what to run before opening a PR.
 
 ## Support
 
