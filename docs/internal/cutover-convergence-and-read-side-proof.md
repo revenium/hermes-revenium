@@ -162,7 +162,7 @@ metering defect, and is never chased as one here.
 
 **Cost is `$0` by operator decision (CUT-08 / BACK-2676 out of scope).**
 This pre-prod dev tenant's cost figures are $0 by explicit operator choice,
-not because nothing was metered — see `docs/auxiliary-usage-sizing.md` and
+not because nothing was metered — see `docs/internal/auxiliary-usage-sizing.md` and
 `.planning/STATE.md` for the full history. Every `totalCost: 0` figure
 quoted in this document carries the caption below.
 

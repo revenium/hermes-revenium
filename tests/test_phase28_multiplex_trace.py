@@ -151,14 +151,21 @@ class Phase28MultiplexTraceParityTests(unittest.TestCase):
         expected = str(self.classifier._module_paths().markers_dir)
         driver = self._write_driver("driver-no-python.sh", sid)
 
-        # A PATH containing bash but deliberately no python3 anywhere on it —
-        # a fixed empty temp dir plus bash's own directory, NOT the real
-        # system PATH (which would still find python3).
-        empty_path_dir = os.path.join(self.tmp, "empty-bin")
-        os.makedirs(empty_path_dir, exist_ok=True)
+        # A PATH containing bash but deliberately no python3 anywhere on it.
+        # Putting bash's own directory on PATH is not good enough: that is
+        # /bin on macOS (no python3 there, so the test passed) but /usr/bin on
+        # Linux, where python3 sits right beside bash and the fail-open branch
+        # is never reached. Symlink bash into an otherwise empty dir and make
+        # that dir the entire PATH, so no real bin directory is reachable on
+        # any platform.
+        stub_bin = os.path.join(self.tmp, "empty-bin")
+        os.makedirs(stub_bin, exist_ok=True)
         bash_path = shutil.which("bash") or "/bin/bash"
+        bash_link = os.path.join(stub_bin, "bash")
+        if not os.path.exists(bash_link):
+            os.symlink(bash_path, bash_link)
         env = dict(os.environ)
-        env["PATH"] = f"{empty_path_dir}:{os.path.dirname(bash_path)}"
+        env["PATH"] = stub_bin
 
         result = subprocess.run(
             ["bash", driver], capture_output=True, text=True, env=env, check=False,

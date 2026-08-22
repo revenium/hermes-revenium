@@ -47,7 +47,7 @@ PLUGIN_DEST_DIR="${HERMES_HOME}/plugins/${PLUGIN_NAME}"
 # --quiet-unchanged. A manual `bash plugin-status.sh` invocation (no flags)
 # stays byte-identical to pre-fix behavior, matching the operator docs that
 # instruct a human to run this script and read the banner
-# (references/trace-type-uncategorized.md, docs/live-host-verification-v1-2.md)
+# (references/trace-type-uncategorized.md, docs/internal/live-host-verification-v1-2.md)
 # and tests/test_phase28_plugin_status.py's assertions on that stdout shape.
 # The default branch of this scan is a NO-OP, never an error: cron.sh
 # forwards its own positional args through this same invocation and this
