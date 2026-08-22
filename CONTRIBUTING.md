@@ -101,7 +101,7 @@ There is no linter or formatter. Match the neighbouring file.
 Operator documentation lives in [`docs/`](docs/). Reference material that ships inside the
 skill bundle and is read at runtime lives in `skills/revenium/references/` — `docs/` links
 to it rather than restating it, because restating it is how the two fell out of sync
-before. Engineering evidence goes in `docs/internal/`.
+before.
 
 Two tests police vocabulary: one greps every shipped text file for the product names this
 skill was forked from, and one fails on any `budget-check` / `budget-status` reference under

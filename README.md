@@ -126,8 +126,7 @@ Reference material that ships inside the skill bundle lives at
 [troubleshooting](skills/revenium/references/troubleshooting.md),
 [task taxonomy](skills/revenium/references/task-taxonomy.md), and the
 [config schema](skills/revenium/references/config-schema.md).
-Engineering evidence — rehearsals, reconciliations, and milestone closeouts — is under
-[`docs/internal/`](docs/internal/).
+
 
 ## Notes
 
@@ -145,9 +144,7 @@ laid out, the invariants the test suite enforces, and what to run before opening
 
 ## Changelog
 
-Release history is in [CHANGELOG.md](CHANGELOG.md). Note that the git tags there are
-*product releases*; the milestone documents under [`docs/internal/`](docs/internal/) are
-*planning cycles* that reuse the same numbers with different meanings.
+Release history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

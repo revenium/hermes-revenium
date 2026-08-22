@@ -8,3 +8,8 @@ venv/
 .cache/
 CLAUDE.md
 .planning/
+
+# Planning and engineering-evidence trees: kept locally, never committed.
+# .planning/ is GSD scaffolding; docs/internal/ held milestone closeouts,
+# rollback rehearsals, reconciliations and live-host verification runs.
+docs/internal/

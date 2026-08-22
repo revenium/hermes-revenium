@@ -87,8 +87,6 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'docs' / 'how-it-works.md',
             ROOT / 'docs' / 'operations.md',
             ROOT / 'docs' / 'upgrading.md',
-            # CUT-07: milestone evidence must survive in git — .planning/ is gitignored
-            ROOT / 'docs' / 'internal' / 'milestone-v1.4-closeout.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -150,12 +148,6 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'docs' / 'migration-guardrails.md',
             # Phase 29 Plan 03 — AGENT-03 operator note (no-observable-change + squad flags)
             ROOT / 'docs' / 'migration-agent-dimension.md',
-            # Phase 31 — sizing-gate verdict and evidence, committed so it survives
-            # deletion of the gitignored planning tree (AUX-06, D-04)
-            ROOT / 'docs' / 'internal' / 'auxiliary-usage-sizing.md',
-            # Live v0.20.1 plugin-surface findings, committed for the same reason —
-            # E1 is a load-bearing negative result guarding halt enforcement
-            ROOT / 'docs' / 'internal' / 'plugin-interface-findings.md',
             # Phase 20 — COMPAT-01 golden-argv wire-shape fixtures (D-01..D-04)
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
@@ -172,14 +164,6 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
-            # Phase 35 — cutover convergence and read-side proof (Phase 33), committed so
-            # it survives deletion of the gitignored planning tree (CUT-07)
-            ROOT / 'docs' / 'internal' / 'cutover-convergence-and-read-side-proof.md',
-            # Phase 35 — transition reconciliation (Phase 34), same reason (CUT-07)
-            ROOT / 'docs' / 'internal' / 'transition-reconciliation.md',
-            # Phase 35 Plan 04 — rollback rehearsal verdict, committed so it survives
-            # deletion of the gitignored planning tree (CUT-05, CUT-07)
-            ROOT / 'docs' / 'internal' / 'rollback-rehearsal.md',
             # The README's hero banner; pinned so deleting it fails the suite instead
             # of silently rendering a broken image on GitHub.
             ROOT / 'assets' / 'hermes-revenium.png',
@@ -224,31 +208,16 @@ class RepositoryTests(unittest.TestCase):
         # The copyright line is the part a rename or a fork silently gets wrong.
         self.assertIn('Revenium, Inc.', license_text)
 
-    def test_changelog_separates_the_two_version_namespaces(self):
-        """CHANGELOG.md must warn that tags and milestones reuse the same numbers.
+    def test_changelog_covers_every_released_tag(self):
+        """CHANGELOG.md must carry a section for each released tag.
 
-        Git tags are product releases; the milestone documents under docs/internal/
-        are planning cycles. They collide numerically and mean different things --
-        release v1.5's own tag note records that it delivered planning milestone
-        v1.4, phases 33-35. A reader who takes milestone-v1.4-closeout.md for the
-        v1.4 release notes gets a materially wrong picture, and now that the docs
-        link to both, that misreading is one click away.
-
-        Pinned because it is a documentation claim: nothing else in the suite
-        protects it, and a tidying edit would drop it without a signal.
+        The changelog is deliberately limited to new functionality and fixes --
+        no test counts, no fleet or verification narrative -- so the only thing
+        worth guarding automatically is that a release cannot ship without an
+        entry. The tag list is written out rather than read from git, because CI
+        checks out without tags and this must not depend on fetch depth.
         """
         text = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
-        self.assertIn(
-            'planning cycles', text,
-            'CHANGELOG.md no longer distinguishes product releases (git tags) '
-            'from planning milestones (docs/internal/), which reuse the same '
-            'version numbers',
-        )
-        self.assertIn('docs/internal/', text)
-
-        # Every released tag needs an entry. Read the tags from the link-reference
-        # block at the bottom rather than from git, since CI checks out without
-        # tags and this must not depend on fetch depth.
         for version in ('v1.0', 'v1.1', 'v1.2', 'v1.3', 'v1.3.1',
                         'v1.4', 'v1.4.1', 'v1.5', 'v1.6'):
             self.assertIn(

@@ -88,8 +88,8 @@ takes over, giving 87,000 seconds, or about 24.17 hours. That is the figure quot
 [Event metering](event-metering.md), and it reflects one fleet's tuned configuration rather
 than the default.
 
-Rollback is the reverse, and it is demonstrated rather than assumed:
-[rollback rehearsal](internal/rollback-rehearsal.md).
+Rollback is the reverse: set `REVENIUM_LEGACY_COMPLETIONS=enabled` again, then
+`REVENIUM_EVENT_METERING_MODE=shadow`.
 
 ## Agentic job tracking
 

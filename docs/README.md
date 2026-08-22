@@ -45,11 +45,5 @@ skill rather than here:
 
 ## Release history
 
-[CHANGELOG.md](../CHANGELOG.md) — product releases, drawn from the annotated git tags.
+[CHANGELOG.md](../CHANGELOG.md) — new functionality and fixes, release by release.
 
-## Engineering evidence
-
-[`internal/`](internal/) holds rehearsals, reconciliations, live-host verifications, and
-milestone closeouts. They are committed because the planning tree they came from is
-gitignored, and they record why the system has the shape it does. They are not operator
-documentation — nothing here requires reading them.
