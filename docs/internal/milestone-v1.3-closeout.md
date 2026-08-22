@@ -23,7 +23,7 @@ profiles' whole retained history returned **0.4598%** cost share (0.1042% token
 share). Per the gate's own rule the phase closed without writing the reporter
 change, and spike P-D was promoted into its slot as Phase 32.
 
-Evidence: `docs/auxiliary-usage-sizing.md`.
+Evidence: `docs/internal/auxiliary-usage-sizing.md`.
 
 Three facts that outlived the phase and must not be rediscovered:
 
@@ -83,7 +83,7 @@ milestone changed what bills today.
 ## Also closed in this milestone
 
 - **Phase 19 SC-8** — the last v1.1 deferral — closed against a **real breached
-  rule** (`docs/halt-enforcement-live-verification.md`). 19-12 had recorded it MET
+  rule** (`docs/internal/halt-enforcement-live-verification.md`). 19-12 had recorded it MET
   against *synthetic* fixtures; the live path had never run. Found and fixed two
   pre-existing defects: a warn rate-limit defeated by a per-second sentinel key,
   and `clear-halt.sh` buying only one tick against a still-breached rule (#64, #65).

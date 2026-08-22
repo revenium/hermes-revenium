@@ -1,7 +1,7 @@
 """The two defects the Phase 19 SC-8 real-breach run surfaced (2026-08-19).
 
 Both were pre-existing and only a live breach exposed them; see
-docs/halt-enforcement-live-verification.md for the run that found them.
+docs/internal/halt-enforcement-live-verification.md for the run that found them.
 
   DEFECT 1 - the warn rate-limit was defeated whenever session_id could not be
   resolved. The fallback key was 'unknown-' + int(time.time()), which changes

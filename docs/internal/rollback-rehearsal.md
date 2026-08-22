@@ -207,7 +207,7 @@ absence for an untested code path.
 
 **The write-loss window is history, not live risk, and this rehearsal runs entirely
 outside it.** Revenium's own confirmed write-loss window is `2026-08-19T18:25:00Z` through
-`2026-08-20T01:24:00Z` (Phase 34, `docs/transition-reconciliation.md`), a closed interval
+`2026-08-20T01:24:00Z` (Phase 34, `docs/internal/transition-reconciliation.md`), a closed interval
 at both ends. This rehearsal's own live work began no earlier than 2026-08-20T21:00Z, and
 the round trip itself (35-03's leg, this plan's leg B) ran later still, into
 2026-08-21T00:22Z — well after the window closed. Any pre-existing ledger or read-side
@@ -676,7 +676,7 @@ them) follows the same convention 35-02 and 35-03 already established for this d
    zero `<label>_<hex>` job-style strings; zero bare hostname hits.
 
 **Placeholder count, derived from the document at the moment of writing, not carried
-forward from an earlier wave:** `grep -oE '<[a-z][a-z-]*-[a-z-]*>' docs/rollback-rehearsal.md | sort -u`
+forward from an earlier wave:** `grep -oE '<[a-z][a-z-]*-[a-z-]*>' docs/internal/rollback-rehearsal.md | sort -u`
 finds **4** distinct hyphenated redaction placeholders in the finished document.
 
 **The file-wide regex gate** (an IPv4 shape, the SSH key filename shape, the login-prefix

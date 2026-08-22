@@ -1,0 +1,39 @@
+name: Tests
+
+# The suite is stdlib unittest with no third-party dependencies, so this needs
+# nothing but a Python and the checkout. It enforces the repo's invariants --
+# file inventory, state-path discipline, shell syntax, marker and taxonomy
+# schemas, split conservation, and the golden argv wire shapes -- which is why
+# it runs on every PR rather than on a schedule.
+
+on:
+  pull_request:
+    branches: ['**']
+  push:
+    branches: ['main']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    name: python3 -m unittest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Show tool versions
+        run: |
+          python3 --version
+          bash --version | head -1
+          sqlite3 --version
+
+      - name: Run the suite
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v

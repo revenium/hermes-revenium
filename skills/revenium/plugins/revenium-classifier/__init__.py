@@ -324,7 +324,7 @@ def _on_post_api_request(
     `response` and `assistant_message` are deliberately NOT forwarded to the
     spool writer. Contract C-2 forbids prompt/response content from ever
     entering the spool record (T-32-03), and per Contract C-3 (the ported
-    langfuse fix, docs/plugin-interface-findings.md § E2), `response` on
+    langfuse fix, docs/internal/plugin-interface-findings.md § E2), `response` on
     THIS hook is always a sanitized dict with no real `.usage` attribute —
     the writer reads token counts directly from the separate top-level
     `usage` summary kwarg, never from `response`.
