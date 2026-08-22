@@ -9,14 +9,33 @@ this repository.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [v1.7] — 2026-08-22
+
 ### Added
-- `LICENSE` (MIT), plus `CONTRIBUTING.md`, issue and pull-request templates, and a CI
-  workflow running the test suite on every pull request. ([#83])
-- Skill-usage attribution on metered completions, and on the event path. ([#81], [#82])
+- Skill-usage attribution on metered completions, and on the event path, for `revenium`
+  CLI 1.4.0. Capability-gated, so an older CLI is unaffected. ([#81], [#82])
+- `LICENSE` (MIT), backing the `license: MIT` that `SKILL.md` had declared in frontmatter
+  since the first commit. ([#83])
+- `CONTRIBUTING.md`, issue and pull-request templates, and a CI workflow running the test
+  suite on every pull request. ([#83])
+- `CHANGELOG.md`. ([#84])
+- [`docs/plugin-interface.md`](docs/plugin-interface.md) — what the Hermes plugin surface
+  does, measured against a live install. Shipped code depends on it: `api_event_spool.py`
+  parses the payload contract it records. ([#85])
 
 ### Changed
 - `README.md` split from 646 lines into a landing page plus seven guides under
-  [`docs/`](docs/). ([#83])
+  [`docs/`](docs/), and corrected to say that the working parts are a plugin, three shell
+  hooks and a cron — `SKILL.md` itself is only a halt-check backstop. ([#83], [#84])
+- Multi-profile guidance corrected: upgrades must re-name profiles, the restart target is
+  often not the gateway, and `rsync --delete` is no longer suggested. ([#78])
+
+### Removed
+- The planning and engineering-evidence trees are no longer tracked. `.planning/` had been
+  gitignored since v1.2, but 32 files were still committed; `docs/internal/` held nine
+  more. ([#84])
 
 ### Fixed
 - `plugin-status.sh` reported a false `firing` when a grace-window session masked a stall,
@@ -172,7 +191,8 @@ turning spend attribution from per-session totals into per-turn activity breakdo
 - Mechanical classification through a Hermes plugin, replacing the agent-side path.
 - `prune-markers.sh`.
 
-[Unreleased]: https://github.com/revenium/hermes-revenium/compare/v1.6...main
+[Unreleased]: https://github.com/revenium/hermes-revenium/compare/v1.7...main
+[v1.7]: https://github.com/revenium/hermes-revenium/compare/v1.6...v1.7
 [v1.6]: https://github.com/revenium/hermes-revenium/compare/v1.5...v1.6
 [v1.5]: https://github.com/revenium/hermes-revenium/compare/v1.4.1...v1.5
 [v1.4.1]: https://github.com/revenium/hermes-revenium/compare/v1.4...v1.4.1
@@ -191,3 +211,5 @@ turning spend attribution from per-session totals into per-turn activity breakdo
 [#81]: https://github.com/revenium/hermes-revenium/pull/81
 [#82]: https://github.com/revenium/hermes-revenium/pull/82
 [#83]: https://github.com/revenium/hermes-revenium/pull/83
+[#84]: https://github.com/revenium/hermes-revenium/pull/84
+[#85]: https://github.com/revenium/hermes-revenium/pull/85
