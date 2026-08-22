@@ -83,6 +83,15 @@ Every new script in `skills/revenium/scripts/` must:
 3. Ship executable.
 4. Parse under `bash -n`.
 
+## Hermes' plugin surface
+
+[`docs/plugin-interface.md`](docs/plugin-interface.md) records what that surface
+actually does, measured live rather than inferred. Read it before changing the
+classifier or the event spool — it carries the payload contract
+`api_event_spool.py` parses, a negative result that forbids moving live halt state
+into a prompt section, two dead ends not worth chasing, and the reason
+`tests/test_phase29_no_session_reset_change.py` exists.
+
 ## Style
 
 There is no linter or formatter. Match the neighbouring file.
