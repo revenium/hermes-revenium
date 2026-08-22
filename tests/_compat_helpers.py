@@ -96,7 +96,8 @@ def assert_argv_matches_golden(test_case, argv, golden):
 
 
 def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None,
-                squad_capable=True, reasoning_tokens_capable=False):
+                squad_capable=True, reasoning_tokens_capable=False,
+                skill_capable=False):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -141,6 +142,17 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         )
     else:
         reasoning_help_lines = ''
+    # CLI 1.4.0 skill attribution. Default False so every existing caller
+    # keeps exercising the pre-1.4 wire shape the goldens pin.
+    if skill_capable:
+        skill_help_lines = (
+            '      echo "--skill-name string                   Skill name"\n'
+            '      echo "--skill-invocation-trigger string     How the skill was invoked"\n'
+            '      echo "--skill-source string                 Skill source"\n'
+            '      echo "--skill-marketplace-name string       Marketplace"\n'
+        )
+    else:
+        skill_help_lines = ''
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
@@ -160,7 +172,8 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         '    # final write, closing the race window this ordering would otherwise open.\n'
         '    if [[ "$3" == "--help" ]]; then\n'
         + squad_help_lines
-        + reasoning_help_lines +
+        + reasoning_help_lines
+        + skill_help_lines +
         '      echo "--agentic-job-id  Agentic job instance identifier"\n'
         '      exit 0\n'
         '    fi\n'
