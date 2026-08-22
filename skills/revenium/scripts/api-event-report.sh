@@ -1110,19 +1110,34 @@ if os.environ.get("SKILL_CAPABLE") == "true":
     _db = os.environ.get("STATE_DB", "")
     _sid = os.environ.get("SID", "")
     _raw = []
-    # The LIMIT is bounded RELATIVE TO THIS SPOOL FILE, not to the session's
-    # newest rows. A blanket "newest 500 in the session" silently drops the
-    # skill that was in force for an OLDER event still awaiting retry — the
-    # whole file then resolves to no attribution once 500 skill calls pile up
-    # behind it. So: the newest 500 rows at-or-after this file's oldest event,
-    # plus one ANCHOR row — the last skill opened BEFORE that event — which is
-    # what every event preceding the first in-window row bisects onto.
+    # The row budget is spent RELATIVE TO THIS SPOOL FILE, not on the
+    # session's newest rows. Two queries:
     #
-    # MIN_EVENT_TS comes from the peek pass that already walked this file. If
-    # it is absent or unparseable the query falls back to the unbounded form:
-    # fail open to today's behaviour, never to no timeline at all.
-    # Set only when the in-window query hit its LIMIT: below this timestamp
-    # the timeline is known-incomplete and attribution is withheld.
+    #   WINDOW  the rows inside [oldest event, newest event] of this file,
+    #           newest first. Both edges matter. Bounding only below lets
+    #           skill calls made after every event in the file evict the ones
+    #           that can actually be selected; bounding only above lets a
+    #           long-lived session do the same from the other direction.
+    #   ANCHOR  the rows immediately before the window, for events that
+    #           precede its first row. 25 deep, not 1: the nearest row may
+    #           carry a payload that will not parse, and a depth-1 anchor
+    #           would resolve the whole file to no skill instead of falling
+    #           through. 25 is the depth hermes-report.sh's resolver uses.
+    #
+    # The window fetches one row more than it keeps. `len(rows) == cap` cannot
+    # tell a full window from a cut one, and reading a complete window as
+    # truncated withholds attribution that was available; the extra row is the
+    # detector, and is discarded rather than used. When it does come back, the
+    # rows dropped are the OLDEST in-window ones — exactly the predecessors of
+    # this file's earlier events — so `_window_floor_ts` marks where the
+    # timeline stops being trustworthy and `_skill_for` returns silence below
+    # it. An absent dimension is recoverable from the transcript later; a
+    # confidently wrong one is indistinguishable from a real observation.
+    #
+    # MIN_EVENT_TS / MAX_EVENT_TS come from the peek pass that already walked
+    # this file. If they are absent or unparseable the query falls back to the
+    # unbounded form: fail open to the previous behaviour, never to no
+    # timeline at all.
     _window_floor_ts = None
     _min_event_ts = None
     try:
@@ -1147,46 +1162,23 @@ if os.environ.get("SKILL_CAPABLE") == "true":
                         _sel + "ORDER BY timestamp DESC LIMIT 500", (_sid,)
                     ).fetchall()
                 else:
-                    # BOTH edges, not just the lower one: rows newer than the
-                    # file's last event can never be selected by any event in
-                    # it, so leaving them in the window would spend the row
-                    # budget on rows that cannot matter — the same eviction
-                    # the lower bound exists to prevent, from the other side.
-                    # LIMIT is 501 for a 500-row window: `len(rows) == cap`
-                    # cannot tell a window that is exactly full from one that
-                    # was cut, and calling a complete window truncated
-                    # withholds attribution that was in fact available. The
-                    # 501st row is the detector — if it came back, rows were
-                    # dropped; it is then discarded rather than used.
+                    # WINDOW: 501 fetched, 500 kept. See the block comment.
                     _raw = _conn.execute(
                         _sel + "AND timestamp >= ? AND timestamp <= ? "
                         "ORDER BY timestamp DESC LIMIT 501",
                         (_sid, _min_event_ts, _max_event_ts),
                     ).fetchall()
-                    # If the window itself is truncated, the rows that were
-                    # dropped are the OLDEST in-window ones — precisely the
-                    # predecessors of this file's earlier events. Those events
-                    # would otherwise bisect onto the anchor and be attributed
-                    # to a skill that was already superseded when they ran.
-                    # Record the boundary so `_skill_for` can return silence
-                    # for them instead: an absent dimension is recoverable, a
-                    # confidently wrong one is not.
+                    # The 501st row came back: rows were dropped below this
+                    # point, so record where the timeline stops being complete.
                     if len(_raw) > 500:
                         _raw = _raw[:500]
                         try:
                             _window_floor_ts = float(_raw[-1][2])
                         except (TypeError, ValueError, IndexError):
                             _window_floor_ts = None
-                    # Appended AFTER the window rows so `_raw` stays globally
-                    # DESC — the `reversed()` below is what makes skill_ts
-                    # ascending, which bisect requires.
-                    #
-                    # 25 anchor rows, not 1: the newest row before the window
-                    # may carry a payload that will not parse, and a depth-1
-                    # anchor would then resolve the whole file to no skill
-                    # rather than falling through to the next-most-recent.
-                    # 25 is the same fall-through depth hermes-report.sh's
-                    # resolver uses on the legacy path.
+                    # ANCHOR, appended AFTER the window rows so `_raw` stays
+                    # globally DESC — the `reversed()` below is what makes
+                    # skill_ts ascending, which bisect requires.
                     _raw.extend(_conn.execute(
                         _sel + "AND timestamp < ? ORDER BY timestamp DESC LIMIT 25",
                         (_sid, _min_event_ts),
