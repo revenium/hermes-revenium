@@ -452,7 +452,7 @@ to clear. Lowering it to `86400` puts the `settle + 86400` term on top, giving
 tuned configuration rather than the default.
 
 Rollback is the reverse and is demonstrated, not assumed:
-[`docs/rollback-rehearsal.md`](docs/rollback-rehearsal.md).
+[`docs/internal/rollback-rehearsal.md`](docs/internal/rollback-rehearsal.md).
 
 ### Agentic job tracking
 

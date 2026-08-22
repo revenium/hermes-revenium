@@ -77,7 +77,7 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'README.md',
             ROOT / 'docs' / 'installation.md',
             # CUT-07: milestone evidence must survive in git — .planning/ is gitignored
-            ROOT / 'docs' / 'milestone-v1.4-closeout.md',
+            ROOT / 'docs' / 'internal' / 'milestone-v1.4-closeout.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -141,10 +141,10 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'docs' / 'migration-agent-dimension.md',
             # Phase 31 — sizing-gate verdict and evidence, committed so it survives
             # deletion of the gitignored planning tree (AUX-06, D-04)
-            ROOT / 'docs' / 'auxiliary-usage-sizing.md',
+            ROOT / 'docs' / 'internal' / 'auxiliary-usage-sizing.md',
             # Live v0.20.1 plugin-surface findings, committed for the same reason —
             # E1 is a load-bearing negative result guarding halt enforcement
-            ROOT / 'docs' / 'plugin-interface-findings.md',
+            ROOT / 'docs' / 'internal' / 'plugin-interface-findings.md',
             # Phase 20 — COMPAT-01 golden-argv wire-shape fixtures (D-01..D-04)
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
@@ -163,12 +163,12 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'docs' / 'event-metering.md',
             # Phase 35 — cutover convergence and read-side proof (Phase 33), committed so
             # it survives deletion of the gitignored planning tree (CUT-07)
-            ROOT / 'docs' / 'cutover-convergence-and-read-side-proof.md',
+            ROOT / 'docs' / 'internal' / 'cutover-convergence-and-read-side-proof.md',
             # Phase 35 — transition reconciliation (Phase 34), same reason (CUT-07)
-            ROOT / 'docs' / 'transition-reconciliation.md',
+            ROOT / 'docs' / 'internal' / 'transition-reconciliation.md',
             # Phase 35 Plan 04 — rollback rehearsal verdict, committed so it survives
             # deletion of the gitignored planning tree (CUT-05, CUT-07)
-            ROOT / 'docs' / 'rollback-rehearsal.md',
+            ROOT / 'docs' / 'internal' / 'rollback-rehearsal.md',
             # The README's hero banner; pinned so deleting it fails the suite instead
             # of silently rendering a broken image on GitHub.
             ROOT / 'assets' / 'hermes-revenium.png',

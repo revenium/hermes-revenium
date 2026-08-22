@@ -1,12 +1,12 @@
 # Milestone v1.4 — Cutover Validation & Convergence — closeout
 
 Git-tracked per CUT-07 (`.planning/` is gitignored). Companion to
-`docs/cutover-convergence-and-read-side-proof.md`,
-`docs/transition-reconciliation.md`, and `docs/rollback-rehearsal.md`, which
+`docs/internal/cutover-convergence-and-read-side-proof.md`,
+`docs/internal/transition-reconciliation.md`, and `docs/internal/rollback-rehearsal.md`, which
 carry the phase-level evidence this document closes over.
 
 Scope: phases 33, 34, 35. Phases 31–32 belong to v1.3 and are closed out in
-`docs/milestone-v1.3-closeout.md`.
+`docs/internal/milestone-v1.3-closeout.md`.
 
 ## Convergence re-sample — 2026-08-21T22:5xZ
 
@@ -52,7 +52,7 @@ Two things demonstrate it now:
 2. **The `env` mtimes still hold.** Nine of ten remain at the identical
    `2026-08-19 21:33:57` flip timestamp. `devops` is later
    (`2026-08-20 23:40:38`) and that is the phase-35 rollback rehearsal
-   (`docs/rollback-rehearsal.md`), which deliberately restored env from backup
+   (`docs/internal/rollback-rehearsal.md`), which deliberately restored env from backup
    and back — a documented, intended write, not a stealth manual step. Phase 33's
    flat claim that "none is later" is superseded by this one exception, named
    here rather than left to contradict a reader's own `stat`.
@@ -92,4 +92,4 @@ diagnosing. Recorded here as a finding against the tooling, not the fleet.
 - The 2026-08-19 Revenium dev outage **accepted writes and discarded them**
   while returning success. Distinct from the 500s, and possibly still latent.
 - CUT-05's restoration criterion 7, NOT MET AS WRITTEN, with the `owners/`
-  backfill category fully characterised in `docs/rollback-rehearsal.md`.
+  backfill category fully characterised in `docs/internal/rollback-rehearsal.md`.

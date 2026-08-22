@@ -25,7 +25,7 @@ and no field derived from either may ever enter the record (T-32-03). This
 is why the hook's `response` and `assistant_message` kwargs are never even
 threaded through to this module by __init__.py's _on_post_api_request.
 
-Contract C-3 (the ported langfuse fix, docs/plugin-interface-findings.md
+Contract C-3 (the ported langfuse fix, docs/internal/plugin-interface-findings.md
 § E2): token counts are read from the separate top-level `usage` kwarg,
 which on this hook is always a pre-built summary dict -- never from a
 `.usage` attribute on `response` (which is always a sanitized plain dict on

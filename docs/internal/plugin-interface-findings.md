@@ -245,7 +245,7 @@ worth a conversation.
 
 | Proposal | Disposition |
 |---|---|
-| **P-A** — meter auxiliary usage from `session_model_usage` | **Closed unbuilt (2026-08-15).** Its own pre-committed gate measured auxiliary spend at 0.4598% of fleet cost against a ≥1% build threshold. See `docs/auxiliary-usage-sizing.md`. Note that document also corrects P-A's ledger-key description: the live primary key is six columns, not the four assumed here. |
+| **P-A** — meter auxiliary usage from `session_model_usage` | **Closed unbuilt (2026-08-15).** Its own pre-committed gate measured auxiliary spend at 0.4598% of fleet cost against a ≥1% build threshold. See `docs/internal/auxiliary-usage-sizing.md`. Note that document also corrects P-A's ledger-key description: the live primary key is six columns, not the four assumed here. |
 | **P-B** — adopt `fail_closed` / `exit 2` in `pre_tool_call.sh` | Open. Requires the policy decision in E4 first. |
 | **P-C** — guardrail standing instruction as a prompt section | Open. **Hard constraint from E1: the section must not be the live-state carrier.** |
 | **P-D** — event-driven metering on `post_api_request` | **Promoted** as the successor to the closed P-A phase. ⚠️ **One claim in the original proposal is refuted:** it asserted this "gets aux usage for free". It does not. A single run was directly observed to serve two chat-completions calls (one main-loop, one title generation) and emit only **one** `post_api_request` event. `post_api_request` does not fire for auxiliary calls. `session_model_usage` remains the only source for auxiliary spend. |
