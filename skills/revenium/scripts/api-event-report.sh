@@ -137,6 +137,17 @@ if supports_flag "meter completion" "--reasoning-tokens"; then
   REASONING_TOKENS_CLI_CAPABLE=true
 fi
 
+# Skill attribution (revenium CLI 1.4.0) — the event-path sibling of the probe
+# hermes-report.sh carries. Same supports_flag posture as the four above and
+# for the same reason: a negative probe is a LIVE configuration, not an error.
+# A CLI without these flags must still meter argv byte-identical to what the
+# golden fixtures pin. Probed on --skill-name because it is the flag the
+# feature is worthless without; the rest ship or omit with it as one family.
+SKILL_CLI_CAPABLE=false
+if supports_flag "meter completion" "--skill-name"; then
+  SKILL_CLI_CAPABLE=true
+fi
+
 ORG_NAME=""
 if [[ -f "${CONFIG_FILE}" ]]; then
   ORG_NAME=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('organizationName', ''))" 2>/dev/null || true)
@@ -466,12 +477,21 @@ for line in rows_text.splitlines():
     if not line:
         continue
     fields = line.split('|')
-    if len(fields) != 19:
+    # Exact arity, deliberately: this width is the desync guard for the row
+    # boundary, so it moves in lockstep with the enrichment heredoc that emits
+    # it (19 -> 23 when the CLI 1.4.0 skill fields were appended). The emitted
+    # row is 23 fields UNCONDITIONALLY — a negative skill probe leaves the four
+    # tail fields empty rather than absent — so this stays a hard equality and
+    # never becomes a `>=`. The four skill fields are read and discarded: this
+    # readout's own columns are unchanged, and the aggregate below is the
+    # operator's pre-cutover evidence, not a billing surface.
+    if len(fields) != 23:
         continue
     (_sid_f, arid_f, response_model_f, _provider_raw_f, provider_resolved_f,
      input_f, output_f, cache_read_f, cache_write_f, reasoning_f, total_f,
      _request_time_f, _response_time_f, _duration_f, _stop_reason_f,
-     task_type_f, operation_type_f, _trace_id_f, _agentic_job_id_f) = fields
+     task_type_f, operation_type_f, _trace_id_f, _agentic_job_id_f,
+     _skill_name_f, _skill_trigger_f, _skill_source_f, _skill_marketplace_f) = fields
     event_rows += 1
     event_input += _int(input_f)
     event_output += _int(output_f)
@@ -929,10 +949,15 @@ PY
       EVENT_FILE="${event_file}" \
       MARKERS_FILE="${markers_file}" \
       JOIN_MODE="${join_mode}" \
+      SID="${sid}" \
+      SKILL_CAPABLE="${SKILL_CLI_CAPABLE}" \
+      SKILL_LOCK_FILE="${HERMES_HOME}/skills/.hub/lock.json" \
+      STATE_DB="${STATE_DB}" \
       python3 - <<'PY' 2>/dev/null
 import bisect
 import json
 import os
+import sqlite3
 from datetime import datetime, timezone
 
 event_file = os.environ.get("EVENT_FILE", "")
@@ -1057,6 +1082,104 @@ def _attribution_for(ts):
     return task_type, operation_type, trace_id, agentic_job_id
 
 
+# --- Skill timeline (CLI 1.4.0 attribution) -------------------------------
+# Signal: Hermes records skill tool calls as ordinary `messages` rows —
+# tool_name in (skill_view, skill_manage, skills_list) — whose payload is JSON
+# carrying {"name": "<skill>"}.
+#
+# One query for the whole session, bisected per event below. NOT one resolver
+# subprocess per record: this heredoc already runs once per session file, and
+# a python3 spawn per API call would be a spawn-cost regression on what is
+# about to be the primary billing path.
+#
+# Read-only URI, matching the env-map query this script already uses: a
+# missing state.db must never be created as a side effect.
+skill_ts = []
+skill_info = []
+if os.environ.get("SKILL_CAPABLE") == "true":
+    _db = os.environ.get("STATE_DB", "")
+    _sid = os.environ.get("SID", "")
+    _raw = []
+    if _db and _sid and os.path.isfile(_db):
+        try:
+            with sqlite3.connect(f"file:{_db}?mode=ro", uri=True) as _conn:
+                _raw = _conn.execute(
+                    "SELECT tool_name, COALESCE(content, tool_calls), timestamp "
+                    "FROM messages WHERE session_id = ? AND tool_name IN "
+                    "('skill_view','skill_manage','skills_list') "
+                    "ORDER BY timestamp DESC LIMIT 500",
+                    (_sid,),
+                ).fetchall()
+        except Exception:
+            # Missing table, locked db, sqlite error — every one of these is a
+            # normal install, not a fault. No timeline, no flags, row still ships.
+            _raw = []
+    for _tool_name, _payload, _ts in reversed(_raw):
+        if not _payload:
+            continue
+        try:
+            _ts = float(_ts)
+        except (TypeError, ValueError):
+            continue
+        try:
+            _name = json.loads(_payload).get("name")
+        except Exception:
+            continue      # unparseable payload: it never enters the timeline
+        if not (isinstance(_name, str) and _name.strip()):
+            continue
+        skill_ts.append(_ts)
+        skill_info.append((_clean(_name.strip(), 128), _clean(_tool_name or "", 64)))
+
+_prov_cache = {}
+_lock_data = None
+
+
+def _provenance(name):
+    # Resolved once per DISTINCT skill name, not once per event. Source and
+    # marketplace come from the hub lockfile or are omitted — an invented
+    # provenance is worse than an absent one. "official"/"builtin"/"local" are
+    # sources but not marketplaces.
+    global _lock_data
+    if name in _prov_cache:
+        return _prov_cache[name]
+    if _lock_data is None:
+        _lock_data = {}
+        _lock = os.environ.get("SKILL_LOCK_FILE", "")
+        if _lock and os.path.isfile(_lock):
+            try:
+                _installed = json.load(open(_lock, encoding="utf-8")).get("installed")
+                if isinstance(_installed, dict):
+                    _lock_data = _installed
+            except Exception:
+                _lock_data = {}
+    _entry = _lock_data.get(name)
+    if not isinstance(_entry, dict):
+        _entry = {}
+    _source = _clean(str(_entry.get("source") or ""), 64)
+    _marketplace = _source if _source and _source not in ("official", "builtin", "local") else ""
+    _prov_cache[name] = (_source, _marketplace)
+    return _prov_cache[name]
+
+
+def _skill_for(ts):
+    # PER-EVENT, not per-session: the skill in force AT THIS CALL. The legacy
+    # path picks the most recent skill at-or-before a DELTA WINDOW end because
+    # a delta spans an unknown range of turns; this path knows each call's own
+    # timestamp, which is strictly more accurate. Do not "unify" these.
+    #
+    # NO backward extension, deliberately — unlike the marker join above. A
+    # skill opened AFTER a call did not influence it, so an event preceding
+    # every skill row resolves to no skill and the flags are omitted.
+    if not skill_ts:
+        return "", "", "", ""
+    idx = bisect.bisect_right(skill_ts, ts) - 1
+    if idx < 0:
+        return "", "", "", ""
+    name, trigger = skill_info[idx]
+    source, marketplace = _provenance(name)
+    return name, trigger, source, marketplace
+
+
 try:
     with open(event_file, "r", encoding="utf-8") as fh:
         for line in fh:
@@ -1107,6 +1230,8 @@ try:
             else:
                 task_type, operation_type, trace_id, agentic_job_id = "unclassified", "CHAT", "", ""
 
+            skill_name, skill_trigger, skill_source, skill_marketplace = _skill_for(event_ts)
+
             provider_resolved = _resolve_provider(provider_raw, response_model)
             stop_reason = _stop_reason(r.get("finish_reason"))
 
@@ -1117,6 +1242,7 @@ try:
                 str(cache_write_tokens), str(reasoning_tokens), str(total_tokens),
                 request_time, response_time, str(duration_ms), stop_reason,
                 task_type, operation_type, trace_id, agentic_job_id,
+                skill_name, skill_trigger, skill_source, skill_marketplace,
             ]
             print("|".join(row))
 except OSError:
@@ -1203,15 +1329,23 @@ PY
       fi
     fi
 
+    # The row is 23 fields UNCONDITIONALLY, including when the skill probe is
+    # negative (the four tail fields are then empty). Constant width is what
+    # keeps this read-back stable across both configurations — the emitted
+    # field count, this `local` list and the `read -r` variable list widen in
+    # lockstep or every field after agentic_job_id desyncs and the billing
+    # argv silently corrupts.
     local sid_r arid_r model_r provider_raw_r provider_resolved_r
     local input_r output_r cache_read_r cache_write_r reasoning_r total_r
     local request_time_r response_time_r duration_r stop_reason_r
     local task_type_r operation_type_r trace_id_r agentic_job_id_r
+    local skill_name_r skill_trigger_r skill_source_r skill_marketplace_r
 
     while IFS='|' read -r sid_r arid_r model_r provider_raw_r provider_resolved_r \
       input_r output_r cache_read_r cache_write_r reasoning_r total_r \
       request_time_r response_time_r duration_r stop_reason_r \
-      task_type_r operation_type_r trace_id_r agentic_job_id_r; do
+      task_type_r operation_type_r trace_id_r agentic_job_id_r \
+      skill_name_r skill_trigger_r skill_source_r skill_marketplace_r; do
       [[ -z "${sid_r}" || -z "${arid_r}" ]] && continue
 
       # Task 3a: in-memory presence check — no subprocess per record.
@@ -1276,6 +1410,23 @@ PY
         else
           cmd+=(--squad-role "subagent")
         fi
+      fi
+
+      # Skill attribution (CLI 1.4.0). Flag ORDER is the argv contract shared
+      # with hermes-report.sh — keep it identical. --skill-kind and
+      # --skill-plugin-name are deliberately NEVER emitted, as on that path:
+      # we do not know what Revenium expects in them, and a guessed value
+      # poisons a dimension worse than an absent one leaves it.
+      #
+      # A record with no skill in force appends NOTHING. That is the common
+      # case (3-36% of token-bearing sessions carry any skill signal), so its
+      # argv staying byte-identical is the load-bearing property, not a
+      # courtesy.
+      if [[ "${SKILL_CLI_CAPABLE}" == "true" && -n "${skill_name_r}" ]]; then
+        cmd+=(--skill-name "${skill_name_r}")
+        [[ -n "${skill_trigger_r}" ]] && cmd+=(--skill-invocation-trigger "${skill_trigger_r}")
+        [[ -n "${skill_source_r}" ]] && cmd+=(--skill-source "${skill_source_r}")
+        [[ -n "${skill_marketplace_r}" ]] && cmd+=(--skill-marketplace-name "${skill_marketplace_r}")
       fi
 
       if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
