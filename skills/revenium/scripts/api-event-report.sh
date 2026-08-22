@@ -1152,9 +1152,15 @@ if os.environ.get("SKILL_CAPABLE") == "true":
                     # it, so leaving them in the window would spend the row
                     # budget on rows that cannot matter — the same eviction
                     # the lower bound exists to prevent, from the other side.
+                    # LIMIT is 501 for a 500-row window: `len(rows) == cap`
+                    # cannot tell a window that is exactly full from one that
+                    # was cut, and calling a complete window truncated
+                    # withholds attribution that was in fact available. The
+                    # 501st row is the detector — if it came back, rows were
+                    # dropped; it is then discarded rather than used.
                     _raw = _conn.execute(
                         _sel + "AND timestamp >= ? AND timestamp <= ? "
-                        "ORDER BY timestamp DESC LIMIT 500",
+                        "ORDER BY timestamp DESC LIMIT 501",
                         (_sid, _min_event_ts, _max_event_ts),
                     ).fetchall()
                     # If the window itself is truncated, the rows that were
@@ -1165,7 +1171,8 @@ if os.environ.get("SKILL_CAPABLE") == "true":
                     # Record the boundary so `_skill_for` can return silence
                     # for them instead: an absent dimension is recoverable, a
                     # confidently wrong one is not.
-                    if len(_raw) == 500:
+                    if len(_raw) > 500:
+                        _raw = _raw[:500]
                         try:
                             _window_floor_ts = float(_raw[-1][2])
                         except (TypeError, ValueError, IndexError):

@@ -347,6 +347,29 @@ class SkillAttributionEventTests(unittest.TestCase):
             b.get('--skill-name'), 'noise-599',
             'the later event\'s predecessor survived the window and must still attribute')
 
+    def test_exactly_full_window_is_not_treated_as_truncated(self):
+        """A window that is exactly full lost nothing, so nothing is withheld.
+
+        `len(rows) == cap` cannot distinguish a complete window from a cut one.
+        Reading it as truncation suppresses attribution that was available —
+        the withholding guard turning on a session it should not touch.
+
+        Raised as P1 by review on PR #82.
+        """
+        wall = [('skill_view', json.dumps({'name': f'noise-{i}'}),
+                 SWITCH_TS + i * 0.1) for i in range(500)]
+        by_txn, all_flags, _out = self._run(
+            events=[_event(ARID_A, EVENT_A_TS, EVENT_A_END),
+                    _event(ARID_B, EVENT_B_TS, EVENT_B_END)],
+            skill_rows=[('skill_view', json.dumps({'name': 'alpha-skill'}), EARLY_TS)] + wall)
+        self.assertEqual(len(all_flags), 2, 'both completions must still ship')
+        self.assertEqual(
+            by_txn[f'event:{ARID_A}'].get('--skill-name'), 'alpha-skill',
+            'a full-but-complete window withheld attribution that was available')
+        self.assertEqual(
+            by_txn[f'event:{ARID_B}'].get('--skill-name'), 'noise-499',
+            'the later event must still take the newest in-window skill')
+
     # --- Property 6 -------------------------------------------------------
     def test_malformed_newest_payload_falls_through(self):
         """A payload that will not parse must not win and must not abort."""
