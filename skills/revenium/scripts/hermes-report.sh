@@ -2949,12 +2949,18 @@ if found is None:
     raise SystemExit(0)
 
 
-def _s(v):
+def _s(v, maxlen=None):
     # Pipe/newline/CR-safe (IFS='|' transport, same rule as every other
-    # marker-derived field in this file).
+    # marker-derived field in this file). WR-01: also length-capped on read
+    # -- classifier.py already clamps these before writing, but this reader
+    # has no independent bound of its own, matching this file's existing
+    # convention (failure_reason capped to 500 at :1418/:2317, skill name to
+    # 128 at :168).
     v = '' if v is None else str(v)
     for bad in ('|', '\n', '\r'):
         v = v.replace(bad, ' ')
+    if maxlen is not None:
+        v = v[:maxlen]
     return v
 
 
@@ -2962,10 +2968,10 @@ assumptions = found.get('assumptions')
 if not isinstance(assumptions, dict):
     assumptions = {}
 print(f"VALUE={_s(found.get('estimated_value', ''))}")
-print(f"CURRENCY={_s(found.get('currency', ''))}")
-print(f"EVIDENCE_CLASS={_s(found.get('evidence_class', ''))}")
-print(f"EVALUATOR={_s(found.get('evaluator', ''))}")
-print(f"EVALUATOR_VERSION={_s(found.get('evaluator_version', ''))}")
+print(f"CURRENCY={_s(found.get('currency', ''), maxlen=32)}")
+print(f"EVIDENCE_CLASS={_s(found.get('evidence_class', ''), maxlen=32)}")
+print(f"EVALUATOR={_s(found.get('evaluator', ''), maxlen=64)}")
+print(f"EVALUATOR_VERSION={_s(found.get('evaluator_version', ''), maxlen=16)}")
 print(f"CONFIDENCE={_s(found.get('confidence', ''))}")
 print(f"HOURS_SAVED={_s(assumptions.get('estimated_hours_saved', ''))}")
 print(f"LOADED_RATE={_s(assumptions.get('assumed_loaded_rate', ''))}")
