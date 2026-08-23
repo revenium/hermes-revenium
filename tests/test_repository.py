@@ -233,6 +233,43 @@ class RepositoryTests(unittest.TestCase):
                 f'CHANGELOG.md has no section for released tag {version}',
             )
 
+    def test_assessment_contract_is_documented_in_the_skill_bundle(self):
+        """The frozen assessment contract must live in git, not only in .planning/.
+
+        ROI-12 makes the assessment key set permanent for every marker reader in
+        the field. The decision was made at a planning checkpoint whose SUMMARY
+        lives under .planning/, which is gitignored -- a permanent contract
+        recorded only in a file that vanishes on clone is not recorded.
+
+        Both files below SHIP INSIDE the skill bundle, so the contract reaches
+        every host. This guard also pins the evidence-class semantics, which are
+        the whole reason the field exists: a later edit must not quietly widen
+        MODEL_ESTIMATED_DEMO to cover measured value.
+        """
+        jd = (SKILL / 'references' / 'job-declaration.md').read_text(errors='ignore')
+        for needle in ('MODEL_ESTIMATED_DEMO', 'estimated_value', 'assumed_loaded_rate',
+                       'estimated_hours_saved', 'evidence_class', 'assessment'):
+            self.assertIn(needle, jd,
+                          f'job-declaration.md no longer documents {needle!r}')
+        self.assertIn(
+            'unverified model estimate', jd,
+            'job-declaration.md must say plainly that the value is unverified',
+        )
+        self.assertIn(
+            'different evidence class', jd,
+            'the rule that a non-LLM evaluator reports its OWN evidence class '
+            'is what stops MODEL_ESTIMATED_DEMO being widened to cover measured value',
+        )
+
+        cs = (SKILL / 'references' / 'config-schema.md').read_text(errors='ignore')
+        for needle in ('llmOutcomeEvaluation', 'maxLoadedRate', 'maxHoursSaved'):
+            self.assertIn(needle, cs, f'config-schema.md no longer documents {needle!r}')
+        self.assertIn(
+            'fails closed', cs,
+            'the fail-closed inversion must stay documented -- it is the opposite '
+            'of guardrail-status.json and reads like a bug without the note',
+        )
+
     def test_docs_document_the_current_metering_surface(self):
         """The operator docs must describe the surface operators actually run.
 

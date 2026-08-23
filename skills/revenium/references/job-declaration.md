@@ -60,3 +60,70 @@ User asked you to refactor the auth module (arc in progress, not yet declared). 
 - First: write a `CANCELLED` job marker for the abandoned refactor arc (`job_type`: `refactoring`, `status`: `CANCELLED`).
 - Then: begin the new arc (release announcement writing).
 - Reason: prevents the refactor's task markers from leaking attribution into the announcement arc.
+
+---
+
+## Outcome-value assessment (v1.5, opt-in, experimental)
+
+When LLM outcome evaluation is enabled and an evaluator returns an accepted
+assessment, a `SUCCESS` job marker carries one extra key: `assessment`.
+
+**This is a frozen contract.** Marker readers written before v1.5 must keep
+parsing, so every reader uses `.get("assessment", {})` and the key is simply
+**absent** whenever evaluation is off, the arc is not `SUCCESS`, or the evaluator
+abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
+
+```json
+{"kind":"job","ts":1756...,"sid":"...","agentic_job_id":"fix_auth_a1b2",
+ "job_name":"Fix auth regression","job_type":"bug_fix","status":"SUCCESS",
+ "assessment":{
+   "estimated_value":375.00,
+   "currency":"USD",
+   "basis":"engineer time avoided on a repro and fix cycle",
+   "assumptions":{
+     "inferred_role":"backend engineer",
+     "estimated_hours_saved":2.5,
+     "assumed_loaded_rate":150.00
+   },
+   "confidence":0.6,
+   "evaluator":"llm",
+   "evaluator_version":"1",
+   "evidence_class":"MODEL_ESTIMATED_DEMO"
+ }}
+```
+
+| key | type | constraint |
+|---|---|---|
+| `estimated_value` | number | **Derived** as `estimated_hours_saved x assumed_loaded_rate`, rounded to 2dp. A value supplied by an evaluator is discarded. |
+| `currency` | string | ISO 4217, from an explicit supported set, and must match the configured currency. |
+| `basis` | string | Clamped to 200 chars. |
+| `assumptions.inferred_role` | string | Clamped to 60 chars. |
+| `assumptions.estimated_hours_saved` | number | Finite, `0 < h <= maxHoursSaved` (default 40). |
+| `assumptions.assumed_loaded_rate` | number | Finite, `0 < r <= maxLoadedRate` (default 500). |
+| `confidence` | number | `[0, 1]`. |
+| `evaluator`, `evaluator_version` | string | Recorded from the resolved evaluator, never read from its output. |
+| `evidence_class` | string | Always `MODEL_ESTIMATED_DEMO` on this path. Forced, never read from output. |
+
+Every string field has `|`, newline, and carriage return replaced with a space
+before persistence. The cron's job-outcome queue is `IFS='|'`-parsed, and one
+pipe reaching that tuple shifts every following field.
+
+### What `MODEL_ESTIMATED_DEMO` means
+
+**An unverified model estimate.** Not measured, not observed, not
+customer-confirmed, and not defensible ROI. Revenium computes a displayed ROI
+from this reported value and the metered cost; the value's quality is the
+model's, and the feature is labelled experimental for that reason.
+
+**A future non-LLM evaluator must report a different evidence class.** ONNX
+classifiers, deterministic customer policies, vertical models, and
+system-of-record adapters each carry their own. Do not widen this one to cover
+measured value — the whole point of the field is that the two are
+distinguishable after the fact.
+
+### Failed and cancelled arcs
+
+`FAILED` and `CANCELLED` arcs are never evaluated: no evaluator call, no
+`assessment` key, no value. They keep their metered cost and so remain eligible
+to show zero or negative ROI. Success is never inferred from a transcript that
+merely sounds productive.

@@ -240,5 +240,156 @@ class ValidateAssessmentTests(unittest.TestCase):
                     self._raw(assumed_loaded_rate=bad), {}, 'stub', '1'))
 
 
+class RejectionMatrixTests(unittest.TestCase):
+    """ROI-06 — the full matrix. Every row must abstain."""
+
+    def setUp(self):
+        self.mod = _load_classifier({})
+
+    def _raw(self, **over):
+        raw = {'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
+               'assumed_loaded_rate': 150.0, 'currency': 'USD',
+               'basis': 'time avoided', 'confidence': 0.5}
+        raw.update(over)
+        return raw
+
+    def test_numeric_field_matrix(self):
+        bad = [float('nan'), float('inf'), float('-inf'), -1, 0,
+               '2', True, False, None, [], {}]
+        over = {'estimated_hours_saved': 41, 'assumed_loaded_rate': 501}
+        for field in ('estimated_hours_saved', 'assumed_loaded_rate'):
+            for v in bad + [over[field]]:
+                with self.subTest(field=field, value=repr(v)):
+                    self.assertIsNone(self.mod._validate_assessment(
+                        self._raw(**{field: v}), {}, 'stub', '1'))
+
+    def test_confidence_matrix(self):
+        for v in (-0.01, 1.01, float('nan'), '0.5', None, True):
+            with self.subTest(repr(v)):
+                self.assertIsNone(self.mod._validate_assessment(
+                    self._raw(confidence=v), {}, 'stub', '1'))
+
+    def test_currency_matrix(self):
+        for v, cfg, why in [
+            ('US', {}, 'too short'),
+            ('XYZ', {}, 'well-formed but not a real currency'),
+            ('DOLLARS', {}, 'not a code'),
+            (123, {}, 'not a string'),
+            (None, {}, 'absent'),
+            ('EUR', {'currency': 'USD'}, 'mismatches the configured currency'),
+        ]:
+            with self.subTest(f'{v!r} {why}'):
+                self.assertIsNone(self.mod._validate_assessment(
+                    self._raw(currency=v), cfg, 'stub', '1'))
+
+    def test_currency_is_normalised_before_the_allow_list(self):
+        """DEVIATION from the plan, recorded deliberately.
+
+        The plan listed 'usd ' (whitespace) as a rejection row. Normalising
+        first — strip + upper — then checking the allow-list is strictly safer
+        than rejecting: the allow-list is the actual control, and refusing a
+        whitespace-padded valid code buys nothing while making the demo brittle
+        against a trailing space in a model response.
+        """
+        got = self.mod._validate_assessment(
+            self._raw(currency=' usd '), {}, 'stub', '1')
+        self.assertIsNotNone(got)
+        self.assertEqual('USD', got['currency'])
+
+    def test_structure_matrix(self):
+        for v in (None, [], 'string', 42, {}, {'estimated_hours_saved': 2.5}):
+            with self.subTest(repr(v)):
+                self.assertIsNone(
+                    self.mod._validate_assessment(v, {}, 'stub', '1'))
+
+    def test_configured_bounds_override_defaults(self):
+        cfg = {'maxHoursSaved': 1.0, 'maxLoadedRate': 100.0}
+        self.assertIsNone(self.mod._validate_assessment(self._raw(), cfg, 'stub', '1'))
+        ok = self.mod._validate_assessment(
+            self._raw(estimated_hours_saved=0.5, assumed_loaded_rate=90.0),
+            cfg, 'stub', '1')
+        self.assertEqual(45.0, ok['estimated_value'])
+
+
+class MarkerBudgetTests(unittest.TestCase):
+    """ROI-12 — a maximally-clamped assessment marker fits the frozen budget."""
+
+    def setUp(self):
+        self.mod = _load_classifier({})
+
+    def test_worst_case_marker_fits_1024_bytes(self):
+        """Headroom is COMPUTED here, not hardcoded. If the base marker shape
+        ever grows, this test must move with it rather than silently pass."""
+        base = {'kind': 'job', 'ts': 1756000000.123456,
+                'sid': '20260822_235959_' + 'a' * 8,
+                'agentic_job_id': 'x' * 48 + '_a1b2',
+                'job_name': 'y' * 60, 'job_type': 'bug_fix', 'status': 'SUCCESS'}
+        base_bytes = len(json.dumps(base, separators=(',', ':'),
+                                    ensure_ascii=True).encode()) + 1
+        self.assertLess(base_bytes, 1024, 'base marker already over budget')
+
+        worst = self.mod._validate_assessment({
+            'inferred_role': 'r' * 200,          # over the clamp on purpose
+            'estimated_hours_saved': 40.0,       # max bound
+            'assumed_loaded_rate': 500.0,        # max bound
+            'currency': 'USD',
+            'basis': 'b' * 1000,                 # far over the clamp
+            'confidence': 0.999999,
+        }, {}, 'evaluator-name-long', 'version-long')
+        self.assertIsNotNone(worst, 'max-bound inputs must be accepted, not rejected')
+
+        full = dict(base, assessment=worst)
+        total = len(json.dumps(full, separators=(',', ':'),
+                               ensure_ascii=True).encode()) + 1
+        self.assertLess(total, 1024,
+                        f'marker with a maximally-clamped assessment is {total} bytes')
+        # Record the margin so a future reader sees how much room is left.
+        self.assertGreater(1024 - total, 100,
+                           'under 100 bytes of margin — re-derive the clamps')
+
+    def test_ifs_characters_are_stripped(self):
+        """T-36-06 (high). Phase 38's outcome queue is IFS='|'-parsed; one pipe
+        reaching that tuple shifts every following field. Mitigated at the
+        producer, not at each consumer."""
+        got = self.mod._validate_assessment({
+            'inferred_role': 'a|b\nc\rd',
+            'estimated_hours_saved': 2.0, 'assumed_loaded_rate': 100.0,
+            'currency': 'USD', 'basis': 'x|y\nz', 'confidence': 0.5,
+        }, {}, 'stub|evil', '1\n2')
+        blob = json.dumps(got)
+        for bad in ('|', '\\n', '\\r'):
+            self.assertNotIn(bad, blob, f'{bad!r} survived into the assessment')
+
+
+class DisabledPathTests(unittest.TestCase):
+    """ROI-02 — with evaluation off, the marker is what it always was.
+
+    Phase 36 wires no call site (that is phase 37), so this asserts the writer's
+    output shape rather than an end-to-end flow. It is the tripwire that catches
+    an `assessment` key leaking into a disabled-path marker later.
+    """
+
+    def test_job_marker_carries_no_assessment_key(self):
+        tmp = tempfile.mkdtemp(prefix='gsd-phase36-disabled-')
+        markers = Path(tmp) / 'markers'
+        mod = _load_classifier({
+            'REVENIUM_STATE_DIR': tmp,
+            'REVENIUM_MARKERS_DIR': str(markers),
+        })
+        job = {'agentic_job_id': 'fix_thing_a1b2', 'job_name': 'Fix thing',
+               'job_type': 'bug_fix', 'status': 'SUCCESS', 'failure_reason': ''}
+        path = mod._write_job_marker('sess-1', job)
+        record = json.loads(path.read_text().strip())
+
+        self.assertNotIn('assessment', record,
+                         'a disabled-path marker must not carry an assessment')
+        self.assertEqual(
+            {'kind', 'ts', 'sid', 'agentic_job_id', 'job_name', 'job_type', 'status'},
+            set(record),
+            'the frozen Phase 7 D-03 job-marker key set changed',
+        )
+        self.assertLess(len(path.read_text().encode()), 1024)
+
+
 if __name__ == '__main__':
     unittest.main()
