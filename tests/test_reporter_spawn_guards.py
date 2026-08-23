@@ -443,13 +443,18 @@ class GuardPermanenceTests(unittest.TestCase):
         """Task 3 Part A (PERF-02, severable) -- for a top-level session
         (root_sid == sid), root_markers_dir must be assigned directly from
         session_markers_dir rather than re-resolved via a second
-        resolve_markers_dir call. Both call sites must remain present in the
-        file (T-28-34's exact-count invariant)."""
+        resolve_markers_dir call. Both original call sites must remain
+        present in the file (T-28-34's exact-count invariant), plus the one
+        Phase 38 (ROI-10/T-38-03) legitimately adds: the post-loop outcome
+        stage re-reads a session's marker for its assessment, using the same
+        helper the in-loop path already uses, so a multiplexed gateway's
+        per-profile marker home is resolved consistently on both paths."""
         src = HERMES_REPORT.read_text(encoding='utf-8')
         self.assertIn('root_markers_dir="${session_markers_dir}"', src)
         self.assertEqual(
-            src.count('resolve_markers_dir'), 2,
-            'exactly two resolve_markers_dir call sites must remain (T-28-34)',
+            src.count('resolve_markers_dir'), 3,
+            'exactly three resolve_markers_dir call sites must remain '
+            '(T-28-34\'s original two, plus Phase 38\'s outcome-stage read)',
         )
 
 

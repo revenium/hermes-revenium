@@ -2801,6 +2801,9 @@ PY
     local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
     local outcome_now_ts _age_s _stale_threshold outcome_metadata
+    local outcome_markers_dir outcome_value outcome_currency
+    local outcome_evidence_class outcome_evaluator outcome_evaluator_version
+    local outcome_confidence outcome_hours_saved outcome_loaded_rate
     for _entry in "${job_outcome_queue[@]}"; do
       IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
@@ -2841,6 +2844,112 @@ except Exception:
           ;;
       esac
 
+      # Phase 38 (ROI-09/ROI-10): resolve an accepted assessment for SUCCESS
+      # arcs only — FAILED/CANCELLED are never evaluated (classifier.py gates
+      # _attach_assessment on status == SUCCESS before this stage ever runs),
+      # so this guard is defensive belt-and-suspenders, not the only gate.
+      # The assessment is NOT a queue field (a nested object cannot be a pipe
+      # field) — it is re-read from the session's marker file, the carrier
+      # 38-RESEARCH.md proved survives a deferred tick. The marker directory
+      # is resolved per-session below (not read off MARKERS_DIR) because a
+      # multiplexed gateway owns each session's markers under its own
+      # profile home — the same helper the in-loop jobs stage already uses
+      # at :~973.
+      outcome_value=""
+      outcome_currency=""
+      outcome_evidence_class=""
+      outcome_evaluator=""
+      outcome_evaluator_version=""
+      outcome_confidence=""
+      outcome_hours_saved=""
+      outcome_loaded_rate=""
+      if [[ "${outcome_status}" == "SUCCESS" && -n "${outcome_sid}" ]]; then
+        outcome_markers_dir="$(resolve_markers_dir "${outcome_sid}")"
+        [[ -z "${outcome_markers_dir}" ]] && outcome_markers_dir="${MARKERS_DIR}"
+        if [[ -f "${outcome_markers_dir}/${outcome_sid}.jsonl" ]]; then
+          local _assessment_kv
+          _assessment_kv=$(
+            MARKERS_DIR="${outcome_markers_dir}" \
+            SID="${outcome_sid}" \
+            OUTCOME_JOB_ID="${outcome_id}" \
+            python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+from pathlib import Path
+
+markers_dir = os.environ.get('MARKERS_DIR', '')
+sid = os.environ.get('SID', '')
+job_id = os.environ.get('OUTCOME_JOB_ID', '')
+
+if not markers_dir or not sid or not job_id:
+    raise SystemExit(0)
+
+marker_path = Path(markers_dir) / f"{sid}.jsonl"
+if not marker_path.is_file():
+    raise SystemExit(0)
+
+found = None
+try:
+    with marker_path.open() as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if not line or len(line) > 4096:
+                continue
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get('kind') != 'job':
+                continue
+            if rec.get('agentic_job_id') != job_id:
+                continue
+            # ROI-12: pre-v1.5 marker lines have no "assessment" key at all —
+            # .get(...) makes that a no-op, not an error.
+            a = rec.get('assessment')
+            if isinstance(a, dict) and a:
+                found = a
+except OSError:
+    pass
+
+if found is None:
+    raise SystemExit(0)
+
+
+def _s(v):
+    # Pipe/newline/CR-safe (IFS='|' transport, same rule as every other
+    # marker-derived field in this file).
+    v = '' if v is None else str(v)
+    for bad in ('|', '\n', '\r'):
+        v = v.replace(bad, ' ')
+    return v
+
+
+assumptions = found.get('assumptions')
+if not isinstance(assumptions, dict):
+    assumptions = {}
+print(f"VALUE={_s(found.get('estimated_value', ''))}")
+print(f"CURRENCY={_s(found.get('currency', ''))}")
+print(f"EVIDENCE_CLASS={_s(found.get('evidence_class', ''))}")
+print(f"EVALUATOR={_s(found.get('evaluator', ''))}")
+print(f"EVALUATOR_VERSION={_s(found.get('evaluator_version', ''))}")
+print(f"CONFIDENCE={_s(found.get('confidence', ''))}")
+print(f"HOURS_SAVED={_s(assumptions.get('estimated_hours_saved', ''))}")
+print(f"LOADED_RATE={_s(assumptions.get('assumed_loaded_rate', ''))}")
+PY
+          )
+          outcome_value=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^VALUE=//p')
+          outcome_currency=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CURRENCY=//p')
+          outcome_evidence_class=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVIDENCE_CLASS=//p')
+          outcome_evaluator=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVALUATOR=//p')
+          outcome_evaluator_version=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVALUATOR_VERSION=//p')
+          outcome_confidence=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CONFIDENCE=//p')
+          outcome_hours_saved=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^HOURS_SAVED=//p')
+          outcome_loaded_rate=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^LOADED_RATE=//p')
+        fi
+      fi
+
       # D-06: API first — build command as array (bash 3.2 portability).
       local outcome_cmd=(
         revenium jobs outcome "${outcome_id}"
@@ -2858,16 +2967,34 @@ except Exception:
       if [[ "${outcome_status}" == "SUCCESS" ]]; then
         outcome_cmd+=(--outcome-type CONVERTED)
       fi
+      # Phase 38 (ROI-10): a resolved assessment ships as the two value flags,
+      # never as --outcome-type — a SUCCESS arc already sends CONVERTED above,
+      # and changing that mapping is out of scope for this plan (would move a
+      # golden). Both flags are added together or not at all (outcome_value is
+      # only ever set alongside outcome_currency by the resolver above).
+      if [[ -n "${outcome_value}" && -n "${outcome_currency}" ]]; then
+        outcome_cmd+=(--outcome-value "${outcome_value}")
+        outcome_cmd+=(--outcome-currency "${outcome_currency}")
+      fi
       # Phase 24 (quick-260531-n4i): attach --metadata JSON. source (deployment
       # environment from the session source column) rides on every outcome when
       # present; failure_reason is added only for FAILED arcs. json.dumps handles
       # quoting/escaping so prose reasons cannot break the JSON arg. Omit the flag
       # entirely when there is nothing to send (preserves v1.4 wire shape for
       # source-less sessions).
+      # Phase 38 (ROI-10): provenance for a resolved assessment rides beside
+      # source/failure_reason in this SAME metadata object, so the estimate's
+      # nature is unmistakable next to its value flags.
       outcome_metadata=$(
         OUTCOME_SOURCE="${outcome_source}" \
         OUTCOME_STATUS="${outcome_status}" \
         OUTCOME_FAILURE_REASON="${outcome_failure_reason}" \
+        OUTCOME_EVIDENCE_CLASS="${outcome_evidence_class}" \
+        OUTCOME_EVALUATOR="${outcome_evaluator}" \
+        OUTCOME_EVALUATOR_VERSION="${outcome_evaluator_version}" \
+        OUTCOME_CONFIDENCE="${outcome_confidence}" \
+        OUTCOME_HOURS_SAVED="${outcome_hours_saved}" \
+        OUTCOME_LOADED_RATE="${outcome_loaded_rate}" \
         python3 - <<'PY' 2>/dev/null || true
 import json, os
 meta = {}
@@ -2878,6 +3005,42 @@ status = os.environ.get('OUTCOME_STATUS', '').strip().upper()
 reason = os.environ.get('OUTCOME_FAILURE_REASON', '').strip()
 if status == 'FAILED' and reason:
     meta['failure_reason'] = reason
+
+# Phase 38 (ROI-10): provenance for a resolved assessment. Present only when
+# the resolver above found one (SUCCESS arcs only, ROI-09) — an empty env var
+# means "no assessment" and every branch below is a no-op, matching the
+# conditional-emit rule the rest of this file already follows.
+evidence_class = os.environ.get('OUTCOME_EVIDENCE_CLASS', '').strip()
+if evidence_class:
+    meta['evidence_class'] = evidence_class
+evaluator = os.environ.get('OUTCOME_EVALUATOR', '').strip()
+if evaluator:
+    meta['evaluator'] = evaluator
+evaluator_version = os.environ.get('OUTCOME_EVALUATOR_VERSION', '').strip()
+if evaluator_version:
+    meta['evaluator_version'] = evaluator_version
+confidence_raw = os.environ.get('OUTCOME_CONFIDENCE', '').strip()
+if confidence_raw:
+    try:
+        meta['confidence'] = float(confidence_raw)
+    except ValueError:
+        pass
+hours_raw = os.environ.get('OUTCOME_HOURS_SAVED', '').strip()
+rate_raw = os.environ.get('OUTCOME_LOADED_RATE', '').strip()
+assumptions = {}
+if hours_raw:
+    try:
+        assumptions['estimated_hours_saved'] = float(hours_raw)
+    except ValueError:
+        pass
+if rate_raw:
+    try:
+        assumptions['assumed_loaded_rate'] = float(rate_raw)
+    except ValueError:
+        pass
+if assumptions:
+    meta['assumptions'] = assumptions
+
 if meta:
     print(json.dumps(meta, separators=(',', ':')))
 PY

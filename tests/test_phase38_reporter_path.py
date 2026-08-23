@@ -18,8 +18,9 @@ Reuses the no-shift shim + synthetic state.db harness from _compat_helpers
 (the same harness tests/test_compat_jobs_outcome.py and
 tests/test_jobs_outcome_metadata.py already use for this exact stage).
 
-Task 1 (this commit): the sixth queue field (sid). Task 2 and Task 3 land in
-follow-up commits and extend this file with the value/provenance and golden
+Task 1: the sixth queue field (sid). Task 2 (this commit): the assessment
+resolver and the value + provenance flags. Task 3 lands in a follow-up
+commit and extends this file with golden and backward-compatibility
 coverage.
 """
 import json
@@ -35,6 +36,25 @@ from tests._compat_helpers import (
     run_script,
     SCRIPTS_DIR,
 )
+
+# The frozen assessment contract (classifier.py's _validate_assessment
+# return shape). estimated_value = 3.5 * 150.0 = 525.0, matching what the
+# evaluator itself would derive -- chosen here directly since these tests
+# exercise hermes-report.sh's READ side, not the classifier's derivation.
+ASSESSMENT_FIXTURE = {
+    "estimated_value": 525.0,
+    "currency": "USD",
+    "basis": "3.5 hours of senior engineer review time",
+    "assumptions": {
+        "inferred_role": "senior software engineer",
+        "estimated_hours_saved": 3.5,
+        "assumed_loaded_rate": 150.0,
+    },
+    "confidence": 0.8,
+    "evaluator": "llm",
+    "evaluator_version": "v1",
+    "evidence_class": "MODEL_ESTIMATED_DEMO",
+}
 
 
 class TestPhase38ReporterPath(unittest.TestCase):
@@ -183,6 +203,65 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta.get('source'), 'test')
         self.assertEqual(meta.get('failure_reason'), '3 assertions failed')
+
+    # -- Task 2: an accepted assessment ships as value + provenance -------
+
+    def test_outcome_success_with_assessment_ships_value_and_provenance(self):
+        argv = self._run_one_outcome(
+            'o38-sid-001', 'o38-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
+
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evaluator'), 'llm')
+        self.assertEqual(meta.get('evaluator_version'), 'v1')
+        self.assertEqual(meta.get('confidence'), 0.8)
+        self.assertEqual(
+            meta.get('assumptions'),
+            {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+        )
+        # basis / inferred_role are not part of the provenance list this plan
+        # names (evidence_class, evaluator, evaluator_version, confidence,
+        # and the two numeric assumptions) -- they stay out of --metadata.
+        self.assertNotIn('basis', meta)
+        self.assertNotIn('inferred_role', meta)
+
+    def test_outcome_success_without_assessment_ships_neither_value_flag(self):
+        argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta, {'source': 'test'})
+
+    def test_outcome_failed_argv_unchanged_by_assessment_logic(self):
+        """ROI-09: FAILED/CANCELLED are never evaluated by the classifier, so
+        no real marker ever carries {status: FAILED, assessment: {...}}. This
+        feeds that shape anyway to prove the outcome stage's OWN guard --
+        not just the classifier's -- refuses to ship a value for a non-SUCCESS
+        arc."""
+        argv = self._run_one_outcome(
+            'o38-sid-003', 'o38-job-003', 'FAILED',
+            failure_reason='boom', assessment=ASSESSMENT_FIXTURE,
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        self.assertNotIn('--outcome-type', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('source'), 'test')
+        self.assertEqual(meta.get('failure_reason'), 'boom')
+        self.assertNotIn('evidence_class', meta)
+
+    def test_outcome_cancelled_never_carries_a_value(self):
+        argv = self._run_one_outcome(
+            'o38-sid-004', 'o38-job-004', 'CANCELLED', assessment=ASSESSMENT_FIXTURE,
+        )
+        self.assertEqual(argv[argv.index('--result') + 1], 'CANCELLED')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        self.assertNotIn('--outcome-type', argv)
 
 
 if __name__ == '__main__':
