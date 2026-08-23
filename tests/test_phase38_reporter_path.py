@@ -21,11 +21,17 @@ tests/test_jobs_outcome_metadata.py already use for this exact stage).
 Task 1: the sixth queue field (sid). Task 2: the assessment resolver and
 the value + provenance flags. Task 3 (this commit): the new golden and
 pre-v1.5 backward-compatibility coverage.
+
+Plan 02 adds the two guarantees invisible in a single-tick test: idempotency
+across ticks (deferred-create survival, the double-outcome/409 paths) and the
+ROI-13 canary sweep across every persisted artifact — the marker, all three
+ledgers, the log, and the argv itself, not just the marker Phase 37 checked.
 """
 import json
 import os
 import shlex
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -283,6 +289,249 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-currency', argv)
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta, {'source': 'test'})
+
+
+# ---------------------------------------------------------------------------
+# Plan 02, Tasks 1 & 2 — the two guarantees only visible across ticks.
+# ---------------------------------------------------------------------------
+
+def _outcome_invocations(jobs_invocations, verb):
+    """Filter jobs_invocations (NO-SHIFT argv, first token 'jobs') by subcommand."""
+    return [a for a in jobs_invocations if len(a) >= 2 and a[0] == 'jobs' and a[1] == verb]
+
+
+def _metadata_of(argv):
+    for i, tok in enumerate(argv):
+        if tok == '--metadata' and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def _build_flexible_shim(shim_path):
+    """revenium shim whose jobs-create / jobs-outcome exit codes and stdout are
+    controlled per-run via JOBS_CREATE_EXIT_CODE / JOBS_CREATE_OUTPUT_TEXT /
+    OUTCOME_EXIT_CODE / OUTCOME_OUTPUT_TEXT env vars (default: succeed silently).
+
+    Full argv is logged NO-SHIFT (starting with the 'jobs' verb) to JOBS_LOG,
+    matching build_shim's shape in _compat_helpers so ('jobs', 'create'/'outcome')
+    filtering stays identical across this file. meter completion is logged the
+    same way to METER_LOG; `meter completion --help` advertises
+    --agentic-job-id so JOBS_CLI_CAPABLE resolves true, matching build_shim.
+    """
+    body = (
+        '#!/usr/bin/env bash\n'
+        'case "$1" in\n'
+        '  config) exit 0 ;;\n'
+        '  guardrails) exit 0 ;;\n'
+        '  meter)\n'
+        '    if [[ "$3" == "--help" ]]; then\n'
+        '      echo "--agentic-job-id  Agentic job instance identifier"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    case "$2" in\n'
+        '      completion)\n'
+        '        printf "%q " "$@" >> "${METER_LOG:-/dev/null}"\n'
+        '        printf "\\n" >> "${METER_LOG:-/dev/null}"\n'
+        '        ;;\n'
+        '    esac\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  jobs)\n'
+        '    if [[ "$2" == "--help" ]]; then exit 0; fi\n'
+        '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    printf "\\n" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    if [[ "$2" == "create" ]]; then\n'
+        '      if [[ -n "${JOBS_CREATE_OUTPUT_TEXT:-}" ]]; then echo "${JOBS_CREATE_OUTPUT_TEXT}"; fi\n'
+        '      exit "${JOBS_CREATE_EXIT_CODE:-0}"\n'
+        '    elif [[ "$2" == "outcome" ]]; then\n'
+        '      if [[ -n "${OUTCOME_OUTPUT_TEXT:-}" ]]; then echo "${OUTCOME_OUTPUT_TEXT}"; fi\n'
+        '      exit "${OUTCOME_EXIT_CODE:-0}"\n'
+        '    fi\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+    with open(shim_path, 'w') as f:
+        f.write(body)
+    os.chmod(shim_path, 0o755)
+
+
+class TestPhase38MultiTick(unittest.TestCase):
+    """Tasks 1 & 2 — the two guarantees only visible across ticks.
+
+    Both tasks share one harness: a persistent tmpdir (jobs ledger NOT reset
+    between runs, unlike the single-tick helper above) driven through a
+    configurable shim so a given run's jobs-create / jobs-outcome exit code
+    can be scripted per tick.
+    """
+
+    def _setup(self, sid, job_id, status='SUCCESS', assessment=None, seed_created=False):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase38-multitick-')
+        hermes_home = os.path.join(tmpdir, 'hh')
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        markers_dir = os.path.join(state_dir, 'markers')
+        os.makedirs(markers_dir, mode=0o700)
+        state_db = os.path.join(hermes_home, 'state.db')
+        jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+        shim_home = os.path.join(tmpdir, 'home')
+        bin_dir = os.path.join(shim_home, '.local', 'bin')
+        os.makedirs(bin_dir)
+        meter_log = os.path.join(tmpdir, 'meter.log')
+        jobs_log = os.path.join(tmpdir, 'jobs.log')
+        shim = os.path.join(bin_dir, 'revenium')
+
+        build_state_db(state_db, [{
+            'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+            'input_tokens': 100, 'output_tokens': 50,
+            'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+            'estimated_cost': '0', 'api_calls': 1,
+            'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+            'billing_provider': 'anthropic',
+        }])
+
+        task_marker = {
+            'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+            'task_type': 'code_review', 'operation_type': 'CHAT',
+        }
+        job_marker = {
+            'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+            'agentic_job_id': job_id, 'job_name': 'Phase 38 Multi-Tick Test',
+            'job_type': 'code_review', 'status': status,
+        }
+        if assessment is not None:
+            job_marker['assessment'] = assessment
+        with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+            f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+            f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+        if seed_created:
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+        _build_flexible_shim(shim)
+
+        base_env = {
+            **os.environ,
+            'HOME': shim_home,
+            'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'METER_LOG': meter_log,
+            'JOBS_LOG': jobs_log,
+            'TZ': 'UTC',
+            'REVENIUM_ORGANIZATION_NAME': '',
+        }
+        return tmpdir, base_env, meter_log, jobs_log, jobs_ledger, state_dir
+
+    def _run_tick(self, env, meter_log, jobs_log, state_dir):
+        """Run hermes-report.sh once. meter_log/jobs_log are truncated first so
+        each tick's return value covers only that tick's invocations; the jobs
+        ledger and the marker file are left untouched -- persistence across
+        ticks is the entire point of this harness."""
+        for log in (meter_log, jobs_log):
+            if os.path.exists(log):
+                os.unlink(log)
+            open(log, 'w').close()
+        metering_log = os.path.join(state_dir, 'revenium-metering.log')
+        if os.path.exists(metering_log):
+            os.unlink(metering_log)
+        result = subprocess.run(
+            ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+
+        def _parse(path):
+            invocations = []
+            if os.path.exists(path):
+                with open(path) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if line:
+                            invocations.append(shlex.split(line))
+            return invocations
+
+        metering_content = open(metering_log).read() if os.path.exists(metering_log) else ''
+        return (
+            result.returncode,
+            _parse(meter_log),
+            _parse(jobs_log),
+            result.stdout + result.stderr + metering_content,
+        )
+
+    # -- Task 1: the deferred-create path, across ticks --------------------
+
+    def test_deferred_create_survives_to_next_tick_with_assessment_intact(self):
+        """T-38-06 / the research doc's own deciding test: an assessment must
+        still be reachable on the tick AFTER the one that inferred it, even
+        when the create call that tick deferred on. OUTCOME-04 governs the
+        defer; the precheck scan (not the token-gated main loop) is what
+        re-reaches the job on tick 2."""
+        sid = 'p38-defer-sid-001'
+        job_id = 'p38-defer-job-001'
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE, seed_created=False,
+        )
+        try:
+            # Tick 1: jobs create fails (no 409 indicator) -> the outcome
+            # stage's OUTCOME-04 gate finds no created line and defers.
+            env1 = {**env, 'JOBS_CREATE_EXIT_CODE': '1'}
+            rc1, meter_inv1, jobs_inv1, out1 = self._run_tick(env1, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc1, 0, f'tick 1 exit {rc1}: {out1}')
+            self.assertEqual(
+                len(_outcome_invocations(jobs_inv1, 'outcome')), 0,
+                f'tick 1 must send no outcome (create failed, no created line): {jobs_inv1}',
+            )
+            self.assertTrue(
+                'outcome deferred' in out1 or 'wedged job' in out1,
+                f'expected an OUTCOME-04 defer warning in tick 1 output: {out1}',
+            )
+            self.assertFalse(
+                os.path.exists(jobs_ledger) and 'created:' in open(jobs_ledger).read(),
+                'no created line should exist after tick 1s failed create',
+            )
+            # First sighting of this session -> exactly one completion metered.
+            self.assertEqual(len(meter_inv1), 1, f'tick 1 should meter the session once: {meter_inv1}')
+
+            # Tick 2: same unchanged state.db (tokens have NOT grown); create
+            # now succeeds, so the same-tick create+outcome ordering (D-01)
+            # lets the deferred outcome ship immediately, with the assessment
+            # still intact from the marker the classifier wrote once.
+            env2 = {**env, 'JOBS_CREATE_EXIT_CODE': '0'}
+            rc2, meter_inv2, jobs_inv2, out2 = self._run_tick(env2, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc2, 0, f'tick 2 exit {rc2}: {out2}')
+
+            # The main loop's ledger gate (~:1810) must have skipped re-metering
+            # this session -- direct proof its total_tokens did not grow between
+            # ticks, which is the whole premise the precheck-scan carrier relies
+            # on (38-RESEARCH.md).
+            self.assertEqual(
+                len(meter_inv2), 0,
+                f'tick 2 must not re-meter a token-stable session: {meter_inv2}',
+            )
+
+            outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
+            self.assertEqual(len(outcome_inv2), 1, f'tick 2 must ship exactly one outcome: {jobs_inv2}')
+            argv2 = outcome_inv2[0]
+            self.assertEqual(argv2[argv2.index('--outcome-value') + 1], '525.0')
+            self.assertEqual(argv2[argv2.index('--outcome-currency') + 1], 'USD')
+            meta2 = json.loads(_metadata_of(argv2))
+            self.assertEqual(meta2.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+            self.assertEqual(meta2.get('evaluator'), 'llm')
+            self.assertEqual(meta2.get('confidence'), 0.8)
+            self.assertEqual(
+                meta2.get('assumptions'),
+                {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+            )
+
+            ledger_text = open(jobs_ledger).read()
+            self.assertTrue(
+                any(l.startswith(f'JOB:{job_id}:outcome:') for l in ledger_text.splitlines()),
+                f'expected an outcome ledger line after tick 2: {ledger_text}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == '__main__':
