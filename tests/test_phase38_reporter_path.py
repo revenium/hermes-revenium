@@ -72,11 +72,16 @@ ASSESSMENT_FIXTURE = {
 
 class TestPhase38ReporterPath(unittest.TestCase):
     def _run_one_outcome(self, sid, job_id, status, failure_reason='', source='test',
-                          assessment=None):
+                          assessment=None, outcome_value_capable=True):
         """Drive hermes-report.sh for one job arc; return the parsed
         `jobs outcome` argv. Mirrors _run_one_outcome in
         tests/test_jobs_outcome_metadata.py, extended with an optional
-        assessment payload on the job marker."""
+        assessment payload on the job marker.
+
+        outcome_value_capable=False (CR-01/WR-03) builds the shim so `jobs
+        outcome --help` omits --outcome-value/--outcome-currency, modelling
+        an older revenium CLI that predates the two flags.
+        """
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase38-')
         try:
             hermes_home = os.path.join(tmpdir, 'hh')
@@ -142,7 +147,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
                 f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
                 f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
 
-            build_shim(shim)
+            build_shim(shim, outcome_value_capable=outcome_value_capable)
 
             base_env = {
                 **os.environ,
@@ -296,6 +301,30 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta, {'source': 'test'})
 
+    # -- WR-03 / CR-01 regression: older CLI without the value flags ------
+
+    def test_outcome_still_ships_when_cli_lacks_outcome_value_flags(self):
+        """CR-01: an older `revenium` CLI predating --outcome-value /
+        --outcome-currency must not have its ENTIRE `jobs outcome` call
+        rejected -- it must ship with neither flag (fail open), and the
+        ledger line must still be written (implied here by the shared
+        helper's own "exactly 1 jobs outcome invocation" assertion). Without
+        the capability probe, this shim (whose `jobs outcome --help` omits
+        both flags) proves the bug: hermes-report.sh would still emit two
+        flags this "CLI" never advertised support for."""
+        argv = self._run_one_outcome(
+            'cr01-sid-001', 'cr01-job-001', 'SUCCESS',
+            assessment=ASSESSMENT_FIXTURE, outcome_value_capable=False,
+        )
+        self.assertEqual(argv[argv.index('--result') + 1], 'SUCCESS')
+        self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        # Provenance (which does not depend on the CLI's flag support) still
+        # rides in --metadata even though the value flags were omitted.
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+
 
 # ---------------------------------------------------------------------------
 # Plan 02, Tasks 1 & 2 — the two guarantees only visible across ticks.
@@ -313,7 +342,7 @@ def _metadata_of(argv):
     return None
 
 
-def _build_flexible_shim(shim_path):
+def _build_flexible_shim(shim_path, outcome_value_capable=True):
     """revenium shim whose jobs-create / jobs-outcome exit codes and stdout are
     controlled per-run via JOBS_CREATE_EXIT_CODE / JOBS_CREATE_OUTPUT_TEXT /
     OUTCOME_EXIT_CODE / OUTCOME_OUTPUT_TEXT env vars (default: succeed silently).
@@ -323,7 +352,18 @@ def _build_flexible_shim(shim_path):
     filtering stays identical across this file. meter completion is logged the
     same way to METER_LOG; `meter completion --help` advertises
     --agentic-job-id so JOBS_CLI_CAPABLE resolves true, matching build_shim.
+
+    outcome_value_capable mirrors build_shim's kwarg of the same name (Phase
+    38 CR-01/WR-03): default True advertises --outcome-value/--outcome-currency
+    on the `jobs outcome --help` probe; False omits them.
     """
+    if outcome_value_capable:
+        outcome_value_help_lines = (
+            '      echo "--outcome-value string     Business outcome value"\n'
+            '      echo "--outcome-currency string   Business outcome currency"\n'
+        )
+    else:
+        outcome_value_help_lines = ''
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
@@ -349,8 +389,7 @@ def _build_flexible_shim(shim_path):
         # JOBS_LOG capture below, so the probe is never logged as a real
         # "jobs outcome" invocation.
         '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
-        '      echo "--outcome-value string     Business outcome value"\n'
-        '      echo "--outcome-currency string   Business outcome currency"\n'
+        + outcome_value_help_lines +
         '      exit 0\n'
         '    fi\n'
         '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'

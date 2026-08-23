@@ -97,7 +97,7 @@ def assert_argv_matches_golden(test_case, argv, golden):
 
 def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None,
                 squad_capable=True, reasoning_tokens_capable=False,
-                skill_capable=False):
+                skill_capable=False, outcome_value_capable=True):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -122,7 +122,16 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
                      CLI v1.3.0 shape) so SQUAD_CLI_CAPABLE resolves true. When
                      squad_capable=False, those three lines are omitted and this
                      branch's output is byte-identical to the pre-Phase-29 shim.
-      jobs)       -> bare --help probe + JOBS_LOG-routed capture
+      jobs)       -> bare `jobs --help` probe (JOBS_CLI_CAPABLE) + a SEPARATE
+                     `jobs outcome --help` probe (Phase 38 CR-01/WR-03,
+                     OUTCOME_VALUE_CLI_CAPABLE). When outcome_value_capable=True
+                     (the default) the latter advertises --outcome-value /
+                     --outcome-currency so the probe resolves true, matching
+                     every existing test's assumption that these flags ship.
+                     outcome_value_capable=False omits them -- the "older CLI"
+                     shape CR-01 exists for. Neither --help branch logs to
+                     JOBS_LOG (a --help probe is not a real invocation); every
+                     other jobs subcommand still logs there.
       *)          -> exit 0  (default catch-all)
     """
     if squad_capable:
@@ -153,6 +162,16 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         )
     else:
         skill_help_lines = ''
+    # Phase 38 (CR-01/WR-03): v1.5 jobs-outcome value flags. Default True so
+    # every existing caller keeps exercising the "flags ship" wire shape;
+    # False models the older CLI CR-01's capability probe exists to protect.
+    if outcome_value_capable:
+        outcome_value_help_lines = (
+            '      echo "--outcome-value string     Business outcome value"\n'
+            '      echo "--outcome-currency string   Business outcome currency"\n'
+        )
+    else:
+        outcome_value_help_lines = ''
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
@@ -202,8 +221,7 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         '    # "jobs outcome" invocation. Advertises both flags so every existing\n'
         '    # caller (assuming the flags ship, as they did pre-CR-01) is unaffected.\n'
         '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
-        '      echo "--outcome-value string     Business outcome value"\n'
-        '      echo "--outcome-currency string   Business outcome currency"\n'
+        + outcome_value_help_lines +
         '      exit 0\n'
         '    fi\n'
         '    printf "%q " "$@" >> "${JOBS_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'
