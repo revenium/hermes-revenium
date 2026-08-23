@@ -72,11 +72,20 @@ ASSESSMENT_FIXTURE = {
 
 class TestPhase38ReporterPath(unittest.TestCase):
     def _run_one_outcome(self, sid, job_id, status, failure_reason='', source='test',
-                          assessment=None, outcome_value_capable=True):
+                          assessment=None, raw_agentic_job_id=None,
+                          outcome_value_capable=True):
         """Drive hermes-report.sh for one job arc; return the parsed
         `jobs outcome` argv. Mirrors _run_one_outcome in
         tests/test_jobs_outcome_metadata.py, extended with an optional
         assessment payload on the job marker.
+
+        job_id is the SANITIZED id (D-16): it is what the JOBS_LEDGER
+        "created" line and the expected `jobs outcome <id>` argv use, since
+        that is what hermes-report.sh's own job-scan always writes/queues.
+        raw_agentic_job_id, when given, is written as the marker's raw
+        (unsanitized) agentic_job_id instead of job_id -- this is CR-02's
+        regression shape: a job id containing a colon/space/tab sanitizes to
+        a different string than what the marker stores on disk.
 
         outcome_value_capable=False (CR-01/WR-03) builds the shim so `jobs
         outcome --help` omits --outcome-value/--outcome-currency, modelling
@@ -131,7 +140,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
                 'kind': 'job',
                 'ts': 1715516002.0,
                 'sid': sid,
-                'agentic_job_id': job_id,
+                'agentic_job_id': raw_agentic_job_id if raw_agentic_job_id is not None else job_id,
                 'job_name': 'Phase 38 Test Job',
                 'job_type': 'code_review',
                 'status': status,
@@ -300,6 +309,33 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-currency', argv)
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta, {'source': 'test'})
+
+    # -- CR-02 regression: sanitized queue id vs raw marker id ------------
+
+    def test_assessment_lookup_survives_a_job_id_needing_sanitization(self):
+        """CR-02: job_outcome_queue's outcome_id is SANITIZED (D-16, both
+        push sites replace ':'/' '/'\\t'/'\\n'/'\\r' with '_' before pushing),
+        but classifier.py writes the marker's agentic_job_id RAW (only
+        .strip()'d). A job id containing a colon or space must still have
+        its assessment resolved -- the lookup has to sanitize the marker's
+        raw id the same way before comparing, or this silently drops the
+        value for exactly the job ids most likely to need it (LLM-minted
+        labels routinely contain ': ')."""
+        raw_id = 'fix: auth regression_a1b2'
+        clean_id = raw_id
+        for bad in (':', ' ', '\t', '\n', '\r'):
+            clean_id = clean_id.replace(bad, '_')
+        self.assertNotEqual(raw_id, clean_id, 'fixture must actually need sanitizing')
+
+        argv = self._run_one_outcome(
+            'cr02-sid-001', clean_id, 'SUCCESS',
+            assessment=ASSESSMENT_FIXTURE, raw_agentic_job_id=raw_id,
+        )
+        self.assertEqual(argv[2], clean_id, f'jobs outcome must target the sanitized id: {argv}')
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
 
     # -- WR-03 / CR-01 regression: older CLI without the value flags ------
 

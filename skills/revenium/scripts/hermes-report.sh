@@ -2903,6 +2903,22 @@ marker_path = Path(markers_dir) / f"{sid}.jsonl"
 if not marker_path.is_file():
     raise SystemExit(0)
 
+# CR-02: the queue's outcome_id (job_id, above) is SANITIZED -- both push
+# sites (:~1440 / :~2342) replace(':',' ','\t','\n','\r' -> '_') the raw
+# agentic_job_id before pushing (D-16). The marker's raw agentic_job_id is
+# NOT sanitized (classifier.py's _validate_job only .strip()s it). Apply the
+# identical D-16 transform here before comparing, or any job id containing
+# one of these characters never matches and its assessment is silently
+# dropped. Same _bad_chars tuple as the two producers -- do not diverge.
+_bad_chars = (':', ' ', '\t', '\n', '\r')
+
+
+def _clean(v):
+    for bad in _bad_chars:
+        v = v.replace(bad, '_')
+    return v
+
+
 found = None
 try:
     with marker_path.open() as f:
@@ -2918,7 +2934,8 @@ try:
                 continue
             if rec.get('kind') != 'job':
                 continue
-            if rec.get('agentic_job_id') != job_id:
+            raw_id = rec.get('agentic_job_id')
+            if not isinstance(raw_id, str) or _clean(raw_id) != job_id:
                 continue
             # ROI-12: pre-v1.5 marker lines have no "assessment" key at all —
             # .get(...) makes that a no-op, not an error.
