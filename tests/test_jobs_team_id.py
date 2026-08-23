@@ -42,6 +42,15 @@ def _write_shim(path, *, team_id_line):
         '    exit 0 ;;\n'
         '  jobs)\n'
         '    if [[ "$2" == "--help" ]]; then exit 0; fi\n'
+        # Phase 38 (CR-01): supports_flag "jobs outcome" "--outcome-value" calls
+        # `revenium jobs outcome --help`. Answer it here, before the generic
+        # JOBS_LOG capture below, so the probe is never logged as a real
+        # "jobs outcome" invocation.
+        '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
+        '      echo "--outcome-value string     Business outcome value"\n'
+        '      echo "--outcome-currency string   Business outcome currency"\n'
+        '      exit 0\n'
+        '    fi\n'
         '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'
         '    printf "\\n"      >> "${JOBS_LOG:-/dev/null}"\n'
         '    exit 0 ;;\n'

@@ -7497,6 +7497,15 @@ exit 0
                     '        ;;\n'
                     '      outcome)\n'
                     '        shift\n'
+                    # Phase 38 (CR-01): supports_flag "jobs outcome" "--outcome-value"
+                    # calls `revenium jobs outcome --help`. Answer it here, before the
+                    # generic outcome-log capture below, so the probe is never logged
+                    # as a real "jobs outcome" invocation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    '          echo "--outcome-value string     Business outcome value"\n'
+                    '          echo "--outcome-currency string   Business outcome currency"\n'
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{outcome_log}"\n'
                     f'        printf "\\n" >> "{outcome_log}"\n'
                     '        exit ${OUTCOME_EXIT_CODE:-0}\n'
@@ -7715,6 +7724,15 @@ exit 0
                     '      create) exit 1 ;;\n'
                     '      outcome)\n'
                     '        shift\n'
+                    # Phase 38 (CR-01): supports_flag "jobs outcome" "--outcome-value"
+                    # calls `revenium jobs outcome --help`. Answer it here, before the
+                    # generic outcome-log capture below, so the probe is never logged
+                    # as a real "jobs outcome" invocation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    '          echo "--outcome-value string     Business outcome value"\n'
+                    '          echo "--outcome-currency string   Business outcome currency"\n'
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{outcome_log}"\n'
                     f'        printf "\\n" >> "{outcome_log}"\n'
                     '        exit 0\n'

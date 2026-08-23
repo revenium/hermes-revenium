@@ -104,6 +104,21 @@ if supports_flag "meter completion" "--skill-name"; then
   SKILL_CLI_CAPABLE=true
 fi
 
+# Phase 38 (CR-01): capability gate for the v1.5 `jobs outcome` value flags
+# (--outcome-value/--outcome-currency). Same supports_flag posture as the
+# squad/skill probes above, and for the same reason: a negative probe is a
+# LIVE configuration (an older revenium CLI predating these two flags), not
+# an error. Unlike the meter-completion probes, an ungated pair of unknown
+# flags here does not just cost one dimension -- it fails the ENTIRE `jobs
+# outcome` call (unrecognized-flag exit), wedging the job in OUTCOME-04's
+# retry loop indefinitely. Probed once at startup and cached for the whole
+# tick; both flags are gated on this single probe and are added together or
+# not at all, mirroring the emission site's own "both or neither" comment.
+OUTCOME_VALUE_CLI_CAPABLE=false
+if supports_flag "jobs outcome" "--outcome-value"; then
+  OUTCOME_VALUE_CLI_CAPABLE=true
+fi
+
 # Resolve the skill a session was working with, if any.
 #
 # Signal: Hermes records skill tool calls as ordinary `messages` rows —
@@ -2972,7 +2987,11 @@ PY
       # and changing that mapping is out of scope for this plan (would move a
       # golden). Both flags are added together or not at all (outcome_value is
       # only ever set alongside outcome_currency by the resolver above).
-      if [[ -n "${outcome_value}" && -n "${outcome_currency}" ]]; then
+      # CR-01: gated on OUTCOME_VALUE_CLI_CAPABLE -- an older CLI predating
+      # these two flags must still receive the rest of the `jobs outcome`
+      # call (fail OPEN), not have the whole call rejected.
+      if [[ "${OUTCOME_VALUE_CLI_CAPABLE}" == "true" \
+            && -n "${outcome_value}" && -n "${outcome_currency}" ]]; then
         outcome_cmd+=(--outcome-value "${outcome_value}")
         outcome_cmd+=(--outcome-currency "${outcome_currency}")
       fi
