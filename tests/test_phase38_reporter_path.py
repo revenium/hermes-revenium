@@ -27,11 +27,14 @@ across ticks (deferred-create survival, the double-outcome/409 paths) and the
 ROI-13 canary sweep across every persisted artifact — the marker, all three
 ledgers, the log, and the argv itself, not just the marker Phase 37 checked.
 """
+import asyncio
+import importlib.util
 import json
 import os
 import shlex
 import shutil
 import subprocess
+import sys as _sys
 import tempfile
 import unittest
 
@@ -41,8 +44,11 @@ from tests._compat_helpers import (
     build_state_db,
     load_golden,
     run_script,
+    ROOT,
     SCRIPTS_DIR,
 )
+
+PLUGIN_DIR = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
 
 # The frozen assessment contract (classifier.py's _validate_assessment
 # return shape). estimated_value = 3.5 * 150.0 = 525.0, matching what the
@@ -616,6 +622,279 @@ class TestPhase38MultiTick(unittest.TestCase):
             self.assertEqual(
                 len(outcome_inv2), 0, f'no retry expected after a 409-success: {jobs_inv2}',
             )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Plan 02, Task 3 — the ROI-13 canary sweep.
+#
+# Copies the isolated-import pattern from tests/test_phase37_llm_evaluator.py
+# (a UNIQUE module name per call, because the classifier binds its path
+# constants at import time and Python caches submodules by name — reusing one
+# name would return a classifier still bound to a PRIOR test's temp
+# directory). Restoring only at tearDownModule (module-scoped, once for the
+# WHOLE file) is not enough here: this file's OTHER classes
+# (TestPhase38ReporterPath, TestPhase38MultiTick) spawn hermes-report.sh with
+# `**os.environ`, so a REVENIUM_STATE_DIR left pointing at a canary test's
+# already-deleted tmpdir silently breaks every later class in the SAME run.
+# _restore_env is therefore also called from TestPhase38Canary.tearDown, per
+# test, not just at module teardown.
+# ---------------------------------------------------------------------------
+_LOAD_SEQ = [0]
+_ENV_TOUCHED = set()
+_ENV_SAVED = {}
+
+
+def setUpModule():
+    for k in ('REVENIUM_STATE_DIR', 'REVENIUM_MARKERS_DIR', 'REVENIUM_CONFIG_FILE',
+              'REVENIUM_TAXONOMY_FILE', 'REVENIUM_JOB_TAXONOMY_FILE', 'HERMES_HOME'):
+        _ENV_SAVED[k] = os.environ.get(k)
+
+
+def _restore_env():
+    for k in _ENV_TOUCHED | set(_ENV_SAVED):
+        prior = _ENV_SAVED.get(k)
+        if prior is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = prior
+
+
+def tearDownModule():
+    _restore_env()
+    for cached in [k for k in list(_sys.modules) if k.startswith('p38_pkg')]:
+        del _sys.modules[cached]
+
+
+def _load_classifier(env=None):
+    """Import the revenium-classifier plugin fresh; return (classifier, evaluators)."""
+    for k, v in (env or {}).items():
+        os.environ[k] = v
+        _ENV_TOUCHED.add(k)
+    _LOAD_SEQ[0] += 1
+    name = f'p38_pkg_{_LOAD_SEQ[0]}'
+    for cached in [k for k in _sys.modules if k.startswith('p38_pkg')]:
+        del _sys.modules[cached]
+    spec = importlib.util.spec_from_file_location(
+        name, str(PLUGIN_DIR / '__init__.py'), submodule_search_locations=[str(PLUGIN_DIR)])
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return _sys.modules[f'{name}.classifier'], _sys.modules[f'{name}.evaluators']
+
+
+class TestPhase38Canary(unittest.TestCase):
+    """Task 3 — the ROI-13 canary, across every persisted artifact.
+
+    Two canaries, deliberately kept distinct:
+
+      TRANSCRIPT_CANARY  lives in the transcript fed to the evaluator. The
+                          evaluator SEES it (proven by an assertion inside the
+                          stub itself) but is never asked to echo it back, so
+                          it must be absent from every persisted artifact --
+                          the marker, all three ledgers, the log, and the
+                          jobs-outcome / meter-completion argv.
+
+      EVALUATOR_*_CANARY lives in the evaluator's OWN prose output (basis,
+                          inferred_role). This is model-controlled but
+                          legitimate content -- it is MEANT to reach the
+                          marker. What is under test there is not its
+                          absence but that it survives IFS-stripped and
+                          clamped to its byte budget (_clamp_assessment_text,
+                          200 bytes for basis / 60 for inferred_role).
+    """
+
+    TRANSCRIPT_CANARY = 'ZZCANARY-7f3a9-SECRET-SENTINEL'
+    EVALUATOR_BASIS_CANARY = 'QQCANARY-b21c4-MODEL-PROSE'
+    EVALUATOR_ROLE_CANARY = 'RRCANARY-99f2-ROLE'
+
+    def tearDown(self):
+        # _load_classifier touches REVENIUM_STATE_DIR/MARKERS_DIR/CONFIG_FILE
+        # as PROCESS env vars pointing into this test's tmpdir, which is
+        # rmtree'd in the test's own finally block. Restoring per-test (not
+        # just at module teardown) keeps TestPhase38ReporterPath and
+        # TestPhase38MultiTick -- which spawn hermes-report.sh with
+        # `**os.environ` -- from inheriting a dangling path when this class
+        # runs earlier in the same module (alphabetical test discovery).
+        _restore_env()
+
+    def _canary_evaluator(self, job, transcript, cfg):
+        # Proves the evaluator really did receive the transcript canary --
+        # the interesting claim is that it is never asked to, and does not,
+        # echo it back into its own output.
+        self.assertIn(self.TRANSCRIPT_CANARY, transcript)
+        basis_raw = (
+            self.EVALUATOR_BASIS_CANARY + '|has|pipes\nand\rnewlines then filler-'
+            + ('Z' * 300)
+        )
+        role_raw = self.EVALUATOR_ROLE_CANARY + '|role|pipe\nbreak\r' + ('Y' * 100)
+        return {
+            'inferred_role': role_raw,
+            'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 100.0,
+            'currency': 'USD',
+            'basis': basis_raw,
+            'confidence': 0.6,
+        }
+
+    def _attach_and_write(self, sid, job_id, state_dir, markers_dir):
+        os.makedirs(state_dir, exist_ok=True)
+        config_file = os.path.join(state_dir, 'config.json')
+        with open(config_file, 'w') as f:
+            json.dump({'llmOutcomeEvaluation': {
+                'enabled': True, 'evaluator': 'p38-canary', 'currency': 'USD',
+            }}, f)
+        env = {
+            'REVENIUM_STATE_DIR': state_dir,
+            'REVENIUM_MARKERS_DIR': markers_dir,
+            'REVENIUM_CONFIG_FILE': config_file,
+        }
+        c, ev = _load_classifier(env)
+        ev.register('p38-canary', self._canary_evaluator)
+
+        job = {
+            'agentic_job_id': job_id, 'job_name': 'Phase 38 Canary Job',
+            'job_type': 'code_review', 'status': 'SUCCESS',
+        }
+        transcript = (
+            f'user: please review this PR\n{self.TRANSCRIPT_CANARY}\nassistant: done'
+        )
+        asyncio.run(c._attach_assessment(job, transcript, c._module_paths()))
+        self.assertIn('assessment', job, 'the canary evaluator must produce an accepted assessment')
+        marker_path = c._write_job_marker(sid, job, c._module_paths())
+        return job, marker_path
+
+    def test_canary_evaluator_prose_persists_clamped_and_ifs_clean(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-')
+        try:
+            state_dir = os.path.join(tmpdir, 'state')
+            markers_dir = os.path.join(state_dir, 'markers')
+            sid = 'p38-canary-sid-001'
+            job_id = 'p38-canary-job-001'
+            job, marker_path = self._attach_and_write(sid, job_id, state_dir, markers_dir)
+
+            basis = job['assessment']['basis']
+            role = job['assessment']['assumptions']['inferred_role']
+
+            for bad in ('|', '\n', '\r'):
+                self.assertNotIn(bad, basis, f'basis must be IFS-clean: {basis!r}')
+                self.assertNotIn(bad, role, f'inferred_role must be IFS-clean: {role!r}')
+
+            self.assertIn(self.EVALUATOR_BASIS_CANARY, basis)
+            self.assertIn(self.EVALUATOR_ROLE_CANARY, role)
+
+            self.assertLessEqual(
+                len(json.dumps(basis).encode('utf-8')) - 2, 200,
+                'basis must be clamped to its 200-byte serialized budget',
+            )
+            self.assertLessEqual(
+                len(json.dumps(role).encode('utf-8')) - 2, 60,
+                'inferred_role must be clamped to its 60-byte serialized budget',
+            )
+
+            self.assertNotIn(
+                self.TRANSCRIPT_CANARY, marker_path.read_text(),
+                'the transcript canary must never reach the marker',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_canary_transcript_text_absent_from_every_persisted_artifact(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-full-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            sid = 'p38-canary-sid-002'
+            job_id = 'p38-canary-job-002'
+
+            self._attach_and_write(sid, job_id, state_dir, markers_dir)
+
+            # Prepend the CHAT/task marker line the classifier's OTHER write
+            # path produces (_write_job_marker above wrote only the job line) --
+            # hermes-report.sh's session loop needs a task_type row to meter.
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+            existing = open(marker_file).read()
+            with open(marker_file, 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(existing)
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+            result = subprocess.run(
+                ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+                env=base_env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'hermes-report.sh failed: {result.stdout}{result.stderr}',
+            )
+
+            canary = self.TRANSCRIPT_CANARY
+
+            marker_text = open(marker_file).read()
+            self.assertNotIn(canary, marker_text, 'marker must not carry the transcript canary')
+
+            meter_text = open(meter_log).read() if os.path.exists(meter_log) else ''
+            self.assertNotIn(canary, meter_text, 'meter completion argv must not carry the canary')
+
+            jobs_text = open(jobs_log).read() if os.path.exists(jobs_log) else ''
+            self.assertNotIn(
+                canary, jobs_text,
+                'jobs create/outcome argv (incl. --metadata) must not carry the canary',
+            )
+
+            for ledger_name in (
+                'revenium-hermes.ledger', 'revenium-jobs.ledger', 'revenium-tool-events.ledger',
+            ):
+                ledger_path = os.path.join(state_dir, ledger_name)
+                if os.path.exists(ledger_path):
+                    self.assertNotIn(
+                        canary, open(ledger_path).read(), f'{ledger_name} must not carry the canary',
+                    )
+
+            metering_log = os.path.join(state_dir, 'revenium-metering.log')
+            if os.path.exists(metering_log):
+                self.assertNotIn(canary, open(metering_log).read(), 'log must not carry the canary')
+
+            self.assertNotIn(canary, result.stdout)
+            self.assertNotIn(canary, result.stderr)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
