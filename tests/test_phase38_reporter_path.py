@@ -337,6 +337,37 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
 
+    # -- WR-02: malformed value/currency must never reach the CLI ---------
+
+    def test_non_numeric_estimated_value_omits_both_value_flags(self):
+        """WR-02: estimated_value is shipped straight to --outcome-value
+        with no numeric validation, unlike confidence/estimated_hours_saved/
+        assumed_loaded_rate which are round-tripped through float(). A
+        hand-edited or malformed marker with a non-numeric estimated_value
+        must not ship a bad monetary value to the CLI -- both flags are
+        omitted together (fail-open-and-omit-both), the same posture used
+        when only one of the pair is present."""
+        bad_assessment = dict(ASSESSMENT_FIXTURE, estimated_value='not-a-number')
+        argv = self._run_one_outcome(
+            'wr02-sid-001', 'wr02-job-001', 'SUCCESS', assessment=bad_assessment,
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        # Provenance unrelated to the malformed value still ships.
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+
+    def test_unsupported_currency_omits_both_value_flags(self):
+        """WR-02: currency is never checked against SUPPORTED_CURRENCIES on
+        read. An unsupported/malformed currency must drop both flags, not
+        ship a bare unvalidated string as --outcome-currency."""
+        bad_assessment = dict(ASSESSMENT_FIXTURE, currency='NOTACURRENCY')
+        argv = self._run_one_outcome(
+            'wr02-sid-002', 'wr02-job-002', 'SUCCESS', assessment=bad_assessment,
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+
     # -- WR-03 / CR-01 regression: older CLI without the value flags ------
 
     def test_outcome_still_ships_when_cli_lacks_outcome_value_flags(self):

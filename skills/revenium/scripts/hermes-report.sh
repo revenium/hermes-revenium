@@ -2964,11 +2964,44 @@ def _s(v, maxlen=None):
     return v
 
 
+# WR-02: estimated_value/currency are shipped straight to the revenium CLI
+# as --outcome-value/--outcome-currency (a monetary value), unlike
+# confidence/estimated_hours_saved/assumed_loaded_rate which are round-
+# tripped through float() before entering --metadata (:~3022-3040). Today's
+# sole writer (classifier.py) always derives a clean float and a currency
+# already checked against SUPPORTED_CURRENCIES -- this is a read-side
+# defense against a malformed or hand-edited marker, not a live gap. Same
+# duplication-is-deliberate posture as SUPPORTED_CURRENCIES in classifier.py
+# (CLAUDE.md: "the plugin must stay importable without the skill's shell
+# environment") -- kept in sync by hand, not shared.
+_SUPPORTED_CURRENCIES = frozenset({'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF'})
+_raw_value = found.get('estimated_value', '')
+_raw_currency = found.get('currency', '')
+_value_ok = False
+try:
+    float(_raw_value)
+    _value_ok = True
+except (TypeError, ValueError):
+    _value_ok = False
+_currency_ok = (
+    isinstance(_raw_currency, str)
+    and _raw_currency.strip().upper() in _SUPPORTED_CURRENCIES
+)
+# Fail-open-and-omit-both: an invalid value or currency drops BOTH flags
+# (same posture the emission site already uses when only one of the pair
+# is present), never a malformed/unvalidated one alone.
+if _value_ok and _currency_ok:
+    value_out = _s(_raw_value)
+    currency_out = _s(_raw_currency, maxlen=32)
+else:
+    value_out = ''
+    currency_out = ''
+
 assumptions = found.get('assumptions')
 if not isinstance(assumptions, dict):
     assumptions = {}
-print(f"VALUE={_s(found.get('estimated_value', ''))}")
-print(f"CURRENCY={_s(found.get('currency', ''), maxlen=32)}")
+print(f"VALUE={value_out}")
+print(f"CURRENCY={currency_out}")
 print(f"EVIDENCE_CLASS={_s(found.get('evidence_class', ''), maxlen=32)}")
 print(f"EVALUATOR={_s(found.get('evaluator', ''), maxlen=64)}")
 print(f"EVALUATOR_VERSION={_s(found.get('evaluator_version', ''), maxlen=16)}")
