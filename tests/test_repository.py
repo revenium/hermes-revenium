@@ -233,6 +233,43 @@ class RepositoryTests(unittest.TestCase):
                 f'CHANGELOG.md has no section for released tag {version}',
             )
 
+    def test_skill_bundle_ships_every_reference_the_docs_depend_on(self):
+        """A reference file only ships if SKILL.md NAMES it bundle-relative.
+
+        `hermes skills install` ships SKILL.md plus only the support files
+        SKILL.md mentions as bundle-relative paths (see
+        test_skill_bundle_ships_bootstrap_script for the upstream regex). A
+        reference that exists in the repo but is not named in SKILL.md is
+        invisible on a tap-installed host.
+
+        Found in phase 36 UAT: config-schema.md had never been named, so the
+        llmOutcomeEvaluation schema and the fail-closed note would not have
+        reached any tap install — while 36-02's commit message and PR claimed
+        both contract files shipped. The claim was false for one of them.
+
+        This guard covers the set the shipped docs actually depend on. Adding a
+        reference under references/ and depending on it from SKILL.md or another
+        shipped file means adding it here AND naming it in SKILL.md.
+        """
+        skill_md = (SKILL / 'SKILL.md').read_text(errors='ignore')
+        must_ship = [
+            ('references/bootstrap.sh', 'the documented post-install command'),
+            ('references/job-declaration.md',
+             'the job-marker and assessment contract'),
+            ('references/config-schema.md',
+             'the config.json schema, including llmOutcomeEvaluation'),
+            ('references/setup.md', 'the guided setup flow'),
+            ('references/troubleshooting.md', 'operator failure modes'),
+            ('references/task-classification.md', 'the classification criteria'),
+        ]
+        missing = [(path, why) for path, why in must_ship if path not in skill_md]
+        self.assertEqual(
+            [], missing,
+            'SKILL.md does not name these bundle-relative, so `hermes skills '
+            'install` will not ship them: '
+            + ', '.join(f'{p} ({w})' for p, w in missing),
+        )
+
     def test_assessment_contract_is_documented_in_the_skill_bundle(self):
         """The frozen assessment contract must live in git, not only in .planning/.
 

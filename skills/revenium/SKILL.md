@@ -262,7 +262,9 @@ The cron ships it to Revenium as `--metadata` on `jobs outcome`; omit it for
 SUCCESS/CANCELLED. Absent key = no-op (readers default to empty).
 
 See `references/job-declaration.md` for the arc-boundary and SUCCESS/FAILED/CANCELLED
-criteria the classifier uses (and the rare backstop case).
+criteria the classifier uses (and the rare backstop case), plus the opt-in
+outcome-value assessment contract. `references/config-schema.md` documents the
+`config.json` schema, including the `llmOutcomeEvaluation` block that gates it.
 
 ## LAST WORD — PRE-RESPONSE CHECKLIST (EVERY TURN)
 
