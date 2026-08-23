@@ -1436,8 +1436,8 @@ PY
             # Phase 10: push to outcome queue for every job row — regardless of create outcome.
             # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
             # Push before the create-gated continue so already-created jobs are also queued.
-            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs.
-            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}")
+            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs; field 6 (sid) is Phase 38's addition (ROI-10, see below).
+            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
             if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -2336,7 +2336,10 @@ PY
             # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
             # Push before the create-gated continue so already-created jobs are also queued.
             # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs.
-            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}|${job_failure_reason}")
+            # Phase 38 (ROI-10): field 6 is sid, NOT the assessment itself — a nested
+            # object cannot be a pipe field. The outcome stage re-reads this session's
+            # marker for the assessment (38-RESEARCH.md: the marker is the carrier).
+            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}|${job_failure_reason}|${sid}")
 
             # D-09: ledger-gated idempotency — skip if this job was already created.
             if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -2795,11 +2798,11 @@ PY
   # write this tick has already been written by the time this stage runs (D-01).
   # Mirrors the in-loop jobs create stage (D-06: API-first, ledger-on-exit-0).
   if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${#job_outcome_queue[@]}" -gt 0 ]]; then
-    local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason
+    local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
     local outcome_now_ts _age_s _stale_threshold outcome_metadata
     for _entry in "${job_outcome_queue[@]}"; do
-      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason <<< "${_entry}"
+      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
 
       # OUTCOME-01 gate: skip if already reported (ledger-gated idempotency).
