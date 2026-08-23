@@ -121,3 +121,41 @@ The `haltedRule` block contains a subset of `rules[]` fields: `ruleId`, `name`,
 `metricType`, `windowType`, `currentValue`, and `hardLimit`. The fields `groupBy`,
 `warnThreshold`, `state`, and `lastChecked` are intentionally omitted — hooks only
 need the static rule identity and current breach values to render the halt message.
+
+## `llmOutcomeEvaluation` (v1.5, opt-in, experimental)
+
+Opt-in LLM estimation of a job's economic outcome value. **Disabled by default.**
+Absent from `config.json` is the same as disabled.
+
+```json
+{
+  "llmOutcomeEvaluation": {
+    "enabled": false,
+    "evaluator": "llm",
+    "currency": "USD",
+    "maxHoursSaved": 40,
+    "maxLoadedRate": 500
+  }
+}
+```
+
+| field | default | purpose |
+|---|---|---|
+| `enabled` | `false` | Must be a **literal JSON boolean** `true`. The string `"true"`, the integer `1`, and `"yes"` all leave the feature off. |
+| `evaluator` | `"llm"` | Which registered evaluator to use. |
+| `currency` | `"USD"` | ISO 4217. An assessment naming a different currency is rejected. |
+| `maxHoursSaved` | `40` | Upper bound on the estimated hours saved. |
+| `maxLoadedRate` | `500` | Upper bound on the assumed loaded hourly rate. |
+
+The read **fails closed**: a missing, unreadable, or malformed `config.json`
+resolves to disabled. This is the deliberate inverse of `guardrail-status.json`,
+which fails *open* so a never-installed cron never blocks work — failing open
+here would estimate money by accident.
+
+Bounds apply to the two *inputs*, not to the product. An out-of-range assumption
+causes the evaluator to abstain, which is legible; an out-of-range total is not.
+Abstention falls back to the existing status-only outcome path.
+
+The value produced is an **unverified model estimate** — see the assessment
+contract in [`job-declaration.md`](job-declaration.md) for what
+`MODEL_ESTIMATED_DEMO` means.

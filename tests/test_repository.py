@@ -146,6 +146,9 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 — post_api_request spool writer, kept as its own module
             # so the metering seam stays visible (D-02, EVT-01/EVT-02/EVT-03)
             SKILL / 'plugins' / 'revenium-classifier' / 'api_event_spool.py',
+            # Phase 36 — the outcome-value evaluator seam (ROI-03), kept as its
+            # own module so the evaluation boundary is a file boundary.
+            SKILL / 'plugins' / 'revenium-classifier' / 'evaluators.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
@@ -229,6 +232,80 @@ class RepositoryTests(unittest.TestCase):
                 f'## [{version}]', text,
                 f'CHANGELOG.md has no section for released tag {version}',
             )
+
+    def test_skill_bundle_ships_every_reference_the_docs_depend_on(self):
+        """A reference file only ships if SKILL.md NAMES it bundle-relative.
+
+        `hermes skills install` ships SKILL.md plus only the support files
+        SKILL.md mentions as bundle-relative paths (see
+        test_skill_bundle_ships_bootstrap_script for the upstream regex). A
+        reference that exists in the repo but is not named in SKILL.md is
+        invisible on a tap-installed host.
+
+        Found in phase 36 UAT: config-schema.md had never been named, so the
+        llmOutcomeEvaluation schema and the fail-closed note would not have
+        reached any tap install — while 36-02's commit message and PR claimed
+        both contract files shipped. The claim was false for one of them.
+
+        This guard covers the set the shipped docs actually depend on. Adding a
+        reference under references/ and depending on it from SKILL.md or another
+        shipped file means adding it here AND naming it in SKILL.md.
+        """
+        skill_md = (SKILL / 'SKILL.md').read_text(errors='ignore')
+        must_ship = [
+            ('references/bootstrap.sh', 'the documented post-install command'),
+            ('references/job-declaration.md',
+             'the job-marker and assessment contract'),
+            ('references/config-schema.md',
+             'the config.json schema, including llmOutcomeEvaluation'),
+            ('references/setup.md', 'the guided setup flow'),
+            ('references/troubleshooting.md', 'operator failure modes'),
+            ('references/task-classification.md', 'the classification criteria'),
+        ]
+        missing = [(path, why) for path, why in must_ship if path not in skill_md]
+        self.assertEqual(
+            [], missing,
+            'SKILL.md does not name these bundle-relative, so `hermes skills '
+            'install` will not ship them: '
+            + ', '.join(f'{p} ({w})' for p, w in missing),
+        )
+
+    def test_assessment_contract_is_documented_in_the_skill_bundle(self):
+        """The frozen assessment contract must live in git, not only in .planning/.
+
+        ROI-12 makes the assessment key set permanent for every marker reader in
+        the field. The decision was made at a planning checkpoint whose SUMMARY
+        lives under .planning/, which is gitignored -- a permanent contract
+        recorded only in a file that vanishes on clone is not recorded.
+
+        Both files below SHIP INSIDE the skill bundle, so the contract reaches
+        every host. This guard also pins the evidence-class semantics, which are
+        the whole reason the field exists: a later edit must not quietly widen
+        MODEL_ESTIMATED_DEMO to cover measured value.
+        """
+        jd = (SKILL / 'references' / 'job-declaration.md').read_text(errors='ignore')
+        for needle in ('MODEL_ESTIMATED_DEMO', 'estimated_value', 'assumed_loaded_rate',
+                       'estimated_hours_saved', 'evidence_class', 'assessment'):
+            self.assertIn(needle, jd,
+                          f'job-declaration.md no longer documents {needle!r}')
+        self.assertIn(
+            'unverified model estimate', jd,
+            'job-declaration.md must say plainly that the value is unverified',
+        )
+        self.assertIn(
+            'different evidence class', jd,
+            'the rule that a non-LLM evaluator reports its OWN evidence class '
+            'is what stops MODEL_ESTIMATED_DEMO being widened to cover measured value',
+        )
+
+        cs = (SKILL / 'references' / 'config-schema.md').read_text(errors='ignore')
+        for needle in ('llmOutcomeEvaluation', 'maxLoadedRate', 'maxHoursSaved'):
+            self.assertIn(needle, cs, f'config-schema.md no longer documents {needle!r}')
+        self.assertIn(
+            'fails closed', cs,
+            'the fail-closed inversion must stay documented -- it is the opposite '
+            'of guardrail-status.json and reads like a bug without the note',
+        )
 
     def test_docs_document_the_current_metering_surface(self):
         """The operator docs must describe the surface operators actually run.

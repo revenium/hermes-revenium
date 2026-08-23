@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import json
+import math
 import logging
 import os
 import re
@@ -41,11 +42,17 @@ MARKERS_READY_DIR = Path(os.environ.get("REVENIUM_MARKERS_READY_DIR", str(MARKER
 TAXONOMY_FILE = Path(os.environ.get("REVENIUM_TAXONOMY_FILE", str(STATE_DIR / "task-taxonomy.json")))
 JOB_TAXONOMY_FILE = Path(os.environ.get("REVENIUM_JOB_TAXONOMY_FILE", str(STATE_DIR / "job-taxonomy.json")))
 GUARDRAIL_STATUS_FILE = STATE_DIR / "guardrail-status.json"  # Phase 19 (ENF-03): renamed from BUDGET_STATUS_FILE, repointed to guardrail-status.json
+CONFIG_FILE = Path(os.environ.get("REVENIUM_CONFIG_FILE", str(STATE_DIR / "config.json")))
 STATE_DB = HERMES_HOME / "state.db"
 
 # Label validation: lowercase snake_case, length 2..48 (regex enforces a
 # leading lowercase letter, then 1..47 more chars from [a-z0-9_]).
 LABEL_RE = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
+
+# ROI-06: an explicit allow-list, NOT r"^[A-Z]{3}$" — a three-letter regex happily
+# accepts XYZ, which is not a currency. This is the demo's supported set, not all
+# of ISO 4217; widening it is a deliberate edit.
+SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF"})
 
 # D-09 trivial-label blocklist — these are forbidden classifier outputs even
 # if they match LABEL_RE. The validator falls through to "unclassified".
@@ -71,7 +78,7 @@ from collections import namedtuple  # noqa: E402  (kept local to BUG-4 machinery
 _Paths = namedtuple(
     "_Paths",
     "hermes_home state_dir markers_dir markers_ready_dir "
-    "taxonomy_file job_taxonomy_file guardrail_status_file state_db",
+    "taxonomy_file job_taxonomy_file guardrail_status_file config_file state_db",
 )
 
 # `agent:<profile>:<rest>` namespace (multiplex). Capture the profile segment.
@@ -83,7 +90,8 @@ def _module_paths() -> "_Paths":
     the module with new env vars still resolve correctly."""
     return _Paths(
         HERMES_HOME, STATE_DIR, MARKERS_DIR, MARKERS_READY_DIR,
-        TAXONOMY_FILE, JOB_TAXONOMY_FILE, GUARDRAIL_STATUS_FILE, STATE_DB,
+        TAXONOMY_FILE, JOB_TAXONOMY_FILE, GUARDRAIL_STATUS_FILE, CONFIG_FILE,
+        STATE_DB,
     )
 
 
@@ -119,6 +127,7 @@ def _paths_for_session(session_id: str) -> "_Paths":
             taxonomy_file=state_dir / "task-taxonomy.json",
             job_taxonomy_file=state_dir / "job-taxonomy.json",
             guardrail_status_file=state_dir / "guardrail-status.json",
+            config_file=state_dir / "config.json",
             state_db=profile_home / "state.db",
         )
     except Exception:
@@ -459,6 +468,165 @@ def _validate_job(job: dict) -> "dict | None":
     }
 
 
+def _clamp_assessment_text(value, limit: int) -> str:
+    """Coerce to str, strip the IFS characters, and clamp to `limit` SERIALIZED
+    BYTES — not characters.
+
+    The distinction is load-bearing. Marker lines are written with
+    ensure_ascii=True (see _write_job_marker), which escapes every non-ASCII code
+    point: "é" and "漢" each serialize to 6 bytes, an emoji to 12. A character
+    clamp therefore under-counts by up to 12x, and a 200-char emoji basis pushed a
+    real marker to 3,638 bytes against the frozen 1024-byte MARK-02 budget —
+    breaking the invariant the clamp exists to protect. Found in review of phase
+    36; the original budget test used ASCII only and could not see it.
+
+    Truncation rather than rejection: an over-long basis is a verbose model, not a
+    hostile one, and abstaining over prose length would throw away a usable
+    estimate.
+
+    The pipe/newline/carriage-return strip is NOT cosmetic. Phase 38's outcome
+    queue is IFS='|'-parsed, so a single pipe reaching that tuple shifts every
+    following field — the same reason failure_reason is already stripped this way
+    (see _validate_job). Mitigated here, at the producer, rather than at each
+    consumer.
+    """
+    if not isinstance(value, str):
+        value = "" if value is None else str(value)
+    for _bad in ("|", "\n", "\r"):
+        value = value.replace(_bad, " ")
+    value = value.strip()
+
+    def _serialized_len(s: str) -> int:
+        # json.dumps adds surrounding quotes; the budget is for the content.
+        return len(json.dumps(s, ensure_ascii=True).encode("utf-8")) - 2
+
+    if _serialized_len(value) <= limit:
+        return value
+    # Drop code points from the end until the escaped form fits. Slicing a str
+    # slices code points, so a surrogate pair is never split in half.
+    lo, hi = 0, len(value)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _serialized_len(value[:mid]) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return value[:lo]
+
+
+# ROI-04/ROI-05: the frozen assessment contract. Chosen at the 36-01 checkpoint
+# as a NESTED object so the job-marker namespace is unchanged and a disabled-path
+# marker stays byte-identical by construction rather than by care. Every reader
+# must use .get("assessment", {}) — the key is simply absent when evaluation is
+# off or the evaluator abstained (ROI-12).
+#
+# `evidence_class` is FORCED here, never read from evaluator output: provenance
+# that a model can assert is not provenance. A future non-LLM evaluator reports a
+# DIFFERENT evidence class and must not reuse this one.
+EVIDENCE_CLASS_MODEL_ESTIMATED = "MODEL_ESTIMATED_DEMO"
+
+# Bound defaults (ROI-05). Overridable per install through llmOutcomeEvaluation.
+# These are judgement, not measurement — chosen to keep a demo credible. Phase 40
+# reports whether real sessions cluster anywhere near them.
+DEFAULT_MAX_HOURS_SAVED = 40.0
+DEFAULT_MAX_LOADED_RATE = 500.0
+
+
+def _finite_number(value) -> "float | None":
+    """Return value as a float if it is a real, finite number — else None.
+
+    bool is rejected explicitly. isinstance(True, int) is True in Python, so a
+    plain isinstance check would silently accept True as the number 1 and price
+    an hour of work off a type error.
+
+    NaN and infinity are rejected explicitly too: a bare `value > 0` comparison
+    is FALSE for NaN, so NaN slips through any naive lower-bound guard and lands
+    in a monetary field.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+def _validate_assessment(raw: dict, config: "dict | None" = None,
+                         evaluator: str = "", evaluator_version: str = "") -> "dict | None":
+    """Validate a raw evaluator assessment and derive its monetary value.
+
+    Mirror of _validate_job: reject by returning None, never raise, and log the
+    rejected value with %r — NOT %s and NOT an f-string. At that branch the value
+    is still unvalidated model output, and a newline in it must not be able to
+    forge a second record on this logger (the T-28-07 rule already established
+    for job_type).
+
+    Returns the frozen nested assessment dict, or None to abstain.
+    """
+    if not isinstance(raw, dict):
+        return None
+    cfg = config if isinstance(config, dict) else {}
+
+    hours = _finite_number(raw.get("estimated_hours_saved"))
+    rate = _finite_number(raw.get("assumed_loaded_rate"))
+    if hours is None or rate is None:
+        logger.warning(
+            "revenium-classifier: rejected assessment, non-numeric hours/rate: %r",
+            (raw.get("estimated_hours_saved"), raw.get("assumed_loaded_rate")),
+        )
+        return None
+
+    max_hours = _finite_number(cfg.get("maxHoursSaved")) or DEFAULT_MAX_HOURS_SAVED
+    max_rate = _finite_number(cfg.get("maxLoadedRate")) or DEFAULT_MAX_LOADED_RATE
+    if not (0 < hours <= max_hours) or not (0 < rate <= max_rate):
+        logger.warning(
+            "revenium-classifier: assessment abstained, bound exceeded: %r",
+            {"hours": hours, "max_hours": max_hours, "rate": rate, "max_rate": max_rate},
+        )
+        return None
+
+    confidence = _finite_number(raw.get("confidence"))
+    if confidence is None or not (0.0 <= confidence <= 1.0):
+        logger.warning(
+            "revenium-classifier: rejected assessment, confidence outside [0,1]: %r",
+            raw.get("confidence"),
+        )
+        return None
+
+    currency = raw.get("currency")
+    if not isinstance(currency, str):
+        return None
+    currency = currency.strip().upper()
+    configured = cfg.get("currency", "USD")
+    configured = configured.strip().upper() if isinstance(configured, str) else "USD"
+    if currency not in SUPPORTED_CURRENCIES or currency != configured:
+        logger.warning(
+            "revenium-classifier: rejected assessment, unsupported or mismatched "
+            "currency: %r (configured %r)", currency, configured,
+        )
+        return None
+
+    # ROI-05: the value is DERIVED. A supplied estimated_value is discarded —
+    # accepting one is exactly the path that lets an unbounded total through
+    # while the bound checks guard inputs nobody used.
+    estimated_value = round(hours * rate, 2)
+
+    return {
+        "estimated_value": estimated_value,
+        "currency": currency,
+        "basis": _clamp_assessment_text(raw.get("basis"), 200),
+        "assumptions": {
+            "inferred_role": _clamp_assessment_text(raw.get("inferred_role"), 60),
+            "estimated_hours_saved": hours,
+            "assumed_loaded_rate": rate,
+        },
+        "confidence": confidence,
+        "evaluator": _clamp_assessment_text(evaluator, 32),
+        "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
+        "evidence_class": EVIDENCE_CLASS_MODEL_ESTIMATED,
+    }
+
+
 def _write_job_marker(sid: str, job: dict, paths: "_Paths | None" = None) -> Path:
     """Atomic O_APPEND + fcntl.LOCK_EX write of a single kind:"job" marker line.
 
@@ -732,6 +900,47 @@ def _guardrail_halted(paths: "_Paths | None" = None) -> bool:
         return bool(data.get("halted", False))
     except Exception:
         return False
+
+
+def _llm_evaluation_enabled(paths: "_Paths | None" = None) -> bool:
+    """Read config.json and return True only if LLM outcome evaluation is opted in.
+
+    Shape-for-shape mirror of _guardrail_halted above, with ONE deliberate
+    inversion that must not be "fixed" into consistency:
+
+        _guardrail_halted  fails OPEN  -> a missing status file means "not halted",
+                                          so a never-installed cron never blocks work.
+        this function      fails CLOSED -> a missing, unreadable, or malformed
+                                          config means "off". Failing open here
+                                          would estimate money by accident.
+
+    `enabled` must be a literal JSON boolean true. A string "true", the integer 1,
+    or any other truthy value does NOT enable the feature (ROI-01) — an operator
+    editing config.json by hand should not be able to switch on money estimation
+    with a near-miss.
+    """
+    try:
+        data = json.loads((paths or _module_paths()).config_file.read_text(encoding="utf-8"))
+        cfg = data.get("llmOutcomeEvaluation") or {}
+        return cfg.get("enabled") is True
+    except Exception:
+        return False   # fail CLOSED — see docstring
+
+
+def _llm_evaluation_config(paths: "_Paths | None" = None) -> dict:
+    """Return the llmOutcomeEvaluation object, or {} on any failure.
+
+    Split from _llm_evaluation_enabled so the gate stays a single boolean read at
+    its call sites while the evaluator gets the bounds and currency it needs.
+    Callers must treat every key as absent-able; defaults live with the validator,
+    not here, so there is one place to change them.
+    """
+    try:
+        data = json.loads((paths or _module_paths()).config_file.read_text(encoding="utf-8"))
+        cfg = data.get("llmOutcomeEvaluation")
+        return cfg if isinstance(cfg, dict) else {}
+    except Exception:
+        return {}
 
 
 def _read_taxonomy_labels(paths: "_Paths | None" = None) -> list:
