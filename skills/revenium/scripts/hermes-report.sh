@@ -1451,10 +1451,7 @@ PY
             # Phase 10: push to outcome queue for every job row — regardless of create outcome.
             # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
             # Push before the create-gated continue so already-created jobs are also queued.
-            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs.
-            # Phase 38 (ROI-10): field 6 is sid, NOT the assessment itself — a nested
-            # object cannot be a pipe field. The outcome stage re-reads this session's
-            # marker for the assessment (38-RESEARCH.md: the marker is the carrier).
+            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs; field 6 (sid) is Phase 38's addition (ROI-10, see below).
             job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
