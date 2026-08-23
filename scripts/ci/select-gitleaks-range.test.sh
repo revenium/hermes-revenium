@@ -234,4 +234,43 @@ assert_output "$output" 'mode=full'
 assert_output "$output" 'reason=push commit range cannot be traversed'
 assert_warning "$output" '::warning::Gitleaks range unavailable: push commit range cannot be traversed. Falling back to a full-history scan.'
 
+# Stacked PR: the base branch (main) has advanced past where feature's
+# ancestor branch was cut, and base is NOT an ancestor of head. The PR's own
+# commits are still well-defined as merge_base(base,head)..head, and the
+# pull_request path should scan exactly that range instead of falling back
+# to full history.
+git -C "$fixture" switch -qc stacked "$root_sha"
+printf 'stacked feature\n' >"$fixture/stacked.txt"
+git -C "$fixture" add stacked.txt
+git -C "$fixture" commit -qm 'stacked feature change'
+stacked_sha="$(git -C "$fixture" rev-parse HEAD)"
+expected_mb="$(git -C "$fixture" merge-base "$main_sha" "$stacked_sha")"
+
+(
+  cd "$fixture"
+  run_selector "$output" \
+    EVENT_NAME=pull_request PR_BASE_SHA="$main_sha" PR_HEAD_SHA="$stacked_sha"
+)
+assert_output "$output" 'mode=incremental'
+assert_output "$output" "commit_range=${expected_mb}..${stacked_sha}"
+assert_output "$output" 'reason=pull request (base branch advanced; scanned from merge base)'
+assert_warning "$output" "::notice::Gitleaks scanning from the merge base: the base branch has advanced past this branch. Range: ${expected_mb}..${stacked_sha}"
+stacked_range_count="$(git -C "$fixture" rev-list --count "${expected_mb}..${stacked_sha}")"
+[[ "$stacked_range_count" -gt 0 ]] ||
+  fail 'stacked PR merge-base range was unexpectedly empty'
+git -C "$fixture" rev-list "${expected_mb}..${stacked_sha}" | grep -Fqx "$main_sha" &&
+  fail 'stacked PR merge-base range must not include a base-only commit'
+
+# The same stacked shape via a push event must NOT get the merge-base
+# fallback — push scoping keeps the full-history fail-safe, proving the
+# fallback did not leak out of the pull_request path.
+(
+  cd "$fixture"
+  run_selector "$output" \
+    EVENT_NAME=push PUSH_BEFORE_SHA="$main_sha" PUSH_AFTER_SHA="$stacked_sha" PUSH_FORCED=false
+)
+assert_output "$output" 'mode=full'
+assert_output "$output" 'reason=push commit range cannot be traversed'
+assert_warning "$output" '::warning::Gitleaks range unavailable: push commit range cannot be traversed. Falling back to a full-history scan.'
+
 printf 'All Gitleaks range-selection tests passed.\n'
