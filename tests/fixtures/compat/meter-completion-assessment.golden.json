@@ -1,0 +1,17 @@
+{
+  "verb": ["jobs", "outcome"],
+  "exact_match_fields": {
+    "__verb": "jobs",
+    "__subcommand": "outcome",
+    "__positional_args": ["assessment-golden-job"],
+    "--result": "SUCCESS",
+    "--outcome-type": "CONVERTED",
+    "--outcome-value": "525.0",
+    "--outcome-currency": "USD",
+    "--quiet": true
+  },
+  "pattern_fields": {
+    "--metadata": "^\\{\"source\":\"test\",\"evidence_class\":\"MODEL_ESTIMATED_DEMO\",\"evaluator\":\"llm\",\"evaluator_version\":\"v1\",\"confidence\":0.8,\"assumptions\":\\{\"estimated_hours_saved\":3.5,\"assumed_loaded_rate\":150.0\\}\\}$"
+  },
+  "forbidden_fields": ["--budget-id", "--alert-id"]
+}

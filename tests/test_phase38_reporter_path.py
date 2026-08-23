@@ -18,10 +18,9 @@ Reuses the no-shift shim + synthetic state.db harness from _compat_helpers
 (the same harness tests/test_compat_jobs_outcome.py and
 tests/test_jobs_outcome_metadata.py already use for this exact stage).
 
-Task 1: the sixth queue field (sid). Task 2 (this commit): the assessment
-resolver and the value + provenance flags. Task 3 lands in a follow-up
-commit and extends this file with golden and backward-compatibility
-coverage.
+Task 1: the sixth queue field (sid). Task 2: the assessment resolver and
+the value + provenance flags. Task 3 (this commit): the new golden and
+pre-v1.5 backward-compatibility coverage.
 """
 import json
 import os
@@ -31,8 +30,10 @@ import tempfile
 import unittest
 
 from tests._compat_helpers import (
+    assert_argv_matches_golden,
     build_shim,
     build_state_db,
+    load_golden,
     run_script,
     SCRIPTS_DIR,
 )
@@ -262,6 +263,26 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
         self.assertNotIn('--outcome-type', argv)
+
+    # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
+
+    def test_golden_valued_outcome_matches_new_fixture(self):
+        argv = self._run_one_outcome(
+            'g38-sid-002', 'assessment-golden-job', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+        )
+        golden = load_golden('meter-completion-assessment.golden.json')
+        assert_argv_matches_golden(self, argv, golden)
+
+    def test_pre_v1_5_marker_with_no_assessment_key_parses_and_reports(self):
+        """ROI-12: a marker line written before v1.5 -- literally no
+        "assessment" key in the JSON object, not merely an empty one --
+        still parses and reports its outcome with no value flags."""
+        argv = self._run_one_outcome('bc38-sid-001', 'bc38-job-001', 'SUCCESS')
+        self.assertEqual(argv[argv.index('--result') + 1], 'SUCCESS')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta, {'source': 'test'})
 
 
 if __name__ == '__main__':
