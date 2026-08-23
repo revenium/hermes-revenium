@@ -533,6 +533,92 @@ class TestPhase38MultiTick(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    # -- Task 2: idempotency — no second outcome, no second value ----------
+
+    def test_idempotent_rerun_produces_exactly_one_outcome_and_one_ledger_line(self):
+        """Two full ticks against unchanged state: exactly one `jobs outcome`
+        call total, exactly one ledger line, and the second tick attempts no
+        `jobs create` either (the arc was already created before tick 1)."""
+        sid = 'p38-idem-sid-001'
+        job_id = 'p38-idem-job-001'
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE, seed_created=True,
+        )
+        try:
+            rc1, _m1, jobs_inv1, out1 = self._run_tick(env, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc1, 0, f'run 1 exit {rc1}: {out1}')
+            outcome_inv1 = _outcome_invocations(jobs_inv1, 'outcome')
+            self.assertEqual(len(outcome_inv1), 1, f'run 1 must ship exactly one outcome: {jobs_inv1}')
+
+            rc2, _m2, jobs_inv2, out2 = self._run_tick(env, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc2, 0, f'run 2 exit {rc2}: {out2}')
+            outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
+            create_inv2 = _outcome_invocations(jobs_inv2, 'create')
+            self.assertEqual(
+                len(outcome_inv2), 0,
+                f'idempotency violated: run 2 must ship zero outcomes (ledger-gated): {jobs_inv2}',
+            )
+            self.assertEqual(
+                len(create_inv2), 0,
+                f'run 2 must attempt zero creates (already created): {jobs_inv2}',
+            )
+
+            total_outcome = len(outcome_inv1) + len(outcome_inv2)
+            self.assertEqual(total_outcome, 1, 'exactly one outcome call across both runs')
+
+            ledger_text = open(jobs_ledger).read()
+            outcome_lines = [
+                l for l in ledger_text.splitlines() if l.startswith(f'JOB:{job_id}:outcome:')
+            ]
+            self.assertEqual(
+                len(outcome_lines), 1, f'expected exactly one outcome ledger line, got: {outcome_lines}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_idempotent_409_is_success_equivalent_and_not_retried(self):
+        """OUTCOME-03: a 409/already-exists response from `jobs outcome` is
+        treated as success-equivalent -- the ledger line is written on that
+        same run, and a later tick does not retry it."""
+        sid = 'p38-idem409-sid-001'
+        job_id = 'p38-idem409-job-001'
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE, seed_created=True,
+        )
+        try:
+            env1 = {
+                **env,
+                'OUTCOME_EXIT_CODE': '1',
+                'OUTCOME_OUTPUT_TEXT': 'Error: HTTP 409 Conflict - outcome already recorded',
+            }
+            rc1, _m1, jobs_inv1, out1 = self._run_tick(env1, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc1, 0, f'409 run exit {rc1}: {out1}')
+            outcome_inv1 = _outcome_invocations(jobs_inv1, 'outcome')
+            self.assertEqual(
+                len(outcome_inv1), 1, f'exactly one outcome attempt on the 409 run: {jobs_inv1}',
+            )
+
+            ledger_text = open(jobs_ledger).read()
+            outcome_lines = [
+                l for l in ledger_text.splitlines() if l.startswith(f'JOB:{job_id}:outcome:')
+            ]
+            self.assertEqual(
+                len(outcome_lines), 1,
+                f'OUTCOME-03: a 409 must write the ledger line as success-equivalent, got: {outcome_lines}',
+            )
+
+            # A later tick, even with the shim now returning a clean 0, must
+            # not retry -- the ledger gate (OUTCOME-01) suppresses it.
+            env2 = {**env, 'OUTCOME_EXIT_CODE': '0'}
+            rc2, _m2, jobs_inv2, out2 = self._run_tick(env2, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc2, 0, f'retry-check run exit {rc2}: {out2}')
+            outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
+            self.assertEqual(
+                len(outcome_inv2), 0, f'no retry expected after a 409-success: {jobs_inv2}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()
