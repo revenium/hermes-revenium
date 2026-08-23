@@ -314,6 +314,54 @@ class FailureMatrixTests(unittest.TestCase):
         self.assertNotIn('assessment', job)
 
 
+class EvaluatorVersionTests(unittest.TestCase):
+    """ROI-04 — provenance must name the evaluator AND its version.
+
+    Greptile P1 on #89. The call site used to resolve the version with
+    `LLM_EVALUATOR_VERSION if name == "llm" else ""`, which dropped the version
+    of every other evaluator. That is the coupling the seam exists to prevent: a
+    future ONNX or policy evaluator must report its own identity without the
+    classifier knowing its name.
+    """
+
+    def _ctx(self, evaluator):
+        tmp = tempfile.mkdtemp(prefix='gsd-p37-ver-')
+        env = {'REVENIUM_STATE_DIR': tmp,
+               'REVENIUM_MARKERS_DIR': str(Path(tmp) / 'markers'),
+               'REVENIUM_CONFIG_FILE': str(Path(tmp) / 'config.json')}
+        Path(tmp, 'config.json').write_text(json.dumps(
+            {'llmOutcomeEvaluation': {'enabled': True, 'evaluator': evaluator,
+                                      'currency': 'USD'}}))
+        return _load(env)
+
+    def test_registry_carries_each_evaluators_declared_version(self):
+        c, ev = self._ctx('stub')
+        self.assertEqual('1', ev.resolve_version('stub'))
+        self.assertEqual('1', ev.resolve_version('llm'))
+        self.assertEqual('', ev.resolve_version('nope'))
+
+    def test_non_llm_evaluator_keeps_its_version(self):
+        c, ev = self._ctx('stub')
+        job = {'agentic_job_id': 'a_1', 'job_type': 'bug_fix', 'status': 'SUCCESS'}
+        asyncio.run(c._attach_assessment(job, 'work', c._module_paths()))
+        self.assertEqual('stub', job['assessment']['evaluator'])
+        self.assertEqual('1', job['assessment']['evaluator_version'],
+                         'a non-LLM evaluator must not lose its version')
+
+    def test_a_third_party_evaluator_reports_its_own_identity(self):
+        """The future case the seam is for: neither name nor version is known
+        to the classifier."""
+        c, ev = self._ctx('onnx-ish')
+        ev.register('onnx-ish', lambda j, t, cfg: {
+            'inferred_role': 'analyst', 'estimated_hours_saved': 1.0,
+            'assumed_loaded_rate': 80.0, 'currency': 'USD',
+            'basis': 'b', 'confidence': 0.4}, '2.3.1')
+        job = {'agentic_job_id': 'a_1', 'job_type': 'bug_fix', 'status': 'SUCCESS'}
+        asyncio.run(c._attach_assessment(job, 'work', c._module_paths()))
+        self.assertEqual('onnx-ish', job['assessment']['evaluator'])
+        self.assertEqual('2.3.1', job['assessment']['evaluator_version'])
+
+
 class InjectionTests(unittest.TestCase):
     """T-37-01 — the ceiling holds against a FULLY COMPROMISED model.
 

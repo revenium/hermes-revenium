@@ -55,13 +55,23 @@ import logging
 
 logger = logging.getLogger("revenium_classifier.evaluators")
 
-# name -> callable. Populated by register() at import time.
+# name -> (callable, version). Populated by register() at import time.
 _REGISTRY: dict = {}
 
 
-def register(name: str, fn) -> None:
-    """Register an evaluator under `name`. Last registration wins."""
-    _REGISTRY[name] = fn
+def register(name: str, fn, version: str = "") -> None:
+    """Register an evaluator under `name`, with the version IT declares.
+
+    The version belongs to the evaluator, not to the caller. An earlier draft
+    resolved it at the call site with `LLM_EVALUATOR_VERSION if name == "llm"
+    else ""`, which silently dropped the version of every other evaluator --
+    including the stub, which declares one. That is precisely the coupling this
+    seam exists to prevent: a future ONNX or policy evaluator must be able to
+    report its own identity without the classifier knowing its name.
+
+    Last registration wins.
+    """
+    _REGISTRY[name] = (fn, str(version or ""))
 
 
 def resolve(name: str):
@@ -72,7 +82,16 @@ def resolve(name: str):
     """
     if not isinstance(name, str):
         return None
-    return _REGISTRY.get(name)
+    entry = _REGISTRY.get(name)
+    return entry[0] if entry else None
+
+
+def resolve_version(name: str) -> str:
+    """The version the named evaluator declared, or "" if unknown."""
+    if not isinstance(name, str):
+        return ""
+    entry = _REGISTRY.get(name)
+    return entry[1] if entry else ""
 
 
 def registered() -> list:
@@ -108,7 +127,7 @@ def _stub_evaluate(job: dict, transcript: str, config: dict) -> "dict | None":
     }
 
 
-register("stub", _stub_evaluate)
+register("stub", _stub_evaluate, STUB_VERSION)
 
 
 # --- llm --------------------------------------------------------------------

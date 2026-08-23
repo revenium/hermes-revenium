@@ -580,7 +580,7 @@ def _register_llm_evaluator() -> None:
             return None
         return await _evaluate_outcome_via_llm(job, transcript, config)
 
-    _ev.register("llm", _llm_evaluate)
+    _ev.register("llm", _llm_evaluate, LLM_EVALUATOR_VERSION)
     globals()["LLM_EVALUATOR_VERSION"] = "1"
 
 
@@ -1459,9 +1459,10 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
                 valid.get("agentic_job_id", ""),
             )
             return
-        assessment = _validate_assessment(
-            raw, cfg, name, LLM_EVALUATOR_VERSION if name == "llm" else "",
-        )
+        # The version comes from the REGISTRY, not from a name comparison here.
+        # Special-casing "llm" dropped every other evaluator's version -- the
+        # exact coupling this seam exists to prevent (Greptile P1 on #89).
+        assessment = _validate_assessment(raw, cfg, name, _ev.resolve_version(name))
         if assessment:
             valid["assessment"] = assessment
             logger.info(
