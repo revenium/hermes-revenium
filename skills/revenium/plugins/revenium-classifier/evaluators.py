@@ -109,3 +109,17 @@ def _stub_evaluate(job: dict, transcript: str, config: dict) -> "dict | None":
 
 
 register("stub", _stub_evaluate)
+
+
+# --- llm --------------------------------------------------------------------
+#
+# The "llm" evaluator is NOT registered here. It lives in classifier.py and
+# registers itself at import time, so the dependency runs one way only:
+# classifier imports evaluators, never the reverse.
+#
+# A lazy `from .classifier import ...` inside a function body would also work at
+# runtime, but the phase-36 ast guard rejects it -- and rightly, because it walks
+# the whole tree rather than only module scope. Rather than loosen the guard to
+# permit function-scope imports, the registration moved to the side that already
+# owns the dependency. The guard stays strict and this module stays importable
+# with no Hermes venv at all.
