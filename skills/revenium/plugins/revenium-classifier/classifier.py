@@ -469,10 +469,19 @@ def _validate_job(job: dict) -> "dict | None":
 
 
 def _clamp_assessment_text(value, limit: int) -> str:
-    """Coerce to str, strip the IFS characters, and truncate to `limit`.
+    """Coerce to str, strip the IFS characters, and clamp to `limit` SERIALIZED
+    BYTES — not characters.
 
-    Truncation rather than rejection: an over-long basis is a verbose model, not
-    a hostile one, and abstaining over prose length would throw away a usable
+    The distinction is load-bearing. Marker lines are written with
+    ensure_ascii=True (see _write_job_marker), which escapes every non-ASCII code
+    point: "é" and "漢" each serialize to 6 bytes, an emoji to 12. A character
+    clamp therefore under-counts by up to 12x, and a 200-char emoji basis pushed a
+    real marker to 3,638 bytes against the frozen 1024-byte MARK-02 budget —
+    breaking the invariant the clamp exists to protect. Found in review of phase
+    36; the original budget test used ASCII only and could not see it.
+
+    Truncation rather than rejection: an over-long basis is a verbose model, not a
+    hostile one, and abstaining over prose length would throw away a usable
     estimate.
 
     The pipe/newline/carriage-return strip is NOT cosmetic. Phase 38's outcome
@@ -480,15 +489,29 @@ def _clamp_assessment_text(value, limit: int) -> str:
     following field — the same reason failure_reason is already stripped this way
     (see _validate_job). Mitigated here, at the producer, rather than at each
     consumer.
-
-    Limits are re-derived from the measured marker byte budget in plan 36-02.
     """
     if not isinstance(value, str):
         value = "" if value is None else str(value)
     for _bad in ("|", "\n", "\r"):
         value = value.replace(_bad, " ")
     value = value.strip()
-    return value[:limit]
+
+    def _serialized_len(s: str) -> int:
+        # json.dumps adds surrounding quotes; the budget is for the content.
+        return len(json.dumps(s, ensure_ascii=True).encode("utf-8")) - 2
+
+    if _serialized_len(value) <= limit:
+        return value
+    # Drop code points from the end until the escaped form fits. Slicing a str
+    # slices code points, so a surrogate pair is never split in half.
+    lo, hi = 0, len(value)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _serialized_len(value[:mid]) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return value[:lo]
 
 
 # ROI-04/ROI-05: the frozen assessment contract. Chosen at the 36-01 checkpoint

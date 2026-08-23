@@ -347,6 +347,43 @@ class MarkerBudgetTests(unittest.TestCase):
         self.assertGreater(1024 - total, 100,
                            'under 100 bytes of margin — re-derive the clamps')
 
+    def test_worst_case_marker_fits_with_non_ascii(self):
+        """The budget must hold for UNICODE evaluator output, not just ASCII.
+
+        Greptile P2 on PR #87, and correct. Markers are written with
+        ensure_ascii=True, so every non-ASCII code point is escaped: "é" and "漢"
+        serialize to 6 bytes each, an emoji to 12. A character-based clamp
+        under-counts by up to 12x — a 200-char emoji basis produced a 3,638-byte
+        marker against the 1024-byte budget. The original budget test used ASCII
+        only and structurally could not see it.
+        """
+        base = {'kind': 'job', 'ts': 1756000000.123456,
+                'sid': '20260822_235959_' + 'a' * 8,
+                'agentic_job_id': 'x' * 48 + '_a1b2',
+                'job_name': 'y' * 60, 'job_type': 'bug_fix', 'status': 'SUCCESS'}
+        for label, ch in (('accented', 'é'), ('cjk', '漢'), ('emoji', '😀'),
+                          ('mixed', 'a😀é漢')):
+            with self.subTest(label):
+                got = self.mod._validate_assessment({
+                    'inferred_role': ch * 300,
+                    'estimated_hours_saved': 40.0, 'assumed_loaded_rate': 500.0,
+                    'currency': 'USD', 'basis': ch * 1000, 'confidence': 0.999,
+                }, {}, 'evaluator-name-long', 'version-long')
+                self.assertIsNotNone(got)
+                total = len(json.dumps(dict(base, assessment=got),
+                                       separators=(',', ':'),
+                                       ensure_ascii=True).encode()) + 1
+                self.assertLess(total, 1024,
+                                f'{label} marker is {total} bytes')
+
+    def test_clamp_never_splits_a_surrogate_pair(self):
+        """Slicing a Python str slices code points, so an emoji is never halved.
+        Asserted rather than assumed — a byte-oriented clamp written against the
+        encoded form would get this wrong."""
+        out = self.mod._clamp_assessment_text('😀' * 100, 40)
+        self.assertEqual(out, '😀' * (len(out)))
+        json.dumps(out)  # must not raise on a lone surrogate
+
     def test_ifs_characters_are_stripped(self):
         """T-36-06 (high). Phase 38's outcome queue is IFS='|'-parsed; one pipe
         reaching that tuple shifts every following field. Mitigated at the
