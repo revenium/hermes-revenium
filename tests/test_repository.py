@@ -1559,6 +1559,82 @@ exit 0
             'merely shares this planning milestone\'s number (D-05)',
         )
 
+    def test_roi_live_verification_evidence_is_committed_and_scrubbed(self):
+        """ROI-16: the live end-to-end proof must leave a durable, redacted
+        record in a tracked file, and that record must not gain a mechanical
+        leak.
+
+        Same `required = [(relpath, needle, why), ...]` shape as
+        `test_docs_document_multi_profile_operation` and
+        `test_docs_state_what_the_outcome_estimate_number_is` above, but this
+        test's subject is different (a live-run record, not fleet operation
+        and not ROI-15's wording bar), so it is a new sibling rather than an
+        extension of either.
+
+        `docs/internal/` is gitignored (see `.gitignore`), so a standalone
+        evidence file placed there would vanish exactly the way ROI-16 exists
+        to prevent. The operator decided (2026-08-24) to fold the record into
+        the already-tracked `docs/how-it-works.md` instead of adding a new
+        file under `docs/internal/` — this test targets that page.
+
+        Each positive needle below is falsifiable: verified absent from
+        `docs/how-it-works.md` before this phase's live-verification section
+        was written (`git show HEAD~N:docs/how-it-works.md` at the commit
+        immediately prior to this test's own commit contains none of them).
+
+        THIS TEST CHECKS STRUCTURE AND REDACTION, NOT HONESTY. It proves the
+        required sections exist and that no mechanical redaction violation
+        (address-shaped token, absolute home path, obvious credential prefix,
+        bare email address) was introduced. It cannot and does not judge
+        whether the Results/claims are truthful or whether the stated
+        limitations are complete — that is a human read against the raw,
+        gitignored phase evidence, not something a grep can carry. A check
+        that lies about its own scope is worse than no check (the same
+        distinction phase 39 drew for `diagnose.sh`).
+        """
+        required = [
+            ('docs/how-it-works.md', 'Live verification against a real tenant',
+             'the section marking this claim as a real, dated live run must survive edits'),
+            ('docs/how-it-works.md', 'MODEL_ESTIMATED_DEMO',
+             'a reader must be able to see, in the record itself, that the '
+             'reported number is a model estimate, not a measurement'),
+            ('docs/how-it-works.md', 'revenium jobs roi',
+             "ROI-16's read-back verb must stay named in the record"),
+            ('docs/how-it-works.md', 'jobs outcome-history',
+             'the platform-side idempotency cross-check must stay named, or '
+             'the doc would claim idempotency on local counters alone'),
+            ('docs/how-it-works.md', 'declined to produce a value',
+             'the abstention arc must be recorded, not only the successful '
+             'one — an evaluator that never abstains is not shown to be '
+             'discriminating'),
+            ('docs/how-it-works.md', 'What this run did NOT prove',
+             'the limitations heading is the difference between a record '
+             'and a claim, and the first thing a later edit would drop'),
+        ]
+        for relpath, needle, why in required:
+            page = ROOT / relpath
+            self.assertTrue(page.exists(), f'missing {relpath}')
+            self.assertIn(
+                needle, page.read_text(errors='ignore'),
+                f'{relpath} no longer documents: {needle!r} — {why}',
+            )
+
+        # Regex-based negative checks, so no sensitive literal is introduced
+        # into this public test file to guard against sensitive literals.
+        text = (ROOT / 'docs' / 'how-it-works.md').read_text(errors='ignore')
+        redaction_checks = [
+            (r'\b\d{1,3}(?:\.\d{1,3}){3}\b', 'address-shaped (dotted-quad) token'),
+            (r'(?:/Users/|/home/)[A-Za-z0-9._-]+', 'absolute home-directory path'),
+            (r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', 'bare email address'),
+            (r'\b(?:sk-|api[_-]?key[_-]?[:=]|Bearer\s+[A-Za-z0-9._-]{10,})',
+             'obvious credential prefix'),
+        ]
+        for pattern, label in redaction_checks:
+            match = re.search(pattern, text, re.IGNORECASE)
+            self.assertIsNone(
+                match, f'docs/how-it-works.md contains a {label}: {match.group(0) if match else ""!r}',
+            )
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning
