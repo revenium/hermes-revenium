@@ -918,6 +918,32 @@ PY
   # THIS shell, so a counter incremented inside it survives to the aggregate
   # line near the end-of-run summary. A pipe would silently zero it.
   local fallback_tick_count=0
+  # Phase 39 D-02: per-tick aggregate for the deferred/wedged job-outcome
+  # backlog (OUTCOME-04 branch, post-loop stage below). Declared here for
+  # the same reason as fallback_tick_count -- the post-loop stage runs in
+  # THIS shell (no subshell), so the increment survives to the aggregate
+  # line after the outcome loop. Incremented for EVERY DISTINCT job this
+  # tick, whether its per-job line was warned or suppressed by
+  # OUTCOME_WARN_FLAGS_DIR -- the aggregate is what keeps the backlog size
+  # visible despite that per-job gate, exactly as fallback_tick_count does
+  # for the trace-type fallback.
+  local outcome_deferred_tick_count=0
+  # WR-01 (39-REVIEW.md): job_outcome_queue is fed by two independent,
+  # ungated producers within one session-loop iteration -- the
+  # token-independent marker precheck (`:1473`) and the in-loop jobs-create
+  # stage (`:2375`, gated on the growth guard at `:1884`). Any session whose
+  # token total grew this tick AND already has an unconfirmed job marker
+  # clears both, pushing the SAME outcome_id twice in one tick. The
+  # (outcome_id, reason) flag file already dedupes the per-job WARN line and
+  # the retry is deliberately never gated -- but the aggregate increment
+  # ran once per QUEUE ENTRY, not once per distinct job, so it could report
+  # up to 2x the true backlog. This newline-delimited "seen set" is the same
+  # bash-3.2-compatible idiom LEGACY_RETAINED_SIDS uses above (`:283`,
+  # `case ... *$'\n'"${sid}"$'\n'*)`) -- no associative arrays. Declared
+  # here for the identical herestring reason as outcome_deferred_tick_count:
+  # the post-loop stage runs in THIS shell, so it survives across queue
+  # entries within the tick.
+  local outcome_deferred_seen=$'\n'
   # quick-260817-tfe (OWN-01/OWN-04): per-tick aggregates for the two
   # ownership outcomes an operator needs to see. Declared HERE, next to
   # fallback_tick_count and before the while loop, for the identical
@@ -2824,6 +2850,7 @@ PY
     local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
     local outcome_now_ts _age_s _stale_threshold outcome_metadata
+    local outcome_warn_reason outcome_warn_key outcome_warn_flag
     local outcome_markers_dir outcome_value outcome_currency
     local outcome_evidence_class outcome_evaluator outcome_evaluator_version
     local outcome_confidence outcome_hours_saved outcome_loaded_rate
@@ -2848,11 +2875,59 @@ try:
 except Exception:
     print(0)
 " 2>/dev/null || echo "0")
+
+        # WR-01: count DISTINCT jobs, not raw queue entries -- the two
+        # producers above (`:1473`, `:2375`) can both push this same
+        # outcome_id in one tick (see outcome_deferred_seen's declaration
+        # comment). Increment only the first time this outcome_id is seen
+        # this tick; a later entry for the same job (deferred or wedged,
+        # doesn't matter) is already the same backlog item.
+        case "${outcome_deferred_seen}" in
+          *$'\n'"${outcome_id}"$'\n'*) ;;  # already counted this tick
+          *)
+            ((outcome_deferred_tick_count++)) || true
+            outcome_deferred_seen="${outcome_deferred_seen}${outcome_id}"$'\n'
+            ;;
+        esac
+
+        # Phase 39 D-02: bound this per-job line to once per (outcome_id,
+        # reason) via a zero-byte flag file under OUTCOME_WARN_FLAGS_DIR --
+        # mirrors FALLBACK_WARN_FLAGS_DIR byte-for-byte. The key is computed
+        # ONCE into a local shared by both the existence check and the
+        # touch (sanitize-before-compare, T-38-08 one level down) -- two
+        # copies of the sanitizing expression drift, and when they do the
+        # check tests one path while the touch creates another, so the gate
+        # silently never matches. Nothing per-tick (_age_s, a timestamp, a
+        # tick counter) may enter this key: outcome_id is stable per job
+        # across ticks (the whole reason it is the key), and a key that
+        # changes every tick reproduces the unknown-<epoch> defeat
+        # pre_llm_call.sh:73-115 already paid for once -- a gate that never
+        # matches, warns every time, and leaks one file per event. A reason
+        # TRANSITION (deferred -> wedged) deliberately changes the key and
+        # therefore warns once more -- that transition is the informative
+        # event and must not be swallowed.
         if [[ "${_age_s}" -ge "${_stale_threshold}" ]]; then
-          warn "wedged job (no create confirmed after ${_age_s}s): id=${outcome_id}"
+          outcome_warn_reason="wedged"
         else
-          warn "outcome deferred: id=${outcome_id} — JOB:...:created not yet confirmed"
+          outcome_warn_reason="deferred"
         fi
+        outcome_warn_key="${outcome_id//[^A-Za-z0-9_:.-]/_}__${outcome_warn_reason}.flag"
+        outcome_warn_flag="${OUTCOME_WARN_FLAGS_DIR}/${outcome_warn_key}"
+        if [[ ! -e "${outcome_warn_flag}" ]]; then
+          # Tolerate a failed flag creation (e.g. a read-only state dir)
+          # without aborting: this script runs `set -uo pipefail` without
+          # `-e`, and a read-only state directory must degrade to today's
+          # every-tick warn rather than crash the reporter.
+          mkdir -p "${OUTCOME_WARN_FLAGS_DIR}" 2>/dev/null && touch "${outcome_warn_flag}" 2>/dev/null
+          if [[ "${outcome_warn_reason}" == "wedged" ]]; then
+            warn "wedged job (no create confirmed after ${_age_s}s): id=${outcome_id}"
+          else
+            warn "outcome deferred: id=${outcome_id} — JOB:...:created not yet confirmed"
+          fi
+        fi
+        # The retry is NEVER gated -- only the LINE above is. A job that
+        # stops being retried is a job that never reports, which is a
+        # strictly worse failure than a noisy log.
         continue
       fi
 
@@ -3155,6 +3230,17 @@ PY
         warn "outcome failed: id=${outcome_id} exit=${outcome_cmd_exit} — retries next tick"
       fi
     done
+  fi
+
+  # Phase 39 D-02: one aggregate line per tick when the deferred/wedged
+  # job-outcome backlog is non-zero; silent when zero. Per-job detail is
+  # gated to once-per-(outcome_id, reason) above (OUTCOME_WARN_FLAGS_DIR) --
+  # this line is what keeps the backlog-size signal alive despite that
+  # gate, rather than trading the per-tick spam for total silence: without
+  # it a growing wedged backlog becomes invisible, the same reason
+  # fallback_tick_count exists for the trace-type fallback below.
+  if [[ "${outcome_deferred_tick_count}" -gt 0 ]]; then
+    info "outcome backlog: ${outcome_deferred_tick_count} job(s) awaiting a confirmed create this tick (per-job detail logged once per job+reason, not every tick)"
   fi
 
   # quick-260813-wnz (LOG-01/D-02): one aggregate line per tick when the

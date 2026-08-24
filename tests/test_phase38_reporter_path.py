@@ -847,6 +847,12 @@ class TestPhase38Canary(unittest.TestCase):
     TRANSCRIPT_CANARY = 'ZZCANARY-7f3a9-SECRET-SENTINEL'
     EVALUATOR_BASIS_CANARY = 'QQCANARY-b21c4-MODEL-PROSE'
     EVALUATOR_ROLE_CANARY = 'RRCANARY-99f2-ROLE'
+    # 39-01 Task 3 -- the malformed response BODY itself, for the `invalid`
+    # line's own canary sweep. Deliberately its own constant, not a reuse of
+    # EVALUATOR_BASIS_CANARY: that one is MEANT to reach the marker (a
+    # presence assertion), and reusing it here for an absence assertion
+    # would make the two tests contradict each other.
+    RESPONSE_BODY_CANARY = 'MMCANARY-9d21f-BROKEN-RESPONSE'
 
     def tearDown(self):
         # _load_classifier touches REVENIUM_STATE_DIR/MARKERS_DIR/CONFIG_FILE
@@ -1034,6 +1040,112 @@ class TestPhase38Canary(unittest.TestCase):
 
             self.assertNotIn(canary, result.stdout)
             self.assertNotIn(canary, result.stderr)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _load_llm_evaluator_classifier(self, state_dir, markers_dir):
+        """Load the classifier configured for the built-in `llm` evaluator --
+        distinct from _attach_and_write's registered `p38-canary` evaluator,
+        because the invalid/timed-out lines are produced only on the `llm`
+        path (_evaluate_outcome_via_llm / _parse_assessment_object)."""
+        os.makedirs(state_dir, exist_ok=True)
+        config_file = os.path.join(state_dir, 'config.json')
+        with open(config_file, 'w') as f:
+            json.dump({'llmOutcomeEvaluation': {
+                'enabled': True, 'evaluator': 'llm', 'currency': 'USD',
+            }}, f)
+        env = {
+            'REVENIUM_STATE_DIR': state_dir,
+            'REVENIUM_MARKERS_DIR': markers_dir,
+            'REVENIUM_CONFIG_FILE': config_file,
+        }
+        return _load_classifier(env)
+
+    def test_invalid_line_carries_neither_transcript_nor_response_body_canary(self):
+        """39-01 Task 3 -- extends the ROI-13 canary sweep over the new
+        `invalid` line. The malformed response body carries its OWN fresh
+        canary (RESPONSE_BODY_CANARY); the transcript carries the class's
+        existing TRANSCRIPT_CANARY. The invalid record must fire (so this
+        proves the new path actually ran, not a path that never fired) and
+        NEITHER canary may appear in any captured record."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-invalid-')
+        try:
+            state_dir = os.path.join(tmpdir, 'state')
+            markers_dir = os.path.join(state_dir, 'markers')
+            c, ev = self._load_llm_evaluator_classifier(state_dir, markers_dir)
+
+            response_canary = self.RESPONSE_BODY_CANARY
+
+            def _broken_call_llm(**kw):
+                return {'choices': [{'message': {
+                    'content': f'Sorry, I cannot comply -- {response_canary} --',
+                }}]}
+
+            c.call_llm = _broken_call_llm
+
+            job = {
+                'agentic_job_id': 'p38-canary-invalid-job', 'job_name': 'n',
+                'job_type': 'code_review', 'status': 'SUCCESS',
+            }
+            transcript = (
+                f'user: please review this PR\n{self.TRANSCRIPT_CANARY}\nassistant: done'
+            )
+            with self.assertLogs('revenium_classifier', level='INFO') as cm:
+                asyncio.run(c._attach_assessment(job, transcript, c._module_paths()))
+
+            messages = [r.getMessage() for r in cm.records]
+            self.assertTrue(
+                any('outcome evaluation invalid for job=' in m for m in messages),
+                f'the invalid record must fire before the canary sweep means anything, got: {messages}',
+            )
+            self.assertNotIn('assessment', job)
+            for message in messages:
+                self.assertNotIn(
+                    self.TRANSCRIPT_CANARY, message,
+                    'the transcript canary must never reach a log record',
+                )
+                self.assertNotIn(
+                    response_canary, message,
+                    'the rejected response body must never reach the invalid log record',
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_timed_out_line_carries_no_transcript_canary(self):
+        """39-01 Task 3 -- extends the ROI-13 canary sweep over the new
+        `timed-out` line."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-timeout-')
+        try:
+            state_dir = os.path.join(tmpdir, 'state')
+            markers_dir = os.path.join(state_dir, 'markers')
+            c, ev = self._load_llm_evaluator_classifier(state_dir, markers_dir)
+
+            def _timing_out_call_llm(**kw):
+                raise TimeoutError()
+
+            c.call_llm = _timing_out_call_llm
+
+            job = {
+                'agentic_job_id': 'p38-canary-timeout-job', 'job_name': 'n',
+                'job_type': 'code_review', 'status': 'SUCCESS',
+            }
+            transcript = (
+                f'user: please review this PR\n{self.TRANSCRIPT_CANARY}\nassistant: done'
+            )
+            with self.assertLogs('revenium_classifier', level='INFO') as cm:
+                asyncio.run(c._attach_assessment(job, transcript, c._module_paths()))
+
+            messages = [r.getMessage() for r in cm.records]
+            self.assertTrue(
+                any('outcome evaluation timed-out for job=' in m for m in messages),
+                f'the timed-out record must fire before the canary sweep means anything, got: {messages}',
+            )
+            self.assertNotIn('assessment', job)
+            for message in messages:
+                self.assertNotIn(
+                    self.TRANSCRIPT_CANARY, message,
+                    'the transcript canary must never reach a log record',
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

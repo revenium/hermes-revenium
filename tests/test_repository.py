@@ -733,6 +733,361 @@ exit 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_diagnose_sh_llm_outcome_section_predicate_and_half_boundary(self):
+        """Section 9 (Phase 39, ROI-14/ROI-15): per-profile enabled/evaluator,
+        the `is True` predicate, and the D-01 half-boundary pointer.
+
+        Three profiles, one diagnose.sh run:
+
+        1. the default home — `enabled: true` (a literal JSON boolean) with an
+           explicit evaluator — must render an enabled row naming the evaluator.
+        2. `profiles/qa` — no `config.json` at all — must render a disabled row
+           with no Python traceback anywhere in stdout.
+        3. `profiles/nearmiss` — `"enabled": "true"` as a JSON *string*, not a
+           boolean — must ALSO render a disabled row. This is the whole reason
+           the predicate is spelled `is True`: a truthiness read would report
+           this profile enabled when the runtime (`classifier.py`'s own
+           `cfg.get("enabled") is True`) treats it as off. Without this row the
+           test would pass against the wrong predicate.
+
+        Also asserts the D-01 pointer names all four in-process words
+        (evaluated, abstained, invalid, timed-out) and the logger they are
+        written on, and never implies this section can show them — and that
+        the report stays read-only (exit 0, no state file created).
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-diagnose-outcome-')
+        try:
+            home = os.path.join(tmp, 'home')
+            bindir = os.path.join(home, '.local', 'bin')
+            hermes_home = os.path.join(home, '.hermes')
+            scripts = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(bindir)
+            shutil.copytree(SKILL / 'scripts', scripts)
+
+            stub_path = os.path.join(bindir, 'revenium')
+            with open(stub_path, 'w') as fh:
+                fh.write('#!/usr/bin/env bash\nexit 0\n')
+            os.chmod(stub_path, 0o755)
+
+            # Profile 1: the default home, enabled=true (literal boolean).
+            default_state = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(default_state)
+            with open(os.path.join(default_state, 'config.json'), 'w') as fh:
+                fh.write('{"llmOutcomeEvaluation": {"enabled": true, '
+                          '"evaluator": "llm"}}')
+
+            # Profile 2: profiles/qa, no config.json at all.
+            qa_state = os.path.join(hermes_home, 'profiles', 'qa', 'state', 'revenium')
+            os.makedirs(qa_state)
+
+            # Profile 3: profiles/nearmiss, enabled as a JSON STRING near-miss.
+            nearmiss_state = os.path.join(
+                hermes_home, 'profiles', 'nearmiss', 'state', 'revenium')
+            os.makedirs(nearmiss_state)
+            with open(os.path.join(nearmiss_state, 'config.json'), 'w') as fh:
+                fh.write('{"llmOutcomeEvaluation": {"enabled": "true", '
+                          '"evaluator": "llm"}}')
+
+            env = {
+                'HOME': home,
+                'PATH': f'{bindir}:/usr/bin:/bin:/usr/sbin:/sbin',
+                'HERMES_HOME': hermes_home,
+                'HERMES_DEFAULT_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': default_state,
+            }
+            r = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh')],
+                env=env, capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(r.returncode, 0,
+                             f'diagnose.sh must always exit 0 — a report, not a '
+                             f'gate.\nstderr={r.stderr}')
+            self.assertIn(
+                '9. LLM OUTCOME EVALUATION', r.stdout,
+                'section 9 header missing',
+            )
+            self.assertNotIn(
+                'Traceback', r.stdout + r.stderr,
+                'a missing or malformed config.json must render a plain '
+                'disabled row, never a Python traceback',
+            )
+
+            lines_by_profile = {}
+            for raw_line in r.stdout.splitlines():
+                for pname in ('default', 'qa', 'nearmiss'):
+                    if raw_line.startswith(f'{pname} ') or raw_line.startswith(f'{pname}\t'):
+                        lines_by_profile[pname] = raw_line
+
+            self.assertIn('default', lines_by_profile,
+                          f'no row for the default profile.\nstdout={r.stdout}')
+            self.assertIn('enabled=true', lines_by_profile['default'],
+                          'a literal JSON boolean true must report enabled=true: '
+                          f'{lines_by_profile["default"]!r}')
+            self.assertIn('evaluator=llm', lines_by_profile['default'],
+                          f'evaluator not named: {lines_by_profile["default"]!r}')
+
+            self.assertIn('qa', lines_by_profile,
+                          f'no row for profiles/qa.\nstdout={r.stdout}')
+            self.assertIn('enabled=false', lines_by_profile['qa'],
+                          f'a missing config.json must report disabled: '
+                          f'{lines_by_profile["qa"]!r}')
+
+            self.assertIn('nearmiss', lines_by_profile,
+                          f'no row for profiles/nearmiss.\nstdout={r.stdout}')
+            self.assertIn(
+                'enabled=false', lines_by_profile['nearmiss'],
+                'T-39-13: the string "true" is not the literal JSON boolean '
+                'true, and must NOT report enabled=true — the predicate must '
+                f'match classifier.py\'s `is True` exactly: '
+                f'{lines_by_profile["nearmiss"]!r}',
+            )
+
+            # D-01: the pointer must name all four in-process words and the
+            # logger, and the section must never claim it can show them.
+            for word in ('evaluated', 'abstained', 'invalid', 'timed-out'):
+                self.assertIn(word, r.stdout,
+                              f'D-01 pointer missing the word {word!r}')
+            self.assertIn('revenium_classifier', r.stdout,
+                          'D-01 pointer must name the logger the four '
+                          'in-process words are written on')
+            self.assertIn('cannot show them', r.stdout,
+                          'the section must state plainly that it cannot show '
+                          'the four in-process outcomes, not merely omit them')
+
+            # Read-only: no state file created under any of the three homes.
+            for state_dir in (default_state, qa_state, nearmiss_state):
+                for artifact in ('revenium-hermes.ledger', 'revenium-metering.log'):
+                    self.assertFalse(
+                        os.path.exists(os.path.join(state_dir, artifact)),
+                        f'diagnose.sh created {artifact} under {state_dir} — a '
+                        'diagnostic must not mutate the state it is diagnosing',
+                    )
+            self.assertFalse(
+                os.path.exists(os.path.join(qa_state, 'config.json')),
+                'diagnose.sh must not create config.json for a profile that '
+                'never had one',
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_diagnose_sh_section9_rejects_non_string_evaluator(self):
+        """Section 9, PR #91 review P1: a truthy non-string `evaluator` must not
+        render as a working evaluator name.
+
+        `evaluators.resolve()` (evaluators.py:77-86) returns None for any `name`
+        that fails `isinstance(name, str)`. classifier.py:1497-1508 then logs
+        "unknown evaluator" and returns WITHOUT evaluating -- the consumer skips
+        entirely. `diagnose.sh`'s own `cfg.get("evaluator") or "llm"` only
+        substitutes the fallback for FALSY values; a truthy non-string (here, the
+        JSON integer 123) sails through unchanged, so before the fix the report
+        printed `evaluator=123` -- a plausible-looking evaluator name for a
+        config the runtime actually treats as broken and skips.
+
+        One profile, `enabled: true` with `evaluator: 123` (a JSON int, not a
+        string). Row must render something that unmistakably signals an invalid
+        evaluator -- specifically it must NOT be exactly `evaluator=123` (a bare
+        echo of the raw value would misreport this as a working configuration).
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-diagnose-badeval-')
+        try:
+            home = os.path.join(tmp, 'home')
+            bindir = os.path.join(home, '.local', 'bin')
+            hermes_home = os.path.join(home, '.hermes')
+            scripts = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(bindir)
+            shutil.copytree(SKILL / 'scripts', scripts)
+
+            stub_path = os.path.join(bindir, 'revenium')
+            with open(stub_path, 'w') as fh:
+                fh.write('#!/usr/bin/env bash\nexit 0\n')
+            os.chmod(stub_path, 0o755)
+
+            default_state = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(default_state)
+            with open(os.path.join(default_state, 'config.json'), 'w') as fh:
+                fh.write('{"llmOutcomeEvaluation": {"enabled": true, '
+                          '"evaluator": 123}}')
+
+            env = {
+                'HOME': home,
+                'PATH': f'{bindir}:/usr/bin:/bin:/usr/sbin:/sbin',
+                'HERMES_HOME': hermes_home,
+                'HERMES_DEFAULT_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': default_state,
+            }
+            r = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh')],
+                env=env, capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(r.returncode, 0,
+                             f'diagnose.sh must always exit 0 — a report, not a '
+                             f'gate.\nstderr={r.stderr}')
+            self.assertNotIn(
+                'Traceback', r.stdout + r.stderr,
+                'a non-string evaluator must render a plain invalid row, '
+                'never a Python traceback',
+            )
+
+            # Section 8 also emits a "default ..." row (ledger/log only, no
+            # evaluator field); section 9's row comes AFTER it in output
+            # order, so keep the LAST match rather than the first (mirrors
+            # test_diagnose_sh_llm_outcome_section_predicate_and_half_boundary's
+            # same technique above).
+            default_line = None
+            for raw_line in r.stdout.splitlines():
+                if raw_line.startswith('default ') or raw_line.startswith('default\t'):
+                    default_line = raw_line
+            self.assertIsNotNone(
+                default_line, f'no row for the default profile.\nstdout={r.stdout}')
+
+            self.assertNotIn(
+                'evaluator=123', default_line,
+                'the raw non-string value must not be echoed as if it were a '
+                f'working evaluator name -- the runtime skips evaluation '
+                f'entirely for a non-string evaluator (evaluators.resolve '
+                f'returns None): {default_line!r}',
+            )
+            self.assertNotRegex(
+                default_line, r'evaluator=123\s',
+                f'evaluator=123 must not appear at all, padded or not: '
+                f'{default_line!r}',
+            )
+            self.assertIn(
+                'evaluator=', default_line,
+                f'section 9 must still print an evaluator field: {default_line!r}')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_diagnose_sh_section9_grepcount_distinguishes_unreadable_from_zero(self):
+        """Section 9, PR #91 review P2: an unreadable `revenium-metering.log`
+        must not render as `0` -- that is indistinguishable from a confirmed
+        zero matches (deferred/wedged/reported all genuinely absent).
+
+        Two profiles in one run:
+
+        1. `unreadable` (default home) -- a real log file exists but is chmod
+           000, so `grep` cannot open it. Before the fix, `grepcount()`'s
+           `n="$(grep -Fc ... 2>/dev/null)"` produced empty stdout on the
+           permission error, and `${n:-0}` silently rendered that as `0` for
+           deferred/wedged/reported alike -- an unreadable log looked identical
+           to an idle one.
+        2. `zerohit` -- a real, READABLE log file with content that matches
+           none of the three patterns. This must still render as a genuine `0`
+           -- the fix must not turn every non-match into an error.
+
+        Skipped when running as root, where chmod 000 does not block reads.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        if hasattr(os, 'geteuid') and os.geteuid() == 0:
+            self.skipTest('chmod 000 does not block reads for root')
+
+        tmp = tempfile.mkdtemp(prefix='gsd-diagnose-unreadable-')
+        try:
+            home = os.path.join(tmp, 'home')
+            bindir = os.path.join(home, '.local', 'bin')
+            hermes_home = os.path.join(home, '.hermes')
+            scripts = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(bindir)
+            shutil.copytree(SKILL / 'scripts', scripts)
+
+            stub_path = os.path.join(bindir, 'revenium')
+            with open(stub_path, 'w') as fh:
+                fh.write('#!/usr/bin/env bash\nexit 0\n')
+            os.chmod(stub_path, 0o755)
+
+            # Profile 1: default home -- unreadable log.
+            default_state = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(default_state)
+            unreadable_log = os.path.join(default_state, 'revenium-metering.log')
+            with open(unreadable_log, 'w') as fh:
+                fh.write('outcome deferred: id=abc123\n')
+            os.chmod(unreadable_log, 0o000)
+
+            # Profile 2: profiles/zerohit -- readable log, zero real matches.
+            zerohit_state = os.path.join(
+                hermes_home, 'profiles', 'zerohit', 'state', 'revenium')
+            os.makedirs(zerohit_state)
+            zerohit_log = os.path.join(zerohit_state, 'revenium-metering.log')
+            with open(zerohit_log, 'w') as fh:
+                fh.write('nothing matching any of the three patterns here\n')
+
+            env = {
+                'HOME': home,
+                'PATH': f'{bindir}:/usr/bin:/bin:/usr/sbin:/sbin',
+                'HERMES_HOME': hermes_home,
+                'HERMES_DEFAULT_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': default_state,
+            }
+            try:
+                r = subprocess.run(
+                    ['bash', os.path.join(scripts, 'diagnose.sh')],
+                    env=env, capture_output=True, text=True, timeout=120,
+                )
+
+                self.assertEqual(r.returncode, 0,
+                                 f'diagnose.sh must always exit 0 — a report, '
+                                 f'not a gate.\nstderr={r.stderr}')
+                self.assertNotIn(
+                    'Traceback', r.stdout + r.stderr,
+                    'an unreadable log must render a plain row, never a '
+                    'Python traceback',
+                )
+
+                lines_by_profile = {}
+                for raw_line in r.stdout.splitlines():
+                    for pname in ('default', 'zerohit'):
+                        if raw_line.startswith(f'{pname} ') or raw_line.startswith(f'{pname}\t'):
+                            lines_by_profile[pname] = raw_line
+
+                self.assertIn('default', lines_by_profile,
+                              f'no row for the default profile.\nstdout={r.stdout}')
+                default_line = lines_by_profile['default']
+                self.assertNotIn(
+                    'deferred=0', default_line,
+                    'an unreadable log must not render deferred as a '
+                    f'confirmed zero: {default_line!r}',
+                )
+                self.assertNotIn(
+                    'reported=0', default_line,
+                    'an unreadable log must not render reported as a '
+                    f'confirmed zero: {default_line!r}',
+                )
+
+                self.assertIn('zerohit', lines_by_profile,
+                              f'no row for profiles/zerohit.\nstdout={r.stdout}')
+                zerohit_line = lines_by_profile['zerohit']
+                self.assertIn(
+                    'deferred=0', zerohit_line,
+                    'a readable log with zero real matches must still print '
+                    f'a genuine 0, not an error: {zerohit_line!r}',
+                )
+                self.assertIn(
+                    'reported=0', zerohit_line,
+                    'a readable log with zero real matches must still print '
+                    f'a genuine 0, not an error: {zerohit_line!r}',
+                )
+            finally:
+                # Restore permissions so tempdir cleanup can remove the file.
+                os.chmod(unreadable_log, 0o644)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_guardrail_status_is_scoped_to_this_installs_rules(self):
         """A profile's guardrail-status.json describes only that profile's rules.
 
@@ -1130,6 +1485,79 @@ exit 0
                 '— it deletes host-only scripts (a fleet cron wrapper) that exist '
                 'in no clone, silently stopping metering across every profile',
             )
+
+    def test_docs_state_what_the_outcome_estimate_number_is(self):
+        """ROI-15: the docs must say what the LLM outcome-evaluation number
+        IS, not just that the switch exists.
+
+        Same `required = [(relpath, needle, why), ...]` shape as
+        `test_docs_document_multi_profile_operation` above, but this test's
+        subject is different (ROI-15's wording bar, not fleet operation), so
+        it is a new sibling rather than an extension of that one.
+
+        Two facts have to survive contact with the prose, and each needle
+        below is falsifiable — verified absent from its target file before
+        this phase:
+
+        - the value is an UNVERIFIED MODEL ESTIMATE, not measured, observed,
+          customer-confirmed, or defensible ROI on its own
+        - the six-word log taxonomy spans TWO log destinations (D-01) — the
+          docs must not imply one file or command shows all six
+
+        This test does not (and cannot) judge whether the prose reads well;
+        that is task 3's human-check. It only proves the load-bearing phrases
+        are present at all, so the claims cannot silently rot back to absent.
+        """
+        required = [
+            ('docs/configuration.md', 'llmOutcomeEvaluation',
+             'the switch is undocumented in the operator config page today'),
+            ('docs/configuration.md', 'literal JSON boolean',
+             'a near-miss value silently leaves money estimation off'),
+            ('docs/configuration.md', 'unverified model estimate',
+             'the config page must not describe the value as measured'),
+            ('docs/how-it-works.md', 'unverified model estimate',
+             "ROI-15's core claim"),
+            ('docs/how-it-works.md', 'metered cost',
+             'the displayed ROI is a combination, not this number alone'),
+            ('docs/how-it-works.md', 'two log destinations',
+             'D-01: the six-word taxonomy is split and the docs must say so'),
+            ('docs/how-it-works.md', 'byte-identical',
+             'upgrade behaviour must be stated, not implied'),
+            ('skills/revenium/references/config-schema.md', 'revenium_classifier',
+             'the config reference must name where four of the six words are '
+             'written'),
+        ]
+        for relpath, needle, why in required:
+            page = ROOT / relpath
+            self.assertTrue(page.exists(), f'missing {relpath}')
+            self.assertIn(
+                needle, page.read_text(errors='ignore'),
+                f'{relpath} no longer documents: {needle!r} — {why}',
+            )
+
+        # D-05: the CHANGELOG entry sits under [Unreleased], not under the
+        # unrelated [v1.5] product tag that merely shares this milestone's
+        # number. Positional, not a version-string match — what needs proving
+        # is WHERE the entry sits, not what it is named.
+        changelog = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
+        unreleased_idx = changelog.find('## [Unreleased]')
+        self.assertNotEqual(unreleased_idx, -1, 'CHANGELOG.md has no [Unreleased] '
+                             'heading')
+        next_release_idx = changelog.find('## [v', unreleased_idx + 1)
+        self.assertNotEqual(next_release_idx, -1, 'CHANGELOG.md has no released '
+                             'version heading below [Unreleased]')
+        entry_idx = changelog.find('LLM outcome evaluation')
+        self.assertNotEqual(
+            entry_idx, -1,
+            'CHANGELOG.md has no entry for LLM outcome evaluation',
+        )
+        self.assertTrue(
+            unreleased_idx < entry_idx < next_release_idx,
+            'the LLM outcome evaluation CHANGELOG entry must sit under '
+            '[Unreleased], not under any released version heading — the '
+            '[v1.5] tag is an unrelated 2026-08-20 product release that '
+            'merely shares this planning milestone\'s number (D-05)',
+        )
 
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,

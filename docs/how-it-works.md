@@ -103,6 +103,50 @@ Every outcome also carries a `--metadata` blob holding the deployment `source`, 
 the session's source column. `FAILED` arcs add a `failure_reason`: a short plain-text cause
 inferred by the classifier. `SUCCESS` and `CANCELLED` arcs carry source alone.
 
+## LLM outcome-value evaluation (experimental)
+
+Opt-in, off by default. When enabled and a job's arc completes `SUCCESS`, the classifier
+makes one separate, bounded LLM call on the user's own configured provider to estimate that
+job's economic value. `FAILED` and `CANCELLED` arcs are never evaluated — there is no
+economic outcome to estimate for an arc that did not finish successfully. The estimate is
+derived from two independently bounded inputs (an assumed hours-saved figure and an assumed
+loaded hourly rate, each capped by `maxHoursSaved` / `maxLoadedRate`), never asserted
+directly by the model.
+
+**What the number is.** The result is an **unverified model estimate** — not measured, not
+observed, not customer-confirmed, and not defensible ROI on its own. Revenium computes the
+ROI figure it displays from this reported value **combined with metered cost**; the estimate
+is one input to that calculation, not the whole of it. See the assessment contract in
+[`references/config-schema.md`](../skills/revenium/references/config-schema.md)
+for the full bounds and validation rules.
+
+**Default and upgrade behaviour.** `llmOutcomeEvaluation` is absent from `config.json` by
+default, and the read **fails closed**: a missing, unreadable, or malformed config resolves
+to disabled, never to estimating money by accident. An existing install upgrading into this
+feature meters **byte-identically** to before — this is proven, not asserted by inspection:
+the `jobs-outcome.golden.json` wire-shape fixture is unchanged by this feature, and the
+fail-closed default is covered by its own tests.
+
+**The log taxonomy spans two log destinations.** Six words describe every outcome an
+evaluation attempt can reach, and they are not all written to the same place:
+
+- `evaluated`, `abstained`, `invalid`, and `timed-out` are written **in-process** by the
+  classifier plugin, on the Python logger `revenium_classifier`, and land wherever Hermes'
+  own logging is configured — not in `revenium-metering.log`. The exact lines:
+  - `revenium-classifier: outcome evaluated job=%s value=%s %s`
+  - `revenium-classifier: outcome evaluation abstained for job=%s`
+  - `revenium-classifier: outcome evaluation invalid for job=%s`
+  - `revenium-classifier: outcome evaluation timed-out for job=%s`
+- `deferred` and `reported` are written by the **cron**, into `revenium-metering.log`. The
+  exact line prefixes:
+  - `outcome deferred: id=` (its aged form logs as `wedged job (no create confirmed after`)
+  - `Outcome reported: agentic_job_id=`
+
+No single file or command shows all six. `diagnose.sh`'s "LLM OUTCOME EVALUATION" section
+reports, per profile, whether the switch is enabled, which evaluator is selected, and the
+two cron-side counts (`deferred`/`wedged`, `reported`) from that profile's own log — and
+names where the other four are written, rather than attempting to show them.
+
 ## Tool-event metering
 
 `post_tool_call` captures each Hermes tool call — name, duration in milliseconds,

@@ -71,6 +71,30 @@ hr()    { echo ""; echo "===== $* ====="; }
 count() { [[ -e "$1" ]] && { ls -1 "$1" 2>/dev/null | wc -l | tr -d ' '; } || echo "(absent)"; }
 lines() { [[ -f "$1" ]] && { wc -l < "$1" | tr -d ' '; } || echo "(absent)"; }
 mtime() { [[ -e "$1" ]] && { date -r "$1" 2>/dev/null || echo "(unknown)"; } || echo "(absent)"; }
+# Same "(absent)" convention as lines() above, but counting occurrences of a
+# literal (fixed-string) prefix rather than every line. Used by section 9 to
+# count the two cron-side log-taxonomy outcomes without a second file-format.
+grepcount() {
+  local f="$1" pat="$2" n rc
+  [[ -f "${f}" ]] || { echo "(absent)"; return; }
+  # A present-but-unreadable file must not render as 0 -- that is
+  # indistinguishable from a confirmed zero matches, same "(absent)" vs
+  # "ran and found nothing" distinction lines()/count() already make above.
+  # Check readability up front (covers the common permission-denied case
+  # without ever invoking grep), and ALSO check grep's own exit code as
+  # defense in depth for a file that fails to open despite passing -r (a
+  # race, an I/O error). `grep -Fc` exits 1 on a legitimate zero-match --
+  # that is NOT an error and must still print 0 -- so only an exit code
+  # greater than 1 (2 = usage/read error) is treated as unreadable.
+  [[ -r "${f}" ]] || { echo "(unreadable)"; return; }
+  n="$(grep -Fc -- "${pat}" "${f}" 2>/dev/null)"
+  rc=$?
+  if [[ ${rc} -gt 1 ]]; then
+    echo "(unreadable)"
+    return
+  fi
+  echo "${n:-0}"
+}
 
 # Probe the state tree BEFORE sourcing common.sh, which eagerly `mkdir -p`s
 # STATE_DIR, markers/, markers/.ready/ and tool-events/ at source time. After
@@ -233,8 +257,90 @@ echo ""
 echo "(re-run with --profile <name> to inspect one of these in full)"
 
 # ---------------------------------------------------------------------------
+hr "9. LLM OUTCOME EVALUATION (opt-in, experimental)"
+# Read-only, and stays that way: config.json and this profile's own LOG_FILE
+# only. No `revenium` CLI call, no write, no --tick behaviour (T-39-12) --
+# the existing functional test catches a stray ledger/log write but cannot
+# catch a stray API call, so that guarantee lives here in the action, not in
+# a test.
+while IFS=$'\t' read -r pname phome; do
+  [[ -z "${pname}" ]] && continue
+  pstate="${phome}/state/revenium"
+  pcfg="${pstate}/config.json"
+  plog="${pstate}/revenium-metering.log"
+
+  # Mirror classifier.py's _llm_evaluation_enabled / _llm_evaluation_config
+  # EXACTLY (T-39-13): `enabled` must be a literal JSON boolean true. The
+  # string "true", the integer 1, or any other truthy value reports disabled
+  # here because it IS disabled in the runtime -- a truthiness test would be
+  # the read-side twin of the sanitize-before-compare defect phase 38 found
+  # on the write side. Fail CLOSED on any read error, same as the consumer:
+  # a missing or malformed config.json means "off", never a traceback.
+  _row="$(CFG="${pcfg}" python3 - <<'PY'
+import json, os
+
+try:
+    with open(os.environ["CFG"]) as fh:
+        data = json.load(fh)
+    cfg = data.get("llmOutcomeEvaluation")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    enabled = cfg.get("enabled") is True
+    evaluator = cfg.get("evaluator") or "llm"
+    # Mirror evaluators.resolve, not just the fallback: `or "llm"` only
+    # catches FALSY values -- 0, "", None, an empty list, an empty dict.
+    # A truthy non-string -- an int, a list, a dict, True -- sails
+    # through unchanged and would print as though it were a working
+    # evaluator name. At runtime resolve rejects it because
+    # isinstance(name, str) is False, fn comes back None, and
+    # classifier.py logs "unknown evaluator" and returns WITHOUT
+    # evaluating -- the same "reports armed, nothing runs" shape
+    # T-39-13 fixed for `enabled`. Render it unmistakably as invalid
+    # rather than silently coercing to "llm", which would be a
+    # different lie: the runtime does not fall back to "llm" here, it
+    # skips.
+    # NOTE: no apostrophes and no unbalanced parens across lines in this
+    # comment block -- bash 3.2 mis-parses a heredoc nested inside
+    # $(...) when either shows up, closing the substitution early.
+    # Verified with bash -n while writing this fix; a balanced,
+    # same-line paren such as isinstance(name, str) above is fine.
+    if not isinstance(evaluator, str):
+        evaluator = "INVALID(not-a-string)"
+except Exception:
+    enabled = False
+    evaluator = "llm"
+print("{}\t{}".format("true" if enabled else "false", evaluator))
+PY
+)"
+  IFS=$'\t' read -r p_enabled p_evaluator <<<"${_row}"
+  # IN-01 (39-REVIEW.md): if python3 is unavailable, the heredoc above never
+  # runs, `_row` is empty, and this `read` from an empty here-string still
+  # succeeds under `set -uo pipefail` -- silently leaving both fields blank
+  # rather than erroring. Default explicitly so the row reads "unknown"
+  # instead of a blank that looks like an unset/empty config value.
+  p_enabled="${p_enabled:-unknown}"
+  p_evaluator="${p_evaluator:-unknown}"
+
+  # Two of the six taxonomy words are visible here: "deferred" (plus its aged
+  # "wedged" restatement of the same outcome) and "reported". Literal prefixes
+  # per 39-01-SUMMARY.md / 39-02-SUMMARY.md -- do not paraphrase a fourth
+  # variant of text already fixed by those plans.
+  deferred="$(grepcount "${plog}" "outcome deferred: id=")"
+  wedged="$(grepcount "${plog}" "wedged job (no create confirmed after")"
+  reported="$(grepcount "${plog}" "Outcome reported: agentic_job_id=")"
+
+  printf '%-16s enabled=%-6s evaluator=%-6s deferred=%-8s wedged=%-8s reported=%-8s\n' \
+    "${pname}" "${p_enabled}" "${p_evaluator}" "${deferred}" "${wedged}" "${reported}"
+done < <(hermes_profile_homes)
+echo ""
+echo "NOTE: the other four outcomes -- evaluated, abstained, invalid, timed-out"
+echo "      -- are written IN-PROCESS by the classifier plugin on the Python"
+echo "      logger 'revenium_classifier', not into revenium-metering.log, so"
+echo "      they land wherever Hermes' own logging is configured. This report"
+echo "      cannot show them; it can only tell you where to look."
+
+# ---------------------------------------------------------------------------
 if [[ "${TICK}" == "true" ]]; then
-  hr "9. ONE REAL CRON TICK — THIS SHIPS DATA"
+  hr "10. ONE REAL CRON TICK — THIS SHIPS DATA"
   bash "${SKILL_DIR}/scripts/cron.sh" 2>&1 | tail -40
   echo "--- log after the tick ---"
   tail -25 "${LOG_FILE}" 2>/dev/null || echo "(no log)"

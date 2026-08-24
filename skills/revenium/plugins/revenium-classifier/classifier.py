@@ -344,6 +344,33 @@ _EVAL_TIMEOUT_SECONDS = 15.0
 _EVAL_TRANSCRIPT_LIMIT = 6000
 
 
+# Phase 39 (ROI-14): two module-private sentinels distinguishing a BROKEN
+# evaluator response from a DELIBERATE abstention (the documented `null`
+# token) and from a timeout. Neither is `None` nor a `dict`, so no existing
+# branch that checks `if raw is None` or treats the return as an assessment
+# dict can mistake one for the other. A tiny named class exists only so
+# `repr()` is readable in a debugger; `is`-identity is the only comparison
+# ever used against these.
+#
+# PRIVATE to this module. Not exported, not mentioned in evaluators.py: the
+# evaluator seam contract (evaluate() -> dict | None) is unchanged. A
+# third-party evaluator returning None still abstains; one returning a
+# non-dict still reaches _validate_assessment and takes the existing
+# rejected path. These sentinels are produced only by the built-in `llm`
+# path (_parse_assessment_object / _evaluate_outcome_via_llm) and consumed
+# only by _attach_assessment.
+class _EvalOutcomeSentinel:
+    def __init__(self, label: str) -> None:
+        self._label = label
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid only
+        return f"<_EvalOutcomeSentinel {self._label}>"
+
+
+_EVAL_INVALID = _EvalOutcomeSentinel("invalid")
+_EVAL_TIMED_OUT = _EvalOutcomeSentinel("timed-out")
+
+
 def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -> str:
     """Build the outcome-value evaluation prompt.
 
@@ -476,7 +503,7 @@ async def _infer_jobs_via_llm(transcript: str, job_labels: list) -> list:
         return []
 
 
-async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict) -> "dict | None":
+async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
     """Invoke the user's LLM to estimate one completed arc's outcome value.
 
     Mirror of _infer_jobs_via_llm with these deviations:
@@ -489,8 +516,10 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict) ->
       model (ROI-07). There is no Revenium-hosted prompt path and must not be one.
 
     Returns the RAW assessment dict for _validate_assessment to bound and derive
-    from, or None. Never raises: an evaluator that can raise turns "no estimate"
-    into "broken turn" (ROI-08).
+    from; None for a deliberate abstention; or, as of Phase 39 (ROI-14), one of
+    the two module-private sentinels _EVAL_INVALID (a broken/unparseable
+    response) or _EVAL_TIMED_OUT (this call's own timeout). Never raises: an
+    evaluator that can raise turns "no estimate" into "broken turn" (ROI-08).
     """
     if call_llm is None:
         return None
@@ -517,6 +546,25 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict) ->
         except AttributeError:
             raw = response["choices"][0]["message"]["content"]
         return _parse_assessment_object(raw or "")
+    except (asyncio.TimeoutError, TimeoutError):
+        # Phase 39 (ROI-14): a real provider timeout, distinguished from the
+        # generic failure below so the caller's log taxonomy can tell them
+        # apart. The dual-name tuple is deliberate -- this repo pins no
+        # Python minimum, and the two names are the same object on 3.11+
+        # (harmless duplicate) but different types before it. This clause
+        # must stay BEFORE the generic `except Exception` or it is dead code.
+        # 39-REVIEW.md WR-02 verified this against the LIVE
+        # agent.auxiliary_client.py, not just this repo's own assumption:
+        # `call_llm` raises the builtin TimeoutError at :1422, :1557, and
+        # :8383 on a real timeout, and on Python 3.11+
+        # `asyncio.TimeoutError is TimeoutError` evaluates True (confirmed on
+        # this host, 3.14.6) -- so this clause is reachable in production,
+        # not just under the test suite's direct `raise TimeoutError()`
+        # stubs. Do not re-open this as an open question without re-reading
+        # that source.
+        # Deliberately NOT catching asyncio.CancelledError: it is a
+        # BaseException and swallowing it would break task cancellation.
+        return _EVAL_TIMED_OUT
     except Exception as exc:
         logger.warning(
             "revenium-classifier outcome evaluation LLM call failed: %r", exc
@@ -524,34 +572,42 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict) ->
         return None
 
 
-def _parse_assessment_object(raw: str) -> "dict | None":
-    """Parse the evaluator response into a dict, or None to abstain.
+def _parse_assessment_object(raw: str):
+    """Parse the evaluator response into a dict, None (deliberate abstention),
+    or the _EVAL_INVALID sentinel (a broken/unparseable response).
 
     Mirror of _parse_job_array's tolerance: models fence JSON in markdown and
-    prepend prose. A bare `null` is a DELIBERATE abstention and returns None,
-    which is indistinguishable at this layer from a parse failure -- and that is
-    fine, because both resolve to the same behaviour. The caller's log taxonomy
-    (ROI-14) separates them at the call site, where the difference is knowable.
+    prepend prose. The prompt instructs the model to `output exactly: null` to
+    abstain (tests/test_phase37_llm_evaluator.py:85 pins that string) -- that
+    literal, after fence-stripping, is the ONLY documented abstention token.
+
+    Phase 39 (ROI-14): everything else that fails to yield a dict is a BROKEN
+    response, not an abstention, and is reported as _EVAL_INVALID so the
+    caller's log taxonomy can tell the two apart -- a non-str input, empty
+    text, text with no balanced braces, text that will not parse, and parsed
+    JSON that is not a dict are all invalid.
     """
     if not isinstance(raw, str):
-        return None
+        return _EVAL_INVALID
     text = raw.strip()
     if text.startswith("```"):
         text = text.split("```")[1] if "```" in text[3:] else text[3:]
         if text.startswith("json"):
             text = text[4:]
         text = text.strip()
-    if not text:
+    if text == "null":
         return None
+    if not text:
+        return _EVAL_INVALID
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
-        return None
+        return _EVAL_INVALID
     try:
         parsed = json.loads(text[start:end + 1])
     except Exception:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+        return _EVAL_INVALID
+    return parsed if isinstance(parsed, dict) else _EVAL_INVALID
 
 
 def _register_llm_evaluator() -> None:
@@ -1453,6 +1509,25 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         raw = fn(valid, transcript, cfg)
         if inspect.isawaitable(raw):
             raw = await raw
+        # Phase 39 (ROI-14): identity-compared BEFORE the `raw is None`
+        # abstention check, so a broken response or a timeout from the
+        # built-in `llm` path never falls through and gets misreported as an
+        # ordinary abstention. Both lines carry ONLY the outcome word and the
+        # job id -- never the rejected response body (ROI-13 / D-04): raw
+        # model output is transcript-derived text, not a bounded scalar, and
+        # phase 38 proved none of it reaches a persisted artifact.
+        if raw is _EVAL_INVALID:
+            logger.warning(
+                "revenium-classifier: outcome evaluation invalid for job=%s",
+                valid.get("agentic_job_id", ""),
+            )
+            return
+        if raw is _EVAL_TIMED_OUT:
+            logger.warning(
+                "revenium-classifier: outcome evaluation timed-out for job=%s",
+                valid.get("agentic_job_id", ""),
+            )
+            return
         if raw is None:
             logger.info(
                 "revenium-classifier: outcome evaluation abstained for job=%s",
@@ -1476,6 +1551,28 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
                 "revenium-classifier: outcome evaluation rejected for job=%s",
                 valid.get("agentic_job_id", ""),
             )
+    except (asyncio.TimeoutError, TimeoutError):
+        # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
+        # can raise a timeout directly -- never entering
+        # _evaluate_outcome_via_llm at all -- so this must be its own clause,
+        # not folded into the generic except below, or half the taxonomy
+        # stays generic. Must stay BEFORE `except Exception` or it is dead
+        # code.
+        # 39-REVIEW.md WR-02 verified this against the LIVE
+        # agent.auxiliary_client.py, not just this repo's own assumption:
+        # `call_llm` raises the builtin TimeoutError at :1422, :1557, and
+        # :8383 on a real timeout, and on Python 3.11+
+        # `asyncio.TimeoutError is TimeoutError` evaluates True (confirmed on
+        # this host, 3.14.6) -- so this clause is reachable in production,
+        # not just under the test suite's direct `raise TimeoutError()`
+        # stubs. Do not re-open this as an open question without re-reading
+        # that source.
+        # Deliberately NOT catching asyncio.CancelledError: it is a
+        # BaseException and swallowing it would break task cancellation.
+        logger.warning(
+            "revenium-classifier: outcome evaluation timed-out for job=%s",
+            (valid or {}).get("agentic_job_id", ""),
+        )
     except Exception as exc:
         logger.warning(
             "revenium-classifier: outcome evaluation failed for job=%s: %r",

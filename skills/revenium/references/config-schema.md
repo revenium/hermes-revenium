@@ -159,3 +159,13 @@ Abstention falls back to the existing status-only outcome path.
 The value produced is an **unverified model estimate** — see the assessment
 contract in [`job-declaration.md`](job-declaration.md) for what
 `MODEL_ESTIMATED_DEMO` means.
+
+### Operator visibility (Phase 39, ROI-14)
+
+`diagnose.sh` reports, per profile, whether this switch is enabled and which evaluator is
+selected, plus the two cron-side outcomes it can legitimately see from that profile's own
+log: `deferred` (and its aged `wedged` restatement) and `reported`. The other four outcomes
+— `evaluated`, `abstained`, `invalid`, `timed-out` — are written in-process by the classifier
+plugin on the `revenium_classifier` Python logger, not into `revenium-metering.log`, so they
+land wherever Hermes' own logging is configured. `diagnose.sh` names where they are; it does
+not show them.
