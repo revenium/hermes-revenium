@@ -1621,7 +1621,31 @@ exit 0
 
         # Regex-based negative checks, so no sensitive literal is introduced
         # into this public test file to guard against sensitive literals.
-        text = (ROOT / 'docs' / 'how-it-works.md').read_text(errors='ignore')
+        #
+        # Scoped to the live-verification section ONLY, not the whole page.
+        # how-it-works.md is general product documentation: a legitimate example
+        # address, config path, contact address, or credential-shaped sample in
+        # an unrelated section would otherwise fail this ROI-16 guard, blaming
+        # prose the guard was never about — and pressuring an author to delete
+        # good documentation to satisfy a check that does not concern it.
+        page = (ROOT / 'docs' / 'how-it-works.md').read_text(errors='ignore')
+        start = page.find('**Live verification against a real tenant')
+        end = page.find('\n## ', start) if start != -1 else -1
+        # Assert the extraction found the section BEFORE scanning it. Slicing on
+        # a marker that has moved yields '' and every regex below then passes
+        # vacuously — the guard would report green precisely when it had stopped
+        # guarding anything.
+        self.assertNotEqual(
+            start, -1,
+            'docs/how-it-works.md no longer contains the live-verification '
+            'section marker — the redaction guard cannot locate what it protects',
+        )
+        text = page[start:end] if end != -1 else page[start:]
+        self.assertGreater(
+            len(text), 500,
+            'the live-verification section extracted to under 500 bytes — the '
+            'redaction guard would pass vacuously on a near-empty slice',
+        )
         redaction_checks = [
             (r'\b\d{1,3}(?:\.\d{1,3}){3}\b', 'address-shaped (dotted-quad) token'),
             (r'(?:/Users/|/home/)[A-Za-z0-9._-]+', 'absolute home-directory path'),
@@ -1632,7 +1656,9 @@ exit 0
         for pattern, label in redaction_checks:
             match = re.search(pattern, text, re.IGNORECASE)
             self.assertIsNone(
-                match, f'docs/how-it-works.md contains a {label}: {match.group(0) if match else ""!r}',
+                match,
+                f'the live-verification section of docs/how-it-works.md contains '
+                f'a {label}: {match.group(0) if match else ""!r}',
             )
 
     def test_no_legacy_branding_left(self):
