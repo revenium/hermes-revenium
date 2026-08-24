@@ -398,6 +398,57 @@ class OutcomeBoundingCrossTickTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_row7_growing_session_double_push_dedupes_backlog_aggregate(self):
+        """WR-01 regression (39-REVIEW.md): a session whose token total is
+        STILL GROWING this tick clears BOTH job_outcome_queue producers --
+        the token-independent marker precheck (`:1473`) AND the in-loop
+        jobs-create stage (`:2375`, gated on the growth guard at `:1884`
+        which this fixture deliberately does NOT trip) -- pushing the SAME
+        outcome_id into the queue twice in one tick.
+
+        The per-job WARN line and the retry are already correctly
+        deduplicated by the (outcome_id, reason) flag file (row 1). This
+        test proves the post-loop AGGREGATE ('outcome backlog: N job(s)...')
+        reports the DISTINCT job count (1), not the raw queue-entry count
+        (2) the double push would otherwise produce.
+
+        Unlike `_setup`'s default fixture -- which deliberately seeds the
+        HERMES ledger with a token-STABLE row so the growth guard trips and
+        the in-loop stage never runs, per `_setup`'s own docstring -- this
+        test overwrites the ledger with a LOWER prior total so the growth
+        guard does NOT trip and both producers fire.
+        """
+        tmpdir, state_dir, markers_dir, jobs_ledger, meter_log, jobs_log, env = _setup(
+            'p39-double-sid', 'p39-double-job',
+        )
+        try:
+            hermes_ledger = os.path.join(state_dir, 'revenium-hermes.ledger')
+            now = time.time()
+            with open(hermes_ledger, 'w') as f:
+                f.write(f'HERMES:p39-double-sid:100:{now - 90:.3f}:seed-muid\n')
+
+            rc, out = _run_tick(env)
+            self.assertEqual(rc, 0, out)
+
+            log_text = _metering_log_text(state_dir)
+            agg_lines = [
+                l for l in log_text.splitlines()
+                if re.search(r'outcome backlog: \d+ job', l)
+            ]
+            self.assertEqual(len(agg_lines), 1, log_text)
+            self.assertIn(
+                ' 1 job', agg_lines[0],
+                f'aggregate must count the DISTINCT job (1), not the raw '
+                f'queue-entry count (2) produced by the double push:\n{agg_lines[0]}',
+            )
+
+            # Companion control: the per-job line is already correctly
+            # deduplicated pre-fix -- proves the bug is isolated to the
+            # aggregate counter, not the per-job WARN line.
+            self.assertEqual(len(_deferred_or_wedged_lines(log_text)), 1, log_text)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # Row 7: common.sh declaration shape

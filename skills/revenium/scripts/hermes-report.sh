@@ -922,12 +922,28 @@ PY
   # backlog (OUTCOME-04 branch, post-loop stage below). Declared here for
   # the same reason as fallback_tick_count -- the post-loop stage runs in
   # THIS shell (no subshell), so the increment survives to the aggregate
-  # line after the outcome loop. Incremented for EVERY deferred or wedged
-  # job this tick, whether its per-job line was warned or suppressed by
+  # line after the outcome loop. Incremented for EVERY DISTINCT job this
+  # tick, whether its per-job line was warned or suppressed by
   # OUTCOME_WARN_FLAGS_DIR -- the aggregate is what keeps the backlog size
   # visible despite that per-job gate, exactly as fallback_tick_count does
   # for the trace-type fallback.
   local outcome_deferred_tick_count=0
+  # WR-01 (39-REVIEW.md): job_outcome_queue is fed by two independent,
+  # ungated producers within one session-loop iteration -- the
+  # token-independent marker precheck (`:1473`) and the in-loop jobs-create
+  # stage (`:2375`, gated on the growth guard at `:1884`). Any session whose
+  # token total grew this tick AND already has an unconfirmed job marker
+  # clears both, pushing the SAME outcome_id twice in one tick. The
+  # (outcome_id, reason) flag file already dedupes the per-job WARN line and
+  # the retry is deliberately never gated -- but the aggregate increment
+  # ran once per QUEUE ENTRY, not once per distinct job, so it could report
+  # up to 2x the true backlog. This newline-delimited "seen set" is the same
+  # bash-3.2-compatible idiom LEGACY_RETAINED_SIDS uses above (`:283`,
+  # `case ... *$'\n'"${sid}"$'\n'*)`) -- no associative arrays. Declared
+  # here for the identical herestring reason as outcome_deferred_tick_count:
+  # the post-loop stage runs in THIS shell, so it survives across queue
+  # entries within the tick.
+  local outcome_deferred_seen=$'\n'
   # quick-260817-tfe (OWN-01/OWN-04): per-tick aggregates for the two
   # ownership outcomes an operator needs to see. Declared HERE, next to
   # fallback_tick_count and before the while loop, for the identical
@@ -2860,7 +2876,19 @@ except Exception:
     print(0)
 " 2>/dev/null || echo "0")
 
-        ((outcome_deferred_tick_count++)) || true
+        # WR-01: count DISTINCT jobs, not raw queue entries -- the two
+        # producers above (`:1473`, `:2375`) can both push this same
+        # outcome_id in one tick (see outcome_deferred_seen's declaration
+        # comment). Increment only the first time this outcome_id is seen
+        # this tick; a later entry for the same job (deferred or wedged,
+        # doesn't matter) is already the same backlog item.
+        case "${outcome_deferred_seen}" in
+          *$'\n'"${outcome_id}"$'\n'*) ;;  # already counted this tick
+          *)
+            ((outcome_deferred_tick_count++)) || true
+            outcome_deferred_seen="${outcome_deferred_seen}${outcome_id}"$'\n'
+            ;;
+        esac
 
         # Phase 39 D-02: bound this per-job line to once per (outcome_id,
         # reason) via a zero-byte flag file under OUTCOME_WARN_FLAGS_DIR --
