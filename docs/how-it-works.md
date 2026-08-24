@@ -180,6 +180,18 @@ dev tenant, with one evaluator model, across two cron ticks. It says nothing abo
 multi-profile behavior, nothing about idempotency across more than two ticks or concurrent
 ticks, and nothing about evaluator behavior on a different LLM provider.
 
+It also did not exercise the value-against-cost calculation. The verification session ran on
+a free-tier model, so its metered cost was genuinely `$0.00` and the read-back returned a
+null ROI — the correct answer to a value divided by no cost, but a degenerate one. The
+reported value was proven end to end; the ratio Revenium computes from that value and the
+metered cost was not.
+
+One provenance limit is worth stating alongside the metadata above. `evaluator` and
+`evaluator_version` identify the evaluator *implementation*, not the model that produced the
+estimate — the evaluator issues an unpinned call and the host routes it, so a provider
+failover can change the deciding model without changing either field. An estimate's metadata
+therefore establishes that a model produced it under stated assumptions, not which one.
+
 ## Tool-event metering
 
 `post_tool_call` captures each Hermes tool call — name, duration in milliseconds,
