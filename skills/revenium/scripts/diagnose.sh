@@ -278,6 +278,13 @@ print("{}\t{}".format("true" if enabled else "false", evaluator))
 PY
 )"
   IFS=$'\t' read -r p_enabled p_evaluator <<<"${_row}"
+  # IN-01 (39-REVIEW.md): if python3 is unavailable, the heredoc above never
+  # runs, `_row` is empty, and this `read` from an empty here-string still
+  # succeeds under `set -uo pipefail` -- silently leaving both fields blank
+  # rather than erroring. Default explicitly so the row reads "unknown"
+  # instead of a blank that looks like an unset/empty config value.
+  p_enabled="${p_enabled:-unknown}"
+  p_evaluator="${p_evaluator:-unknown}"
 
   # Two of the six taxonomy words are visible here: "deferred" (plus its aged
   # "wedged" restatement of the same outcome) and "reported". Literal prefixes
