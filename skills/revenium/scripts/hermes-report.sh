@@ -114,8 +114,16 @@ fi
 # retry loop indefinitely. Probed once at startup and cached for the whole
 # tick; both flags are gated on this single probe and are added together or
 # not at all, mirroring the emission site's own "both or neither" comment.
+#
+# BOTH halves of the pair are probed, not just --outcome-value. The emission
+# site sends the two together, so a CLI advertising one without the other
+# would take the enabled branch and then reject the whole call -- the exact
+# wedge this gate exists to prevent, reintroduced through the half of the pair
+# nobody checked. `&&` short-circuits, so the common older-CLI case (neither
+# flag present) still costs a single --help.
 OUTCOME_VALUE_CLI_CAPABLE=false
-if supports_flag "jobs outcome" "--outcome-value"; then
+if supports_flag "jobs outcome" "--outcome-value" \
+   && supports_flag "jobs outcome" "--outcome-currency"; then
   OUTCOME_VALUE_CLI_CAPABLE=true
 fi
 

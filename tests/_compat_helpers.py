@@ -165,7 +165,16 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
     # Phase 38 (CR-01/WR-03): v1.5 jobs-outcome value flags. Default True so
     # every existing caller keeps exercising the "flags ship" wire shape;
     # False models the older CLI CR-01's capability probe exists to protect.
-    if outcome_value_capable:
+    # 'value-only' models the split-pair CLI: --outcome-value advertised but
+    # --outcome-currency absent. Probing only the first half would take the
+    # enabled branch here and then have the whole call rejected (greptile P2
+    # on PR #90), so the gate probes both and this shape must resolve to
+    # "not capable".
+    if outcome_value_capable == 'value-only':
+        outcome_value_help_lines = (
+            '      echo "--outcome-value string     Business outcome value"\n'
+        )
+    elif outcome_value_capable:
         outcome_value_help_lines = (
             '      echo "--outcome-value string     Business outcome value"\n'
             '      echo "--outcome-currency string   Business outcome currency"\n'

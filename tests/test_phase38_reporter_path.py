@@ -392,6 +392,26 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
 
+    def test_outcome_omits_pair_when_cli_advertises_only_outcome_value(self):
+        """greptile P2 on PR #90: the emission site sends --outcome-value and
+        --outcome-currency together, so gating the pair on a probe of only the
+        FIRST half reintroduces CR-01's wedge through the half nobody checked.
+        A CLI advertising --outcome-value WITHOUT --outcome-currency must
+        resolve the gate to false and ship neither flag -- not take the enabled
+        branch and have the whole `jobs outcome` call rejected."""
+        argv = self._run_one_outcome(
+            'p2-sid-001', 'p2-job-001', 'SUCCESS',
+            assessment=ASSESSMENT_FIXTURE, outcome_value_capable='value-only',
+        )
+        self.assertEqual(argv[argv.index('--result') + 1], 'SUCCESS')
+        self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
+        # Both halves omitted -- "both or neither" holds even when the CLI
+        # advertises exactly one of them.
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+
 
 # ---------------------------------------------------------------------------
 # Plan 02, Tasks 1 & 2 — the two guarantees only visible across ticks.
@@ -424,7 +444,11 @@ def _build_flexible_shim(shim_path, outcome_value_capable=True):
     38 CR-01/WR-03): default True advertises --outcome-value/--outcome-currency
     on the `jobs outcome --help` probe; False omits them.
     """
-    if outcome_value_capable:
+    if outcome_value_capable == 'value-only':
+        outcome_value_help_lines = (
+            '      echo "--outcome-value string     Business outcome value"\n'
+        )
+    elif outcome_value_capable:
         outcome_value_help_lines = (
             '      echo "--outcome-value string     Business outcome value"\n'
             '      echo "--outcome-currency string   Business outcome currency"\n'
