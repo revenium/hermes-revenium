@@ -104,6 +104,29 @@ if supports_flag "meter completion" "--skill-name"; then
   SKILL_CLI_CAPABLE=true
 fi
 
+# Phase 38 (CR-01): capability gate for the v1.5 `jobs outcome` value flags
+# (--outcome-value/--outcome-currency). Same supports_flag posture as the
+# squad/skill probes above, and for the same reason: a negative probe is a
+# LIVE configuration (an older revenium CLI predating these two flags), not
+# an error. Unlike the meter-completion probes, an ungated pair of unknown
+# flags here does not just cost one dimension -- it fails the ENTIRE `jobs
+# outcome` call (unrecognized-flag exit), wedging the job in OUTCOME-04's
+# retry loop indefinitely. Probed once at startup and cached for the whole
+# tick; both flags are gated on this single probe and are added together or
+# not at all, mirroring the emission site's own "both or neither" comment.
+#
+# BOTH halves of the pair are probed, not just --outcome-value. The emission
+# site sends the two together, so a CLI advertising one without the other
+# would take the enabled branch and then reject the whole call -- the exact
+# wedge this gate exists to prevent, reintroduced through the half of the pair
+# nobody checked. `&&` short-circuits, so the common older-CLI case (neither
+# flag present) still costs a single --help.
+OUTCOME_VALUE_CLI_CAPABLE=false
+if supports_flag "jobs outcome" "--outcome-value" \
+   && supports_flag "jobs outcome" "--outcome-currency"; then
+  OUTCOME_VALUE_CLI_CAPABLE=true
+fi
+
 # Resolve the skill a session was working with, if any.
 #
 # Signal: Hermes records skill tool calls as ordinary `messages` rows —
@@ -1436,8 +1459,8 @@ PY
             # Phase 10: push to outcome queue for every job row — regardless of create outcome.
             # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
             # Push before the create-gated continue so already-created jobs are also queued.
-            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs.
-            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}")
+            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs; field 6 (sid) is Phase 38's addition (ROI-10, see below).
+            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
             if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -2336,7 +2359,10 @@ PY
             # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
             # Push before the create-gated continue so already-created jobs are also queued.
             # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs.
-            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}|${job_failure_reason}")
+            # Phase 38 (ROI-10): field 6 is sid, NOT the assessment itself — a nested
+            # object cannot be a pipe field. The outcome stage re-reads this session's
+            # marker for the assessment (38-RESEARCH.md: the marker is the carrier).
+            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}|${job_failure_reason}|${sid}")
 
             # D-09: ledger-gated idempotency — skip if this job was already created.
             if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -2795,11 +2821,14 @@ PY
   # write this tick has already been written by the time this stage runs (D-01).
   # Mirrors the in-loop jobs create stage (D-06: API-first, ledger-on-exit-0).
   if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${#job_outcome_queue[@]}" -gt 0 ]]; then
-    local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason
+    local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
     local outcome_now_ts _age_s _stale_threshold outcome_metadata
+    local outcome_markers_dir outcome_value outcome_currency
+    local outcome_evidence_class outcome_evaluator outcome_evaluator_version
+    local outcome_confidence outcome_hours_saved outcome_loaded_rate
     for _entry in "${job_outcome_queue[@]}"; do
-      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason <<< "${_entry}"
+      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
 
       # OUTCOME-01 gate: skip if already reported (ledger-gated idempotency).
@@ -2838,6 +2867,168 @@ except Exception:
           ;;
       esac
 
+      # Phase 38 (ROI-09/ROI-10): resolve an accepted assessment for SUCCESS
+      # arcs only — FAILED/CANCELLED are never evaluated (classifier.py gates
+      # _attach_assessment on status == SUCCESS before this stage ever runs),
+      # so this guard is defensive belt-and-suspenders, not the only gate.
+      # The assessment is NOT a queue field (a nested object cannot be a pipe
+      # field) — it is re-read from the session's marker file, the carrier
+      # 38-RESEARCH.md proved survives a deferred tick. The marker directory
+      # is resolved per-session below (not read off MARKERS_DIR) because a
+      # multiplexed gateway owns each session's markers under its own
+      # profile home — the same helper the in-loop jobs stage already uses
+      # at :~973.
+      outcome_value=""
+      outcome_currency=""
+      outcome_evidence_class=""
+      outcome_evaluator=""
+      outcome_evaluator_version=""
+      outcome_confidence=""
+      outcome_hours_saved=""
+      outcome_loaded_rate=""
+      if [[ "${outcome_status}" == "SUCCESS" && -n "${outcome_sid}" ]]; then
+        outcome_markers_dir="$(resolve_markers_dir "${outcome_sid}")"
+        [[ -z "${outcome_markers_dir}" ]] && outcome_markers_dir="${MARKERS_DIR}"
+        if [[ -f "${outcome_markers_dir}/${outcome_sid}.jsonl" ]]; then
+          local _assessment_kv
+          _assessment_kv=$(
+            MARKERS_DIR="${outcome_markers_dir}" \
+            SID="${outcome_sid}" \
+            OUTCOME_JOB_ID="${outcome_id}" \
+            python3 - <<'PY' 2>/dev/null || true
+import json
+import os
+from pathlib import Path
+
+markers_dir = os.environ.get('MARKERS_DIR', '')
+sid = os.environ.get('SID', '')
+job_id = os.environ.get('OUTCOME_JOB_ID', '')
+
+if not markers_dir or not sid or not job_id:
+    raise SystemExit(0)
+
+marker_path = Path(markers_dir) / f"{sid}.jsonl"
+if not marker_path.is_file():
+    raise SystemExit(0)
+
+# CR-02: the queue's outcome_id (job_id, above) is SANITIZED -- both push
+# sites (:~1440 / :~2342) replace(':',' ','\t','\n','\r' -> '_') the raw
+# agentic_job_id before pushing (D-16). The marker's raw agentic_job_id is
+# NOT sanitized (classifier.py's _validate_job only .strip()s it). Apply the
+# identical D-16 transform here before comparing, or any job id containing
+# one of these characters never matches and its assessment is silently
+# dropped. Same _bad_chars tuple as the two producers -- do not diverge.
+_bad_chars = (':', ' ', '\t', '\n', '\r')
+
+
+def _clean(v):
+    for bad in _bad_chars:
+        v = v.replace(bad, '_')
+    return v
+
+
+found = None
+try:
+    with marker_path.open() as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if not line or len(line) > 4096:
+                continue
+            try:
+                rec = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get('kind') != 'job':
+                continue
+            raw_id = rec.get('agentic_job_id')
+            if not isinstance(raw_id, str) or _clean(raw_id) != job_id:
+                continue
+            # ROI-12: pre-v1.5 marker lines have no "assessment" key at all —
+            # .get(...) makes that a no-op, not an error.
+            a = rec.get('assessment')
+            if isinstance(a, dict) and a:
+                found = a
+except OSError:
+    pass
+
+if found is None:
+    raise SystemExit(0)
+
+
+def _s(v, maxlen=None):
+    # Pipe/newline/CR-safe (IFS='|' transport, same rule as every other
+    # marker-derived field in this file). WR-01: also length-capped on read
+    # -- classifier.py already clamps these before writing, but this reader
+    # has no independent bound of its own, matching this file's existing
+    # convention (failure_reason capped to 500 at :1418/:2317, skill name to
+    # 128 at :168).
+    v = '' if v is None else str(v)
+    for bad in ('|', '\n', '\r'):
+        v = v.replace(bad, ' ')
+    if maxlen is not None:
+        v = v[:maxlen]
+    return v
+
+
+# WR-02: estimated_value/currency are shipped straight to the revenium CLI
+# as --outcome-value/--outcome-currency (a monetary value), unlike
+# confidence/estimated_hours_saved/assumed_loaded_rate which are round-
+# tripped through float() before entering --metadata (:~3022-3040). Today's
+# sole writer (classifier.py) always derives a clean float and a currency
+# already checked against SUPPORTED_CURRENCIES -- this is a read-side
+# defense against a malformed or hand-edited marker, not a live gap. Same
+# duplication-is-deliberate posture as SUPPORTED_CURRENCIES in classifier.py
+# (CLAUDE.md: "the plugin must stay importable without the skill's shell
+# environment") -- kept in sync by hand, not shared.
+_SUPPORTED_CURRENCIES = frozenset({'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF'})
+_raw_value = found.get('estimated_value', '')
+_raw_currency = found.get('currency', '')
+_value_ok = False
+try:
+    float(_raw_value)
+    _value_ok = True
+except (TypeError, ValueError):
+    _value_ok = False
+_currency_ok = (
+    isinstance(_raw_currency, str)
+    and _raw_currency.strip().upper() in _SUPPORTED_CURRENCIES
+)
+# Fail-open-and-omit-both: an invalid value or currency drops BOTH flags
+# (same posture the emission site already uses when only one of the pair
+# is present), never a malformed/unvalidated one alone.
+if _value_ok and _currency_ok:
+    value_out = _s(_raw_value)
+    currency_out = _s(_raw_currency, maxlen=32)
+else:
+    value_out = ''
+    currency_out = ''
+
+assumptions = found.get('assumptions')
+if not isinstance(assumptions, dict):
+    assumptions = {}
+print(f"VALUE={value_out}")
+print(f"CURRENCY={currency_out}")
+print(f"EVIDENCE_CLASS={_s(found.get('evidence_class', ''), maxlen=32)}")
+print(f"EVALUATOR={_s(found.get('evaluator', ''), maxlen=64)}")
+print(f"EVALUATOR_VERSION={_s(found.get('evaluator_version', ''), maxlen=16)}")
+print(f"CONFIDENCE={_s(found.get('confidence', ''))}")
+print(f"HOURS_SAVED={_s(assumptions.get('estimated_hours_saved', ''))}")
+print(f"LOADED_RATE={_s(assumptions.get('assumed_loaded_rate', ''))}")
+PY
+          )
+          outcome_value=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^VALUE=//p')
+          outcome_currency=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CURRENCY=//p')
+          outcome_evidence_class=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVIDENCE_CLASS=//p')
+          outcome_evaluator=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVALUATOR=//p')
+          outcome_evaluator_version=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVALUATOR_VERSION=//p')
+          outcome_confidence=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CONFIDENCE=//p')
+          outcome_hours_saved=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^HOURS_SAVED=//p')
+          outcome_loaded_rate=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^LOADED_RATE=//p')
+        fi
+      fi
+
       # D-06: API first — build command as array (bash 3.2 portability).
       local outcome_cmd=(
         revenium jobs outcome "${outcome_id}"
@@ -2855,16 +3046,38 @@ except Exception:
       if [[ "${outcome_status}" == "SUCCESS" ]]; then
         outcome_cmd+=(--outcome-type CONVERTED)
       fi
+      # Phase 38 (ROI-10): a resolved assessment ships as the two value flags,
+      # never as --outcome-type — a SUCCESS arc already sends CONVERTED above,
+      # and changing that mapping is out of scope for this plan (would move a
+      # golden). Both flags are added together or not at all (outcome_value is
+      # only ever set alongside outcome_currency by the resolver above).
+      # CR-01: gated on OUTCOME_VALUE_CLI_CAPABLE -- an older CLI predating
+      # these two flags must still receive the rest of the `jobs outcome`
+      # call (fail OPEN), not have the whole call rejected.
+      if [[ "${OUTCOME_VALUE_CLI_CAPABLE}" == "true" \
+            && -n "${outcome_value}" && -n "${outcome_currency}" ]]; then
+        outcome_cmd+=(--outcome-value "${outcome_value}")
+        outcome_cmd+=(--outcome-currency "${outcome_currency}")
+      fi
       # Phase 24 (quick-260531-n4i): attach --metadata JSON. source (deployment
       # environment from the session source column) rides on every outcome when
       # present; failure_reason is added only for FAILED arcs. json.dumps handles
       # quoting/escaping so prose reasons cannot break the JSON arg. Omit the flag
       # entirely when there is nothing to send (preserves v1.4 wire shape for
       # source-less sessions).
+      # Phase 38 (ROI-10): provenance for a resolved assessment rides beside
+      # source/failure_reason in this SAME metadata object, so the estimate's
+      # nature is unmistakable next to its value flags.
       outcome_metadata=$(
         OUTCOME_SOURCE="${outcome_source}" \
         OUTCOME_STATUS="${outcome_status}" \
         OUTCOME_FAILURE_REASON="${outcome_failure_reason}" \
+        OUTCOME_EVIDENCE_CLASS="${outcome_evidence_class}" \
+        OUTCOME_EVALUATOR="${outcome_evaluator}" \
+        OUTCOME_EVALUATOR_VERSION="${outcome_evaluator_version}" \
+        OUTCOME_CONFIDENCE="${outcome_confidence}" \
+        OUTCOME_HOURS_SAVED="${outcome_hours_saved}" \
+        OUTCOME_LOADED_RATE="${outcome_loaded_rate}" \
         python3 - <<'PY' 2>/dev/null || true
 import json, os
 meta = {}
@@ -2875,6 +3088,42 @@ status = os.environ.get('OUTCOME_STATUS', '').strip().upper()
 reason = os.environ.get('OUTCOME_FAILURE_REASON', '').strip()
 if status == 'FAILED' and reason:
     meta['failure_reason'] = reason
+
+# Phase 38 (ROI-10): provenance for a resolved assessment. Present only when
+# the resolver above found one (SUCCESS arcs only, ROI-09) — an empty env var
+# means "no assessment" and every branch below is a no-op, matching the
+# conditional-emit rule the rest of this file already follows.
+evidence_class = os.environ.get('OUTCOME_EVIDENCE_CLASS', '').strip()
+if evidence_class:
+    meta['evidence_class'] = evidence_class
+evaluator = os.environ.get('OUTCOME_EVALUATOR', '').strip()
+if evaluator:
+    meta['evaluator'] = evaluator
+evaluator_version = os.environ.get('OUTCOME_EVALUATOR_VERSION', '').strip()
+if evaluator_version:
+    meta['evaluator_version'] = evaluator_version
+confidence_raw = os.environ.get('OUTCOME_CONFIDENCE', '').strip()
+if confidence_raw:
+    try:
+        meta['confidence'] = float(confidence_raw)
+    except ValueError:
+        pass
+hours_raw = os.environ.get('OUTCOME_HOURS_SAVED', '').strip()
+rate_raw = os.environ.get('OUTCOME_LOADED_RATE', '').strip()
+assumptions = {}
+if hours_raw:
+    try:
+        assumptions['estimated_hours_saved'] = float(hours_raw)
+    except ValueError:
+        pass
+if rate_raw:
+    try:
+        assumptions['assumed_loaded_rate'] = float(rate_raw)
+    except ValueError:
+        pass
+if assumptions:
+    meta['assumptions'] = assumptions
+
 if meta:
     print(json.dumps(meta, separators=(',', ':')))
 PY

@@ -169,6 +169,11 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 Plan 04 — the event path's own argv-shape golden,
             # additive to (not part of) the v1.x immutability contract above
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-event.golden.json',
+            # Phase 38 Plan 01 (ROI-10) — the valued-outcome argv-shape golden,
+            # additive to (not part of) the jobs-outcome.golden.json v1.x
+            # immutability contract, which stays byte-identical for the
+            # unvalued path.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-assessment.golden.json',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
@@ -7492,6 +7497,15 @@ exit 0
                     '        ;;\n'
                     '      outcome)\n'
                     '        shift\n'
+                    # Phase 38 (CR-01): supports_flag "jobs outcome" "--outcome-value"
+                    # calls `revenium jobs outcome --help`. Answer it here, before the
+                    # generic outcome-log capture below, so the probe is never logged
+                    # as a real "jobs outcome" invocation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    '          echo "--outcome-value string     Business outcome value"\n'
+                    '          echo "--outcome-currency string   Business outcome currency"\n'
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{outcome_log}"\n'
                     f'        printf "\\n" >> "{outcome_log}"\n'
                     '        exit ${OUTCOME_EXIT_CODE:-0}\n'
@@ -7710,6 +7724,15 @@ exit 0
                     '      create) exit 1 ;;\n'
                     '      outcome)\n'
                     '        shift\n'
+                    # Phase 38 (CR-01): supports_flag "jobs outcome" "--outcome-value"
+                    # calls `revenium jobs outcome --help`. Answer it here, before the
+                    # generic outcome-log capture below, so the probe is never logged
+                    # as a real "jobs outcome" invocation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    '          echo "--outcome-value string     Business outcome value"\n'
+                    '          echo "--outcome-currency string   Business outcome currency"\n'
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{outcome_log}"\n'
                     f'        printf "\\n" >> "{outcome_log}"\n'
                     '        exit 0\n'
