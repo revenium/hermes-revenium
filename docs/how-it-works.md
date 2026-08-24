@@ -147,6 +147,64 @@ reports, per profile, whether the switch is enabled, which evaluator is selected
 two cron-side counts (`deferred`/`wedged`, `reported`) from that profile's own log — and
 names where the other four are written, rather than attempting to show them.
 
+**Live verification against a real tenant (2026-08-24).** Every earlier phase of this
+feature proved the chain above against fixtures, stubs, and a shell test double. It has
+since been run once, end to end, against a real Hermes session and a real Revenium tenant:
+a session produced an inferred job, the evaluator produced or correctly withheld an
+assessment, the outcome was reported through the normal cron pipeline exactly once across
+two ticks, and the result was read back live with `revenium jobs roi <id>`.
+
+The run did not use the dedicated sandbox host this verification was originally scoped
+against — that host was unreachable, and the only other available host with a real tenant
+was a production fleet host deliberately excluded from this work, because the feature
+writes estimated money into whatever tenant it touches. It ran instead on a throwaway
+profile on a developer workstation, against an isolated development tenant. The substitution
+narrows what the result covers, and the limits below are stated with that in mind.
+
+What it wrote is permanent. The verification job and its reported outcome remain in that
+development tenant: `revenium jobs outcome` is labelled immutable by the CLI itself, and
+nothing this skill calls can retract a reported outcome. Whether deleting a job also
+removes its outcome revisions was not tested. Anyone repeating this procedure should expect
+the rows to stay.
+
+The reported outcome carried `evidence_class: MODEL_ESTIMATED_DEMO` in its metadata,
+alongside `evaluator`, `evaluator_version`, `confidence`, and both numeric assumptions the
+estimate is built from. A reader inspecting the outcome's own metadata can tell this number
+apart from a measured one — but `revenium jobs roi <id>` itself, in both its JSON and table
+output, surfaced none of that: no `evidence_class`, no `evaluator`, no `confidence`, nothing
+distinguishing an estimate from a measurement. The estimated value is shown with the exact
+same visual weight a measured value would get. Only the separate `jobs outcome-history`
+command echoes the metadata blob at all. **The honesty burden for stating that a value is an
+unverified model estimate therefore rests entirely on this skill's own `--metadata` payload
+and on documentation like this page — not on anything Revenium's primary read-back
+surfaces.**
+
+Both outcomes were observed, not just the successful one. A trivial, low-stakes task
+produced a genuine `SUCCESS` job, and the evaluator declined to produce a value — no
+assessment, nothing reported. A separate, realistic, bounded engineering task produced a
+`SUCCESS` job with a complete, non-inflated assessment (`$250.00` USD, `2.0` hours at
+`$125/hr`, confidence `0.9`), which was reported and read back unchanged. Read together, the
+pair shows the evaluator discriminating rather than assigning a number to every successful
+arc regardless of merit — an evaluator that never abstains would be indistinguishable from
+one that always inflates.
+
+**What this run did NOT prove.** One arc reported, on one workstation, against one isolated
+dev tenant, with one evaluator model, across two cron ticks. It says nothing about fleet or
+multi-profile behavior, nothing about idempotency across more than two ticks or concurrent
+ticks, and nothing about evaluator behavior on a different LLM provider.
+
+It also did not exercise the value-against-cost calculation. The verification session ran on
+a free-tier model, so its metered cost was genuinely `$0.00` and the read-back returned a
+null ROI — the correct answer to a value divided by no cost, but a degenerate one. The
+reported value was proven end to end; the ratio Revenium computes from that value and the
+metered cost was not.
+
+One provenance limit is worth stating alongside the metadata above. `evaluator` and
+`evaluator_version` identify the evaluator *implementation*, not the model that produced the
+estimate — the evaluator issues an unpinned call and the host routes it, so a provider
+failover can change the deciding model without changing either field. An estimate's metadata
+therefore establishes that a model produced it under stated assumptions, not which one.
+
 ## Tool-event metering
 
 `post_tool_call` captures each Hermes tool call — name, duration in milliseconds,
