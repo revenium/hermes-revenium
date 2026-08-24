@@ -41,7 +41,7 @@ registered, `2` registered but inert.
 | Command | What it does |
 |---|---|
 | `clear-halt.sh` | Clear an active halt. `--rule-id <id>` clears one rule. This is the only thing that clears a halt — nothing auto-clears. |
-| `prune-markers.sh` | Remove marker files older than 30 days. `--dry-run` previews. Deliberately not wired into cron. |
+| `prune-markers.sh` | Remove marker files older than 30 days, plus the warn-flag sentinel directories (`.warn`, `.fallback-warn`, `.outcome-warn`, `.probe-warn`) — these accumulate one zero-byte file per suppressed condition and are never pruned automatically. `--dry-run` previews. Deliberately not wired into cron; run it periodically by hand. |
 | `install-cron.sh` / `uninstall-cron.sh` | Manage the per-minute crontab entry |
 | `install-hooks.sh` / `uninstall-hooks.sh` | Manage the three shell hooks in `config.yaml` |
 | `install-plugin.sh` | Copy the classifier into `~/.hermes/plugins/` and restart the gateway |
