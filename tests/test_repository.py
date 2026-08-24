@@ -1274,6 +1274,79 @@ exit 0
                 'in no clone, silently stopping metering across every profile',
             )
 
+    def test_docs_state_what_the_outcome_estimate_number_is(self):
+        """ROI-15: the docs must say what the LLM outcome-evaluation number
+        IS, not just that the switch exists.
+
+        Same `required = [(relpath, needle, why), ...]` shape as
+        `test_docs_document_multi_profile_operation` above, but this test's
+        subject is different (ROI-15's wording bar, not fleet operation), so
+        it is a new sibling rather than an extension of that one.
+
+        Two facts have to survive contact with the prose, and each needle
+        below is falsifiable — verified absent from its target file before
+        this phase:
+
+        - the value is an UNVERIFIED MODEL ESTIMATE, not measured, observed,
+          customer-confirmed, or defensible ROI on its own
+        - the six-word log taxonomy spans TWO log destinations (D-01) — the
+          docs must not imply one file or command shows all six
+
+        This test does not (and cannot) judge whether the prose reads well;
+        that is task 3's human-check. It only proves the load-bearing phrases
+        are present at all, so the claims cannot silently rot back to absent.
+        """
+        required = [
+            ('docs/configuration.md', 'llmOutcomeEvaluation',
+             'the switch is undocumented in the operator config page today'),
+            ('docs/configuration.md', 'literal JSON boolean',
+             'a near-miss value silently leaves money estimation off'),
+            ('docs/configuration.md', 'unverified model estimate',
+             'the config page must not describe the value as measured'),
+            ('docs/how-it-works.md', 'unverified model estimate',
+             "ROI-15's core claim"),
+            ('docs/how-it-works.md', 'metered cost',
+             'the displayed ROI is a combination, not this number alone'),
+            ('docs/how-it-works.md', 'two log destinations',
+             'D-01: the six-word taxonomy is split and the docs must say so'),
+            ('docs/how-it-works.md', 'byte-identical',
+             'upgrade behaviour must be stated, not implied'),
+            ('skills/revenium/references/config-schema.md', 'revenium_classifier',
+             'the config reference must name where four of the six words are '
+             'written'),
+        ]
+        for relpath, needle, why in required:
+            page = ROOT / relpath
+            self.assertTrue(page.exists(), f'missing {relpath}')
+            self.assertIn(
+                needle, page.read_text(errors='ignore'),
+                f'{relpath} no longer documents: {needle!r} — {why}',
+            )
+
+        # D-05: the CHANGELOG entry sits under [Unreleased], not under the
+        # unrelated [v1.5] product tag that merely shares this milestone's
+        # number. Positional, not a version-string match — what needs proving
+        # is WHERE the entry sits, not what it is named.
+        changelog = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
+        unreleased_idx = changelog.find('## [Unreleased]')
+        self.assertNotEqual(unreleased_idx, -1, 'CHANGELOG.md has no [Unreleased] '
+                             'heading')
+        next_release_idx = changelog.find('## [v', unreleased_idx + 1)
+        self.assertNotEqual(next_release_idx, -1, 'CHANGELOG.md has no released '
+                             'version heading below [Unreleased]')
+        entry_idx = changelog.find('LLM outcome evaluation')
+        self.assertNotEqual(
+            entry_idx, -1,
+            'CHANGELOG.md has no entry for LLM outcome evaluation',
+        )
+        self.assertTrue(
+            unreleased_idx < entry_idx < next_release_idx,
+            'the LLM outcome evaluation CHANGELOG entry must sit under '
+            '[Unreleased], not under any released version heading — the '
+            '[v1.5] tag is an unrelated 2026-08-20 product release that '
+            'merely shares this planning milestone\'s number (D-05)',
+        )
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning
