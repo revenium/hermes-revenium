@@ -970,6 +970,124 @@ exit 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_diagnose_sh_section9_grepcount_distinguishes_unreadable_from_zero(self):
+        """Section 9, PR #91 review P2: an unreadable `revenium-metering.log`
+        must not render as `0` -- that is indistinguishable from a confirmed
+        zero matches (deferred/wedged/reported all genuinely absent).
+
+        Two profiles in one run:
+
+        1. `unreadable` (default home) -- a real log file exists but is chmod
+           000, so `grep` cannot open it. Before the fix, `grepcount()`'s
+           `n="$(grep -Fc ... 2>/dev/null)"` produced empty stdout on the
+           permission error, and `${n:-0}` silently rendered that as `0` for
+           deferred/wedged/reported alike -- an unreadable log looked identical
+           to an idle one.
+        2. `zerohit` -- a real, READABLE log file with content that matches
+           none of the three patterns. This must still render as a genuine `0`
+           -- the fix must not turn every non-match into an error.
+
+        Skipped when running as root, where chmod 000 does not block reads.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        if hasattr(os, 'geteuid') and os.geteuid() == 0:
+            self.skipTest('chmod 000 does not block reads for root')
+
+        tmp = tempfile.mkdtemp(prefix='gsd-diagnose-unreadable-')
+        try:
+            home = os.path.join(tmp, 'home')
+            bindir = os.path.join(home, '.local', 'bin')
+            hermes_home = os.path.join(home, '.hermes')
+            scripts = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(bindir)
+            shutil.copytree(SKILL / 'scripts', scripts)
+
+            stub_path = os.path.join(bindir, 'revenium')
+            with open(stub_path, 'w') as fh:
+                fh.write('#!/usr/bin/env bash\nexit 0\n')
+            os.chmod(stub_path, 0o755)
+
+            # Profile 1: default home -- unreadable log.
+            default_state = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(default_state)
+            unreadable_log = os.path.join(default_state, 'revenium-metering.log')
+            with open(unreadable_log, 'w') as fh:
+                fh.write('outcome deferred: id=abc123\n')
+            os.chmod(unreadable_log, 0o000)
+
+            # Profile 2: profiles/zerohit -- readable log, zero real matches.
+            zerohit_state = os.path.join(
+                hermes_home, 'profiles', 'zerohit', 'state', 'revenium')
+            os.makedirs(zerohit_state)
+            zerohit_log = os.path.join(zerohit_state, 'revenium-metering.log')
+            with open(zerohit_log, 'w') as fh:
+                fh.write('nothing matching any of the three patterns here\n')
+
+            env = {
+                'HOME': home,
+                'PATH': f'{bindir}:/usr/bin:/bin:/usr/sbin:/sbin',
+                'HERMES_HOME': hermes_home,
+                'HERMES_DEFAULT_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': default_state,
+            }
+            try:
+                r = subprocess.run(
+                    ['bash', os.path.join(scripts, 'diagnose.sh')],
+                    env=env, capture_output=True, text=True, timeout=120,
+                )
+
+                self.assertEqual(r.returncode, 0,
+                                 f'diagnose.sh must always exit 0 — a report, '
+                                 f'not a gate.\nstderr={r.stderr}')
+                self.assertNotIn(
+                    'Traceback', r.stdout + r.stderr,
+                    'an unreadable log must render a plain row, never a '
+                    'Python traceback',
+                )
+
+                lines_by_profile = {}
+                for raw_line in r.stdout.splitlines():
+                    for pname in ('default', 'zerohit'):
+                        if raw_line.startswith(f'{pname} ') or raw_line.startswith(f'{pname}\t'):
+                            lines_by_profile[pname] = raw_line
+
+                self.assertIn('default', lines_by_profile,
+                              f'no row for the default profile.\nstdout={r.stdout}')
+                default_line = lines_by_profile['default']
+                self.assertNotIn(
+                    'deferred=0', default_line,
+                    'an unreadable log must not render deferred as a '
+                    f'confirmed zero: {default_line!r}',
+                )
+                self.assertNotIn(
+                    'reported=0', default_line,
+                    'an unreadable log must not render reported as a '
+                    f'confirmed zero: {default_line!r}',
+                )
+
+                self.assertIn('zerohit', lines_by_profile,
+                              f'no row for profiles/zerohit.\nstdout={r.stdout}')
+                zerohit_line = lines_by_profile['zerohit']
+                self.assertIn(
+                    'deferred=0', zerohit_line,
+                    'a readable log with zero real matches must still print '
+                    f'a genuine 0, not an error: {zerohit_line!r}',
+                )
+                self.assertIn(
+                    'reported=0', zerohit_line,
+                    'a readable log with zero real matches must still print '
+                    f'a genuine 0, not an error: {zerohit_line!r}',
+                )
+            finally:
+                # Restore permissions so tempdir cleanup can remove the file.
+                os.chmod(unreadable_log, 0o644)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_guardrail_status_is_scoped_to_this_installs_rules(self):
         """A profile's guardrail-status.json describes only that profile's rules.
 

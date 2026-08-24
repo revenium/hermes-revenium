@@ -75,9 +75,24 @@ mtime() { [[ -e "$1" ]] && { date -r "$1" 2>/dev/null || echo "(unknown)"; } || 
 # literal (fixed-string) prefix rather than every line. Used by section 9 to
 # count the two cron-side log-taxonomy outcomes without a second file-format.
 grepcount() {
-  local f="$1" pat="$2" n
+  local f="$1" pat="$2" n rc
   [[ -f "${f}" ]] || { echo "(absent)"; return; }
+  # A present-but-unreadable file must not render as 0 -- that is
+  # indistinguishable from a confirmed zero matches, same "(absent)" vs
+  # "ran and found nothing" distinction lines()/count() already make above.
+  # Check readability up front (covers the common permission-denied case
+  # without ever invoking grep), and ALSO check grep's own exit code as
+  # defense in depth for a file that fails to open despite passing -r (a
+  # race, an I/O error). `grep -Fc` exits 1 on a legitimate zero-match --
+  # that is NOT an error and must still print 0 -- so only an exit code
+  # greater than 1 (2 = usage/read error) is treated as unreadable.
+  [[ -r "${f}" ]] || { echo "(unreadable)"; return; }
   n="$(grep -Fc -- "${pat}" "${f}" 2>/dev/null)"
+  rc=$?
+  if [[ ${rc} -gt 1 ]]; then
+    echo "(unreadable)"
+    return
+  fi
   echo "${n:-0}"
 }
 
