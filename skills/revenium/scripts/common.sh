@@ -40,6 +40,22 @@ FALLBACK_WARN_FLAGS_DIR="${REVENIUM_FALLBACK_WARN_FLAGS_DIR:-${MARKERS_DIR}/.fal
 # instead of silently stripping a dimension off every row in the tick.
 # Created lazily by its writer, deliberately absent from the eager mkdir -p.
 PROBE_WARN_FLAGS_DIR="${REVENIUM_PROBE_WARN_FLAGS_DIR:-${MARKERS_DIR}/.probe-warn}"
+
+# Fourth sentinel directory in the same family as WARN_FLAGS_DIR,
+# FALLBACK_WARN_FLAGS_DIR, and PROBE_WARN_FLAGS_DIR (Phase 39 D-02): one
+# zero-byte flag per (outcome_id, reason) whose deferred/wedged job-outcome
+# WARN (hermes-report.sh's OUTCOME-04 branch) has already fired once. The
+# key is outcome_id -- stable per job across every tick, already sanitized
+# at both queue producers -- plus the reason word ("deferred" or "wedged"),
+# NEVER a per-tick value (age, timestamp, tick counter): a key that changes
+# every tick reproduces the unknown-<epoch> defeat pre_llm_call.sh:73-115
+# already paid for once, where the sentinel never matches and the warn fires
+# every time. A reason TRANSITION (deferred -> wedged) is a NEW filename and
+# therefore warns once more -- that transition is the informative event and
+# must not be swallowed. A job whose create later succeeds is retried
+# regardless of this gate; only the LINE is bounded, never the retry.
+# Created lazily by its writer, deliberately absent from the eager mkdir -p.
+OUTCOME_WARN_FLAGS_DIR="${REVENIUM_OUTCOME_WARN_FLAGS_DIR:-${MARKERS_DIR}/.outcome-warn}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 MARKER_RETENTION_DAYS="${REVENIUM_MARKER_RETENTION_DAYS:-30}"
 PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
