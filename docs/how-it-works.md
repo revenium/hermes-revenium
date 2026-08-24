@@ -147,6 +147,39 @@ reports, per profile, whether the switch is enabled, which evaluator is selected
 two cron-side counts (`deferred`/`wedged`, `reported`) from that profile's own log — and
 names where the other four are written, rather than attempting to show them.
 
+**Live verification against a real tenant (2026-08-24).** Every earlier phase of this
+feature proved the chain above against fixtures, stubs, and a shell test double. It has
+since been run once, end to end, against a real Hermes session and a real Revenium tenant:
+a session produced an inferred job, the evaluator produced or correctly withheld an
+assessment, the outcome was reported through the normal cron pipeline exactly once across
+two ticks, and the result was read back live with `revenium jobs roi <id>`.
+
+The reported outcome carried `evidence_class: MODEL_ESTIMATED_DEMO` in its metadata,
+alongside `evaluator`, `evaluator_version`, `confidence`, and both numeric assumptions the
+estimate is built from. A reader inspecting the outcome's own metadata can tell this number
+apart from a measured one — but `revenium jobs roi <id>` itself, in both its JSON and table
+output, surfaced none of that: no `evidence_class`, no `evaluator`, no `confidence`, nothing
+distinguishing an estimate from a measurement. The estimated value is shown with the exact
+same visual weight a measured value would get. Only the separate `jobs outcome-history`
+command echoes the metadata blob at all. **The honesty burden for stating that a value is an
+unverified model estimate therefore rests entirely on this skill's own `--metadata` payload
+and on documentation like this page — not on anything Revenium's primary read-back
+surfaces.**
+
+Both outcomes were observed, not just the successful one. A trivial, low-stakes task
+produced a genuine `SUCCESS` job, and the evaluator declined to produce a value — no
+assessment, nothing reported. A separate, realistic, bounded engineering task produced a
+`SUCCESS` job with a complete, non-inflated assessment (`$250.00` USD, `2.0` hours at
+`$125/hr`, confidence `0.9`), which was reported and read back unchanged. Read together, the
+pair shows the evaluator discriminating rather than assigning a number to every successful
+arc regardless of merit — an evaluator that never abstains would be indistinguishable from
+one that always inflates.
+
+**What this run did NOT prove.** One arc reported, on one workstation, against one isolated
+dev tenant, with one evaluator model, across two cron ticks. It says nothing about fleet or
+multi-profile behavior, nothing about idempotency across more than two ticks or concurrent
+ticks, and nothing about evaluator behavior on a different LLM provider.
+
 ## Tool-event metering
 
 `post_tool_call` captures each Hermes tool call — name, duration in milliseconds,
