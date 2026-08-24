@@ -271,6 +271,25 @@ try:
     cfg = cfg if isinstance(cfg, dict) else {}
     enabled = cfg.get("enabled") is True
     evaluator = cfg.get("evaluator") or "llm"
+    # Mirror evaluators.resolve, not just the fallback: `or "llm"` only
+    # catches FALSY values -- 0, "", None, an empty list, an empty dict.
+    # A truthy non-string -- an int, a list, a dict, True -- sails
+    # through unchanged and would print as though it were a working
+    # evaluator name. At runtime resolve rejects it because
+    # isinstance(name, str) is False, fn comes back None, and
+    # classifier.py logs "unknown evaluator" and returns WITHOUT
+    # evaluating -- the same "reports armed, nothing runs" shape
+    # T-39-13 fixed for `enabled`. Render it unmistakably as invalid
+    # rather than silently coercing to "llm", which would be a
+    # different lie: the runtime does not fall back to "llm" here, it
+    # skips.
+    # NOTE: no apostrophes and no unbalanced parens across lines in this
+    # comment block -- bash 3.2 mis-parses a heredoc nested inside
+    # $(...) when either shows up, closing the substitution early.
+    # Verified with bash -n while writing this fix; a balanced,
+    # same-line paren such as isinstance(name, str) above is fine.
+    if not isinstance(evaluator, str):
+        evaluator = "INVALID(not-a-string)"
 except Exception:
     enabled = False
     evaluator = "llm"

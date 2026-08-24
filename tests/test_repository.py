@@ -876,6 +876,100 @@ exit 0
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_diagnose_sh_section9_rejects_non_string_evaluator(self):
+        """Section 9, PR #91 review P1: a truthy non-string `evaluator` must not
+        render as a working evaluator name.
+
+        `evaluators.resolve()` (evaluators.py:77-86) returns None for any `name`
+        that fails `isinstance(name, str)`. classifier.py:1497-1508 then logs
+        "unknown evaluator" and returns WITHOUT evaluating -- the consumer skips
+        entirely. `diagnose.sh`'s own `cfg.get("evaluator") or "llm"` only
+        substitutes the fallback for FALSY values; a truthy non-string (here, the
+        JSON integer 123) sails through unchanged, so before the fix the report
+        printed `evaluator=123` -- a plausible-looking evaluator name for a
+        config the runtime actually treats as broken and skips.
+
+        One profile, `enabled: true` with `evaluator: 123` (a JSON int, not a
+        string). Row must render something that unmistakably signals an invalid
+        evaluator -- specifically it must NOT be exactly `evaluator=123` (a bare
+        echo of the raw value would misreport this as a working configuration).
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmp = tempfile.mkdtemp(prefix='gsd-diagnose-badeval-')
+        try:
+            home = os.path.join(tmp, 'home')
+            bindir = os.path.join(home, '.local', 'bin')
+            hermes_home = os.path.join(home, '.hermes')
+            scripts = os.path.join(hermes_home, 'skills', 'revenium', 'scripts')
+            os.makedirs(bindir)
+            shutil.copytree(SKILL / 'scripts', scripts)
+
+            stub_path = os.path.join(bindir, 'revenium')
+            with open(stub_path, 'w') as fh:
+                fh.write('#!/usr/bin/env bash\nexit 0\n')
+            os.chmod(stub_path, 0o755)
+
+            default_state = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(default_state)
+            with open(os.path.join(default_state, 'config.json'), 'w') as fh:
+                fh.write('{"llmOutcomeEvaluation": {"enabled": true, '
+                          '"evaluator": 123}}')
+
+            env = {
+                'HOME': home,
+                'PATH': f'{bindir}:/usr/bin:/bin:/usr/sbin:/sbin',
+                'HERMES_HOME': hermes_home,
+                'HERMES_DEFAULT_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': default_state,
+            }
+            r = subprocess.run(
+                ['bash', os.path.join(scripts, 'diagnose.sh')],
+                env=env, capture_output=True, text=True, timeout=120,
+            )
+
+            self.assertEqual(r.returncode, 0,
+                             f'diagnose.sh must always exit 0 — a report, not a '
+                             f'gate.\nstderr={r.stderr}')
+            self.assertNotIn(
+                'Traceback', r.stdout + r.stderr,
+                'a non-string evaluator must render a plain invalid row, '
+                'never a Python traceback',
+            )
+
+            # Section 8 also emits a "default ..." row (ledger/log only, no
+            # evaluator field); section 9's row comes AFTER it in output
+            # order, so keep the LAST match rather than the first (mirrors
+            # test_diagnose_sh_llm_outcome_section_predicate_and_half_boundary's
+            # same technique above).
+            default_line = None
+            for raw_line in r.stdout.splitlines():
+                if raw_line.startswith('default ') or raw_line.startswith('default\t'):
+                    default_line = raw_line
+            self.assertIsNotNone(
+                default_line, f'no row for the default profile.\nstdout={r.stdout}')
+
+            self.assertNotIn(
+                'evaluator=123', default_line,
+                'the raw non-string value must not be echoed as if it were a '
+                f'working evaluator name -- the runtime skips evaluation '
+                f'entirely for a non-string evaluator (evaluators.resolve '
+                f'returns None): {default_line!r}',
+            )
+            self.assertNotRegex(
+                default_line, r'evaluator=123\s',
+                f'evaluator=123 must not appear at all, padded or not: '
+                f'{default_line!r}',
+            )
+            self.assertIn(
+                'evaluator=', default_line,
+                f'section 9 must still print an evaluator field: {default_line!r}')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_guardrail_status_is_scoped_to_this_installs_rules(self):
         """A profile's guardrail-status.json describes only that profile's rules.
 
