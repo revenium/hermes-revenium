@@ -71,6 +71,15 @@ hr()    { echo ""; echo "===== $* ====="; }
 count() { [[ -e "$1" ]] && { ls -1 "$1" 2>/dev/null | wc -l | tr -d ' '; } || echo "(absent)"; }
 lines() { [[ -f "$1" ]] && { wc -l < "$1" | tr -d ' '; } || echo "(absent)"; }
 mtime() { [[ -e "$1" ]] && { date -r "$1" 2>/dev/null || echo "(unknown)"; } || echo "(absent)"; }
+# Same "(absent)" convention as lines() above, but counting occurrences of a
+# literal (fixed-string) prefix rather than every line. Used by section 9 to
+# count the two cron-side log-taxonomy outcomes without a second file-format.
+grepcount() {
+  local f="$1" pat="$2" n
+  [[ -f "${f}" ]] || { echo "(absent)"; return; }
+  n="$(grep -Fc -- "${pat}" "${f}" 2>/dev/null)"
+  echo "${n:-0}"
+}
 
 # Probe the state tree BEFORE sourcing common.sh, which eagerly `mkdir -p`s
 # STATE_DIR, markers/, markers/.ready/ and tool-events/ at source time. After
@@ -233,8 +242,64 @@ echo ""
 echo "(re-run with --profile <name> to inspect one of these in full)"
 
 # ---------------------------------------------------------------------------
+hr "9. LLM OUTCOME EVALUATION (opt-in, experimental)"
+# Read-only, and stays that way: config.json and this profile's own LOG_FILE
+# only. No `revenium` CLI call, no write, no --tick behaviour (T-39-12) --
+# the existing functional test catches a stray ledger/log write but cannot
+# catch a stray API call, so that guarantee lives here in the action, not in
+# a test.
+while IFS=$'\t' read -r pname phome; do
+  [[ -z "${pname}" ]] && continue
+  pstate="${phome}/state/revenium"
+  pcfg="${pstate}/config.json"
+  plog="${pstate}/revenium-metering.log"
+
+  # Mirror classifier.py's _llm_evaluation_enabled / _llm_evaluation_config
+  # EXACTLY (T-39-13): `enabled` must be a literal JSON boolean true. The
+  # string "true", the integer 1, or any other truthy value reports disabled
+  # here because it IS disabled in the runtime -- a truthiness test would be
+  # the read-side twin of the sanitize-before-compare defect phase 38 found
+  # on the write side. Fail CLOSED on any read error, same as the consumer:
+  # a missing or malformed config.json means "off", never a traceback.
+  _row="$(CFG="${pcfg}" python3 - <<'PY'
+import json, os
+
+try:
+    with open(os.environ["CFG"]) as fh:
+        data = json.load(fh)
+    cfg = data.get("llmOutcomeEvaluation")
+    cfg = cfg if isinstance(cfg, dict) else {}
+    enabled = cfg.get("enabled") is True
+    evaluator = cfg.get("evaluator") or "llm"
+except Exception:
+    enabled = False
+    evaluator = "llm"
+print("{}\t{}".format("true" if enabled else "false", evaluator))
+PY
+)"
+  IFS=$'\t' read -r p_enabled p_evaluator <<<"${_row}"
+
+  # Two of the six taxonomy words are visible here: "deferred" (plus its aged
+  # "wedged" restatement of the same outcome) and "reported". Literal prefixes
+  # per 39-01-SUMMARY.md / 39-02-SUMMARY.md -- do not paraphrase a fourth
+  # variant of text already fixed by those plans.
+  deferred="$(grepcount "${plog}" "outcome deferred: id=")"
+  wedged="$(grepcount "${plog}" "wedged job (no create confirmed after")"
+  reported="$(grepcount "${plog}" "Outcome reported: agentic_job_id=")"
+
+  printf '%-16s enabled=%-6s evaluator=%-6s deferred=%-8s wedged=%-8s reported=%-8s\n' \
+    "${pname}" "${p_enabled}" "${p_evaluator}" "${deferred}" "${wedged}" "${reported}"
+done < <(hermes_profile_homes)
+echo ""
+echo "NOTE: the other four outcomes -- evaluated, abstained, invalid, timed-out"
+echo "      -- are written IN-PROCESS by the classifier plugin on the Python"
+echo "      logger 'revenium_classifier', not into revenium-metering.log, so"
+echo "      they land wherever Hermes' own logging is configured. This report"
+echo "      cannot show them; it can only tell you where to look."
+
+# ---------------------------------------------------------------------------
 if [[ "${TICK}" == "true" ]]; then
-  hr "9. ONE REAL CRON TICK — THIS SHIPS DATA"
+  hr "10. ONE REAL CRON TICK — THIS SHIPS DATA"
   bash "${SKILL_DIR}/scripts/cron.sh" 2>&1 | tail -40
   echo "--- log after the tick ---"
   tail -25 "${LOG_FILE}" 2>/dev/null || echo "(no log)"
