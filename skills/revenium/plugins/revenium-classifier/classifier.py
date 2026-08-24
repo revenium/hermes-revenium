@@ -553,6 +553,15 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
         # Python minimum, and the two names are the same object on 3.11+
         # (harmless duplicate) but different types before it. This clause
         # must stay BEFORE the generic `except Exception` or it is dead code.
+        # 39-REVIEW.md WR-02 verified this against the LIVE
+        # agent.auxiliary_client.py, not just this repo's own assumption:
+        # `call_llm` raises the builtin TimeoutError at :1422, :1557, and
+        # :8383 on a real timeout, and on Python 3.11+
+        # `asyncio.TimeoutError is TimeoutError` evaluates True (confirmed on
+        # this host, 3.14.6) -- so this clause is reachable in production,
+        # not just under the test suite's direct `raise TimeoutError()`
+        # stubs. Do not re-open this as an open question without re-reading
+        # that source.
         # Deliberately NOT catching asyncio.CancelledError: it is a
         # BaseException and swallowing it would break task cancellation.
         return _EVAL_TIMED_OUT
@@ -1548,7 +1557,17 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         # _evaluate_outcome_via_llm at all -- so this must be its own clause,
         # not folded into the generic except below, or half the taxonomy
         # stays generic. Must stay BEFORE `except Exception` or it is dead
-        # code. Deliberately NOT catching asyncio.CancelledError: it is a
+        # code.
+        # 39-REVIEW.md WR-02 verified this against the LIVE
+        # agent.auxiliary_client.py, not just this repo's own assumption:
+        # `call_llm` raises the builtin TimeoutError at :1422, :1557, and
+        # :8383 on a real timeout, and on Python 3.11+
+        # `asyncio.TimeoutError is TimeoutError` evaluates True (confirmed on
+        # this host, 3.14.6) -- so this clause is reachable in production,
+        # not just under the test suite's direct `raise TimeoutError()`
+        # stubs. Do not re-open this as an open question without re-reading
+        # that source.
+        # Deliberately NOT catching asyncio.CancelledError: it is a
         # BaseException and swallowing it would break task cancellation.
         logger.warning(
             "revenium-classifier: outcome evaluation timed-out for job=%s",
