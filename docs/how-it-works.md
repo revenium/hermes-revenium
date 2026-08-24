@@ -154,6 +154,19 @@ a session produced an inferred job, the evaluator produced or correctly withheld
 assessment, the outcome was reported through the normal cron pipeline exactly once across
 two ticks, and the result was read back live with `revenium jobs roi <id>`.
 
+The run did not use the dedicated sandbox host this verification was originally scoped
+against — that host was unreachable, and the only other available host with a real tenant
+was a production fleet host deliberately excluded from this work, because the feature
+writes estimated money into whatever tenant it touches. It ran instead on a throwaway
+profile on a developer workstation, against an isolated development tenant. The substitution
+narrows what the result covers, and the limits below are stated with that in mind.
+
+What it wrote is permanent. The verification job and its reported outcome remain in that
+development tenant: `revenium jobs outcome` is labelled immutable by the CLI itself, and
+nothing this skill calls can retract a reported outcome. Whether deleting a job also
+removes its outcome revisions was not tested. Anyone repeating this procedure should expect
+the rows to stay.
+
 The reported outcome carried `evidence_class: MODEL_ESTIMATED_DEMO` in its metadata,
 alongside `evaluator`, `evaluator_version`, `confidence`, and both numeric assumptions the
 estimate is built from. A reader inspecting the outcome's own metadata can tell this number
