@@ -30,6 +30,30 @@ or writes that file itself.
 An upgraded host keeps its legacy `alertId` field, but nothing reads it. See
 [Guardrails migration](migration-guardrails.md).
 
+### LLM outcome evaluation (experimental)
+
+```json
+{
+  "llmOutcomeEvaluation": {
+    "enabled": false,
+    "evaluator": "llm",
+    "currency": "USD",
+    "maxHoursSaved": 40,
+    "maxLoadedRate": 500
+  }
+}
+```
+
+| Field | Required | Purpose |
+|---|---|---|
+| `enabled` | no | Must be a **literal JSON boolean** `true` — the string `"true"`, the integer `1`, and any other truthy value all leave the feature off. `false` or absent (the default) meters exactly as before. |
+| `evaluator` | no | Which registered evaluator to use. Defaults to `"llm"`. |
+| `currency`, `maxHoursSaved`, `maxLoadedRate` | no | Bounds on the estimate. See the full schema for defaults and behaviour when exceeded. |
+
+The value this produces is an **unverified model estimate** — see
+[How it works](how-it-works.md#llm-outcome-value-evaluation-experimental) for what that
+means and how Revenium combines it with metered cost into a displayed ROI.
+
 The full schema is in
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md).
 

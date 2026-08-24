@@ -9,7 +9,22 @@ this repository.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- Opt-in, off-by-default **LLM outcome evaluation** (`llmOutcomeEvaluation` in
+  `config.json`): on a `SUCCESS` job arc, estimates the job's economic value via one
+  bounded LLM call on the user's own provider. The result is an unverified model
+  estimate — Revenium combines it with metered cost into the displayed ROI. Fails
+  closed: a missing or malformed config metres exactly as before.
+- The evaluation-outcome log taxonomy now distinguishes `invalid` and `timed-out` from
+  `abstained`, in addition to the pre-existing `evaluated`, `deferred`, and `reported` —
+  six words in total, split across two log destinations (in-process on the
+  `revenium_classifier` logger for four of them, the cron's `revenium-metering.log` for
+  the other two).
+- `diagnose.sh` section reporting, per profile, whether LLM outcome evaluation is
+  enabled, which evaluator is selected, and the two cron-side taxonomy counts.
+- The pre-existing unbounded deferred/wedged job-outcome logger is now rate-limited to
+  once per `(outcome_id, reason)`, with a per-tick backlog aggregate line when the
+  count is non-zero.
 
 ## [v1.7] — 2026-08-22
 
