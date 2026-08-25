@@ -1902,6 +1902,50 @@ def _jobs_log_invocations(jobs_log):
     return invocations
 
 
+def _build_toctou_race_shim(shim_path, entered_file, release_file):
+    """WR-02 (42-REVIEW.md) race-reproduction shim.
+
+    correct-assessment.sh's Step 4 (`supports_flag "jobs outcome-update"
+    "--reason"`) calls `revenium jobs outcome-update --help` -- the LAST
+    thing the script does before Step 5 opens the sidecar file. Blocking
+    right there gives the test a deterministic hook between Step 1+2's
+    unlocked D-14 existence check (far above) and Step 5's append: touch
+    `entered_file` so the test knows the script is paused at that exact
+    point, then poll for `release_file` before answering the probe. The
+    test deletes the sidecar in between -- a real interleaving, not a
+    pre-script deletion (which would only exercise the ALREADY-WORKING
+    D-14 refusal for a record that was never found in the first place).
+
+    The wait is bounded (10s) so a broken test fails fast instead of
+    hanging the suite if the release signal never arrives.
+    """
+    body = (
+        '#!/usr/bin/env bash\n'
+        'case "$1" in\n'
+        '  config) exit 0 ;;\n'
+        '  guardrails) exit 0 ;;\n'
+        '  jobs)\n'
+        '    if [[ "$2" == "outcome-update" && "$3" == "--help" ]]; then\n'
+        f'      : > "{entered_file}"\n'
+        '      for _ in $(seq 1 200); do\n'
+        f'        [[ -e "{release_file}" ]] && break\n'
+        '        sleep 0.05\n'
+        '      done\n'
+        '      echo "--reason string    Reason for the update"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    printf "\\n" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+    with open(shim_path, 'w') as f:
+        f.write(body)
+    os.chmod(shim_path, 0o755)
+
+
 class CorrectionAppendTests(unittest.TestCase):
     """Phase 42 Plan 06 -- EGV-09/D-01/D-02/D-03/D-04/D-14: correct-assessment.sh
     appends a `kind:"correction"` sidecar line, never destructively rewrites
@@ -2459,6 +2503,92 @@ class CorrectionAppendTests(unittest.TestCase):
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_wr02_toctou_refuses_when_sidecar_deleted_between_check_and_append(self):
+        """42-REVIEW.md WR-02: Step 1+2's D-14 check reads the sidecar with
+        no lock held. If the file is deleted between that check and Step
+        5's append -- plausibly a concurrent, manually-invoked
+        prune-markers.sh, since D-13's sidecar pass is mtime-only and both
+        scripts are operator-run -- the append must refuse, not silently
+        vivify a brand-new sidecar containing only the correction line.
+
+        This test exercises the ACTUAL race, not source text: the shim
+        blocks correct-assessment.sh's Step 4 capability probe (the last
+        thing the script does before Step 5 opens the sidecar), the test
+        deletes the sidecar while the script is paused there, then
+        releases it -- a deterministic interleaving landing exactly in the
+        window WR-02 describes. A test that deletes the file before the
+        script even starts would only exercise the ALREADY-WORKING D-14
+        refusal for a record never found in the first place (see
+        test_d14_refusal_for_absent_sidecar_record above) -- that is NOT
+        what this test proves.
+        """
+        sid, job_id = 'p42c-sid-015', 'p42c-job-015'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            self.assertTrue(os.path.exists(sidecar_path))
+            ledger_before = Path(jobs_ledger).read_text()
+
+            bin_dir = env['PATH'].split(os.pathsep)[0]
+            shim = os.path.join(bin_dir, 'revenium')
+            entered_file = os.path.join(tmpdir, 'probe-entered')
+            release_file = os.path.join(tmpdir, 'probe-release')
+            _build_toctou_race_shim(shim, entered_file, release_file)
+
+            proc = subprocess.Popen(
+                ['bash', str(CORRECT_ASSESSMENT_SH),
+                 '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                 '--reason', 'toctou race'],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 10
+                while not os.path.exists(entered_file):
+                    self.assertLess(
+                        time.time(), deadline,
+                        'shim never reached the blocking probe -- the race '
+                        'window this test targets was never entered',
+                    )
+                    time.sleep(0.02)
+
+                # The script is now paused inside Step 4, between Step 1+2's
+                # unlocked D-14 check and Step 5's append. Delete the
+                # sidecar HERE -- this is the actual race, not a pre-start
+                # deletion.
+                self.assertTrue(os.path.exists(sidecar_path))
+                os.remove(sidecar_path)
+
+                Path(release_file).touch()
+                out, err = proc.communicate(timeout=30)
+                rc = proc.returncode
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+
+            self.assertNotEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('D-14', err)
+            self.assertFalse(
+                os.path.exists(sidecar_path),
+                'WR-02: the append must not silently re-create a sidecar '
+                'file containing only the correction line',
+            )
+            self.assertEqual(
+                Path(jobs_ledger).read_text(), ledger_before,
+                'WR-02: no ledger line may be written when the '
+                're-verified-under-lock existence check refuses',
+            )
+            self.assertEqual(
+                _jobs_log_invocations(jobs_log), [],
+                'WR-02: no CLI invocation on a refused correction',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 
 # ---------------------------------------------------------------------------
