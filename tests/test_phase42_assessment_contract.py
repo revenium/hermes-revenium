@@ -292,7 +292,9 @@ import tempfile
 import textwrap
 import unittest.mock
 
-from tests._compat_helpers import build_shim, build_state_db
+from tests._compat_helpers import (
+    assert_argv_matches_golden, build_shim, build_state_db, load_golden,
+)
 
 PLUGIN_DIR = SKILL / 'plugins' / 'revenium-classifier'
 
@@ -1711,6 +1713,688 @@ class SecondSiteBoundsTests(unittest.TestCase):
             shipped = argv[argv.index('--outcome-value') + 1]
             self.assertEqual(shipped, '446.25')
             self.assertNotEqual(shipped, '525.0')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Plan 06 — the operator correction script itself: correct-assessment.sh
+# appends locally, appends to the jobs ledger with a disjoint prefix, and
+# ships to Revenium via `jobs outcome-update` when the CLI supports it.
+#
+# Requirements covered:
+#   EGV-09 — the correction appends; the original assessment and the full
+#            correction history are preserved, never destructively replaced,
+#            and the newest correction is what the reader resolves.
+# ---------------------------------------------------------------------------
+
+CORRECT_ASSESSMENT_SH = SCRIPTS_DIR / 'correct-assessment.sh'
+
+
+def _build_correction_shim(shim_path, outcome_update_capable=True):
+    """revenium shim for the correction-path test suite.
+
+    Extends build_shim's `jobs)` branch with a THIRD --help probe --
+    `jobs outcome-update --help` (D-04's OUTCOME_UPDATE_CLI_CAPABLE probe,
+    resolved by correct-assessment.sh) -- alongside the existing `jobs
+    outcome --help` (hermes-report.sh's CR-01 probe) and bare `meter
+    completion --help` (JOBS_CLI_CAPABLE). All three probes are answered
+    BEFORE the generic JOBS_LOG capture, so none of them is ever logged as
+    a real invocation -- matching build_shim's own no-shift design.
+
+    outcome_update_capable=False omits --reason from the outcome-update
+    probe's help text, modelling the older-CLI D-04 fail-loud branch.
+    """
+    if outcome_update_capable:
+        outcome_update_help_lines = (
+            '      echo "--reason string    Reason for the update"\n'
+        )
+    else:
+        outcome_update_help_lines = ''
+    body = (
+        '#!/usr/bin/env bash\n'
+        'case "$1" in\n'
+        '  config) exit 0 ;;\n'
+        '  guardrails) exit 0 ;;\n'
+        '  meter)\n'
+        '    if [[ "$3" == "--help" ]]; then\n'
+        '      echo "--agentic-job-id  Agentic job instance identifier"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    case "$2" in\n'
+        '      completion)\n'
+        '        printf "%q " "$@" >> "${METER_LOG:-/dev/null}"\n'
+        '        printf "\\n" >> "${METER_LOG:-/dev/null}"\n'
+        '        ;;\n'
+        '    esac\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  jobs)\n'
+        '    if [[ "$2" == "--help" ]]; then exit 0; fi\n'
+        '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
+        '      echo "--outcome-value string     Business outcome value"\n'
+        '      echo "--outcome-currency string   Business outcome currency"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    if [[ "$2" == "outcome-update" && "$3" == "--help" ]]; then\n'
+        + outcome_update_help_lines +
+        '      exit 0\n'
+        '    fi\n'
+        '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    printf "\\n" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+    with open(shim_path, 'w') as f:
+        f.write(body)
+    os.chmod(shim_path, 0o755)
+
+
+def _build_correction_tree(sid, job_id, sidecar_lines=None, seed_outcome_line=False,
+                            outcome_update_capable=True):
+    """Build a tmp HERMES_HOME tree for the correction-path test suite.
+
+    Mirrors _build_outcome_tree's shape (state.db, jobs ledger seeded with a
+    `created` line, marker pair, optional sidecar records) but uses
+    _build_correction_shim so BOTH `bash correct-assessment.sh` and `bash
+    hermes-report.sh` can be run as real subprocesses against the SAME
+    state dir -- required by the last-match-wins and ordinary-path-stays-
+    gated tests, which exercise both scripts in sequence.
+
+    Returns (tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger).
+    """
+    tmpdir = tempfile.mkdtemp(prefix='gsd-phase42-correction-')
+    hermes_home = os.path.join(tmpdir, 'hh')
+    state_dir = os.path.join(hermes_home, 'state', 'revenium')
+    markers_dir = os.path.join(state_dir, 'markers')
+    assessments_dir = os.path.join(state_dir, 'job-assessments')
+    os.makedirs(markers_dir, mode=0o700)
+    os.makedirs(assessments_dir, mode=0o700)
+    state_db = os.path.join(hermes_home, 'state.db')
+    jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+    build_state_db(state_db, [{
+        'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+        'input_tokens': 100, 'output_tokens': 50,
+        'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+        'estimated_cost': '0', 'api_calls': 1,
+        'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+        'billing_provider': 'anthropic',
+    }])
+
+    ledger_lines = [f'JOB:{job_id}:created:1715516001.000\n']
+    if seed_outcome_line:
+        ledger_lines.append(f'JOB:{job_id}:outcome:1715516003.000:SUCCESS\n')
+    with open(jobs_ledger, 'w') as f:
+        f.writelines(ledger_lines)
+
+    task_marker = {
+        'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+        'task_type': 'code_review', 'operation_type': 'CHAT',
+    }
+    job_marker = {
+        'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+        'agentic_job_id': job_id, 'job_name': 'Phase 42 Plan 06 Correction Job',
+        'job_type': 'code_review', 'status': 'SUCCESS',
+    }
+    with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+        f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+        f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+    sidecar_path = os.path.join(assessments_dir, f'{job_id}.jsonl')
+    if sidecar_lines:
+        with open(sidecar_path, 'w') as f:
+            for rec in sidecar_lines:
+                f.write(json.dumps(rec, separators=(',', ':')) + '\n')
+
+    shim_home = os.path.join(tmpdir, 'home')
+    bin_dir = os.path.join(shim_home, '.local', 'bin')
+    os.makedirs(bin_dir)
+    meter_log = os.path.join(tmpdir, 'meter.log')
+    jobs_log = os.path.join(tmpdir, 'jobs.log')
+    shim = os.path.join(bin_dir, 'revenium')
+    _build_correction_shim(shim, outcome_update_capable=outcome_update_capable)
+
+    env = {
+        **os.environ,
+        'HOME': shim_home,
+        'HERMES_HOME': hermes_home,
+        'REVENIUM_STATE_DIR': state_dir,
+        'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+        'METER_LOG': meter_log,
+        'JOBS_LOG': jobs_log,
+        'TZ': 'UTC',
+        'REVENIUM_ORGANIZATION_NAME': '',
+    }
+    return tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger
+
+
+def _run_correct_assessment(env, args):
+    """Run correct-assessment.sh as a REAL subprocess; return
+    (returncode, stdout, stderr)."""
+    result = subprocess.run(
+        ['bash', str(CORRECT_ASSESSMENT_SH)] + list(args),
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def _read_sidecar_lines(sidecar_path):
+    if not os.path.exists(sidecar_path):
+        return []
+    with open(sidecar_path, 'rb') as f:
+        return [line for line in f.read().split(b'\n') if line]
+
+
+def _jobs_log_invocations(jobs_log):
+    if not os.path.exists(jobs_log):
+        return []
+    invocations = []
+    with open(jobs_log) as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if line:
+                invocations.append(shlex.split(line))
+    return invocations
+
+
+class CorrectionAppendTests(unittest.TestCase):
+    """Phase 42 Plan 06 -- EGV-09/D-01/D-02/D-03/D-04/D-14: correct-assessment.sh
+    appends a `kind:"correction"` sidecar line, never destructively rewrites
+    the original or any earlier correction, appends a ledger line proven
+    disjoint from both outcome-stage grep gates, validates operator input
+    before any write, and fails loudly (never silently) when the CLI
+    cannot ship the correction or when the target record is absent."""
+
+    def test_original_byte_identical_after_one_correction(self):
+        sid, job_id = 'p42c-sid-001', 'p42c-job-001'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            lines_before = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(len(lines_before), 1)
+
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'first correction',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            lines_after = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(len(lines_after), 2)
+            self.assertEqual(
+                lines_after[0], lines_before[0],
+                'EGV-09: the original job_assessment line must be '
+                'byte-identical after a correction -- a correction must '
+                'append, never rewrite.',
+            )
+            second = json.loads(lines_after[1])
+            self.assertEqual(second['kind'], 'correction')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_original_and_first_correction_byte_identical_after_second_correction(self):
+        sid, job_id = 'p42c-sid-002', 'p42c-job-002'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            rc1, out1, err1 = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'first correction',
+            ])
+            self.assertEqual(rc1, 0, f'stdout={out1!r} stderr={err1!r}')
+            lines_after_first = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(len(lines_after_first), 2)
+
+            rc2, out2, err2 = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '300', '--currency', 'USD',
+                '--reason', 'second correction',
+            ])
+            self.assertEqual(rc2, 0, f'stdout={out2!r} stderr={err2!r}')
+            lines_after_second = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(len(lines_after_second), 3)
+
+            self.assertEqual(
+                lines_after_second[0], lines_after_first[0],
+                'EGV-09: the original must stay byte-identical across TWO '
+                'corrections, not just one.',
+            )
+            self.assertEqual(
+                lines_after_second[1], lines_after_first[1],
+                'EGV-09: the FIRST correction must also stay byte-identical '
+                'after a second correction is filed -- the complete '
+                'history is preserved, not just the original.',
+            )
+            third = json.loads(lines_after_second[2])
+            self.assertEqual(third['kind'], 'correction')
+            self.assertEqual(third['sequence'], 2)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_correction_line_shape_and_bare_value_equal_bounds(self):
+        sid, job_id = 'p42c-sid-003', 'p42c-job-003'
+        record = _tracer_assessment_record(
+            job_id, value_low=446.25, value_base=525.0, value_high=603.75,
+        )
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'gbp',
+                '--reason', 'shape check',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            lines = _read_sidecar_lines(sidecar_path)
+            correction = json.loads(lines[1])
+            self.assertEqual(correction['kind'], 'correction')
+            self.assertEqual(correction['sequence'], 1)
+            self.assertEqual(correction['assessment_id'], f'{job_id}:1')
+            self.assertEqual(correction['agentic_job_id'], job_id)
+            self.assertEqual(correction['prior_value_low'], 446.25)
+            self.assertEqual(correction['prior_value_base'], 525.0)
+            self.assertEqual(correction['prior_value_high'], 603.75)
+            self.assertEqual(correction['prior_currency'], 'USD')
+            # A bare --value with no range flags produces equal bounds (D-03).
+            self.assertEqual(correction['value_low'], 400.0)
+            self.assertEqual(correction['value_base'], 400.0)
+            self.assertEqual(correction['value_high'], 400.0)
+            self.assertEqual(correction['currency'], 'GBP')
+            self.assertEqual(correction['reason'], 'shape check')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_original_stays_readable_by_index_and_assessment_id_after_three_corrections(self):
+        sid, job_id = 'p42c-sid-004', 'p42c-job-004'
+        record = _tracer_assessment_record(
+            job_id, value_low=446.25, value_base=525.0, value_high=603.75,
+        )
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            for i, value in enumerate((400, 300, 200), start=1):
+                rc, out, err = _run_correct_assessment(env, [
+                    '--job-id', job_id, '--value', str(value),
+                    '--currency', 'USD', '--reason', f'correction {i}',
+                ])
+                self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            lines = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(len(lines), 4)
+
+            by_index = json.loads(lines[0])
+            self.assertEqual(by_index['kind'], 'job_assessment')
+            self.assertEqual(by_index['assessment_id'], f'{job_id}:0')
+            self.assertEqual(by_index['value_low'], 446.25)
+            self.assertEqual(by_index['value_base'], 525.0)
+            self.assertEqual(by_index['value_high'], 603.75)
+            self.assertEqual(by_index['currency'], 'USD')
+            self.assertEqual(by_index['evaluator'], 'llm')
+            self.assertEqual(by_index['evaluator_version'], 'v1')
+            self.assertEqual(by_index['confidence'], 0.8)
+
+            by_assessment_id = {
+                json.loads(line)['assessment_id']: json.loads(line)
+                for line in lines
+            }
+            self.assertEqual(by_assessment_id[f'{job_id}:0'], by_index)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_last_match_wins_ships_newest_correction_low_bound(self):
+        sid, job_id = 'p42c-sid-005', 'p42c-job-005'
+        record = _tracer_assessment_record(
+            job_id, value_low=446.25, value_base=525.0, value_high=603.75,
+        )
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            rc1, out1, err1 = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value-low', '100', '--value', '110',
+                '--value-high', '120', '--currency', 'USD',
+                '--reason', 'first',
+            ])
+            self.assertEqual(rc1, 0, f'stdout={out1!r} stderr={err1!r}')
+            rc2, out2, err2 = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value-low', '50', '--value', '60',
+                '--value-high', '70', '--currency', 'USD',
+                '--reason', 'second, newest',
+            ])
+            self.assertEqual(rc2, 0, f'stdout={out2!r} stderr={err2!r}')
+
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertEqual(
+                argv[argv.index('--outcome-value') + 1], '50.0',
+                'EGV-09: the reader must resolve the NEWEST correction '
+                '(low bound 50.0), not the original (446.25) or the first '
+                'correction (100.0) -- scan-to-end, deliberate.',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ledger_line_written_and_disjoint_from_both_gates(self):
+        sid, job_id = 'p42c-sid-006', 'p42c-job-006'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'ledger disjointness',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            with open(jobs_ledger) as f:
+                ledger_content = f.read()
+            self.assertIn(f'JOB:{job_id}:correction:1:', ledger_content)
+
+            script_text = HERMES_REPORT_SH.read_text()
+            outcome_01_pattern = _extract_grep_pattern(
+                script_text, OUTCOME_01_GATE_COMMENT, job_id)
+            outcome_04_pattern = _extract_grep_pattern(
+                script_text, OUTCOME_04_GATE_COMMENT, job_id)
+            self.assertIsNotNone(outcome_01_pattern)
+            self.assertIsNotNone(outcome_04_pattern)
+
+            outcome_01_matches = _grep_matching_lines(
+                outcome_01_pattern, Path(jobs_ledger))
+            self.assertEqual(
+                outcome_01_matches, [],
+                'EGV-09/D-01: OUTCOME-01 must not match the REAL writer\'s '
+                f'correction line, got {outcome_01_matches!r}',
+            )
+            outcome_04_matches = _grep_matching_lines(
+                outcome_04_pattern, Path(jobs_ledger))
+            self.assertEqual(
+                len(outcome_04_matches), 1,
+                'EGV-09/D-01: OUTCOME-04 must match only the pre-seeded '
+                f'created line, never the correction line, got {outcome_04_matches!r}',
+            )
+            self.assertTrue(outcome_04_matches[0].startswith(f'JOB:{job_id}:created:'))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_ordinary_path_stays_gated_after_correction(self):
+        """Asserts the ordinary per-tick path remains gated after a
+        correction is filed -- a correction must never unblock or
+        re-trigger the ordinary `jobs outcome` report. This does NOT assert
+        (and must never be read as asserting) that a job id can be reported
+        twice through job_outcome_queue -- 42-RESEARCH.md's Pitfall 4 names
+        exactly this drift as the regression to avoid."""
+        sid, job_id = 'p42c-sid-007', 'p42c-job-007'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(
+                sid, job_id, sidecar_lines=[record], seed_outcome_line=True,
+            )
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'must not unblock the ordinary path',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            outcome_invocations = [
+                argv for argv in invocations
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome'
+            ]
+            self.assertEqual(
+                outcome_invocations, [],
+                'EGV-09/D-01: the ordinary path must stay gated by '
+                'OUTCOME-01 after a correction -- a correction must never '
+                f'cause a further jobs outcome call, got {outcome_invocations!r}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_d04_fail_loud_saves_locally_when_cli_lacks_outcome_update(self):
+        sid, job_id = 'p42c-sid-008', 'p42c-job-008'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(
+                sid, job_id, sidecar_lines=[record], outcome_update_capable=False,
+            )
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'older CLI',
+            ])
+            self.assertNotEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('does not support', err)
+
+            lines = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(
+                len(lines), 2,
+                'D-04: the local correction must be saved even though the '
+                f'CLI could not ship it, got {len(lines)} line(s)',
+            )
+            with open(jobs_ledger) as f:
+                ledger_content = f.read()
+            self.assertIn(f'JOB:{job_id}:correction:1:', ledger_content)
+
+            invocations = _jobs_log_invocations(jobs_log)
+            update_invocations = [
+                argv for argv in invocations
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome-update'
+            ]
+            self.assertEqual(
+                update_invocations, [],
+                'D-04: an unsupported CLI must never actually be invoked '
+                f'for outcome-update, got {update_invocations!r}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_d14_refusal_for_absent_sidecar_record(self):
+        sid, job_id = 'p42c-sid-009', 'p42c-job-009'
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=None)
+        )
+        try:
+            # _build_correction_tree always pre-seeds a `created` line for
+            # the ORDINARY per-tick path's OUTCOME-04 gate -- capture it so
+            # the assertion below is "no NEW (correction) line appeared",
+            # not "the ledger file must not exist" (it already does).
+            ledger_before = Path(jobs_ledger).read_text()
+
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'no record exists',
+            ])
+            self.assertNotEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('D-14', err)
+            self.assertFalse(
+                os.path.exists(sidecar_path),
+                'D-14: no file may be created for an absent record',
+            )
+            self.assertEqual(
+                Path(jobs_ledger).read_text(), ledger_before,
+                'D-14: no ledger line may be written for a refused correction',
+            )
+            invocations = _jobs_log_invocations(jobs_log)
+            self.assertEqual(
+                invocations, [],
+                f'D-14: no CLI invocation at all, got {invocations!r}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_input_validation_rejects_bad_values(self):
+        sid, job_id = 'p42c-sid-010', 'p42c-job-010'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            ledger_before = Path(jobs_ledger).read_text()
+            cases = {
+                'non-numeric': ['--value', 'not-a-number'],
+                'negative': ['--value', '-10'],
+                'reversed-bounds': [
+                    '--value', '500', '--value-low', '600', '--value-high', '700',
+                ],
+            }
+            for label, value_args in cases.items():
+                with self.subTest(label):
+                    rc, out, err = _run_correct_assessment(env, [
+                        '--job-id', job_id, *value_args,
+                        '--currency', 'USD', '--reason', f'bad input: {label}',
+                    ])
+                    self.assertEqual(rc, 2, f'stdout={out!r} stderr={err!r}')
+                    self.assertIn('Invalid input', err)
+
+            # No write of any kind occurred across any of the rejected cases.
+            lines = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(len(lines), 1, 'no correction line may be written on invalid input')
+            self.assertEqual(
+                Path(jobs_ledger).read_text(), ledger_before,
+                'no ledger line may be written on invalid input',
+            )
+            self.assertEqual(_jobs_log_invocations(jobs_log), [], 'no CLI invocation on invalid input')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_path_traversal_job_id_creates_no_file_outside_assessments_dir(self):
+        sid, job_id = 'p42c-sid-011', 'p42c-job-011'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            assessments_dir = os.path.dirname(sidecar_path)
+            files_before = set(os.listdir(assessments_dir))
+            outside_target = os.path.join(tmpdir, 'evil.jsonl')
+
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', '../../evil', '--value', '1',
+                '--currency', 'USD', '--reason', 'traversal attempt',
+            ])
+            self.assertNotEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('D-14', err)
+
+            self.assertFalse(
+                os.path.exists(outside_target),
+                'the filename-safety pass must prevent escaping the '
+                'assessments directory via a job id with a path separator '
+                'and a parent-directory reference',
+            )
+            files_after = set(os.listdir(assessments_dir))
+            self.assertEqual(
+                files_before, files_after,
+                f'no new file may appear in the assessments directory: {files_after - files_before}',
+            )
+
+            # D-14's refusal (above) makes no escaped file observable at
+            # the process level EITHER before or after a broken sanitizer,
+            # because this script only ever appends to an EXISTING match --
+            # it never creates a brand-new sidecar file. So the mutation
+            # this task requires (removing the filename-safety pass) must
+            # be caught by exercising the SHIPPED transform directly, not
+            # by the file-creation assertions above alone. Extracted
+            # verbatim from correct-assessment.sh's own source (not
+            # retyped), so a mutation to the real file is what this
+            # assertion actually exercises.
+            script_text = CORRECT_ASSESSMENT_SH.read_text()
+            func_src = script_text[
+                script_text.index('def _clean(v):'):
+                script_text.index('component = _sidecar_filename_component(raw_job_id)')
+            ]
+            probe = 'import re\n' + func_src + (
+                "\nfor case in ('../../evil', '/etc/passwd', '..', '.', 'a/b/c'):\n"
+                "    print(_sidecar_filename_component(case))\n"
+            )
+            result = subprocess.run(
+                ['python3', '-c', probe], capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout.splitlines(),
+                ['.._.._evil', '_etc_passwd', '_', '_', 'a_b_c'],
+                'the shipped _sidecar_filename_component transform must '
+                'strip every path separator and collapse pure dot-segments '
+                '-- this is what actually protects the assessments '
+                'directory (the D-14 refusal above cannot demonstrate it '
+                'on its own, since this script never creates a brand-new '
+                'sidecar file).',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dry_run_writes_nothing(self):
+        sid, job_id = 'p42c-sid-012', 'p42c-job-012'
+        record = _tracer_assessment_record(
+            job_id, value_low=446.25, value_base=525.0, value_high=603.75,
+        )
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            sidecar_bytes_before = Path(sidecar_path).read_bytes()
+            ledger_exists_before = os.path.exists(jobs_ledger)
+            invocations_before = _jobs_log_invocations(jobs_log)
+
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '999', '--currency', 'EUR',
+                '--reason', 'dry run preview', '--dry-run',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('[dry-run]', out)
+            self.assertIn('446.25', out)  # prior value named in the preview
+            self.assertIn('999', out)     # new value named in the preview
+
+            self.assertEqual(
+                Path(sidecar_path).read_bytes(), sidecar_bytes_before,
+                '--dry-run must write nothing to the sidecar file',
+            )
+            self.assertEqual(
+                os.path.exists(jobs_ledger), ledger_exists_before,
+                '--dry-run must write nothing to the jobs ledger',
+            )
+            self.assertEqual(
+                _jobs_log_invocations(jobs_log), invocations_before,
+                '--dry-run must make no CLI call',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_argv_matches_golden(self):
+        sid, job_id = 'p42c-sid-013', 'assess-42-correction-job'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '525.0', '--currency', 'USD',
+                '--reason', 'correction-golden-reason',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            invocations = _jobs_log_invocations(jobs_log)
+            update_argv = None
+            for argv in invocations:
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome-update':
+                    update_argv = argv
+                    break
+            self.assertIsNotNone(update_argv, f'expected an outcome-update invocation: {invocations}')
+            assert_argv_matches_golden(
+                self, update_argv, load_golden('jobs-outcome-update.golden.json'))
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

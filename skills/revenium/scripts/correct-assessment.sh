@@ -386,12 +386,54 @@ fi
 # Step 8: ship it. Built as an array per the project's long-invocation
 # convention. On a non-zero exit, the local record is already intact and
 # the command may be re-run -- no automatic retry.
+#
+# --metadata carries the same prior-value/sequence provenance the local
+# correction line records, so the revision on Revenium's side is
+# traceable back to what it superseded without a second round trip.
 # --------------------------------------------------------------------------
+OUTCOME_UPDATE_METADATA=$(
+  SEQUENCE_PY="${SEQUENCE}" \
+  PRIOR_VALUE_LOW_PY="${CURRENT_VALUE_LOW}" \
+  PRIOR_VALUE_BASE_PY="${CURRENT_VALUE_BASE}" \
+  PRIOR_VALUE_HIGH_PY="${CURRENT_VALUE_HIGH}" \
+  PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
+  python3 - <<'PY'
+import json
+import os
+
+
+def _num(raw):
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+meta = {
+    'assessment_schema_version': 1,
+    'sequence': int(os.environ.get('SEQUENCE_PY', '0') or '0'),
+}
+for key, env_key in (
+    ('prior_value_low', 'PRIOR_VALUE_LOW_PY'),
+    ('prior_value_base', 'PRIOR_VALUE_BASE_PY'),
+    ('prior_value_high', 'PRIOR_VALUE_HIGH_PY'),
+):
+    v = _num(os.environ.get(env_key, ''))
+    if v is not None:
+        meta[key] = v
+prior_currency = os.environ.get('PRIOR_CURRENCY_PY', '')
+if prior_currency:
+    meta['prior_currency'] = prior_currency
+print(json.dumps(meta, separators=(',', ':')))
+PY
+)
+
 outcome_update_cmd=(
   revenium jobs outcome-update "${JOB_ID}"
   --reason "${REASON}"
   --outcome-value "${VALUE}"
   --outcome-currency "${CURRENCY}"
+  --metadata "${OUTCOME_UPDATE_METADATA}"
   --quiet
 )
 TEAM_ID_RESOLVED="$(resolve_team_id)"
