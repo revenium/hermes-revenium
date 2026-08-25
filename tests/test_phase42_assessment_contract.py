@@ -2400,6 +2400,66 @@ class CorrectionAppendTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_shipped_reason_is_byte_identical_to_the_recorded_reason(self):
+        """Greptile P1 (PR #93): the sidecar records _clamp_reason(REASON)
+        -- stripped, with '|'/newlines replaced by spaces, truncated to 500
+        SERIALIZED bytes -- while the remote `outcome-update --reason` used
+        to ship the raw ${REASON}. Any reason the clamp touched therefore
+        produced a local audit record that disagreed with the correction
+        filed at Revenium, on the one script whose entire purpose is an
+        accurate audit trail.
+
+        This reason exercises all three clamp behaviours at once: leading
+        and trailing whitespace, an embedded pipe and newline, and a body
+        long enough to be truncated."""
+        sid, job_id = 'p42c-sid-014', 'assess-42-reason-parity-job'
+        record = _tracer_assessment_record(job_id)
+        raw_reason = '  billing re-rate | Q3\ntrue-up ' + ('x' * 700) + '  '
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '525.0', '--currency', 'USD',
+                '--reason', raw_reason,
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            correction = None
+            with open(sidecar_path, 'r', encoding='utf-8') as fh:
+                for raw_line in fh:
+                    if not raw_line.strip():
+                        continue
+                    parsed = json.loads(raw_line)
+                    if parsed.get('kind') == 'correction':
+                        correction = parsed
+            self.assertIsNotNone(correction, 'expected a correction line in the sidecar')
+            recorded = correction['reason']
+
+            update_argv = None
+            for argv in _jobs_log_invocations(jobs_log):
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome-update':
+                    update_argv = argv
+                    break
+            self.assertIsNotNone(update_argv, 'expected an outcome-update invocation')
+            shipped = update_argv[update_argv.index('--reason') + 1]
+
+            # The clamp must actually have done something, or this test would
+            # pass vacuously against the raw string.
+            self.assertNotEqual(
+                recorded, raw_reason,
+                'fixture no longer exercises the clamp -- rewrite the reason so '
+                'stripping, character replacement and truncation all apply',
+            )
+            self.assertEqual(
+                shipped, recorded,
+                'EGV-09: the reason shipped to Revenium must be byte-identical '
+                'to the reason recorded in the sidecar -- a divergence makes the '
+                'local audit record disagree with the filed correction',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # Plan 07 (D-13/C-01): the fifth prune pass on the sidecar's OWN mtime clock

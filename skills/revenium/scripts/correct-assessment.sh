@@ -350,11 +350,27 @@ with open(path, 'a+b', buffering=0) as f:
 
 print(f'SEQUENCE={sequence}')
 print(f'TS={now}')
+# Greptile P1 (PR #93): the CLAMPED reason must go back to the shell so the
+# remote `outcome-update --reason` ships byte-identically what the sidecar
+# recorded. Sending the raw ${REASON} here let the local audit record and
+# the correction filed at Revenium disagree whenever _clamp_reason stripped
+# a character, trimmed whitespace, or truncated past 500 serialized bytes --
+# on the one script whose whole purpose is an accurate audit trail.
+# Safe as a single KEY=value line: _clamp_reason has already replaced every
+# '\n'/'\r'/'|' with a space, so the value cannot span lines.
+print(f'REASON_CLAMPED={reason}')
 PY
 )
 
 SEQUENCE=$(printf '%s\n' "${APPEND_OUTPUT}" | sed -n 's/^SEQUENCE=//p')
 CORRECTION_TS=$(printf '%s\n' "${APPEND_OUTPUT}" | sed -n 's/^TS=//p')
+# Greptile P1 (PR #93): ship what was RECORDED, not what was typed. Fall back
+# to the raw reason only if the emission is somehow absent, so a parsing
+# failure degrades to today's behaviour rather than shipping an empty reason.
+REASON_SHIPPED=$(printf '%s\n' "${APPEND_OUTPUT}" | sed -n 's/^REASON_CLAMPED=//p')
+if [[ -z "${REASON_SHIPPED}" ]]; then
+  REASON_SHIPPED="${REASON}"
+fi
 
 echo "Local correction saved: job='${JOB_ID}' sequence=${SEQUENCE} sidecar=${SIDECAR_PATH}"
 
@@ -430,7 +446,7 @@ PY
 
 outcome_update_cmd=(
   revenium jobs outcome-update "${JOB_ID}"
-  --reason "${REASON}"
+  --reason "${REASON_SHIPPED}"
   --outcome-value "${VALUE}"
   --outcome-currency "${CURRENCY}"
   --metadata "${OUTCOME_UPDATE_METADATA}"
