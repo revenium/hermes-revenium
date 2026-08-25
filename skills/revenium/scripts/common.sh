@@ -58,6 +58,14 @@ PROBE_WARN_FLAGS_DIR="${REVENIUM_PROBE_WARN_FLAGS_DIR:-${MARKERS_DIR}/.probe-war
 OUTCOME_WARN_FLAGS_DIR="${REVENIUM_OUTCOME_WARN_FLAGS_DIR:-${MARKERS_DIR}/.outcome-warn}"
 LOCK_FILE="${STATE_DIR}/cron.lock"
 MARKER_RETENTION_DAYS="${REVENIUM_MARKER_RETENTION_DAYS:-30}"
+# Phase 42 (D-13): retention clock for the job-assessments sidecar (see
+# JOB_ASSESSMENTS_DIR below). 90 days, well above MARKER_RETENTION_DAYS'
+# 30 -- assessments are the audit record a correction is filed against, and
+# corrections arrive on a human timescale, not a session one. The naming
+# asymmetry with MARKER_RETENTION_DAYS is deliberate (D-13's literal text):
+# the REVENIUM_ prefix goes on both the variable and its override here,
+# unlike the older sibling, which carries it only on the override.
+REVENIUM_ASSESSMENT_RETENTION_DAYS="${REVENIUM_ASSESSMENT_RETENTION_DAYS:-90}"
 PRUNE_LOCK_FILE="${STATE_DIR}/prune.lock"
 # v1.3 hotfix (quick-task 260524-lpu): single source of truth for the agent name
 # that ships on every meter completion (--agent argv) AND scopes default
@@ -143,6 +151,16 @@ REVENIUM_LOG_KEEP_BYTES="${REVENIUM_LOG_KEEP_BYTES:-2097152}"
 # collide.
 EVENT_SPOOL_DIR="${REVENIUM_EVENT_SPOOL_DIR:-${STATE_DIR}/api-events}"
 EVENT_LEDGER_FILE="${REVENIUM_EVENT_LEDGER_FILE:-${STATE_DIR}/revenium-api-events.ledger}"
+# Phase 42 (D-15): job-id-keyed sidecar for the JobAssessment record --
+# ${STATE_DIR}/job-assessments/<sanitized_job_id>.jsonl. Gets its OWN
+# directory rather than sharing MARKERS_DIR because its retention clock
+# differs: REVENIUM_ASSESSMENT_RETENTION_DAYS above keys on the RECORD's own
+# last write (mtime), not the owning session's ledger timestamp the way
+# markers/ is pruned (C-01) -- a per-job file gives that clock for free as
+# file mtime, which a per-session shape would not. This is a first-class
+# spool like EVENT_SPOOL_DIR/TOOL_EVENTS_DIR, always present -- not a lazily
+# created sentinel directory -- so it is added to the eager mkdir -p below.
+JOB_ASSESSMENTS_DIR="${REVENIUM_JOB_ASSESSMENTS_DIR:-${STATE_DIR}/job-assessments}"
 # quick-260817-tfe (OWN-01/OWN-02): the durable session OWNERSHIP record —
 # one small file per owned session, whose first line is the literal `legacy`
 # or `event` and whose optional second line is the legacy delta path's
@@ -228,7 +246,7 @@ REVENIUM_DRAIN_QUIET_TICKS="${REVENIUM_DRAIN_QUIET_TICKS:-15}"
 # drain-status.sh.
 REVENIUM_DRAIN_STALE_SECONDS="${REVENIUM_DRAIN_STALE_SECONDS:-604800}"
 
-mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}"
+mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}" "${JOB_ASSESSMENTS_DIR}"
 
 ensure_path() {
   local brew_prefix=""
@@ -570,6 +588,25 @@ resolve_spool_dir() {
     return 0
   fi
   python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" "api-events" 2>/dev/null || printf '%s\n' "${EVENT_SPOOL_DIR}"
+}
+
+# Phase 42 (D-15): resolve the job-assessments sidecar directory that OWNS a
+# given session identifier -- same per-session, per-profile resolution as
+# resolve_spool_dir above, generalized onto a third subdirectory.
+# Production usage: assessments_dir="$(resolve_assessments_dir "${sid}")"
+# Fail-open, identical contract to resolve_markers_dir/resolve_spool_dir:
+# empty sid → empty stdout; missing python3 or sidecar failure → prints the
+# process-level JOB_ASSESSMENTS_DIR unchanged.
+resolve_assessments_dir() {
+  local sid="${1:-}"
+  if [[ -z "${sid}" ]]; then
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' "${JOB_ASSESSMENTS_DIR}"
+    return 0
+  fi
+  python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" "job-assessments" 2>/dev/null || printf '%s\n' "${JOB_ASSESSMENTS_DIR}"
 }
 
 # quick-260605: resolve the Revenium teamId for CLI calls that require it

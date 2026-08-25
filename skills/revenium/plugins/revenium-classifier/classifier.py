@@ -42,6 +42,11 @@ MARKERS_DIR = Path(os.environ.get("REVENIUM_MARKERS_DIR", str(STATE_DIR / "marke
 MARKERS_READY_DIR = Path(os.environ.get("REVENIUM_MARKERS_READY_DIR", str(MARKERS_DIR / ".ready")))
 TAXONOMY_FILE = Path(os.environ.get("REVENIUM_TAXONOMY_FILE", str(STATE_DIR / "task-taxonomy.json")))
 JOB_TAXONOMY_FILE = Path(os.environ.get("REVENIUM_JOB_TAXONOMY_FILE", str(STATE_DIR / "job-taxonomy.json")))
+# Phase 42 (D-15): the job-assessments sidecar directory -- mirrors
+# common.sh's JOB_ASSESSMENTS_DIR declaration, the second hand-maintained
+# mirror of that path (resolve-markers-dir.py's _SUBDIR_ENV_OVERRIDE is the
+# third).
+JOB_ASSESSMENTS_DIR = Path(os.environ.get("REVENIUM_JOB_ASSESSMENTS_DIR", str(STATE_DIR / "job-assessments")))
 GUARDRAIL_STATUS_FILE = STATE_DIR / "guardrail-status.json"  # Phase 19 (ENF-03): renamed from BUDGET_STATUS_FILE, repointed to guardrail-status.json
 CONFIG_FILE = Path(os.environ.get("REVENIUM_CONFIG_FILE", str(STATE_DIR / "config.json")))
 STATE_DB = HERMES_HOME / "state.db"
@@ -79,7 +84,8 @@ from collections import namedtuple  # noqa: E402  (kept local to BUG-4 machinery
 _Paths = namedtuple(
     "_Paths",
     "hermes_home state_dir markers_dir markers_ready_dir "
-    "taxonomy_file job_taxonomy_file guardrail_status_file config_file state_db",
+    "taxonomy_file job_taxonomy_file guardrail_status_file config_file state_db "
+    "job_assessments_dir",
 )
 
 # `agent:<profile>:<rest>` namespace (multiplex). Capture the profile segment.
@@ -92,7 +98,7 @@ def _module_paths() -> "_Paths":
     return _Paths(
         HERMES_HOME, STATE_DIR, MARKERS_DIR, MARKERS_READY_DIR,
         TAXONOMY_FILE, JOB_TAXONOMY_FILE, GUARDRAIL_STATUS_FILE, CONFIG_FILE,
-        STATE_DB,
+        STATE_DB, JOB_ASSESSMENTS_DIR,
     )
 
 
@@ -130,6 +136,7 @@ def _paths_for_session(session_id: str) -> "_Paths":
             guardrail_status_file=state_dir / "guardrail-status.json",
             config_file=state_dir / "config.json",
             state_db=profile_home / "state.db",
+            job_assessments_dir=state_dir / "job-assessments",
         )
     except Exception:
         return _module_paths()
@@ -911,6 +918,77 @@ def _write_job_marker(sid: str, job: dict, paths: "_Paths | None" = None) -> Pat
     return marker_path
 
 
+# Phase 42 (C-01/D-06): the JobAssessment sidecar's own schema version and
+# per-record byte ceiling. Schema stays at literal 1 through Phases 43-45
+# (D-06); the ceiling is chosen independently of the marker's 1024-byte
+# budget and the --metadata transport's 65,536-byte envelope -- the sidecar
+# never crosses the wire (41-CARRIER-DECISION.md Part 3).
+ASSESSMENT_SCHEMA_VERSION = 1
+SIDECAR_LINE_MAX_BYTES = 8192
+
+
+def _sidecar_filename_component(raw_job_id) -> str:
+    """Derive the job-assessments sidecar's filename component from an
+    agentic_job_id.
+
+    Three steps, in order, none optional:
+      1. The same five-character sanitize transform applied at
+         hermes-report.sh:1418/:2332/:2996 -- a fourth independent copy of
+         `_clean()`, by design (CLAUDE.md: classifier.py/bash duplication is
+         deliberate, never a shared import).
+      2. A filename-safety pass replacing every character outside
+         A-Za-z0-9._- with underscore. NOT optional and NOT redundant with
+         step 1: the five-character tuple contains no path separator and no
+         dot, so a job id shaped like "../../something" survives step 1
+         completely unchanged and would escape the assessments directory
+         without this pass.
+      3. A final guard mapping the empty string, ".", and ".." each to a
+         single underscore, so a job id that sanitizes down to nothing (or
+         to a directory-traversal token) still resolves to a safe filename.
+
+    Never raises: a non-string input returns the single-underscore fallback,
+    matching every other fail-open path in this module (D-04).
+    """
+    if not isinstance(raw_job_id, str):
+        return "_"
+    value = raw_job_id
+    for bad in (":", " ", "\t", "\n", "\r"):
+        value = value.replace(bad, "_")
+    value = re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    if value in ("", ".", ".."):
+        return "_"
+    return value
+
+
+def _write_job_assessment(record: dict, paths: "_Paths | None" = None) -> "Path | None":
+    """Atomic O_APPEND + fcntl.LOCK_EX append of one JobAssessment sidecar
+    line to <job_assessments_dir>/<sanitized_job_id>.jsonl.
+
+    Modelled on _write_job_marker: same open mode, same lock, same compact
+    serialization. Refuses to write and returns None when the serialized
+    line would exceed SIDECAR_LINE_MAX_BYTES -- a line the reader will skip
+    is worse written than not written, because it looks like data. Never
+    raises; the D-12 call site wraps this in its own try/except so a sidecar
+    write failure never prevents _write_job_marker from still running.
+    """
+    p = paths or _module_paths()
+    p.job_assessments_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    component = _sidecar_filename_component(record.get("agentic_job_id"))
+    sidecar_path = p.job_assessments_dir / f"{component}.jsonl"
+    line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
+    if len(line.encode("utf-8")) > SIDECAR_LINE_MAX_BYTES:
+        logger.warning(
+            "revenium-classifier: sidecar assessment line exceeds %d bytes, "
+            "not written for job=%s",
+            SIDECAR_LINE_MAX_BYTES, record.get("agentic_job_id", ""),
+        )
+        return None
+    with open(sidecar_path, "ab", buffering=0) as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        f.write(line.encode("utf-8"))
+    return sidecar_path
+
+
 def _read_job_taxonomy_labels(paths: "_Paths | None" = None) -> list:
     """Read JOB_TAXONOMY_FILE and return job_type labels sorted recent-first, alpha within ties.
 
@@ -1540,6 +1618,34 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         assessment = _validate_assessment(raw, cfg, name, _ev.resolve_version(name))
         if assessment:
             valid["assessment"] = assessment
+            # Phase 42 (C-01/C-04/D-12): the sidecar record of record, built
+            # here in the success branch only and consumed once at the D-12
+            # seam in the job loop (popped and written before
+            # _write_job_marker). Leading underscore is deliberate -- it
+            # marks this as loop-local plumbing, never part of the frozen
+            # 9-key marker `assessment` object above. Deliberately narrow
+            # for this tracer plan: identity, schema version, one bound
+            # family (a point estimate expressed as a zero-width band),
+            # currency, and provenance. Plan 42-03 replaces the zero-width
+            # band with real low/base/high derivation and adds the
+            # remaining EGV-04 fields.
+            job_id = valid.get("agentic_job_id", "")
+            valid["_assessment_record"] = {
+                "kind": "job_assessment",
+                "ts": time.time(),
+                "agentic_job_id": job_id,
+                "assessment_id": f"{_sidecar_filename_component(job_id)}:0",
+                "assessment_schema_version": ASSESSMENT_SCHEMA_VERSION,
+                "value_low": assessment["estimated_value"],
+                "value_base": assessment["estimated_value"],
+                "value_high": assessment["estimated_value"],
+                "bounds_source": "derived",
+                "currency": assessment["currency"],
+                "estimated_value": assessment["estimated_value"],
+                "evaluator": assessment["evaluator"],
+                "evaluator_version": assessment["evaluator_version"],
+                "confidence": assessment["confidence"],
+            }
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
                 valid.get("agentic_job_id", ""),
@@ -1692,6 +1798,29 @@ async def run_classification_async(
                                     and _llm_evaluation_enabled(paths=p)
                                 ):
                                     await _attach_assessment(valid, transcript, p)
+                                # Phase 42 (D-12): sidecar FIRST, then the job
+                                # marker. A crash between the two appends
+                                # leaves an orphan sidecar record that
+                                # nothing reads -- harmless, and the prune
+                                # pass reclaims it on mtime. The reverse
+                                # order would lose the assessment's value
+                                # permanently on the same crash (the marker
+                                # would then be reported status-only, D-10).
+                                # Own try/except: a sidecar write failure
+                                # must never prevent _write_job_marker from
+                                # still running below.
+                                _assessment_record = valid.pop("_assessment_record", None)
+                                if isinstance(_assessment_record, dict) and _assessment_record:
+                                    try:
+                                        await asyncio.to_thread(
+                                            _write_job_assessment, _assessment_record, p
+                                        )
+                                    except Exception as exc:
+                                        logger.warning(
+                                            "revenium-classifier: sidecar assessment write "
+                                            "failed for job=%s: %s",
+                                            valid.get("agentic_job_id", ""), exc,
+                                        )
                                 await asyncio.to_thread(_write_job_marker, session_id, valid, p)
                                 _persist_job_type_to_taxonomy(valid["job_type"], paths=p)
                         except Exception as exc:

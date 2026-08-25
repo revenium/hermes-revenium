@@ -50,6 +50,8 @@ _NS_RE = re.compile(r"^agent:([^:]+):")
 _SUBDIR_ENV_OVERRIDE = {
     "markers": "REVENIUM_MARKERS_DIR",
     "api-events": "REVENIUM_EVENT_SPOOL_DIR",
+    # Phase 42 (D-15): the job-assessments sidecar's third subdirectory.
+    "job-assessments": "REVENIUM_JOB_ASSESSMENTS_DIR",
 }
 
 

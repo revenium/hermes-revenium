@@ -234,27 +234,24 @@ class TestPhase38ReporterPath(unittest.TestCase):
     # -- Task 2: an accepted assessment ships as value + provenance -------
 
     def test_outcome_success_with_assessment_ships_value_and_provenance(self):
+        """Phase 42 (D-10): a marker-embedded `assessment` alone no longer
+        produces a valued outcome -- the outcome stage now resolves value
+        and provenance from the job-assessments SIDECAR only, never from
+        the marker's 9-key summary (C-01 demoted that object to
+        pointer-and-summary, not the record of record). This fixture writes
+        no sidecar file, so the behaviour under test legitimately changed:
+        no value flags, no provenance. See
+        tests/test_phase42_assessment_contract.py::SidecarTracerTests for
+        the sidecar-sourced valued-outcome proof this test used to provide."""
         argv = self._run_one_outcome(
             'o38-sid-001', 'o38-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
         )
-        self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
-        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
 
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
-        self.assertEqual(meta.get('evaluator'), 'llm')
-        self.assertEqual(meta.get('evaluator_version'), 'v1')
-        self.assertEqual(meta.get('confidence'), 0.8)
-        self.assertEqual(
-            meta.get('assumptions'),
-            {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
-        )
-        # basis / inferred_role are not part of the provenance list this plan
-        # names (evidence_class, evaluator, evaluator_version, confidence,
-        # and the two numeric assumptions) -- they stay out of --metadata.
-        self.assertNotIn('basis', meta)
-        self.assertNotIn('inferred_role', meta)
+        self.assertEqual(meta, {'source': 'test'})
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
         argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')
@@ -293,11 +290,23 @@ class TestPhase38ReporterPath(unittest.TestCase):
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
     def test_golden_valued_outcome_matches_new_fixture(self):
+        """Phase 42 (D-10): meter-completion-assessment.golden.json pins the
+        wire shape a SIDECAR-sourced valued outcome produces, not a
+        marker-only one -- this fixture (marker `assessment`, no sidecar
+        file) can no longer reach that golden's shape, so the golden-match
+        assertion moved. The immutable golden fixture itself is untouched;
+        only what this specific (marker-only) scenario asserts changed.
+        Golden-shape coverage for the sidecar-sourced path lives in
+        tests/test_phase42_assessment_contract.py::SidecarTracerTests,
+        which will grow its own golden once the full EGV-04 schema (plan
+        42-03) makes an exact match meaningful."""
         argv = self._run_one_outcome(
             'g38-sid-002', 'assessment-golden-job', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
         )
-        golden = load_golden('meter-completion-assessment.golden.json')
-        assert_argv_matches_golden(self, argv, golden)
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta, {'source': 'test'})
 
     def test_pre_v1_5_marker_with_no_assessment_key_parses_and_reports(self):
         """ROI-12: a marker line written before v1.5 -- literally no
@@ -317,10 +326,18 @@ class TestPhase38ReporterPath(unittest.TestCase):
         push sites replace ':'/' '/'\\t'/'\\n'/'\\r' with '_' before pushing),
         but classifier.py writes the marker's agentic_job_id RAW (only
         .strip()'d). A job id containing a colon or space must still have
-        its assessment resolved -- the lookup has to sanitize the marker's
-        raw id the same way before comparing, or this silently drops the
-        value for exactly the job ids most likely to need it (LLM-minted
-        labels routinely contain ': ')."""
+        its assessment resolved.
+
+        Phase 42 (D-10): this lookup now happens against the job-assessments
+        SIDECAR, not the marker -- this fixture writes only a marker
+        `assessment`, so under D-10 it ships no value regardless of the
+        job id's shape. The sanitize-before-compare concern this test was
+        built to catch now applies to the SIDECAR's own join (a fourth
+        independent copy of the same transform, in hermes-report.sh's
+        sidecar reader and in classifier.py's `_sidecar_filename_component`)
+        and is covered by
+        tests/test_phase42_assessment_contract.py::PathMirrorParityTests
+        and the writer/reader transform's shared unit coverage, not here."""
         raw_id = 'fix: auth regression_a1b2'
         clean_id = raw_id
         for bad in (':', ' ', '\t', '\n', '\r'):
@@ -332,10 +349,8 @@ class TestPhase38ReporterPath(unittest.TestCase):
             assessment=ASSESSMENT_FIXTURE, raw_agentic_job_id=raw_id,
         )
         self.assertEqual(argv[2], clean_id, f'jobs outcome must target the sanitized id: {argv}')
-        self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
-        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
-        meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
 
     # -- WR-02: malformed value/currency must never reach the CLI ---------
 
@@ -353,9 +368,11 @@ class TestPhase38ReporterPath(unittest.TestCase):
         )
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
-        # Provenance unrelated to the malformed value still ships.
+        # Phase 42 (D-10): this fixture is marker-only (no sidecar file), so
+        # under D-10 no provenance ships either -- the marker's assessment
+        # (malformed or not) no longer feeds --metadata at all.
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta, {'source': 'test'})
 
     def test_unsupported_currency_omits_both_value_flags(self):
         """WR-02: currency is never checked against SUPPORTED_CURRENCIES on
@@ -387,10 +404,11 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
-        # Provenance (which does not depend on the CLI's flag support) still
-        # rides in --metadata even though the value flags were omitted.
+        # Phase 42 (D-10): this fixture is marker-only (no sidecar file), so
+        # no provenance rides in --metadata regardless of CLI capability --
+        # provenance now comes exclusively from the sidecar.
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta, {'source': 'test'})
 
     def test_outcome_omits_pair_when_cli_advertises_only_outcome_value(self):
         """greptile P2 on PR #90: the emission site sends --outcome-value and
@@ -409,8 +427,9 @@ class TestPhase38ReporterPath(unittest.TestCase):
         # advertises exactly one of them.
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
+        # Phase 42 (D-10): marker-only fixture -- no provenance either.
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta, {'source': 'test'})
 
 
 # ---------------------------------------------------------------------------
@@ -608,11 +627,22 @@ class TestPhase38MultiTick(unittest.TestCase):
     # -- Task 1: the deferred-create path, across ticks --------------------
 
     def test_deferred_create_survives_to_next_tick_with_assessment_intact(self):
-        """T-38-06 / the research doc's own deciding test: an assessment must
+        """T-38-06 / the research doc's own deciding test: an outcome must
         still be reachable on the tick AFTER the one that inferred it, even
         when the create call that tick deferred on. OUTCOME-04 governs the
         defer; the precheck scan (not the token-gated main loop) is what
-        re-reaches the job on tick 2."""
+        re-reaches the job on tick 2.
+
+        Phase 42 (D-10): this harness seeds only a marker-embedded
+        `assessment`, no sidecar file, so under D-10 tick 2's outcome ships
+        with no value flags and no provenance -- the deferred-create
+        survival property under test here (the outcome itself still ships,
+        exactly once, on tick 2) is unchanged; what changed is that a
+        marker-only assessment no longer produces a VALUED outcome. The
+        real sidecar-sourced deferral-survival proof (EGV-07: provenance
+        surviving a real deferred create through the sidecar re-read) is a
+        later plan's scope, extending this same harness with a real sidecar
+        fixture."""
         sid = 'p38-defer-sid-001'
         job_id = 'p38-defer-job-001'
         tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
@@ -659,16 +689,12 @@ class TestPhase38MultiTick(unittest.TestCase):
             outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
             self.assertEqual(len(outcome_inv2), 1, f'tick 2 must ship exactly one outcome: {jobs_inv2}')
             argv2 = outcome_inv2[0]
-            self.assertEqual(argv2[argv2.index('--outcome-value') + 1], '525.0')
-            self.assertEqual(argv2[argv2.index('--outcome-currency') + 1], 'USD')
+            # Phase 42 (D-10): marker-only fixture -- tick 2 ships status-only,
+            # no value flags, no provenance (see docstring above).
+            self.assertNotIn('--outcome-value', argv2)
+            self.assertNotIn('--outcome-currency', argv2)
             meta2 = json.loads(_metadata_of(argv2))
-            self.assertEqual(meta2.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
-            self.assertEqual(meta2.get('evaluator'), 'llm')
-            self.assertEqual(meta2.get('confidence'), 0.8)
-            self.assertEqual(
-                meta2.get('assumptions'),
-                {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
-            )
+            self.assertEqual(meta2, {'source': 'test'})
 
             ledger_text = open(jobs_ledger).read()
             self.assertTrue(
