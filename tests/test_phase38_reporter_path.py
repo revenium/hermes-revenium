@@ -594,6 +594,32 @@ def _build_flexible_shim(shim_path, outcome_value_capable=True):
     os.chmod(shim_path, 0o755)
 
 
+# Phase 42 Plan 05 (EGV-07) -- a full EGV-04 sidecar record, built through
+# the REAL classifier construction path (_validate_assessment then
+# _build_job_assessment), never a hand-written dict. C-04 is explicit that
+# Phase 38's deferral proof does not extend to this schema unless the test
+# exercises real construction, not a plan's idea of the shape. hours=3.5,
+# rate=150.0 -> base=525.0, matching ASSESSMENT_FIXTURE/_sidecar_record's
+# shared arithmetic so the low/base/high bounds this fixture produces
+# (446.25/525.0/603.75) line up with the rest of this file's fixtures.
+def _build_real_sidecar_record(job_id):
+    c, _ev = _load_classifier({})
+    raw = {
+        'inferred_role': 'senior software engineer',
+        'estimated_hours_saved': 3.5,
+        'assumed_loaded_rate': 150.0,
+        'currency': 'USD',
+        'basis': '3.5 hours of senior engineer review time',
+        'confidence': 0.8,
+        'candidate_downstream_outcome': 'PR merged to main',
+        'counterfactual_assumption': 'a human reviewer would have taken the same time',
+    }
+    valid = {'agentic_job_id': job_id, 'job_type': 'code_review', 'status': 'SUCCESS'}
+    assessment = c._validate_assessment(raw, {}, 'llm', 'v1')
+    record = c._build_job_assessment(valid, assessment, raw, {}, 'llm', 'v1')
+    return c, record
+
+
 class TestPhase38MultiTick(unittest.TestCase):
     """Tasks 1 & 2 — the two guarantees only visible across ticks.
 
@@ -603,7 +629,17 @@ class TestPhase38MultiTick(unittest.TestCase):
     can be scripted per tick.
     """
 
-    def _setup(self, sid, job_id, status='SUCCESS', assessment=None, seed_created=False):
+    def _setup(self, sid, job_id, status='SUCCESS', assessment=None, seed_created=False,
+               sidecar=None):
+        """sidecar (Phase 42 Plan 05, EGV-07), when given, is one record dict
+        or a list of them, written to ${state_dir}/job-assessments/<component>.jsonl
+        where <component> is produced by the classifier's OWN
+        _sidecar_filename_component transform (imported fresh via
+        _load_classifier, never a hand-written string) -- so the fixture's
+        filename can never silently drift from the real writer's. Additive
+        to the existing `assessment` (marker-embedded) parameter; both may
+        be supplied together, exactly like TestPhase38ReporterPath's
+        _run_one_outcome already allows."""
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase38-multitick-')
         hermes_home = os.path.join(tmpdir, 'hh')
         state_dir = os.path.join(hermes_home, 'state', 'revenium')
@@ -646,6 +682,16 @@ class TestPhase38MultiTick(unittest.TestCase):
         if seed_created:
             with open(jobs_ledger, 'w') as f:
                 f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+        if sidecar is not None:
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(assessments_dir, mode=0o700, exist_ok=True)
+            _classifier_mod, _ev_mod = _load_classifier({})
+            component = _classifier_mod._sidecar_filename_component(job_id)
+            sidecar_records = sidecar if isinstance(sidecar, list) else [sidecar]
+            with open(os.path.join(assessments_dir, f'{component}.jsonl'), 'w') as f:
+                for _rec in sidecar_records:
+                    f.write(json.dumps(_rec, separators=(',', ':')) + '\n')
 
         _build_flexible_shim(shim)
 
@@ -859,6 +905,222 @@ class TestPhase38MultiTick(unittest.TestCase):
             outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
             self.assertEqual(
                 len(outcome_inv2), 0, f'no retry expected after a 409-success: {jobs_inv2}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    # -- Plan 05 (EGV-07): provenance survives a REAL deferred create -----
+
+    def test_provenance_survives_deferred_create_and_retry(self):
+        """EGV-07, and the roadmap's own wording verbatim: "Model, prompt,
+        taxonomy, policy and schema versions survive a deferred create and
+        a retry -- the phase-38 deferral path is the test, not a mock."
+
+        C-04 is explicit Phase 38's deferral proof does not extend to this
+        schema: the matching logic is schema-agnostic but the field
+        extraction was not, and Phase 42 replaced the extraction wholesale.
+        This test rebuilds the proof on the real harness this class already
+        uses for the marker-only deferral guarantee
+        (test_deferred_create_survives_to_next_tick_with_assessment_intact):
+        a real `jobs create` failure in tick 1 (JOBS_CREATE_EXIT_CODE=1,
+        via a real `bash hermes-report.sh` subprocess through _run_tick),
+        a real second subprocess run in tick 2, and a real sidecar file
+        persisted on disk between them -- never a mock of the extraction
+        logic.
+
+        Every provenance field EGV-07 names by word (model, prompt,
+        taxonomy, policy, schema) plus the evaluator/evaluator-version pair
+        is captured from the ON-DISK sidecar file before tick 1 (not the
+        in-memory record, so serialization is covered too) and asserted
+        field-for-field, per-field message, against tick 2's --metadata --
+        a dict-equality assertion would tell the reader nothing about which
+        link in the provenance chain broke.
+        """
+        sid = 'p42-05-prov-sid-001'
+        job_id = 'p42-05-prov-job-001'
+        c, record = _build_real_sidecar_record(job_id)
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            seed_created=False, sidecar=record,
+        )
+        try:
+            component = c._sidecar_filename_component(job_id)
+            sidecar_path = os.path.join(state_dir, 'job-assessments', f'{component}.jsonl')
+
+            # Read the provenance fields back OUT OF THE FILE ON DISK,
+            # before tick 1 even runs -- proving serialization survived,
+            # not just the in-memory dict the fixture built.
+            with open(sidecar_path) as f:
+                on_disk_before = json.loads(f.read().strip())
+            provenance_fields = (
+                'assessment_schema_version', 'taxonomy_version', 'prompt_version',
+                'policy_version', 'model', 'evaluator', 'evaluator_version',
+            )
+            expected = {field: on_disk_before[field] for field in provenance_fields}
+
+            # Tick 1: jobs create fails -> OUTCOME-04's defer branch. No
+            # outcome ships; the sidecar file is untouched by this tick
+            # (proven separately, byte-for-byte, in the next test).
+            env1 = {**env, 'JOBS_CREATE_EXIT_CODE': '1'}
+            rc1, meter_inv1, jobs_inv1, out1 = self._run_tick(env1, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc1, 0, f'tick 1 exit {rc1}: {out1}')
+            self.assertEqual(
+                len(_outcome_invocations(jobs_inv1, 'outcome')), 0,
+                f'tick 1 must send no outcome (create failed, no created line): {jobs_inv1}',
+            )
+            self.assertTrue(
+                'outcome deferred' in out1 or 'wedged job' in out1,
+                f'expected an OUTCOME-04 defer warning in tick 1 output: {out1}',
+            )
+
+            # Tick 2: jobs create succeeds -> the deferred outcome ships,
+            # via a REAL second `bash hermes-report.sh` subprocess re-
+            # reading the SAME sidecar file tick 1 left on disk.
+            env2 = {**env, 'JOBS_CREATE_EXIT_CODE': '0'}
+            rc2, meter_inv2, jobs_inv2, out2 = self._run_tick(env2, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc2, 0, f'tick 2 exit {rc2}: {out2}')
+
+            outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
+            self.assertEqual(
+                len(outcome_inv2), 1, f'tick 2 must ship exactly one outcome: {jobs_inv2}',
+            )
+            argv2 = outcome_inv2[0]
+
+            # D-08's meaning survives the deferral too: --outcome-value
+            # carries the LOW bound the sidecar held before tick 1.
+            self.assertIn(
+                '--outcome-value', argv2, f'expected --outcome-value in tick 2 argv: {argv2}',
+            )
+            self.assertEqual(
+                argv2[argv2.index('--outcome-value') + 1], str(on_disk_before['value_low']),
+                'the LOW bound must survive the deferral onto --outcome-value unchanged',
+            )
+
+            meta2 = json.loads(_metadata_of(argv2))
+            for field in provenance_fields:
+                self.assertIn(
+                    field, meta2,
+                    f'provenance field {field!r} is missing from tick 2 --metadata: {meta2}',
+                )
+                self.assertEqual(
+                    meta2[field], expected[field],
+                    f'provenance field {field!r} changed across the deferral: '
+                    f'sidecar held {expected[field]!r} before tick 1, '
+                    f'tick 2 shipped {meta2[field]!r}',
+                )
+
+            ledger_text = open(jobs_ledger).read()
+            self.assertTrue(
+                any(l.startswith(f'JOB:{job_id}:outcome:') for l in ledger_text.splitlines()),
+                f'expected an outcome ledger line after tick 2: {ledger_text}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_sidecar_record_unmodified_by_a_deferred_tick(self):
+        """The reporter is a PURE READER of the sidecar; if a future change
+        ever makes it a writer, this is the test that says so. Hashes the
+        sidecar file's bytes before tick 1 and after tick 2 and asserts
+        identity. Also re-asserts the marker file's own bytes are
+        unchanged across both ticks -- the existing EGV-22 guarantee
+        (test_deferred_create_survives_to_next_tick_with_assessment_intact)
+        restated at the file level rather than the field level, now
+        alongside the new sidecar carrier."""
+        sid = 'p42-05-unmod-sid-001'
+        job_id = 'p42-05-unmod-job-001'
+        c, record = _build_real_sidecar_record(job_id)
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            seed_created=False, sidecar=record,
+        )
+        try:
+            component = c._sidecar_filename_component(job_id)
+            sidecar_path = os.path.join(state_dir, 'job-assessments', f'{component}.jsonl')
+            marker_path = os.path.join(state_dir, 'markers', f'{sid}.jsonl')
+
+            with open(sidecar_path, 'rb') as f:
+                sidecar_bytes_before = f.read()
+            with open(marker_path, 'rb') as f:
+                marker_bytes_before = f.read()
+
+            env1 = {**env, 'JOBS_CREATE_EXIT_CODE': '1'}
+            rc1, _m1, jobs_inv1, out1 = self._run_tick(env1, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc1, 0, f'tick 1 exit {rc1}: {out1}')
+            self.assertEqual(
+                len(_outcome_invocations(jobs_inv1, 'outcome')), 0,
+                f'tick 1 must send no outcome: {jobs_inv1}',
+            )
+
+            env2 = {**env, 'JOBS_CREATE_EXIT_CODE': '0'}
+            rc2, _m2, jobs_inv2, out2 = self._run_tick(env2, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc2, 0, f'tick 2 exit {rc2}: {out2}')
+            self.assertEqual(
+                len(_outcome_invocations(jobs_inv2, 'outcome')), 1,
+                f'tick 2 must ship exactly one outcome: {jobs_inv2}',
+            )
+
+            with open(sidecar_path, 'rb') as f:
+                sidecar_bytes_after = f.read()
+            with open(marker_path, 'rb') as f:
+                marker_bytes_after = f.read()
+
+            self.assertEqual(
+                sidecar_bytes_before, sidecar_bytes_after,
+                'the sidecar file must be byte-identical across a deferred tick and its '
+                'retry -- the reporter is a pure reader of it',
+            )
+            self.assertEqual(
+                marker_bytes_before, marker_bytes_after,
+                'EGV-22 at the file level: the marker file must also be byte-identical '
+                'across a deferred tick and its retry',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_rerun_after_a_valued_outcome_reports_exactly_once(self):
+        """Idempotency with a sidecar present. Three ticks against a state
+        that never changes must produce exactly one `jobs outcome`
+        invocation total and exactly one `JOB:<id>:outcome:` ledger line
+        total -- the idempotency edge this repo has been bitten by twice
+        (the phase-32 cross-profile double-ship; the legacy-reporter race
+        still carried as an @expectedFailure).
+        test_idempotent_rerun_produces_exactly_one_outcome_and_one_ledger_line
+        already covers this for the marker-sourced path; this test covers
+        it with a real sidecar record present, over three ticks instead of
+        two.
+
+        This test asserts EXACTLY-ONCE. It never asserts, and must never be
+        read as demonstrating, that a job id CAN be reported twice through
+        the ordinary `job_outcome_queue` path -- that is the regression
+        this design exists to avoid, not a feature.
+        """
+        sid = 'p42-05-rerun-sid-001'
+        job_id = 'p42-05-rerun-job-001'
+        c, record = _build_real_sidecar_record(job_id)
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            seed_created=True, sidecar=record,
+        )
+        try:
+            total_outcome_invocations = 0
+            for tick_num in (1, 2, 3):
+                rc, _m, jobs_inv, out = self._run_tick(env, meter_log, jobs_log, state_dir)
+                self.assertEqual(rc, 0, f'tick {tick_num} exit {rc}: {out}')
+                total_outcome_invocations += len(_outcome_invocations(jobs_inv, 'outcome'))
+
+            self.assertEqual(
+                total_outcome_invocations, 1,
+                'exactly one jobs outcome invocation across three ticks against unchanged '
+                'state, with a sidecar present',
+            )
+
+            ledger_text = open(jobs_ledger).read()
+            outcome_lines = [
+                l for l in ledger_text.splitlines() if l.startswith(f'JOB:{job_id}:outcome:')
+            ]
+            self.assertEqual(
+                len(outcome_lines), 1,
+                f'exactly one outcome ledger line across three ticks, got: {outcome_lines}',
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

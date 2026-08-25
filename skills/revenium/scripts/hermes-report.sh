@@ -3367,6 +3367,20 @@ if assessment_raw:
         schema_version = record.get('assessment_schema_version')
         if isinstance(schema_version, (int, float)) and not isinstance(schema_version, bool):
             meta['assessment_schema_version'] = schema_version
+        # EGV-07 (Phase 42 Plan 05): the sibling provenance-version fields
+        # the requirement names alongside the schema version -- taxonomy,
+        # prompt, and policy versions must survive a deferred create and a
+        # retry exactly like assessment_schema_version already does. Same
+        # conditional-emit rule: absent from the record, absent from meta.
+        taxonomy_version = record.get('taxonomy_version')
+        if isinstance(taxonomy_version, (int, float)) and not isinstance(taxonomy_version, bool):
+            meta['taxonomy_version'] = taxonomy_version
+        prompt_version = record.get('prompt_version')
+        if isinstance(prompt_version, (int, float)) and not isinstance(prompt_version, bool):
+            meta['prompt_version'] = prompt_version
+        policy_version = record.get('policy_version')
+        if isinstance(policy_version, (int, float)) and not isinstance(policy_version, bool):
+            meta['policy_version'] = policy_version
         evidence_class = record.get('evidence_class')
         if isinstance(evidence_class, str) and evidence_class:
             meta['evidence_class'] = evidence_class[:32]
@@ -3376,6 +3390,14 @@ if assessment_raw:
         evaluator_version = record.get('evaluator_version')
         if isinstance(evaluator_version, str) and evaluator_version:
             meta['evaluator_version'] = evaluator_version[:16]
+        # EGV-07: the fifth named provenance field -- which MODEL produced
+        # the assessment (Phase 45/EGV-08 owns real semantics; today's
+        # value is PROVENANCE_MODEL_UNKNOWN, but the field still crosses
+        # the wire so a later phase's real value survives the same path
+        # without another edit here).
+        model_field = record.get('model')
+        if isinstance(model_field, str) and model_field:
+            meta['model'] = model_field[:64]
         confidence_raw = record.get('confidence')
         if confidence_raw is not None:
             try:
