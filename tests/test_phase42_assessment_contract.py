@@ -290,6 +290,7 @@ import subprocess
 import sys as _sys
 import tempfile
 import textwrap
+import time
 import unittest.mock
 
 from tests._compat_helpers import (
@@ -1729,6 +1730,7 @@ class SecondSiteBoundsTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 CORRECT_ASSESSMENT_SH = SCRIPTS_DIR / 'correct-assessment.sh'
+PRUNE_MARKERS_SH = SCRIPTS_DIR / 'prune-markers.sh'
 
 
 def _build_correction_shim(shim_path, outcome_update_capable=True):
@@ -2395,6 +2397,282 @@ class CorrectionAppendTests(unittest.TestCase):
             self.assertIsNotNone(update_argv, f'expected an outcome-update invocation: {invocations}')
             assert_argv_matches_golden(
                 self, update_argv, load_golden('jobs-outcome-update.golden.json'))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Plan 07 (D-13/C-01): the fifth prune pass on the sidecar's OWN mtime clock
+# and its OWN retention tunable (REVENIUM_ASSESSMENT_RETENTION_DAYS, default
+# 90), wholly independent of REVENIUM_MARKER_RETENTION_DAYS' 30.
+#
+# Requirements covered:
+#   EGV-09 — a correction filed against a sidecar record must not lose the
+#            race against a prune keyed on the OWNING SESSION's ledger
+#            timestamp; ageing must be the record's own last write instead,
+#            so a correction append (which extends the file, never rewrites
+#            it) is itself what refreshes the retention window.
+# ---------------------------------------------------------------------------
+
+
+def _build_sidecar_prune_tree():
+    """Build a tmp HERMES_HOME tree with only a job-assessments dir and a
+    markers dir (no ledger, no state.db) -- enough for prune-markers.sh to
+    run standalone against a real subprocess.
+
+    Returns (tmpdir, env, state_dir, assessments_dir, markers_dir).
+    """
+    tmpdir = tempfile.mkdtemp(prefix='gsd-phase42-sidecar-prune-')
+    hermes_home = os.path.join(tmpdir, 'hh')
+    state_dir = os.path.join(hermes_home, 'state', 'revenium')
+    assessments_dir = os.path.join(state_dir, 'job-assessments')
+    markers_dir = os.path.join(state_dir, 'markers')
+    os.makedirs(assessments_dir, mode=0o700)
+    os.makedirs(markers_dir, mode=0o700)
+
+    env = {
+        **os.environ,
+        'HERMES_HOME': hermes_home,
+        'REVENIUM_STATE_DIR': state_dir,
+        'TZ': 'UTC',
+    }
+    return tmpdir, env, state_dir, assessments_dir, markers_dir
+
+
+def _write_sidecar_record(assessments_dir, job_id, mtime, extra=None):
+    """Write a minimal job_assessment sidecar record for job_id, then
+    backdate its mtime (and atime) to `mtime` (a unix timestamp)."""
+    record = {
+        'kind': 'job_assessment',
+        'agentic_job_id': job_id,
+        'assessment_id': f'{job_id}:0',
+        'value_low': 100.0, 'value_base': 110.0, 'value_high': 120.0,
+        'currency': 'USD',
+    }
+    if extra:
+        record.update(extra)
+    path = os.path.join(assessments_dir, f'{job_id}.jsonl')
+    with open(path, 'w') as f:
+        f.write(json.dumps(record, separators=(',', ':')) + '\n')
+    os.utime(path, (mtime, mtime))
+    return path
+
+
+def _run_prune_markers(env, *args):
+    """Run prune-markers.sh as a REAL subprocess; return
+    (returncode, stdout, stderr)."""
+    result = subprocess.run(
+        ['bash', str(PRUNE_MARKERS_SH), *args],
+        env=env, capture_output=True, text=True, timeout=30,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def _read_log(state_dir_for_prune):
+    """log()'s stderr mirror is TTY-gated (common.sh) -- under a captured
+    subprocess it never reaches stdout/stderr, so warn/info assertions must
+    read the metering log file directly, matching Phase 32's own helper."""
+    log_path = os.path.join(state_dir_for_prune, 'revenium-metering.log')
+    if not os.path.exists(log_path):
+        return ''
+    with open(log_path, encoding='utf-8') as f:
+        return f.read()
+
+
+class SidecarRetentionTests(unittest.TestCase):
+    """Plan 07 -- D-13/C-01: the job-assessments sidecar ages from its own
+    mtime on its own 90-day REVENIUM_ASSESSMENT_RETENTION_DAYS tunable,
+    never from the owning session's ledger timestamp and never from the
+    30-day REVENIUM_MARKER_RETENTION_DAYS the four pre-existing passes
+    share -- so a file the marker clock would already have deleted still
+    survives under the sidecar's own clock, and a correction append (which
+    extends the file's mtime) extends the retention window with it."""
+
+    def test_file_older_than_sidecar_cutoff_is_removed(self):
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            old_ts = time.time() - 91 * 86400  # past the 90-day default
+            path = _write_sidecar_record(assessments_dir, 'old-job', old_ts)
+
+            rc, out, err = _run_prune_markers(env)
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertFalse(
+                os.path.exists(path),
+                'a sidecar file past the 90-day default must be removed',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_file_younger_than_sidecar_cutoff_survives(self):
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            fresh_ts = time.time() - 1 * 86400
+            path = _write_sidecar_record(assessments_dir, 'fresh-job', fresh_ts)
+
+            rc, out, err = _run_prune_markers(env)
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertTrue(
+                os.path.exists(path),
+                'a sidecar file younger than the 90-day default must survive',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_older_than_marker_cutoff_but_younger_than_sidecar_cutoff_survives(self):
+        """The executable form of D-13's rule: 40 days is stale under the
+        30-day MARKER_RETENTION_DAYS the four pre-existing passes share, but
+        this file lives in the sidecar's OWN 90-day retention window and
+        must survive -- proving the sidecar ages on its own clock, not the
+        owning session's."""
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            mid_ts = time.time() - 40 * 86400
+            path = _write_sidecar_record(assessments_dir, 'mid-job', mid_ts)
+
+            env = {**env, 'REVENIUM_MARKER_RETENTION_DAYS': '30'}
+            rc, out, err = _run_prune_markers(env)
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertTrue(
+                os.path.exists(path),
+                'D-13: a file older than the 30-day MARKER_RETENTION_DAYS '
+                'but younger than the sidecar\'s own 90-day cutoff must '
+                'survive -- its own clock, not the session\'s.',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_dry_run_removes_nothing_but_still_reports(self):
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            old_ts = time.time() - 91 * 86400
+            path = _write_sidecar_record(assessments_dir, 'old-job-dry', old_ts)
+
+            rc, out, err = _run_prune_markers(env, '--dry-run')
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertTrue(
+                os.path.exists(path),
+                '--dry-run must not remove a stale sidecar file',
+            )
+            log_text = _read_log(state_dir)
+            self.assertIn(
+                'dry-run, would remove', log_text,
+                f'--dry-run must still report what it would remove: {log_text!r}',
+            )
+            self.assertIn('dir=job-assessments', log_text)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_invalid_sidecar_tunable_refuses_to_prune_and_leaves_files_in_place(self):
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            old_ts = time.time() - 91 * 86400
+            path = _write_sidecar_record(assessments_dir, 'old-job-invalid', old_ts)
+
+            env = {**env, 'REVENIUM_ASSESSMENT_RETENTION_DAYS': 'not-a-number'}
+            rc, out, err = _run_prune_markers(env)
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertTrue(
+                os.path.exists(path),
+                'an invalid REVENIUM_ASSESSMENT_RETENTION_DAYS must refuse '
+                'to prune the sidecar directory, leaving every file in place',
+            )
+            log_text = _read_log(state_dir)
+            self.assertIn('REVENIUM_ASSESSMENT_RETENTION_DAYS', log_text)
+            self.assertIn('invalid', log_text.lower())
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_invalid_sidecar_tunable_does_not_disable_the_four_existing_passes(self):
+        """The other half of the decoupling: an invalid sidecar tunable
+        must not gate the marker/flag/spool/ledger passes, which key on the
+        wholly separate REVENIUM_MARKER_RETENTION_DAYS."""
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            old_ts = time.time() - 91 * 86400
+            marker_path = os.path.join(markers_dir, 'old-sid.jsonl')
+            with open(marker_path, 'w') as f:
+                f.write(json.dumps({
+                    'muid': 'aaa', 'ts': old_ts, 'sid': 'old-sid',
+                    'task_type': 'research', 'operation_type': 'CHAT',
+                }) + '\n')
+            os.utime(marker_path, (old_ts, old_ts))
+
+            env = {**env, 'REVENIUM_ASSESSMENT_RETENTION_DAYS': 'not-a-number'}
+            rc, out, err = _run_prune_markers(env)
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertFalse(
+                os.path.exists(marker_path),
+                'an invalid sidecar tunable must not disable the ordinary '
+                'marker pass (no ledger row -> mtime-fallback stale)',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_invalid_marker_tunable_does_not_disable_the_sidecar_pass(self):
+        """The mirror of the previous test: an invalid MARKER_RETENTION_DAYS
+        must not gate the new sidecar pass, which keys on the wholly
+        separate REVENIUM_ASSESSMENT_RETENTION_DAYS."""
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            old_ts = time.time() - 91 * 86400
+            path = _write_sidecar_record(assessments_dir, 'old-job-marker-invalid', old_ts)
+
+            env = {**env, 'REVENIUM_MARKER_RETENTION_DAYS': 'not-a-number'}
+            rc, out, err = _run_prune_markers(env)
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertFalse(
+                os.path.exists(path),
+                'an invalid MARKER_RETENTION_DAYS must not disable the '
+                'sidecar pass -- its own tunable is unaffected',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_correction_append_refreshes_mtime_so_next_prune_keeps_it(self):
+        """C-01's whole point, proven end to end: correct-assessment.sh
+        appends a correction line to an about-to-expire sidecar record;
+        appending refreshes the file's mtime; the next prune run keeps it
+        instead of deleting it. This is the only test that proves the two
+        halves (Plan 06's writer, Plan 07's prune pass) compose."""
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            job_id = 'compose-job'
+            near_expiry_ts = time.time() - 89 * 86400  # about to cross 90d
+            path = _write_sidecar_record(assessments_dir, job_id, near_expiry_ts)
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            shim = os.path.join(bin_dir, 'revenium')
+            _build_correction_shim(shim, outcome_update_capable=True)
+            correction_env = {
+                **env,
+                'HOME': shim_home,
+                'PATH': bin_dir + os.pathsep + env.get('PATH', ''),
+                'JOBS_LOG': os.path.join(tmpdir, 'jobs.log'),
+            }
+
+            rc, out, err = _run_correct_assessment(correction_env, [
+                '--job-id', job_id, '--value', '90', '--currency', 'USD',
+                '--reason', 'compose test -- refresh before expiry',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            mtime_after_correction = os.path.getmtime(path)
+            self.assertGreater(
+                mtime_after_correction, near_expiry_ts + 86400,
+                'appending a correction must refresh the sidecar file\'s '
+                'mtime',
+            )
+
+            rc2, out2, err2 = _run_prune_markers(env)
+            self.assertEqual(rc2, 0, f'stdout={out2!r} stderr={err2!r}')
+            self.assertTrue(
+                os.path.exists(path),
+                'C-01: a correction filed against an about-to-expire record '
+                'must extend its retention window, so the next prune keeps '
+                'it rather than deleting the very file it just appended to',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
