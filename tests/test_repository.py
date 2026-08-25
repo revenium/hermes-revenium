@@ -110,6 +110,11 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'cron.sh',
             SKILL / 'scripts' / 'hermes-report.sh',
             SKILL / 'scripts' / 'clear-halt.sh',
+            # Phase 42 Plan 06 (D-02) — operator-triggered EGV-09 correction
+            # script, modelled on clear-halt.sh; structurally unreachable
+            # from cron.sh/install-cron.sh (never invoked by the per-tick
+            # pipeline).
+            SKILL / 'scripts' / 'correct-assessment.sh',
             SKILL / 'scripts' / 'prune-markers.sh',
             SKILL / 'scripts' / 'pre_llm_call.sh',      # Phase 12 — pre-LLM-call halt hook
             SKILL / 'scripts' / 'pre_tool_call.sh',     # Phase 12 — pre-tool-call block + CANCELLED marker
