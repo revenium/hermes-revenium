@@ -2851,9 +2851,20 @@ PY
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
     local outcome_now_ts _age_s _stale_threshold outcome_metadata
     local outcome_warn_reason outcome_warn_key outcome_warn_flag
-    local outcome_markers_dir outcome_value outcome_currency
-    local outcome_evidence_class outcome_evaluator outcome_evaluator_version
-    local outcome_confidence outcome_hours_saved outcome_loaded_rate
+    # Phase 42 (C-04): the marker-sourced outcome_evidence_class/
+    # outcome_evaluator/outcome_evaluator_version/outcome_confidence/
+    # outcome_hours_saved/outcome_loaded_rate locals are gone -- the outcome
+    # stage now resolves an accepted assessment from the sidecar, never the
+    # marker (D-10). outcome_value/outcome_currency remain scalars because
+    # the outcome_cmd+=(--outcome-value ...) construction below runs BEFORE
+    # the metadata heredoc; outcome_assessment_json carries the rest as one
+    # JSON blob. outcome_markers_dir returns (Phase 42 Plan 04, D-10): a
+    # narrow read-only presence PROBE on the job marker's own `assessment`
+    # key, used only to tell "never evaluated" apart from "evaluated by an
+    # older classifier, sidecar since pruned or never written" for the
+    # rolling-upgrade diagnostic reason word -- never a value source.
+    local outcome_assessment_dir outcome_value outcome_currency outcome_markers_dir
+    local outcome_assessment_json outcome_reason
     for _entry in "${job_outcome_queue[@]}"; do
       IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
@@ -2942,57 +2953,61 @@ except Exception:
           ;;
       esac
 
-      # Phase 38 (ROI-09/ROI-10): resolve an accepted assessment for SUCCESS
-      # arcs only — FAILED/CANCELLED are never evaluated (classifier.py gates
-      # _attach_assessment on status == SUCCESS before this stage ever runs),
-      # so this guard is defensive belt-and-suspenders, not the only gate.
-      # The assessment is NOT a queue field (a nested object cannot be a pipe
-      # field) — it is re-read from the session's marker file, the carrier
-      # 38-RESEARCH.md proved survives a deferred tick. The marker directory
-      # is resolved per-session below (not read off MARKERS_DIR) because a
-      # multiplexed gateway owns each session's markers under its own
-      # profile home — the same helper the in-loop jobs stage already uses
-      # at :~973.
+      # Phase 42 (C-01/C-04/D-10): resolve an accepted assessment for
+      # SUCCESS arcs only — FAILED/CANCELLED are never evaluated
+      # (classifier.py gates _attach_assessment on status == SUCCESS before
+      # this stage ever runs), so this guard is defensive belt-and-
+      # suspenders, not the only gate. The assessment is now re-read from
+      # the job-assessments SIDECAR, never from the job marker's own 9-key
+      # `assessment` summary (D-10) — C-01 demoted that object to
+      # pointer-and-summary, not the record of record. An absent,
+      # unreadable, over-SIDECAR_LINE_MAX_BYTES, or pruned sidecar record
+      # reports the outcome status-only, with no --outcome-value, and never
+      # falls back to the marker. The sidecar directory is resolved
+      # per-session below (not read off JOB_ASSESSMENTS_DIR) because a
+      # multiplexed gateway owns each session's state under its own profile
+      # home — the same per-session resolution pattern resolve_markers_dir
+      # already provides for the marker directory.
       outcome_value=""
       outcome_currency=""
-      outcome_evidence_class=""
-      outcome_evaluator=""
-      outcome_evaluator_version=""
-      outcome_confidence=""
-      outcome_hours_saved=""
-      outcome_loaded_rate=""
+      outcome_assessment_json=""
+      outcome_reason=""
       if [[ "${outcome_status}" == "SUCCESS" && -n "${outcome_sid}" ]]; then
+        outcome_assessment_dir="$(resolve_assessments_dir "${outcome_sid}")"
+        [[ -z "${outcome_assessment_dir}" ]] && outcome_assessment_dir="${JOB_ASSESSMENTS_DIR}"
+        # D-10 diagnostic reason word: resolve the SAME per-session markers
+        # dir the marker reader uses, so the presence probe below reads the
+        # profile that actually owns this session, not the process-level
+        # default (the same reasoning resolve_assessments_dir already
+        # documents for the sidecar directory itself).
         outcome_markers_dir="$(resolve_markers_dir "${outcome_sid}")"
         [[ -z "${outcome_markers_dir}" ]] && outcome_markers_dir="${MARKERS_DIR}"
-        if [[ -f "${outcome_markers_dir}/${outcome_sid}.jsonl" ]]; then
-          local _assessment_kv
-          _assessment_kv=$(
-            MARKERS_DIR="${outcome_markers_dir}" \
-            SID="${outcome_sid}" \
-            OUTCOME_JOB_ID="${outcome_id}" \
-            python3 - <<'PY' 2>/dev/null || true
+        local _assessment_kv
+        _assessment_kv=$(
+          ASSESSMENTS_DIR="${outcome_assessment_dir}" \
+          OUTCOME_JOB_ID="${outcome_id}" \
+          OUTCOME_MARKERS_DIR="${outcome_markers_dir}" \
+          OUTCOME_SID="${outcome_sid}" \
+          python3 - <<'PY' 2>/dev/null || true
 import json
 import os
+import re
 from pathlib import Path
 
-markers_dir = os.environ.get('MARKERS_DIR', '')
-sid = os.environ.get('SID', '')
+assessments_dir = os.environ.get('ASSESSMENTS_DIR', '')
 job_id = os.environ.get('OUTCOME_JOB_ID', '')
 
-if not markers_dir or not sid or not job_id:
+if not assessments_dir or not job_id:
     raise SystemExit(0)
 
-marker_path = Path(markers_dir) / f"{sid}.jsonl"
-if not marker_path.is_file():
-    raise SystemExit(0)
-
-# CR-02: the queue's outcome_id (job_id, above) is SANITIZED -- both push
-# sites (:~1440 / :~2342) replace(':',' ','\t','\n','\r' -> '_') the raw
-# agentic_job_id before pushing (D-16). The marker's raw agentic_job_id is
-# NOT sanitized (classifier.py's _validate_job only .strip()s it). Apply the
-# identical D-16 transform here before comparing, or any job id containing
-# one of these characters never matches and its assessment is silently
-# dropped. Same _bad_chars tuple as the two producers -- do not diverge.
+# Phase 42: a fourth independent copy of the writer-side sanitize transform
+# (hermes-report.sh:1418/:2332/:2996; classifier.py's
+# _sidecar_filename_component's first step) plus its filename-safety pass
+# (that function's second step) -- kept in sync by hand, matching this
+# file's existing deliberate-duplication posture (CLAUDE.md). A
+# one-character disagreement between the writer and this reader orphans
+# every record for that job (the CR-02 bug class this repo already paid
+# for once, at a different join site).
 _bad_chars = (':', ' ', '\t', '\n', '\r')
 
 
@@ -3002,43 +3017,116 @@ def _clean(v):
     return v
 
 
+def _sidecar_component(raw):
+    if not isinstance(raw, str):
+        return '_'
+    value = _clean(raw)
+    value = re.sub(r'[^A-Za-z0-9._-]', '_', value)
+    if value in ('', '.', '..'):
+        return '_'
+    return value
+
+
+component = _sidecar_component(job_id)
+sidecar_path = Path(assessments_dir) / f"{component}.jsonl"
+
+# Phase 42's own guard, sized to the sidecar's SIDECAR_LINE_MAX_BYTES
+# per-record ceiling -- deliberately NOT the marker reader's 4096 (that
+# guard governs a different re-read and a different budget). Skip an
+# over-length line, never crash.
+SIDECAR_LINE_MAX_BYTES = 8192
+
 found = None
 try:
-    with marker_path.open() as f:
+    with sidecar_path.open() as f:
         for line in f:
-            line = line.rstrip('\n')
-            if not line or len(line) > 4096:
+            raw_line = line.rstrip('\n')
+            if not raw_line or len(raw_line.encode('utf-8')) > SIDECAR_LINE_MAX_BYTES:
                 continue
             try:
-                rec = json.loads(line)
+                rec = json.loads(raw_line)
             except (json.JSONDecodeError, ValueError):
                 continue
             if not isinstance(rec, dict):
                 continue
-            if rec.get('kind') != 'job':
+            if rec.get('kind') not in ('job_assessment', 'correction'):
                 continue
             raw_id = rec.get('agentic_job_id')
             if not isinstance(raw_id, str) or _clean(raw_id) != job_id:
                 continue
-            # ROI-12: pre-v1.5 marker lines have no "assessment" key at all —
-            # .get(...) makes that a no-op, not an error.
-            a = rec.get('assessment')
-            if isinstance(a, dict) and a:
-                found = a
+            # Deliberate: no break. A later kind:"correction" line for the
+            # same job id must naturally supersede the original on a
+            # scan-to-end -- unlike the marker reader's identical-looking
+            # loop (accidental), this one is deliberate, per
+            # 41-CARRIER-DECISION.md Part 2.
+            found = rec
 except OSError:
     pass
 
 if found is None:
+    # D-10 diagnostic reason word (Phase 42 Plan 04): tell "never
+    # evaluated" apart from "evaluated by an older classifier, sidecar
+    # since pruned or never written" -- a PRESENCE probe only, on the job
+    # marker's own frozen 9-key `assessment` summary (C-01's demoted
+    # pointer-and-summary object). No field is extracted and no value is
+    # taken from it here; D-10 still forbids using the marker as a value
+    # source -- this only tells the operator which unvalued case they are
+    # looking at.
+    _reason = 'sidecar_unavailable'
+    _markers_dir = os.environ.get('OUTCOME_MARKERS_DIR', '')
+    _sid = os.environ.get('OUTCOME_SID', '')
+    if _markers_dir and _sid:
+        _marker_path = Path(_markers_dir) / f"{_sid}.jsonl"
+        try:
+            with _marker_path.open() as _mf:
+                for _mline in _mf:
+                    _mraw = _mline.rstrip('\n')
+                    if not _mraw or len(_mraw.encode('utf-8')) > 4096:
+                        continue
+                    try:
+                        _mrec = json.loads(_mraw)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(_mrec, dict) or _mrec.get('kind') != 'job':
+                        continue
+                    _mid = _mrec.get('agentic_job_id')
+                    if not isinstance(_mid, str) or _clean(_mid) != job_id:
+                        continue
+                    # Deliberate: no break -- mirrors this file's own
+                    # scan-to-end convention; a later job-status line for
+                    # the same id supersedes an earlier one.
+                    _reason = (
+                        'sidecar_missing_for_valued_marker'
+                        if 'assessment' in _mrec
+                        else 'sidecar_unavailable'
+                    )
+        except OSError:
+            pass
+    print(f"REASON={_reason}")
+    raise SystemExit(0)
+
+# D-07 (Phase 42 Plan 04): fail closed on an unrecognized (newer)
+# assessment_schema_version -- a newer version may redefine what the value
+# field means (gross vs net lands in Phase 44), and billing on a guess is
+# the failure mode worth avoiding. A recognized OLDER version is still
+# valued normally -- do not strand every pre-upgrade record on the fleet at
+# a version bump. Exactly one version is recognized today, so that branch
+# is inert; it stays explicit because the first bump is when a missing
+# branch becomes a silent outage.
+RECOGNIZED_ASSESSMENT_SCHEMA_VERSIONS = frozenset({1})
+_schema_version = found.get('assessment_schema_version')
+if _schema_version not in RECOGNIZED_ASSESSMENT_SCHEMA_VERSIONS:
+    # Emit NOTHING for the value scalars and NOTHING for the assessment
+    # portion of --metadata -- an unrecognized version is not valued on a
+    # guess, and its shape is not trusted enough to even echo back.
+    print("REASON=schema_unrecognized")
     raise SystemExit(0)
 
 
 def _s(v, maxlen=None):
     # Pipe/newline/CR-safe (IFS='|' transport, same rule as every other
-    # marker-derived field in this file). WR-01: also length-capped on read
-    # -- classifier.py already clamps these before writing, but this reader
-    # has no independent bound of its own, matching this file's existing
-    # convention (failure_reason capped to 500 at :1418/:2317, skill name to
-    # 128 at :168).
+    # sidecar/marker-derived field in this file). Also length-capped on
+    # read, matching this file's existing convention.
     v = '' if v is None else str(v)
     for bad in ('|', '\n', '\r'):
         v = v.replace(bad, ' ')
@@ -3047,18 +3135,14 @@ def _s(v, maxlen=None):
     return v
 
 
-# WR-02: estimated_value/currency are shipped straight to the revenium CLI
-# as --outcome-value/--outcome-currency (a monetary value), unlike
-# confidence/estimated_hours_saved/assumed_loaded_rate which are round-
-# tripped through float() before entering --metadata (:~3022-3040). Today's
-# sole writer (classifier.py) always derives a clean float and a currency
-# already checked against SUPPORTED_CURRENCIES -- this is a read-side
-# defense against a malformed or hand-edited marker, not a live gap. Same
-# duplication-is-deliberate posture as SUPPORTED_CURRENCIES in classifier.py
-# (CLAUDE.md: "the plugin must stay importable without the skill's shell
-# environment") -- kept in sync by hand, not shared.
+# D-08: --outcome-value carries the LOW bound, not base -- understates
+# rather than overstates. All three bounds still ride in --metadata via
+# ASSESSMENT_JSON below, so the range stays recoverable. Read-side defense
+# against a hand-edited or corrupt sidecar record, carried over intact from
+# the marker reader (WR-02): a non-numeric value or an unsupported/
+# malformed currency drops BOTH flags together, never one alone.
 _SUPPORTED_CURRENCIES = frozenset({'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF'})
-_raw_value = found.get('estimated_value', '')
+_raw_value = found.get('value_low', '')
 _raw_currency = found.get('currency', '')
 _value_ok = False
 try:
@@ -3070,9 +3154,6 @@ _currency_ok = (
     isinstance(_raw_currency, str)
     and _raw_currency.strip().upper() in _SUPPORTED_CURRENCIES
 )
-# Fail-open-and-omit-both: an invalid value or currency drops BOTH flags
-# (same posture the emission site already uses when only one of the pair
-# is present), never a malformed/unvalidated one alone.
 if _value_ok and _currency_ok:
     value_out = _s(_raw_value)
     currency_out = _s(_raw_currency, maxlen=32)
@@ -3080,27 +3161,117 @@ else:
     value_out = ''
     currency_out = ''
 
-assumptions = found.get('assumptions')
-if not isinstance(assumptions, dict):
-    assumptions = {}
+# Phase 42 (C-04): the whole resolved sidecar record rides as ONE JSON
+# blob -- replacing the eight separate KEY=value prints the marker reader
+# used. Fields holding lists/dicts (evidence_references, correction_history,
+# added by later plans) cannot be represented as scalar env lines at all
+# under the old transport; a single JSON variable removes that ceiling.
+# VALUE/CURRENCY still ride as their own scalar lines because
+# outcome_cmd+=(--outcome-value ...) below runs BEFORE the metadata heredoc
+# that parses ASSESSMENT_JSON.
 print(f"VALUE={value_out}")
 print(f"CURRENCY={currency_out}")
-print(f"EVIDENCE_CLASS={_s(found.get('evidence_class', ''), maxlen=32)}")
-print(f"EVALUATOR={_s(found.get('evaluator', ''), maxlen=64)}")
-print(f"EVALUATOR_VERSION={_s(found.get('evaluator_version', ''), maxlen=16)}")
-print(f"CONFIDENCE={_s(found.get('confidence', ''))}")
-print(f"HOURS_SAVED={_s(assumptions.get('estimated_hours_saved', ''))}")
-print(f"LOADED_RATE={_s(assumptions.get('assumed_loaded_rate', ''))}")
+print(f"ASSESSMENT_JSON={json.dumps(found, separators=(',', ':'))}")
 PY
+        )
+        outcome_value=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^VALUE=//p')
+        outcome_currency=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CURRENCY=//p')
+        outcome_assessment_json=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^ASSESSMENT_JSON=//p')
+        outcome_reason=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^REASON=//p')
+
+        # D-09 second site (Phase 42 Plan 04): re-validate the three bounds
+        # INDEPENDENTLY of anything the classifier did, immediately before
+        # the value flags are constructed below -- the check standing
+        # between a hand-edited or corrupt sidecar line and a dollar figure
+        # on a customer's bill (same shape and reasoning as C-02's
+        # evidence_class allow-list, and the currency allow-list already
+        # above in this same reader). On failure, clear BOTH value scalars
+        # together, never one -- the emission gate below already refuses to
+        # send one flag without the other, and a partial clear would rely
+        # on that downstream rule instead of stating the intent here. The
+        # outcome arc itself is still reported; only the value is withheld.
+        if [[ -n "${outcome_value}" && -n "${outcome_currency}" ]]; then
+          local _bounds_ok
+          _bounds_ok=$(
+            ASSESSMENT_JSON="${outcome_assessment_json}" \
+            python3 -c "
+import json, math, os
+raw = os.environ.get('ASSESSMENT_JSON', '').strip()
+try:
+    rec = json.loads(raw) if raw else {}
+except (ValueError, TypeError):
+    rec = {}
+if not isinstance(rec, dict):
+    rec = {}
+
+
+def _finite(v):
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+low = _finite(rec.get('value_low'))
+base = _finite(rec.get('value_base'))
+high = _finite(rec.get('value_high'))
+ok = (
+    low is not None and base is not None and high is not None
+    and low >= 0 and base >= 0 and high >= 0
+    and low <= base <= high
+)
+print('true' if ok else 'false')
+" 2>/dev/null || echo "false"
           )
-          outcome_value=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^VALUE=//p')
-          outcome_currency=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CURRENCY=//p')
-          outcome_evidence_class=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVIDENCE_CLASS=//p')
-          outcome_evaluator=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVALUATOR=//p')
-          outcome_evaluator_version=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^EVALUATOR_VERSION=//p')
-          outcome_confidence=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CONFIDENCE=//p')
-          outcome_hours_saved=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^HOURS_SAVED=//p')
-          outcome_loaded_rate=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^LOADED_RATE=//p')
+          if [[ "${_bounds_ok}" != "true" ]]; then
+            outcome_value=""
+            outcome_currency=""
+            outcome_reason="bounds_invalid"
+          fi
+        fi
+
+        # Phase 39 D-02 pattern, reused (Plan 42-04): one warn per
+        # (outcome_id, reason), gated through the SAME OUTCOME_WARN_FLAGS_DIR
+        # sentinel the deferred/wedged block above uses -- not a fifth
+        # sentinel directory. The key is computed ONCE into a single local
+        # shared by both the existence test and the touch, for the identical
+        # reason the deferred/wedged block's own comment gives: two copies of
+        # the sanitizing expression drift, and when they do the check tests
+        # one path while the touch creates another and the gate never
+        # matches. Nothing per-tick (age, timestamp, counter) may enter the
+        # key -- outcome_id is stable per job across ticks, and a per-tick
+        # key reproduces the unknown-<epoch> defeat this repo already paid
+        # for once. Tolerate a failed flag creation without aborting: this
+        # script runs without -e and a read-only state directory must
+        # degrade to a noisier log, never crash the reporter.
+        if [[ -n "${outcome_reason}" ]]; then
+          outcome_warn_key="${outcome_id//[^A-Za-z0-9_:.-]/_}__${outcome_reason}.flag"
+          outcome_warn_flag="${OUTCOME_WARN_FLAGS_DIR}/${outcome_warn_key}"
+          if [[ ! -e "${outcome_warn_flag}" ]]; then
+            mkdir -p "${OUTCOME_WARN_FLAGS_DIR}" 2>/dev/null && touch "${outcome_warn_flag}" 2>/dev/null
+            case "${outcome_reason}" in
+              schema_unrecognized)
+                warn "assessment schema unrecognized, reporting status-only: id=${outcome_id}"
+                ;;
+              sidecar_unavailable)
+                warn "assessment sidecar unavailable, reporting status-only: id=${outcome_id}"
+                ;;
+              sidecar_missing_for_valued_marker)
+                warn "assessment sidecar missing for a marker carrying assessment (rolling-upgrade window), reporting status-only: id=${outcome_id}"
+                ;;
+              bounds_invalid)
+                warn "assessment bounds reversed, negative, or non-finite at the second site, reporting status-only: id=${outcome_id}"
+                ;;
+              *)
+                warn "assessment unvalued (${outcome_reason}), reporting status-only: id=${outcome_id}"
+                ;;
+            esac
+          fi
         fi
       fi
 
@@ -3140,19 +3311,19 @@ PY
       # quoting/escaping so prose reasons cannot break the JSON arg. Omit the flag
       # entirely when there is nothing to send (preserves v1.4 wire shape for
       # source-less sessions).
-      # Phase 38 (ROI-10): provenance for a resolved assessment rides beside
+      # Phase 42 (C-04): provenance for a resolved assessment rides beside
       # source/failure_reason in this SAME metadata object, so the estimate's
-      # nature is unmistakable next to its value flags.
+      # nature is unmistakable next to its value flags. Parsed ONCE from the
+      # single ASSESSMENT_JSON blob printed by the sidecar re-read above,
+      # replacing the eight separate OUTCOME_* env vars the marker-sourced
+      # transport used — a field holding a list/dict (evidence_references,
+      # correction_history, added by later plans) could never ride the old
+      # scalar-per-field transport at all.
       outcome_metadata=$(
         OUTCOME_SOURCE="${outcome_source}" \
         OUTCOME_STATUS="${outcome_status}" \
         OUTCOME_FAILURE_REASON="${outcome_failure_reason}" \
-        OUTCOME_EVIDENCE_CLASS="${outcome_evidence_class}" \
-        OUTCOME_EVALUATOR="${outcome_evaluator}" \
-        OUTCOME_EVALUATOR_VERSION="${outcome_evaluator_version}" \
-        OUTCOME_CONFIDENCE="${outcome_confidence}" \
-        OUTCOME_HOURS_SAVED="${outcome_hours_saved}" \
-        OUTCOME_LOADED_RATE="${outcome_loaded_rate}" \
+        ASSESSMENT_JSON="${outcome_assessment_json}" \
         python3 - <<'PY' 2>/dev/null || true
 import json, os
 meta = {}
@@ -3164,40 +3335,92 @@ reason = os.environ.get('OUTCOME_FAILURE_REASON', '').strip()
 if status == 'FAILED' and reason:
     meta['failure_reason'] = reason
 
-# Phase 38 (ROI-10): provenance for a resolved assessment. Present only when
-# the resolver above found one (SUCCESS arcs only, ROI-09) — an empty env var
-# means "no assessment" and every branch below is a no-op, matching the
-# conditional-emit rule the rest of this file already follows.
-evidence_class = os.environ.get('OUTCOME_EVIDENCE_CLASS', '').strip()
-if evidence_class:
-    meta['evidence_class'] = evidence_class
-evaluator = os.environ.get('OUTCOME_EVALUATOR', '').strip()
-if evaluator:
-    meta['evaluator'] = evaluator
-evaluator_version = os.environ.get('OUTCOME_EVALUATOR_VERSION', '').strip()
-if evaluator_version:
-    meta['evaluator_version'] = evaluator_version
-confidence_raw = os.environ.get('OUTCOME_CONFIDENCE', '').strip()
-if confidence_raw:
+# Phase 42 (C-04): the sidecar's resolved assessment record, parsed once
+# from ASSESSMENT_JSON. Present only when the sidecar re-read above found
+# one (SUCCESS arcs only) — an empty/malformed blob degrades to an empty
+# contribution here, never crashes the heredoc (2>/dev/null || true above
+# is the outer belt; the try/except is the inner suspenders). Conditional-
+# emit rule preserved: a field absent from the record adds no key to meta.
+assessment_raw = os.environ.get('ASSESSMENT_JSON', '').strip()
+if assessment_raw:
     try:
-        meta['confidence'] = float(confidence_raw)
-    except ValueError:
-        pass
-hours_raw = os.environ.get('OUTCOME_HOURS_SAVED', '').strip()
-rate_raw = os.environ.get('OUTCOME_LOADED_RATE', '').strip()
-assumptions = {}
-if hours_raw:
-    try:
-        assumptions['estimated_hours_saved'] = float(hours_raw)
-    except ValueError:
-        pass
-if rate_raw:
-    try:
-        assumptions['assumed_loaded_rate'] = float(rate_raw)
-    except ValueError:
-        pass
-if assumptions:
-    meta['assumptions'] = assumptions
+        record = json.loads(assessment_raw)
+    except (json.JSONDecodeError, ValueError):
+        record = None
+    if isinstance(record, dict):
+        # Phase 42 (D-08/D-09/EGV-07, Plan 04): the full bound family plus
+        # its source and the schema version that produced it -- so the
+        # range is recoverable from what was actually reported, whether or
+        # not the D-09 second site accepted it for --outcome-value above.
+        # Same conditional-emit rule as every other field here: a field
+        # absent from the record adds no key to meta.
+        for _bound_key in ('value_low', 'value_base', 'value_high'):
+            _bound_raw = record.get(_bound_key)
+            if _bound_raw is not None:
+                try:
+                    meta[_bound_key] = float(_bound_raw)
+                except (TypeError, ValueError):
+                    pass
+        bounds_source = record.get('bounds_source')
+        if isinstance(bounds_source, str) and bounds_source:
+            meta['bounds_source'] = bounds_source[:16]
+        schema_version = record.get('assessment_schema_version')
+        if isinstance(schema_version, (int, float)) and not isinstance(schema_version, bool):
+            meta['assessment_schema_version'] = schema_version
+        # EGV-07 (Phase 42 Plan 05): the sibling provenance-version fields
+        # the requirement names alongside the schema version -- taxonomy,
+        # prompt, and policy versions must survive a deferred create and a
+        # retry exactly like assessment_schema_version already does. Same
+        # conditional-emit rule: absent from the record, absent from meta.
+        taxonomy_version = record.get('taxonomy_version')
+        if isinstance(taxonomy_version, (int, float)) and not isinstance(taxonomy_version, bool):
+            meta['taxonomy_version'] = taxonomy_version
+        prompt_version = record.get('prompt_version')
+        if isinstance(prompt_version, (int, float)) and not isinstance(prompt_version, bool):
+            meta['prompt_version'] = prompt_version
+        policy_version = record.get('policy_version')
+        if isinstance(policy_version, (int, float)) and not isinstance(policy_version, bool):
+            meta['policy_version'] = policy_version
+        evidence_class = record.get('evidence_class')
+        if isinstance(evidence_class, str) and evidence_class:
+            meta['evidence_class'] = evidence_class[:32]
+        evaluator = record.get('evaluator')
+        if isinstance(evaluator, str) and evaluator:
+            meta['evaluator'] = evaluator[:64]
+        evaluator_version = record.get('evaluator_version')
+        if isinstance(evaluator_version, str) and evaluator_version:
+            meta['evaluator_version'] = evaluator_version[:16]
+        # EGV-07: the fifth named provenance field -- which MODEL produced
+        # the assessment (Phase 45/EGV-08 owns real semantics; today's
+        # value is PROVENANCE_MODEL_UNKNOWN, but the field still crosses
+        # the wire so a later phase's real value survives the same path
+        # without another edit here).
+        model_field = record.get('model')
+        if isinstance(model_field, str) and model_field:
+            meta['model'] = model_field[:64]
+        confidence_raw = record.get('confidence')
+        if confidence_raw is not None:
+            try:
+                meta['confidence'] = float(confidence_raw)
+            except (TypeError, ValueError):
+                pass
+        assumptions_raw = record.get('assumptions')
+        assumptions = {}
+        if isinstance(assumptions_raw, dict):
+            hours_raw = assumptions_raw.get('estimated_hours_saved')
+            if hours_raw is not None:
+                try:
+                    assumptions['estimated_hours_saved'] = float(hours_raw)
+                except (TypeError, ValueError):
+                    pass
+            rate_raw = assumptions_raw.get('assumed_loaded_rate')
+            if rate_raw is not None:
+                try:
+                    assumptions['assumed_loaded_rate'] = float(rate_raw)
+                except (TypeError, ValueError):
+                    pass
+        if assumptions:
+            meta['assumptions'] = assumptions
 
 if meta:
     print(json.dumps(meta, separators=(',', ':')))

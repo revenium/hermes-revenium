@@ -451,8 +451,14 @@ class GuardPermanenceTests(unittest.TestCase):
         per-profile marker home is resolved consistently on both paths."""
         src = HERMES_REPORT.read_text(encoding='utf-8')
         self.assertIn('root_markers_dir="${session_markers_dir}"', src)
+        # Count INVOCATIONS, not bare mentions: this file's conventions
+        # encourage comments that name the helper they describe (Phase 42
+        # Plan 05 added one such comment), and a prose mention is not a
+        # call site. Counting '$(resolve_markers_dir ' measures the
+        # invariant this test's own docstring states, and still fails if a
+        # call site is added or removed.
         self.assertEqual(
-            src.count('resolve_markers_dir'), 3,
+            src.count('$(resolve_markers_dir '), 3,
             'exactly three resolve_markers_dir call sites must remain '
             '(T-28-34\'s original two, plus Phase 38\'s outcome-stage read)',
         )

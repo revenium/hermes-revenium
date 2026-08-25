@@ -33,17 +33,34 @@ for arg in "$@"; do
 done
 
 # ---------------------------------------------------------------------------
-# Preflight: validate MARKER_RETENTION_DAYS is an integer >= 1 (HARDEN-03).
-# A value of 0 (or non-integer) would make every marker stale and trigger a
-# mass-delete.  Warn loudly and exit 0 (no error mail from cron) instead of
-# deleting anything.  Mirrors the lock-contention exit-0 branch below.
+# Preflight: validate MARKER_RETENTION_DAYS and, independently,
+# REVENIUM_ASSESSMENT_RETENTION_DAYS (Phase 42 D-13/T-42-07-02) are each an
+# integer >= 1 (HARDEN-03). A value of 0 (or non-integer) would make every
+# record stale and trigger a mass-delete. Warn loudly and refuse to prune
+# rather than deleting anything -- but a bad value in ONE tunable must gate
+# only ITS OWN passes: the marker/flag/spool/ledger/owner passes below all
+# key on MARKER_RETENTION_DAYS and are gated by MARKER_RETENTION_OK; the
+# job-assessments sidecar pass keys on its own
+# REVENIUM_ASSESSMENT_RETENTION_DAYS and is gated independently by
+# ASSESSMENT_RETENTION_OK. The previous shape here was a single `exit 0` for
+# the whole script on an invalid MARKER_RETENTION_DAYS -- that would also
+# silently skip the unrelated sidecar pass, which is exactly the
+# cross-tunable coupling this phase forbids. Only when BOTH tunables are
+# invalid is there nothing left to prune, so only that case exits early.
 # ---------------------------------------------------------------------------
-if ! [[ "${MARKER_RETENTION_DAYS}" =~ ^[0-9]+$ ]]; then
-  warn "prune-markers: REVENIUM_MARKER_RETENTION_DAYS=${MARKER_RETENTION_DAYS} is invalid (must be an integer >= 1); refusing to prune"
-  exit 0
+MARKER_RETENTION_OK=true
+if ! [[ "${MARKER_RETENTION_DAYS}" =~ ^[0-9]+$ ]] || [[ "${MARKER_RETENTION_DAYS}" -lt 1 ]]; then
+  warn "prune-markers: REVENIUM_MARKER_RETENTION_DAYS=${MARKER_RETENTION_DAYS} is invalid (must be an integer >= 1); refusing to prune the marker/flag/spool/ledger/owner passes"
+  MARKER_RETENTION_OK=false
 fi
-if [[ "${MARKER_RETENTION_DAYS}" -lt 1 ]]; then
-  warn "prune-markers: REVENIUM_MARKER_RETENTION_DAYS=${MARKER_RETENTION_DAYS} is invalid (must be an integer >= 1); refusing to prune"
+
+ASSESSMENT_RETENTION_OK=true
+if ! [[ "${REVENIUM_ASSESSMENT_RETENTION_DAYS}" =~ ^[0-9]+$ ]] || [[ "${REVENIUM_ASSESSMENT_RETENTION_DAYS}" -lt 1 ]]; then
+  warn "prune-markers: REVENIUM_ASSESSMENT_RETENTION_DAYS=${REVENIUM_ASSESSMENT_RETENTION_DAYS} is invalid (must be an integer >= 1); refusing to prune the job-assessments sidecar"
+  ASSESSMENT_RETENTION_OK=false
+fi
+
+if [[ "${MARKER_RETENTION_OK}" == "false" && "${ASSESSMENT_RETENTION_OK}" == "false" ]]; then
   exit 0
 fi
 
@@ -84,6 +101,7 @@ set +e
 MARKERS_DIR_PY="${MARKERS_DIR}" \
 LEDGER_FILE_PY="${LEDGER_FILE}" \
 MARKER_RETENTION_DAYS_PY="${MARKER_RETENTION_DAYS}" \
+MARKER_RETENTION_OK_PY="${MARKER_RETENTION_OK}" \
 DRY_RUN_PY="${DRY_RUN}" \
 FLAG_DIRS_PY="${WARN_FLAGS_DIR}
 ${FALLBACK_WARN_FLAGS_DIR}
@@ -95,6 +113,9 @@ EVENT_LEDGER_FILE_PY="${EVENT_LEDGER_FILE}" \
 TOOL_EVENTS_LEDGER_FILE_PY="${TOOL_EVENTS_LEDGER_FILE}" \
 OWNERS_DIR_PY="${OWNERS_DIR}" \
 STATE_DB_PY="${STATE_DB}" \
+JOB_ASSESSMENTS_DIR_PY="${JOB_ASSESSMENTS_DIR}" \
+ASSESSMENT_RETENTION_DAYS_PY="${REVENIUM_ASSESSMENT_RETENTION_DAYS}" \
+ASSESSMENT_RETENTION_OK_PY="${ASSESSMENT_RETENTION_OK}" \
 python3 - <<'PY' >"${prune_out}"
 import os
 import re
@@ -104,10 +125,19 @@ import time
 
 markers_dir    = os.environ['MARKERS_DIR_PY']
 ledger_file    = os.environ['LEDGER_FILE_PY']
-retention_days = int(os.environ['MARKER_RETENTION_DAYS_PY'])
+marker_retention_ok = os.environ.get('MARKER_RETENTION_OK_PY') == 'true'
 dry_run        = os.environ['DRY_RUN_PY'] == "true"
 
-cutoff_secs = retention_days * 86400
+# Only parsed when the bash-side preflight found MARKER_RETENTION_DAYS valid
+# (Phase 42 D-13/T-42-07-02) -- an invalid value's raw string (e.g.
+# "not-a-number") must never reach int() here, since marker_retention_ok
+# already gates every consumer of cutoff_secs below to a no-op.
+if marker_retention_ok:
+    retention_days = int(os.environ['MARKER_RETENTION_DAYS_PY'])
+    cutoff_secs = retention_days * 86400
+else:
+    retention_days = None
+    cutoff_secs = None
 
 
 def ledger_last_ts(sid, ledger_path):
@@ -143,116 +173,52 @@ def iso(ts):
     return datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-scanned = 0
-kept = 0
-removed = 0
+if marker_retention_ok:
+    scanned = 0
+    kept = 0
+    removed = 0
 
-try:
-    entries = sorted(os.listdir(markers_dir))
-except FileNotFoundError:
-    entries = []
-
-for fname in entries:
-    if not fname.endswith('.jsonl'):
-        continue
-    fpath = os.path.join(markers_dir, fname)
-    if not os.path.isfile(fpath):
-        continue
-
-    scanned += 1
-    sid = fname[:-len('.jsonl')]  # strip .jsonl suffix
-
-    last_ts = ledger_last_ts(sid, ledger_file)
-    if last_ts is not None:
-        # Ledger-based stale check (D-26 primary path)
-        age_secs  = time.time() - last_ts
-        age_days  = age_secs / 86400
-        ts_label  = iso(last_ts)
-        ts_source = 'last_ledger_ts'
-    else:
-        # Orphan fallback: no ledger row — use file mtime (D-26 fallback)
-        mtime     = os.path.getmtime(fpath)
-        age_secs  = time.time() - mtime
-        age_days  = age_secs / 86400
-        ts_label  = iso(mtime)
-        ts_source = 'mtime'
-
-    if age_secs < cutoff_secs:
-        kept += 1
-        continue
-
-    # File is stale — remove or report
-    action = 'dry-run, would remove' if dry_run else 'removed'
-    print(
-        'prune: ' + action +
-        ' sid=' + sid +
-        ' marker=' + fname +
-        ' ' + ts_source + '=' + ts_label +
-        ' age_days=' + str(round(age_days, 1)),
-        flush=True,
-    )
-
-    if not dry_run:
-        try:
-            os.unlink(fpath)
-            removed += 1
-        except OSError as exc:
-            print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
-            sys.exit(1)
-    else:
-        removed += 1  # count for dry-run summary
-
-# ---------------------------------------------------------------------------
-# quick-260813-wnz (LOG-01/D-05): second pass -- bound the once-per-
-# (key, reason) flag directories (WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR,
-# OUTCOME_WARN_FLAGS_DIR, and PROBE_WARN_FLAGS_DIR, passed in
-# newline-separated via FLAG_DIRS_PY) so the fix for each re-warn spam
-# cannot itself become a new unbounded-growth path. Filtered to files ending
-# in '.flag'; staleness is the flag's own mtime (a flag's mtime IS the
-# moment we last warned, so it needs no ledger correlation, unlike a
-# marker's mtime). Gated by the SAME MARKER_RETENTION_DAYS preflight and
-# cutoff_secs the marker pass above uses; --dry-run honored identically.
-#
-# OUTCOME_WARN_FLAGS_DIR is Phase 39 D-02 (the deferred/wedged job-outcome
-# gate). PROBE_WARN_FLAGS_DIR is a pre-existing omission from this list --
-# not this phase's defect, but the identical leak, closed alongside here
-# since this pass is already generic over the directory list and needs no
-# other change to cover it.
-# ---------------------------------------------------------------------------
-flag_dirs = [d for d in os.environ.get('FLAG_DIRS_PY', '').split('\n') if d]
-
-flags_scanned = 0
-flags_kept = 0
-flags_removed = 0
-
-for flag_dir in flag_dirs:
     try:
-        flag_entries = sorted(os.listdir(flag_dir))
+        entries = sorted(os.listdir(markers_dir))
     except FileNotFoundError:
-        continue
+        entries = []
 
-    for fname in flag_entries:
-        if not fname.endswith('.flag'):
+    for fname in entries:
+        if not fname.endswith('.jsonl'):
             continue
-        fpath = os.path.join(flag_dir, fname)
+        fpath = os.path.join(markers_dir, fname)
         if not os.path.isfile(fpath):
             continue
 
-        flags_scanned += 1
-        mtime = os.path.getmtime(fpath)
-        age_secs = time.time() - mtime
-        age_days = age_secs / 86400
+        scanned += 1
+        sid = fname[:-len('.jsonl')]  # strip .jsonl suffix
+
+        last_ts = ledger_last_ts(sid, ledger_file)
+        if last_ts is not None:
+            # Ledger-based stale check (D-26 primary path)
+            age_secs  = time.time() - last_ts
+            age_days  = age_secs / 86400
+            ts_label  = iso(last_ts)
+            ts_source = 'last_ledger_ts'
+        else:
+            # Orphan fallback: no ledger row — use file mtime (D-26 fallback)
+            mtime     = os.path.getmtime(fpath)
+            age_secs  = time.time() - mtime
+            age_days  = age_secs / 86400
+            ts_label  = iso(mtime)
+            ts_source = 'mtime'
 
         if age_secs < cutoff_secs:
-            flags_kept += 1
+            kept += 1
             continue
 
+        # File is stale — remove or report
         action = 'dry-run, would remove' if dry_run else 'removed'
         print(
             'prune: ' + action +
-            ' dir=' + flag_dir +
-            ' flag=' + fname +
-            ' mtime=' + iso(mtime) +
+            ' sid=' + sid +
+            ' marker=' + fname +
+            ' ' + ts_source + '=' + ts_label +
             ' age_days=' + str(round(age_days, 1)),
             flush=True,
         )
@@ -260,26 +226,91 @@ for flag_dir in flag_dirs:
         if not dry_run:
             try:
                 os.unlink(fpath)
-                flags_removed += 1
+                removed += 1
             except OSError as exc:
                 print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
                 sys.exit(1)
         else:
-            flags_removed += 1  # count for dry-run summary
+            removed += 1  # count for dry-run summary
 
-print(
-    'prune: flags summary, scanned=' + str(flags_scanned) +
-    ' kept=' + str(flags_kept) +
-    ' removed=' + str(flags_removed),
-    flush=True,
-)
+    # ---------------------------------------------------------------------------
+    # quick-260813-wnz (LOG-01/D-05): second pass -- bound the once-per-
+    # (key, reason) flag directories (WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR,
+    # OUTCOME_WARN_FLAGS_DIR, and PROBE_WARN_FLAGS_DIR, passed in
+    # newline-separated via FLAG_DIRS_PY) so the fix for each re-warn spam
+    # cannot itself become a new unbounded-growth path. Filtered to files ending
+    # in '.flag'; staleness is the flag's own mtime (a flag's mtime IS the
+    # moment we last warned, so it needs no ledger correlation, unlike a
+    # marker's mtime). Gated by the SAME MARKER_RETENTION_DAYS preflight and
+    # cutoff_secs the marker pass above uses; --dry-run honored identically.
+    #
+    # OUTCOME_WARN_FLAGS_DIR is Phase 39 D-02 (the deferred/wedged job-outcome
+    # gate). PROBE_WARN_FLAGS_DIR is a pre-existing omission from this list --
+    # not this phase's defect, but the identical leak, closed alongside here
+    # since this pass is already generic over the directory list and needs no
+    # other change to cover it.
+    # ---------------------------------------------------------------------------
+    flag_dirs = [d for d in os.environ.get('FLAG_DIRS_PY', '').split('\n') if d]
 
-print(
-    'prune: summary, scanned=' + str(scanned) +
-    ' kept=' + str(kept) +
-    ' removed=' + str(removed),
-    flush=True,
-)
+    flags_scanned = 0
+    flags_kept = 0
+    flags_removed = 0
+
+    for flag_dir in flag_dirs:
+        try:
+            flag_entries = sorted(os.listdir(flag_dir))
+        except FileNotFoundError:
+            continue
+
+        for fname in flag_entries:
+            if not fname.endswith('.flag'):
+                continue
+            fpath = os.path.join(flag_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+
+            flags_scanned += 1
+            mtime = os.path.getmtime(fpath)
+            age_secs = time.time() - mtime
+            age_days = age_secs / 86400
+
+            if age_secs < cutoff_secs:
+                flags_kept += 1
+                continue
+
+            action = 'dry-run, would remove' if dry_run else 'removed'
+            print(
+                'prune: ' + action +
+                ' dir=' + flag_dir +
+                ' flag=' + fname +
+                ' mtime=' + iso(mtime) +
+                ' age_days=' + str(round(age_days, 1)),
+                flush=True,
+            )
+
+            if not dry_run:
+                try:
+                    os.unlink(fpath)
+                    flags_removed += 1
+                except OSError as exc:
+                    print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
+                    sys.exit(1)
+            else:
+                flags_removed += 1  # count for dry-run summary
+
+    print(
+        'prune: flags summary, scanned=' + str(flags_scanned) +
+        ' kept=' + str(flags_kept) +
+        ' removed=' + str(flags_removed),
+        flush=True,
+    )
+
+    print(
+        'prune: summary, scanned=' + str(scanned) +
+        ' kept=' + str(kept) +
+        ' removed=' + str(removed),
+        flush=True,
+    )
 
 # ---------------------------------------------------------------------------
 # Phase 32 (D-15): third pass -- the two per-session JSONL spool directories,
@@ -446,10 +477,13 @@ tool_events_dir_py = os.environ.get('TOOL_EVENTS_DIR_PY', '')
 event_ledger_file_py = os.environ.get('EVENT_LEDGER_FILE_PY', '')
 tool_events_ledger_file_py = os.environ.get('TOOL_EVENTS_LEDGER_FILE_PY', '')
 
-if event_spool_dir_py:
+# Gated by marker_retention_ok (Phase 42 D-13/T-42-07-02): these two spool
+# passes age from cutoff_secs, which is None when MARKER_RETENTION_DAYS was
+# invalid -- see the preflight decoupling note above prune_owners below.
+if marker_retention_ok and event_spool_dir_py:
     prune_spool_dir(event_spool_dir_py, event_ledger_last_ts, event_ledger_file_py, 'api-events')
 
-if tool_events_dir_py:
+if marker_retention_ok and tool_events_dir_py:
     prune_spool_dir(tool_events_dir_py, tool_ledger_last_ts, tool_events_ledger_file_py, 'tool-events')
 
 # ---------------------------------------------------------------------------
@@ -542,7 +576,9 @@ def prune_event_ledger(ledger_path, spool_dir):
     return l_scanned, l_kept, l_removed
 
 
-if event_ledger_file_py:
+# Gated by marker_retention_ok: this pass ages API: lines from cutoff_secs,
+# which is None when MARKER_RETENTION_DAYS was invalid.
+if marker_retention_ok and event_ledger_file_py:
     prune_event_ledger(event_ledger_file_py, event_spool_dir_py)
 
 # ---------------------------------------------------------------------------
@@ -651,6 +687,95 @@ def prune_owners(owners_dir, state_db):
 
 
 prune_owners(os.environ.get('OWNERS_DIR_PY', ''), os.environ.get('STATE_DB_PY', ''))
+
+# ---------------------------------------------------------------------------
+# Phase 42 (D-13/C-01): sixth pass -- the job-assessments sidecar
+# (JOB_ASSESSMENTS_DIR). This is a BESPOKE, SIMPLER shape than
+# prune_spool_dir above, and the simplification is deliberate
+# (42-RESEARCH.md Assumption A3): prune_spool_dir ages a file from the
+# NEWER of a ledger timestamp and the file's mtime because a spool file
+# mixes shipped and unshipped billable lines, and ageing from the ledger
+# alone would delete revenue. The sidecar has no shipped-versus-unshipped
+# distinction -- it is a local audit record, never itself billed -- so
+# D-13's rule is mtime-only, full stop: a correction append (which rewrites
+# nothing but appends a new line to the SAME file) is itself what refreshes
+# the file's mtime and therefore the record's retention window. A later
+# reader "restoring" a ledger correlation here, the way prune_spool_dir has
+# one, would reintroduce exactly the race C-01 identified: a correction
+# filed against a session whose OWN ledger clock has long since expired
+# would no longer protect the file it is appending to.
+#
+# This pass is gated by ASSESSMENT_RETENTION_OK (its OWN preflight, wholly
+# independent of MARKER_RETENTION_OK above) and ages from its OWN cutoff --
+# assessment_cutoff_secs, computed from REVENIUM_ASSESSMENT_RETENTION_DAYS,
+# never from the shared cutoff_secs the marker/flag/spool/ledger passes use.
+# Two retention rules, two numbers, two reasons.
+# ---------------------------------------------------------------------------
+
+
+def prune_assessments_dir(assessments_dir, retention_secs, dry_run):
+    a_scanned = a_kept = a_removed = 0
+    try:
+        entries = sorted(os.listdir(assessments_dir))
+    except FileNotFoundError:
+        entries = []
+
+    for fname in entries:
+        if not fname.endswith('.jsonl'):
+            continue
+        fpath = os.path.join(assessments_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+
+        a_scanned += 1
+        # mtime-only, deliberately -- no ledger_fn, no session correlation.
+        # See the block comment above: a correction append IS the signal
+        # that this record is still live, and its own mtime carries that
+        # signal for free.
+        mtime = os.path.getmtime(fpath)
+        age_secs = time.time() - mtime
+        age_days = age_secs / 86400
+
+        if age_secs < retention_secs:
+            a_kept += 1
+            continue
+
+        action = 'dry-run, would remove' if dry_run else 'removed'
+        print(
+            'prune: ' + action +
+            ' dir=job-assessments' +
+            ' assessment=' + fname +
+            ' mtime=' + iso(mtime) +
+            ' age_days=' + str(round(age_days, 1)),
+            flush=True,
+        )
+
+        if not dry_run:
+            try:
+                os.unlink(fpath)
+                a_removed += 1
+            except OSError as exc:
+                print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
+                sys.exit(1)
+        else:
+            a_removed += 1  # count for dry-run summary
+
+    print(
+        'prune: job-assessments summary, scanned=' + str(a_scanned) +
+        ' kept=' + str(a_kept) +
+        ' removed=' + str(a_removed),
+        flush=True,
+    )
+    return a_scanned, a_kept, a_removed
+
+
+assessment_retention_ok = os.environ.get('ASSESSMENT_RETENTION_OK_PY') == 'true'
+job_assessments_dir_py = os.environ.get('JOB_ASSESSMENTS_DIR_PY', '')
+
+if assessment_retention_ok and job_assessments_dir_py:
+    assessment_retention_days = int(os.environ['ASSESSMENT_RETENTION_DAYS_PY'])
+    assessment_cutoff_secs = assessment_retention_days * 86400
+    prune_assessments_dir(job_assessments_dir_py, assessment_cutoff_secs, dry_run)
 PY
 prune_rc=$?
 set -e

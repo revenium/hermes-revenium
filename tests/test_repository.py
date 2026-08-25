@@ -110,6 +110,11 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'cron.sh',
             SKILL / 'scripts' / 'hermes-report.sh',
             SKILL / 'scripts' / 'clear-halt.sh',
+            # Phase 42 Plan 06 (D-02) — operator-triggered EGV-09 correction
+            # script, modelled on clear-halt.sh; structurally unreachable
+            # from cron.sh/install-cron.sh (never invoked by the per-tick
+            # pipeline).
+            SKILL / 'scripts' / 'correct-assessment.sh',
             SKILL / 'scripts' / 'prune-markers.sh',
             SKILL / 'scripts' / 'pre_llm_call.sh',      # Phase 12 — pre-LLM-call halt hook
             SKILL / 'scripts' / 'pre_tool_call.sh',     # Phase 12 — pre-tool-call block + CANCELLED marker
@@ -174,6 +179,15 @@ class RepositoryTests(unittest.TestCase):
             # immutability contract, which stays byte-identical for the
             # unvalued path.
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-assessment.golden.json',
+            # Phase 42 Plan 01 (EGV-09/D-01, D-02) — the correction path's own
+            # `jobs outcome-update` argv-shape golden, additive to (not part
+            # of) the jobs-outcome.golden.json v1.x immutability contract,
+            # which stays byte-identical for the ordinary per-tick path.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome-update.golden.json',
+            # Phase 42 Plan 01 (EGV-09/D-01) — proves the correction ledger
+            # prefix is unmatchable by the ordinary path's OUTCOME-01/OUTCOME-04
+            # grep gates before any correction-authoring code exists.
+            ROOT / 'tests' / 'test_phase42_assessment_contract.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
@@ -1771,6 +1785,30 @@ exit 0
             self.assertNotIn('OWNERS_DIR', ln,
                              'OWNERS_DIR must NOT be in the eager mkdir -p — it is created '
                              'lazily by the claim so a no-event-path install creates nothing')
+        # Phase 42 (D-15): the job-assessments sidecar directory and its
+        # own retention tunable. Declared ONLY in common.sh, same
+        # env-override shape every neighbour uses.
+        self.assertIn('JOB_ASSESSMENTS_DIR=', text)
+        self.assertIn('job-assessments', text)
+        self.assertRegex(
+            text,
+            r'JOB_ASSESSMENTS_DIR="\$\{REVENIUM_JOB_ASSESSMENTS_DIR:-\$\{STATE_DIR\}/job-assessments\}"',
+        )
+        self.assertIn('REVENIUM_ASSESSMENT_RETENTION_DAYS', text)
+        self.assertRegex(
+            text,
+            r'REVENIUM_ASSESSMENT_RETENTION_DAYS="\$\{REVENIUM_ASSESSMENT_RETENTION_DAYS:-90\}"',
+        )
+        # D-15: unlike OWNERS_DIR above, the assessments sidecar IS a
+        # first-class per-job spool (like EVENT_SPOOL_DIR/TOOL_EVENTS_DIR),
+        # always present -- not a lazily created sentinel directory -- so it
+        # MUST be in the eager mkdir -p line, the mirror image of the
+        # OWNERS_DIR assertion just above.
+        self.assertTrue(
+            any('JOB_ASSESSMENTS_DIR' in ln for ln in mkdir_lines),
+            'JOB_ASSESSMENTS_DIR must be in the eager mkdir -p — it is a '
+            'first-class spool like EVENT_SPOOL_DIR, always present',
+        )
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""

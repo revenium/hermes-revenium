@@ -70,10 +70,55 @@ ASSESSMENT_FIXTURE = {
 }
 
 
+# Phase 42 (D-10): the job-assessments SIDECAR shape hermes-report.sh's
+# outcome stage now reads value/provenance from -- the marker's
+# ASSESSMENT_FIXTURE above no longer reaches a valued outcome (D-10). Bounds
+# match _resolve_value_bounds's DERIVED_BOUND_SPREAD (0.15) applied to the
+# same 3.5h * $150/h = $525.0 base ASSESSMENT_FIXTURE uses, so the two
+# fixtures describe the same underlying estimate through the two different
+# carriers: low = round(525.0 * 0.85, 2) = 446.25, high = round(525.0 * 1.15, 2)
+# = 603.75. D-08: --outcome-value ships the LOW bound, not base.
+def _sidecar_record(job_id, **overrides):
+    record = {
+        "kind": "job_assessment",
+        "ts": 1715516002.5,
+        "agentic_job_id": job_id,
+        "assessment_id": f"{job_id}:0",
+        "assessment_schema_version": 1,
+        # WR-04: classifier.py's _build_job_assessment populates these four
+        # UNCONDITIONALLY on every record it builds (TAXONOMY_VERSION,
+        # PROMPT_VERSION, POLICY_VERSION, PROVENANCE_MODEL_UNKNOWN), and
+        # Plan 42-05 made hermes-report.sh forward all four into --metadata.
+        # Omitting them here let meter-completion-assessment.golden.json pin
+        # a wire shape production never actually sends. Values mirror the
+        # real constants so the fixture stays a faithful stand-in.
+        "taxonomy_version": 1,
+        "prompt_version": 1,
+        "policy_version": 1,
+        "model": "unknown",
+        "value_low": 446.25,
+        "value_base": 525.0,
+        "value_high": 603.75,
+        "bounds_source": "derived",
+        "currency": "USD",
+        "estimated_value": 525.0,
+        "evaluator": "llm",
+        "evaluator_version": "v1",
+        "confidence": 0.8,
+        "evidence_class": "MODEL_ESTIMATED_DEMO",
+        "assumptions": {
+            "estimated_hours_saved": 3.5,
+            "assumed_loaded_rate": 150.0,
+        },
+    }
+    record.update(overrides)
+    return record
+
+
 class TestPhase38ReporterPath(unittest.TestCase):
     def _run_one_outcome(self, sid, job_id, status, failure_reason='', source='test',
                           assessment=None, raw_agentic_job_id=None,
-                          outcome_value_capable=True):
+                          outcome_value_capable=True, sidecar=None):
         """Drive hermes-report.sh for one job arc; return the parsed
         `jobs outcome` argv. Mirrors _run_one_outcome in
         tests/test_jobs_outcome_metadata.py, extended with an optional
@@ -90,13 +135,21 @@ class TestPhase38ReporterPath(unittest.TestCase):
         outcome_value_capable=False (CR-01/WR-03) builds the shim so `jobs
         outcome --help` omits --outcome-value/--outcome-currency, modelling
         an older revenium CLI that predates the two flags.
+
+        sidecar (Phase 42, D-10), when given, is one record dict or a list
+        of them, written to ${state_dir}/job-assessments/<job_id>.jsonl --
+        the ONLY value/provenance source the outcome stage reads from
+        (never the marker's own `assessment` key, even when both are
+        present in the same fixture).
         """
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase38-')
         try:
             hermes_home = os.path.join(tmpdir, 'hh')
             state_dir = os.path.join(hermes_home, 'state', 'revenium')
             markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
             os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
             state_db = os.path.join(hermes_home, 'state.db')
             jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
 
@@ -155,6 +208,16 @@ class TestPhase38ReporterPath(unittest.TestCase):
             with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
                 f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
                 f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            # Phase 42 (D-10): the sidecar is the ONLY value/provenance
+            # source the outcome stage reads -- written here, independent
+            # of job_marker['assessment'] above, so a fixture can assert
+            # the marker plays no part even when both are present.
+            if sidecar is not None:
+                sidecar_records = sidecar if isinstance(sidecar, list) else [sidecar]
+                with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
+                    for _rec in sidecar_records:
+                        f.write(json.dumps(_rec, separators=(',', ':')) + '\n')
 
             build_shim(shim, outcome_value_capable=outcome_value_capable)
 
@@ -234,14 +297,25 @@ class TestPhase38ReporterPath(unittest.TestCase):
     # -- Task 2: an accepted assessment ships as value + provenance -------
 
     def test_outcome_success_with_assessment_ships_value_and_provenance(self):
+        """Phase 42 (D-08/D-10): value and provenance are resolved from the
+        job-assessments SIDECAR only -- this fixture writes a REAL sidecar
+        record (as classifier.py's _write_job_assessment would) alongside
+        the marker's own 9-key `assessment` summary, proving the marker
+        plays no part even when both carry a plausible, DIFFERENT number
+        (ASSESSMENT_FIXTURE's 525.0 vs the sidecar's 446.25 low bound).
+        --outcome-value ships the LOW bound (D-08), and the full bound
+        family plus its source rides in --metadata alongside the existing
+        provenance fields."""
         argv = self._run_one_outcome(
             'o38-sid-001', 'o38-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('o38-job-001'),
         )
-        self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
-        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
 
         meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('source'), 'test')
         self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
         self.assertEqual(meta.get('evaluator'), 'llm')
         self.assertEqual(meta.get('evaluator_version'), 'v1')
@@ -250,11 +324,14 @@ class TestPhase38ReporterPath(unittest.TestCase):
             meta.get('assumptions'),
             {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
         )
-        # basis / inferred_role are not part of the provenance list this plan
-        # names (evidence_class, evaluator, evaluator_version, confidence,
-        # and the two numeric assumptions) -- they stay out of --metadata.
-        self.assertNotIn('basis', meta)
-        self.assertNotIn('inferred_role', meta)
+        self.assertEqual(meta.get('value_low'), 446.25)
+        self.assertEqual(meta.get('value_base'), 525.0)
+        self.assertEqual(meta.get('value_high'), 603.75)
+        self.assertEqual(meta.get('bounds_source'), 'derived')
+        self.assertEqual(meta.get('assessment_schema_version'), 1)
+        # D-08 executable proof: the shipped value is the LOW bound, never
+        # the marker's estimated_value (525.0) or the sidecar's own base.
+        self.assertNotEqual(argv[argv.index('--outcome-value') + 1], '525.0')
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
         argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')
@@ -293,11 +370,27 @@ class TestPhase38ReporterPath(unittest.TestCase):
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
     def test_golden_valued_outcome_matches_new_fixture(self):
+        """Phase 42 (D-08/D-10): meter-completion-assessment.golden.json
+        pins the wire shape a SIDECAR-sourced valued outcome produces --
+        this fixture writes a real sidecar record (D-10: the marker is
+        never the value source) and asserts the resulting argv against the
+        golden, closing the coverage gap plan 42-02 opened when the
+        marker-only scenario could no longer reach this golden's shape.
+        The golden's own pin moved deliberately with this change: the
+        value from the marker-derived 525.0 point estimate to the
+        sidecar's 446.25 low bound (D-08), and the --metadata pattern to
+        the full bound family + bounds_source + assessment_schema_version
+        (D-10, since the record now comes from the sidecar's richer
+        shape, not the marker's frozen 9 keys)."""
         argv = self._run_one_outcome(
-            'g38-sid-002', 'assessment-golden-job', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            'g38-sid-002', 'assessment-golden-job', 'SUCCESS',
+            sidecar=_sidecar_record('assessment-golden-job'),
         )
-        golden = load_golden('meter-completion-assessment.golden.json')
-        assert_argv_matches_golden(self, argv, golden)
+        # CF-1: the genuine call site (kept on one line so it is grep-able
+        # as a pair with the golden's own filename, closing the gap plan
+        # 42-02's SUMMARY deferred -- an existence pin in test_repository.py
+        # alone does not prove the wire shape is actually asserted).
+        assert_argv_matches_golden(self, argv, load_golden('meter-completion-assessment.golden.json'))
 
     def test_pre_v1_5_marker_with_no_assessment_key_parses_and_reports(self):
         """ROI-12: a marker line written before v1.5 -- literally no
@@ -317,10 +410,18 @@ class TestPhase38ReporterPath(unittest.TestCase):
         push sites replace ':'/' '/'\\t'/'\\n'/'\\r' with '_' before pushing),
         but classifier.py writes the marker's agentic_job_id RAW (only
         .strip()'d). A job id containing a colon or space must still have
-        its assessment resolved -- the lookup has to sanitize the marker's
-        raw id the same way before comparing, or this silently drops the
-        value for exactly the job ids most likely to need it (LLM-minted
-        labels routinely contain ': ')."""
+        its assessment resolved.
+
+        Phase 42 (D-10): this lookup now happens against the job-assessments
+        SIDECAR, not the marker -- this fixture writes only a marker
+        `assessment`, so under D-10 it ships no value regardless of the
+        job id's shape. The sanitize-before-compare concern this test was
+        built to catch now applies to the SIDECAR's own join (a fourth
+        independent copy of the same transform, in hermes-report.sh's
+        sidecar reader and in classifier.py's `_sidecar_filename_component`)
+        and is covered by
+        tests/test_phase42_assessment_contract.py::PathMirrorParityTests
+        and the writer/reader transform's shared unit coverage, not here."""
         raw_id = 'fix: auth regression_a1b2'
         clean_id = raw_id
         for bad in (':', ' ', '\t', '\n', '\r'):
@@ -332,10 +433,8 @@ class TestPhase38ReporterPath(unittest.TestCase):
             assessment=ASSESSMENT_FIXTURE, raw_agentic_job_id=raw_id,
         )
         self.assertEqual(argv[2], clean_id, f'jobs outcome must target the sanitized id: {argv}')
-        self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
-        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
-        meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
 
     # -- WR-02: malformed value/currency must never reach the CLI ---------
 
@@ -353,9 +452,11 @@ class TestPhase38ReporterPath(unittest.TestCase):
         )
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
-        # Provenance unrelated to the malformed value still ships.
+        # Phase 42 (D-10): this fixture is marker-only (no sidecar file), so
+        # under D-10 no provenance ships either -- the marker's assessment
+        # (malformed or not) no longer feeds --metadata at all.
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta, {'source': 'test'})
 
     def test_unsupported_currency_omits_both_value_flags(self):
         """WR-02: currency is never checked against SUPPORTED_CURRENCIES on
@@ -387,10 +488,11 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
-        # Provenance (which does not depend on the CLI's flag support) still
-        # rides in --metadata even though the value flags were omitted.
+        # Phase 42 (D-10): this fixture is marker-only (no sidecar file), so
+        # no provenance rides in --metadata regardless of CLI capability --
+        # provenance now comes exclusively from the sidecar.
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta, {'source': 'test'})
 
     def test_outcome_omits_pair_when_cli_advertises_only_outcome_value(self):
         """greptile P2 on PR #90: the emission site sends --outcome-value and
@@ -409,8 +511,9 @@ class TestPhase38ReporterPath(unittest.TestCase):
         # advertises exactly one of them.
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
+        # Phase 42 (D-10): marker-only fixture -- no provenance either.
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta, {'source': 'test'})
 
 
 # ---------------------------------------------------------------------------
@@ -502,6 +605,32 @@ def _build_flexible_shim(shim_path, outcome_value_capable=True):
     os.chmod(shim_path, 0o755)
 
 
+# Phase 42 Plan 05 (EGV-07) -- a full EGV-04 sidecar record, built through
+# the REAL classifier construction path (_validate_assessment then
+# _build_job_assessment), never a hand-written dict. C-04 is explicit that
+# Phase 38's deferral proof does not extend to this schema unless the test
+# exercises real construction, not a plan's idea of the shape. hours=3.5,
+# rate=150.0 -> base=525.0, matching ASSESSMENT_FIXTURE/_sidecar_record's
+# shared arithmetic so the low/base/high bounds this fixture produces
+# (446.25/525.0/603.75) line up with the rest of this file's fixtures.
+def _build_real_sidecar_record(job_id):
+    c, _ev = _load_classifier({})
+    raw = {
+        'inferred_role': 'senior software engineer',
+        'estimated_hours_saved': 3.5,
+        'assumed_loaded_rate': 150.0,
+        'currency': 'USD',
+        'basis': '3.5 hours of senior engineer review time',
+        'confidence': 0.8,
+        'candidate_downstream_outcome': 'PR merged to main',
+        'counterfactual_assumption': 'a human reviewer would have taken the same time',
+    }
+    valid = {'agentic_job_id': job_id, 'job_type': 'code_review', 'status': 'SUCCESS'}
+    assessment = c._validate_assessment(raw, {}, 'llm', 'v1')
+    record = c._build_job_assessment(valid, assessment, raw, {}, 'llm', 'v1')
+    return c, record
+
+
 class TestPhase38MultiTick(unittest.TestCase):
     """Tasks 1 & 2 — the two guarantees only visible across ticks.
 
@@ -511,7 +640,17 @@ class TestPhase38MultiTick(unittest.TestCase):
     can be scripted per tick.
     """
 
-    def _setup(self, sid, job_id, status='SUCCESS', assessment=None, seed_created=False):
+    def _setup(self, sid, job_id, status='SUCCESS', assessment=None, seed_created=False,
+               sidecar=None):
+        """sidecar (Phase 42 Plan 05, EGV-07), when given, is one record dict
+        or a list of them, written to ${state_dir}/job-assessments/<component>.jsonl
+        where <component> is produced by the classifier's OWN
+        _sidecar_filename_component transform (imported fresh via
+        _load_classifier, never a hand-written string) -- so the fixture's
+        filename can never silently drift from the real writer's. Additive
+        to the existing `assessment` (marker-embedded) parameter; both may
+        be supplied together, exactly like TestPhase38ReporterPath's
+        _run_one_outcome already allows."""
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase38-multitick-')
         hermes_home = os.path.join(tmpdir, 'hh')
         state_dir = os.path.join(hermes_home, 'state', 'revenium')
@@ -554,6 +693,16 @@ class TestPhase38MultiTick(unittest.TestCase):
         if seed_created:
             with open(jobs_ledger, 'w') as f:
                 f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+        if sidecar is not None:
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(assessments_dir, mode=0o700, exist_ok=True)
+            _classifier_mod, _ev_mod = _load_classifier({})
+            component = _classifier_mod._sidecar_filename_component(job_id)
+            sidecar_records = sidecar if isinstance(sidecar, list) else [sidecar]
+            with open(os.path.join(assessments_dir, f'{component}.jsonl'), 'w') as f:
+                for _rec in sidecar_records:
+                    f.write(json.dumps(_rec, separators=(',', ':')) + '\n')
 
         _build_flexible_shim(shim)
 
@@ -608,11 +757,22 @@ class TestPhase38MultiTick(unittest.TestCase):
     # -- Task 1: the deferred-create path, across ticks --------------------
 
     def test_deferred_create_survives_to_next_tick_with_assessment_intact(self):
-        """T-38-06 / the research doc's own deciding test: an assessment must
+        """T-38-06 / the research doc's own deciding test: an outcome must
         still be reachable on the tick AFTER the one that inferred it, even
         when the create call that tick deferred on. OUTCOME-04 governs the
         defer; the precheck scan (not the token-gated main loop) is what
-        re-reaches the job on tick 2."""
+        re-reaches the job on tick 2.
+
+        Phase 42 (D-10): this harness seeds only a marker-embedded
+        `assessment`, no sidecar file, so under D-10 tick 2's outcome ships
+        with no value flags and no provenance -- the deferred-create
+        survival property under test here (the outcome itself still ships,
+        exactly once, on tick 2) is unchanged; what changed is that a
+        marker-only assessment no longer produces a VALUED outcome. The
+        real sidecar-sourced deferral-survival proof (EGV-07: provenance
+        surviving a real deferred create through the sidecar re-read) is a
+        later plan's scope, extending this same harness with a real sidecar
+        fixture."""
         sid = 'p38-defer-sid-001'
         job_id = 'p38-defer-job-001'
         tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
@@ -659,16 +819,12 @@ class TestPhase38MultiTick(unittest.TestCase):
             outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
             self.assertEqual(len(outcome_inv2), 1, f'tick 2 must ship exactly one outcome: {jobs_inv2}')
             argv2 = outcome_inv2[0]
-            self.assertEqual(argv2[argv2.index('--outcome-value') + 1], '525.0')
-            self.assertEqual(argv2[argv2.index('--outcome-currency') + 1], 'USD')
+            # Phase 42 (D-10): marker-only fixture -- tick 2 ships status-only,
+            # no value flags, no provenance (see docstring above).
+            self.assertNotIn('--outcome-value', argv2)
+            self.assertNotIn('--outcome-currency', argv2)
             meta2 = json.loads(_metadata_of(argv2))
-            self.assertEqual(meta2.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
-            self.assertEqual(meta2.get('evaluator'), 'llm')
-            self.assertEqual(meta2.get('confidence'), 0.8)
-            self.assertEqual(
-                meta2.get('assumptions'),
-                {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
-            )
+            self.assertEqual(meta2, {'source': 'test'})
 
             ledger_text = open(jobs_ledger).read()
             self.assertTrue(
@@ -764,6 +920,222 @@ class TestPhase38MultiTick(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    # -- Plan 05 (EGV-07): provenance survives a REAL deferred create -----
+
+    def test_provenance_survives_deferred_create_and_retry(self):
+        """EGV-07, and the roadmap's own wording verbatim: "Model, prompt,
+        taxonomy, policy and schema versions survive a deferred create and
+        a retry -- the phase-38 deferral path is the test, not a mock."
+
+        C-04 is explicit Phase 38's deferral proof does not extend to this
+        schema: the matching logic is schema-agnostic but the field
+        extraction was not, and Phase 42 replaced the extraction wholesale.
+        This test rebuilds the proof on the real harness this class already
+        uses for the marker-only deferral guarantee
+        (test_deferred_create_survives_to_next_tick_with_assessment_intact):
+        a real `jobs create` failure in tick 1 (JOBS_CREATE_EXIT_CODE=1,
+        via a real `bash hermes-report.sh` subprocess through _run_tick),
+        a real second subprocess run in tick 2, and a real sidecar file
+        persisted on disk between them -- never a mock of the extraction
+        logic.
+
+        Every provenance field EGV-07 names by word (model, prompt,
+        taxonomy, policy, schema) plus the evaluator/evaluator-version pair
+        is captured from the ON-DISK sidecar file before tick 1 (not the
+        in-memory record, so serialization is covered too) and asserted
+        field-for-field, per-field message, against tick 2's --metadata --
+        a dict-equality assertion would tell the reader nothing about which
+        link in the provenance chain broke.
+        """
+        sid = 'p42-05-prov-sid-001'
+        job_id = 'p42-05-prov-job-001'
+        c, record = _build_real_sidecar_record(job_id)
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            seed_created=False, sidecar=record,
+        )
+        try:
+            component = c._sidecar_filename_component(job_id)
+            sidecar_path = os.path.join(state_dir, 'job-assessments', f'{component}.jsonl')
+
+            # Read the provenance fields back OUT OF THE FILE ON DISK,
+            # before tick 1 even runs -- proving serialization survived,
+            # not just the in-memory dict the fixture built.
+            with open(sidecar_path) as f:
+                on_disk_before = json.loads(f.read().strip())
+            provenance_fields = (
+                'assessment_schema_version', 'taxonomy_version', 'prompt_version',
+                'policy_version', 'model', 'evaluator', 'evaluator_version',
+            )
+            expected = {field: on_disk_before[field] for field in provenance_fields}
+
+            # Tick 1: jobs create fails -> OUTCOME-04's defer branch. No
+            # outcome ships; the sidecar file is untouched by this tick
+            # (proven separately, byte-for-byte, in the next test).
+            env1 = {**env, 'JOBS_CREATE_EXIT_CODE': '1'}
+            rc1, meter_inv1, jobs_inv1, out1 = self._run_tick(env1, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc1, 0, f'tick 1 exit {rc1}: {out1}')
+            self.assertEqual(
+                len(_outcome_invocations(jobs_inv1, 'outcome')), 0,
+                f'tick 1 must send no outcome (create failed, no created line): {jobs_inv1}',
+            )
+            self.assertTrue(
+                'outcome deferred' in out1 or 'wedged job' in out1,
+                f'expected an OUTCOME-04 defer warning in tick 1 output: {out1}',
+            )
+
+            # Tick 2: jobs create succeeds -> the deferred outcome ships,
+            # via a REAL second `bash hermes-report.sh` subprocess re-
+            # reading the SAME sidecar file tick 1 left on disk.
+            env2 = {**env, 'JOBS_CREATE_EXIT_CODE': '0'}
+            rc2, meter_inv2, jobs_inv2, out2 = self._run_tick(env2, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc2, 0, f'tick 2 exit {rc2}: {out2}')
+
+            outcome_inv2 = _outcome_invocations(jobs_inv2, 'outcome')
+            self.assertEqual(
+                len(outcome_inv2), 1, f'tick 2 must ship exactly one outcome: {jobs_inv2}',
+            )
+            argv2 = outcome_inv2[0]
+
+            # D-08's meaning survives the deferral too: --outcome-value
+            # carries the LOW bound the sidecar held before tick 1.
+            self.assertIn(
+                '--outcome-value', argv2, f'expected --outcome-value in tick 2 argv: {argv2}',
+            )
+            self.assertEqual(
+                argv2[argv2.index('--outcome-value') + 1], str(on_disk_before['value_low']),
+                'the LOW bound must survive the deferral onto --outcome-value unchanged',
+            )
+
+            meta2 = json.loads(_metadata_of(argv2))
+            for field in provenance_fields:
+                self.assertIn(
+                    field, meta2,
+                    f'provenance field {field!r} is missing from tick 2 --metadata: {meta2}',
+                )
+                self.assertEqual(
+                    meta2[field], expected[field],
+                    f'provenance field {field!r} changed across the deferral: '
+                    f'sidecar held {expected[field]!r} before tick 1, '
+                    f'tick 2 shipped {meta2[field]!r}',
+                )
+
+            ledger_text = open(jobs_ledger).read()
+            self.assertTrue(
+                any(l.startswith(f'JOB:{job_id}:outcome:') for l in ledger_text.splitlines()),
+                f'expected an outcome ledger line after tick 2: {ledger_text}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_sidecar_record_unmodified_by_a_deferred_tick(self):
+        """The reporter is a PURE READER of the sidecar; if a future change
+        ever makes it a writer, this is the test that says so. Hashes the
+        sidecar file's bytes before tick 1 and after tick 2 and asserts
+        identity. Also re-asserts the marker file's own bytes are
+        unchanged across both ticks -- the existing EGV-22 guarantee
+        (test_deferred_create_survives_to_next_tick_with_assessment_intact)
+        restated at the file level rather than the field level, now
+        alongside the new sidecar carrier."""
+        sid = 'p42-05-unmod-sid-001'
+        job_id = 'p42-05-unmod-job-001'
+        c, record = _build_real_sidecar_record(job_id)
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            seed_created=False, sidecar=record,
+        )
+        try:
+            component = c._sidecar_filename_component(job_id)
+            sidecar_path = os.path.join(state_dir, 'job-assessments', f'{component}.jsonl')
+            marker_path = os.path.join(state_dir, 'markers', f'{sid}.jsonl')
+
+            with open(sidecar_path, 'rb') as f:
+                sidecar_bytes_before = f.read()
+            with open(marker_path, 'rb') as f:
+                marker_bytes_before = f.read()
+
+            env1 = {**env, 'JOBS_CREATE_EXIT_CODE': '1'}
+            rc1, _m1, jobs_inv1, out1 = self._run_tick(env1, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc1, 0, f'tick 1 exit {rc1}: {out1}')
+            self.assertEqual(
+                len(_outcome_invocations(jobs_inv1, 'outcome')), 0,
+                f'tick 1 must send no outcome: {jobs_inv1}',
+            )
+
+            env2 = {**env, 'JOBS_CREATE_EXIT_CODE': '0'}
+            rc2, _m2, jobs_inv2, out2 = self._run_tick(env2, meter_log, jobs_log, state_dir)
+            self.assertEqual(rc2, 0, f'tick 2 exit {rc2}: {out2}')
+            self.assertEqual(
+                len(_outcome_invocations(jobs_inv2, 'outcome')), 1,
+                f'tick 2 must ship exactly one outcome: {jobs_inv2}',
+            )
+
+            with open(sidecar_path, 'rb') as f:
+                sidecar_bytes_after = f.read()
+            with open(marker_path, 'rb') as f:
+                marker_bytes_after = f.read()
+
+            self.assertEqual(
+                sidecar_bytes_before, sidecar_bytes_after,
+                'the sidecar file must be byte-identical across a deferred tick and its '
+                'retry -- the reporter is a pure reader of it',
+            )
+            self.assertEqual(
+                marker_bytes_before, marker_bytes_after,
+                'EGV-22 at the file level: the marker file must also be byte-identical '
+                'across a deferred tick and its retry',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_rerun_after_a_valued_outcome_reports_exactly_once(self):
+        """Idempotency with a sidecar present. Three ticks against a state
+        that never changes must produce exactly one `jobs outcome`
+        invocation total and exactly one `JOB:<id>:outcome:` ledger line
+        total -- the idempotency edge this repo has been bitten by twice
+        (the phase-32 cross-profile double-ship; the legacy-reporter race
+        still carried as an @expectedFailure).
+        test_idempotent_rerun_produces_exactly_one_outcome_and_one_ledger_line
+        already covers this for the marker-sourced path; this test covers
+        it with a real sidecar record present, over three ticks instead of
+        two.
+
+        This test asserts EXACTLY-ONCE. It never asserts, and must never be
+        read as demonstrating, that a job id CAN be reported twice through
+        the ordinary `job_outcome_queue` path -- that is the regression
+        this design exists to avoid, not a feature.
+        """
+        sid = 'p42-05-rerun-sid-001'
+        job_id = 'p42-05-rerun-job-001'
+        c, record = _build_real_sidecar_record(job_id)
+        tmpdir, env, meter_log, jobs_log, jobs_ledger, state_dir = self._setup(
+            sid, job_id, status='SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            seed_created=True, sidecar=record,
+        )
+        try:
+            total_outcome_invocations = 0
+            for tick_num in (1, 2, 3):
+                rc, _m, jobs_inv, out = self._run_tick(env, meter_log, jobs_log, state_dir)
+                self.assertEqual(rc, 0, f'tick {tick_num} exit {rc}: {out}')
+                total_outcome_invocations += len(_outcome_invocations(jobs_inv, 'outcome'))
+
+            self.assertEqual(
+                total_outcome_invocations, 1,
+                'exactly one jobs outcome invocation across three ticks against unchanged '
+                'state, with a sidecar present',
+            )
+
+            ledger_text = open(jobs_ledger).read()
+            outcome_lines = [
+                l for l in ledger_text.splitlines() if l.startswith(f'JOB:{job_id}:outcome:')
+            ]
+            self.assertEqual(
+                len(outcome_lines), 1,
+                f'exactly one outcome ledger line across three ticks, got: {outcome_lines}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # Plan 02, Task 3 — the ROI-13 canary sweep.
@@ -847,6 +1219,15 @@ class TestPhase38Canary(unittest.TestCase):
     TRANSCRIPT_CANARY = 'ZZCANARY-7f3a9-SECRET-SENTINEL'
     EVALUATOR_BASIS_CANARY = 'QQCANARY-b21c4-MODEL-PROSE'
     EVALUATOR_ROLE_CANARY = 'RRCANARY-99f2-ROLE'
+    # Phase 42 Plan 05 -- the sidecar's other two narrative fields
+    # (candidate_downstream_outcome, counterfactual_assumption), each
+    # clamped to its own 500-byte NARRATIVE_CLAMP_BYTES budget, distinct
+    # from the marker's basis (200 bytes). The marker's `basis` and the
+    # sidecar's `basis` share ONE canary (EVALUATOR_BASIS_CANARY) because
+    # they are the SAME field surviving through two different carriers with
+    # two different clamps -- these two fields exist only in the sidecar.
+    EVALUATOR_OUTCOME_CANARY = 'SSCANARY-c31d5-OUTCOME-PROSE'
+    EVALUATOR_COUNTERFACTUAL_CANARY = 'TTCANARY-d42e6-COUNTERFACTUAL-PROSE'
     # 39-01 Task 3 -- the malformed response BODY itself, for the `invalid`
     # line's own canary sweep. Deliberately its own constant, not a reuse of
     # EVALUATOR_BASIS_CANARY: that one is MEANT to reach the marker (a
@@ -874,6 +1255,16 @@ class TestPhase38Canary(unittest.TestCase):
             + ('Z' * 300)
         )
         role_raw = self.EVALUATOR_ROLE_CANARY + '|role|pipe\nbreak\r' + ('Y' * 100)
+        # Phase 42 Plan 05 -- the sidecar's other two narrative fields, each
+        # over their own 500-byte NARRATIVE_CLAMP_BYTES budget and carrying
+        # pipe/newline/CR so the same IFS-cleanliness assertion the marker's
+        # basis/inferred_role already get can be repeated against them.
+        outcome_raw = (
+            self.EVALUATOR_OUTCOME_CANARY + '|outcome|pipe\nbreak\r' + ('W' * 600)
+        )
+        counterfactual_raw = (
+            self.EVALUATOR_COUNTERFACTUAL_CANARY + '|cf|pipe\nbreak\r' + ('V' * 600)
+        )
         return {
             'inferred_role': role_raw,
             'estimated_hours_saved': 2.0,
@@ -881,6 +1272,8 @@ class TestPhase38Canary(unittest.TestCase):
             'currency': 'USD',
             'basis': basis_raw,
             'confidence': 0.6,
+            'candidate_downstream_outcome': outcome_raw,
+            'counterfactual_assumption': counterfactual_raw,
         }
 
     def _attach_and_write(self, sid, job_id, state_dir, markers_dir):
@@ -907,8 +1300,20 @@ class TestPhase38Canary(unittest.TestCase):
         )
         asyncio.run(c._attach_assessment(job, transcript, c._module_paths()))
         self.assertIn('assessment', job, 'the canary evaluator must produce an accepted assessment')
+        # Phase 42 Plan 05: also produce a sidecar record through the REAL
+        # write path (_write_job_assessment), mirroring the D-12 ordering
+        # (sidecar first, then the marker) the real caller in
+        # run_classification_async uses -- the sidecar is a NEW persisted
+        # artifact the existing canary sweep enumerated by name and did not
+        # know about; a fixture that skips writing it would leave that hole
+        # unexercised rather than closing it.
+        assessment_record = job.pop('_assessment_record', None)
+        sidecar_path = None
+        if isinstance(assessment_record, dict) and assessment_record:
+            sidecar_path = c._write_job_assessment(assessment_record, c._module_paths())
+            self.assertIsNotNone(sidecar_path, 'the canary fixture must produce a real sidecar write')
         marker_path = c._write_job_marker(sid, job, c._module_paths())
-        return job, marker_path
+        return job, marker_path, sidecar_path
 
     def test_canary_evaluator_prose_persists_clamped_and_ifs_clean(self):
         tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-')
@@ -917,7 +1322,7 @@ class TestPhase38Canary(unittest.TestCase):
             markers_dir = os.path.join(state_dir, 'markers')
             sid = 'p38-canary-sid-001'
             job_id = 'p38-canary-job-001'
-            job, marker_path = self._attach_and_write(sid, job_id, state_dir, markers_dir)
+            job, marker_path, sidecar_path = self._attach_and_write(sid, job_id, state_dir, markers_dir)
 
             basis = job['assessment']['basis']
             role = job['assessment']['assumptions']['inferred_role']
@@ -942,6 +1347,40 @@ class TestPhase38Canary(unittest.TestCase):
                 self.TRANSCRIPT_CANARY, marker_path.read_text(),
                 'the transcript canary must never reach the marker',
             )
+
+            # Phase 42 Plan 05 -- the same clamping and IFS-cleanliness
+            # guarantees, now for all THREE narrative fields in the SIDECAR
+            # record (basis, candidate_downstream_outcome,
+            # counterfactual_assumption), against the sidecar's OWN 500-byte
+            # NARRATIVE_CLAMP_BYTES budget -- not the marker's 200.
+            self.assertIsNotNone(sidecar_path, 'the canary fixture must have produced a sidecar record')
+            sidecar_lines = sidecar_path.read_text().strip().splitlines()
+            self.assertEqual(len(sidecar_lines), 1, f'expected exactly one sidecar line: {sidecar_lines}')
+            sidecar_record = json.loads(sidecar_lines[0])
+
+            sidecar_basis = sidecar_record['basis']
+            sidecar_outcome = sidecar_record['candidate_downstream_outcome']
+            sidecar_counterfactual = sidecar_record['counterfactual_assumption']
+
+            for field_name, value, canary in (
+                ('basis', sidecar_basis, self.EVALUATOR_BASIS_CANARY),
+                ('candidate_downstream_outcome', sidecar_outcome, self.EVALUATOR_OUTCOME_CANARY),
+                ('counterfactual_assumption', sidecar_counterfactual, self.EVALUATOR_COUNTERFACTUAL_CANARY),
+            ):
+                for bad in ('|', '\n', '\r'):
+                    self.assertNotIn(
+                        bad, value, f'sidecar {field_name} must be IFS-clean: {value!r}',
+                    )
+                self.assertIn(canary, value, f'sidecar {field_name} must carry its own canary')
+                self.assertLessEqual(
+                    len(json.dumps(value).encode('utf-8')) - 2, 500,
+                    f'sidecar {field_name} must be clamped to its 500-byte serialized budget',
+                )
+
+            self.assertNotIn(
+                self.TRANSCRIPT_CANARY, sidecar_path.read_text(),
+                'the transcript canary must never reach the sidecar',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -957,7 +1396,9 @@ class TestPhase38Canary(unittest.TestCase):
             sid = 'p38-canary-sid-002'
             job_id = 'p38-canary-job-002'
 
-            self._attach_and_write(sid, job_id, state_dir, markers_dir)
+            _job, _marker_path, _sidecar_path = self._attach_and_write(
+                sid, job_id, state_dir, markers_dir,
+            )
 
             # Prepend the CHAT/task marker line the classifier's OTHER write
             # path produces (_write_job_marker above wrote only the job line) --
@@ -1040,6 +1481,44 @@ class TestPhase38Canary(unittest.TestCase):
 
             self.assertNotIn(canary, result.stdout)
             self.assertNotIn(canary, result.stderr)
+
+            # Phase 42 Plan 05: the sidecar is a NEW persisted artifact the
+            # checks above -- enumerated by name -- do not know about. A
+            # recursive walk of the whole temp tree covers it (and every
+            # FUTURE new artifact) automatically instead of needing another
+            # hand-listed edit. This is additive to the named checks above,
+            # not a replacement -- their per-artifact failure messages stay
+            # useful for triage; the walk is the safety net that catches
+            # what a hand-listed set would miss.
+            self.assertTrue(_sidecar_path is not None and _sidecar_path.exists(),
+                             'the fixture must have produced a real sidecar file for this sweep to mean anything')
+            swept_files = []
+            for root, _dirs, files in os.walk(tmpdir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    swept_files.append(fpath)
+                    try:
+                        with open(fpath, 'rb') as f:
+                            raw_bytes = f.read()
+                    except OSError:
+                        continue
+                    try:
+                        text = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        # No text artifact this pipeline writes is expected
+                        # to be non-UTF-8 (every JSONL/ledger/log write in
+                        # this codebase is ensure_ascii=True text); a binary
+                        # file here is out of scope for a text canary sweep.
+                        continue
+                    self.assertNotIn(
+                        canary, text,
+                        f'{fpath} must not carry the transcript canary (recursive sweep)',
+                    )
+            self.assertIn(
+                str(_sidecar_path), swept_files,
+                'the recursive walk must have actually visited the sidecar file, or this '
+                'sweep proves nothing about the NEW artifact it exists to cover',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1108,6 +1587,36 @@ class TestPhase38Canary(unittest.TestCase):
                     response_canary, message,
                     'the rejected response body must never reach the invalid log record',
                 )
+
+            # Phase 42 Plan 05 (D-11): an abstention is now a REAL sidecar
+            # record -- the raw model output was in scope moments before
+            # this record was built, so it is exactly where a leak would
+            # land. Sweep it for both canaries.
+            record = job.get('_assessment_record')
+            self.assertIsInstance(record, dict, 'D-11: a rejected evaluation must still produce a record')
+            self.assertEqual(
+                record.get('abstention_reason'), 'invalid',
+                'the abstention record must carry the reason word this rejection produced',
+            )
+            for absent_key in (
+                'value_low', 'value_base', 'value_high', 'bounds_source',
+                'currency', 'estimated_value', 'assumptions',
+            ):
+                self.assertNotIn(
+                    absent_key, record,
+                    f'D-11: an abstention record must OMIT {absent_key!r}, not null it',
+                )
+            sidecar_path = c._write_job_assessment(record, c._module_paths())
+            self.assertIsNotNone(sidecar_path, 'the abstention record must write successfully')
+            sidecar_text = sidecar_path.read_text()
+            self.assertNotIn(
+                self.TRANSCRIPT_CANARY, sidecar_text,
+                'the transcript canary must never reach the abstention sidecar record',
+            )
+            self.assertNotIn(
+                response_canary, sidecar_text,
+                'the raw response body must never reach the abstention sidecar record',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1146,6 +1655,23 @@ class TestPhase38Canary(unittest.TestCase):
                     self.TRANSCRIPT_CANARY, message,
                     'the transcript canary must never reach a log record',
                 )
+
+            # Phase 42 Plan 05 (D-11): same abstention-sidecar sweep as the
+            # invalid-line test, for the timed-out path.
+            record = job.get('_assessment_record')
+            self.assertIsInstance(record, dict, 'D-11: a timed-out evaluation must still produce a record')
+            self.assertEqual(record.get('abstention_reason'), 'timed_out')
+            for absent_key in (
+                'value_low', 'value_base', 'value_high', 'bounds_source',
+                'currency', 'estimated_value', 'assumptions',
+            ):
+                self.assertNotIn(absent_key, record)
+            sidecar_path = c._write_job_assessment(record, c._module_paths())
+            self.assertIsNotNone(sidecar_path, 'the abstention record must write successfully')
+            self.assertNotIn(
+                self.TRANSCRIPT_CANARY, sidecar_path.read_text(),
+                'the transcript canary must never reach the abstention sidecar record',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

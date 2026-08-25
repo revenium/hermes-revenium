@@ -169,3 +169,39 @@ log: `deferred` (and its aged `wedged` restatement) and `reported`. The other fo
 plugin on the `revenium_classifier` Python logger, not into `revenium-metering.log`, so they
 land wherever Hermes' own logging is configured. `diagnose.sh` names where they are; it does
 not show them.
+
+---
+
+# Job Assessment Sidecar (Phase 42)
+
+## Overview
+
+Every accepted `llmOutcomeEvaluation` assessment (see above) is now also written to a
+job-id-keyed sidecar file, `${STATE_DIR}/job-assessments/<sanitized_job_id>.jsonl`
+(declared as `JOB_ASSESSMENTS_DIR` in `common.sh`) — the record of record for a job's
+`JobAssessment`, distinct from the job marker's existing 9-key `assessment` summary
+(`markers/<sid>.jsonl`), which stays a pointer-and-summary and is byte-unchanged. The
+outcome stage in `hermes-report.sh` reads the sidecar, never the marker's summary, to
+resolve `--outcome-value`/`--outcome-currency` and `--metadata` provenance — an absent,
+unreadable, oversized, or pruned sidecar record reports the outcome status-only, with no
+value flags.
+
+The file holds one JSON line per record, of two kinds: `job_assessment` (the original,
+written by the classifier immediately after evaluation, before the job marker itself —
+sidecar-first ordering means a crash between the two writes leaves a harmless orphan
+sidecar record rather than losing the assessment's value) and `correction` (an
+operator-filed revision, appended by a later plan's `correct-assessment.sh`). A scan-to-end
+reader with no early exit means the LAST line matching a job id wins, so a `correction` line
+naturally supersedes the original. Each line is capped at 8,192 bytes; an over-length line
+is skipped by the reader (never crashes it) and refused outright by the writer.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REVENIUM_JOB_ASSESSMENTS_DIR` | `${STATE_DIR}/job-assessments` | Overrides the sidecar directory, following the same `REVENIUM_*` override convention as `EVENT_SPOOL_DIR`/`TOOL_EVENTS_DIR`. |
+| `REVENIUM_ASSESSMENT_RETENTION_DAYS` | `90` | Retention window for sidecar files, keyed on each file's own last write (mtime) — not the owning session's ledger timestamp, the way `markers/` is pruned. Deliberately well above `MARKER_RETENTION_DAYS`' 30: assessments are the audit record a correction is filed against, and corrections arrive on a human timescale, not a session one. |
+
+Both variables are declared only in `common.sh`, between the existing declarations and
+the eager `mkdir -p` line, following the single-source-of-truth rule every other state
+path in this document follows.
