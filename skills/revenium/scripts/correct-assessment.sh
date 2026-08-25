@@ -401,6 +401,27 @@ with os.fdopen(fd, 'r+b', buffering=0) as f:
     }
     line_bytes = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
     f.write(line_bytes)
+    # Greptile P1 (PR #94): the st_nlink check ABOVE closes only the
+    # open()->flock() window. It does NOT close check->scan->write, which is
+    # the far wider one: prune-markers.sh's os.unlink takes no per-file lock
+    # (its flock is the global prune.lock), so an unlink landing anywhere
+    # after that check leaves this write succeeding against an orphaned
+    # inode -- the bytes vanish when the last fd closes -- while the shell
+    # goes on to append the JOB:<id>:correction ledger line and ship the
+    # remote outcome-update, telling the operator it worked. Remote holds a
+    # correction, local holds nothing, and nobody is told.
+    #
+    # A pre-write check cannot fix a post-check unlink; only re-verifying
+    # AFTER the bytes are down can. Once this check passes the record lives
+    # in a file that still has a name, so any later unlink is ordinary
+    # pruning rather than a lost write. Refusing here (before SEQUENCE is
+    # emitted) is what keeps the shell from writing the ledger line or
+    # shipping -- leaving no local record, no remote correction and no
+    # ledger line, which a re-run then reports truthfully as D-14.
+    os.fsync(f.fileno())
+    if os.fstat(f.fileno()).st_nlink == 0:
+        print('REFUSED_TOCTOU=1')
+        raise SystemExit(0)
 
 print(f'SEQUENCE={sequence}')
 print(f'TS={now}')

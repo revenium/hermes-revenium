@@ -2605,6 +2605,115 @@ class CorrectionAppendTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_wr02b_post_write_unlink_refuses_and_ships_nothing(self):
+        """Greptile P1 on PR #94: the under-lock st_nlink check closes only
+        the open()->flock() window. It does NOT close check->scan->write.
+        prune-markers.sh's os.unlink takes no per-file lock (its flock is
+        the global prune.lock), so an unlink landing after that check leaves
+        the write succeeding against an orphaned inode -- the bytes vanish
+        on close -- while the shell still appends the ledger line and ships
+        the remote outcome-update, reporting success. Revenium would hold a
+        correction the local audit record does not.
+
+        The window is real and wide here because the sequence scan iterates
+        an UNBUFFERED FileIO (`os.fdopen(fd, 'r+b', buffering=0)`), so line
+        iteration reads a byte at a time. Padding the sidecar with prior
+        correction history makes the scan take long enough to unlink inside
+        it deterministically: the shim blocks at Step 4, the test releases
+        it, waits past the (fast) open and first st_nlink check, then
+        unlinks while the (slow) scan is still running.
+
+        The test ASSERTS the refusal rather than tolerating a miss -- if the
+        interleaving ever stops landing, this fails loudly instead of
+        silently proving nothing."""
+        sid, job_id = 'p42c-sid-016', 'p42c-job-016'
+        record = _tracer_assessment_record(job_id)
+        # Padding history: real `correction` records, so the file stays a
+        # legitimate sidecar rather than a synthetic blob.
+        padding = []
+        for i in range(4000):
+            padding.append({
+                'kind': 'correction',
+                'ts': 1715516100.0 + i,
+                'agentic_job_id': job_id,
+                'assessment_id': f'{job_id}:{i}',
+                'sequence': i,
+                'assessment_schema_version': 1,
+                'prior_value_low': 400.0, 'prior_value_base': 500.0,
+                'prior_value_high': 600.0, 'prior_currency': 'USD',
+                'value_low': 400.0, 'value_base': 500.0, 'value_high': 600.0,
+                'currency': 'USD',
+                'reason': f'padding correction {i} ' + ('p' * 120),
+            })
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record] + padding)
+        )
+        try:
+            ledger_before = Path(jobs_ledger).read_text()
+            bin_dir = env['PATH'].split(os.pathsep)[0]
+            shim = os.path.join(bin_dir, 'revenium')
+            entered_file = os.path.join(tmpdir, 'probe-entered')
+            release_file = os.path.join(tmpdir, 'probe-release')
+            _build_toctou_race_shim(shim, entered_file, release_file)
+
+            proc = subprocess.Popen(
+                ['bash', str(CORRECT_ASSESSMENT_SH),
+                 '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                 '--reason', 'post-write unlink race'],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 30
+                while not os.path.exists(entered_file):
+                    self.assertLess(
+                        time.time(), deadline,
+                        'shim never reached the blocking probe',
+                    )
+                    time.sleep(0.02)
+
+                # Release, then let the open and the FIRST st_nlink check
+                # pass (both O(1)) before unlinking -- so the deletion lands
+                # inside the slow scan, AFTER the pre-write check, which is
+                # the window this test exists for.
+                Path(release_file).touch()
+                time.sleep(0.15)
+                self.assertTrue(
+                    os.path.exists(sidecar_path),
+                    'sidecar vanished before the test could unlink it',
+                )
+                os.remove(sidecar_path)
+
+                out, err = proc.communicate(timeout=60)
+                rc = proc.returncode
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+
+            self.assertNotEqual(
+                rc, 0,
+                f'post-write unlink must refuse, not report success: '
+                f'stdout={out!r} stderr={err!r}',
+            )
+            self.assertNotIn(
+                'Correction shipped to Revenium', out,
+                'a correction whose local record was unlinked must NOT be '
+                'reported as shipped',
+            )
+            self.assertEqual(
+                Path(jobs_ledger).read_text(), ledger_before,
+                'no ledger line may be written when the post-write check '
+                'refuses -- the local record does not exist',
+            )
+            self.assertEqual(
+                _jobs_log_invocations(jobs_log), [],
+                'no remote outcome-update may be shipped when the local '
+                'audit record was lost to a concurrent unlink',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def test_wr03_team_id_resolution_failure_fails_loud_after_local_save(self):
         """42-REVIEW.md WR-03: `resolve_team_id`'s `revenium config show`
         call is DIFFERENT from the `jobs outcome-update --help` capability
