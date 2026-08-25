@@ -1273,5 +1273,337 @@ class PathMirrorParityTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Plan 42-04 -- D-07 (schema version fail-closed), D-10 (sidecar-unavailable
+# fail-closed, plus the rolling-upgrade diagnostic reason), D-09 site two
+# (independent bounds re-check immediately before --outcome-value), and D-08
+# (the low bound ships, not base). Shared tree builder mirrors
+# SidecarTracerTests._build_tree above; kept separate (rather than promoted
+# to a shared method) because these tests also need sidecar-file permission
+# control and a failure-injecting shim the tracer tests never needed.
+# ---------------------------------------------------------------------------
+
+def _read_log(state_dir):
+    log_path = os.path.join(state_dir, 'revenium-metering.log')
+    if not os.path.exists(log_path):
+        return ''
+    with open(log_path) as f:
+        return f.read()
+
+
+def _build_fail_once_shim(shim_path, jobs_log, fail_marker):
+    """A `jobs outcome` shim whose FIRST call fails (exit 1, no ledger
+    write) and every call after succeeds -- lets a two-tick test genuinely
+    re-run the assessment resolution on tick 2, since OUTCOME-01's ledger
+    gate never fires while the job stays unreported. Every other verb
+    behaves exactly like the reusable build_shim (config/guardrails/meter
+    --help probes, bare `jobs --help`, and the `jobs outcome --help`
+    capability probe)."""
+    body = (
+        '#!/usr/bin/env bash\n'
+        'case "$1" in\n'
+        '  config) exit 0 ;;\n'
+        '  guardrails) exit 0 ;;\n'
+        '  meter)\n'
+        '    if [[ "$3" == "--help" ]]; then\n'
+        '      echo "--agentic-job-id  Agentic job instance identifier"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  jobs)\n'
+        '    if [[ "$2" == "--help" ]]; then exit 0; fi\n'
+        '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
+        '      echo "--outcome-value string     Business outcome value"\n'
+        '      echo "--outcome-currency string   Business outcome currency"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    if [[ "$2" == "outcome" ]]; then\n'
+        f'      if [[ ! -e "{fail_marker}" ]]; then\n'
+        f'        touch "{fail_marker}"\n'
+        '        echo "test-injected transient outcome failure, retry expected" >&2\n'
+        '        exit 1\n'
+        '      fi\n'
+        f'      printf "%q " "$@" >> "{jobs_log}"\n'
+        f'      printf "\\n"      >> "{jobs_log}"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+    with open(shim_path, 'w') as f:
+        f.write(body)
+    os.chmod(shim_path, 0o755)
+
+
+def _build_outcome_tree(sid, job_id, sidecar_lines=None, marker_assessment=None,
+                         sidecar_mode=None, fail_outcome_once=False):
+    """Build a tmp HERMES_HOME tree for one job arc against the outcome
+    stage's D-07/D-09/D-10 fail-closed paths. Returns
+    (tmpdir, env, jobs_log, state_dir).
+
+    sidecar_lines: list of dict records written to
+        job-assessments/<job_id>.jsonl, or None to leave the sidecar file
+        absent entirely (D-10's "absent" case).
+    marker_assessment: when given, written as the job marker's own
+        `assessment` key (C-01's demoted pointer-and-summary object) --
+        present ALONGSIDE, never instead of, the sidecar.
+    sidecar_mode: chmod applied to the sidecar file after writing (e.g.
+        0o000 to simulate D-10's "unreadable" case). Ignored when
+        sidecar_lines is None.
+    fail_outcome_once: builds a shim whose FIRST `jobs outcome` call fails
+        so the job stays unreported after tick 1 -- required for a genuine
+        two-tick rate-limit proof (see _build_fail_once_shim).
+    """
+    tmpdir = tempfile.mkdtemp(prefix='gsd-phase42-failclosed-')
+    hermes_home = os.path.join(tmpdir, 'hh')
+    state_dir = os.path.join(hermes_home, 'state', 'revenium')
+    markers_dir = os.path.join(state_dir, 'markers')
+    assessments_dir = os.path.join(state_dir, 'job-assessments')
+    os.makedirs(markers_dir, mode=0o700)
+    os.makedirs(assessments_dir, mode=0o700)
+    state_db = os.path.join(hermes_home, 'state.db')
+    jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+    build_state_db(state_db, [{
+        'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+        'input_tokens': 100, 'output_tokens': 50,
+        'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+        'estimated_cost': '0', 'api_calls': 1,
+        'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+        'billing_provider': 'anthropic',
+    }])
+
+    # Pre-seed created line so the outcome stage does not defer (OUTCOME-04).
+    with open(jobs_ledger, 'w') as f:
+        f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+    task_marker = {
+        'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+        'task_type': 'code_review', 'operation_type': 'CHAT',
+    }
+    job_marker = {
+        'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+        'agentic_job_id': job_id, 'job_name': 'Phase 42 Plan 04 Fail-Closed Job',
+        'job_type': 'code_review', 'status': 'SUCCESS',
+    }
+    if marker_assessment is not None:
+        job_marker['assessment'] = marker_assessment
+    with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+        f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+        f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+    if sidecar_lines is not None:
+        sidecar_path = os.path.join(assessments_dir, f'{job_id}.jsonl')
+        with open(sidecar_path, 'w') as f:
+            for rec in sidecar_lines:
+                f.write(json.dumps(rec, separators=(',', ':')) + '\n')
+        if sidecar_mode is not None:
+            os.chmod(sidecar_path, sidecar_mode)
+
+    shim_home = os.path.join(tmpdir, 'home')
+    bin_dir = os.path.join(shim_home, '.local', 'bin')
+    os.makedirs(bin_dir)
+    meter_log = os.path.join(tmpdir, 'meter.log')
+    jobs_log = os.path.join(tmpdir, 'jobs.log')
+    shim = os.path.join(bin_dir, 'revenium')
+
+    if fail_outcome_once:
+        fail_marker = os.path.join(tmpdir, 'outcome-fail-marker')
+        _build_fail_once_shim(shim, jobs_log, fail_marker)
+    else:
+        build_shim(shim)
+
+    env = {
+        **os.environ,
+        'HOME': shim_home,
+        'HERMES_HOME': hermes_home,
+        'REVENIUM_STATE_DIR': state_dir,
+        'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+        'METER_LOG': meter_log,
+        'JOBS_LOG': jobs_log,
+        'TZ': 'UTC',
+        'REVENIUM_ORGANIZATION_NAME': '',
+    }
+    return tmpdir, env, jobs_log, state_dir
+
+
+class FailClosedTests(unittest.TestCase):
+    """Phase 42 Plan 04 -- D-07 (unrecognized schema version) and D-10
+    (unavailable sidecar) both fail closed: the outcome stage reports
+    status-only, never falls back to the marker's 9-key `assessment`
+    summary, and logs exactly once per (outcome_id, reason) through the
+    SAME OUTCOME_WARN_FLAGS_DIR sentinel the deferred/wedged block already
+    uses (T-42-04-02, T-42-04-03, T-42-04-04, T-42-04-05)."""
+
+    def test_unrecognized_schema_version_ships_no_value_and_logs_once(self):
+        sid, job_id = 'p42-fc-sid-001', 'p42-fc-job-001'
+        record = _tracer_assessment_record(job_id, assessment_schema_version=99)
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+            meta = json.loads(_metadata_of(argv))
+            self.assertNotIn('evidence_class', meta)
+            self.assertNotIn('value_low', meta)
+            self.assertNotIn('assessment_schema_version', meta)
+            log_content = _read_log(state_dir)
+            self.assertEqual(
+                log_content.count('schema unrecognized'), 1,
+                f'expected exactly one schema_unrecognized warn:\n{log_content}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_recognized_current_version_still_values_normally(self):
+        sid, job_id = 'p42-fc-sid-002', 'p42-fc-job-002'
+        record = _tracer_assessment_record(job_id)  # assessment_schema_version: 1
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
+            self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_missing_sidecar_ships_no_value_and_logs_sidecar_unavailable(self):
+        sid, job_id = 'p42-fc-sid-003', 'p42-fc-job-003'
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=None,
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+            log_content = _read_log(state_dir)
+            self.assertEqual(
+                log_content.count('sidecar unavailable, reporting'), 1, log_content,
+            )
+            self.assertNotIn('rolling-upgrade window', log_content)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_unreadable_sidecar_ships_no_value_and_logs_sidecar_unavailable(self):
+        sid, job_id = 'p42-fc-sid-004', 'p42-fc-job-004'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record], sidecar_mode=0o000,
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+            log_content = _read_log(state_dir)
+            self.assertEqual(
+                log_content.count('sidecar unavailable, reporting'), 1, log_content,
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_oversized_line_ships_no_value_and_logs_sidecar_unavailable(self):
+        sid, job_id = 'p42-fc-sid-005', 'p42-fc-job-005'
+        huge = _tracer_assessment_record(job_id, padding='z' * 9000)
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[huge],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+            log_content = _read_log(state_dir)
+            self.assertEqual(
+                log_content.count('sidecar unavailable, reporting'), 1, log_content,
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_missing_sidecar_beside_marker_assessment_logs_diagnostic_reason(self):
+        sid, job_id = 'p42-fc-sid-006', 'p42-fc-job-006'
+        marker_assessment = {
+            'estimated_value': 999.0, 'currency': 'USD', 'basis': 'x',
+            'assumptions': {'inferred_role': 'x', 'estimated_hours_saved': 1.0,
+                             'assumed_loaded_rate': 999.0},
+            'confidence': 0.9, 'evaluator': 'llm', 'evaluator_version': 'v1',
+            'evidence_class': 'MODEL_ESTIMATED_DEMO',
+        }
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=None, marker_assessment=marker_assessment,
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+            log_content = _read_log(state_dir)
+            self.assertEqual(log_content.count('rolling-upgrade window'), 1, log_content)
+            # Distinct from the generic reason -- must not ALSO log the
+            # generic message for the same job.
+            self.assertEqual(log_content.count('sidecar unavailable, reporting'), 0, log_content)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_warn_fires_once_across_two_ticks(self):
+        """T-42-04-04: the deferred/wedged rate-limit pattern reused -- the
+        SAME unavailable-sidecar condition, re-evaluated every tick because
+        the job's own outcome report fails on tick 1 (so OUTCOME-01 never
+        ledger-gates it out), warns once on tick 1 and stays silent on
+        tick 2. The rate limit is the assertion, not a comment."""
+        sid, job_id = 'p42-fc-sid-007', 'p42-fc-job-007'
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=None, fail_outcome_once=True,
+        )
+        try:
+            rc1, _inv1, out1 = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc1, 0, f'tick 1 failed: {out1}')
+            log_after_tick1 = _read_log(state_dir)
+            self.assertEqual(
+                log_after_tick1.count('sidecar unavailable, reporting'), 1, log_after_tick1,
+            )
+
+            rc2, _inv2, out2 = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc2, 0, f'tick 2 failed: {out2}')
+            log_after_tick2 = _read_log(state_dir)
+            self.assertEqual(
+                log_after_tick2.count('sidecar unavailable, reporting'), 1,
+                f'warn must not repeat on tick 2:\n{log_after_tick2}',
+            )
+
+            # The sentinel flag is the ENTIRE mechanism preventing tick 2
+            # from re-warning -- assert it exists, not just the log count.
+            flag_dir = os.path.join(state_dir, 'markers', '.outcome-warn')
+            flags = os.listdir(flag_dir) if os.path.isdir(flag_dir) else []
+            matching = [
+                f for f in flags
+                if f.startswith(job_id) and f.endswith('__sidecar_unavailable.flag')
+            ]
+            self.assertEqual(len(matching), 1, f'expected one sentinel flag, found: {flags}')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()

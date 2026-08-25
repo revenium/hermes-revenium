@@ -2851,16 +2851,20 @@ PY
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
     local outcome_now_ts _age_s _stale_threshold outcome_metadata
     local outcome_warn_reason outcome_warn_key outcome_warn_flag
-    # Phase 42 (C-04): the marker-sourced outcome_markers_dir/outcome_evidence_class/
+    # Phase 42 (C-04): the marker-sourced outcome_evidence_class/
     # outcome_evaluator/outcome_evaluator_version/outcome_confidence/
     # outcome_hours_saved/outcome_loaded_rate locals are gone -- the outcome
     # stage now resolves an accepted assessment from the sidecar, never the
     # marker (D-10). outcome_value/outcome_currency remain scalars because
     # the outcome_cmd+=(--outcome-value ...) construction below runs BEFORE
     # the metadata heredoc; outcome_assessment_json carries the rest as one
-    # JSON blob.
-    local outcome_assessment_dir outcome_value outcome_currency
-    local outcome_assessment_json
+    # JSON blob. outcome_markers_dir returns (Phase 42 Plan 04, D-10): a
+    # narrow read-only presence PROBE on the job marker's own `assessment`
+    # key, used only to tell "never evaluated" apart from "evaluated by an
+    # older classifier, sidecar since pruned or never written" for the
+    # rolling-upgrade diagnostic reason word -- never a value source.
+    local outcome_assessment_dir outcome_value outcome_currency outcome_markers_dir
+    local outcome_assessment_json outcome_reason
     for _entry in "${job_outcome_queue[@]}"; do
       IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
@@ -2967,13 +2971,23 @@ except Exception:
       outcome_value=""
       outcome_currency=""
       outcome_assessment_json=""
+      outcome_reason=""
       if [[ "${outcome_status}" == "SUCCESS" && -n "${outcome_sid}" ]]; then
         outcome_assessment_dir="$(resolve_assessments_dir "${outcome_sid}")"
         [[ -z "${outcome_assessment_dir}" ]] && outcome_assessment_dir="${JOB_ASSESSMENTS_DIR}"
+        # D-10 diagnostic reason word: resolve the SAME per-session markers
+        # dir the marker reader uses, so the presence probe below reads the
+        # profile that actually owns this session, not the process-level
+        # default (the same reasoning resolve_assessments_dir already
+        # documents for the sidecar directory itself).
+        outcome_markers_dir="$(resolve_markers_dir "${outcome_sid}")"
+        [[ -z "${outcome_markers_dir}" ]] && outcome_markers_dir="${MARKERS_DIR}"
         local _assessment_kv
         _assessment_kv=$(
           ASSESSMENTS_DIR="${outcome_assessment_dir}" \
           OUTCOME_JOB_ID="${outcome_id}" \
+          OUTCOME_MARKERS_DIR="${outcome_markers_dir}" \
+          OUTCOME_SID="${outcome_sid}" \
           python3 - <<'PY' 2>/dev/null || true
 import json
 import os
@@ -3050,6 +3064,62 @@ except OSError:
     pass
 
 if found is None:
+    # D-10 diagnostic reason word (Phase 42 Plan 04): tell "never
+    # evaluated" apart from "evaluated by an older classifier, sidecar
+    # since pruned or never written" -- a PRESENCE probe only, on the job
+    # marker's own frozen 9-key `assessment` summary (C-01's demoted
+    # pointer-and-summary object). No field is extracted and no value is
+    # taken from it here; D-10 still forbids using the marker as a value
+    # source -- this only tells the operator which unvalued case they are
+    # looking at.
+    _reason = 'sidecar_unavailable'
+    _markers_dir = os.environ.get('OUTCOME_MARKERS_DIR', '')
+    _sid = os.environ.get('OUTCOME_SID', '')
+    if _markers_dir and _sid:
+        _marker_path = Path(_markers_dir) / f"{_sid}.jsonl"
+        try:
+            with _marker_path.open() as _mf:
+                for _mline in _mf:
+                    _mraw = _mline.rstrip('\n')
+                    if not _mraw or len(_mraw.encode('utf-8')) > 4096:
+                        continue
+                    try:
+                        _mrec = json.loads(_mraw)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(_mrec, dict) or _mrec.get('kind') != 'job':
+                        continue
+                    _mid = _mrec.get('agentic_job_id')
+                    if not isinstance(_mid, str) or _clean(_mid) != job_id:
+                        continue
+                    # Deliberate: no break -- mirrors this file's own
+                    # scan-to-end convention; a later job-status line for
+                    # the same id supersedes an earlier one.
+                    _reason = (
+                        'sidecar_missing_for_valued_marker'
+                        if 'assessment' in _mrec
+                        else 'sidecar_unavailable'
+                    )
+        except OSError:
+            pass
+    print(f"REASON={_reason}")
+    raise SystemExit(0)
+
+# D-07 (Phase 42 Plan 04): fail closed on an unrecognized (newer)
+# assessment_schema_version -- a newer version may redefine what the value
+# field means (gross vs net lands in Phase 44), and billing on a guess is
+# the failure mode worth avoiding. A recognized OLDER version is still
+# valued normally -- do not strand every pre-upgrade record on the fleet at
+# a version bump. Exactly one version is recognized today, so that branch
+# is inert; it stays explicit because the first bump is when a missing
+# branch becomes a silent outage.
+RECOGNIZED_ASSESSMENT_SCHEMA_VERSIONS = frozenset({1})
+_schema_version = found.get('assessment_schema_version')
+if _schema_version not in RECOGNIZED_ASSESSMENT_SCHEMA_VERSIONS:
+    # Emit NOTHING for the value scalars and NOTHING for the assessment
+    # portion of --metadata -- an unrecognized version is not valued on a
+    # guess, and its shape is not trusted enough to even echo back.
+    print("REASON=schema_unrecognized")
     raise SystemExit(0)
 
 
@@ -3107,6 +3177,47 @@ PY
         outcome_value=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^VALUE=//p')
         outcome_currency=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^CURRENCY=//p')
         outcome_assessment_json=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^ASSESSMENT_JSON=//p')
+        outcome_reason=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^REASON=//p')
+
+
+        # Phase 39 D-02 pattern, reused (Plan 42-04): one warn per
+        # (outcome_id, reason), gated through the SAME OUTCOME_WARN_FLAGS_DIR
+        # sentinel the deferred/wedged block above uses -- not a fifth
+        # sentinel directory. The key is computed ONCE into a single local
+        # shared by both the existence test and the touch, for the identical
+        # reason the deferred/wedged block's own comment gives: two copies of
+        # the sanitizing expression drift, and when they do the check tests
+        # one path while the touch creates another and the gate never
+        # matches. Nothing per-tick (age, timestamp, counter) may enter the
+        # key -- outcome_id is stable per job across ticks, and a per-tick
+        # key reproduces the unknown-<epoch> defeat this repo already paid
+        # for once. Tolerate a failed flag creation without aborting: this
+        # script runs without -e and a read-only state directory must
+        # degrade to a noisier log, never crash the reporter.
+        if [[ -n "${outcome_reason}" ]]; then
+          outcome_warn_key="${outcome_id//[^A-Za-z0-9_:.-]/_}__${outcome_reason}.flag"
+          outcome_warn_flag="${OUTCOME_WARN_FLAGS_DIR}/${outcome_warn_key}"
+          if [[ ! -e "${outcome_warn_flag}" ]]; then
+            mkdir -p "${OUTCOME_WARN_FLAGS_DIR}" 2>/dev/null && touch "${outcome_warn_flag}" 2>/dev/null
+            case "${outcome_reason}" in
+              schema_unrecognized)
+                warn "assessment schema unrecognized, reporting status-only: id=${outcome_id}"
+                ;;
+              sidecar_unavailable)
+                warn "assessment sidecar unavailable, reporting status-only: id=${outcome_id}"
+                ;;
+              sidecar_missing_for_valued_marker)
+                warn "assessment sidecar missing for a marker carrying assessment (rolling-upgrade window), reporting status-only: id=${outcome_id}"
+                ;;
+              bounds_invalid)
+                warn "assessment bounds reversed, negative, or non-finite at the second site, reporting status-only: id=${outcome_id}"
+                ;;
+              *)
+                warn "assessment unvalued (${outcome_reason}), reporting status-only: id=${outcome_id}"
+                ;;
+            esac
+          fi
+        fi
       fi
 
       # D-06: API first — build command as array (bash 3.2 portability).
