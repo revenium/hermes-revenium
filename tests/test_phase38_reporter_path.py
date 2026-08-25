@@ -70,10 +70,44 @@ ASSESSMENT_FIXTURE = {
 }
 
 
+# Phase 42 (D-10): the job-assessments SIDECAR shape hermes-report.sh's
+# outcome stage now reads value/provenance from -- the marker's
+# ASSESSMENT_FIXTURE above no longer reaches a valued outcome (D-10). Bounds
+# match _resolve_value_bounds's DERIVED_BOUND_SPREAD (0.15) applied to the
+# same 3.5h * $150/h = $525.0 base ASSESSMENT_FIXTURE uses, so the two
+# fixtures describe the same underlying estimate through the two different
+# carriers: low = round(525.0 * 0.85, 2) = 446.25, high = round(525.0 * 1.15, 2)
+# = 603.75. D-08: --outcome-value ships the LOW bound, not base.
+def _sidecar_record(job_id, **overrides):
+    record = {
+        "kind": "job_assessment",
+        "ts": 1715516002.5,
+        "agentic_job_id": job_id,
+        "assessment_id": f"{job_id}:0",
+        "assessment_schema_version": 1,
+        "value_low": 446.25,
+        "value_base": 525.0,
+        "value_high": 603.75,
+        "bounds_source": "derived",
+        "currency": "USD",
+        "estimated_value": 525.0,
+        "evaluator": "llm",
+        "evaluator_version": "v1",
+        "confidence": 0.8,
+        "evidence_class": "MODEL_ESTIMATED_DEMO",
+        "assumptions": {
+            "estimated_hours_saved": 3.5,
+            "assumed_loaded_rate": 150.0,
+        },
+    }
+    record.update(overrides)
+    return record
+
+
 class TestPhase38ReporterPath(unittest.TestCase):
     def _run_one_outcome(self, sid, job_id, status, failure_reason='', source='test',
                           assessment=None, raw_agentic_job_id=None,
-                          outcome_value_capable=True):
+                          outcome_value_capable=True, sidecar=None):
         """Drive hermes-report.sh for one job arc; return the parsed
         `jobs outcome` argv. Mirrors _run_one_outcome in
         tests/test_jobs_outcome_metadata.py, extended with an optional
@@ -90,13 +124,21 @@ class TestPhase38ReporterPath(unittest.TestCase):
         outcome_value_capable=False (CR-01/WR-03) builds the shim so `jobs
         outcome --help` omits --outcome-value/--outcome-currency, modelling
         an older revenium CLI that predates the two flags.
+
+        sidecar (Phase 42, D-10), when given, is one record dict or a list
+        of them, written to ${state_dir}/job-assessments/<job_id>.jsonl --
+        the ONLY value/provenance source the outcome stage reads from
+        (never the marker's own `assessment` key, even when both are
+        present in the same fixture).
         """
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase38-')
         try:
             hermes_home = os.path.join(tmpdir, 'hh')
             state_dir = os.path.join(hermes_home, 'state', 'revenium')
             markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
             os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
             state_db = os.path.join(hermes_home, 'state.db')
             jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
 
@@ -155,6 +197,16 @@ class TestPhase38ReporterPath(unittest.TestCase):
             with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
                 f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
                 f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            # Phase 42 (D-10): the sidecar is the ONLY value/provenance
+            # source the outcome stage reads -- written here, independent
+            # of job_marker['assessment'] above, so a fixture can assert
+            # the marker plays no part even when both are present.
+            if sidecar is not None:
+                sidecar_records = sidecar if isinstance(sidecar, list) else [sidecar]
+                with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
+                    for _rec in sidecar_records:
+                        f.write(json.dumps(_rec, separators=(',', ':')) + '\n')
 
             build_shim(shim, outcome_value_capable=outcome_value_capable)
 
@@ -234,24 +286,41 @@ class TestPhase38ReporterPath(unittest.TestCase):
     # -- Task 2: an accepted assessment ships as value + provenance -------
 
     def test_outcome_success_with_assessment_ships_value_and_provenance(self):
-        """Phase 42 (D-10): a marker-embedded `assessment` alone no longer
-        produces a valued outcome -- the outcome stage now resolves value
-        and provenance from the job-assessments SIDECAR only, never from
-        the marker's 9-key summary (C-01 demoted that object to
-        pointer-and-summary, not the record of record). This fixture writes
-        no sidecar file, so the behaviour under test legitimately changed:
-        no value flags, no provenance. See
-        tests/test_phase42_assessment_contract.py::SidecarTracerTests for
-        the sidecar-sourced valued-outcome proof this test used to provide."""
+        """Phase 42 (D-08/D-10): value and provenance are resolved from the
+        job-assessments SIDECAR only -- this fixture writes a REAL sidecar
+        record (as classifier.py's _write_job_assessment would) alongside
+        the marker's own 9-key `assessment` summary, proving the marker
+        plays no part even when both carry a plausible, DIFFERENT number
+        (ASSESSMENT_FIXTURE's 525.0 vs the sidecar's 446.25 low bound).
+        --outcome-value ships the LOW bound (D-08), and the full bound
+        family plus its source rides in --metadata alongside the existing
+        provenance fields."""
         argv = self._run_one_outcome(
             'o38-sid-001', 'o38-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('o38-job-001'),
         )
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
-        self.assertNotIn('--outcome-value', argv)
-        self.assertNotIn('--outcome-currency', argv)
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
 
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta, {'source': 'test'})
+        self.assertEqual(meta.get('source'), 'test')
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evaluator'), 'llm')
+        self.assertEqual(meta.get('evaluator_version'), 'v1')
+        self.assertEqual(meta.get('confidence'), 0.8)
+        self.assertEqual(
+            meta.get('assumptions'),
+            {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+        )
+        self.assertEqual(meta.get('value_low'), 446.25)
+        self.assertEqual(meta.get('value_base'), 525.0)
+        self.assertEqual(meta.get('value_high'), 603.75)
+        self.assertEqual(meta.get('bounds_source'), 'derived')
+        self.assertEqual(meta.get('assessment_schema_version'), 1)
+        # D-08 executable proof: the shipped value is the LOW bound, never
+        # the marker's estimated_value (525.0) or the sidecar's own base.
+        self.assertNotEqual(argv[argv.index('--outcome-value') + 1], '525.0')
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
         argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')
@@ -290,23 +359,27 @@ class TestPhase38ReporterPath(unittest.TestCase):
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
     def test_golden_valued_outcome_matches_new_fixture(self):
-        """Phase 42 (D-10): meter-completion-assessment.golden.json pins the
-        wire shape a SIDECAR-sourced valued outcome produces, not a
-        marker-only one -- this fixture (marker `assessment`, no sidecar
-        file) can no longer reach that golden's shape, so the golden-match
-        assertion moved. The immutable golden fixture itself is untouched;
-        only what this specific (marker-only) scenario asserts changed.
-        Golden-shape coverage for the sidecar-sourced path lives in
-        tests/test_phase42_assessment_contract.py::SidecarTracerTests,
-        which will grow its own golden once the full EGV-04 schema (plan
-        42-03) makes an exact match meaningful."""
+        """Phase 42 (D-08/D-10): meter-completion-assessment.golden.json
+        pins the wire shape a SIDECAR-sourced valued outcome produces --
+        this fixture writes a real sidecar record (D-10: the marker is
+        never the value source) and asserts the resulting argv against the
+        golden, closing the coverage gap plan 42-02 opened when the
+        marker-only scenario could no longer reach this golden's shape.
+        The golden's own pin moved deliberately with this change: the
+        value from the marker-derived 525.0 point estimate to the
+        sidecar's 446.25 low bound (D-08), and the --metadata pattern to
+        the full bound family + bounds_source + assessment_schema_version
+        (D-10, since the record now comes from the sidecar's richer
+        shape, not the marker's frozen 9 keys)."""
         argv = self._run_one_outcome(
-            'g38-sid-002', 'assessment-golden-job', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            'g38-sid-002', 'assessment-golden-job', 'SUCCESS',
+            sidecar=_sidecar_record('assessment-golden-job'),
         )
-        self.assertNotIn('--outcome-value', argv)
-        self.assertNotIn('--outcome-currency', argv)
-        meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta, {'source': 'test'})
+        # CF-1: the genuine call site (kept on one line so it is grep-able
+        # as a pair with the golden's own filename, closing the gap plan
+        # 42-02's SUMMARY deferred -- an existence pin in test_repository.py
+        # alone does not prove the wire shape is actually asserted).
+        assert_argv_matches_golden(self, argv, load_golden('meter-completion-assessment.golden.json'))
 
     def test_pre_v1_5_marker_with_no_assessment_key_parses_and_reports(self):
         """ROI-12: a marker line written before v1.5 -- literally no

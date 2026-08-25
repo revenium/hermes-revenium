@@ -3179,6 +3179,61 @@ PY
         outcome_assessment_json=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^ASSESSMENT_JSON=//p')
         outcome_reason=$(printf '%s\n' "${_assessment_kv}" | sed -n 's/^REASON=//p')
 
+        # D-09 second site (Phase 42 Plan 04): re-validate the three bounds
+        # INDEPENDENTLY of anything the classifier did, immediately before
+        # the value flags are constructed below -- the check standing
+        # between a hand-edited or corrupt sidecar line and a dollar figure
+        # on a customer's bill (same shape and reasoning as C-02's
+        # evidence_class allow-list, and the currency allow-list already
+        # above in this same reader). On failure, clear BOTH value scalars
+        # together, never one -- the emission gate below already refuses to
+        # send one flag without the other, and a partial clear would rely
+        # on that downstream rule instead of stating the intent here. The
+        # outcome arc itself is still reported; only the value is withheld.
+        if [[ -n "${outcome_value}" && -n "${outcome_currency}" ]]; then
+          local _bounds_ok
+          _bounds_ok=$(
+            ASSESSMENT_JSON="${outcome_assessment_json}" \
+            python3 -c "
+import json, math, os
+raw = os.environ.get('ASSESSMENT_JSON', '').strip()
+try:
+    rec = json.loads(raw) if raw else {}
+except (ValueError, TypeError):
+    rec = {}
+if not isinstance(rec, dict):
+    rec = {}
+
+
+def _finite(v):
+    if isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+low = _finite(rec.get('value_low'))
+base = _finite(rec.get('value_base'))
+high = _finite(rec.get('value_high'))
+ok = (
+    low is not None and base is not None and high is not None
+    and low >= 0 and base >= 0 and high >= 0
+    and low <= base <= high
+)
+print('true' if ok else 'false')
+" 2>/dev/null || echo "false"
+          )
+          if [[ "${_bounds_ok}" != "true" ]]; then
+            outcome_value=""
+            outcome_currency=""
+            outcome_reason="bounds_invalid"
+          fi
+        fi
 
         # Phase 39 D-02 pattern, reused (Plan 42-04): one warn per
         # (outcome_id, reason), gated through the SAME OUTCOME_WARN_FLAGS_DIR
@@ -3293,6 +3348,25 @@ if assessment_raw:
     except (json.JSONDecodeError, ValueError):
         record = None
     if isinstance(record, dict):
+        # Phase 42 (D-08/D-09/EGV-07, Plan 04): the full bound family plus
+        # its source and the schema version that produced it -- so the
+        # range is recoverable from what was actually reported, whether or
+        # not the D-09 second site accepted it for --outcome-value above.
+        # Same conditional-emit rule as every other field here: a field
+        # absent from the record adds no key to meta.
+        for _bound_key in ('value_low', 'value_base', 'value_high'):
+            _bound_raw = record.get(_bound_key)
+            if _bound_raw is not None:
+                try:
+                    meta[_bound_key] = float(_bound_raw)
+                except (TypeError, ValueError):
+                    pass
+        bounds_source = record.get('bounds_source')
+        if isinstance(bounds_source, str) and bounds_source:
+            meta['bounds_source'] = bounds_source[:16]
+        schema_version = record.get('assessment_schema_version')
+        if isinstance(schema_version, (int, float)) and not isinstance(schema_version, bool):
+            meta['assessment_schema_version'] = schema_version
         evidence_class = record.get('evidence_class')
         if isinstance(evidence_class, str) and evidence_class:
             meta['evidence_class'] = evidence_class[:32]

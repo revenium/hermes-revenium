@@ -1605,5 +1605,115 @@ class FailClosedTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class SecondSiteBoundsTests(unittest.TestCase):
+    """Phase 42 Plan 04 -- D-09 site two: an INDEPENDENT re-check of the
+    three bounds immediately before --outcome-value is constructed (same
+    shape and reasoning as C-02's evidence_class allow-list), and D-08:
+    the value that ships on the wire is the LOW bound, never base
+    (T-42-04-01)."""
+
+    def test_reversed_bounds_ship_no_value_but_outcome_still_reports(self):
+        sid, job_id = 'p42-b2-sid-001', 'p42-b2-job-001'
+        record = _tracer_assessment_record(
+            job_id, value_low=600.0, value_base=500.0, value_high=700.0,
+        )
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertEqual(argv[argv.index('--result') + 1], 'SUCCESS')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+            log_content = _read_log(state_dir)
+            self.assertIn('bounds reversed', log_content)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_negative_low_bound_ships_no_value(self):
+        sid, job_id = 'p42-b2-sid-002', 'p42-b2-job-002'
+        record = _tracer_assessment_record(
+            job_id, value_low=-10.0, value_base=100.0, value_high=200.0,
+        )
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_non_numeric_bound_ships_no_value(self):
+        sid, job_id = 'p42-b2-sid-003', 'p42-b2-job-003'
+        record = _tracer_assessment_record(
+            job_id, value_low=100.0, value_base='not-a-number', value_high=200.0,
+        )
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertNotIn('--outcome-value', argv)
+            self.assertNotIn('--outcome-currency', argv)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_well_formed_bounds_ship_value_low_and_full_range_in_metadata(self):
+        sid, job_id = 'p42-b2-sid-004', 'p42-b2-job-004'
+        record = _tracer_assessment_record(
+            job_id, value_low=446.25, value_base=525.0, value_high=603.75,
+        )
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+            self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+            meta = json.loads(_metadata_of(argv))
+            self.assertEqual(meta.get('value_low'), 446.25)
+            self.assertEqual(meta.get('value_base'), 525.0)
+            self.assertEqual(meta.get('value_high'), 603.75)
+            self.assertEqual(meta.get('bounds_source'), 'derived')
+            self.assertEqual(meta.get('assessment_schema_version'), 1)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_shipped_value_is_never_value_base(self):
+        """D-08's executable proof: a later refactor that quietly reverts
+        to shipping the base estimate must fail this test loudly."""
+        sid, job_id = 'p42-b2-sid-005', 'p42-b2-job-005'
+        record = _tracer_assessment_record(
+            job_id, value_low=446.25, value_base=525.0, value_high=603.75,
+        )
+        tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
+            sid, job_id, sidecar_lines=[record],
+        )
+        try:
+            rc, invocations, out = _run_hermes_report(env, jobs_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed: {out}')
+            argv = _outcome_argv(invocations)
+            self.assertIsNotNone(argv, f'expected a jobs outcome invocation: {invocations}')
+            shipped = argv[argv.index('--outcome-value') + 1]
+            self.assertEqual(shipped, '446.25')
+            self.assertNotEqual(shipped, '525.0')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()

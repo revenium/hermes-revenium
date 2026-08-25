@@ -1,4 +1,5 @@
 {
+  "__note": "Deliberately changed in Phase 42 Plan 04. --outcome-value moved from the marker-derived 525.0 point estimate to the sidecar's 446.25 low bound (D-08: --outcome-value carries value_low, not value_base -- understates rather than overstates). --metadata's shape moved from the marker's frozen 9-key `assessment` summary to the job-assessments SIDECAR record (D-10: the sidecar is the only value/provenance source; the marker plays no part), gaining value_low/value_base/value_high/bounds_source/assessment_schema_version alongside the pre-existing provenance fields. This fixture is NOT one of the four immutable v1.x wire-contract goldens named in tests/test_compat_v1_4_meta.py's docstring (jobs-outcome, meter-completion, meter-completion-markerless, meter-tool-event) -- it is eligible for a deliberate, decision-traceable change like this one.",
   "verb": ["jobs", "outcome"],
   "exact_match_fields": {
     "__verb": "jobs",
@@ -6,12 +7,12 @@
     "__positional_args": ["assessment-golden-job"],
     "--result": "SUCCESS",
     "--outcome-type": "CONVERTED",
-    "--outcome-value": "525.0",
+    "--outcome-value": "446.25",
     "--outcome-currency": "USD",
     "--quiet": true
   },
   "pattern_fields": {
-    "--metadata": "^\\{\"source\":\"test\",\"evidence_class\":\"MODEL_ESTIMATED_DEMO\",\"evaluator\":\"llm\",\"evaluator_version\":\"v1\",\"confidence\":0.8,\"assumptions\":\\{\"estimated_hours_saved\":3.5,\"assumed_loaded_rate\":150.0\\}\\}$"
+    "--metadata": "^\\{\"source\":\"test\",\"value_low\":446.25,\"value_base\":525.0,\"value_high\":603.75,\"bounds_source\":\"derived\",\"assessment_schema_version\":1,\"evidence_class\":\"MODEL_ESTIMATED_DEMO\",\"evaluator\":\"llm\",\"evaluator_version\":\"v1\",\"confidence\":0.8,\"assumptions\":\\{\"estimated_hours_saved\":3.5,\"assumed_loaded_rate\":150.0\\}\\}$"
   },
   "forbidden_fields": ["--budget-id", "--alert-id"]
 }
