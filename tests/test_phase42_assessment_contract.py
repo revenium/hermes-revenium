@@ -1733,7 +1733,8 @@ CORRECT_ASSESSMENT_SH = SCRIPTS_DIR / 'correct-assessment.sh'
 PRUNE_MARKERS_SH = SCRIPTS_DIR / 'prune-markers.sh'
 
 
-def _build_correction_shim(shim_path, outcome_update_capable=True):
+def _build_correction_shim(shim_path, outcome_update_capable=True,
+                            config_show_fails=False):
     """revenium shim for the correction-path test suite.
 
     Extends build_shim's `jobs)` branch with a THIRD --help probe --
@@ -1746,6 +1747,12 @@ def _build_correction_shim(shim_path, outcome_update_capable=True):
 
     outcome_update_capable=False omits --reason from the outcome-update
     probe's help text, modelling the older-CLI D-04 fail-loud branch.
+
+    config_show_fails=True (WR-03) makes `revenium config show` -- the
+    call inside resolve_team_id's pipeline, a DIFFERENT call from the
+    `jobs outcome-update --help` probe above -- exit non-zero with output
+    on stderr only, modelling a transient auth/network failure that lands
+    strictly AFTER the local correction and ledger line are already saved.
     """
     if outcome_update_capable:
         outcome_update_help_lines = (
@@ -1753,10 +1760,16 @@ def _build_correction_shim(shim_path, outcome_update_capable=True):
         )
     else:
         outcome_update_help_lines = ''
+    if config_show_fails:
+        config_branch = (
+            '  config) echo "revenium: connection error" >&2; exit 3 ;;\n'
+        )
+    else:
+        config_branch = '  config) exit 0 ;;\n'
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
-        '  config) exit 0 ;;\n'
+        + config_branch +
         '  guardrails) exit 0 ;;\n'
         '  meter)\n'
         '    if [[ "$3" == "--help" ]]; then\n'
@@ -1795,7 +1808,7 @@ def _build_correction_shim(shim_path, outcome_update_capable=True):
 
 
 def _build_correction_tree(sid, job_id, sidecar_lines=None, seed_outcome_line=False,
-                            outcome_update_capable=True):
+                            outcome_update_capable=True, config_show_fails=False):
     """Build a tmp HERMES_HOME tree for the correction-path test suite.
 
     Mirrors _build_outcome_tree's shape (state.db, jobs ledger seeded with a
@@ -1857,7 +1870,10 @@ def _build_correction_tree(sid, job_id, sidecar_lines=None, seed_outcome_line=Fa
     meter_log = os.path.join(tmpdir, 'meter.log')
     jobs_log = os.path.join(tmpdir, 'jobs.log')
     shim = os.path.join(bin_dir, 'revenium')
-    _build_correction_shim(shim, outcome_update_capable=outcome_update_capable)
+    _build_correction_shim(
+        shim, outcome_update_capable=outcome_update_capable,
+        config_show_fails=config_show_fails,
+    )
 
     env = {
         **os.environ,
@@ -2589,6 +2605,54 @@ class CorrectionAppendTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_wr03_team_id_resolution_failure_fails_loud_after_local_save(self):
+        """42-REVIEW.md WR-03: `resolve_team_id`'s `revenium config show`
+        call is DIFFERENT from the `jobs outcome-update --help` capability
+        probe that already succeeded by this point -- its failure must not
+        silently kill the script via `set -e` after the local correction
+        and ledger line are already durably saved. The operator must be
+        told plainly that shipping to Revenium did not happen."""
+        sid, job_id = 'p42c-sid-016', 'p42c-job-016'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(
+                sid, job_id, sidecar_lines=[record], config_show_fails=True,
+            )
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'team id resolution fails',
+            ])
+            self.assertNotEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('config show failed', err)
+            self.assertIn('NOT shipped to Revenium', err)
+
+            # The local record and ledger line -- Steps 5-6 -- must already
+            # be durably saved: they run strictly BEFORE the team-id
+            # resolution this test breaks.
+            lines = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(
+                len(lines), 2,
+                'WR-03: the local correction must be saved even though '
+                f'team-id resolution failed, got {len(lines)} line(s)',
+            )
+            with open(jobs_ledger) as f:
+                ledger_content = f.read()
+            self.assertIn(f'JOB:{job_id}:correction:1:', ledger_content)
+
+            invocations = _jobs_log_invocations(jobs_log)
+            update_invocations = [
+                argv for argv in invocations
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome-update'
+            ]
+            self.assertEqual(
+                update_invocations, [],
+                'WR-03: outcome-update must never be invoked once team-id '
+                f'resolution has already failed, got {update_invocations!r}',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

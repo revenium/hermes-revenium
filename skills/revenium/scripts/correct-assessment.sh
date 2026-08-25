@@ -519,7 +519,26 @@ outcome_update_cmd=(
   --metadata "${OUTCOME_UPDATE_METADATA}"
   --quiet
 )
-TEAM_ID_RESOLVED="$(resolve_team_id)"
+# WR-03 (42-REVIEW.md): resolve_team_id (common.sh) is a PIPELINE
+# (`revenium config show | sed | sed | head -1 | tr -d ...`) -- a
+# DIFFERENT call from the `jobs outcome-update --help` capability probe
+# above, so its success proves nothing about this one. Under this script's
+# `set -euo pipefail`, an unguarded `TEAM_ID_RESOLVED="$(resolve_team_id)"`
+# lets a transient `revenium config show` failure (auth, network) kill the
+# script via `set -e` BEFORE any diagnostic reaches the operator --
+# strictly AFTER Steps 5-6 already durably saved the local correction and
+# the ledger line, so nothing is lost, but the operator gets no signal at
+# all that the ship-to-Revenium leg never ran. That is the exact failure
+# D-04's own rationale rules out ("a silently-skipped correction is worse
+# than a refused one"). Guarded the same way every other fallible call in
+# this file already is -- `... && x=0 || x=$?` -- so this one is fail-loud
+# too, matching Step 7's message shape.
+TEAM_ID_RESOLVED="$(resolve_team_id)" && team_id_exit=0 || team_id_exit=$?
+if [[ "${team_id_exit}" -ne 0 ]]; then
+  echo "revenium config show failed while resolving team id (exit ${team_id_exit}) -- the local correction was saved, but NOT shipped to Revenium." >&2
+  echo "The local correction record is intact; this command may be re-run once the underlying issue is fixed." >&2
+  exit 1
+fi
 if [[ -n "${TEAM_ID_RESOLVED}" ]]; then
   outcome_update_cmd+=(--team-id "${TEAM_ID_RESOLVED}")
 fi
