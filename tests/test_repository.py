@@ -1780,6 +1780,30 @@ exit 0
             self.assertNotIn('OWNERS_DIR', ln,
                              'OWNERS_DIR must NOT be in the eager mkdir -p — it is created '
                              'lazily by the claim so a no-event-path install creates nothing')
+        # Phase 42 (D-15): the job-assessments sidecar directory and its
+        # own retention tunable. Declared ONLY in common.sh, same
+        # env-override shape every neighbour uses.
+        self.assertIn('JOB_ASSESSMENTS_DIR=', text)
+        self.assertIn('job-assessments', text)
+        self.assertRegex(
+            text,
+            r'JOB_ASSESSMENTS_DIR="\$\{REVENIUM_JOB_ASSESSMENTS_DIR:-\$\{STATE_DIR\}/job-assessments\}"',
+        )
+        self.assertIn('REVENIUM_ASSESSMENT_RETENTION_DAYS', text)
+        self.assertRegex(
+            text,
+            r'REVENIUM_ASSESSMENT_RETENTION_DAYS="\$\{REVENIUM_ASSESSMENT_RETENTION_DAYS:-90\}"',
+        )
+        # D-15: unlike OWNERS_DIR above, the assessments sidecar IS a
+        # first-class per-job spool (like EVENT_SPOOL_DIR/TOOL_EVENTS_DIR),
+        # always present -- not a lazily created sentinel directory -- so it
+        # MUST be in the eager mkdir -p line, the mirror image of the
+        # OWNERS_DIR assertion just above.
+        self.assertTrue(
+            any('JOB_ASSESSMENTS_DIR' in ln for ln in mkdir_lines),
+            'JOB_ASSESSMENTS_DIR must be in the eager mkdir -p — it is a '
+            'first-class spool like EVENT_SPOOL_DIR, always present',
+        )
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
