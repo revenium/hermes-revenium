@@ -1011,6 +1011,186 @@ def _write_job_marker(sid: str, job: dict, paths: "_Paths | None" = None) -> Pat
 ASSESSMENT_SCHEMA_VERSION = 1
 SIDECAR_LINE_MAX_BYTES = 8192
 
+# Phase 42 (D-06): the remaining EGV-04 schema constants. job-taxonomy.json
+# carries no version marker today (verified by reading it) -- these three
+# are literal, hand-bumped constants rather than derived from any file.
+# D-06 permits this because assessment_schema_version itself stays at 1
+# through Phases 43-45; bump these BY HAND when the taxonomy shape, the
+# job-inference prompt, or the outcome-evaluation policy actually changes.
+# Nothing in this module does that automatically.
+TAXONOMY_VERSION = 1
+PROMPT_VERSION = 1
+POLICY_VERSION = 1
+
+# The shared narrative-field clamp, in serialized bytes (see
+# _clamp_assessment_text). Applies independently to all three of
+# candidate_downstream_outcome, counterfactual_assumption, and basis.
+NARRATIVE_CLAMP_BYTES = 500
+
+# Declared-only defaults (D-06: every EGV-04 field family is declared even
+# where only a later phase implements its semantics -- a field is never
+# silently dropped because "nothing populates it yet").
+STATE_QUARTET_UNKNOWN = "unknown"  # output_status/acceptance_status/adoption_status: 42-RESEARCH.md Section 1 Assumption A2, the current evaluator has no mechanism to assess these
+ECONOMIC_MECHANISM_LABOR_SUBSTITUTION = "labor_substitution"  # only mechanism derivable from today's prompt; Phase 44 (EGV-05) widens to the full six-mechanism enum
+REPORTABILITY_STATUS_DEFAULT = "local_only"  # Phase 43 (EGV-18) owns the resolver; this is 42-RESEARCH.md Section 1's recommended safe default until it lands
+PROVENANCE_MODEL_UNKNOWN = "unknown"  # Phase 45 (EGV-08) owns which model produced the assessment; the naked-LLM path has no reliable model identity to report today
+
+
+def _build_job_assessment(
+    valid: dict,
+    assessment: "dict | None",
+    raw: "dict | None",
+    cfg: "dict | None",
+    evaluator: str,
+    evaluator_version: str,
+    abstention_reason: "str | None" = None,
+) -> "dict | None":
+    """Construct the full EGV-04 JobAssessment sidecar record.
+
+    Called from _attach_assessment at every early-return path (each passing
+    its own distinct abstention_reason) plus the success branch (passing
+    None). Never raises (D-04): the whole body runs inside one try/except,
+    and any internal failure returns None after a logger.warning rather
+    than propagating -- construction and persistence are deliberately
+    separate (_write_job_assessment is the writer), so a construction
+    failure here never touches the filesystem.
+
+    D-06 (no silent narrowing): every EGV-04 field family named in
+    42-CONTEXT.md/42-RESEARCH.md Section 1 is present in the returned dict,
+    whether or not this phase implements real semantics for it. A field
+    whose semantics belong to Phase 43/44/45 is still declared here with an
+    honestly-labelled placeholder.
+
+    D-11: an abstention (abstention_reason is not None) OMITS value_low,
+    value_base, value_high, bounds_source, currency, estimated_value, and
+    assumptions entirely -- absent, not null. (bounds_source travels with
+    the three bounds as one family per the plan's own artifact table; a
+    record naming a bounds SOURCE for bounds that do not exist would be
+    internally inconsistent, so it is folded into the same omit set as the
+    three bounds it describes, even though D-11's own prose enumerates only
+    six of these seven keys.) Every other field, including identity,
+    provenance, and the state quartet, is still populated, so an abstained
+    evaluation is auditable rather than indistinguishable from a broken
+    sidecar write.
+    """
+    try:
+        raw = raw if isinstance(raw, dict) else {}
+        cfg = cfg if isinstance(cfg, dict) else {}
+        valid = valid if isinstance(valid, dict) else {}
+        job_id = valid.get("agentic_job_id", "")
+        job_type = valid.get("job_type", "")
+        status = valid.get("status", "")
+
+        now = time.time()
+        # _validate_job's returned shape carries no start/end timestamps
+        # today -- fall back to the classifier's own clock, documented
+        # rather than hidden. A future job-boundary source (e.g. the
+        # transcript's own arc) would set these from `valid` directly with
+        # no other change here.
+        job_started_at = valid.get("job_started_at", now)
+        job_ended_at = valid.get("job_ended_at", now)
+
+        record: dict = {
+            "kind": "job_assessment",
+            "ts": now,
+            "assessment_id": f"{_sidecar_filename_component(job_id)}:0",
+            "sequence": 0,
+            "agentic_job_id": job_id,
+            "assessment_schema_version": ASSESSMENT_SCHEMA_VERSION,
+
+            "job_type": job_type,
+            "taxonomy_version": TAXONOMY_VERSION,
+            "job_started_at": job_started_at,
+            "job_ended_at": job_ended_at,
+
+            "execution_status": status,
+            "output_status": STATE_QUARTET_UNKNOWN,
+            "acceptance_status": STATE_QUARTET_UNKNOWN,
+            "adoption_status": STATE_QUARTET_UNKNOWN,
+
+            "candidate_downstream_outcome": _clamp_assessment_text(
+                raw.get("candidate_downstream_outcome"), NARRATIVE_CLAMP_BYTES),
+            "counterfactual_assumption": _clamp_assessment_text(
+                raw.get("counterfactual_assumption"), NARRATIVE_CLAMP_BYTES),
+            "basis": _clamp_assessment_text(
+                assessment.get("basis") if isinstance(assessment, dict) else raw.get("basis"),
+                NARRATIVE_CLAMP_BYTES,
+            ),
+
+            "economic_mechanism": ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+
+            # Observation window: the naked-LLM evaluator cannot observe
+            # past the transcript's own boundaries. Defaulting to the arc
+            # boundaries is a STATED decision (42-RESEARCH.md Section 1),
+            # not an inferred fact.
+            "observation_window_start": job_started_at,
+            "observation_window_end": job_ended_at,
+
+            # Phase 43 (C-02) owns evidence_references' nine-label
+            # semantics; declared empty here, never omitted.
+            "evidence_references": [],
+            # Forced, never read from evaluator output (ROI-04): provenance
+            # a model can assert is not provenance.
+            "evidence_class": EVIDENCE_CLASS_MODEL_ESTIMATED,
+
+            "evaluator": _clamp_assessment_text(evaluator, 32),
+            "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
+            "model": PROVENANCE_MODEL_UNKNOWN,
+            "prompt_version": PROMPT_VERSION,
+            "policy_version": POLICY_VERSION,
+
+            # No meaningful confidence for an abstained evaluation -- 0.0
+            # documents the absence of trust rather than omitting the
+            # field (confidence is NOT in D-11's omit list, unlike
+            # value_low/base/high/bounds_source/currency/estimated_value/
+            # assumptions).
+            "confidence": (
+                assessment.get("confidence") if isinstance(assessment, dict) else 0.0
+            ),
+            "abstention_reason": abstention_reason or "",
+            "reportability_status": REPORTABILITY_STATUS_DEFAULT,
+        }
+
+        if abstention_reason:
+            return record
+
+        # Success path only, from here down. `assessment` is guaranteed a
+        # dict at this point -- the sole caller only omits abstention_reason
+        # when _validate_assessment already returned a validated dict.
+        hours = assessment["assumptions"]["estimated_hours_saved"]
+        rate = assessment["assumptions"]["assumed_loaded_rate"]
+        bounds = _resolve_value_bounds(raw, hours, rate)
+        if bounds is None:
+            # _validate_assessment's own EGV-06 gate already accepted this
+            # exact (raw, hours, rate) triple, so this branch should be
+            # unreachable in production -- treat a disagreement as an
+            # internal failure (return None) rather than ship a value this
+            # second call could not itself re-derive.
+            logger.warning(
+                "revenium-classifier: _build_job_assessment's own EGV-06 "
+                "re-check disagreed with _validate_assessment for job=%s",
+                job_id,
+            )
+            return None
+        value_low, value_base, value_high, bounds_source = bounds
+        record.update({
+            "value_low": value_low,
+            "value_base": value_base,
+            "value_high": value_high,
+            "bounds_source": bounds_source,
+            "currency": assessment.get("currency", ""),
+            "estimated_value": assessment.get("estimated_value", value_base),
+            "assumptions": assessment.get("assumptions", {}),
+        })
+        return record
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier: _build_job_assessment failed for job=%s: %r",
+            valid.get("agentic_job_id", "") if isinstance(valid, dict) else "",
+            exc,
+        )
+        return None
+
 
 def _sidecar_filename_component(raw_job_id) -> str:
     """Derive the job-assessments sidecar's filename component from an
@@ -1652,9 +1832,25 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
 
     Mutates `valid` in place, adding "assessment" only when validation returned a
     dict. Every other outcome -- abstention, unknown evaluator, malformed output,
-    out-of-bounds, timeout, raise -- leaves the job exactly as it was, so the
-    status-only outcome path proceeds untouched.
+    out-of-bounds, timeout, raise -- leaves the frozen marker `assessment` key
+    exactly as it was, so the status-only outcome path proceeds untouched.
+
+    Phase 42 (D-11): every one of the SIX early-return branches below, plus
+    both exception handlers, now ALSO sets valid["_assessment_record"] to a
+    full EGV-04 sidecar record via _build_job_assessment -- an abstention
+    record on the six non-success paths (identity/provenance kept, value
+    fields absent, a distinct abstention_reason), the full valued record on
+    success. This makes "the evaluator declined" and "the sidecar write
+    failed" distinguishable on disk (D-10/D-11), rather than colliding into
+    identical wire output. _build_job_assessment never raises (D-04), so no
+    additional try/except is needed around any individual call below.
     """
+    # Pre-bound before the try so the exception handlers can reference them
+    # even if the failure happened before _llm_evaluation_config or the
+    # evaluators import completed.
+    cfg: dict = {}
+    name = ""
+    raw = None
     try:
         cfg = _llm_evaluation_config(paths=paths)
         name = cfg.get("evaluator") or "llm"
@@ -1667,6 +1863,10 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             logger.warning(
                 "revenium-classifier: outcome evaluation skipped, unknown "
                 "evaluator: %r", name,
+            )
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, None, None, cfg, name, _ev.resolve_version(name),
+                abstention_reason="unknown_evaluator",
             )
             return
         raw = fn(valid, transcript, cfg)
@@ -1684,11 +1884,19 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
                 "revenium-classifier: outcome evaluation invalid for job=%s",
                 valid.get("agentic_job_id", ""),
             )
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, None, None, cfg, name, _ev.resolve_version(name),
+                abstention_reason="invalid",
+            )
             return
         if raw is _EVAL_TIMED_OUT:
             logger.warning(
                 "revenium-classifier: outcome evaluation timed-out for job=%s",
                 valid.get("agentic_job_id", ""),
+            )
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, None, None, cfg, name, _ev.resolve_version(name),
+                abstention_reason="timed_out",
             )
             return
         if raw is None:
@@ -1696,41 +1904,27 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
                 "revenium-classifier: outcome evaluation abstained for job=%s",
                 valid.get("agentic_job_id", ""),
             )
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, None, None, cfg, name, _ev.resolve_version(name),
+                abstention_reason="abstained",
+            )
             return
         # The version comes from the REGISTRY, not from a name comparison here.
         # Special-casing "llm" dropped every other evaluator's version -- the
         # exact coupling this seam exists to prevent (Greptile P1 on #89).
-        assessment = _validate_assessment(raw, cfg, name, _ev.resolve_version(name))
+        evaluator_version = _ev.resolve_version(name)
+        assessment = _validate_assessment(raw, cfg, name, evaluator_version)
         if assessment:
             valid["assessment"] = assessment
             # Phase 42 (C-01/C-04/D-12): the sidecar record of record, built
-            # here in the success branch only and consumed once at the D-12
-            # seam in the job loop (popped and written before
-            # _write_job_marker). Leading underscore is deliberate -- it
-            # marks this as loop-local plumbing, never part of the frozen
-            # 9-key marker `assessment` object above. Deliberately narrow
-            # for this tracer plan: identity, schema version, one bound
-            # family (a point estimate expressed as a zero-width band),
-            # currency, and provenance. Plan 42-03 replaces the zero-width
-            # band with real low/base/high derivation and adds the
-            # remaining EGV-04 fields.
-            job_id = valid.get("agentic_job_id", "")
-            valid["_assessment_record"] = {
-                "kind": "job_assessment",
-                "ts": time.time(),
-                "agentic_job_id": job_id,
-                "assessment_id": f"{_sidecar_filename_component(job_id)}:0",
-                "assessment_schema_version": ASSESSMENT_SCHEMA_VERSION,
-                "value_low": assessment["estimated_value"],
-                "value_base": assessment["estimated_value"],
-                "value_high": assessment["estimated_value"],
-                "bounds_source": "derived",
-                "currency": assessment["currency"],
-                "estimated_value": assessment["estimated_value"],
-                "evaluator": assessment["evaluator"],
-                "evaluator_version": assessment["evaluator_version"],
-                "confidence": assessment["confidence"],
-            }
+            # here in the success branch and consumed once at the D-12 seam
+            # in the job loop (popped and written before _write_job_marker).
+            # Leading underscore is deliberate -- it marks this as
+            # loop-local plumbing, never part of the frozen 9-key marker
+            # `assessment` object above.
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, assessment, raw, cfg, name, evaluator_version,
+            )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
                 valid.get("agentic_job_id", ""),
@@ -1741,6 +1935,10 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             logger.warning(
                 "revenium-classifier: outcome evaluation rejected for job=%s",
                 valid.get("agentic_job_id", ""),
+            )
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, None, raw if isinstance(raw, dict) else None, cfg, name,
+                evaluator_version, abstention_reason="rejected",
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -1764,10 +1962,18 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             "revenium-classifier: outcome evaluation timed-out for job=%s",
             (valid or {}).get("agentic_job_id", ""),
         )
+        # Reuses the SAME "timed_out" reason as the direct _EVAL_TIMED_OUT
+        # sentinel check above -- two code sites, one distinct meaning.
+        valid["_assessment_record"] = _build_job_assessment(
+            valid, None, None, cfg, name, "", abstention_reason="timed_out",
+        )
     except Exception as exc:
         logger.warning(
             "revenium-classifier: outcome evaluation failed for job=%s: %r",
             (valid or {}).get("agentic_job_id", ""), exc,
+        )
+        valid["_assessment_record"] = _build_job_assessment(
+            valid, None, None, cfg, name, "", abstention_reason="failed",
         )
 
 

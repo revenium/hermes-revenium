@@ -881,6 +881,199 @@ class BoundsOrderingTests(unittest.TestCase):
         self.assertIsNone(got)
 
 
+def _p42_shape_env(tmpdir, evaluator_name='p42-shape-stub'):
+    """A minimal state tree with LLM outcome evaluation opted in for
+    `evaluator_name` -- used by RecordShapeTests/AbstentionRecordTests to
+    drive _attach_assessment directly (bypassing the full session
+    classification pipeline, which SidecarWriteOrderingTests already
+    covers end to end)."""
+    state_dir = os.path.join(tmpdir, 'state')
+    os.makedirs(state_dir, exist_ok=True)
+    config_file = os.path.join(state_dir, 'config.json')
+    with open(config_file, 'w') as f:
+        json.dump({'llmOutcomeEvaluation': {
+            'enabled': True, 'evaluator': evaluator_name, 'currency': 'USD',
+        }}, f)
+    return {
+        'REVENIUM_STATE_DIR': state_dir,
+        'REVENIUM_CONFIG_FILE': config_file,
+    }
+
+
+class RecordShapeTests(unittest.TestCase):
+    """EGV-04: every declared field family is present in a successfully
+    constructed record, and the record round-trips byte-for-byte through
+    the REAL sidecar writer plus a plain json.loads of the file's last
+    line -- not a hand-copied literal."""
+
+    # The full EGV-04 shape this plan declares (D-06): carrier/identity,
+    # job identity/boundaries, the state quartet, the three narrative
+    # fields, economics, the value family, assumptions, the observation
+    # window, evidence, provenance, and judgement. Compared as a SET
+    # against the constructed record's key set so both a missing field and
+    # a surprise field are loud (symmetric difference, not a subset check).
+    DECLARED_KEYS = {
+        'kind', 'ts', 'assessment_id', 'sequence', 'agentic_job_id',
+        'assessment_schema_version',
+        'job_type', 'taxonomy_version', 'job_started_at', 'job_ended_at',
+        'execution_status', 'output_status', 'acceptance_status', 'adoption_status',
+        'candidate_downstream_outcome', 'counterfactual_assumption', 'basis',
+        'economic_mechanism',
+        'value_low', 'value_base', 'value_high', 'bounds_source', 'currency',
+        'estimated_value', 'assumptions',
+        'observation_window_start', 'observation_window_end',
+        'evidence_references', 'evidence_class',
+        'evaluator', 'evaluator_version', 'model', 'prompt_version', 'policy_version',
+        'confidence', 'abstention_reason', 'reportability_status',
+    }
+
+    def tearDown(self):
+        _restore_env()
+
+    def _raw(self, **over):
+        raw = {
+            'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
+            'assumed_loaded_rate': 150.0, 'currency': 'USD',
+            'basis': 'time avoided', 'confidence': 0.5,
+            'candidate_downstream_outcome': 'shipped a fix to production',
+            'counterfactual_assumption': 'an engineer would have done this manually',
+        }
+        raw.update(over)
+        return raw
+
+    def _valid_job(self, job_id):
+        return {'agentic_job_id': job_id, 'job_name': 'n', 'job_type': 'bug_fix', 'status': 'SUCCESS'}
+
+    def test_successful_record_has_every_declared_key(self):
+        mod, _ev = _load_classifier({})
+        raw = self._raw()
+        assessment = mod._validate_assessment(raw, {}, 'stub', '1')
+        self.assertIsNotNone(assessment)
+        rec = mod._build_job_assessment(
+            self._valid_job('p42-shape-001'), assessment, raw, {}, 'stub', '1')
+        self.assertIsNotNone(rec)
+        got_keys = set(rec.keys())
+        missing = self.DECLARED_KEYS - got_keys
+        extra = got_keys - self.DECLARED_KEYS
+        self.assertEqual(missing, set(), f'record missing declared EGV-04 fields: {missing}')
+        self.assertEqual(extra, set(), f'record carries undeclared fields: {extra}')
+        # A spot check that narrative/economic/provenance fields carry real
+        # values, not placeholders, on the success path.
+        self.assertEqual(rec['candidate_downstream_outcome'], raw['candidate_downstream_outcome'])
+        self.assertEqual(rec['counterfactual_assumption'], raw['counterfactual_assumption'])
+        self.assertEqual(rec['bounds_source'], mod.BOUNDS_SOURCE_DERIVED)
+        self.assertEqual(rec['abstention_reason'], '')
+
+    def test_write_then_read_round_trip_equals_constructed_record(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase42-shape-roundtrip-')
+        try:
+            mod, _ev = _load_classifier({'REVENIUM_JOB_ASSESSMENTS_DIR': tmpdir})
+            raw = self._raw()
+            assessment = mod._validate_assessment(raw, {}, 'stub', '1')
+            self.assertIsNotNone(assessment)
+            job_id = 'p42-shape-roundtrip-001'
+            rec = mod._build_job_assessment(
+                self._valid_job(job_id), assessment, raw, {}, 'stub', '1')
+            self.assertIsNotNone(rec)
+
+            written_path = mod._write_job_assessment(rec)
+            self.assertIsNotNone(written_path)
+            lines = [l for l in written_path.read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 1, lines)
+            read_back = json.loads(lines[0])
+            self.assertEqual(read_back, rec, 'round trip must equal the constructed record field for field')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class AbstentionRecordTests(unittest.TestCase):
+    """D-11: all SIX of _attach_assessment's early-return paths persist a
+    real sidecar record onto valid["_assessment_record"] -- a distinct
+    abstention_reason, every value field ABSENT (not null), full identity
+    and provenance kept -- rather than leaving `valid` untouched as before
+    this plan. One test method per path (not subTest) so each is
+    independently visible in `-v` output."""
+
+    VALUE_KEYS = frozenset({'value_low', 'value_base', 'value_high', 'bounds_source',
+                             'currency', 'estimated_value', 'assumptions'})
+    IDENTITY_PROVENANCE_KEYS = frozenset({
+        'assessment_id', 'ts', 'agentic_job_id', 'assessment_schema_version',
+        'evaluator', 'evaluator_version', 'execution_status',
+    })
+
+    def tearDown(self):
+        _restore_env()
+
+    def _run_case(self, label, behavior, evaluator_name='p42-shape-stub'):
+        tmpdir = tempfile.mkdtemp(prefix=f'gsd-phase42-abstain-{label}-')
+        try:
+            env = _p42_shape_env(tmpdir, evaluator_name)
+            mod, ev = _load_classifier(env)
+            if behavior == 'invalid':
+                ev.register(evaluator_name, lambda job, t, c: mod._EVAL_INVALID, version='v1')
+            elif behavior == 'timed_out':
+                ev.register(evaluator_name, lambda job, t, c: mod._EVAL_TIMED_OUT, version='v1')
+            elif behavior == 'abstained':
+                ev.register(evaluator_name, lambda job, t, c: None, version='v1')
+            elif behavior == 'rejected':
+                ev.register(evaluator_name, lambda job, t, c: {
+                    'inferred_role': 'x', 'estimated_hours_saved': -1.0,
+                    'assumed_loaded_rate': 100.0, 'currency': 'USD',
+                    'basis': 'x', 'confidence': 0.5,
+                }, version='v1')
+            elif behavior == 'failed':
+                def _boom(job, t, c):
+                    raise RuntimeError('boom')
+                ev.register(evaluator_name, _boom, version='v1')
+            elif behavior is None:
+                pass  # unknown_evaluator: evaluator_name is deliberately never registered
+            else:
+                raise AssertionError(f'unknown behavior {behavior!r}')
+
+            valid = {'agentic_job_id': 'p42-abstain-job', 'job_name': 'n',
+                      'job_type': 'bug_fix', 'status': 'SUCCESS'}
+            paths = mod._module_paths()
+            asyncio.run(mod._attach_assessment(valid, 'user: x\nassistant: y', paths))
+            return valid.get('_assessment_record')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def _assert_abstention_shape(self, rec, expected_reason):
+        self.assertIsNotNone(rec, f'{expected_reason}: expected a real abstention record, not None')
+        self.assertEqual(rec.get('abstention_reason'), expected_reason)
+        self.assertEqual(
+            set(rec.keys()) & self.VALUE_KEYS, set(),
+            f'{expected_reason}: value fields must be ABSENT, not null: {set(rec.keys()) & self.VALUE_KEYS}',
+        )
+        for key in self.IDENTITY_PROVENANCE_KEYS:
+            self.assertIn(key, rec, f'{expected_reason}: missing identity/provenance key {key!r}')
+        self.assertEqual(rec['execution_status'], 'SUCCESS')
+
+    def test_unknown_evaluator_persists_abstention_record(self):
+        rec = self._run_case('unknown_evaluator', None, evaluator_name='p42-shape-never-registered')
+        self._assert_abstention_shape(rec, 'unknown_evaluator')
+
+    def test_invalid_response_persists_abstention_record(self):
+        rec = self._run_case('invalid', 'invalid')
+        self._assert_abstention_shape(rec, 'invalid')
+
+    def test_timed_out_sentinel_persists_abstention_record(self):
+        rec = self._run_case('timed_out', 'timed_out')
+        self._assert_abstention_shape(rec, 'timed_out')
+
+    def test_raw_none_abstained_persists_abstention_record(self):
+        rec = self._run_case('abstained', 'abstained')
+        self._assert_abstention_shape(rec, 'abstained')
+
+    def test_validate_assessment_rejection_persists_abstention_record(self):
+        rec = self._run_case('rejected', 'rejected')
+        self._assert_abstention_shape(rec, 'rejected')
+
+    def test_generic_exception_persists_abstention_record(self):
+        rec = self._run_case('failed', 'failed')
+        self._assert_abstention_shape(rec, 'failed')
+
+
 class PathMirrorParityTests(unittest.TestCase):
     """The only mechanism keeping the three hand-maintained path mirrors
     (common.sh, resolve-markers-dir.py, classifier.py's _Paths) honest:
