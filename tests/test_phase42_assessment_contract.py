@@ -764,6 +764,123 @@ class SidecarConcurrentWriterTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+class BoundsOrderingTests(unittest.TestCase):
+    """EGV-06 / D-09 site one: `_validate_assessment`'s abstain-on-disorder
+    gate for the sidecar's low/base/high value band, exercised through
+    hand-constructed adversarial raw dicts. Table-driven, mirroring
+    `tests.test_phase36_evaluator_seam.RejectionMatrixTests`' own shape --
+    per 42-CONTEXT.md's Flagged Assumption 1, EGV-06's abstain-on-disorder
+    rule needs a hand-constructed adversarial INPUT to exercise, because a
+    purely-derived band can never be reversed by construction.
+    """
+
+    def setUp(self):
+        self.mod, self.ev = _load_classifier({})
+        # Baseline key set for the frozen marker `assessment` dict, computed
+        # once from a no-bounds (derived) call -- never hardcoded, so a
+        # future field addition/removal to _validate_assessment's return
+        # shape is caught here rather than silently tolerated.
+        baseline = self.mod._validate_assessment(self._raw(), {}, 'stub', '1')
+        self.assertIsNotNone(baseline, 'baseline call must be accepted')
+        self.baseline_keys = set(baseline.keys())
+
+    def tearDown(self):
+        _restore_env()
+
+    def _raw(self, **over):
+        raw = {
+            'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
+            'assumed_loaded_rate': 150.0, 'currency': 'USD',
+            'basis': 'time avoided', 'confidence': 0.5,
+        }
+        raw.update(over)
+        return raw
+
+    def test_bounds_ordering_matrix(self):
+        cases = [
+            ('no_bounds_supplied_derives', {}, True),
+            ('all_three_ordered_accepted', {
+                'value_low': 300.0, 'value_base': 375.0, 'value_high': 450.0,
+            }, True),
+            # Non-strict ordering is load-bearing: plan 42-06's operator
+            # point correction writes low == base == high, and that record
+            # must be accepted, not rejected.
+            ('equal_bounds_accepted_for_42_06_point_corrections', {
+                'value_low': 375.0, 'value_base': 375.0, 'value_high': 375.0,
+            }, True),
+            ('low_gt_base_abstains', {
+                'value_low': 400.0, 'value_base': 375.0, 'value_high': 450.0,
+            }, False),
+            ('base_gt_high_abstains', {
+                'value_low': 300.0, 'value_base': 460.0, 'value_high': 450.0,
+            }, False),
+            ('low_gt_high_abstains', {
+                'value_low': 500.0, 'value_base': 375.0, 'value_high': 450.0,
+            }, False),
+            ('negative_low_abstains', {
+                'value_low': -1.0, 'value_base': 375.0, 'value_high': 450.0,
+            }, False),
+            ('negative_base_abstains', {
+                'value_low': 300.0, 'value_base': -1.0, 'value_high': 450.0,
+            }, False),
+            ('negative_high_abstains', {
+                'value_low': 300.0, 'value_base': 375.0, 'value_high': -1.0,
+            }, False),
+            ('nan_bound_abstains', {
+                'value_low': float('nan'), 'value_base': 375.0, 'value_high': 450.0,
+            }, False),
+            ('inf_bound_abstains', {
+                'value_low': 300.0, 'value_base': 375.0, 'value_high': float('inf'),
+            }, False),
+            ('bool_bound_abstains', {
+                'value_low': True, 'value_base': 375.0, 'value_high': 450.0,
+            }, False),
+            ('string_bound_abstains', {
+                'value_low': '300', 'value_base': 375.0, 'value_high': 450.0,
+            }, False),
+            ('one_of_three_supplied_abstains', {
+                'value_low': 300.0,
+            }, False),
+            ('two_of_three_supplied_abstains', {
+                'value_low': 300.0, 'value_base': 375.0,
+            }, False),
+        ]
+        self.assertGreaterEqual(len(cases), 9, 'need at least 9 subtests per plan 42-03')
+        for label, overrides, expect_accepted in cases:
+            with self.subTest(label):
+                got = self.mod._validate_assessment(self._raw(**overrides), {}, 'stub', '1')
+                if expect_accepted:
+                    self.assertIsNotNone(got, f'{label}: expected acceptance')
+                    self.assertEqual(
+                        set(got.keys()), self.baseline_keys,
+                        f'{label}: the frozen marker assessment dict gained or lost a key',
+                    )
+                else:
+                    self.assertIsNone(got, f'{label}: expected abstention')
+
+    def test_derived_bounds_are_a_symmetric_spread_around_the_point_estimate(self):
+        low, base, high, source = self.mod._resolve_value_bounds(self._raw(), 2.5, 150.0)
+        self.assertEqual(source, self.mod.BOUNDS_SOURCE_DERIVED)
+        self.assertEqual(base, 375.0)
+        self.assertLess(low, base)
+        self.assertGreater(high, base)
+
+    def test_evaluator_supplied_bounds_used_verbatim(self):
+        low, base, high, source = self.mod._resolve_value_bounds(
+            self._raw(value_low=300.0, value_base=375.0, value_high=450.0), 2.5, 150.0,
+        )
+        self.assertEqual((low, base, high), (300.0, 375.0, 450.0))
+        self.assertEqual(source, self.mod.BOUNDS_SOURCE_EVALUATOR)
+
+    def test_out_of_bounds_hours_abstains_for_its_original_reason(self):
+        """The bounds gate is placed AFTER the hours/rate bound check, so an
+        hours value over the configured max still abstains there -- not at
+        the (also-failing, since no bounds are supplied) bounds gate."""
+        got = self.mod._validate_assessment(
+            self._raw(estimated_hours_saved=999.0), {}, 'stub', '1')
+        self.assertIsNone(got)
+
+
 class PathMirrorParityTests(unittest.TestCase):
     """The only mechanism keeping the three hand-maintained path mirrors
     (common.sh, resolve-markers-dir.py, classifier.py's _Paths) honest:

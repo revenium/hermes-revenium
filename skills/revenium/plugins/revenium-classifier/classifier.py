@@ -802,6 +802,74 @@ def _finite_number(value) -> "float | None":
     return f
 
 
+# Phase 42 (EGV-06/D-09 site one): the fractional half-width used to DERIVE a
+# low/base/high band when the evaluator supplies no bounds of its own -- the
+# only path today's naked-LLM evaluator can take. This is a declared
+# PLACEHOLDER band, not a measured one: 42-RESEARCH.md's Open Question 2 asks
+# whether the evaluator prompt should change to emit a genuine range, and this
+# plan answers no -- 41-ARCHITECTURE.md assigns evaluator-prompt work to Phase
+# 44. When Phase 44 teaches the prompt to emit a real range, no code in
+# _resolve_value_bounds changes; only bounds_source flips from "derived" to
+# "evaluator" because the `len(supplied) == 3` branch below starts firing.
+DERIVED_BOUND_SPREAD = 0.15
+BOUNDS_SOURCE_EVALUATOR = "evaluator"
+BOUNDS_SOURCE_DERIVED = "derived"
+
+
+def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float, float, float, str] | None":
+    """Resolve the low/base/high value triple for one assessment (EGV-06).
+
+    Two paths:
+      - Evaluator-supplied: `raw` carries ALL THREE of value_low/value_base/
+        value_high. Validated non-negative and non-strictly ordered
+        (low <= base <= high) -- EQUAL bounds are a valid degenerate case (a
+        point estimate, or an operator's point correction in plan 42-06), not
+        a rejection.
+      - Derived: `raw` carries NONE of the three. base is the point estimate
+        (hours * rate, matching _validate_assessment's own derivation); low/
+        high are a symmetric DERIVED_BOUND_SPREAD band around it, with low
+        clamped at zero.
+
+    A PARTIAL set (one or two of the three present) is disorder, not a hint,
+    and abstains -- a half-specified band cannot be trusted more than a fully
+    absent one.
+
+    Returns None to signal abstain on: a negative bound, a non-finite bound
+    (via _finite_number, which already rejects bool/NaN/inf), reversed
+    ordering, or a partial supplied set. Never raises (D-04): every input is
+    already-parsed dict/float data, no I/O and no external call.
+
+    Called from TWO sites deliberately (_validate_assessment for the abstain
+    decision, _build_job_assessment for the values themselves) rather than
+    threading the result through _validate_assessment's frozen 9-key return
+    dict, which EGV-22 and test_marker_file_schema pin byte-for-byte.
+    """
+    raw_low = raw.get("value_low")
+    raw_base = raw.get("value_base")
+    raw_high = raw.get("value_high")
+    supplied = [v for v in (raw_low, raw_base, raw_high) if v is not None]
+
+    if len(supplied) == 0:
+        base = round(hours * rate, 2)
+        low = round(max(0.0, base * (1 - DERIVED_BOUND_SPREAD)), 2)
+        high = round(base * (1 + DERIVED_BOUND_SPREAD), 2)
+        return (low, base, high, BOUNDS_SOURCE_DERIVED)
+
+    if len(supplied) != 3:
+        return None
+
+    low = _finite_number(raw_low)
+    base = _finite_number(raw_base)
+    high = _finite_number(raw_high)
+    if low is None or base is None or high is None:
+        return None
+    if low < 0 or base < 0 or high < 0:
+        return None
+    if not (low <= base <= high):
+        return None
+    return (low, base, high, BOUNDS_SOURCE_EVALUATOR)
+
+
 def _validate_assessment(raw: dict, config: "dict | None" = None,
                          evaluator: str = "", evaluator_version: str = "") -> "dict | None":
     """Validate a raw evaluator assessment and derive its monetary value.
@@ -841,6 +909,23 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         logger.warning(
             "revenium-classifier: rejected assessment, confidence outside [0,1]: %r",
             raw.get("confidence"),
+        )
+        return None
+
+    # Phase 42 (EGV-06/D-09 site one): the abstain-on-disorder gate for the
+    # sidecar's low/base/high value band. Placed after the hours/rate/
+    # confidence checks and before the currency check so an out-of-bounds
+    # hours/rate input still abstains for its ORIGINAL reason above, not this
+    # one. The resolved triple itself is discarded here -- only the abstain/
+    # accept verdict matters at this call site; _build_job_assessment calls
+    # _resolve_value_bounds a second time for the actual values (see that
+    # function's docstring for why calling it twice is the right shape).
+    if _resolve_value_bounds(raw, hours, rate) is None:
+        logger.warning(
+            "revenium-classifier: assessment abstained, disordered or invalid "
+            "value bounds: %r",
+            {"value_low": raw.get("value_low"), "value_base": raw.get("value_base"),
+             "value_high": raw.get("value_high")},
         )
         return None
 
