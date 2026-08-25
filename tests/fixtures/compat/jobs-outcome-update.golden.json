@@ -1,0 +1,17 @@
+{
+  "__note": "ADDITIVE to the v1.x wire contract above (Phase 32/38 precedent) -- pins the correction path's OWN verb, produced only by the explicitly operator-triggered skills/revenium/scripts/correct-assessment.sh (D-02), never by the per-tick reporter. jobs-outcome.golden.json and meter-completion-assessment.golden.json, which pin the ordinary `jobs outcome` verb, are untouched by this fixture's existence. Originating decisions: 42-CONTEXT.md D-01 (full C-06 correction path) and D-02 (standalone operator script).",
+  "verb": ["jobs", "outcome-update"],
+  "exact_match_fields": {
+    "__verb": "jobs",
+    "__subcommand": "outcome-update",
+    "__positional_args": ["assess-42-correction-job"],
+    "--reason": "correction-golden-reason",
+    "--outcome-value": "525.0",
+    "--outcome-currency": "USD",
+    "--quiet": true
+  },
+  "pattern_fields": {
+    "--metadata": "^\\{.*\\}$"
+  },
+  "forbidden_fields": ["--budget-id", "--alert-id"]
+}

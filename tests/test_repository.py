@@ -174,6 +174,15 @@ class RepositoryTests(unittest.TestCase):
             # immutability contract, which stays byte-identical for the
             # unvalued path.
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-assessment.golden.json',
+            # Phase 42 Plan 01 (EGV-09/D-01, D-02) — the correction path's own
+            # `jobs outcome-update` argv-shape golden, additive to (not part
+            # of) the jobs-outcome.golden.json v1.x immutability contract,
+            # which stays byte-identical for the ordinary per-tick path.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome-update.golden.json',
+            # Phase 42 Plan 01 (EGV-09/D-01) — proves the correction ledger
+            # prefix is unmatchable by the ordinary path's OUTCOME-01/OUTCOME-04
+            # grep gates before any correction-authoring code exists.
+            ROOT / 'tests' / 'test_phase42_assessment_contract.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
