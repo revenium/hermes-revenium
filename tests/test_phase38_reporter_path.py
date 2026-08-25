@@ -1208,6 +1208,15 @@ class TestPhase38Canary(unittest.TestCase):
     TRANSCRIPT_CANARY = 'ZZCANARY-7f3a9-SECRET-SENTINEL'
     EVALUATOR_BASIS_CANARY = 'QQCANARY-b21c4-MODEL-PROSE'
     EVALUATOR_ROLE_CANARY = 'RRCANARY-99f2-ROLE'
+    # Phase 42 Plan 05 -- the sidecar's other two narrative fields
+    # (candidate_downstream_outcome, counterfactual_assumption), each
+    # clamped to its own 500-byte NARRATIVE_CLAMP_BYTES budget, distinct
+    # from the marker's basis (200 bytes). The marker's `basis` and the
+    # sidecar's `basis` share ONE canary (EVALUATOR_BASIS_CANARY) because
+    # they are the SAME field surviving through two different carriers with
+    # two different clamps -- these two fields exist only in the sidecar.
+    EVALUATOR_OUTCOME_CANARY = 'SSCANARY-c31d5-OUTCOME-PROSE'
+    EVALUATOR_COUNTERFACTUAL_CANARY = 'TTCANARY-d42e6-COUNTERFACTUAL-PROSE'
     # 39-01 Task 3 -- the malformed response BODY itself, for the `invalid`
     # line's own canary sweep. Deliberately its own constant, not a reuse of
     # EVALUATOR_BASIS_CANARY: that one is MEANT to reach the marker (a
@@ -1235,6 +1244,16 @@ class TestPhase38Canary(unittest.TestCase):
             + ('Z' * 300)
         )
         role_raw = self.EVALUATOR_ROLE_CANARY + '|role|pipe\nbreak\r' + ('Y' * 100)
+        # Phase 42 Plan 05 -- the sidecar's other two narrative fields, each
+        # over their own 500-byte NARRATIVE_CLAMP_BYTES budget and carrying
+        # pipe/newline/CR so the same IFS-cleanliness assertion the marker's
+        # basis/inferred_role already get can be repeated against them.
+        outcome_raw = (
+            self.EVALUATOR_OUTCOME_CANARY + '|outcome|pipe\nbreak\r' + ('W' * 600)
+        )
+        counterfactual_raw = (
+            self.EVALUATOR_COUNTERFACTUAL_CANARY + '|cf|pipe\nbreak\r' + ('V' * 600)
+        )
         return {
             'inferred_role': role_raw,
             'estimated_hours_saved': 2.0,
@@ -1242,6 +1261,8 @@ class TestPhase38Canary(unittest.TestCase):
             'currency': 'USD',
             'basis': basis_raw,
             'confidence': 0.6,
+            'candidate_downstream_outcome': outcome_raw,
+            'counterfactual_assumption': counterfactual_raw,
         }
 
     def _attach_and_write(self, sid, job_id, state_dir, markers_dir):
@@ -1268,8 +1289,20 @@ class TestPhase38Canary(unittest.TestCase):
         )
         asyncio.run(c._attach_assessment(job, transcript, c._module_paths()))
         self.assertIn('assessment', job, 'the canary evaluator must produce an accepted assessment')
+        # Phase 42 Plan 05: also produce a sidecar record through the REAL
+        # write path (_write_job_assessment), mirroring the D-12 ordering
+        # (sidecar first, then the marker) the real caller in
+        # run_classification_async uses -- the sidecar is a NEW persisted
+        # artifact the existing canary sweep enumerated by name and did not
+        # know about; a fixture that skips writing it would leave that hole
+        # unexercised rather than closing it.
+        assessment_record = job.pop('_assessment_record', None)
+        sidecar_path = None
+        if isinstance(assessment_record, dict) and assessment_record:
+            sidecar_path = c._write_job_assessment(assessment_record, c._module_paths())
+            self.assertIsNotNone(sidecar_path, 'the canary fixture must produce a real sidecar write')
         marker_path = c._write_job_marker(sid, job, c._module_paths())
-        return job, marker_path
+        return job, marker_path, sidecar_path
 
     def test_canary_evaluator_prose_persists_clamped_and_ifs_clean(self):
         tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-')
@@ -1278,7 +1311,7 @@ class TestPhase38Canary(unittest.TestCase):
             markers_dir = os.path.join(state_dir, 'markers')
             sid = 'p38-canary-sid-001'
             job_id = 'p38-canary-job-001'
-            job, marker_path = self._attach_and_write(sid, job_id, state_dir, markers_dir)
+            job, marker_path, sidecar_path = self._attach_and_write(sid, job_id, state_dir, markers_dir)
 
             basis = job['assessment']['basis']
             role = job['assessment']['assumptions']['inferred_role']
@@ -1303,6 +1336,40 @@ class TestPhase38Canary(unittest.TestCase):
                 self.TRANSCRIPT_CANARY, marker_path.read_text(),
                 'the transcript canary must never reach the marker',
             )
+
+            # Phase 42 Plan 05 -- the same clamping and IFS-cleanliness
+            # guarantees, now for all THREE narrative fields in the SIDECAR
+            # record (basis, candidate_downstream_outcome,
+            # counterfactual_assumption), against the sidecar's OWN 500-byte
+            # NARRATIVE_CLAMP_BYTES budget -- not the marker's 200.
+            self.assertIsNotNone(sidecar_path, 'the canary fixture must have produced a sidecar record')
+            sidecar_lines = sidecar_path.read_text().strip().splitlines()
+            self.assertEqual(len(sidecar_lines), 1, f'expected exactly one sidecar line: {sidecar_lines}')
+            sidecar_record = json.loads(sidecar_lines[0])
+
+            sidecar_basis = sidecar_record['basis']
+            sidecar_outcome = sidecar_record['candidate_downstream_outcome']
+            sidecar_counterfactual = sidecar_record['counterfactual_assumption']
+
+            for field_name, value, canary in (
+                ('basis', sidecar_basis, self.EVALUATOR_BASIS_CANARY),
+                ('candidate_downstream_outcome', sidecar_outcome, self.EVALUATOR_OUTCOME_CANARY),
+                ('counterfactual_assumption', sidecar_counterfactual, self.EVALUATOR_COUNTERFACTUAL_CANARY),
+            ):
+                for bad in ('|', '\n', '\r'):
+                    self.assertNotIn(
+                        bad, value, f'sidecar {field_name} must be IFS-clean: {value!r}',
+                    )
+                self.assertIn(canary, value, f'sidecar {field_name} must carry its own canary')
+                self.assertLessEqual(
+                    len(json.dumps(value).encode('utf-8')) - 2, 500,
+                    f'sidecar {field_name} must be clamped to its 500-byte serialized budget',
+                )
+
+            self.assertNotIn(
+                self.TRANSCRIPT_CANARY, sidecar_path.read_text(),
+                'the transcript canary must never reach the sidecar',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1318,7 +1385,9 @@ class TestPhase38Canary(unittest.TestCase):
             sid = 'p38-canary-sid-002'
             job_id = 'p38-canary-job-002'
 
-            self._attach_and_write(sid, job_id, state_dir, markers_dir)
+            _job, _marker_path, _sidecar_path = self._attach_and_write(
+                sid, job_id, state_dir, markers_dir,
+            )
 
             # Prepend the CHAT/task marker line the classifier's OTHER write
             # path produces (_write_job_marker above wrote only the job line) --
@@ -1401,6 +1470,44 @@ class TestPhase38Canary(unittest.TestCase):
 
             self.assertNotIn(canary, result.stdout)
             self.assertNotIn(canary, result.stderr)
+
+            # Phase 42 Plan 05: the sidecar is a NEW persisted artifact the
+            # checks above -- enumerated by name -- do not know about. A
+            # recursive walk of the whole temp tree covers it (and every
+            # FUTURE new artifact) automatically instead of needing another
+            # hand-listed edit. This is additive to the named checks above,
+            # not a replacement -- their per-artifact failure messages stay
+            # useful for triage; the walk is the safety net that catches
+            # what a hand-listed set would miss.
+            self.assertTrue(_sidecar_path is not None and _sidecar_path.exists(),
+                             'the fixture must have produced a real sidecar file for this sweep to mean anything')
+            swept_files = []
+            for root, _dirs, files in os.walk(tmpdir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    swept_files.append(fpath)
+                    try:
+                        with open(fpath, 'rb') as f:
+                            raw_bytes = f.read()
+                    except OSError:
+                        continue
+                    try:
+                        text = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        # No text artifact this pipeline writes is expected
+                        # to be non-UTF-8 (every JSONL/ledger/log write in
+                        # this codebase is ensure_ascii=True text); a binary
+                        # file here is out of scope for a text canary sweep.
+                        continue
+                    self.assertNotIn(
+                        canary, text,
+                        f'{fpath} must not carry the transcript canary (recursive sweep)',
+                    )
+            self.assertIn(
+                str(_sidecar_path), swept_files,
+                'the recursive walk must have actually visited the sidecar file, or this '
+                'sweep proves nothing about the NEW artifact it exists to cover',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1469,6 +1576,36 @@ class TestPhase38Canary(unittest.TestCase):
                     response_canary, message,
                     'the rejected response body must never reach the invalid log record',
                 )
+
+            # Phase 42 Plan 05 (D-11): an abstention is now a REAL sidecar
+            # record -- the raw model output was in scope moments before
+            # this record was built, so it is exactly where a leak would
+            # land. Sweep it for both canaries.
+            record = job.get('_assessment_record')
+            self.assertIsInstance(record, dict, 'D-11: a rejected evaluation must still produce a record')
+            self.assertEqual(
+                record.get('abstention_reason'), 'invalid',
+                'the abstention record must carry the reason word this rejection produced',
+            )
+            for absent_key in (
+                'value_low', 'value_base', 'value_high', 'bounds_source',
+                'currency', 'estimated_value', 'assumptions',
+            ):
+                self.assertNotIn(
+                    absent_key, record,
+                    f'D-11: an abstention record must OMIT {absent_key!r}, not null it',
+                )
+            sidecar_path = c._write_job_assessment(record, c._module_paths())
+            self.assertIsNotNone(sidecar_path, 'the abstention record must write successfully')
+            sidecar_text = sidecar_path.read_text()
+            self.assertNotIn(
+                self.TRANSCRIPT_CANARY, sidecar_text,
+                'the transcript canary must never reach the abstention sidecar record',
+            )
+            self.assertNotIn(
+                response_canary, sidecar_text,
+                'the raw response body must never reach the abstention sidecar record',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1507,6 +1644,23 @@ class TestPhase38Canary(unittest.TestCase):
                     self.TRANSCRIPT_CANARY, message,
                     'the transcript canary must never reach a log record',
                 )
+
+            # Phase 42 Plan 05 (D-11): same abstention-sidecar sweep as the
+            # invalid-line test, for the timed-out path.
+            record = job.get('_assessment_record')
+            self.assertIsInstance(record, dict, 'D-11: a timed-out evaluation must still produce a record')
+            self.assertEqual(record.get('abstention_reason'), 'timed_out')
+            for absent_key in (
+                'value_low', 'value_base', 'value_high', 'bounds_source',
+                'currency', 'estimated_value', 'assumptions',
+            ):
+                self.assertNotIn(absent_key, record)
+            sidecar_path = c._write_job_assessment(record, c._module_paths())
+            self.assertIsNotNone(sidecar_path, 'the abstention record must write successfully')
+            self.assertNotIn(
+                self.TRANSCRIPT_CANARY, sidecar_path.read_text(),
+                'the transcript canary must never reach the abstention sidecar record',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
