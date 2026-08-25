@@ -1733,7 +1733,8 @@ CORRECT_ASSESSMENT_SH = SCRIPTS_DIR / 'correct-assessment.sh'
 PRUNE_MARKERS_SH = SCRIPTS_DIR / 'prune-markers.sh'
 
 
-def _build_correction_shim(shim_path, outcome_update_capable=True):
+def _build_correction_shim(shim_path, outcome_update_capable=True,
+                            config_show_fails=False):
     """revenium shim for the correction-path test suite.
 
     Extends build_shim's `jobs)` branch with a THIRD --help probe --
@@ -1746,6 +1747,12 @@ def _build_correction_shim(shim_path, outcome_update_capable=True):
 
     outcome_update_capable=False omits --reason from the outcome-update
     probe's help text, modelling the older-CLI D-04 fail-loud branch.
+
+    config_show_fails=True (WR-03) makes `revenium config show` -- the
+    call inside resolve_team_id's pipeline, a DIFFERENT call from the
+    `jobs outcome-update --help` probe above -- exit non-zero with output
+    on stderr only, modelling a transient auth/network failure that lands
+    strictly AFTER the local correction and ledger line are already saved.
     """
     if outcome_update_capable:
         outcome_update_help_lines = (
@@ -1753,10 +1760,16 @@ def _build_correction_shim(shim_path, outcome_update_capable=True):
         )
     else:
         outcome_update_help_lines = ''
+    if config_show_fails:
+        config_branch = (
+            '  config) echo "revenium: connection error" >&2; exit 3 ;;\n'
+        )
+    else:
+        config_branch = '  config) exit 0 ;;\n'
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
-        '  config) exit 0 ;;\n'
+        + config_branch +
         '  guardrails) exit 0 ;;\n'
         '  meter)\n'
         '    if [[ "$3" == "--help" ]]; then\n'
@@ -1795,7 +1808,7 @@ def _build_correction_shim(shim_path, outcome_update_capable=True):
 
 
 def _build_correction_tree(sid, job_id, sidecar_lines=None, seed_outcome_line=False,
-                            outcome_update_capable=True):
+                            outcome_update_capable=True, config_show_fails=False):
     """Build a tmp HERMES_HOME tree for the correction-path test suite.
 
     Mirrors _build_outcome_tree's shape (state.db, jobs ledger seeded with a
@@ -1857,7 +1870,10 @@ def _build_correction_tree(sid, job_id, sidecar_lines=None, seed_outcome_line=Fa
     meter_log = os.path.join(tmpdir, 'meter.log')
     jobs_log = os.path.join(tmpdir, 'jobs.log')
     shim = os.path.join(bin_dir, 'revenium')
-    _build_correction_shim(shim, outcome_update_capable=outcome_update_capable)
+    _build_correction_shim(
+        shim, outcome_update_capable=outcome_update_capable,
+        config_show_fails=config_show_fails,
+    )
 
     env = {
         **os.environ,
@@ -1900,6 +1916,50 @@ def _jobs_log_invocations(jobs_log):
             if line:
                 invocations.append(shlex.split(line))
     return invocations
+
+
+def _build_toctou_race_shim(shim_path, entered_file, release_file):
+    """WR-02 (42-REVIEW.md) race-reproduction shim.
+
+    correct-assessment.sh's Step 4 (`supports_flag "jobs outcome-update"
+    "--reason"`) calls `revenium jobs outcome-update --help` -- the LAST
+    thing the script does before Step 5 opens the sidecar file. Blocking
+    right there gives the test a deterministic hook between Step 1+2's
+    unlocked D-14 existence check (far above) and Step 5's append: touch
+    `entered_file` so the test knows the script is paused at that exact
+    point, then poll for `release_file` before answering the probe. The
+    test deletes the sidecar in between -- a real interleaving, not a
+    pre-script deletion (which would only exercise the ALREADY-WORKING
+    D-14 refusal for a record that was never found in the first place).
+
+    The wait is bounded (10s) so a broken test fails fast instead of
+    hanging the suite if the release signal never arrives.
+    """
+    body = (
+        '#!/usr/bin/env bash\n'
+        'case "$1" in\n'
+        '  config) exit 0 ;;\n'
+        '  guardrails) exit 0 ;;\n'
+        '  jobs)\n'
+        '    if [[ "$2" == "outcome-update" && "$3" == "--help" ]]; then\n'
+        f'      : > "{entered_file}"\n'
+        '      for _ in $(seq 1 200); do\n'
+        f'        [[ -e "{release_file}" ]] && break\n'
+        '        sleep 0.05\n'
+        '      done\n'
+        '      echo "--reason string    Reason for the update"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    printf "\\n" >> "${JOBS_LOG:-/dev/null}"\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+    with open(shim_path, 'w') as f:
+        f.write(body)
+    os.chmod(shim_path, 0o755)
 
 
 class CorrectionAppendTests(unittest.TestCase):
@@ -2456,6 +2516,249 @@ class CorrectionAppendTests(unittest.TestCase):
                 'EGV-09: the reason shipped to Revenium must be byte-identical '
                 'to the reason recorded in the sidecar -- a divergence makes the '
                 'local audit record disagree with the filed correction',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_wr02_toctou_refuses_when_sidecar_deleted_between_check_and_append(self):
+        """42-REVIEW.md WR-02: Step 1+2's D-14 check reads the sidecar with
+        no lock held. If the file is deleted between that check and Step
+        5's append -- plausibly a concurrent, manually-invoked
+        prune-markers.sh, since D-13's sidecar pass is mtime-only and both
+        scripts are operator-run -- the append must refuse, not silently
+        vivify a brand-new sidecar containing only the correction line.
+
+        This test exercises the ACTUAL race, not source text: the shim
+        blocks correct-assessment.sh's Step 4 capability probe (the last
+        thing the script does before Step 5 opens the sidecar), the test
+        deletes the sidecar while the script is paused there, then
+        releases it -- a deterministic interleaving landing exactly in the
+        window WR-02 describes. A test that deletes the file before the
+        script even starts would only exercise the ALREADY-WORKING D-14
+        refusal for a record never found in the first place (see
+        test_d14_refusal_for_absent_sidecar_record above) -- that is NOT
+        what this test proves.
+        """
+        sid, job_id = 'p42c-sid-015', 'p42c-job-015'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            self.assertTrue(os.path.exists(sidecar_path))
+            ledger_before = Path(jobs_ledger).read_text()
+
+            bin_dir = env['PATH'].split(os.pathsep)[0]
+            shim = os.path.join(bin_dir, 'revenium')
+            entered_file = os.path.join(tmpdir, 'probe-entered')
+            release_file = os.path.join(tmpdir, 'probe-release')
+            _build_toctou_race_shim(shim, entered_file, release_file)
+
+            proc = subprocess.Popen(
+                ['bash', str(CORRECT_ASSESSMENT_SH),
+                 '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                 '--reason', 'toctou race'],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 10
+                while not os.path.exists(entered_file):
+                    self.assertLess(
+                        time.time(), deadline,
+                        'shim never reached the blocking probe -- the race '
+                        'window this test targets was never entered',
+                    )
+                    time.sleep(0.02)
+
+                # The script is now paused inside Step 4, between Step 1+2's
+                # unlocked D-14 check and Step 5's append. Delete the
+                # sidecar HERE -- this is the actual race, not a pre-start
+                # deletion.
+                self.assertTrue(os.path.exists(sidecar_path))
+                os.remove(sidecar_path)
+
+                Path(release_file).touch()
+                out, err = proc.communicate(timeout=30)
+                rc = proc.returncode
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+
+            self.assertNotEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('D-14', err)
+            self.assertFalse(
+                os.path.exists(sidecar_path),
+                'WR-02: the append must not silently re-create a sidecar '
+                'file containing only the correction line',
+            )
+            self.assertEqual(
+                Path(jobs_ledger).read_text(), ledger_before,
+                'WR-02: no ledger line may be written when the '
+                're-verified-under-lock existence check refuses',
+            )
+            self.assertEqual(
+                _jobs_log_invocations(jobs_log), [],
+                'WR-02: no CLI invocation on a refused correction',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_wr02b_post_write_unlink_refuses_and_ships_nothing(self):
+        """Greptile P1 on PR #94: the under-lock st_nlink check closes only
+        the open()->flock() window. It does NOT close check->scan->write.
+        prune-markers.sh's os.unlink takes no per-file lock (its flock is
+        the global prune.lock), so an unlink landing after that check leaves
+        the write succeeding against an orphaned inode -- the bytes vanish
+        on close -- while the shell still appends the ledger line and ships
+        the remote outcome-update, reporting success. Revenium would hold a
+        correction the local audit record does not.
+
+        The window is real and wide here because the sequence scan iterates
+        an UNBUFFERED FileIO (`os.fdopen(fd, 'r+b', buffering=0)`), so line
+        iteration reads a byte at a time. Padding the sidecar with prior
+        correction history makes the scan take long enough to unlink inside
+        it deterministically: the shim blocks at Step 4, the test releases
+        it, waits past the (fast) open and first st_nlink check, then
+        unlinks while the (slow) scan is still running.
+
+        The test ASSERTS the refusal rather than tolerating a miss -- if the
+        interleaving ever stops landing, this fails loudly instead of
+        silently proving nothing."""
+        sid, job_id = 'p42c-sid-016', 'p42c-job-016'
+        record = _tracer_assessment_record(job_id)
+        # Padding history: real `correction` records, so the file stays a
+        # legitimate sidecar rather than a synthetic blob.
+        padding = []
+        for i in range(4000):
+            padding.append({
+                'kind': 'correction',
+                'ts': 1715516100.0 + i,
+                'agentic_job_id': job_id,
+                'assessment_id': f'{job_id}:{i}',
+                'sequence': i,
+                'assessment_schema_version': 1,
+                'prior_value_low': 400.0, 'prior_value_base': 500.0,
+                'prior_value_high': 600.0, 'prior_currency': 'USD',
+                'value_low': 400.0, 'value_base': 500.0, 'value_high': 600.0,
+                'currency': 'USD',
+                'reason': f'padding correction {i} ' + ('p' * 120),
+            })
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record] + padding)
+        )
+        try:
+            ledger_before = Path(jobs_ledger).read_text()
+            bin_dir = env['PATH'].split(os.pathsep)[0]
+            shim = os.path.join(bin_dir, 'revenium')
+            entered_file = os.path.join(tmpdir, 'probe-entered')
+            release_file = os.path.join(tmpdir, 'probe-release')
+            _build_toctou_race_shim(shim, entered_file, release_file)
+
+            proc = subprocess.Popen(
+                ['bash', str(CORRECT_ASSESSMENT_SH),
+                 '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                 '--reason', 'post-write unlink race'],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 30
+                while not os.path.exists(entered_file):
+                    self.assertLess(
+                        time.time(), deadline,
+                        'shim never reached the blocking probe',
+                    )
+                    time.sleep(0.02)
+
+                # Release, then let the open and the FIRST st_nlink check
+                # pass (both O(1)) before unlinking -- so the deletion lands
+                # inside the slow scan, AFTER the pre-write check, which is
+                # the window this test exists for.
+                Path(release_file).touch()
+                time.sleep(0.15)
+                self.assertTrue(
+                    os.path.exists(sidecar_path),
+                    'sidecar vanished before the test could unlink it',
+                )
+                os.remove(sidecar_path)
+
+                out, err = proc.communicate(timeout=60)
+                rc = proc.returncode
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+
+            self.assertNotEqual(
+                rc, 0,
+                f'post-write unlink must refuse, not report success: '
+                f'stdout={out!r} stderr={err!r}',
+            )
+            self.assertNotIn(
+                'Correction shipped to Revenium', out,
+                'a correction whose local record was unlinked must NOT be '
+                'reported as shipped',
+            )
+            self.assertEqual(
+                Path(jobs_ledger).read_text(), ledger_before,
+                'no ledger line may be written when the post-write check '
+                'refuses -- the local record does not exist',
+            )
+            self.assertEqual(
+                _jobs_log_invocations(jobs_log), [],
+                'no remote outcome-update may be shipped when the local '
+                'audit record was lost to a concurrent unlink',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_wr03_team_id_resolution_failure_fails_loud_after_local_save(self):
+        """42-REVIEW.md WR-03: `resolve_team_id`'s `revenium config show`
+        call is DIFFERENT from the `jobs outcome-update --help` capability
+        probe that already succeeded by this point -- its failure must not
+        silently kill the script via `set -e` after the local correction
+        and ledger line are already durably saved. The operator must be
+        told plainly that shipping to Revenium did not happen."""
+        sid, job_id = 'p42c-sid-016', 'p42c-job-016'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(
+                sid, job_id, sidecar_lines=[record], config_show_fails=True,
+            )
+        )
+        try:
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'team id resolution fails',
+            ])
+            self.assertNotEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('config show failed', err)
+            self.assertIn('NOT shipped to Revenium', err)
+
+            # The local record and ledger line -- Steps 5-6 -- must already
+            # be durably saved: they run strictly BEFORE the team-id
+            # resolution this test breaks.
+            lines = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(
+                len(lines), 2,
+                'WR-03: the local correction must be saved even though '
+                f'team-id resolution failed, got {len(lines)} line(s)',
+            )
+            with open(jobs_ledger) as f:
+                ledger_content = f.read()
+            self.assertIn(f'JOB:{job_id}:correction:1:', ledger_content)
+
+            invocations = _jobs_log_invocations(jobs_log)
+            update_invocations = [
+                argv for argv in invocations
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome-update'
+            ]
+            self.assertEqual(
+                update_invocations, [],
+                'WR-03: outcome-update must never be invoked once team-id '
+                f'resolution has already failed, got {update_invocations!r}',
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

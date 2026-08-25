@@ -270,6 +270,13 @@ fi
 # ONE lock acquisition (fcntl.LOCK_EX), so the sequence can never be
 # computed against a stale count. O_APPEND + LOCK_EX mirrors
 # _write_job_assessment's own append discipline exactly.
+#
+# WR-02 (42-REVIEW.md): Step 1+2's D-14 refusal check above reads the
+# sidecar with NO lock held. This open is opened WITHOUT O_CREAT and its
+# existence is re-verified a SECOND time, INSIDE the held flock, right
+# before the append -- see the heredoc below for why narrowing that first
+# check's window is not an acceptable fix here (this project already
+# learned that lesson once, on the billing path).
 # --------------------------------------------------------------------------
 APPEND_OUTPUT=$(
   SIDECAR_PATH_PY="${SIDECAR_PATH}" \
@@ -317,11 +324,58 @@ job_id = os.environ.get('JOB_ID_PY', '')
 component = os.environ.get('COMPONENT_PY', '')
 reason = _clamp_reason(os.environ.get('REASON_PY', ''))
 
-# 'a+b' opens with O_APPEND (writes always land at EOF regardless of the
-# current seek position) while still allowing the read needed to compute
-# `sequence` -- both happen under the SAME flock acquisition below.
-with open(path, 'a+b', buffering=0) as f:
+# WR-02 (42-REVIEW.md): Step 1+2's D-14 check (far above, and unlocked)
+# can observe FOUND=1 and then lose a race to a concurrent, manually-
+# invoked prune-markers.sh (D-13's sidecar pass is mtime-only, and both
+# scripts are operator-run) that deletes this exact sidecar file before
+# we get here. The OLD code opened with 'a+b', which CREATES the file if
+# it is missing -- silently turning a should-be-refused correction into a
+# brand-new sidecar whose only line is the correction, with no original
+# `job_assessment` line ever having existed. That is precisely the D-14
+# invariant this script exists to enforce.
+#
+# Fixed two ways, deliberately NOT by narrowing the window between the two
+# checks (this project already learned, on the billing path, that
+# narrowing a TOCTOU is not closing it -- only a lock closes it):
+#
+#   1. Open WITHOUT O_CREAT (os.O_RDWR | os.O_APPEND, no os.O_CREAT). The
+#      open() syscall itself becomes the atomic "does this path exist
+#      right now" test -- there is no separate check-then-act step left to
+#      race, and a missing file raises FileNotFoundError instead of being
+#      silently vivified. O_APPEND is kept so writes still land at EOF
+#      regardless of seek position, matching the original append
+#      discipline exactly.
+#   2. Re-verify os.fstat(fd).st_nlink != 0 immediately AFTER flock() is
+#      held below -- this is the check done genuinely INSIDE the lock, the
+#      same discipline this file already uses for the sequence-number
+#      read. It closes the (much smaller, but still real) residual window
+#      between this open() succeeding and the flock() call succeeding:
+#      prune-markers.sh's os.unlink is not flock-coordinated, so a delete
+#      can still land there. unlink() drops the directory entry but not
+#      the inode while our fd holds it open, and st_nlink drops to 0 the
+#      instant no path points at that inode anymore -- an fd-local,
+#      race-free answer to "did the file I opened stop existing", which
+#      os.path.exists(path) cannot give (it asks about the PATH, not about
+#      the specific inode `fd` already refers to).
+#
+# Rejected alternative: comparing os.fstat(fd).st_ino against a stat taken
+# during Step 1+2's unlocked check. That needs an extra value threaded
+# across two separate python subprocess invocations for no protection the
+# two checks above don't already provide -- the non-creating open already
+# makes "silently replace with a new file of the same name" impossible, so
+# there is no distinct-inode-same-name case left for an inode comparison
+# to catch that st_nlink misses.
+try:
+    fd = os.open(path, os.O_RDWR | os.O_APPEND)
+except FileNotFoundError:
+    print('REFUSED_TOCTOU=1')
+    raise SystemExit(0)
+
+with os.fdopen(fd, 'r+b', buffering=0) as f:
     fcntl.flock(f, fcntl.LOCK_EX)
+    if os.fstat(f.fileno()).st_nlink == 0:
+        print('REFUSED_TOCTOU=1')
+        raise SystemExit(0)
     f.seek(0)
     sequence = 0
     for line in f:
@@ -347,6 +401,27 @@ with open(path, 'a+b', buffering=0) as f:
     }
     line_bytes = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
     f.write(line_bytes)
+    # Greptile P1 (PR #94): the st_nlink check ABOVE closes only the
+    # open()->flock() window. It does NOT close check->scan->write, which is
+    # the far wider one: prune-markers.sh's os.unlink takes no per-file lock
+    # (its flock is the global prune.lock), so an unlink landing anywhere
+    # after that check leaves this write succeeding against an orphaned
+    # inode -- the bytes vanish when the last fd closes -- while the shell
+    # goes on to append the JOB:<id>:correction ledger line and ship the
+    # remote outcome-update, telling the operator it worked. Remote holds a
+    # correction, local holds nothing, and nobody is told.
+    #
+    # A pre-write check cannot fix a post-check unlink; only re-verifying
+    # AFTER the bytes are down can. Once this check passes the record lives
+    # in a file that still has a name, so any later unlink is ordinary
+    # pruning rather than a lost write. Refusing here (before SEQUENCE is
+    # emitted) is what keeps the shell from writing the ledger line or
+    # shipping -- leaving no local record, no remote correction and no
+    # ledger line, which a re-run then reports truthfully as D-14.
+    os.fsync(f.fileno())
+    if os.fstat(f.fileno()).st_nlink == 0:
+        print('REFUSED_TOCTOU=1')
+        raise SystemExit(0)
 
 print(f'SEQUENCE={sequence}')
 print(f'TS={now}')
@@ -361,6 +436,19 @@ print(f'TS={now}')
 print(f'REASON_CLAMPED={reason}')
 PY
 )
+
+# WR-02 (42-REVIEW.md): the heredoc above refuses (prints only this marker,
+# writes nothing) when its re-verification under the held lock finds the
+# sidecar gone -- deleted between Step 1+2's unlocked D-14 check and this
+# step, most plausibly by a concurrent, manually-invoked prune-markers.sh.
+# Checked BEFORE parsing SEQUENCE/TS below, which are meaningless (empty)
+# on this path.
+REFUSED_TOCTOU=$(printf '%s\n' "${APPEND_OUTPUT}" | sed -n 's/^REFUSED_TOCTOU=//p')
+if [[ "${REFUSED_TOCTOU}" == "1" ]]; then
+  echo "Sidecar record for job '${JOB_ID}' disappeared between the existence check and the correction append (likely a concurrent prune) -- refusing without writing (D-14)." >&2
+  echo "Re-run this exact command; if the record was legitimately pruned, an operator willing to lose the audit trail can still correct the row with the revenium CLI directly." >&2
+  exit 1
+fi
 
 SEQUENCE=$(printf '%s\n' "${APPEND_OUTPUT}" | sed -n 's/^SEQUENCE=//p')
 CORRECTION_TS=$(printf '%s\n' "${APPEND_OUTPUT}" | sed -n 's/^TS=//p')
@@ -452,7 +540,26 @@ outcome_update_cmd=(
   --metadata "${OUTCOME_UPDATE_METADATA}"
   --quiet
 )
-TEAM_ID_RESOLVED="$(resolve_team_id)"
+# WR-03 (42-REVIEW.md): resolve_team_id (common.sh) is a PIPELINE
+# (`revenium config show | sed | sed | head -1 | tr -d ...`) -- a
+# DIFFERENT call from the `jobs outcome-update --help` capability probe
+# above, so its success proves nothing about this one. Under this script's
+# `set -euo pipefail`, an unguarded `TEAM_ID_RESOLVED="$(resolve_team_id)"`
+# lets a transient `revenium config show` failure (auth, network) kill the
+# script via `set -e` BEFORE any diagnostic reaches the operator --
+# strictly AFTER Steps 5-6 already durably saved the local correction and
+# the ledger line, so nothing is lost, but the operator gets no signal at
+# all that the ship-to-Revenium leg never ran. That is the exact failure
+# D-04's own rationale rules out ("a silently-skipped correction is worse
+# than a refused one"). Guarded the same way every other fallible call in
+# this file already is -- `... && x=0 || x=$?` -- so this one is fail-loud
+# too, matching Step 7's message shape.
+TEAM_ID_RESOLVED="$(resolve_team_id)" && team_id_exit=0 || team_id_exit=$?
+if [[ "${team_id_exit}" -ne 0 ]]; then
+  echo "revenium config show failed while resolving team id (exit ${team_id_exit}) -- the local correction was saved, but NOT shipped to Revenium." >&2
+  echo "The local correction record is intact; this command may be re-run once the underlying issue is fixed." >&2
+  exit 1
+fi
 if [[ -n "${TEAM_ID_RESOLVED}" ]]; then
   outcome_update_cmd+=(--team-id "${TEAM_ID_RESOLVED}")
 fi
