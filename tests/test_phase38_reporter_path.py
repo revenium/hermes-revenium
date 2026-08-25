@@ -85,6 +85,17 @@ def _sidecar_record(job_id, **overrides):
         "agentic_job_id": job_id,
         "assessment_id": f"{job_id}:0",
         "assessment_schema_version": 1,
+        # WR-04: classifier.py's _build_job_assessment populates these four
+        # UNCONDITIONALLY on every record it builds (TAXONOMY_VERSION,
+        # PROMPT_VERSION, POLICY_VERSION, PROVENANCE_MODEL_UNKNOWN), and
+        # Plan 42-05 made hermes-report.sh forward all four into --metadata.
+        # Omitting them here let meter-completion-assessment.golden.json pin
+        # a wire shape production never actually sends. Values mirror the
+        # real constants so the fixture stays a faithful stand-in.
+        "taxonomy_version": 1,
+        "prompt_version": 1,
+        "policy_version": 1,
+        "model": "unknown",
         "value_low": 446.25,
         "value_base": 525.0,
         "value_high": 603.75,
