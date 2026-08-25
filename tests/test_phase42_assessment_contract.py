@@ -900,6 +900,158 @@ def _p42_shape_env(tmpdir, evaluator_name='p42-shape-stub'):
     }
 
 
+class SidecarBudgetTests(unittest.TestCase):
+    """Phase 42 Task 3: the sidecar's own 8,192-byte per-record ceiling.
+
+    Mirrors tests.test_phase36_evaluator_seam.MarkerBudgetTests method for
+    method, against SIDECAR_LINE_MAX_BYTES (8192) rather than the marker's
+    1024: compute the worst case PROGRAMMATICALLY (never a hardcoded byte
+    count), call the REAL constructor, assert acceptance before measuring,
+    serialize exactly as the writer does (compact separators,
+    ensure_ascii=True, + 1 trailing-newline byte), assert under budget AND
+    a stated minimum margin, and cover non-ASCII input -- the exact
+    regression class (a character clamp under-counting by up to 12x under
+    ensure_ascii=True) that produced a real 3,638-byte marker overrun,
+    found only in Phase 36 review.
+
+    41-CARRIER-DECISION.md Part 3 measured a ~2,707-byte worst case with a
+    projected 5,485-byte margin for an earlier field count; this class
+    measures the REAL number against the REAL constructor and prints it so
+    a future reader can compare against that projection.
+    """
+
+    # 12.5% of the 8192-byte ceiling -- proportionally close to
+    # MarkerBudgetTests' own 100-of-1024 (~9.8%) margin, and comfortably
+    # inside 41-03's projected 5,485-byte margin, so a failure here means a
+    # real regression rather than a tight fit.
+    MARGIN_BYTES = 1024
+
+    def tearDown(self):
+        _restore_env()
+
+    def _worst_case_valid(self, job_id):
+        return {
+            'agentic_job_id': job_id,
+            # job_type is LABEL_RE-bounded to 48 chars in production
+            # (_validate_job); this is that real ceiling, not an invented one.
+            'job_type': 'a' + 'b' * 46 + 'c',
+            'status': 'SUCCESS',
+        }
+
+    def _worst_case_raw(self, narrative_char='n'):
+        return {
+            'inferred_role': narrative_char * 60,
+            'estimated_hours_saved': 40.0,   # DEFAULT_MAX_HOURS_SAVED, the real bound
+            'assumed_loaded_rate': 500.0,    # DEFAULT_MAX_LOADED_RATE, the real bound
+            'currency': 'USD',
+            'basis': narrative_char * 1000,                          # far over the marker's 200-byte clamp
+            'confidence': 0.999999,
+            'candidate_downstream_outcome': narrative_char * 1000,   # far over the 500-byte clamp
+            'counterfactual_assumption': narrative_char * 1000,      # far over the 500-byte clamp
+        }
+
+    def _worst_case_record(self, mod, job_id, narrative_char='n',
+                            evaluator='evaluator-name-that-is-fairly-long',
+                            evaluator_version='version-string-also-long'):
+        raw = self._worst_case_raw(narrative_char)
+        assessment = mod._validate_assessment(raw, {}, evaluator, evaluator_version)
+        self.assertIsNotNone(assessment, 'max-bound inputs must be accepted, not rejected')
+        rec = mod._build_job_assessment(
+            self._worst_case_valid(job_id), assessment, raw, {}, evaluator, evaluator_version)
+        self.assertIsNotNone(rec, 'worst-case record construction must succeed')
+        return rec
+
+    def _serialized_bytes(self, rec):
+        # Exactly the writer's own encoding (_write_job_assessment): compact
+        # separators, ensure_ascii=True, UTF-8, plus the trailing newline byte.
+        return len(json.dumps(rec, separators=(',', ':'), ensure_ascii=True).encode('utf-8')) + 1
+
+    def test_worst_case_full_field_record_fits_8192_bytes_with_margin(self):
+        mod, _ev = _load_classifier({})
+        rec = self._worst_case_record(mod, job_id='x' * 48 + '_a1b2')
+        total = self._serialized_bytes(rec)
+        self.assertLess(total, 8192, f'worst-case sidecar record is {total} bytes')
+        margin = 8192 - total
+        self.assertGreater(
+            margin, self.MARGIN_BYTES,
+            f'only {margin} bytes of margin (need > {self.MARGIN_BYTES}) -- re-derive the clamps',
+        )
+        print(f'[42-03 SidecarBudgetTests] worst-case ASCII record: {total} bytes, margin {margin} '
+              f'(41-03 projected ~2,707 bytes worst-case / 5,485 bytes margin for an earlier field count)')
+
+    def test_worst_case_record_fits_with_non_ascii(self):
+        """Greptile P2 on PR #87's regression class, re-proven for the
+        sidecar: markers/sidecar lines are written with ensure_ascii=True,
+        so every non-ASCII code point is escaped -- "e"-with-accent and a
+        CJK character serialize to 6 bytes each, an emoji to 12. A
+        character-based clamp under-counts by up to 12x."""
+        mod, _ev = _load_classifier({})
+        for label, ch in (('accented', 'é'), ('cjk', '漢'), ('emoji', '😀'), ('mixed', 'a😀é漢')):
+            with self.subTest(label):
+                rec = self._worst_case_record(
+                    mod, job_id=f'job-{label}-' + ch * 10, narrative_char=ch)
+                total = self._serialized_bytes(rec)
+                self.assertLess(total, 8192, f'{label} record is {total} bytes')
+                margin = 8192 - total
+                self.assertGreater(
+                    margin, self.MARGIN_BYTES,
+                    f'{label}: only {margin} bytes of margin (need > {self.MARGIN_BYTES})',
+                )
+                print(f'[42-03 SidecarBudgetTests] worst-case {label} record: {total} bytes, margin {margin}')
+
+    def test_worst_case_correction_line_fits_8192_bytes_with_margin(self):
+        """The kind:"correction" shape plan 42-06 will append -- built here
+        directly, since that script does not exist yet, so the reader's
+        per-line 8192-byte guard is proven adequate for BOTH line kinds
+        before the correction path is built (per this task's own action
+        text). Shape per 41-CARRIER-DECISION.md Part 3: job id, timestamp,
+        a 500-byte reason, and prior/new bound values -- measured there at
+        672 bytes for a much smaller reason; this is the WORST case."""
+        mod, _ev = _load_classifier({})
+        reason = mod._clamp_assessment_text('r' * 2000, mod.NARRATIVE_CLAMP_BYTES)
+        correction = {
+            'kind': 'correction',
+            'ts': 1756000000.123456,
+            'sequence': 999,
+            'agentic_job_id': 'x' * 48 + '_a1b2',
+            'reason': reason,
+            'prior_value_low': 999999.99, 'prior_value_base': 999999.99, 'prior_value_high': 999999.99,
+            'new_value_low': 999999.99, 'new_value_base': 999999.99, 'new_value_high': 999999.99,
+            'currency': 'USD',
+            'operator': 'o' * 80,
+        }
+        total = len(json.dumps(correction, separators=(',', ':'), ensure_ascii=True).encode('utf-8')) + 1
+        self.assertLess(total, 8192, f'worst-case correction line is {total} bytes')
+        margin = 8192 - total
+        self.assertGreater(
+            margin, self.MARGIN_BYTES,
+            f'only {margin} bytes of margin for a correction line (need > {self.MARGIN_BYTES})',
+        )
+        print(f'[42-03 SidecarBudgetTests] worst-case correction line: {total} bytes, margin {margin}')
+
+    def test_narrative_fields_never_split_a_surrogate_pair_and_strip_ifs_characters(self):
+        mod, _ev = _load_classifier({})
+        raw = self._worst_case_raw()
+        raw['candidate_downstream_outcome'] = '😀' * 400
+        raw['counterfactual_assumption'] = 'a|b\nc\rd'
+        raw['basis'] = 'x|y\nz'
+        assessment = mod._validate_assessment(raw, {}, 'stub', '1')
+        self.assertIsNotNone(assessment)
+        rec = mod._build_job_assessment(
+            self._worst_case_valid('p42-budget-ifs-job'), assessment, raw, {}, 'stub', '1')
+        self.assertIsNotNone(rec)
+
+        # Slicing a Python str slices code points, so an emoji is never
+        # halved -- asserted, not assumed.
+        out = rec['candidate_downstream_outcome']
+        self.assertEqual(out, '😀' * len(out))
+        json.dumps(out)  # must not raise on a lone surrogate
+
+        blob = json.dumps(rec)
+        for bad in ('|', '\\n', '\\r'):
+            self.assertNotIn(bad, blob, f'{bad!r} survived into the sidecar record')
+
+
 class RecordShapeTests(unittest.TestCase):
     """EGV-04: every declared field family is present in a successfully
     constructed record, and the record round-trips byte-for-byte through
