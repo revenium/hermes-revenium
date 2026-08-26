@@ -62,6 +62,25 @@ def _extract_grep_pattern(script_text, gate_comment, job_id):
     return match.group(1).replace('${outcome_id}', job_id)
 
 
+def _extract_correction_record_fields(script_text):
+    """Pull the correction record's key names, in source order, straight out
+    of correct-assessment.sh's own `record = {...}` dict literal (Step 5) --
+    the same "read the live source, don't retype the plan" discipline
+    `_extract_grep_pattern` uses above for the ledger gate patterns (IN-01,
+    42-REVIEW.md). Returns None -- never a partial or guessed list -- if the
+    block has moved or no longer parses as expected, so a real drift fails
+    the caller loudly instead of silently testing a stale shape again.
+    """
+    start = script_text.find('record = {')
+    if start == -1:
+        return None
+    end = script_text.find('\n    }', start)
+    if end == -1:
+        return None
+    fields = re.findall(r"'(\w+)':", script_text[start:end])
+    return fields or None
+
+
 def _grep_matching_lines(pattern, ledger_path):
     """Run `pattern` through a REAL grep subprocess against `ledger_path`.
 
@@ -1003,26 +1022,68 @@ class SidecarBudgetTests(unittest.TestCase):
                 print(f'[42-03 SidecarBudgetTests] worst-case {label} record: {total} bytes, margin {margin}')
 
     def test_worst_case_correction_line_fits_8192_bytes_with_margin(self):
-        """The kind:"correction" shape plan 42-06 will append -- built here
-        directly, since that script does not exist yet, so the reader's
-        per-line 8192-byte guard is proven adequate for BOTH line kinds
-        before the correction path is built (per this task's own action
-        text). Shape per 41-CARRIER-DECISION.md Part 3: job id, timestamp,
-        a 500-byte reason, and prior/new bound values -- measured there at
-        672 bytes for a much smaller reason; this is the WORST case."""
+        """The REAL kind:"correction" shape correct-assessment.sh's Step 5
+        writes -- as of plan 42-06 shipping, that script exists, so this
+        test now reads its field list straight from the shipped source
+        (_extract_correction_record_fields) rather than hand-retyping a
+        plan sketch. IN-01 (42-REVIEW.md): the sketch this replaced used
+        new_value_low/new_value_base/new_value_high and an `operator` field
+        that never shipped, and omitted assessment_id/
+        assessment_schema_version/prior_currency, which did -- this
+        extraction makes that drift impossible to reintroduce silently: a
+        field correct-assessment.sh writes but this test has no worst-case
+        value for fails loudly (see the `missing` assertion below) instead
+        of quietly measuring the wrong shape.
+
+        Values themselves are still hand-picked worst cases (deriving those
+        from source too would require re-implementing correct-assessment.sh's
+        own validation/clamping in Python, which is what CLAUDE.md's
+        no-shared-code rule already argues against) -- reason is real-clamped
+        via NARRATIVE_CLAMP_BYTES, job id and sequence match the ceiling
+        `SidecarBudgetTests._worst_case_valid` uses for the ordinary
+        job_assessment shape. Shape per 41-CARRIER-DECISION.md Part 3: job
+        id, timestamp, a 500-byte reason, and prior/new bound values --
+        measured there at 672 bytes for a much smaller reason; this is the
+        WORST case.
+        """
+        script_text = CORRECT_ASSESSMENT_SH.read_text()
+        fields = _extract_correction_record_fields(script_text)
+        self.assertIsNotNone(
+            fields,
+            'IN-01: could not extract the correction record fields from '
+            "correct-assessment.sh's `record = {...}` block -- it moved or "
+            'changed shape; update the extraction before trusting this test.',
+        )
+
         mod, _ev = _load_classifier({})
         reason = mod._clamp_assessment_text('r' * 2000, mod.NARRATIVE_CLAMP_BYTES)
-        correction = {
+        job_id = 'x' * 48 + '_a1b2'
+        worst_case_values = {
             'kind': 'correction',
             'ts': 1756000000.123456,
+            'agentic_job_id': job_id,
+            'assessment_id': f'{job_id}:999',
             'sequence': 999,
-            'agentic_job_id': 'x' * 48 + '_a1b2',
-            'reason': reason,
-            'prior_value_low': 999999.99, 'prior_value_base': 999999.99, 'prior_value_high': 999999.99,
-            'new_value_low': 999999.99, 'new_value_base': 999999.99, 'new_value_high': 999999.99,
+            'assessment_schema_version': 1,
+            'prior_value_low': 999999.99,
+            'prior_value_base': 999999.99,
+            'prior_value_high': 999999.99,
+            'prior_currency': 'USD',
+            'value_low': 999999.99,
+            'value_base': 999999.99,
+            'value_high': 999999.99,
             'currency': 'USD',
-            'operator': 'o' * 80,
+            'reason': reason,
         }
+        missing = [k for k in fields if k not in worst_case_values]
+        self.assertEqual(
+            missing, [],
+            'IN-01: correct-assessment.sh writes a field this test has no '
+            f'worst-case value for: {missing!r} -- add one before trusting '
+            'the byte budget.',
+        )
+        correction = {k: worst_case_values[k] for k in fields}
+
         total = len(json.dumps(correction, separators=(',', ':'), ensure_ascii=True).encode('utf-8')) + 1
         self.assertLess(total, 8192, f'worst-case correction line is {total} bytes')
         margin = 8192 - total
