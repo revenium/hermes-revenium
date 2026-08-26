@@ -3444,6 +3444,16 @@ if assessment_raw:
         evidence_class = record.get('evidence_class')
         if isinstance(evidence_class, str) and evidence_class:
             meta['evidence_class'] = evidence_class[:32]
+        # Phase 43 (EGV-18, T-43-04): forwards the reportability decision
+        # itself, not just its effect -- without this, a row withheld by
+        # the gate above is indistinguishable on the tenant from a row
+        # dropped for bounds or schema reasons. Same conditional-emit rule:
+        # absent from the record (or already stripped/dropped by the gate
+        # above for an unrecognized value) adds no key to meta. 16 bytes is
+        # ample for both locked D-05 words ("reportable"/"candidate").
+        reportability_status = record.get('reportability_status')
+        if isinstance(reportability_status, str) and reportability_status:
+            meta['reportability_status'] = reportability_status[:16]
         evaluator = record.get('evaluator')
         if isinstance(evaluator, str) and evaluator:
             meta['evaluator'] = evaluator[:64]

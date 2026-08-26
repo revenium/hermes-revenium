@@ -378,11 +378,16 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(meta.get('taxonomy_version'), 1)
         self.assertEqual(meta.get('prompt_version'), 1)
         self.assertEqual(meta.get('policy_version'), 1)
+        # T-43-04: the reportability decision itself rides in --metadata too
+        # -- a withheld row must be distinguishable from a row dropped for
+        # bounds or schema reasons.
+        self.assertEqual(meta.get('reportability_status'), 'candidate')
 
     def test_reportable_reportability_ships_exactly_as_before(self):
         """Phase 43 (EGV-18): a record whose reportability_status is
         "reportable" ships exactly as the pre-Phase-43 behavior did --
-        same flags, same --metadata provenance."""
+        same flags, same --metadata provenance, plus reportability_status
+        itself (Task 2, Test 1)."""
         argv = self._run_one_outcome(
             'r43-sid-001', 'r43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
             sidecar=_sidecar_record('r43-job-001'),
@@ -399,6 +404,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
         )
         self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('reportability_status'), 'reportable')
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
         argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')

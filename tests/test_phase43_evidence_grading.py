@@ -140,5 +140,69 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(self.mod.REPORTABILITY_CANDIDATE, 'candidate')
 
 
+class FixtureFidelityTests(unittest.TestCase):
+    """Task 2 -- the direct answer to 42-LEARNINGS' "a golden fixture can pin
+    what the TEST produces, not what production sends": tests/test_phase38_
+    reporter_path.py's _sidecar_record() hand-written fixture and a REAL
+    record built through classifier.py's own construction path can no
+    longer drift apart silently, because this test compares one against
+    the other on every run.
+
+    Guarantee class: BEHAVIOURAL -- this proves the fixture's key set is a
+    subset of what production emits and that the two governed values agree,
+    for the inputs exercised here. It does not prove no other divergence is
+    possible.
+    """
+
+    def test_sidecar_record_fixture_key_set_is_a_subset_of_the_real_record(self):
+        # Imported here, not at module scope, matching this module's own
+        # "not imported across test modules for the loader" posture for the
+        # classifier import -- but _sidecar_record is a plain fixture
+        # builder (no module-level path constants), so importing IT across
+        # modules is the point: the same function both files' assertions
+        # are built against.
+        from tests.test_phase38_reporter_path import _sidecar_record
+
+        mod = _load_classifier()
+        raw = {
+            'inferred_role': 'senior software engineer',
+            'estimated_hours_saved': 3.5,
+            'assumed_loaded_rate': 150.0,
+            'currency': 'USD',
+            'basis': '3.5 hours of senior engineer review time',
+            'confidence': 0.8,
+            'candidate_downstream_outcome': 'PR merged to main',
+            'counterfactual_assumption': 'a human reviewer would have taken the same time',
+        }
+        valid = {
+            'agentic_job_id': 'fidelity-job-001', 'job_type': 'code_review', 'status': 'SUCCESS',
+        }
+        assessment = mod._validate_assessment(raw, {}, 'llm', 'v1')
+        self.assertIsNotNone(assessment, 'fixture raw input must validate for this test to be meaningful')
+        real_record = mod._build_job_assessment(
+            valid, assessment, raw, {'experimentalReportEstimates': True}, 'llm', 'v1')
+        self.assertIsNotNone(real_record, 'real construction must succeed for this test to be meaningful')
+
+        fixture_record = _sidecar_record('fidelity-job-001')
+
+        missing = set(fixture_record.keys()) - set(real_record.keys())
+        self.assertEqual(
+            missing, set(),
+            f'_sidecar_record carries keys production does not emit: {missing} -- '
+            'the fixture must describe a subset of the real wire shape, never a superset.',
+        )
+        # The two values this phase's gate is actually built on must agree
+        # between the hand-written fixture and the real constructor, under
+        # the SAME (reportable) config the fixture's default represents.
+        self.assertEqual(
+            fixture_record['reportability_status'], real_record['reportability_status'],
+            'fixture and real record disagree on reportability_status',
+        )
+        self.assertEqual(
+            fixture_record['evidence_class'], real_record['evidence_class'],
+            'fixture and real record disagree on evidence_class',
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
