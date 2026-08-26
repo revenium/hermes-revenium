@@ -901,5 +901,333 @@ class CoverageOrderTests(unittest.TestCase):
         self.assertEqual(c1['known_zero'], ['human_review'])
 
 
+# ---------------------------------------------------------------------------
+# Plan 44-02, Task 3 -- the value-omit family extension and the operand
+# forwarders, driven end to end through the real hermes-report.sh.
+# ---------------------------------------------------------------------------
+
+
+def _cost_sidecar_record(job_id, reportability_status='reportable',
+                          evidence_class='MODEL_ESTIMATED_DEMO', **overrides):
+    """Minimal job-assessments sidecar record for driving hermes-report.sh's
+    --metadata forwarder end to end, with net_value/supplied_costs/
+    cost_coverage as the fields under test. Mirrors this module's own
+    _mechanism_sidecar_record (itself mirroring
+    tests/test_phase38_reporter_path.py's _sidecar_record) -- not imported
+    across test modules, per this repo's per-file self-containment
+    convention."""
+    record = {
+        'kind': 'job_assessment',
+        'ts': 1715516002.5,
+        'agentic_job_id': job_id,
+        'assessment_id': f'{job_id}:0',
+        'assessment_schema_version': 1,
+        'taxonomy_version': 1,
+        'prompt_version': 1,
+        'policy_version': 1,
+        'model': 'unknown',
+        'value_low': 100.0,
+        'value_base': 110.0,
+        'value_high': 120.0,
+        'bounds_source': 'derived',
+        'currency': 'USD',
+        'estimated_value': 110.0,
+        'evaluator': 'llm',
+        'evaluator_version': 'v1',
+        'confidence': 0.8,
+        'evidence_class': evidence_class,
+        'assumptions': {
+            'estimated_hours_saved': 1.0,
+            'assumed_loaded_rate': 110.0,
+        },
+        'reportability_status': reportability_status,
+        'economic_mechanism': 'labor_substitution',
+        'net_value': 85.0,
+        'supplied_costs': {'human_review': 25.0},
+        'cost_coverage': {
+            'included': ['human_review'],
+            'known_zero': [],
+            'unknown': ['rework_or_error', 'integration', 'training_or_change'],
+            'excluded': ['metered_ai_cost'],
+        },
+    }
+    record.update(overrides)
+    return record
+
+
+class ReporterStripTests(unittest.TestCase):
+    """D-07 end-to-end -- net_value is withheld from a candidate assessment
+    through the single shared _strip_value_family stripper, while
+    supplied_costs and cost_coverage ship regardless of reportability.
+    Driven through the real hermes-report.sh via the no-shift shim +
+    synthetic state.db harness (same shape as MechanismWireTests above)."""
+
+    def _run_one_outcome(self, sid, job_id, record):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase44-strip-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            shim = os.path.join(bin_dir, 'revenium')
+
+            build_state_db(state_db, [{
+                'id': sid,
+                'model': 'claude-sonnet-4-6',
+                'source': 'test',
+                'input_tokens': 100,
+                'output_tokens': 50,
+                'cache_read': 0,
+                'cache_write': 0,
+                'reasoning': 0,
+                'estimated_cost': '0',
+                'api_calls': 1,
+                'started_at': 1715514000.0,
+                'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+
+            os.makedirs(os.path.dirname(jobs_ledger), exist_ok=True)
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            task_marker = {
+                'muid': f'{job_id}-task',
+                'ts': 1715516000.5,
+                'sid': sid,
+                'task_type': 'code_review',
+                'operation_type': 'CHAT',
+            }
+            job_marker = {
+                'kind': 'job',
+                'ts': 1715516002.0,
+                'sid': sid,
+                'agentic_job_id': job_id,
+                'job_name': 'Phase 44 Cost Strip Test',
+                'job_type': 'code_review',
+                'status': 'SUCCESS',
+            }
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
+                f.write(json.dumps(record, separators=(',', ':')) + '\n')
+
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'INVOCATIONS_LOG': inv_log,
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+
+            rc, _ignored, output = run_script(
+                SCRIPTS_DIR / 'hermes-report.sh', base_env, inv_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed (rc={rc}): {output}')
+
+            outcome_inv = []
+            if os.path.exists(jobs_log):
+                with open(jobs_log) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if not line:
+                            continue
+                        argv = shlex.split(line)
+                        if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome':
+                            outcome_inv.append(argv)
+
+            self.assertEqual(
+                len(outcome_inv), 1,
+                f'expected exactly 1 "jobs outcome" invocation, got '
+                f'{len(outcome_inv)}: {outcome_inv!r}\nOutput: {output}'
+            )
+            return outcome_inv[0]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _metadata_value(argv):
+        for i, tok in enumerate(argv):
+            if tok == '--metadata' and i + 1 < len(argv):
+                return argv[i + 1]
+        return None
+
+    def test_candidate_row_withholds_net_value_but_ships_costs(self):
+        record = _cost_sidecar_record('rs44-job-001', reportability_status='candidate')
+        argv = self._run_one_outcome('rs44-sid-001', 'rs44-job-001', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('net_value', meta)
+        self.assertIn('supplied_costs', meta)
+        self.assertIn('cost_coverage', meta)
+        self.assertEqual(meta['supplied_costs'], {'human_review': 25.0})
+
+    def test_reportable_row_ships_net_value_too(self):
+        record = _cost_sidecar_record('rs44-job-002', reportability_status='reportable')
+        argv = self._run_one_outcome('rs44-sid-002', 'rs44-job-002', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIn('net_value', meta)
+        self.assertEqual(meta['net_value'], 85.0)
+        self.assertIn('supplied_costs', meta)
+        self.assertIn('cost_coverage', meta)
+
+    def test_evidence_class_rejected_row_still_ships_costs_not_net_value(self):
+        record = _cost_sidecar_record(
+            'rs44-job-003', reportability_status='reportable',
+            evidence_class='NOT_A_REAL_EVIDENCE_CLASS')
+        argv = self._run_one_outcome('rs44-sid-003', 'rs44-job-003', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('net_value', meta)
+        self.assertIn('supplied_costs', meta)
+        self.assertIn('cost_coverage', meta)
+
+    def test_unknown_cost_category_key_dropped_from_metadata(self):
+        record = _cost_sidecar_record(
+            'rs44-job-004', reportability_status='reportable',
+            supplied_costs={'human_review': 25.0, 'made_up_category': 999.0})
+        argv = self._run_one_outcome('rs44-sid-004', 'rs44-job-004', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('made_up_category', meta['supplied_costs'])
+        self.assertIn('human_review', meta['supplied_costs'])
+
+    def test_cost_coverage_unknown_category_entry_dropped(self):
+        record = _cost_sidecar_record(
+            'rs44-job-005', reportability_status='reportable',
+            cost_coverage={
+                'included': ['human_review'],
+                'known_zero': [],
+                'unknown': ['rework_or_error', 'not_a_real_category'],
+                'excluded': ['metered_ai_cost', 'not_the_ai_literal'],
+            })
+        argv = self._run_one_outcome('rs44-sid-005', 'rs44-job-005', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('not_a_real_category', meta['cost_coverage']['unknown'])
+        self.assertIn('rework_or_error', meta['cost_coverage']['unknown'])
+        self.assertNotIn('not_the_ai_literal', meta['cost_coverage']['excluded'])
+        self.assertIn('metered_ai_cost', meta['cost_coverage']['excluded'])
+
+    def test_non_numeric_supplied_cost_value_dropped_without_crashing(self):
+        record = _cost_sidecar_record(
+            'rs44-job-006', reportability_status='reportable',
+            supplied_costs={'human_review': 'not-a-number'})
+        argv = self._run_one_outcome('rs44-sid-006', 'rs44-job-006', record)
+        # the arc still reports -- exactly one jobs outcome invocation is
+        # already asserted inside _run_one_outcome.
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('supplied_costs', meta)
+
+
+def _extract_tuple_from_module(tree, target_name):
+    """Read `target_name = (...)`'s string elements straight out of a
+    parsed ast.Module, preserving ORDER -- unlike
+    tests.test_phase43_evidence_grading._extract_frozenset_from_module,
+    which returns an unordered set. EGV-14's ordering probe edge requires
+    COST_CATEGORIES' emission order to be part of the contract, so this
+    drift check must compare sequences, not sets.
+
+    Refuses (returns None) if there are zero or more than one matching
+    assignment, or if any element is not a plain string constant.
+    """
+    matches = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        if node.targets[0].id != target_name:
+            continue
+        if not isinstance(node.value, ast.Tuple):
+            continue
+        matches.append(node.value)
+    if len(matches) != 1:
+        return None
+    elements = []
+    for elt in matches[0].elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, str):
+            return None
+        elements.append(elt.value)
+    return tuple(elements)
+
+
+def _extract_tuple_assignment_fragment(text, target_name):
+    """Isolate the ONE `target_name = (...)` assignment out of a larger text
+    blob and parse it -- the tuple-typed, order-preserving counterpart to
+    tests.test_phase43_evidence_grading._extract_frozenset_assignment_fragment,
+    used here because hermes-report.sh is bash with embedded Python heredocs
+    and cannot be ast.parse'd as a whole.
+
+    Refuses (returns None) if the anchor text does not appear exactly once,
+    or if the isolated fragment does not parse as a single `NAME = (...)`
+    assignment of string constants.
+    """
+    anchor = f'{target_name} = ('
+    occurrences = [i for i in range(len(text)) if text.startswith(anchor, i)]
+    if len(occurrences) != 1:
+        return None
+    start = occurrences[0]
+    end = text.find(')', start)
+    if end == -1:
+        return None
+    fragment = text[start:end + 1]
+    try:
+        tree = ast.parse(fragment)
+    except SyntaxError:
+        return None
+    return _extract_tuple_from_module(tree, target_name)
+
+
+class CostCategoryDriftTests(unittest.TestCase):
+    """EGV-14 -- classifier.py's COST_CATEGORIES and hermes-report.sh's
+    _COST_CATEGORIES are a HAND-SYNCED pair, proven equal AND
+    ORDER-EQUAL -- unlike MechanismDriftTests' set comparison, emission
+    order is part of EGV-14's contract (the ordering probe edge), so this
+    compares tuples positionally, not sets."""
+
+    def test_classifier_and_reporter_cost_categories_agree_in_order(self):
+        classifier_tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        classifier_categories = _extract_tuple_from_module(
+            classifier_tree, 'COST_CATEGORIES')
+        self.assertIsNotNone(
+            classifier_categories,
+            'COST_CATEGORIES could not be extracted from classifier.py -- '
+            'the declaration moved and this extractor needs updating',
+        )
+
+        reporter_text = HERMES_REPORT_PATH.read_text()
+        reporter_categories = _extract_tuple_assignment_fragment(
+            reporter_text, '_COST_CATEGORIES')
+        self.assertIsNotNone(
+            reporter_categories,
+            '_COST_CATEGORIES could not be extracted from hermes-report.sh '
+            '-- the declaration moved and this extractor needs updating',
+        )
+
+        self.assertIsInstance(classifier_categories, tuple)
+        self.assertIsInstance(reporter_categories, tuple)
+        self.assertEqual(
+            classifier_categories, reporter_categories,
+            'classifier.py and hermes-report.sh have drifted on the '
+            'four-cost-category tuple, or their declared order differs',
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

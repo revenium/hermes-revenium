@@ -119,6 +119,27 @@ def _sidecar_record(job_id, **overrides):
         # because the record it describes IS a labor-substitution
         # assessment -- 3.5 hours of senior engineer review at $150/h.
         "economic_mechanism": "labor_substitution",
+        # Phase 44 (EGV-14/EGV-15, plan 44-02): classifier.py's
+        # _build_job_assessment populates net_value/supplied_costs/
+        # cost_coverage UNCONDITIONALLY (the latter two on every path
+        # including abstention; net_value on the success path only), and
+        # this plan makes hermes-report.sh forward all three -- another
+        # WR-04 fixture-fidelity site (PA-12), closed the same way plan
+        # 44-01 closed economic_mechanism's. Chosen deliberately over the
+        # unconfigured `supplied_costs: {}` shape (that shape is covered by
+        # ReporterStripTests' own records and 44-05's
+        # LiveShapeRegressionTests) so this golden exercises every
+        # forwarder: human_review costs $25 of this job's $525.0
+        # estimated_value, leaving a net_value of $500.0 -- internally
+        # consistent with the record already above.
+        "net_value": 500.0,
+        "supplied_costs": {"human_review": 25.0},
+        "cost_coverage": {
+            "included": ["human_review"],
+            "known_zero": [],
+            "unknown": ["rework_or_error", "integration", "training_or_change"],
+            "excluded": ["metered_ai_cost"],
+        },
         # Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
         # populates this UNCONDITIONALLY on every record it builds (Phase 42
         # onward). Default here is the reportable literal so every existing

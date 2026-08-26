@@ -3163,8 +3163,16 @@ _reportable = _is_correction or found.get('reportability_status') == _REPORTABIL
 # stripper rather than a second copy of the tuple is deliberate: a third
 # refusal branch added later cannot forget the family, because there is
 # nothing to forget -- it calls the same function.
+#
+# Phase 44 (EGV-14/EGV-15, D-07): 'net_value' joins this tuple because it is
+# MODEL-DERIVED MONEY -- the same reason estimated_value is already in the
+# family. supplied_costs and cost_coverage deliberately do NOT join it: they
+# are OPERATOR input, not model output, and withholding them is what would
+# make a null ROI unreadable (D-07's second sentence) -- they ship
+# unconditionally via their own --metadata forwarders further below,
+# regardless of reportability_status.
 _VALUE_OMIT_FAMILY = ('value_low', 'value_base', 'value_high', 'bounds_source',
-                      'currency', 'estimated_value', 'assumptions')
+                      'currency', 'estimated_value', 'assumptions', 'net_value')
 
 
 def _strip_value_family(rec):
@@ -3592,12 +3600,84 @@ if assessment_raw:
             'newly_enabled_work', 'quality_decision_improvement',
             'risk_avoidance', 'incremental_revenue',
         })
+
+        # Phase 44 (EGV-14/EGV-15, D-05/D-06, T-44-09): the same four cost
+        # categories classifier.py declares as COST_CATEGORIES, hand-synced
+        # exactly like _ECONOMIC_MECHANISMS immediately above -- a TUPLE,
+        # not a frozenset, because emission order is part of the contract
+        # (EGV-14's ordering probe edge) and
+        # tests/test_phase44_economic_mechanisms.py::CostCategoryDriftTests
+        # compares the two as an ORDERED sequence, not a set (unlike
+        # MechanismDriftTests' set comparison). This is the ONLY
+        # declaration of _COST_CATEGORIES in hermes-report.sh.
+        _COST_CATEGORIES = (
+            'human_review', 'rework_or_error', 'integration', 'training_or_change',
+        )
         economic_mechanism = record.get('economic_mechanism')
         if (
             isinstance(economic_mechanism, str)
             and economic_mechanism in _ECONOMIC_MECHANISMS
         ):
             meta['economic_mechanism'] = economic_mechanism[:64]
+
+        # Phase 44 (EGV-14/EGV-15, D-06/D-07/D-08): APPENDED to the same
+        # contiguous Phase 44 forwarder block plan 44-01 opened above, in
+        # the fixed order net_value / supplied_costs / cost_coverage --
+        # order and placement are contract, not style:
+        # meter-completion-assessment.golden.json's anchored pattern pins
+        # --metadata's key order, so appending here keeps this plan's
+        # re-pin a pure insertion.
+        #
+        # net_value survives to this point ONLY when the record was
+        # reportable -- D-07 strips it from `record` through the single
+        # shared _strip_value_family(), never a second per-forwarder gate.
+        net_value_raw = record.get('net_value')
+        if net_value_raw is not None:
+            try:
+                meta['net_value'] = float(net_value_raw)
+            except (TypeError, ValueError):
+                pass
+
+        # supplied_costs and cost_coverage are OPERATOR input, not model
+        # output, and are deliberately NEVER in _VALUE_OMIT_FAMILY (D-07's
+        # second half) -- they ship regardless of reportability, because
+        # withholding them is what would make a null ROI unreadable.
+        # T-44-09: an allow-list rebuild against _COST_CATEGORIES, key by
+        # key, so a hand-edited sidecar cannot smuggle an unknown key or a
+        # non-numeric value onto the wire; a value that fails float() is
+        # dropped rather than crashing this heredoc.
+        supplied_costs_raw = record.get('supplied_costs')
+        if isinstance(supplied_costs_raw, dict):
+            _rebuilt_costs = {}
+            for _category in _COST_CATEGORIES:
+                if _category not in supplied_costs_raw:
+                    continue
+                try:
+                    _rebuilt_costs[_category] = float(supplied_costs_raw[_category])
+                except (TypeError, ValueError):
+                    continue
+            if _rebuilt_costs:
+                meta['supplied_costs'] = _rebuilt_costs
+
+        cost_coverage_raw = record.get('cost_coverage')
+        if isinstance(cost_coverage_raw, dict):
+            _COST_COVERAGE_EXCLUDED_AI = 'metered_ai_cost'
+            _rebuilt_coverage = {}
+            for _list_key in ('included', 'known_zero', 'unknown'):
+                _raw_list = cost_coverage_raw.get(_list_key)
+                if isinstance(_raw_list, list):
+                    _filtered = [v for v in _raw_list if v in _COST_CATEGORIES]
+                    if _filtered:
+                        _rebuilt_coverage[_list_key] = _filtered
+            _raw_excluded = cost_coverage_raw.get('excluded')
+            if isinstance(_raw_excluded, list):
+                _filtered_excluded = [
+                    v for v in _raw_excluded if v == _COST_COVERAGE_EXCLUDED_AI
+                ]
+                if _filtered_excluded:
+                    _rebuilt_coverage['excluded'] = _filtered_excluded
+            if _rebuilt_coverage:
+                meta['cost_coverage'] = _rebuilt_coverage
         # Phase 43 (D-06, T-43-17): a correction stays reportable by
         # construction -- the reader's carve-out above never consults the
         # reportability gate for it -- but Finding 4 / C-06 established that
