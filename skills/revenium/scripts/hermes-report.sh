@@ -3505,6 +3505,24 @@ if assessment_raw:
         reportability_status = record.get('reportability_status')
         if isinstance(reportability_status, str) and reportability_status:
             meta['reportability_status'] = reportability_status[:16]
+        # Phase 43 (D-06, T-43-17): a correction stays reportable by
+        # construction -- the reader's carve-out above never consults the
+        # reportability gate for it -- but Finding 4 / C-06 established that
+        # `jobs roi` surfaces the corrected value indistinguishably from an
+        # original. `jobs roi` will not surface this marker either, but with
+        # it the distinguishing signal exists in data Revenium HOLDS rather
+        # than only in the local sidecar, which is the compensating control
+        # C-06 asked this phase for. Emitted ONLY when the resolved record's
+        # kind is a correction -- same conditional-emit rule as every other
+        # field here: a key absent from the record adds no key to meta, and
+        # an ORIGINAL assessment must never carry a marker saying it is not
+        # one. `sequence` guarded by the same non-bool numeric check the
+        # version fields above already use.
+        if record.get('kind') == 'correction':
+            meta['corrected'] = True
+            sequence_raw = record.get('sequence')
+            if isinstance(sequence_raw, (int, float)) and not isinstance(sequence_raw, bool):
+                meta['correction_sequence'] = int(sequence_raw)
         evaluator = record.get('evaluator')
         if isinstance(evaluator, str) and evaluator:
             meta['evaluator'] = evaluator[:64]
