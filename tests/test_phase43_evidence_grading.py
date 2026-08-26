@@ -204,5 +204,40 @@ class FixtureFidelityTests(unittest.TestCase):
         )
 
 
+class AbstentionTests(unittest.TestCase):
+    """Task 3 -- D-05: an abstained assessment is never reportable, whatever
+    the config says. Driven through the REAL construction path
+    (_build_job_assessment with abstention_reason set), not the resolver
+    directly -- proving bool(abstention_reason) is actually wired at the
+    single consumer site inside classifier.py, not merely available."""
+
+    def test_abstained_record_is_candidate_even_under_a_reportable_config(self):
+        mod = _load_classifier()
+        valid = {
+            'agentic_job_id': 'abstain-job-001', 'job_type': 'code_review', 'status': 'SUCCESS',
+        }
+        record = mod._build_job_assessment(
+            valid, None, None, {'experimentalReportEstimates': True}, 'llm', 'v1',
+            abstention_reason='abstained',
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            record['reportability_status'], mod.REPORTABILITY_CANDIDATE,
+            'an abstained record must be candidate even when the config opts in',
+        )
+        # D-11: the abstention omit family stays absent -- reportability_status
+        # is deliberately NOT in it (present, valued candidate), but the
+        # value-bearing fields it withholds must still be entirely missing.
+        for omitted_key in (
+            'value_low', 'value_base', 'value_high', 'bounds_source',
+            'currency', 'estimated_value', 'assumptions',
+        ):
+            self.assertNotIn(
+                omitted_key, record,
+                f'D-11 omit family key {omitted_key!r} must be absent on an abstained record',
+            )
+        self.assertEqual(record['abstention_reason'], 'abstained')
+
+
 if __name__ == '__main__':
     unittest.main()

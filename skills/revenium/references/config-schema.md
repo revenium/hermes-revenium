@@ -146,6 +146,7 @@ Absent from `config.json` is the same as disabled.
 | `currency` | `"USD"` | ISO 4217. An assessment naming a different currency is rejected. |
 | `maxHoursSaved` | `40` | Upper bound on the estimated hours saved. |
 | `maxLoadedRate` | `500` | Upper bound on the assumed loaded hourly rate. |
+| `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. |
 
 The read **fails closed**: a missing, unreadable, or malformed `config.json`
 resolves to disabled. This is the deliberate inverse of `guardrail-status.json`,
@@ -159,6 +160,20 @@ Abstention falls back to the existing status-only outcome path.
 The value produced is an **unverified model estimate** — see the assessment
 contract in [`job-declaration.md`](job-declaration.md) for what
 `MODEL_ESTIMATED_DEMO` means.
+
+### Reporting the estimate's value (EGV-18)
+
+`experimentalReportEstimates` is a second, independent opt-in on top of `enabled`. With it
+absent or not a literal `true`, an estimate is still computed and recorded locally in the
+job-assessments sidecar, but its `reportability_status` resolves to `candidate`: the outcome
+arc still reports to Revenium, and provenance (`evidence_class`, `evaluator`,
+`evaluator_version`, `model`, and the version family) still ships in `--metadata`, but no
+bound, no `bounds_source`, and no `assumptions` cross the wire — the number stays on this
+machine. Set it to a literal JSON `true` and `reportability_status` resolves to `reportable`,
+shipping the estimate exactly as the value flags and `--metadata` describe above. An
+abstained assessment is never `reportable`, whatever this key says. An operator-filed
+correction (`correct-assessment.sh`) always ships its value, regardless of this key — it is
+filed under explicit human authorisation, not naked-LLM estimation.
 
 ### Operator visibility (Phase 39, ROI-14)
 
