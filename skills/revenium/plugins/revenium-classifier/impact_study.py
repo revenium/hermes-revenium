@@ -404,7 +404,7 @@ def _validate(candidate) -> "dict | None":
         "value_low": value_low,
         "value_base": value_base,
         "value_high": value_high,
-        "assumptions": list(assumptions),
-        "diagnostics": list(diagnostics),
+        "assumptions": [_clamp_text(v) for v in assumptions],
+        "diagnostics": [_clamp_text(v) for v in diagnostics],
         "validity_scope": narrative["validity_scope"],
     }

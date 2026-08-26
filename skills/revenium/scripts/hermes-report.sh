@@ -3270,11 +3270,29 @@ _EVIDENCE_CLASSES = frozenset({
     'MODEL_ESTIMATED_DEMO', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
     'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
 })
+# WR-02 (43-REVIEW.md): scope the absent-is-permissible exception to the
+# record kind that actually earns it. Only a kind:"correction" record
+# legitimately carries no evidence_class -- correct-assessment.sh has never
+# written one. classifier.py populates it unconditionally on every
+# job_assessment via _forced_evidence_class(), so an ABSENT field on a
+# job_assessment is not a normal state: it is a hand-edited or truncated
+# line, the same bypass CR-01 came in through. Treating absence as
+# permissible for every kind let exactly that record sail through with no
+# rejection at all.
 _raw_evidence_class = found.get('evidence_class', None)
-if _raw_evidence_class is not None and (
-    not isinstance(_raw_evidence_class, str)
-    or _raw_evidence_class not in _EVIDENCE_CLASSES
-):
+_evidence_class_missing = _raw_evidence_class is None
+if _evidence_class_missing and not _is_correction:
+    # A job_assessment with no evidence_class is refused like an invalid
+    # one: there is no provenance to forward and no basis to ship a value.
+    _reject_evidence_class = True
+elif _evidence_class_missing:
+    _reject_evidence_class = False
+else:
+    _reject_evidence_class = (
+        not isinstance(_raw_evidence_class, str)
+        or _raw_evidence_class not in _EVIDENCE_CLASSES
+    )
+if _reject_evidence_class:
     # Reject: remove the key from the resolved record before ASSESSMENT_JSON
     # is dumped below -- the --metadata heredoc's existing conditional-emit
     # rule already adds no key for a field absent from the record, so one

@@ -405,6 +405,13 @@ def _tracer_assessment_record(job_id, **overrides):
     explicitly overrides it to exercise the EGV-18 gate itself."""
     record = {
         'kind': 'job_assessment',
+        # WR-02: classifier.py's _forced_evidence_class() populates this
+        # UNCONDITIONALLY on every job_assessment, exactly as it does
+        # reportability_status. A fixture without it tested a state
+        # production cannot produce -- and the reporter now refuses an
+        # absent evidence_class on a job_assessment, which is what
+        # surfaced the gap.
+        'evidence_class': 'MODEL_ESTIMATED_DEMO',
         'ts': 1715516002.5,
         'agentic_job_id': job_id,
         'assessment_id': f'{job_id}:0',

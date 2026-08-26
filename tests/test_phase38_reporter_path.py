@@ -518,6 +518,40 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertNotIn('evidence_class', meta)
 
+    def test_absent_evidence_class_on_a_job_assessment_is_refused(self):
+        """WR-02 (43-REVIEW.md): absence is permissible only for the record
+        kind that earns it.
+
+        correct-assessment.sh never writes an evidence_class, so a
+        kind:"correction" record legitimately has none -- that exception is
+        covered by test_absent_evidence_class_is_not_a_rejection above and
+        by test_last_match_wins_ships_newest_correction_low_bound. But
+        classifier.py populates the field unconditionally on every
+        job_assessment via _forced_evidence_class(), so an ABSENT field on
+        a job_assessment is not a normal state: it is a hand-edited or
+        truncated line -- the same bypass CR-01 came in through. Before
+        this fix such a record sailed through the allow-list with no
+        rejection at all.
+
+        BEHAVIOURAL, on real constructed argv. Not an impossibility claim."""
+        sidecar = _sidecar_record('ec43-job-004', reportability_status='reportable')
+        sidecar.pop('evidence_class', None)
+        argv = self._run_one_outcome(
+            'ec43-sid-004', 'ec43-job-004', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=sidecar,
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        for leaked in ('value_low', 'value_base', 'value_high',
+                       'bounds_source', 'currency', 'estimated_value',
+                       'assumptions'):
+            self.assertNotIn(
+                leaked, meta,
+                f'WR-02: {leaked!r} shipped for a job_assessment whose '
+                f'evidence_class was deleted: {meta}',
+            )
+
     def test_rejected_evidence_class_also_withholds_the_value_family(self):
         """CR-01 (43-REVIEW.md): a record REJECTED by the allow-list must
         withhold the estimate itself, not merely the two CLI scalars.
@@ -572,13 +606,25 @@ class TestPhase38ReporterPath(unittest.TestCase):
         module per the plan's own verification list -- would go red).
         Whether the value ships is decided by reportability_status alone,
         unaffected by this check."""
-        record = _sidecar_record('ec43-job-003')
-        del record['evidence_class']
+        # WR-02: this test's docstring has always described a
+        # kind:"correction" record, but its fixture was a job_assessment
+        # with the key deleted -- so it passed for the wrong reason, and
+        # scoping the exception by kind is what exposed that. Use the real
+        # correction record, which genuinely carries no evidence_class.
+        record = _correction_sidecar_record('ec43-job-003')
+        self.assertNotIn(
+            'evidence_class', record,
+            'correct-assessment.sh has never written evidence_class; if this '
+            'fires, the fixture has drifted from the shipped writer',
+        )
         argv = self._run_one_outcome(
             'ec43-sid-003', 'ec43-job-003', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
             sidecar=record,
         )
-        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        # The correction's OWN low bound (D-08), not the prior record's --
+        # the point is that a missing evidence_class does not block the
+        # value, whichever record supplies it.
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '100.0')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         meta = json.loads(self._metadata_value(argv))
         self.assertNotIn('evidence_class', meta)
