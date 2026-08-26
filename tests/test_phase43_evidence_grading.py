@@ -204,6 +204,104 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(self.mod.REPORTABILITY_CANDIDATE, 'candidate')
 
 
+class StudyReferenceTests(unittest.TestCase):
+    """EGV-13 -- _resolve_study_reference(cfg) resolves studyId/studyVersion
+    as an ALL-OR-NONE pair.
+
+    A half-reference (a lone id, or a lone version) is provenance no reader
+    can follow: impact_study.validate() admits a record only when study_id
+    is a non-empty string AND study_version is a plain int >= 1, so
+    ("study-a", 0) and ("", 3) can never name a real ImpactStudyResult.
+    Both config docs already describe the reference as a pair -- these
+    tests are what keeps the code and those docs from drifting apart.
+    """
+
+    def setUp(self):
+        self.mod = _load_classifier()
+
+    def test_a_fully_paired_config_is_carried_through(self):
+        """The control case: with both fields valid the reference survives
+        intact. Without this, every assertion below would also pass against
+        a function that returned ("", 0) unconditionally."""
+        self.assertEqual(
+            self.mod._resolve_study_reference(
+                {'studyId': 'study-a', 'studyVersion': 3}),
+            ('study-a', 3),
+        )
+
+    def test_partial_configs_resolve_both_fields_to_their_absent_defaults(self):
+        """The four partial shapes an operator can actually write: an id
+        with no version, a version with no id, an id with an out-of-range
+        version, and a blank-after-stripping id beside a valid version.
+        Each drops the WHOLE reference, not just the offending half."""
+        partial_cfgs = (
+            {'studyId': 'study-a'},
+            {'studyVersion': 3},
+            {'studyId': 'study-a', 'studyVersion': 0},
+            {'studyId': '   ', 'studyVersion': 3},
+        )
+        for cfg in partial_cfgs:
+            with self.subTest(cfg=cfg):
+                self.assertEqual(self.mod._resolve_study_reference(cfg), ('', 0))
+
+    def test_a_malformed_version_type_also_drops_the_id(self):
+        """studyVersion's type rules (no bools, no floats, no numeric
+        strings) are the same rules impact_study.py applies to
+        study_version -- and failing any of them takes the id down with
+        it."""
+        for bad_version in (True, 3.0, '3', None, [3]):
+            with self.subTest(studyVersion=bad_version):
+                self.assertEqual(
+                    self.mod._resolve_study_reference(
+                        {'studyId': 'study-a', 'studyVersion': bad_version}),
+                    ('', 0),
+                )
+
+    def test_a_partial_config_reaches_the_record_as_no_reference_at_all(self):
+        """The production path, not just the helper (42-LEARNINGS: a test
+        can pin what the TEST produces rather than what production sends).
+        A real _build_job_assessment call with a half-configured study must
+        persist "" / 0 on the sidecar record."""
+        mod = self.mod
+        raw = {
+            'inferred_role': 'engineer',
+            'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 100.0,
+            'currency': 'USD',
+            'basis': 'time avoided',
+            'confidence': 0.6,
+        }
+        cfg = {'studyId': 'half-configured-study'}  # no studyVersion
+        assessment = mod._validate_assessment(raw, cfg, 'stub', '1')
+        self.assertIsNotNone(assessment)
+        valid_job = {
+            'agentic_job_id': 'partial-study-job-001',
+            'job_type': 'code_review',
+            'status': 'SUCCESS',
+        }
+        record = mod._build_job_assessment(valid_job, assessment, raw, cfg, 'stub', '1')
+        self.assertIsNotNone(record)
+        self.assertEqual(record['study_id'], '')
+        self.assertEqual(record['study_version'], 0)
+
+    def test_never_raises_for_pathological_config_values(self):
+        """Same never-raise guarantee the reportability resolver carries:
+        exotic values fail their type checks and resolve to the absent
+        pair rather than propagating."""
+        pathological_cfgs = (
+            None, [], 'not-a-dict', 42,
+            {'studyId': object(), 'studyVersion': object()},
+            {'studyId': ['study-a'], 'studyVersion': {'v': 3}},
+        )
+        for cfg in pathological_cfgs:
+            with self.subTest(cfg=cfg):
+                try:
+                    ref = self.mod._resolve_study_reference(cfg)
+                except Exception as exc:  # pragma: no cover -- this IS the assertion
+                    self.fail(f'_resolve_study_reference raised {exc!r} for cfg={cfg!r}')
+                self.assertEqual(ref, ('', 0))
+
+
 class FixtureFidelityTests(unittest.TestCase):
     """Task 2 -- the direct answer to 42-LEARNINGS' "a golden fixture can pin
     what the TEST produces, not what production sends": tests/test_phase38_

@@ -50,7 +50,7 @@ An upgraded host keeps its legacy `alertId` field, but nothing reads it. See
 | `evaluator` | no | Which registered evaluator to use. Defaults to `"llm"`. |
 | `currency`, `maxHoursSaved`, `maxLoadedRate` | no | Bounds on the estimate. See the full schema for defaults and behaviour when exceeded. |
 | `experimentalReportEstimates` | no | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. `false` or absent (the default) computes and records an estimate locally but withholds its value from Revenium — the outcome and provenance still report, the number does not (`reportability_status: "candidate"`). `true` ships the value too (`reportability_status: "reportable"`). |
-| `studyId`, `studyVersion` | no | Name an impact study (EGV-12/EGV-13) this install's job assessments reference — a non-empty string id paired with an integer version >= 1. Recorded on every assessment; referencing a study never changes that assessment's own `evidence_class`. |
+| `studyId`, `studyVersion` | no | Name an impact study (EGV-12/EGV-13) this install's job assessments reference — a non-empty string id paired with an integer version >= 1, all-or-none (configure one without the other and neither is recorded). Recorded on every assessment; referencing a study never changes that assessment's own `evidence_class`. |
 
 The value this produces is an **unverified model estimate** — see
 [How it works](how-it-works.md#llm-outcome-value-evaluation-experimental) for what that

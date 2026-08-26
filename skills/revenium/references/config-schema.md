@@ -148,7 +148,7 @@ Absent from `config.json` is the same as disabled.
 | `maxLoadedRate` | `500` | Upper bound on the assumed loaded hourly rate. |
 | `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. |
 | `studyId` | `""` | A non-empty string naming an `ImpactStudyResult` this install's job assessments reference. Recorded on every assessment this install produces; never changes an assessment's own `evidence_class` (EGV-13, D-08). |
-| `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. Anything else (missing, non-integer, `< 1`) resolves both fields to their absent defaults. |
+| `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. The pair is **all-or-none in both directions**: if either field is missing or malformed (a blank `studyId`, a non-integer or `< 1` `studyVersion`), both resolve to their absent defaults. A half-reference could never name a real `ImpactStudyResult`, so none is recorded. |
 
 The read **fails closed**: a missing, unreadable, or malformed `config.json`
 resolves to disabled. This is the deliberate inverse of `guardrail-status.json`,

@@ -1166,10 +1166,18 @@ def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
     reference travel as data through a validator -- D-03 already rules that
     out for evidence_class, and the same reasoning covers this field.
 
-    Returns (study_id, study_version). study_id is a clamped, non-empty
-    string, or "" for anything else (missing, wrong type, or blank after
-    stripping). study_version is a plain non-bool int >= 1, or 0 for
-    anything else. Never raises: a pure function of one dict-or-None
+    Returns (study_id, study_version) as an ALL-OR-NONE pair. A study_id
+    is a clamped, non-empty string; a study_version is a plain non-bool int
+    >= 1. If EITHER field fails its own check (missing, wrong type, blank
+    after stripping, or a version below 1), BOTH resolve to their absent
+    defaults ("", 0) -- a lone id or a lone version is unresolvable
+    provenance, because impact_study.validate() admits a record only when
+    both are present and well-formed, so no half-reference can ever name a
+    real ImpactStudyResult. Recording one would put a reference on every
+    assessment this install produces that no reader could ever follow.
+    Both config docs already state the pairing (config-schema.md's
+    llmOutcomeEvaluation table and docs/configuration.md); this is the code
+    that makes it true. Never raises: a pure function of one dict-or-None
     argument, no I/O.
 
     D-08: the two fields returned here are the ENTIRE study reference a job
@@ -1194,6 +1202,14 @@ def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
     study_version = cfg.get("studyVersion")
     if isinstance(study_version, bool) or not isinstance(study_version, int) or study_version < 1:
         study_version = 0
+
+    # All-or-none: a partial config yields no reference at all, never a
+    # half one. Checked after both per-field resolutions rather than by
+    # returning early from the first, so each field is validated by its own
+    # rules regardless of which one is malformed -- the two checks stay
+    # readable side by side against the two rows in the config docs.
+    if not study_id or not study_version:
+        return ("", 0)
 
     return (study_id, study_version)
 
