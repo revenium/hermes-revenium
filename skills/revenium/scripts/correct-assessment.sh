@@ -76,10 +76,11 @@ fi
 [[ -z "${VALUE_HIGH}" ]] && VALUE_HIGH="${VALUE}"
 
 # --------------------------------------------------------------------------
-# Step 1+2: resolve the sidecar path and perform the D-14 refusal check in
-# ONE pass -- both need the same filename component and the same read of
-# the file, so doing them together avoids a second independent read that
-# could observe a different file state.
+# Step 1: resolve ONLY the sidecar path -- a pure string transform over
+# JOB_ID and JOB_ASSESSMENTS_DIR, no file I/O. Split out from the read that
+# used to follow it in the same pass (see the lock block immediately below
+# for why): the path must be known BEFORE anything can be locked, but
+# resolving it needs no lock of its own.
 #
 # The filename component is derived through the SAME three-step transform
 # `_sidecar_filename_component` in classifier.py uses (a fifth independent
@@ -90,8 +91,7 @@ fi
 # the whole script has one internally-consistent notion of "this job's
 # identity on disk" rather than a second hand-maintained transform.
 # --------------------------------------------------------------------------
-RESOLVE_OUTPUT=$(JOB_ID_PY="${JOB_ID}" JOB_ASSESSMENTS_DIR_PY="${JOB_ASSESSMENTS_DIR}" python3 - <<'PY'
-import json
+PATH_OUTPUT=$(JOB_ID_PY="${JOB_ID}" JOB_ASSESSMENTS_DIR_PY="${JOB_ASSESSMENTS_DIR}" python3 - <<'PY'
 import os
 import re
 
@@ -117,10 +117,103 @@ def _sidecar_filename_component(raw):
 
 component = _sidecar_filename_component(raw_job_id)
 sidecar_path = os.path.join(assessments_dir, f'{component}.jsonl')
-target_clean = _clean(raw_job_id)
 
 print(f'COMPONENT={component}')
 print(f'SIDECAR_PATH={sidecar_path}')
+PY
+)
+
+COMPONENT=$(printf '%s\n' "${PATH_OUTPUT}" | sed -n 's/^COMPONENT=//p')
+SIDECAR_PATH=$(printf '%s\n' "${PATH_OUTPUT}" | sed -n 's/^SIDECAR_PATH=//p')
+
+# --------------------------------------------------------------------------
+# Race-closing lock (Greptile P1, PR #94 follow-up). Prior to this, the
+# D-14 existence check (Step 2 below) ran UNLOCKED, and the append (old
+# Step 5) released its own lock the instant its heredoc exited -- Step 6's
+# ledger append and Step 8's remote ship ran AFTER that, with nothing held.
+# prune-markers.sh's os.unlink took no per-sidecar lock either (only the
+# global prune.lock), so it never blocked on the append's brief hold. Two
+# st_nlink checks (still below, unchanged) narrowed the window an unlink
+# could land in; narrowing is not closing it -- this project has now
+# learned that lesson three times, twice already on this very PR. Only
+# mutual exclusion closes it: acquire ONE lock here, covering the D-14
+# check through the remote ship (Step 8), and release only at the very end.
+#
+# `exec 9<"${SIDECAR_PATH}"` -- `<`, deliberately NOT `<>`. Bash's `<>`
+# opens for read/write and CREATES the file if it is missing, which would
+# reintroduce exactly the O_CREAT vivification bug PR #94's Step 5 fix
+# already closed once (a correction script must never be able to conjure a
+# sidecar into existence). flock() locks the INODE, not a particular open
+# mode, so a read-only fd serializes against any other cooperating locker
+# (this script and prune-markers.sh's job-assessments pass) just as well as
+# a read/write one would; Step 5 below still writes through its own
+# O_RDWR|O_APPEND descriptor, opened separately.
+#
+# A missing sidecar must produce the ordinary D-14 refusal, never bash's
+# raw "No such file or directory" redirection diagnostic. `exec` with only
+# redirections (no command) is special-cased by bash to abort the whole
+# (non-interactive) shell on a failed redirection, bypassing `set -e` and
+# any surrounding `if`/`||` guard on the exec form itself -- confirmed
+# against this repo's bash 3.2 -- so the existence is probed with `[[ -e ]]`
+# FIRST (avoiding the attempt entirely in the common case), and the `exec`
+# itself is wrapped in a `{ ...; }` group with its own `2>/dev/null` so even
+# a probe-to-exec TOCTOU (the file vanishing in between) degrades to a
+# catchable, silent failure rather than an uncatchable shell exit.
+# --------------------------------------------------------------------------
+if [[ ! -e "${SIDECAR_PATH}" ]]; then
+  echo "No assessment record found for job '${JOB_ID}' (sidecar absent, unreadable, or pruned) -- cannot correct (D-14)." >&2
+  echo "An operator willing to lose the audit trail can still correct the row with the revenium CLI directly." >&2
+  exit 1
+fi
+if ! { exec 9<"${SIDECAR_PATH}"; } 2>/dev/null; then
+  echo "No assessment record found for job '${JOB_ID}' (sidecar absent, unreadable, or pruned) -- cannot correct (D-14)." >&2
+  echo "An operator willing to lose the audit trail can still correct the row with the revenium CLI directly." >&2
+  exit 1
+fi
+if ! python3 - <<'PY'
+import fcntl
+import sys
+
+try:
+    # Blocking, deliberately: two operators correcting the same job, or an
+    # operator correcting while a manual prune-markers.sh is mid-check on
+    # this exact file, should serialize rather than one of them failing
+    # outright. prune-markers.sh's own acquisition (job-assessments pass)
+    # is non-blocking and skips instead -- a manual prune must never make an
+    # operator's correction wait, but an operator's correction MAY make a
+    # manual prune wait one tick's worth of skip-and-retry-later.
+    fcntl.flock(9, fcntl.LOCK_EX)
+except OSError as exc:
+    print(f'flock(LOCK_EX) failed on the sidecar: {exc}', file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  echo "Failed to acquire the assessment lock for job '${JOB_ID}' -- cannot correct." >&2
+  exit 1
+fi
+
+# --------------------------------------------------------------------------
+# Step 2: the D-14 existence / effective-assessment read, NOW performed
+# under the lock acquired above -- this is the change that actually closes
+# the race: nothing between here and Step 8's remote ship can be
+# invalidated by a cooperating prune anymore, because a cooperating prune
+# must take the same lock before it may unlink (see prune-markers.sh).
+# --------------------------------------------------------------------------
+RESOLVE_OUTPUT=$(JOB_ID_PY="${JOB_ID}" SIDECAR_PATH_PY="${SIDECAR_PATH}" python3 - <<'PY'
+import json
+import os
+
+raw_job_id = os.environ.get('JOB_ID_PY', '')
+sidecar_path = os.environ.get('SIDECAR_PATH_PY', '')
+
+
+def _clean(v):
+    for bad in (':', ' ', '\t', '\n', '\r'):
+        v = v.replace(bad, '_')
+    return v
+
+
+target_clean = _clean(raw_job_id)
 
 found = None
 line_count = 0
@@ -166,8 +259,6 @@ else:
 PY
 )
 
-COMPONENT=$(printf '%s\n' "${RESOLVE_OUTPUT}" | sed -n 's/^COMPONENT=//p')
-SIDECAR_PATH=$(printf '%s\n' "${RESOLVE_OUTPUT}" | sed -n 's/^SIDECAR_PATH=//p')
 FOUND=$(printf '%s\n' "${RESOLVE_OUTPUT}" | sed -n 's/^FOUND=//p')
 LINE_COUNT=$(printf '%s\n' "${RESOLVE_OUTPUT}" | sed -n 's/^LINE_COUNT=//p')
 CORRECTION_COUNT=$(printf '%s\n' "${RESOLVE_OUTPUT}" | sed -n 's/^CORRECTION_COUNT=//p')
@@ -266,17 +357,21 @@ fi
 # --------------------------------------------------------------------------
 # Step 5: write the local correction line FIRST, before any network call,
 # so nothing is lost when the remote leg fails or is unsupported. The read
-# of existing lines (to compute `sequence`) and the append happen under
-# ONE lock acquisition (fcntl.LOCK_EX), so the sequence can never be
-# computed against a stale count. O_APPEND + LOCK_EX mirrors
-# _write_job_assessment's own append discipline exactly.
+# of existing lines (to compute `sequence`) and the append happen under the
+# fd9 lock acquired above (held continuously since before Step 2), so the
+# sequence can never be computed against a stale count and nothing else
+# cooperating can be appending or unlinking underneath this. O_APPEND
+# mirrors _write_job_assessment's own append discipline exactly.
 #
-# WR-02 (42-REVIEW.md): Step 1+2's D-14 refusal check above reads the
-# sidecar with NO lock held. This open is opened WITHOUT O_CREAT and its
-# existence is re-verified a SECOND time, INSIDE the held flock, right
-# before the append -- see the heredoc below for why narrowing that first
-# check's window is not an acceptable fix here (this project already
-# learned that lesson once, on the billing path).
+# WR-02 (42-REVIEW.md): Step 1+2's original D-14 refusal check (now Step 2,
+# above) used to read the sidecar with NO lock held, and this append's own
+# internal flock() released the instant this heredoc exited -- both closed
+# by the fd9 lock now held end-to-end (see the block above Step 2). This
+# open is STILL opened WITHOUT O_CREAT and its existence is STILL
+# re-verified via st_nlink, both retained deliberately (see the heredoc
+# below) as defense in depth against a deleter that predates this change or
+# does not honor the fd9 lock protocol -- flock is advisory, so a bare `rm`
+# or an unpatched prune-markers.sh is not stopped by it.
 # --------------------------------------------------------------------------
 APPEND_OUTPUT=$(
   SIDECAR_PATH_PY="${SIDECAR_PATH}" \
@@ -292,7 +387,6 @@ APPEND_OUTPUT=$(
   PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
   REASON_PY="${REASON}" \
   python3 - <<'PY'
-import fcntl
 import json
 import os
 import time
@@ -324,47 +418,40 @@ job_id = os.environ.get('JOB_ID_PY', '')
 component = os.environ.get('COMPONENT_PY', '')
 reason = _clamp_reason(os.environ.get('REASON_PY', ''))
 
-# WR-02 (42-REVIEW.md): Step 1+2's D-14 check (far above, and unlocked)
-# can observe FOUND=1 and then lose a race to a concurrent, manually-
-# invoked prune-markers.sh (D-13's sidecar pass is mtime-only, and both
-# scripts are operator-run) that deletes this exact sidecar file before
-# we get here. The OLD code opened with 'a+b', which CREATES the file if
-# it is missing -- silently turning a should-be-refused correction into a
-# brand-new sidecar whose only line is the correction, with no original
-# `job_assessment` line ever having existed. That is precisely the D-14
-# invariant this script exists to enforce.
-#
-# Fixed two ways, deliberately NOT by narrowing the window between the two
-# checks (this project already learned, on the billing path, that
-# narrowing a TOCTOU is not closing it -- only a lock closes it):
+# WR-02 (42-REVIEW.md), CLOSED for good by the fd9 lock held since before
+# Step 2: a cooperating deleter (this script's own earlier D-14 check, or
+# prune-markers.sh's job-assessments pass, both updated to take the same
+# per-sidecar lock) literally cannot unlink this file while we hold fd9.
+# The two defenses below are retained anyway, as defense in depth against
+# an UNCOOPERATING deleter -- a bare `rm`, a hand-rolled script, or a
+# not-yet-upgraded prune-markers.sh that has never heard of this lock.
+# flock() is advisory: it only serializes against other processes that
+# also call flock() on the same file, never against unlink() itself.
 #
 #   1. Open WITHOUT O_CREAT (os.O_RDWR | os.O_APPEND, no os.O_CREAT). The
 #      open() syscall itself becomes the atomic "does this path exist
 #      right now" test -- there is no separate check-then-act step left to
 #      race, and a missing file raises FileNotFoundError instead of being
-#      silently vivified. O_APPEND is kept so writes still land at EOF
-#      regardless of seek position, matching the original append
-#      discipline exactly.
-#   2. Re-verify os.fstat(fd).st_nlink != 0 immediately AFTER flock() is
-#      held below -- this is the check done genuinely INSIDE the lock, the
-#      same discipline this file already uses for the sequence-number
-#      read. It closes the (much smaller, but still real) residual window
-#      between this open() succeeding and the flock() call succeeding:
-#      prune-markers.sh's os.unlink is not flock-coordinated, so a delete
-#      can still land there. unlink() drops the directory entry but not
-#      the inode while our fd holds it open, and st_nlink drops to 0 the
-#      instant no path points at that inode anymore -- an fd-local,
-#      race-free answer to "did the file I opened stop existing", which
-#      os.path.exists(path) cannot give (it asks about the PATH, not about
-#      the specific inode `fd` already refers to).
-#
-# Rejected alternative: comparing os.fstat(fd).st_ino against a stat taken
-# during Step 1+2's unlocked check. That needs an extra value threaded
-# across two separate python subprocess invocations for no protection the
-# two checks above don't already provide -- the non-creating open already
-# makes "silently replace with a new file of the same name" impossible, so
-# there is no distinct-inode-same-name case left for an inode comparison
-# to catch that st_nlink misses.
+#      silently vivified (the OLD code opened with 'a+b', which CREATES
+#      the file if missing -- silently turning a should-be-refused
+#      correction into a brand-new sidecar whose only line is the
+#      correction, with no original `job_assessment` line ever having
+#      existed; that is precisely the D-14 invariant this script exists to
+#      enforce). O_APPEND is kept so writes still land at EOF regardless of
+#      seek position, matching the original append discipline exactly.
+#   2. Re-verify os.fstat(fd).st_nlink != 0 immediately after the open
+#      above, and again after the write below. This is NOT re-acquiring a
+#      lock -- a second flock() call on a second fd for the same file
+#      would deadlock against the fd9 lock this process's own parent shell
+#      already holds (flock locks are scoped to the open file description,
+#      not the process; a same-process second open+flock on the same inode
+#      blocks on the first, and here the "first" is held by an ancestor
+#      that is waiting on THIS subprocess to exit -- proven with a two-fd
+#      same-process reproduction before this fix was written). st_nlink
+#      drops to 0 the instant no path points at the inode anymore --
+#      fd-local and race-free, unlike os.path.exists(path), which asks
+#      about the PATH rather than the specific inode this fd already holds
+#      open, and would not detect an uncooperating unlink+recreate at all.
 try:
     fd = os.open(path, os.O_RDWR | os.O_APPEND)
 except FileNotFoundError:
@@ -372,7 +459,6 @@ except FileNotFoundError:
     raise SystemExit(0)
 
 with os.fdopen(fd, 'r+b', buffering=0) as f:
-    fcntl.flock(f, fcntl.LOCK_EX)
     if os.fstat(f.fileno()).st_nlink == 0:
         print('REFUSED_TOCTOU=1')
         raise SystemExit(0)
@@ -401,23 +487,21 @@ with os.fdopen(fd, 'r+b', buffering=0) as f:
     }
     line_bytes = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
     f.write(line_bytes)
-    # Greptile P1 (PR #94): the st_nlink check ABOVE closes only the
-    # open()->flock() window. It does NOT close check->scan->write, which is
-    # the far wider one: prune-markers.sh's os.unlink takes no per-file lock
-    # (its flock is the global prune.lock), so an unlink landing anywhere
-    # after that check leaves this write succeeding against an orphaned
-    # inode -- the bytes vanish when the last fd closes -- while the shell
-    # goes on to append the JOB:<id>:correction ledger line and ship the
-    # remote outcome-update, telling the operator it worked. Remote holds a
-    # correction, local holds nothing, and nobody is told.
-    #
-    # A pre-write check cannot fix a post-check unlink; only re-verifying
-    # AFTER the bytes are down can. Once this check passes the record lives
-    # in a file that still has a name, so any later unlink is ordinary
-    # pruning rather than a lost write. Refusing here (before SEQUENCE is
-    # emitted) is what keeps the shell from writing the ledger line or
-    # shipping -- leaving no local record, no remote correction and no
-    # ledger line, which a re-run then reports truthfully as D-14.
+    # Greptile P1 (PR #94), CLOSED for good by the fd9 lock: this check used
+    # to be the ONLY thing standing between a concurrent, uncoordinated
+    # prune-markers.sh unlink and a write succeeding against an orphaned
+    # inode -- bytes that vanish when the last fd closes, while the shell
+    # goes on to append the ledger line and ship the remote outcome-update,
+    # telling the operator it worked. prune-markers.sh's job-assessments
+    # pass now takes this SAME lock before it may unlink, so a cooperating
+    # prune cannot land here at all. Retained as defense in depth against an
+    # uncooperating deleter (see the block comment above the open() call):
+    # once this check passes the record lives in a file that still has a
+    # name, so any LATER unlink is ordinary pruning rather than a lost
+    # write. Refusing here (before SEQUENCE is emitted) is what keeps the
+    # shell from writing the ledger line or shipping -- leaving no local
+    # record, no remote correction and no ledger line, which a re-run then
+    # reports truthfully as D-14.
     os.fsync(f.fileno())
     if os.fstat(f.fileno()).st_nlink == 0:
         print('REFUSED_TOCTOU=1')
@@ -438,11 +522,12 @@ PY
 )
 
 # WR-02 (42-REVIEW.md): the heredoc above refuses (prints only this marker,
-# writes nothing) when its re-verification under the held lock finds the
-# sidecar gone -- deleted between Step 1+2's unlocked D-14 check and this
-# step, most plausibly by a concurrent, manually-invoked prune-markers.sh.
-# Checked BEFORE parsing SEQUENCE/TS below, which are meaningless (empty)
-# on this path.
+# writes nothing) when its st_nlink defense-in-depth finds the sidecar
+# gone. Under the fd9 lock held since before Step 2, a cooperating deleter
+# (prune-markers.sh's job-assessments pass) cannot have caused this; if it
+# fires, the file was removed by something that never took the lock at all
+# -- a bare `rm` or an un-upgraded prune-markers.sh. Checked BEFORE parsing
+# SEQUENCE/TS below, which are meaningless (empty) on this path.
 REFUSED_TOCTOU=$(printf '%s\n' "${APPEND_OUTPUT}" | sed -n 's/^REFUSED_TOCTOU=//p')
 if [[ "${REFUSED_TOCTOU}" == "1" ]]; then
   echo "Sidecar record for job '${JOB_ID}' disappeared between the existence check and the correction append (likely a concurrent prune) -- refusing without writing (D-14)." >&2
@@ -573,3 +658,11 @@ if [[ "${cmd_exit}" -ne 0 ]]; then
 fi
 
 echo "Correction shipped to Revenium: job='${JOB_ID}' sequence=${SEQUENCE}"
+
+# --------------------------------------------------------------------------
+# Release the fd9 lock explicitly on the success path. Every refusal path
+# above exits non-zero instead, which releases it just as well via process
+# exit -- explicit release is only needed here, at the one place execution
+# falls off the end of the script.
+# --------------------------------------------------------------------------
+exec 9<&-
