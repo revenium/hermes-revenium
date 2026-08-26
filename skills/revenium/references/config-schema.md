@@ -190,7 +190,7 @@ The file holds one JSON line per record, of two kinds: `job_assessment` (the ori
 written by the classifier immediately after evaluation, before the job marker itself —
 sidecar-first ordering means a crash between the two writes leaves a harmless orphan
 sidecar record rather than losing the assessment's value) and `correction` (an
-operator-filed revision, appended by a later plan's `correct-assessment.sh`). A scan-to-end
+operator-filed revision, appended by `correct-assessment.sh`). A scan-to-end
 reader with no early exit means the LAST line matching a job id wins, so a `correction` line
 naturally supersedes the original. Each line is capped at 8,192 bytes; an over-length line
 is skipped by the reader (never crashes it) and refused outright by the writer.
