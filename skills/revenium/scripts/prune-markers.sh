@@ -116,8 +116,6 @@ STATE_DB_PY="${STATE_DB}" \
 JOB_ASSESSMENTS_DIR_PY="${JOB_ASSESSMENTS_DIR}" \
 ASSESSMENT_RETENTION_DAYS_PY="${REVENIUM_ASSESSMENT_RETENTION_DAYS}" \
 ASSESSMENT_RETENTION_OK_PY="${ASSESSMENT_RETENTION_OK}" \
-REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_ENTERED_PY="${REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_ENTERED:-}" \
-REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_RELEASE_PY="${REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_RELEASE:-}" \
 python3 - <<'PY' >"${prune_out}"
 import fcntl
 import os
@@ -751,29 +749,6 @@ prune_owners(os.environ.get('OWNERS_DIR_PY', ''), os.environ.get('STATE_DB_PY', 
 #     can be writing.
 # ---------------------------------------------------------------------------
 
-# Test-only deterministic interleaving hook for the mutation-checked proof
-# that the mtime re-check above happens genuinely AFTER flock() succeeds,
-# not before it (tests/test_phase42_assessment_contract.py). No-op unless
-# BOTH env vars are set, which only the test harness does: it pauses this
-# process here -- lock already held, mtime not yet read -- while the test
-# externally mutates the file's mtime, then releases. Mirrors the same
-# blocking-checkpoint technique correct-assessment.sh's own WR-02 tests use
-# via a revenium CLI shim; this script has no external command to
-# intercept a call to, so the checkpoint is inline instead.
-_TEST_HOOK_ENTERED = os.environ.get('REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_ENTERED_PY', '')
-_TEST_HOOK_RELEASE = os.environ.get('REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_RELEASE_PY', '')
-
-
-def _test_hook_pause_after_lock_acquired():
-    if not (_TEST_HOOK_ENTERED and _TEST_HOOK_RELEASE):
-        return
-    with open(_TEST_HOOK_ENTERED, 'w'):
-        pass
-    deadline = time.time() + 10
-    while not os.path.exists(_TEST_HOOK_RELEASE) and time.time() < deadline:
-        time.sleep(0.02)
-
-
 def prune_assessments_dir(assessments_dir, retention_secs, dry_run):
     a_scanned = a_kept = a_removed = a_skipped_busy = 0
     try:
@@ -812,8 +787,6 @@ def prune_assessments_dir(assessments_dir, retention_secs, dry_run):
                     flush=True,
                 )
                 continue
-
-            _test_hook_pause_after_lock_acquired()
 
             # Re-stat UNDER the lock -- the authoritative staleness read.
             # fstat(fd) rather than getmtime(fpath): the fd was opened
