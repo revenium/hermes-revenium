@@ -1,5 +1,6 @@
 """Phase 43 Plans 01, 02 & 04 — the EGV-18 reportability gate, the EGV-10
-nine-label evidence-class vocabulary, and EGV-11's promotion fixture.
+nine-label evidence-class vocabulary, and EGV-11/EGV-13's two-instrument
+promotion and non-inheritance proofs.
 
 An estimate produced without explicit experimental opt-in is retained locally
 as a candidate; its number never leaves the machine. Plan 01's classes test
@@ -9,20 +10,20 @@ Plan 02's classes (`LabelTests`, `LabelDriftTests`) test the nine EGV-10
 claim labels themselves -- that they exist as one flat, unordered set, what
 is genuinely impossible about that shape versus what is merely absent from
 today's code, and that the hand-synced pair in classifier.py and
-hermes-report.sh cannot drift apart silently. Plan 04 Task 2 adds
-`PromotionTests` -- the behavioural half of EGV-11's two-instrument proof
-(D-04): a hostile evaluator response, seven simultaneous attacks, fed
-through the REAL construction path. The static half (a scoped ast-guard) and
-EGV-13's non-inheritance proof land in Plan 04 Task 3, appended to this same
-module.
+hermes-report.sh cannot drift apart silently. Plan 04's classes
+(`PromotionTests`, `NonInheritanceTests`) prove EGV-11 twice, per D-04, and
+EGV-13 once, per D-08/D-07 -- see each class's own docstring for exactly
+which of the two instruments it is and what it does and does not claim.
 
 Requirements covered:
   EGV-10 — the nine claim labels are representable as a flat, unordered set;
            customer confirmation, observation, and configuration are not
            comparable and must never be modelled as a confidence ladder.
   EGV-11 — a hostile evaluator response cannot promote its own claim
-           strength. This module's `PromotionTests` (Plan 04 Task 2) is the
-           BEHAVIOURAL half of D-04's two-instrument proof.
+           strength, proven both behaviourally (the fixture) and
+           structurally (the scoped ast-guard) -- D-04 requires BOTH.
+  EGV-13 — a job referencing an impact study never inherits the study's
+           evidence_class, strength, or validity scope.
   EGV-18 — reportability_status gates whether an estimate's VALUE (not its
            provenance) reaches Revenium.
 
@@ -37,16 +38,17 @@ Decisions this module exercises (43-CONTEXT.md):
   D-03 — evidence_class is blocked by never consulting evaluator output
          for it -- there is no field to attack.
   D-04 — EGV-11 is proven twice: an adversarial fixture through the REAL
-         construction path (this class), AND a scoped ast-guard over
-         classifier.py (Plan 04 Task 3, appended below). The fixture
-         proves today's code ignores the field; only the guard catches a
-         future edit that starts reading it.
+         construction path, AND a scoped ast-guard over classifier.py.
+         The fixture proves today's code ignores the field; only the
+         guard catches a future edit that starts reading it.
   D-05 — reportable | candidate; a candidate withholds value_low/value_base/
          value_high/bounds_source/currency/estimated_value/assumptions but
          keeps evidence_class/evaluator/evaluator_version/model/the version
          family.
   D-06 — a kind:"correction" record is reportable by construction, no
          config opt-in required.
+  D-08 — a job references a study by id and version only; its own
+         evidence_class is always set by its own source's forced constant.
   D-09 — reportability_status is a straight rename of Phase 42's
          REPORTABILITY_STATUS_DEFAULT placeholder; no migration shim.
   D-11 — reportability_status is deliberately NOT in the abstention omit
@@ -64,12 +66,16 @@ test's own docstring: not-indexable is IMPOSSIBLE-class (a frozenset has no
 __getitem__), never-sorted is STATIC-class (proves absence in the two files
 scanned today, not impossibility -- Python's str is orderable). LabelDriftTests
 is BEHAVIOURAL: it proves the two live declarations agree right now, not that
-they can never diverge in the future. Plan 04's `PromotionTests` (this
-addition) is entirely BEHAVIOURAL: it proves the code that exists TODAY
-ignores every attacked key when fed a hostile-but-accepted response through
-the real construction path. It does NOT prove a future edit cannot start
-reading one of these keys -- that stronger, static claim belongs to Task 3's
-ast-guard, appended to this same class in the next commit.
+they can never diverge in the future. Plan 04's PromotionTests is MIXED: its
+seven attack methods and the closing key-set method are BEHAVIOURAL (today's
+code ignores these keys); its two guard methods are STATIC, current-code-only
+(no future edit that starts reading a forbidden key survives them, but
+neither proves such an edit is impossible to write). NonInheritanceTests is
+also MIXED, and its structural half is the STRONGEST claim in this whole
+phase: with no import edge from classifier.py to impact_study.py (and no
+dynamic-import escape), no code path in classifier.py can reach ANY field of
+ANY study, full stop -- that one guard is entitled to say "impossible", not
+merely "absent today", and its own docstring says so.
 """
 import ast
 import importlib.util
@@ -81,6 +87,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
 CLASSIFIER_SOURCE_PATH = PLUGIN / 'classifier.py'
 HERMES_REPORT_PATH = ROOT / 'skills' / 'revenium' / 'scripts' / 'hermes-report.sh'
+IMPACT_STUDY_PATH = PLUGIN / 'impact_study.py'
 
 
 def _load_classifier(env: dict | None = None):
@@ -106,6 +113,19 @@ def _load_classifier(env: dict | None = None):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def _load_impact_study():
+    """Import impact_study.py fresh -- same not-imported-across-test-modules
+    posture as _load_classifier above (matching tests/test_phase43_impact_
+    study.py's own loader), used here only by NonInheritanceTests to build a
+    REAL ImpactStudyResult through validate() rather than a hand-built dict.
+    """
+    spec = importlib.util.spec_from_file_location(
+        'phase43_04_impact_study', str(IMPACT_STUDY_PATH))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 class ResolverTests(unittest.TestCase):
@@ -329,21 +349,164 @@ def _hostile_evaluator_response():
     }
 
 
+# -- Plan 43-04, Task 3: the scoped ast key-read guard ----------------------
+#
+# The forbidden-key set the guard below scans classifier.py for, taken
+# VERBATIM from the seven attacks _hostile_evaluator_response() builds
+# above -- the guard's coverage is derived from a concrete, reviewed attack
+# shape, not guessed at. A3/A6 each contribute more than one key.
+_PROMOTION_FORBIDDEN_KEYS = frozenset({
+    'evidence_class', 'impact_class', 'study_id', 'study_version',
+    'reportability_status', 'evidence_references',
+    'evaluator', 'evaluator_version', 'model', 'estimated_value',
+})
+
+# The three functions that legitimately hold the untrusted evaluator
+# response in scope, all under the SAME parameter name -- which is what
+# lets one guard cover all three (confirmed against classifier.py at plan
+# 43-04 execution time).
+_SCOPED_FUNCTIONS = ('_validate_assessment', '_build_job_assessment', '_resolve_value_bounds')
+_UNTRUSTED_PARAM_NAME = 'raw'
+
+
+def _scoped_function_defs(tree):
+    """Return {function_name: ast.FunctionDef} for each name in
+    _SCOPED_FUNCTIONS found anywhere in `tree` -- classifier.py declares all
+    three at module level, but ast.walk is used rather than assuming that
+    stays true forever."""
+    found = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name in _SCOPED_FUNCTIONS:
+            found[node.name] = node
+    return found
+
+
+def _assert_functions_declare_untrusted_param(tree, filename):
+    """Discovery step, run BEFORE the read-scan below. If any of the three
+    scoped functions is missing, or no longer declares a parameter named
+    _UNTRUSTED_PARAM_NAME (e.g. a rename), this guard's scoping has broken
+    silently -- and a name-scoped guard that silently stops matching is
+    worse than no guard at all, because it keeps passing while covering
+    nothing. Returns a list of "file: ..." offense strings (empty means the
+    guard's own scoping is intact), never a bool, so a failure names exactly
+    which function/rename broke it."""
+    found = _scoped_function_defs(tree)
+    offenders = []
+    for name in _SCOPED_FUNCTIONS:
+        node = found.get(name)
+        if node is None:
+            offenders.append(
+                f'{filename}: {name} not found -- guard scoping needs updating')
+            continue
+        arg_names = {a.arg for a in node.args.args}
+        if _UNTRUSTED_PARAM_NAME not in arg_names:
+            offenders.append(
+                f'{filename}:{node.lineno}: {name} no longer declares a '
+                f'parameter named {_UNTRUSTED_PARAM_NAME!r} -- guard scoping '
+                'needs updating'
+            )
+    return offenders
+
+
+def _constant_str_key(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _find_forbidden_raw_reads(tree, filename):
+    """Walk ONLY inside the three scoped functions' bodies (per the
+    discovery step above) for reads of a forbidden key off the
+    _UNTRUSTED_PARAM_NAME-named variable, across every access idiom this
+    codebase -- or an attacker's future edit -- could spell: subscript,
+    the .get()/.pop()/.setdefault() dict-lookup methods (the two-argument
+    default form of .get() is the SAME node shape and needs no special
+    handling), the getattr() builtin, and dict-literal splat unpacking
+    (**raw).
+
+    Deliberately scoped to the `raw` NAME within these three functions, and
+    to a NAMED forbidden-key set, not a blanket string match on the key
+    names anywhere in the file: classifier.py legitimately WRITES several
+    of these same key names as dict-LITERAL keys (e.g. "evidence_class":
+    _forced_evidence_class() inside _build_job_assessment's own record
+    literal), and later pipeline code legitimately reads these fields back
+    off the ALREADY-CONSTRUCTED record -- a local variable this guard never
+    scopes to. A blanket matcher would false-positive on that fully
+    compliant code the day it shipped.
+
+    The splat check is unconditional on key name (not just the forbidden
+    set): a splat cannot be scoped to one key statically and would smuggle
+    every forbidden key in at once -- the obvious way around a key-name
+    matcher, and the reason the plan calls it out by name.
+
+    Returns a list of "file:line: ..." offense strings.
+    """
+    found = _scoped_function_defs(tree)
+    offenders = []
+    for func_node in found.values():
+        for node in ast.walk(func_node):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == _UNTRUSTED_PARAM_NAME
+            ):
+                key = _constant_str_key(node.slice)
+                if key in _PROMOTION_FORBIDDEN_KEYS:
+                    offenders.append(
+                        f'{filename}:{node.lineno}: raw[{key!r}] subscript read')
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ('get', 'pop', 'setdefault')
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == _UNTRUSTED_PARAM_NAME
+                and node.args
+            ):
+                key = _constant_str_key(node.args[0])
+                if key in _PROMOTION_FORBIDDEN_KEYS:
+                    offenders.append(
+                        f'{filename}:{node.lineno}: raw.{node.func.attr}({key!r}, ...) read')
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == 'getattr'
+                and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name)
+                and node.args[0].id == _UNTRUSTED_PARAM_NAME
+            ):
+                key = _constant_str_key(node.args[1])
+                if key in _PROMOTION_FORBIDDEN_KEYS:
+                    offenders.append(
+                        f'{filename}:{node.lineno}: getattr(raw, {key!r}, ...) read')
+            if isinstance(node, ast.Dict):
+                for dict_key, dict_value in zip(node.keys, node.values):
+                    if (
+                        dict_key is None
+                        and isinstance(dict_value, ast.Name)
+                        and dict_value.id == _UNTRUSTED_PARAM_NAME
+                    ):
+                        offenders.append(
+                            f'{filename}:{node.lineno}: {{**raw, ...}} splat unpack')
+    return offenders
+
+
 class PromotionTests(unittest.TestCase):
-    """EGV-11 (D-04) -- the BEHAVIOURAL half of the two-instrument proof.
-    This class's seven attack methods and the closing key-set method prove
-    the code that exists TODAY ignores every one of these keys when a
-    hostile response is fed through the REAL _validate_assessment ->
-    _build_job_assessment construction path. They do NOT prove a future
-    edit cannot start reading one of these keys -- that is what Task 3's
-    scoped ast-guard (appended to this same class in the next commit) is
-    for, and D-04 requires both: the fixture proves today's code is safe;
-    the guard proves a future edit that starts reading a forbidden key
-    turns red. Neither makes the other's claim -- a mutation that adds a
-    fallback read (value if present, else the forced constant) would turn
-    the guard red without turning this fixture red, because the fallback
-    still yields the same value on this fixture's inputs. That asymmetry
-    is exactly why D-04 requires both instruments.
+    """EGV-11 (D-04) -- proven twice, and both instruments live in this one
+    class. The seven attack methods and the closing key-set method above
+    are the BEHAVIOURAL half: they prove the code that exists TODAY
+    ignores every one of these keys when a hostile response is fed through
+    the REAL _validate_assessment -> _build_job_assessment construction
+    path. They do NOT prove a future edit cannot start reading one of
+    these keys -- that is what the two guard methods below
+    (test_functions_declare_the_scoped_parameter,
+    test_no_forbidden_key_is_read_off_the_untrusted_response) are for, and
+    D-04 requires both: the fixture proves today's code is safe; the guard
+    proves a future edit that starts reading a forbidden key turns red.
+    Neither makes the other's claim -- a mutation that adds a fallback read
+    (value if present, else the forced constant) turns the guard red
+    without turning the fixture red, because the fallback still yields the
+    same value on this fixture's inputs. That asymmetry is exactly why
+    D-04 requires both instruments.
     """
 
     def setUp(self):
@@ -416,6 +579,167 @@ class PromotionTests(unittest.TestCase):
             got_keys, declared_keys,
             f'record key set does not match the declared contract exactly -- '
             f'missing={declared_keys - got_keys!r}, extra={got_keys - declared_keys!r}',
+        )
+
+    # -- Guard one: the scoped ast key-read guard (43-04-PLAN.md Task 3). --
+
+    def test_functions_declare_the_scoped_parameter(self):
+        """Discovery step: if this fails, the guard below is scoped to a
+        name that no longer exists on one of the three functions -- fix the
+        guard's scoping, not this assertion."""
+        tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        offenders = _assert_functions_declare_untrusted_param(tree, 'classifier.py')
+        self.assertEqual(offenders, [], f'guard scoping is broken: {offenders!r}')
+
+    def test_no_forbidden_key_is_read_off_the_untrusted_response(self):
+        """GUARD ONE (EGV-11's structural half). STATIC, current-code-only:
+        proves no code path inside _validate_assessment, _build_job_
+        assessment, or _resolve_value_bounds reads a forbidden key off the
+        untrusted `raw` parameter TODAY, via subscript, .get()/.pop()/
+        .setdefault(), getattr(), or dict-splat unpacking. It does NOT
+        prove such a read is impossible to write -- that is a claim only
+        NonInheritanceTests' import-boundary guard below is entitled to
+        make, and only for a different question (whether a study's own
+        fields can reach a job assessment at all). Paired with the seven
+        behavioural attack methods above: the fixture proves today's code
+        ignores these keys; this guard proves a future edit that starts
+        reading one turns red.
+
+        Deliberately scoped to reads on the untrusted evaluator-response
+        parameter, not a blanket string match on the key names: the same
+        file legitimately WRITES the forced label as a dict-literal key
+        (e.g. "evidence_class": _forced_evidence_class()), and later
+        pipeline code legitimately reads these fields back off the
+        already-constructed record. A blanket matcher would fail on
+        compliant code the day it shipped.
+        """
+        tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        offenders = _find_forbidden_raw_reads(tree, 'classifier.py')
+        self.assertEqual(offenders, [], f'forbidden read(s) of raw: {offenders!r}')
+
+
+def _top_level_imports(tree):
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name.split('.')[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported.add(node.module.split('.')[0])
+    return imported
+
+
+class NonInheritanceTests(unittest.TestCase):
+    """EGV-13 (D-08, D-07) -- a job referencing an impact study never
+    inherits the study's evidence_class, effect estimate, or validity
+    scope.
+
+    Two halves, and they are NOT the same kind of guarantee:
+
+    test_referencing_the_strongest_study_leaves_the_jobs_own_label_unchanged
+    is BEHAVIOURAL: it builds a REAL ImpactStudyResult via
+    impact_study.validate() using the randomized-design identification
+    method (RCT) -- the strongest in the vocabulary, and the study a naive
+    consumer would be most tempted to treat as individually observed
+    causality -- configures the classifier with that study's id/version,
+    and proves the resulting job assessment's own evidence_class,
+    confidence, and every other field carry no trace of the study's
+    values, for the one study exercised here.
+
+    test_classifier_does_not_import_impact_study_statically_or_dynamically
+    is this PHASE's one genuine STRUCTURAL impossibility claim, stronger
+    than every other guard in Plan 43-04: with no import edge from
+    classifier.py to impact_study.py, and no dynamic-import escape via
+    importlib, NO code in classifier.py can call ANYTHING impact_study.py
+    defines -- full stop, for ANY study, not merely the one this test
+    happens to construct. A study's strength is UNREACHABLE, not merely
+    unread. This is the mirror half of impact_study.py's own ast-guard
+    (tests/test_phase43_impact_study.py's ImportBoundaryTests), which
+    proves the reverse edge is absent; together the two close the loop
+    from both sides.
+    """
+
+    def test_referencing_the_strongest_study_leaves_the_jobs_own_label_unchanged(self):
+        impact_study = _load_impact_study()
+        study_candidate = {
+            'study_id': 'randomized-onboarding-study-2026',
+            'study_version': 3,
+            'unit': 'individual contributor',
+            'population': 'engineers using Hermes for code review',
+            'intervention': 'agent-assisted review',
+            'comparator': 'unassisted review',
+            'estimand': 'average treatment effect of agent assistance on review time',
+            'identification_method': 'RCT',
+            'outcome': 'hours to complete review',
+            'observation_window_start': 1700000000.0,
+            'observation_window_end': 1700600000.0,
+            'value_low': 1000.0,
+            'value_base': 5000.0,
+            'value_high': 9000.0,
+            'assumptions': ['SUTVA holds', 'random assignment was honored'],
+            'diagnostics': ['balance table shows no significant covariate imbalance'],
+            'validity_scope': 'internal validity strong; external validity limited to this cohort',
+        }
+        study = impact_study.validate(study_candidate)
+        self.assertIsNotNone(
+            study, 'the study fixture itself must validate for this test to be meaningful')
+
+        mod = _load_classifier()
+        raw = {
+            'inferred_role': 'engineer',
+            'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 100.0,
+            'currency': 'USD',
+            'basis': 'time avoided',
+            'confidence': 0.6,
+        }
+        cfg = {'studyId': study['study_id'], 'studyVersion': study['study_version']}
+        assessment = mod._validate_assessment(raw, cfg, 'stub', '1')
+        self.assertIsNotNone(assessment)
+        valid_job = {
+            'agentic_job_id': 'noninherit-job-001', 'job_type': 'code_review', 'status': 'SUCCESS',
+        }
+        record = mod._build_job_assessment(valid_job, assessment, raw, cfg, 'stub', '1')
+        self.assertIsNotNone(record)
+
+        # The job's own label is untouched by referencing an EXPERIMENTAL-
+        # strength (RCT) study.
+        self.assertEqual(record['evidence_class'], mod.EVIDENCE_CLASS_MODEL_ESTIMATED)
+        # The reference itself IS carried, exactly as configured.
+        self.assertEqual(record['study_id'], study['study_id'])
+        self.assertEqual(record['study_version'], study['study_version'])
+
+        # No other value from the study appears anywhere among the record's
+        # values -- not the effect estimate, not validity_scope, not any
+        # narrative field. String-compared so a numeric collision (e.g. an
+        # unrelated field that happens to equal 1700000000.0) is still
+        # caught.
+        study_values_other_than_reference = {
+            str(v) for k, v in study.items() if k not in ('study_id', 'study_version')
+        }
+        record_values_as_strings = {str(v) for v in record.values()}
+        leaked = study_values_other_than_reference & record_values_as_strings
+        self.assertEqual(
+            leaked, set(),
+            f'study value(s) leaked into the job assessment record: {leaked!r}',
+        )
+
+    def test_classifier_does_not_import_impact_study_statically_or_dynamically(self):
+        tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        imported = _top_level_imports(tree)
+        self.assertNotIn(
+            'impact_study', imported,
+            'classifier.py imports impact_study.py -- this is the ONE genuinely '
+            'structural guarantee this phase makes; an import edge here would '
+            'give a study a code path into a job assessment',
+        )
+        # A dynamic import via importlib is the one way to reach a module
+        # without a static import edge, and would silently defeat the
+        # guarantee above.
+        self.assertNotIn(
+            'importlib', imported,
+            'classifier.py imports importlib -- a dynamic import is the one way '
+            'to reach impact_study.py without a static import edge',
         )
 
 
