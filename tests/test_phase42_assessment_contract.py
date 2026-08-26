@@ -1962,6 +1962,36 @@ def _build_toctou_race_shim(shim_path, entered_file, release_file):
     os.chmod(shim_path, 0o755)
 
 
+def _sidecar_component_for(job_id):
+    """Run the REAL `_sidecar_filename_component` transform, extracted
+    verbatim from correct-assessment.sh's own source (not retyped) --
+    same extraction technique
+    `test_path_traversal_job_id_creates_no_file_outside_assessments_dir`
+    uses. Lets a fixture using a punctuated job id name its sidecar file
+    exactly as the shipped script would resolve it, without hand-
+    duplicating the transform and risking it silently drifting from the
+    source it is meant to mirror."""
+    script_text = CORRECT_ASSESSMENT_SH.read_text()
+    func_src = script_text[
+        script_text.index('def _clean(v):'):
+        script_text.index('component = _sidecar_filename_component(raw_job_id)')
+    ]
+    probe = (
+        'import re, sys\n' + func_src +
+        '\nprint(_sidecar_filename_component(sys.argv[1]))\n'
+    )
+    result = subprocess.run(
+        ['python3', '-c', probe, job_id],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f'_sidecar_filename_component probe failed for {job_id!r}: '
+            f'{result.stderr}'
+        )
+    return result.stdout.strip()
+
+
 class CorrectionAppendTests(unittest.TestCase):
     """Phase 42 Plan 06 -- EGV-09/D-01/D-02/D-03/D-04/D-14: correct-assessment.sh
     appends a `kind:"correction"` sidecar line, never destructively rewrites
@@ -2186,6 +2216,134 @@ class CorrectionAppendTests(unittest.TestCase):
                 f'created line, never the correction line, got {outcome_04_matches!r}',
             )
             self.assertTrue(outcome_04_matches[0].startswith(f'JOB:{job_id}:created:'))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_correction_ledger_line_shares_id_with_ordinary_path_for_punctuated_job_id(self):
+        """WR-01 (42-REVIEW.md): the ledger-line id must track the ordinary
+        path's narrow five-character transform, not the fuller filename-safe
+        COMPONENT.
+
+        Uses a job id carrying an apostrophe and parentheses -- punctuation
+        outside hermes-report.sh's `_bad_chars` list (`:`, ` `, tab, `\\n`,
+        `\\r`) but inside `_sidecar_filename_component`'s A-Za-z0-9._-
+        filename-safety pass, so the two transforms disagree by construction.
+        Before the WR-01 fix, the correction line's `<id>` substring diverged
+        from the ordinary path's `created:` line for this same job,
+        silently breaking a `^JOB:<id>:` grep for the job's full history.
+        """
+        sid = 'p42c-sid-012'
+        job_id = "p42c-job-012's(x)"
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase42-correction-punct-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+
+            # The ordinary path's `created:` line keeps punctuation
+            # verbatim -- job_id has no colon/space/tab/newline/CR, so
+            # hermes-report.sh's narrow transform is a no-op, matching
+            # clean_id/outcome_id there exactly.
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            # The sidecar FILENAME must use the filename-safe COMPONENT
+            # transform -- extracted from the shipped script (see
+            # _sidecar_component_for), not retyped, so this fixture stays
+            # correct even if the transform's exact substitution changes.
+            component = _sidecar_component_for(job_id)
+            sidecar_path = os.path.join(assessments_dir, f'{component}.jsonl')
+            record = _tracer_assessment_record(job_id)
+            with open(sidecar_path, 'w') as f:
+                f.write(json.dumps(record, separators=(',', ':')) + '\n')
+
+            task_marker = {
+                'muid': f'{component}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            job_marker = {
+                'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+                'agentic_job_id': job_id, 'job_name': 'Punctuated job id',
+                'job_type': 'code_review', 'status': 'SUCCESS',
+            }
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            _build_correction_shim(shim)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'punctuated job id correlation',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            with open(jobs_ledger) as f:
+                ledger_lines = [line.rstrip('\n') for line in f if line.strip()]
+
+            created_lines = [l for l in ledger_lines if ':created:' in l]
+            correction_lines = [l for l in ledger_lines if ':correction:' in l]
+            self.assertEqual(len(created_lines), 1, ledger_lines)
+            self.assertEqual(len(correction_lines), 1, ledger_lines)
+
+            created_id = created_lines[0].split(':', 2)[1]
+            correction_id = correction_lines[0].split(':', 2)[1]
+            self.assertEqual(
+                created_id, job_id,
+                'sanity: the pre-seeded created: line must carry the raw '
+                f'punctuated job id verbatim, got {created_id!r}',
+            )
+            self.assertEqual(
+                correction_id, created_id,
+                'WR-01: the correction: line must carry the SAME <id> '
+                f'substring as the created: line for the same job -- got '
+                f'correction id {correction_id!r} vs created id '
+                f'{created_id!r}',
+            )
+
+            # The full-history grep itself, through a real ledger file --
+            # what an operator auditing this job would actually run.
+            full_history = _grep_matching_lines(
+                f'^JOB:{job_id}:', Path(jobs_ledger))
+            self.assertEqual(
+                len(full_history), 2,
+                'WR-01: `^JOB:<id>:` must return BOTH the created: and '
+                f'correction: lines for a punctuated job id, got '
+                f'{full_history!r}',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

@@ -76,20 +76,40 @@ fi
 [[ -z "${VALUE_HIGH}" ]] && VALUE_HIGH="${VALUE}"
 
 # --------------------------------------------------------------------------
-# Step 1: resolve ONLY the sidecar path -- a pure string transform over
-# JOB_ID and JOB_ASSESSMENTS_DIR, no file I/O. Split out from the read that
-# used to follow it in the same pass (see the lock block immediately below
-# for why): the path must be known BEFORE anything can be locked, but
-# resolving it needs no lock of its own.
+# Step 1: resolve the sidecar path AND the ledger-line id -- a pure string
+# transform over JOB_ID and JOB_ASSESSMENTS_DIR, no file I/O. Split out from
+# the read that used to follow it in the same pass (see the lock block
+# immediately below for why): the path must be known BEFORE anything can be
+# locked, but resolving it needs no lock of its own.
 #
-# The filename component is derived through the SAME three-step transform
-# `_sidecar_filename_component` in classifier.py uses (a fifth independent
-# copy, deliberate per CLAUDE.md's no-shared-code-across-the-two-halves
-# rule): the five-character sanitize tuple, then the A-Za-z0-9._- filename-
-# safety pass, then the empty/dot/dot-dot guard. This is also the value
-# used below for `assessment_id` and the jobs-ledger correction line, so
-# the whole script has one internally-consistent notion of "this job's
-# identity on disk" rather than a second hand-maintained transform.
+# Two DELIBERATELY DIFFERENT transforms of the same raw job id, kept
+# distinct on purpose (WR-01, 42-REVIEW.md):
+#
+#   COMPONENT -- the filename component, derived through the SAME
+#   three-step transform `_sidecar_filename_component` in classifier.py uses
+#   (a fifth independent copy, deliberate per CLAUDE.md's no-shared-code-
+#   across-the-two-halves rule): the five-character sanitize tuple, then the
+#   A-Za-z0-9._- filename-safety pass, then the empty/dot/dot-dot guard.
+#   This is what protects against path traversal (a job id of `../../evil`
+#   must never escape JOB_ASSESSMENTS_DIR) and is used for the sidecar path
+#   and `assessment_id` below. It must stay the fuller transform -- do not
+#   weaken it to fix WR-01.
+#
+#   LEDGER_ID -- for the `JOB:<id>:correction:...` ledger line ONLY, using
+#   the SAME five-character-only transform hermes-report.sh's ordinary path
+#   uses for `clean_id`/`outcome_id`/`precheck_clean_job_id` (see
+#   hermes-report.sh's `_bad_chars = (':', ' ', '\t', '\n', '\r')`, applied
+#   with no filename-safety pass on top). `agentic_job_id` is LLM-generated
+#   free text -- `_validate_job` in classifier.py only requires a non-empty
+#   string and, unlike `job_type`, never checks it against LABEL_RE -- so an
+#   apostrophe, parenthesis, or comma can survive into it. Before this fix,
+#   such a job id made the ordinary path's `created:`/`outcome:` lines keep
+#   the punctuation verbatim while this script's `correction:` line replaced
+#   it with `_`, so the two no longer shared the same `<id>` substring and an
+#   operator's `^JOB:<id>:` grep for a job's full history came back
+#   incomplete. Using the identical narrow transform here restores that
+#   correlation, without touching the filename-safe COMPONENT the path
+#   traversal protection depends on.
 # --------------------------------------------------------------------------
 PATH_OUTPUT=$(JOB_ID_PY="${JOB_ID}" JOB_ASSESSMENTS_DIR_PY="${JOB_ASSESSMENTS_DIR}" python3 - <<'PY'
 import os
@@ -116,14 +136,23 @@ def _sidecar_filename_component(raw):
 
 
 component = _sidecar_filename_component(raw_job_id)
+# WR-01: the ledger-line id uses ONLY the narrow five-character transform --
+# the same one hermes-report.sh's ordinary path applies via `_clean` above,
+# deliberately WITHOUT the filename-safety pass `component` layers on top,
+# so a `JOB:<id>:correction:...` line shares its `<id>` substring with that
+# same job's `created:`/`outcome:` lines even when the raw id carries
+# punctuation outside [A-Za-z0-9._-].
+ledger_id = _clean(raw_job_id)
 sidecar_path = os.path.join(assessments_dir, f'{component}.jsonl')
 
 print(f'COMPONENT={component}')
+print(f'LEDGER_ID={ledger_id}')
 print(f'SIDECAR_PATH={sidecar_path}')
 PY
 )
 
 COMPONENT=$(printf '%s\n' "${PATH_OUTPUT}" | sed -n 's/^COMPONENT=//p')
+LEDGER_ID=$(printf '%s\n' "${PATH_OUTPUT}" | sed -n 's/^LEDGER_ID=//p')
 SIDECAR_PATH=$(printf '%s\n' "${PATH_OUTPUT}" | sed -n 's/^SIDECAR_PATH=//p')
 
 # --------------------------------------------------------------------------
@@ -555,8 +584,16 @@ echo "Local correction saved: job='${JOB_ID}' sequence=${SEQUENCE} sidecar=${SID
 # per-tick path neither unblocked nor re-triggered by a correction. Plan
 # 42-01 proved this disjointness against a real ledger before this script
 # existed; this line is what plan 42-06 asserts it against.
+#
+# WR-01 (42-REVIEW.md): uses LEDGER_ID, not COMPONENT -- the narrow
+# five-character transform, matching hermes-report.sh's `created:`/
+# `outcome:` lines for the SAME job id byte-for-byte, so a single
+# `^JOB:<id>:` grep returns a job's complete history regardless of
+# punctuation in the raw agentic_job_id. COMPONENT stays reserved for the
+# sidecar filename, where the extra filename-safety pass is load-bearing
+# for path-traversal protection.
 # --------------------------------------------------------------------------
-echo "JOB:${COMPONENT}:correction:${SEQUENCE}:${CORRECTION_TS}" >> "${JOBS_LEDGER_FILE}"
+echo "JOB:${LEDGER_ID}:correction:${SEQUENCE}:${CORRECTION_TS}" >> "${JOBS_LEDGER_FILE}"
 
 # --------------------------------------------------------------------------
 # Step 7: fail loudly when the CLI cannot ship it. D-04's deliberate
