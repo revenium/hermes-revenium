@@ -378,6 +378,61 @@ _EVAL_INVALID = _EvalOutcomeSentinel("invalid")
 _EVAL_TIMED_OUT = _EvalOutcomeSentinel("timed-out")
 
 
+def _mechanism_instruction_block(
+    mechanism: str, max_hours: float, max_rate: float, currency: str,
+) -> str:
+    """Return the per-mechanism output-shape fragment for one member of
+    EVALUATOR_MECHANISMS (D-02), or the empty string for anything else.
+
+    labor_substitution and augmentation_capacity_expansion share the same
+    counterfactual-role-and-rate shape -- both mechanisms genuinely have a
+    counterfactual human doing the work by hand, so both ask for a human
+    role, bounded hours, and a bounded loaded rate.
+
+    newly_enabled_work drops that demand ENTIRELY rather than softening it
+    (41-ARCHITECTURE.md Finding 3, D-02): this mechanism has no
+    counterfactual human role BY DEFINITION -- the work would not have
+    happened at all without an AI agent, so asking for a role/hours/rate
+    invites an invented number for work nobody would ever have done by
+    hand. This arc's value is not priced on this path (D-04); only a
+    narrative basis is solicited.
+
+    Never raises: a pure function over four already-bounded/validated
+    arguments.
+    """
+    if mechanism in (
+        ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+        ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
+    ):
+        return (
+            f"If economic_mechanism is \"{mechanism}\", also supply:\n"
+            "  - inferred_role: the human role that would otherwise have "
+            "done this work (short noun phrase)\n"
+            "  - estimated_hours_saved: a number, greater than 0 and at "
+            f"most {max_hours}\n"
+            "  - assumed_loaded_rate: the fully-loaded hourly cost for "
+            f"that role, a number greater than 0 and at most {max_rate}\n"
+            f"  - currency: must be exactly {currency}\n"
+            "  - basis: one sentence naming what work was avoided\n\n"
+        )
+    if mechanism == ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK:
+        # Deliberately does NOT spell out inferred_role / estimated_hours_
+        # saved / assumed_loaded_rate as field names -- naming them here,
+        # even to say "do not supply", would still put those exact tokens
+        # in front of the model and risks the same copy-verbatim anchoring
+        # quick-260815-r39 already measured for prompt examples. Describes
+        # what to withhold in plain language instead.
+        return (
+            f"If economic_mechanism is \"{mechanism}\": this mechanism has "
+            "NO counterfactual human role BY DEFINITION. Do NOT supply a "
+            "human role, an hours estimate, a loaded rate, or a currency "
+            "-- this arc's value is not priced on this path.\n"
+            "  - basis: one sentence naming the work that would not have "
+            "happened at all without an AI agent\n\n"
+        )
+    return ""
+
+
 def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -> str:
     """Build the outcome-value evaluation prompt.
 
@@ -398,6 +453,18 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     Follows quick-260815-r39, as the job prompt does: describe the shape, give NO
     concrete example values. Example labels were measured getting copied verbatim
     onto unrelated work; an example dollar figure would do the same with money.
+
+    Phase 44 (EGV-05, D-01/D-02): the flat field list is now THREE labelled
+    branches, one per EVALUATOR_MECHANISMS member, built by
+    _mechanism_instruction_block in a FIXED declared order (labor
+    substitution, augmentation/capacity expansion, newly enabled work) --
+    never by iterating the frozenset, whose order is not stable. The
+    revenue prohibition, the transcript-is-data framing, the abstention
+    offer, and the "do not output a total" instruction are
+    mechanism-independent BY DESIGN and stay in the shared preamble/
+    trailer, present exactly once regardless of which branch the model
+    follows -- the abstention offer in particular must survive in every
+    branch.
     """
     cfg = config if isinstance(config, dict) else {}
     currency = cfg.get("currency", "USD")
@@ -406,35 +473,39 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     transcript_preview = (transcript or "")[:_EVAL_TRANSCRIPT_LIMIT]
     job_type = (job or {}).get("job_type", "")
     job_name = (job or {}).get("job_name", "")
-    return (
+
+    preamble = (
         "You are estimating the economic value of one completed task arc performed "
         "by an AI agent, so that it can be compared against what the arc cost to "
         "run.\n\n"
         "Estimate the HUMAN EFFORT this arc avoided. Do not estimate revenue, "
         "deal size, or downstream business impact — only the work a person would "
         "otherwise have done.\n\n"
-        "Output ONLY a JSON object with these fields:\n"
-        # Phase 44 (EGV-05, D-01/D-02): the mechanism field is FIRST in this
-        # list -- plan 44-01 Task 2 turns that ordering into a real branch
-        # selector, one instruction block per permitted mechanism. Only the
-        # three EVALUATOR_MECHANISMS values are offered here; the other
-        # three (quality_decision_improvement, risk_avoidance,
-        # incremental_revenue) are operator-declared only (D-01) and are
-        # never named in this prompt.
+        "Output ONLY a JSON object. First choose exactly one economic_mechanism "
+        "from the three below, then supply ONLY the fields listed under that "
+        "mechanism's own block below -- do not mix fields from a different "
+        "block.\n\n"
         "  - economic_mechanism: exactly one of \"labor_substitution\", "
-        "\"augmentation_capacity_expansion\", or \"newly_enabled_work\"\n"
-        "  - inferred_role: the human role that would otherwise have done this "
-        "work (short noun phrase)\n"
-        "  - estimated_hours_saved: a number, greater than 0 and at most "
-        f"{max_hours}\n"
-        "  - assumed_loaded_rate: the fully-loaded hourly cost for that role, a "
-        f"number greater than 0 and at most {max_rate}\n"
-        f"  - currency: must be exactly {currency}\n"
-        "  - basis: one sentence naming what work was avoided\n"
+        "\"augmentation_capacity_expansion\", or \"newly_enabled_work\"\n\n"
+    )
+
+    # D-02: fixed order, not a frozenset iteration -- EVALUATOR_MECHANISMS'
+    # own iteration order is not a stable contract.
+    mechanism_blocks = "".join(
+        _mechanism_instruction_block(mechanism, max_hours, max_rate, currency)
+        for mechanism in (
+            ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+            ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
+            ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
+        )
+    )
+
+    trailer = (
         "  - confidence: a number from 0 to 1 reflecting how well the transcript "
         "supports this estimate\n\n"
         "Do NOT output a total or a monetary value. The value is computed from "
-        "your hours and rate; any total you provide is discarded.\n\n"
+        "your hours and rate where the chosen mechanism supplies them; any total "
+        "you provide is discarded.\n\n"
         "If the transcript does not support a responsible estimate — the work is "
         "unclear, trivial, or you would be guessing — output exactly: null\n"
         "Abstaining is a correct and expected answer. Do not invent a number to "
@@ -447,6 +518,8 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
         f"Session transcript:\n{transcript_preview}\n\n"
         "JSON object or null:"
     )
+
+    return preamble + mechanism_blocks + trailer
 
 
 def _parse_job_array(raw: str) -> list:
@@ -1000,6 +1073,21 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     if not isinstance(raw, dict):
         return None
     cfg = config if isinstance(config, dict) else {}
+
+    # Phase 44 (EGV-05, D-01/D-03): the mechanism gate runs FIRST, ahead of
+    # the hours/rate check below, so a response naming a bad mechanism
+    # abstains for the mechanism reason rather than a downstream one.
+    # _resolve_economic_mechanism's own membership test is against
+    # EVALUATOR_MECHANISMS, so this gate structurally cannot accept one of
+    # the three OPERATOR_ONLY_MECHANISMS values -- D-01's authority split,
+    # enforced here rather than merely documented.
+    if _resolve_economic_mechanism(raw) == ECONOMIC_MECHANISM_UNKNOWN:
+        logger.warning(
+            "revenium-classifier: rejected assessment, unrecognised or "
+            "operator-only economic_mechanism: %r",
+            raw.get("economic_mechanism"),
+        )
+        return None
 
     hours = _finite_number(raw.get("estimated_hours_saved"))
     rate = _finite_number(raw.get("assumed_loaded_rate"))
@@ -2228,6 +2316,21 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         # Special-casing "llm" dropped every other evaluator's version -- the
         # exact coupling this seam exists to prevent (Greptile P1 on #89).
         evaluator_version = _ev.resolve_version(name)
+        # Phase 44 (EGV-05, D-04): the newly-enabled-work branch, placed
+        # BEFORE _validate_assessment so this mechanism's abstention reason
+        # is distinct from a generic validation rejection. D-04 requires
+        # the record to retain the mechanism and its narrative basis while
+        # omitting the entire value family -- this is the ONLY abstention
+        # branch in this function that passes `raw` rather than `None` to
+        # _build_job_assessment, deliberately, for that reason. Must never
+        # set valid["assessment"], so the frozen marker shape and the
+        # status-only outcome path stay untouched.
+        if _resolve_economic_mechanism(raw) == ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK:
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, None, raw, cfg, name, evaluator_version,
+                abstention_reason="mechanism_abstains_from_value",
+            )
+            return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version)
         if assessment:
             valid["assessment"] = assessment

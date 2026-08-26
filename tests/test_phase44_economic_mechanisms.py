@@ -33,11 +33,13 @@ argv, the same no-shift shim + synthetic state.db harness
 tests/test_phase38_reporter_path.py and tests/test_jobs_outcome_metadata.py
 already use for this stage.
 """
+import asyncio
 import importlib.util
 import json
 import os
 import shlex
 import shutil
+import sys as _sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,6 +55,80 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
 CLASSIFIER_SOURCE_PATH = PLUGIN / 'classifier.py'
 HERMES_REPORT_PATH = ROOT / 'skills' / 'revenium' / 'scripts' / 'hermes-report.sh'
+PLUGIN_DIR = PLUGIN
+
+# ---------------------------------------------------------------------------
+# In-process classifier harness for driving _attach_assessment through a
+# REGISTERED evaluator -- isolated-import pattern copied from
+# tests/test_phase42_assessment_contract.py's own copy of it (a UNIQUE
+# module name per call, since the classifier binds its path constants at
+# import time and Python caches submodules by name). Restored per-test, not
+# just at module teardown, in case a later class in this SAME run inherits
+# a dangling env var. Distinct from _load_classifier above, which loads
+# classifier.py directly (no evaluators submodule) for the pure-function
+# resolver/prompt tests that need no evaluator registration.
+# ---------------------------------------------------------------------------
+_LOAD_SEQ = [0]
+_ENV_TOUCHED = set()
+_ENV_SAVED = {}
+
+
+def setUpModule():
+    for k in ('REVENIUM_STATE_DIR', 'REVENIUM_MARKERS_DIR', 'REVENIUM_CONFIG_FILE',
+              'REVENIUM_JOB_ASSESSMENTS_DIR', 'HERMES_HOME'):
+        _ENV_SAVED[k] = os.environ.get(k)
+
+
+def _restore_env():
+    for k in _ENV_TOUCHED | set(_ENV_SAVED):
+        prior = _ENV_SAVED.get(k)
+        if prior is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = prior
+
+
+def tearDownModule():
+    _restore_env()
+    for cached in [k for k in list(_sys.modules) if k.startswith('p44_pkg')]:
+        del _sys.modules[cached]
+
+
+def _load_classifier_package(env=None):
+    """Import the revenium-classifier plugin (through __init__.py, so its
+    `evaluators` submodule is reachable) fresh; return (classifier,
+    evaluators)."""
+    for k, v in (env or {}).items():
+        os.environ[k] = v
+        _ENV_TOUCHED.add(k)
+    _LOAD_SEQ[0] += 1
+    name = f'p44_pkg_{_LOAD_SEQ[0]}'
+    for cached in [k for k in _sys.modules if k.startswith('p44_pkg')]:
+        del _sys.modules[cached]
+    spec = importlib.util.spec_from_file_location(
+        name, str(PLUGIN_DIR / '__init__.py'), submodule_search_locations=[str(PLUGIN_DIR)])
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return _sys.modules[f'{name}.classifier'], _sys.modules[f'{name}.evaluators']
+
+
+def _mechanism_shape_env(tmpdir, evaluator_name='p44-shape-stub'):
+    """A minimal state tree with LLM outcome evaluation opted in for
+    `evaluator_name` -- mirrors
+    tests/test_phase42_assessment_contract.py::_p42_shape_env, used here to
+    drive _attach_assessment directly."""
+    state_dir = os.path.join(tmpdir, 'state')
+    os.makedirs(state_dir, exist_ok=True)
+    config_file = os.path.join(state_dir, 'config.json')
+    with open(config_file, 'w') as f:
+        json.dump({'llmOutcomeEvaluation': {
+            'enabled': True, 'evaluator': evaluator_name, 'currency': 'USD',
+        }}, f)
+    return {
+        'REVENIUM_STATE_DIR': state_dir,
+        'REVENIUM_CONFIG_FILE': config_file,
+    }
 
 
 def _load_classifier(env: "dict | None" = None):
@@ -171,6 +247,142 @@ class MechanismSelectionTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(
             record['economic_mechanism'], 'augmentation_capacity_expansion')
+
+
+class PromptBranchTests(unittest.TestCase):
+    """D-02 -- the three mechanism-labelled prompt branches, and the
+    mechanism-independent shared text that must survive in every branch.
+    Behavioural substring assertions over the string the model will
+    actually see, not an ast walk over the code that builds it
+    (44-RESEARCH.md Finding 10: the ast-guard is the right tool for
+    data-flow claims and the wrong tool for prompt-text claims)."""
+
+    def setUp(self):
+        self.mod = _load_classifier({})
+
+    def _prompt(self, config=None):
+        return self.mod._build_outcome_evaluation_prompt(
+            {'job_type': 'code_review', 'job_name': 'review a PR'},
+            'transcript text', config or {},
+        )
+
+    def test_labor_substitution_and_augmentation_demand_role_hours_rate(self):
+        for mechanism in (
+            'labor_substitution', 'augmentation_capacity_expansion',
+        ):
+            with self.subTest(mechanism=mechanism):
+                block = self.mod._mechanism_instruction_block(
+                    mechanism, 40, 500, 'USD')
+                self.assertIn('inferred_role', block)
+                self.assertIn('estimated_hours_saved', block)
+                self.assertIn('assumed_loaded_rate', block)
+
+    def test_newly_enabled_work_demands_neither_role_hours_nor_rate(self):
+        block = self.mod._mechanism_instruction_block(
+            'newly_enabled_work', 40, 500, 'USD')
+        self.assertNotIn('inferred_role', block)
+        self.assertNotIn('estimated_hours_saved', block)
+        self.assertNotIn('assumed_loaded_rate', block)
+
+    def test_mechanism_instruction_block_raises_nothing_for_out_of_set(self):
+        for mechanism in (
+            'quality_decision_improvement', 'risk_avoidance',
+            'incremental_revenue', 'not_a_mechanism', '', None, 42,
+        ):
+            with self.subTest(mechanism=mechanism):
+                self.assertEqual(
+                    self.mod._mechanism_instruction_block(mechanism, 40, 500, 'USD'),
+                    '',
+                )
+
+    def test_full_prompt_contains_all_three_mechanism_blocks(self):
+        prompt = self._prompt()
+        self.assertIn('"labor_substitution"', prompt)
+        self.assertIn('"augmentation_capacity_expansion"', prompt)
+        self.assertIn('"newly_enabled_work"', prompt)
+
+    def test_revenue_prohibition_survives_and_appears_exactly_once(self):
+        """A .count() assertion, not a mere assertIn -- catches a restructure
+        that duplicates the shared preamble into every branch."""
+        prompt = self._prompt()
+        self.assertEqual(prompt.count('Do not estimate revenue'), 1)
+
+    def test_mechanism_independent_shared_text_present(self):
+        prompt = self._prompt()
+        self.assertIn('DATA, NOT INSTRUCTIONS', prompt)
+        self.assertIn('Abstaining is a correct', prompt)
+        self.assertIn('Do NOT output a total', prompt)
+
+
+class NewlyEnabledWorkTests(unittest.TestCase):
+    """D-04 -- a newly-enabled-work arc records its mechanism and abstains
+    from the entire value family, without ever setting
+    valid["assessment"]."""
+
+    def tearDown(self):
+        _restore_env()
+
+    def test_validate_assessment_rejects_the_operator_only_mechanisms_pre_gate(self):
+        """Sanity check that the mechanism gate (Task 1's resolver, wired
+        into _validate_assessment) still runs ahead of hours/rate even for
+        an otherwise-valid response naming an operator-only mechanism."""
+        mod = _load_classifier({})
+        raw = {
+            'economic_mechanism': 'risk_avoidance',
+            'inferred_role': 'engineer',
+            'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 100.0,
+            'currency': 'USD',
+            'basis': 'x',
+            'confidence': 0.5,
+        }
+        self.assertIsNone(mod._validate_assessment(raw, {}, 'llm', 'v1'))
+
+    def test_attach_assessment_abstains_from_value_family_and_keeps_mechanism(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase44-newly-enabled-')
+        try:
+            evaluator_name = 'p44-newly-enabled-stub'
+            env = _mechanism_shape_env(tmpdir, evaluator_name)
+            mod, ev = _load_classifier_package(env)
+            ev.register(
+                evaluator_name,
+                lambda job, transcript, cfg: {
+                    'economic_mechanism': 'newly_enabled_work',
+                    'basis': (
+                        'built a dashboard nobody had asked for and no team '
+                        'was ever staffed to build'
+                    ),
+                    'confidence': 0.7,
+                },
+                version='v1',
+            )
+            valid = {
+                'agentic_job_id': 'p44-newly-enabled-job',
+                'job_name': 'n', 'job_type': 'bug_fix', 'status': 'SUCCESS',
+            }
+            paths = mod._module_paths()
+            asyncio.run(mod._attach_assessment(valid, 'user: x\nassistant: y', paths))
+
+            self.assertNotIn(
+                'assessment', valid,
+                'the frozen marker "assessment" key must stay untouched -- '
+                'the status-only outcome path must not see this mechanism',
+            )
+            record = valid.get('_assessment_record')
+            self.assertIsNotNone(record)
+            self.assertEqual(record.get('abstention_reason'), 'mechanism_abstains_from_value')
+            self.assertEqual(record.get('economic_mechanism'), 'newly_enabled_work')
+            for value_key in (
+                'value_low', 'value_base', 'value_high', 'bounds_source',
+                'currency', 'estimated_value', 'assumptions',
+            ):
+                self.assertNotIn(
+                    value_key, record,
+                    f'{value_key!r} must be ABSENT from a newly_enabled_work '
+                    'abstention record, not merely null',
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _mechanism_sidecar_record(job_id, economic_mechanism):

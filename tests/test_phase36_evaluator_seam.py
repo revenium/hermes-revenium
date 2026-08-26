@@ -194,6 +194,11 @@ class ValidateAssessmentTests(unittest.TestCase):
 
     def _raw(self, **over):
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'software engineer',
             'estimated_hours_saved': 2.5,
             'assumed_loaded_rate': 150.0,
@@ -247,9 +252,17 @@ class RejectionMatrixTests(unittest.TestCase):
         self.mod = _load_classifier({})
 
     def _raw(self, **over):
-        raw = {'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
-               'assumed_loaded_rate': 150.0, 'currency': 'USD',
-               'basis': 'time avoided', 'confidence': 0.5}
+        raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path (the rejection-matrix cases below
+            # abstain for their own tested reason regardless).
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
+            'assumed_loaded_rate': 150.0, 'currency': 'USD',
+            'basis': 'time avoided', 'confidence': 0.5,
+        }
         raw.update(over)
         return raw
 
@@ -329,6 +342,11 @@ class MarkerBudgetTests(unittest.TestCase):
         self.assertLess(base_bytes, 1024, 'base marker already over budget')
 
         worst = self.mod._validate_assessment({
+            # Phase 44 (EGV-05): after the mechanism gate lands, a raw
+            # response with no mechanism abstains -- carry the LONGEST
+            # evaluator-selectable mechanism so this stays a genuine
+            # worst-case byte-budget fixture.
+            'economic_mechanism': 'augmentation_capacity_expansion',
             'inferred_role': 'r' * 200,          # over the clamp on purpose
             'estimated_hours_saved': 40.0,       # max bound
             'assumed_loaded_rate': 500.0,        # max bound
@@ -365,6 +383,7 @@ class MarkerBudgetTests(unittest.TestCase):
                           ('mixed', 'a😀é漢')):
             with self.subTest(label):
                 got = self.mod._validate_assessment({
+                    'economic_mechanism': 'augmentation_capacity_expansion',
                     'inferred_role': ch * 300,
                     'estimated_hours_saved': 40.0, 'assumed_loaded_rate': 500.0,
                     'currency': 'USD', 'basis': ch * 1000, 'confidence': 0.999,
@@ -389,6 +408,7 @@ class MarkerBudgetTests(unittest.TestCase):
         reaching that tuple shifts every following field. Mitigated at the
         producer, not at each consumer."""
         got = self.mod._validate_assessment({
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'a|b\nc\rd',
             'estimated_hours_saved': 2.0, 'assumed_loaded_rate': 100.0,
             'currency': 'USD', 'basis': 'x|y\nz', 'confidence': 0.5,

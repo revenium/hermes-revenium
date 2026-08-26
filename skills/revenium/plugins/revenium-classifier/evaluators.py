@@ -118,6 +118,11 @@ def _stub_evaluate(job: dict, transcript: str, config: dict) -> "dict | None":
         # cannot be trusted alone is not much of a boundary.
         return None
     return {
+        # Phase 44 (EGV-05): after the mechanism gate lands in
+        # _validate_assessment, a response with no economic_mechanism
+        # abstains -- this stub must carry one to stay "a fixed, in-bounds
+        # assessment" rather than silently becoming a fixed abstention.
+        "economic_mechanism": "labor_substitution",
         "inferred_role": "software engineer",
         "estimated_hours_saved": 2.5,
         "assumed_loaded_rate": 150.0,

@@ -1099,6 +1099,15 @@ _REPORTABLE_CFG = {'experimentalReportEstimates': True}
 def _build_real_sidecar_record(job_id):
     c, _ev = _load_classifier({})
     raw = {
+        # Phase 44 (EGV-05): after the mechanism gate lands in
+        # _validate_assessment, a raw response with no mechanism abstains.
+        # This is the ONLY builder in this repo that runs the REAL
+        # _validate_assessment for the reporter tests -- every multi-tick
+        # deferral, provenance-forwarding, and
+        # test_sidecar_record_unmodified_by_a_deferred_tick case depends on
+        # it describing a valued outcome, so without this key those cases
+        # would silently start describing an abstention instead.
+        'economic_mechanism': 'labor_substitution',
         'inferred_role': 'senior software engineer',
         'estimated_hours_saved': 3.5,
         'assumed_loaded_rate': 150.0,
@@ -1749,6 +1758,11 @@ class TestPhase38Canary(unittest.TestCase):
             self.EVALUATOR_COUNTERFACTUAL_CANARY + '|cf|pipe\nbreak\r' + ('V' * 600)
         )
         return {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this canary fixture must carry one to keep
+            # producing an accepted assessment.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': role_raw,
             'estimated_hours_saved': 2.0,
             'assumed_loaded_rate': 100.0,

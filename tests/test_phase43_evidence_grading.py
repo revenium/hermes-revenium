@@ -264,6 +264,11 @@ class StudyReferenceTests(unittest.TestCase):
         persist "" / 0 on the sidecar record."""
         mod = self.mod
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer',
             'estimated_hours_saved': 2.0,
             'assumed_loaded_rate': 100.0,
@@ -327,6 +332,11 @@ class FixtureFidelityTests(unittest.TestCase):
 
         mod = _load_classifier()
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'senior software engineer',
             'estimated_hours_saved': 3.5,
             'assumed_loaded_rate': 150.0,
@@ -419,6 +429,14 @@ def _hostile_evaluator_response():
     """
     return {
         # Legitimate keys, nominal in-bounds values -- the ACCEPT path.
+        # Phase 44 (EGV-05): after the mechanism gate lands in
+        # _validate_assessment, a raw response with no mechanism abstains --
+        # this fixture must carry one to keep describing a production
+        # success path. Not one of the seven promotion attacks below: D-03
+        # permits reading this key off raw (MechanismGuardScopeTests in
+        # tests/test_phase44_economic_mechanisms.py proves it is
+        # deliberately absent from _PROMOTION_FORBIDDEN_KEYS).
+        'economic_mechanism': 'labor_substitution',
         'inferred_role': 'senior engineer',
         'estimated_hours_saved': 3.0,
         'assumed_loaded_rate': 120.0,
@@ -784,6 +802,11 @@ class NonInheritanceTests(unittest.TestCase):
 
         mod = _load_classifier()
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer',
             'estimated_hours_saved': 2.0,
             'assumed_loaded_rate': 100.0,

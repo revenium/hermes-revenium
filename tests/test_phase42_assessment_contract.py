@@ -866,6 +866,11 @@ class BoundsOrderingTests(unittest.TestCase):
 
     def _raw(self, **over):
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
             'assumed_loaded_rate': 150.0, 'currency': 'USD',
             'basis': 'time avoided', 'confidence': 0.5,
@@ -1017,6 +1022,14 @@ class SidecarBudgetTests(unittest.TestCase):
 
     def _worst_case_raw(self, narrative_char='n'):
         return {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- and this is the worst-case byte-budget fixture, so
+            # it uses the LONGEST of the three evaluator-selectable
+            # mechanisms (augmentation_capacity_expansion, 32 bytes) rather
+            # than labor_substitution, to keep measuring a genuine worst
+            # case rather than an accidentally-smaller one.
+            'economic_mechanism': 'augmentation_capacity_expansion',
             'inferred_role': narrative_char * 60,
             'estimated_hours_saved': 40.0,   # DEFAULT_MAX_HOURS_SAVED, the real bound
             'assumed_loaded_rate': 500.0,    # DEFAULT_MAX_LOADED_RATE, the real bound
@@ -1209,6 +1222,11 @@ class RecordShapeTests(unittest.TestCase):
 
     def _raw(self, **over):
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
             'assumed_loaded_rate': 150.0, 'currency': 'USD',
             'basis': 'time avoided', 'confidence': 0.5,
