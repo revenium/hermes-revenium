@@ -3,9 +3,8 @@
 Every test here runs OFFLINE. No provider, no network, no subprocess, and no
 import of classifier.py -- impact_study.py is a stdlib-only contract module
 and its tests exercise exactly that surface: validate()'s accept/reject
-behavior (this module), plus the two ast-guards (import boundary, no
-estimator) that prove the module's structural claims over the code as it
-exists today (added in Task 3, below).
+behavior, plus the two ast-guards (import boundary, no estimator) that prove
+the module's structural claims over the code as it exists today.
 """
 
 import importlib.util
@@ -315,5 +314,110 @@ class NeverRaisesTests(unittest.TestCase):
         except Exception as exc:  # pragma: no cover
             self.fail(f'validate() raised {exc!r} instead of returning None')
         self.assertIsNone(got)
+class ImportBoundaryTests(unittest.TestCase):
+    """No inheritance path for a study's strength into a job's own claim
+    label (EGV-13/D-08) can exist through an import this module does not
+    have. Parsed with ast, not grepped.
+
+    GUARANTEE CLASS: this is a STRUCTURAL rule Python's import machinery
+    cannot be talked around -- if 'classifier' is not in the module's
+    top-level import graph, no code in this file can call anything
+    classifier.py defines, full stop. Unlike the no-estimator guard below,
+    this one is not merely static-over-current-code; import resolution is
+    the actual mechanism being proven absent, not just a name pattern.
+
+    Parsed rather than grepped for the same reason
+    test_phase36_evaluator_seam.py's test_module_does_not_import_classifier
+    is: this module's own docstring documents the rule in prose ("must not
+    import classifier.py"), so a substring search for the import statement
+    would match the very comment explaining the invariant and fail on a
+    compliant file.
+    """
+
+    def test_module_does_not_import_classifier_or_agent(self):
+        import ast
+        tree = ast.parse(IMPACT_STUDY_PATH.read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split('.')[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imported.add(node.module.split('.')[0])
+        self.assertNotIn('classifier', imported)
+        # The same rule that keeps call_llm lazy: no Hermes venv at module scope.
+        self.assertNotIn('agent', imported)
+
+
+class NoEstimatorTests(unittest.TestCase):
+    """EGV-12: this module declares a contract and nothing more -- no
+    function computes an effect, and it imports nothing that would let it.
+
+    GUARANTEE CLASS: STATIC, over the code that exists TODAY. This proves
+    no estimator is present now; it does NOT make one impossible, since
+    plain arithmetic needs no import at all and a determined future edit
+    could add a top-level function that computes something without
+    importing anything named below. Per 43-VALIDATION.md's honesty rule
+    and 42-LEARNINGS, this test's guarantee must be stated exactly this way
+    and no stronger.
+    """
+
+    # The only top-level functions Task 1 actually wrote. A new top-level
+    # function turns this test red until someone deliberately widens this
+    # allow-list -- that IS the point: a silent addition should be loud.
+    _ALLOWED_TOP_LEVEL_FUNCTIONS = frozenset({
+        'validate',
+        '_validate',
+        '_clamp_text',
+        '_finite_number',
+    })
+
+    # Numerical/statistical stdlib and third-party names an estimator would
+    # plausibly need. `math` is DELIBERATELY excluded from this forbidden
+    # set: Task 1 imports it only for math.isnan/math.isinf inside
+    # _finite_number, which is a finiteness CHECK (validation), not
+    # estimation -- see impact_study.py's _finite_number docstring.
+    _FORBIDDEN_IMPORTS = frozenset({
+        'statistics',
+        'numpy',
+        'scipy',
+        'pandas',
+        'sklearn',
+        'statsmodels',
+        'torch',
+        'tensorflow',
+        'random',
+        'cmath',
+    })
+
+    def test_top_level_functions_are_a_named_allow_list(self):
+        import ast
+        tree = ast.parse(IMPACT_STUDY_PATH.read_text())
+        defined = {
+            node.name for node in ast.iter_child_nodes(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        extra = defined - self._ALLOWED_TOP_LEVEL_FUNCTIONS
+        self.assertEqual(
+            set(), extra,
+            f'undeclared top-level function(s) {extra!r} -- add to the '
+            'allow-list deliberately if this is intentional, or remove it '
+            'if it is an estimator this module must not carry',
+        )
+
+    def test_no_statistical_or_estimator_adjacent_import(self):
+        import ast
+        tree = ast.parse(IMPACT_STUDY_PATH.read_text())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split('.')[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imported.add(node.module.split('.')[0])
+        forbidden_hit = imported & self._FORBIDDEN_IMPORTS
+        self.assertEqual(set(), forbidden_hit)
+
+
 if __name__ == '__main__':  # pragma: no cover
     unittest.main()

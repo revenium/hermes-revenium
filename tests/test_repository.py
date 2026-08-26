@@ -154,6 +154,10 @@ class RepositoryTests(unittest.TestCase):
             # Phase 36 — the outcome-value evaluator seam (ROI-03), kept as its
             # own module so the evaluation boundary is a file boundary.
             SKILL / 'plugins' / 'revenium-classifier' / 'evaluators.py',
+            # Phase 43 Plan 03 (EGV-12) — the ImpactStudyResult contract:
+            # TypedDict + validate(), no estimator, no experiment
+            # orchestration, imported by nothing in the shipped skill.
+            SKILL / 'plugins' / 'revenium-classifier' / 'impact_study.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
