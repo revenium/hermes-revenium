@@ -395,7 +395,14 @@ def _tracer_assessment_record(job_id, **overrides):
     """The tracer's own narrow JobAssessment shape (Task 1's action text):
     identity, schema version, one bound family (a zero-width band), currency,
     and provenance. 42-03 replaces the zero-width band with real bound
-    derivation and adds the remaining EGV-04 fields."""
+    derivation and adds the remaining EGV-04 fields.
+
+    Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
+    populates reportability_status UNCONDITIONALLY on every record it
+    builds. Defaulted here to the reportable literal so every test in this
+    module -- written before hermes-report.sh read this field at all --
+    keeps describing a record that ships its value, unless a test
+    explicitly overrides it to exercise the EGV-18 gate itself."""
     record = {
         'kind': 'job_assessment',
         'ts': 1715516002.5,
@@ -411,6 +418,7 @@ def _tracer_assessment_record(job_id, **overrides):
         'evaluator': 'llm',
         'evaluator_version': 'v1',
         'confidence': 0.8,
+        'reportability_status': 'reportable',
     }
     record.update(overrides)
     return record

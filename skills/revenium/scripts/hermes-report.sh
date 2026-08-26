@@ -3135,12 +3135,61 @@ def _s(v, maxlen=None):
     return v
 
 
+# Phase 43 (EGV-18, D-05/D-06/CF-1/CF-3): resolve reportability BEFORE the
+# value scalars below are computed. hermes-report.sh holds NO independent
+# reportability policy (CF-3) -- it reads and obeys reportability_status,
+# with exactly one carve-out: a correction (kind == "correction") is
+# reportable by construction. D-06: a correction is filed by an operator
+# under explicit human authorisation, so EGV-18's gate over naked-LLM
+# estimates does not apply to it -- this is the reasoning that keeps
+# test_last_match_wins_ships_newest_correction_low_bound green, untouched
+# by this change. Otherwise the record's own reportability_status must
+# equal the reportable literal exactly; anything else (absent, "candidate",
+# or a malformed value) is NOT reportable.
+_REPORTABILITY_REPORTABLE = 'reportable'
+_REPORTABILITY_STATUSES = frozenset({'reportable', 'candidate'})
+_is_correction = found.get('kind') == 'correction'
+_reportable = _is_correction or found.get('reportability_status') == _REPORTABILITY_REPORTABLE
+
+_not_reportable_reason = ''
+if not _reportable:
+    # T-43-01: sanitize the TRANSPORTED RECORD, not the forwarder list.
+    # Withholding --outcome-value/--outcome-currency alone does NOT
+    # withhold the value: value_low/value_base/value_high/bounds_source and
+    # assumptions (whose estimated_hours_saved * assumed_loaded_rate
+    # product IS the estimate) already ride into --metadata via the
+    # forwarders further below in the metadata heredoc. Deleting them here,
+    # from the blob itself, means no current or future forwarder can
+    # reintroduce the leak -- exactly the same omit family D-11 already
+    # established on the classifier's abstention path (value_low,
+    # value_base, value_high, bounds_source, currency, estimated_value,
+    # assumptions), applied here by the other half of the pipeline.
+    # confidence and every provenance field (evidence_class, evaluator,
+    # evaluator_version, model, the four version fields) are deliberately
+    # KEPT: D-05 withholds the VALUE, not the fact that an estimate
+    # happened.
+    for _k in ('value_low', 'value_base', 'value_high', 'bounds_source',
+               'currency', 'estimated_value', 'assumptions'):
+        found.pop(_k, None)
+    _not_reportable_reason = 'not_reportable'
+
+# An unrecognized reportability_status must never cross the wire -- only
+# the two locked D-05 values are meaningful downstream, so a future or
+# hand-edited status word is dropped rather than forwarded unexamined.
+if found.get('reportability_status') not in _REPORTABILITY_STATUSES:
+    found.pop('reportability_status', None)
+
 # D-08: --outcome-value carries the LOW bound, not base -- understates
 # rather than overstates. All three bounds still ride in --metadata via
 # ASSESSMENT_JSON below, so the range stays recoverable. Read-side defense
 # against a hand-edited or corrupt sidecar record, carried over intact from
 # the marker reader (WR-02): a non-numeric value or an unsupported/
-# malformed currency drops BOTH flags together, never one alone.
+# malformed currency drops BOTH flags together, never one alone. Phase 43:
+# ANDed with _reportable, stated explicitly rather than relying only on the
+# sanitizer above having already emptied value_low -- the D-09 second-site
+# comment elsewhere in this file names exactly this trap (a partial clear
+# that relies on downstream/incidental behavior instead of stating intent
+# locally).
 _SUPPORTED_CURRENCIES = frozenset({'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF'})
 _raw_value = found.get('value_low', '')
 _raw_currency = found.get('currency', '')
@@ -3154,7 +3203,7 @@ _currency_ok = (
     isinstance(_raw_currency, str)
     and _raw_currency.strip().upper() in _SUPPORTED_CURRENCIES
 )
-if _value_ok and _currency_ok:
+if _reportable and _value_ok and _currency_ok:
     value_out = _s(_raw_value)
     currency_out = _s(_raw_currency, maxlen=32)
 else:
@@ -3169,6 +3218,14 @@ else:
 # VALUE/CURRENCY still ride as their own scalar lines because
 # outcome_cmd+=(--outcome-value ...) below runs BEFORE the metadata heredoc
 # that parses ASSESSMENT_JSON.
+# Phase 43: print the not_reportable REASON exactly once, only when it
+# exists -- the shell captures REASON with a `sed` filter (see
+# outcome_reason= below) that would concatenate two matching lines. The
+# earlier REASON prints in this same heredoc (sidecar_unavailable,
+# schema_unrecognized, ...) all `raise SystemExit(0)` before reaching here,
+# so at most one REASON line is ever emitted per run.
+if _not_reportable_reason:
+    print(f"REASON={_not_reportable_reason}")
 print(f"VALUE={value_out}")
 print(f"CURRENCY={currency_out}")
 print(f"ASSESSMENT_JSON={json.dumps(found, separators=(',', ':'))}")
@@ -3266,6 +3323,9 @@ print('true' if ok else 'false')
                 ;;
               bounds_invalid)
                 warn "assessment bounds reversed, negative, or non-finite at the second site, reporting status-only: id=${outcome_id}"
+                ;;
+              not_reportable)
+                warn "assessment not reportable per EGV-18 gate, reporting status-only: id=${outcome_id}"
                 ;;
               *)
                 warn "assessment unvalued (${outcome_reason}), reporting status-only: id=${outcome_id}"

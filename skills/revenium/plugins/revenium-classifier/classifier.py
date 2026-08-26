@@ -1032,8 +1032,48 @@ NARRATIVE_CLAMP_BYTES = 500
 # silently dropped because "nothing populates it yet").
 STATE_QUARTET_UNKNOWN = "unknown"  # output_status/acceptance_status/adoption_status: 42-RESEARCH.md Section 1 Assumption A2, the current evaluator has no mechanism to assess these
 ECONOMIC_MECHANISM_LABOR_SUBSTITUTION = "labor_substitution"  # only mechanism derivable from today's prompt; Phase 44 (EGV-05) widens to the full six-mechanism enum
-REPORTABILITY_STATUS_DEFAULT = "local_only"  # Phase 43 (EGV-18) owns the resolver; this is 42-RESEARCH.md Section 1's recommended safe default until it lands
+
+# Phase 43 (EGV-18, D-05/D-09): the two locked reportability_status values.
+# D-09: this is a straight rename of Phase 42's REPORTABILITY_STATUS_DEFAULT
+# placeholder ("local_only") -- no migration shim, because that field was
+# written only into the sidecar, never read by hermes-report.sh, and absent
+# from every golden fixture (verified before this rename; nothing in
+# production depends on the old spelling).
+REPORTABILITY_REPORTABLE = "reportable"
+REPORTABILITY_CANDIDATE = "candidate"
+
 PROVENANCE_MODEL_UNKNOWN = "unknown"  # Phase 45 (EGV-08) owns which model produced the assessment; the naked-LLM path has no reliable model identity to report today
+
+
+def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:
+    """Resolve EGV-18's reportability_status for one JobAssessment record.
+
+    Returns REPORTABILITY_REPORTABLE only when ALL of:
+      - abstained is False (D-05: an abstained assessment is never reportable,
+        whatever the config says -- checked first, unconditionally)
+      - cfg is a dict
+      - cfg["experimentalReportEstimates"] is True -- a literal JSON boolean,
+        identity-compared exactly like _llm_evaluation_enabled's "enabled"
+        check above, and for the same recorded reason (D-12): an operator
+        editing config.json by hand must not be able to switch money
+        reporting on with a near-miss like the string "true" or the int 1.
+
+    Everything else -- including a non-dict/None cfg and a missing key --
+    resolves to REPORTABILITY_CANDIDATE. Never raises: this is a pure
+    function of its two arguments, no I/O.
+
+    D-05: reportable ships the estimate's VALUE to Revenium; candidate keeps
+    the value local but still ships provenance (evidence_class, evaluator,
+    evaluator_version, model, and the version family) -- hermes-report.sh
+    enforces that split when it reads this field, not this function.
+    """
+    if abstained:
+        return REPORTABILITY_CANDIDATE
+    if not isinstance(cfg, dict):
+        return REPORTABILITY_CANDIDATE
+    if cfg.get("experimentalReportEstimates") is True:
+        return REPORTABILITY_REPORTABLE
+    return REPORTABILITY_CANDIDATE
 
 
 def _build_job_assessment(
@@ -1148,7 +1188,16 @@ def _build_job_assessment(
                 assessment.get("confidence") if isinstance(assessment, dict) else 0.0
             ),
             "abstention_reason": abstention_reason or "",
-            "reportability_status": REPORTABILITY_STATUS_DEFAULT,
+            # Phase 43 (EGV-18): ONE consumer site covers both the
+            # abstention early-return below and the success-path
+            # continuation -- they share this single dict literal, so
+            # bool(abstention_reason) is all the resolver needs. Note per
+            # 43-PATTERNS.md's D-11 trap: reportability_status is
+            # deliberately NOT in D-11's omit family. An abstained record
+            # still carries this key, valued REPORTABILITY_CANDIDATE --
+            # the absence of a value is itself something the reporter must
+            # be able to read, not merely infer from a missing field.
+            "reportability_status": _resolve_reportability_status(cfg, bool(abstention_reason)),
         }
 
         if abstention_reason:

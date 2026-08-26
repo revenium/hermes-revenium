@@ -110,6 +110,13 @@ def _sidecar_record(job_id, **overrides):
             "estimated_hours_saved": 3.5,
             "assumed_loaded_rate": 150.0,
         },
+        # Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
+        # populates this UNCONDITIONALLY on every record it builds (Phase 42
+        # onward). Default here is the reportable literal so every existing
+        # test in this file -- written before hermes-report.sh read this
+        # field at all -- keeps describing a record that ships its value,
+        # unless a test explicitly overrides it to exercise the gate.
+        "reportability_status": "reportable",
     }
     record.update(overrides)
     return record
@@ -332,6 +339,66 @@ class TestPhase38ReporterPath(unittest.TestCase):
         # D-08 executable proof: the shipped value is the LOW bound, never
         # the marker's estimated_value (525.0) or the sidecar's own base.
         self.assertNotEqual(argv[argv.index('--outcome-value') + 1], '525.0')
+
+    def test_candidate_reportability_ships_no_value_but_keeps_provenance(self):
+        """Phase 43 (EGV-18, D-05 clarification, T-43-01) -- behavior 7 of
+        43-01-PLAN.md's Task 1. A sidecar record whose reportability_status
+        is "candidate" (an estimate computed without the experimental
+        opt-in) must not let its number leave the machine: the constructed
+        `jobs outcome` argv carries neither --outcome-value nor
+        --outcome-currency, and --metadata carries none of the value-bearing
+        keys either -- not just the two flags. The value stays local; the
+        fact that an estimate happened does not (D-05): evidence_class,
+        evaluator, evaluator_version, model, and the four version fields
+        still ship."""
+        argv = self._run_one_outcome(
+            'c43-sid-001', 'c43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('c43-job-001', reportability_status='candidate'),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+
+        meta = json.loads(self._metadata_value(argv))
+        # T-43-01: sanitized from the transported blob, not merely
+        # unforwarded -- these keys must be entirely absent from --metadata,
+        # including the assumptions object whose
+        # estimated_hours_saved * assumed_loaded_rate product IS the
+        # estimate this gate exists to withhold.
+        for stripped_key in (
+            'value_low', 'value_base', 'value_high', 'bounds_source',
+            'currency', 'estimated_value', 'assumptions',
+        ):
+            self.assertNotIn(stripped_key, meta, f'{stripped_key!r} must not cross the wire on a candidate record')
+        # D-05: provenance still ships even though the value did not.
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evaluator'), 'llm')
+        self.assertEqual(meta.get('evaluator_version'), 'v1')
+        self.assertEqual(meta.get('model'), 'unknown')
+        self.assertEqual(meta.get('assessment_schema_version'), 1)
+        self.assertEqual(meta.get('taxonomy_version'), 1)
+        self.assertEqual(meta.get('prompt_version'), 1)
+        self.assertEqual(meta.get('policy_version'), 1)
+
+    def test_reportable_reportability_ships_exactly_as_before(self):
+        """Phase 43 (EGV-18): a record whose reportability_status is
+        "reportable" ships exactly as the pre-Phase-43 behavior did --
+        same flags, same --metadata provenance."""
+        argv = self._run_one_outcome(
+            'r43-sid-001', 'r43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('r43-job-001'),
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('value_low'), 446.25)
+        self.assertEqual(meta.get('value_base'), 525.0)
+        self.assertEqual(meta.get('value_high'), 603.75)
+        self.assertEqual(meta.get('bounds_source'), 'derived')
+        self.assertEqual(
+            meta.get('assumptions'),
+            {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+        )
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
         argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')
@@ -613,6 +680,17 @@ def _build_flexible_shim(shim_path, outcome_value_capable=True):
 # rate=150.0 -> base=525.0, matching ASSESSMENT_FIXTURE/_sidecar_record's
 # shared arithmetic so the low/base/high bounds this fixture produces
 # (446.25/525.0/603.75) line up with the rest of this file's fixtures.
+#
+# Phase 43 (EGV-18): this helper's callers assert a VALUED outcome (deferred
+# create/retry, provenance forwarding) -- orthogonal to the reportability
+# gate itself. _build_job_assessment's cfg carries the reportable opt-in so
+# those pre-existing assertions keep describing a shipped value; a test that
+# wants to exercise the candidate/withheld path builds its own record via
+# _sidecar_record or calls _build_job_assessment directly with a different
+# cfg, not through this helper.
+_REPORTABLE_CFG = {'experimentalReportEstimates': True}
+
+
 def _build_real_sidecar_record(job_id):
     c, _ev = _load_classifier({})
     raw = {
@@ -627,7 +705,7 @@ def _build_real_sidecar_record(job_id):
     }
     valid = {'agentic_job_id': job_id, 'job_type': 'code_review', 'status': 'SUCCESS'}
     assessment = c._validate_assessment(raw, {}, 'llm', 'v1')
-    record = c._build_job_assessment(valid, assessment, raw, {}, 'llm', 'v1')
+    record = c._build_job_assessment(valid, assessment, raw, _REPORTABLE_CFG, 'llm', 'v1')
     return c, record
 
 
