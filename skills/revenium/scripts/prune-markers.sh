@@ -117,6 +117,7 @@ JOB_ASSESSMENTS_DIR_PY="${JOB_ASSESSMENTS_DIR}" \
 ASSESSMENT_RETENTION_DAYS_PY="${REVENIUM_ASSESSMENT_RETENTION_DAYS}" \
 ASSESSMENT_RETENTION_OK_PY="${ASSESSMENT_RETENTION_OK}" \
 python3 - <<'PY' >"${prune_out}"
+import fcntl
 import os
 import re
 import sqlite3
@@ -710,11 +711,46 @@ prune_owners(os.environ.get('OWNERS_DIR_PY', ''), os.environ.get('STATE_DB_PY', 
 # assessment_cutoff_secs, computed from REVENIUM_ASSESSMENT_RETENTION_DAYS,
 # never from the shared cutoff_secs the marker/flag/spool/ledger passes use.
 # Two retention rules, two numbers, two reasons.
+#
+# Race-closing lock coordination (Greptile P1, PR #94 follow-up), the other
+# half of the fix in correct-assessment.sh: this pass used to unlink a
+# stale record with NO coordination at all -- os.unlink() here has never
+# taken any lock, per-file or otherwise (the prune.lock held by fd 9 in the
+# surrounding shell is global to the whole prune run, not scoped to any one
+# sidecar). correct-assessment.sh now holds a per-sidecar flock(LOCK_EX)
+# continuously from its D-14 existence check through its remote ship; for
+# that lock to mean anything, this pass must take the SAME lock before it
+# may unlink, or the two scripts are still just racing on an inode neither
+# of them is actually coordinating on.
+#
+#   * O_RDONLY, non-blocking (LOCK_EX | LOCK_NB). A manual, human-triggered
+#     prune must NEVER block waiting on an in-flight correction -- unlike
+#     correct-assessment.sh's blocking acquisition (an operator filing a
+#     correction may reasonably wait a moment for a concurrent prune to
+#     finish its own per-file check), a prune run is a maintenance sweep
+#     over potentially thousands of files, and stalling the whole sweep on
+#     one busy record defeats the point of it being non-interactive.
+#   * Busy -> skip THIS FILE ONLY and log it, then move on to the next
+#     entry. A locked sidecar is, by construction, either being actively
+#     corrected (which just refreshed or is about to refresh its mtime) or
+#     about to be D-14-refused (which touches nothing) -- neither case
+#     benefits from waiting, and D-13's own rule already says a live
+#     correction is not stale.
+#   * Staleness is DECIDED under the lock, not before it. The mtime read
+#     happens via os.fstat(fd) AFTER flock() succeeds -- never via
+#     os.path.getmtime(fpath) taken earlier (e.g. during the os.listdir()
+#     scan or in a cached value) -- so a correction that lands between
+#     "this file's name turned up in the directory listing" and "this
+#     process actually acquired the lock" is what the unlink decision
+#     sees, not a stale snapshot from before the file was reachable. This
+#     is the specific half a pre-lock decision gets wrong: narrowing the
+#     window between an early stat and a later unlink is not the same as
+#     making the stat happen only once the lock guarantees nothing else
+#     can be writing.
 # ---------------------------------------------------------------------------
 
-
 def prune_assessments_dir(assessments_dir, retention_secs, dry_run):
-    a_scanned = a_kept = a_removed = 0
+    a_scanned = a_kept = a_removed = a_skipped_busy = 0
     try:
         entries = sorted(os.listdir(assessments_dir))
     except FileNotFoundError:
@@ -728,42 +764,74 @@ def prune_assessments_dir(assessments_dir, retention_secs, dry_run):
             continue
 
         a_scanned += 1
-        # mtime-only, deliberately -- no ledger_fn, no session correlation.
-        # See the block comment above: a correction append IS the signal
-        # that this record is still live, and its own mtime carries that
-        # signal for free.
-        mtime = os.path.getmtime(fpath)
-        age_secs = time.time() - mtime
-        age_days = age_secs / 86400
 
-        if age_secs < retention_secs:
-            a_kept += 1
+        try:
+            fd = os.open(fpath, os.O_RDONLY)
+        except OSError as exc:
+            print('prune: ERROR opening ' + fname + ' for lock: ' + str(exc), flush=True)
             continue
 
-        action = 'dry-run, would remove' if dry_run else 'removed'
-        print(
-            'prune: ' + action +
-            ' dir=job-assessments' +
-            ' assessment=' + fname +
-            ' mtime=' + iso(mtime) +
-            ' age_days=' + str(round(age_days, 1)),
-            flush=True,
-        )
-
-        if not dry_run:
+        try:
             try:
-                os.unlink(fpath)
-                a_removed += 1
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (OSError, BlockingIOError):
+                # Busy -- a correction is being filed against this record
+                # right now (or is about to be D-14-refused). Not stale by
+                # definition (D-13); skip without waiting, per the block
+                # comment above.
+                a_skipped_busy += 1
+                print(
+                    'prune: skipped (locked, correction in progress)' +
+                    ' dir=job-assessments' +
+                    ' assessment=' + fname,
+                    flush=True,
+                )
+                continue
+
+            # Re-stat UNDER the lock -- the authoritative staleness read.
+            # fstat(fd) rather than getmtime(fpath): the fd was opened
+            # before the lock and stays valid even if the path is later
+            # unlinked by something else, so this always reflects the
+            # inode this process is actually holding the lock on.
+            try:
+                mtime = os.fstat(fd).st_mtime
             except OSError as exc:
-                print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
-                sys.exit(1)
-        else:
-            a_removed += 1  # count for dry-run summary
+                print('prune: ERROR stating ' + fname + ': ' + str(exc), flush=True)
+                continue
+            age_secs = time.time() - mtime
+            age_days = age_secs / 86400
+
+            if age_secs < retention_secs:
+                a_kept += 1
+                continue
+
+            action = 'dry-run, would remove' if dry_run else 'removed'
+            print(
+                'prune: ' + action +
+                ' dir=job-assessments' +
+                ' assessment=' + fname +
+                ' mtime=' + iso(mtime) +
+                ' age_days=' + str(round(age_days, 1)),
+                flush=True,
+            )
+
+            if not dry_run:
+                try:
+                    os.unlink(fpath)
+                    a_removed += 1
+                except OSError as exc:
+                    print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
+                    sys.exit(1)
+            else:
+                a_removed += 1  # count for dry-run summary
+        finally:
+            os.close(fd)
 
     print(
         'prune: job-assessments summary, scanned=' + str(a_scanned) +
         ' kept=' + str(a_kept) +
-        ' removed=' + str(a_removed),
+        ' removed=' + str(a_removed) +
+        ' skipped_busy=' + str(a_skipped_busy),
         flush=True,
     )
     return a_scanned, a_kept, a_removed
