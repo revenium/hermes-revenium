@@ -121,6 +121,15 @@ system-of-record adapters each carry their own. Do not widen this one to cover
 measured value — the whole point of the field is that the two are
 distinguishable after the fact.
 
+### The nine evidence-class labels (EGV-10)
+
+`evidence_class` is one of nine flat, unordered labels, never a confidence
+ladder: `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`,
+`MODEL_ESTIMATED_DEMO`, `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`,
+`ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`, `EXPERIMENTAL_IMPACT`. The
+naked-LLM path documented above always emits `MODEL_ESTIMATED_DEMO`; no label
+is ranked above or below another.
+
 ### Failed and cancelled arcs
 
 `FAILED` and `CANCELLED` arcs are never evaluated: no evaluator call, no

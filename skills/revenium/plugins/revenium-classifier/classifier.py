@@ -776,6 +776,73 @@ def _clamp_assessment_text(value, limit: int) -> str:
 # DIFFERENT evidence class and must not reuse this one.
 EVIDENCE_CLASS_MODEL_ESTIMATED = "MODEL_ESTIMATED_DEMO"
 
+# EGV-10 (D-01): the nine claim labels, as a flat, unordered frozenset --
+# an explicit allow-list, matching SUPPORTED_CURRENCIES' declaration shape
+# above (classifier.py:61), not a pattern. Widening it is a deliberate
+# edit, never silent drift.
+#
+# Flat and unordered ON PURPOSE: EGV-10 forbids modelling these as a
+# confidence ladder. Customer confirmation may be commercially
+# authoritative yet causally weak; observation proves occurrence, not
+# cause; configuration establishes an approved RATE, not actual hours
+# worked -- so no two of these labels are comparable, and none may be
+# sorted, ranked, or compared as an ordering key (D-01). See
+# tests/test_phase43_evidence_grading.py's LabelTests/LabelDriftTests for
+# exactly what is provable about that (not indexable is a genuine type-level
+# impossibility; never sorted is only proven absent from today's code --
+# Python's str is orderable, so that half can never be more than a static
+# guard).
+#
+# Accepted risk (D-01): nothing here records WHY a label is what it is.
+# Descriptive axes (basis x causal strength) are a deliberate deferral to a
+# later phase, not an oversight.
+EVIDENCE_CLASSES = frozenset({
+    "ACTIVITY_MEASURED",
+    "OUTPUT_OBSERVED",
+    "OUTCOME_OBSERVED",
+    "MODEL_ESTIMATED_DEMO",
+    "CUSTOMER_CONFIGURED",
+    "CUSTOMER_CONFIRMED",
+    "ASSOCIATIONAL",
+    "QUASI_EXPERIMENTAL_IMPACT",
+    "EXPERIMENTAL_IMPACT",
+})
+
+# A bare module-level assert is unusual for this codebase -- CLAUDE.md's
+# error-handling convention favors explicit try/except and fail-open over
+# asserts everywhere a caller exists to fail open FOR -- but this is an
+# IMPORT-TIME invariant with no caller and no request in flight: the
+# module must refuse to load at all if the constant it unconditionally
+# forces at both call sites below ever drifts out of its own label set.
+# python3 does not strip asserts anywhere this module is invoked (no `-O`
+# flag in common.sh/cron.sh), so a bare assert is the plainest spelling of
+# that invariant rather than an oversight of the fail-open convention.
+assert EVIDENCE_CLASS_MODEL_ESTIMATED in EVIDENCE_CLASSES, (
+    f"EVIDENCE_CLASS_MODEL_ESTIMATED ({EVIDENCE_CLASS_MODEL_ESTIMATED!r}) is "
+    "not a member of EVIDENCE_CLASSES -- the forced constant has drifted "
+    "out of the label set it is supposed to belong to"
+)
+
+
+def _forced_evidence_class() -> str:
+    """Return the ONE evidence_class this construction path may ever emit --
+    EVIDENCE_CLASS_MODEL_ESTIMATED, forced, never derived.
+
+    Guarantee class: this function takes NO parameter carrying evaluator
+    output, so it structurally CANNOT read evaluator output, no matter how
+    the read is spelled -- a real, checkable scoping guarantee AT THIS SITE
+    (both of this module's two call sites: _validate_assessment's return
+    dict and _build_job_assessment's record literal). It does NOT extend to
+    _validate_assessment or _build_job_assessment themselves, which
+    legitimately hold the untrusted evaluator response in scope for the six
+    documented fields they do read (hours, rate, confidence, currency,
+    basis, inferred_role) -- those two are covered by plan 43-03's
+    ast-guard, a static check over current code, not an impossibility this
+    function's shape provides.
+    """
+    return EVIDENCE_CLASS_MODEL_ESTIMATED
+
+
 # Bound defaults (ROI-05). Overridable per install through llmOutcomeEvaluation.
 # These are judgement, not measurement — chosen to keep a demo credible. Phase 40
 # reports whether real sessions cluster anywhere near them.
@@ -959,7 +1026,7 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "confidence": confidence,
         "evaluator": _clamp_assessment_text(evaluator, 32),
         "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-        "evidence_class": EVIDENCE_CLASS_MODEL_ESTIMATED,
+        "evidence_class": _forced_evidence_class(),
     }
 
 
@@ -1166,12 +1233,16 @@ def _build_job_assessment(
             "observation_window_start": job_started_at,
             "observation_window_end": job_ended_at,
 
-            # Phase 43 (C-02) owns evidence_references' nine-label
-            # semantics; declared empty here, never omitted.
+            # evidence_references remains a declared-empty list of safe
+            # pointers in this phase, never omitted -- the nine-label
+            # vocabulary this comment used to (mis)attribute here actually
+            # belongs to evidence_class below; see EVIDENCE_CLASSES'
+            # declaration above for where it lives and D-01's rationale.
             "evidence_references": [],
-            # Forced, never read from evaluator output (ROI-04): provenance
-            # a model can assert is not provenance.
-            "evidence_class": EVIDENCE_CLASS_MODEL_ESTIMATED,
+            # Forced via _forced_evidence_class(), never read from evaluator
+            # output (ROI-04, D-03): provenance a model can assert is not
+            # provenance.
+            "evidence_class": _forced_evidence_class(),
 
             "evaluator": _clamp_assessment_text(evaluator, 32),
             "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
