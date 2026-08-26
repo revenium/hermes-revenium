@@ -395,9 +395,23 @@ def _tracer_assessment_record(job_id, **overrides):
     """The tracer's own narrow JobAssessment shape (Task 1's action text):
     identity, schema version, one bound family (a zero-width band), currency,
     and provenance. 42-03 replaces the zero-width band with real bound
-    derivation and adds the remaining EGV-04 fields."""
+    derivation and adds the remaining EGV-04 fields.
+
+    Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
+    populates reportability_status UNCONDITIONALLY on every record it
+    builds. Defaulted here to the reportable literal so every test in this
+    module -- written before hermes-report.sh read this field at all --
+    keeps describing a record that ships its value, unless a test
+    explicitly overrides it to exercise the EGV-18 gate itself."""
     record = {
         'kind': 'job_assessment',
+        # WR-02: classifier.py's _forced_evidence_class() populates this
+        # UNCONDITIONALLY on every job_assessment, exactly as it does
+        # reportability_status. A fixture without it tested a state
+        # production cannot produce -- and the reporter now refuses an
+        # absent evidence_class on a job_assessment, which is what
+        # surfaced the gap.
+        'evidence_class': 'MODEL_ESTIMATED_DEMO',
         'ts': 1715516002.5,
         'agentic_job_id': job_id,
         'assessment_id': f'{job_id}:0',
@@ -411,6 +425,7 @@ def _tracer_assessment_record(job_id, **overrides):
         'evaluator': 'llm',
         'evaluator_version': 'v1',
         'confidence': 0.8,
+        'reportability_status': 'reportable',
     }
     record.update(overrides)
     return record
@@ -1179,6 +1194,12 @@ class RecordShapeTests(unittest.TestCase):
         'estimated_value', 'assumptions',
         'observation_window_start', 'observation_window_end',
         'evidence_references', 'evidence_class',
+        # Phase 43 (EGV-13, D-08): the study reference a job assessment may
+        # carry -- sourced from operator configuration only, never from
+        # evaluator output. Added deliberately here, not discovered by a
+        # failing test: this comment IS the intent, matching D-02's own
+        # "not a test bent to fit code" instruction.
+        'study_id', 'study_version',
         'evaluator', 'evaluator_version', 'model', 'prompt_version', 'policy_version',
         'confidence', 'abstention_reason', 'reportability_status',
     }

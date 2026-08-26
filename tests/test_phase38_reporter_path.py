@@ -110,6 +110,45 @@ def _sidecar_record(job_id, **overrides):
             "estimated_hours_saved": 3.5,
             "assumed_loaded_rate": 150.0,
         },
+        # Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
+        # populates this UNCONDITIONALLY on every record it builds (Phase 42
+        # onward). Default here is the reportable literal so every existing
+        # test in this file -- written before hermes-report.sh read this
+        # field at all -- keeps describing a record that ships its value,
+        # unless a test explicitly overrides it to exercise the gate.
+        "reportability_status": "reportable",
+    }
+    record.update(overrides)
+    return record
+
+
+# Phase 43 Plan 05 (D-06): a correction sidecar line, shaped exactly like
+# correct-assessment.sh's own `record = {...}` literal (Step 5) --
+# tests/test_phase42_assessment_contract.py's SidecarBudgetTests extracts
+# that exact field list from live source via _extract_correction_record_fields
+# rather than a hand-typed guess; this fixture mirrors that list rather than
+# inventing one. Deliberately carries NEITHER evidence_class NOR
+# reportability_status: correct-assessment.sh has never written either, and a
+# fixture that quietly added one would test a shape production never sends
+# (Pitfall 3 in its exact recurring form) -- the whole point of the D-06
+# tests below is that a correction lacking both still ships.
+def _correction_sidecar_record(job_id, sequence=1, **overrides):
+    record = {
+        "kind": "correction",
+        "ts": 1715516010.0,
+        "agentic_job_id": job_id,
+        "assessment_id": f"{job_id}:{sequence}",
+        "sequence": sequence,
+        "assessment_schema_version": 1,
+        "prior_value_low": 446.25,
+        "prior_value_base": 525.0,
+        "prior_value_high": 603.75,
+        "prior_currency": "USD",
+        "value_low": 100.0,
+        "value_base": 110.0,
+        "value_high": 120.0,
+        "currency": "USD",
+        "reason": "operator correction",
     }
     record.update(overrides)
     return record
@@ -333,6 +372,72 @@ class TestPhase38ReporterPath(unittest.TestCase):
         # the marker's estimated_value (525.0) or the sidecar's own base.
         self.assertNotEqual(argv[argv.index('--outcome-value') + 1], '525.0')
 
+    def test_candidate_reportability_ships_no_value_but_keeps_provenance(self):
+        """Phase 43 (EGV-18, D-05 clarification, T-43-01) -- behavior 7 of
+        43-01-PLAN.md's Task 1. A sidecar record whose reportability_status
+        is "candidate" (an estimate computed without the experimental
+        opt-in) must not let its number leave the machine: the constructed
+        `jobs outcome` argv carries neither --outcome-value nor
+        --outcome-currency, and --metadata carries none of the value-bearing
+        keys either -- not just the two flags. The value stays local; the
+        fact that an estimate happened does not (D-05): evidence_class,
+        evaluator, evaluator_version, model, and the four version fields
+        still ship."""
+        argv = self._run_one_outcome(
+            'c43-sid-001', 'c43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('c43-job-001', reportability_status='candidate'),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+
+        meta = json.loads(self._metadata_value(argv))
+        # T-43-01: sanitized from the transported blob, not merely
+        # unforwarded -- these keys must be entirely absent from --metadata,
+        # including the assumptions object whose
+        # estimated_hours_saved * assumed_loaded_rate product IS the
+        # estimate this gate exists to withhold.
+        for stripped_key in (
+            'value_low', 'value_base', 'value_high', 'bounds_source',
+            'currency', 'estimated_value', 'assumptions',
+        ):
+            self.assertNotIn(stripped_key, meta, f'{stripped_key!r} must not cross the wire on a candidate record')
+        # D-05: provenance still ships even though the value did not.
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evaluator'), 'llm')
+        self.assertEqual(meta.get('evaluator_version'), 'v1')
+        self.assertEqual(meta.get('model'), 'unknown')
+        self.assertEqual(meta.get('assessment_schema_version'), 1)
+        self.assertEqual(meta.get('taxonomy_version'), 1)
+        self.assertEqual(meta.get('prompt_version'), 1)
+        self.assertEqual(meta.get('policy_version'), 1)
+        # T-43-04: the reportability decision itself rides in --metadata too
+        # -- a withheld row must be distinguishable from a row dropped for
+        # bounds or schema reasons.
+        self.assertEqual(meta.get('reportability_status'), 'candidate')
+
+    def test_reportable_reportability_ships_exactly_as_before(self):
+        """Phase 43 (EGV-18): a record whose reportability_status is
+        "reportable" ships exactly as the pre-Phase-43 behavior did --
+        same flags, same --metadata provenance, plus reportability_status
+        itself (Task 2, Test 1)."""
+        argv = self._run_one_outcome(
+            'r43-sid-001', 'r43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('r43-job-001'),
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('value_low'), 446.25)
+        self.assertEqual(meta.get('value_base'), 525.0)
+        self.assertEqual(meta.get('value_high'), 603.75)
+        self.assertEqual(meta.get('bounds_source'), 'derived')
+        self.assertEqual(
+            meta.get('assumptions'),
+            {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+        )
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('reportability_status'), 'reportable')
+
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
         argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')
         self.assertNotIn('--outcome-value', argv)
@@ -366,6 +471,179 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
         self.assertNotIn('--outcome-type', argv)
+
+    # -- Plan 43-02 Task 2: the reporter's own evidence_class allow-list --
+
+    def test_evidence_class_outside_the_nine_is_not_forwarded(self):
+        """Plan 43-02, Task 2, behavior 1 (CF-2 reject, D-11 exercised): a
+        sidecar record identical to the nominal fixture except that
+        evidence_class holds a value outside the nine labels must not have
+        that value forwarded into --metadata, and takes both value flags
+        down with it. Single-adversarial-field style, matching
+        test_negative_low_bound_ships_no_value /
+        test_non_numeric_bound_ships_no_value in
+        tests/test_phase42_assessment_contract.py -- everything except
+        evidence_class stays exactly what _sidecar_record's nominal
+        default sends, so a failure here is attributable to this one
+        field. Asserted on the PARSED --metadata object, never a raw
+        string search -- a substring match on the rejected label would
+        pass for the wrong reason if it happened to appear anywhere else
+        in the payload.
+
+        Guarantee class: BEHAVIOURAL. A runtime membership check over
+        untrusted sidecar content, proven on the paths exercised here --
+        not a structural or impossibility claim."""
+        argv = self._run_one_outcome(
+            'ec43-sid-001', 'ec43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('ec43-job-001', evidence_class='ANECDOTAL_VIBES'),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+
+    def test_evidence_class_non_string_is_not_forwarded(self):
+        """Behavior 2: a numeric evidence_class is rejected the same way a
+        misspelled string one is -- the allow-list checks isinstance(str)
+        before membership, not membership alone (a bare `in` test against
+        a frozenset of strings would already reject a non-string via
+        __eq__/__hash__ mismatch, but the explicit isinstance keeps the
+        rejection reason legible rather than incidental)."""
+        argv = self._run_one_outcome(
+            'ec43-sid-002', 'ec43-job-002', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('ec43-job-002', evidence_class=7),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+
+    def test_absent_evidence_class_on_a_job_assessment_is_refused(self):
+        """WR-02 (43-REVIEW.md): absence is permissible only for the record
+        kind that earns it.
+
+        correct-assessment.sh never writes an evidence_class, so a
+        kind:"correction" record legitimately has none -- that exception is
+        covered by test_absent_evidence_class_is_not_a_rejection above and
+        by test_last_match_wins_ships_newest_correction_low_bound. But
+        classifier.py populates the field unconditionally on every
+        job_assessment via _forced_evidence_class(), so an ABSENT field on
+        a job_assessment is not a normal state: it is a hand-edited or
+        truncated line -- the same bypass CR-01 came in through. Before
+        this fix such a record sailed through the allow-list with no
+        rejection at all.
+
+        BEHAVIOURAL, on real constructed argv. Not an impossibility claim."""
+        sidecar = _sidecar_record('ec43-job-004', reportability_status='reportable')
+        sidecar.pop('evidence_class', None)
+        argv = self._run_one_outcome(
+            'ec43-sid-004', 'ec43-job-004', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=sidecar,
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        for leaked in ('value_low', 'value_base', 'value_high',
+                       'bounds_source', 'currency', 'estimated_value',
+                       'assumptions'):
+            self.assertNotIn(
+                leaked, meta,
+                f'WR-02: {leaked!r} shipped for a job_assessment whose '
+                f'evidence_class was deleted: {meta}',
+            )
+
+    def test_rejected_evidence_class_also_withholds_the_value_family(self):
+        """CR-01 (43-REVIEW.md): a record REJECTED by the allow-list must
+        withhold the estimate itself, not merely the two CLI scalars.
+
+        The two refusal gates in hermes-report.sh are independent: the
+        reportability gate strips the value family from the transported
+        record, while the allow-list originally cleared only value_out /
+        currency_out. So a record that was `reportable` but carried an
+        out-of-set evidence_class -- a hand-edited sidecar, precisely the
+        threat CF-2 exists to catch -- had its flags refused while
+        value_low/value_base/value_high, bounds_source and the assumptions
+        object still rode out in --metadata. assumptions is the sharpest
+        part: estimated_hours_saved * assumed_loaded_rate IS the estimate.
+
+        The two tests above assert only flag and evidence_class absence,
+        which is why this shipped untested -- an assertion that checks the
+        fields anyone thought of, again.
+
+        BEHAVIOURAL, on real constructed argv. Not an impossibility claim."""
+        argv = self._run_one_outcome(
+            'ec43-sid-003', 'ec43-job-003', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record(
+                'ec43-job-003',
+                evidence_class='ANECDOTAL_VIBES',
+                reportability_status='reportable',
+            ),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+        for leaked in ('value_low', 'value_base', 'value_high',
+                       'bounds_source', 'currency', 'estimated_value',
+                       'assumptions'):
+            self.assertNotIn(
+                leaked, meta,
+                f'CR-01: {leaked!r} rode into --metadata on a record the '
+                f'allow-list rejected -- the value was refused at the flags '
+                f'and shipped in the blob: {meta}',
+            )
+
+    def test_absent_evidence_class_is_not_a_rejection(self):
+        """Behavior 3 -- the trap this check exists to avoid inverting
+        (D-11's note, and the reporter-side echo of 43-CONTEXT's absent-
+        vs-invalid distinction): a kind:"correction" record carries NO
+        evidence_class key at all, because correct-assessment.sh has never
+        written one. This test pins that absence is permissible on the
+        sidecar-record path directly (a check that rejected absence would
+        silently downgrade every human-authorised correction, and
+        test_last_match_wins_ships_newest_correction_low_bound in
+        tests/test_phase42_assessment_contract.py -- run alongside this
+        module per the plan's own verification list -- would go red).
+        Whether the value ships is decided by reportability_status alone,
+        unaffected by this check."""
+        # WR-02: this test's docstring has always described a
+        # kind:"correction" record, but its fixture was a job_assessment
+        # with the key deleted -- so it passed for the wrong reason, and
+        # scoping the exception by kind is what exposed that. Use the real
+        # correction record, which genuinely carries no evidence_class.
+        record = _correction_sidecar_record('ec43-job-003')
+        self.assertNotIn(
+            'evidence_class', record,
+            'correct-assessment.sh has never written evidence_class; if this '
+            'fires, the fixture has drifted from the shipped writer',
+        )
+        argv = self._run_one_outcome(
+            'ec43-sid-003', 'ec43-job-003', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=record,
+        )
+        # The correction's OWN low bound (D-08), not the prior record's --
+        # the point is that a missing evidence_class does not block the
+        # value, whichever record supplies it.
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '100.0')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+
+    def test_nominal_evidence_class_still_ships_unaffected_by_the_new_check(self):
+        """Behavior 4, the accept-branch regression pin: the nominal
+        fixture's MODEL_ESTIMATED_DEMO still forwards both value flags and
+        the label itself, unchanged by the new allow-list. Tests 3 and 4
+        are not padding -- they are what stops Test 1 from being satisfied
+        by an over-broad check that rejects everything, including absence
+        and the nominal case."""
+        argv = self._run_one_outcome(
+            'ec43-sid-004', 'ec43-job-004', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('ec43-job-004'),
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
 
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
@@ -515,6 +793,85 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta, {'source': 'test'})
 
+    # -- Plan 05 (D-06): a correction stays reportable and says so ---------
+
+    def test_correction_ships_its_own_low_bound_with_no_reporting_opt_in(self):
+        """D-06, behavior 1. The original assessment is written CANDIDATE --
+        the shape classifier.py produces with no experimentalReportEstimates
+        opt-in configured -- and a correction line follows it. Scan-to-end
+        (41-CARRIER-DECISION.md Part 2) resolves `found` to the correction
+        record alone, and the correction carve-out at the reader (D-06) never
+        consults reportability_status at all, so both value flags ship
+        carrying the correction's OWN low bound (100.0) -- never the
+        original's candidate-withheld 446.25."""
+        job_id = 'd06-job-001'
+        argv = self._run_one_outcome(
+            'd06-sid-001', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=[
+                _sidecar_record(job_id, reportability_status='candidate'),
+                _correction_sidecar_record(job_id),
+            ],
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '100.0')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+
+    def test_correction_metadata_carries_corrected_marker_and_sequence(self):
+        """D-06, behavior 2. The same invocation as the prior test's
+        --metadata carries the corrected marker plus the correction's own
+        sequence -- the only signal on the customer's tenant distinguishing
+        this value from an original, since `jobs roi` surfaces neither
+        (Finding 4 / C-06)."""
+        job_id = 'd06-job-002'
+        argv = self._run_one_outcome(
+            'd06-sid-002', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=[
+                _sidecar_record(job_id, reportability_status='candidate'),
+                _correction_sidecar_record(job_id, sequence=1),
+            ],
+        )
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIs(meta.get('corrected'), True)
+        self.assertEqual(meta.get('correction_sequence'), 1)
+
+    def test_ordinary_assessment_metadata_carries_neither_correction_key(self):
+        """D-06, behavior 3. An ORIGINAL assessment (no correction line at
+        all) must not carry a marker saying it is one -- the corrected
+        marker and sequence are emitted ONLY when the resolved record's kind
+        is a correction."""
+        job_id = 'd06-job-003'
+        argv = self._run_one_outcome(
+            'd06-sid-003', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record(job_id),
+        )
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('corrected', meta)
+        self.assertNotIn('correction_sequence', meta)
+
+    def test_correction_ships_even_when_the_reportability_gate_is_closed(self):
+        """D-06, behavior 4 -- the test that would have caught the
+        regression this plan exists to prevent. Plan 43-01 introduced a
+        reportability gate whose DEFAULT is to withhold an ordinary
+        estimate's value; a correction is precisely the record that must
+        not be caught by it. The gate is framed as explicitly CLOSED here
+        (reportability_status='candidate' on the original, not merely
+        absent/unset), so a future change to the resolver's default cannot
+        make this assertion vacuous. The gate and the correction path do
+        not interact: the correction ships regardless of what the gate
+        would have done to an ordinary estimate in the same sidecar."""
+        job_id = 'd06-job-004'
+        argv = self._run_one_outcome(
+            'd06-sid-004', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=[
+                _sidecar_record(job_id, reportability_status='candidate'),
+                _correction_sidecar_record(job_id, sequence=2, value_low=50.0),
+            ],
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '50.0')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIs(meta.get('corrected'), True)
+        self.assertEqual(meta.get('correction_sequence'), 2)
+
 
 # ---------------------------------------------------------------------------
 # Plan 02, Tasks 1 & 2 — the two guarantees only visible across ticks.
@@ -613,6 +970,17 @@ def _build_flexible_shim(shim_path, outcome_value_capable=True):
 # rate=150.0 -> base=525.0, matching ASSESSMENT_FIXTURE/_sidecar_record's
 # shared arithmetic so the low/base/high bounds this fixture produces
 # (446.25/525.0/603.75) line up with the rest of this file's fixtures.
+#
+# Phase 43 (EGV-18): this helper's callers assert a VALUED outcome (deferred
+# create/retry, provenance forwarding) -- orthogonal to the reportability
+# gate itself. _build_job_assessment's cfg carries the reportable opt-in so
+# those pre-existing assertions keep describing a shipped value; a test that
+# wants to exercise the candidate/withheld path builds its own record via
+# _sidecar_record or calls _build_job_assessment directly with a different
+# cfg, not through this helper.
+_REPORTABLE_CFG = {'experimentalReportEstimates': True}
+
+
 def _build_real_sidecar_record(job_id):
     c, _ev = _load_classifier({})
     raw = {
@@ -627,7 +995,7 @@ def _build_real_sidecar_record(job_id):
     }
     valid = {'agentic_job_id': job_id, 'job_type': 'code_review', 'status': 'SUCCESS'}
     assessment = c._validate_assessment(raw, {}, 'llm', 'v1')
-    record = c._build_job_assessment(valid, assessment, raw, {}, 'llm', 'v1')
+    record = c._build_job_assessment(valid, assessment, raw, _REPORTABLE_CFG, 'llm', 'v1')
     return c, record
 
 

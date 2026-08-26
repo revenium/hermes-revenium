@@ -776,6 +776,73 @@ def _clamp_assessment_text(value, limit: int) -> str:
 # DIFFERENT evidence class and must not reuse this one.
 EVIDENCE_CLASS_MODEL_ESTIMATED = "MODEL_ESTIMATED_DEMO"
 
+# EGV-10 (D-01): the nine claim labels, as a flat, unordered frozenset --
+# an explicit allow-list, matching SUPPORTED_CURRENCIES' declaration shape
+# above (classifier.py:61), not a pattern. Widening it is a deliberate
+# edit, never silent drift.
+#
+# Flat and unordered ON PURPOSE: EGV-10 forbids modelling these as a
+# confidence ladder. Customer confirmation may be commercially
+# authoritative yet causally weak; observation proves occurrence, not
+# cause; configuration establishes an approved RATE, not actual hours
+# worked -- so no two of these labels are comparable, and none may be
+# sorted, ranked, or compared as an ordering key (D-01). See
+# tests/test_phase43_evidence_grading.py's LabelTests/LabelDriftTests for
+# exactly what is provable about that (not indexable is a genuine type-level
+# impossibility; never sorted is only proven absent from today's code --
+# Python's str is orderable, so that half can never be more than a static
+# guard).
+#
+# Accepted risk (D-01): nothing here records WHY a label is what it is.
+# Descriptive axes (basis x causal strength) are a deliberate deferral to a
+# later phase, not an oversight.
+EVIDENCE_CLASSES = frozenset({
+    "ACTIVITY_MEASURED",
+    "OUTPUT_OBSERVED",
+    "OUTCOME_OBSERVED",
+    "MODEL_ESTIMATED_DEMO",
+    "CUSTOMER_CONFIGURED",
+    "CUSTOMER_CONFIRMED",
+    "ASSOCIATIONAL",
+    "QUASI_EXPERIMENTAL_IMPACT",
+    "EXPERIMENTAL_IMPACT",
+})
+
+# A bare module-level assert is unusual for this codebase -- CLAUDE.md's
+# error-handling convention favors explicit try/except and fail-open over
+# asserts everywhere a caller exists to fail open FOR -- but this is an
+# IMPORT-TIME invariant with no caller and no request in flight: the
+# module must refuse to load at all if the constant it unconditionally
+# forces at both call sites below ever drifts out of its own label set.
+# python3 does not strip asserts anywhere this module is invoked (no `-O`
+# flag in common.sh/cron.sh), so a bare assert is the plainest spelling of
+# that invariant rather than an oversight of the fail-open convention.
+assert EVIDENCE_CLASS_MODEL_ESTIMATED in EVIDENCE_CLASSES, (
+    f"EVIDENCE_CLASS_MODEL_ESTIMATED ({EVIDENCE_CLASS_MODEL_ESTIMATED!r}) is "
+    "not a member of EVIDENCE_CLASSES -- the forced constant has drifted "
+    "out of the label set it is supposed to belong to"
+)
+
+
+def _forced_evidence_class() -> str:
+    """Return the ONE evidence_class this construction path may ever emit --
+    EVIDENCE_CLASS_MODEL_ESTIMATED, forced, never derived.
+
+    Guarantee class: this function takes NO parameter carrying evaluator
+    output, so it structurally CANNOT read evaluator output, no matter how
+    the read is spelled -- a real, checkable scoping guarantee AT THIS SITE
+    (both of this module's two call sites: _validate_assessment's return
+    dict and _build_job_assessment's record literal). It does NOT extend to
+    _validate_assessment or _build_job_assessment themselves, which
+    legitimately hold the untrusted evaluator response in scope for the six
+    documented fields they do read (hours, rate, confidence, currency,
+    basis, inferred_role) -- those two are covered by plan 43-03's
+    ast-guard, a static check over current code, not an impossibility this
+    function's shape provides.
+    """
+    return EVIDENCE_CLASS_MODEL_ESTIMATED
+
+
 # Bound defaults (ROI-05). Overridable per install through llmOutcomeEvaluation.
 # These are judgement, not measurement — chosen to keep a demo credible. Phase 40
 # reports whether real sessions cluster anywhere near them.
@@ -959,7 +1026,7 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "confidence": confidence,
         "evaluator": _clamp_assessment_text(evaluator, 32),
         "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-        "evidence_class": EVIDENCE_CLASS_MODEL_ESTIMATED,
+        "evidence_class": _forced_evidence_class(),
     }
 
 
@@ -1032,8 +1099,119 @@ NARRATIVE_CLAMP_BYTES = 500
 # silently dropped because "nothing populates it yet").
 STATE_QUARTET_UNKNOWN = "unknown"  # output_status/acceptance_status/adoption_status: 42-RESEARCH.md Section 1 Assumption A2, the current evaluator has no mechanism to assess these
 ECONOMIC_MECHANISM_LABOR_SUBSTITUTION = "labor_substitution"  # only mechanism derivable from today's prompt; Phase 44 (EGV-05) widens to the full six-mechanism enum
-REPORTABILITY_STATUS_DEFAULT = "local_only"  # Phase 43 (EGV-18) owns the resolver; this is 42-RESEARCH.md Section 1's recommended safe default until it lands
+
+# Phase 43 (EGV-18, D-05/D-09): the two locked reportability_status values.
+# D-09: this is a straight rename of Phase 42's REPORTABILITY_STATUS_DEFAULT
+# placeholder ("local_only") -- no migration shim, because that field was
+# written only into the sidecar, never read by hermes-report.sh, and absent
+# from every golden fixture (verified before this rename; nothing in
+# production depends on the old spelling).
+REPORTABILITY_REPORTABLE = "reportable"
+REPORTABILITY_CANDIDATE = "candidate"
+
 PROVENANCE_MODEL_UNKNOWN = "unknown"  # Phase 45 (EGV-08) owns which model produced the assessment; the naked-LLM path has no reliable model identity to report today
+
+
+def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:
+    """Resolve EGV-18's reportability_status for one JobAssessment record.
+
+    Returns REPORTABILITY_REPORTABLE only when ALL of:
+      - abstained is False (D-05: an abstained assessment is never reportable,
+        whatever the config says -- checked first, unconditionally)
+      - cfg is a dict
+      - cfg["experimentalReportEstimates"] is True -- a literal JSON boolean,
+        identity-compared exactly like _llm_evaluation_enabled's "enabled"
+        check above, and for the same recorded reason (D-12): an operator
+        editing config.json by hand must not be able to switch money
+        reporting on with a near-miss like the string "true" or the int 1.
+
+    Everything else -- including a non-dict/None cfg and a missing key --
+    resolves to REPORTABILITY_CANDIDATE. Never raises: this is a pure
+    function of its two arguments, no I/O.
+
+    D-05: reportable ships the estimate's VALUE to Revenium; candidate keeps
+    the value local but still ships provenance (evidence_class, evaluator,
+    evaluator_version, model, and the version family) -- hermes-report.sh
+    enforces that split when it reads this field, not this function.
+    """
+    if abstained:
+        return REPORTABILITY_CANDIDATE
+    if not isinstance(cfg, dict):
+        return REPORTABILITY_CANDIDATE
+    if cfg.get("experimentalReportEstimates") is True:
+        return REPORTABILITY_REPORTABLE
+    return REPORTABILITY_CANDIDATE
+
+
+# Phase 43 (EGV-13, D-08): a modest ceiling on the operator-configured
+# studyId string -- an identifier, not narrative text, so this sits closer
+# to evaluator_version's 16-byte clamp than basis's 200-byte one. Widened
+# only if a real operator study-id naming scheme needs more room.
+STUDY_ID_MAX_BYTES = 100
+
+
+def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
+    """Resolve EGV-13's study_id/study_version reference for one JobAssessment
+    record.
+
+    Sourced from `cfg` (the llmOutcomeEvaluation object) ONLY -- studyId and
+    studyVersion are read from configuration and from NOWHERE else, in
+    particular never from `raw` (the untrusted evaluator response). An
+    operator declaring "jobs on this install relate to study S" is the only
+    legitimate source of a study reference on this path: the naked-LLM
+    evaluator cannot know of a study it was never told about, and a response
+    that CLAIMS one is exactly the attack
+    tests/test_phase43_evidence_grading.py's PromotionTests (A3) exercises.
+    Reading the reference from the evaluator response instead would make the
+    reference travel as data through a validator -- D-03 already rules that
+    out for evidence_class, and the same reasoning covers this field.
+
+    Returns (study_id, study_version) as an ALL-OR-NONE pair. A study_id
+    is a clamped, non-empty string; a study_version is a plain non-bool int
+    >= 1. If EITHER field fails its own check (missing, wrong type, blank
+    after stripping, or a version below 1), BOTH resolve to their absent
+    defaults ("", 0) -- a lone id or a lone version is unresolvable
+    provenance, because impact_study.validate() admits a record only when
+    both are present and well-formed, so no half-reference can ever name a
+    real ImpactStudyResult. Recording one would put a reference on every
+    assessment this install produces that no reader could ever follow.
+    Both config docs already state the pairing (config-schema.md's
+    llmOutcomeEvaluation table and docs/configuration.md); this is the code
+    that makes it true. Never raises: a pure function of one dict-or-None
+    argument, no I/O.
+
+    D-08: the two fields returned here are the ENTIRE study reference a job
+    assessment may ever carry. This function does not read, and
+    _build_job_assessment's caller has no way to obtain, the study's
+    identification_method, its validity_scope, its effect estimate, or
+    anything else about the study -- classifier.py does not even import the
+    module that would let it (see impact_study.py's own module docstring
+    and tests/test_phase43_evidence_grading.py's NonInheritanceTests). The
+    job's own evidence_class is always set by _forced_evidence_class(),
+    completely independent of whatever study_id/study_version this function
+    returns; referencing a study can never change it.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    study_id = cfg.get("studyId")
+    if isinstance(study_id, str) and study_id.strip():
+        study_id = _clamp_assessment_text(study_id, STUDY_ID_MAX_BYTES)
+    else:
+        study_id = ""
+
+    study_version = cfg.get("studyVersion")
+    if isinstance(study_version, bool) or not isinstance(study_version, int) or study_version < 1:
+        study_version = 0
+
+    # All-or-none: a partial config yields no reference at all, never a
+    # half one. Checked after both per-field resolutions rather than by
+    # returning early from the first, so each field is validated by its own
+    # rules regardless of which one is malformed -- the two checks stay
+    # readable side by side against the two rows in the config docs.
+    if not study_id or not study_version:
+        return ("", 0)
+
+    return (study_id, study_version)
 
 
 def _build_job_assessment(
@@ -1090,6 +1268,14 @@ def _build_job_assessment(
         job_started_at = valid.get("job_started_at", now)
         job_ended_at = valid.get("job_ended_at", now)
 
+        # Phase 43 (EGV-13, D-08): resolved from cfg ONLY, never from raw --
+        # see _resolve_study_reference's own docstring for the full
+        # rationale. Computed once here so both the abstention early-return
+        # and the success-path continuation below (which share this single
+        # dict literal, per the same Phase 43 EGV-18 pattern already
+        # established for reportability_status) carry the same reference.
+        study_id, study_version = _resolve_study_reference(cfg)
+
         record: dict = {
             "kind": "job_assessment",
             "ts": now,
@@ -1126,12 +1312,22 @@ def _build_job_assessment(
             "observation_window_start": job_started_at,
             "observation_window_end": job_ended_at,
 
-            # Phase 43 (C-02) owns evidence_references' nine-label
-            # semantics; declared empty here, never omitted.
+            # evidence_references remains a declared-empty list of safe
+            # pointers in this phase, never omitted -- the nine-label
+            # vocabulary this comment used to (mis)attribute here actually
+            # belongs to evidence_class below; see EVIDENCE_CLASSES'
+            # declaration above for where it lives and D-01's rationale.
             "evidence_references": [],
-            # Forced, never read from evaluator output (ROI-04): provenance
-            # a model can assert is not provenance.
-            "evidence_class": EVIDENCE_CLASS_MODEL_ESTIMATED,
+            # Forced via _forced_evidence_class(), never read from evaluator
+            # output (ROI-04, D-03): provenance a model can assert is not
+            # provenance.
+            "evidence_class": _forced_evidence_class(),
+            # Phase 43 (EGV-13, D-08): the study reference, and NOTHING else
+            # about the study -- resolved above via _resolve_study_reference
+            # from cfg only. Referencing a study never changes evidence_class
+            # above, which is forced independently of these two fields.
+            "study_id": study_id,
+            "study_version": study_version,
 
             "evaluator": _clamp_assessment_text(evaluator, 32),
             "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
@@ -1148,7 +1344,16 @@ def _build_job_assessment(
                 assessment.get("confidence") if isinstance(assessment, dict) else 0.0
             ),
             "abstention_reason": abstention_reason or "",
-            "reportability_status": REPORTABILITY_STATUS_DEFAULT,
+            # Phase 43 (EGV-18): ONE consumer site covers both the
+            # abstention early-return below and the success-path
+            # continuation -- they share this single dict literal, so
+            # bool(abstention_reason) is all the resolver needs. Note per
+            # 43-PATTERNS.md's D-11 trap: reportability_status is
+            # deliberately NOT in D-11's omit family. An abstained record
+            # still carries this key, valued REPORTABILITY_CANDIDATE --
+            # the absence of a value is itself something the reporter must
+            # be able to read, not merely infer from a missing field.
+            "reportability_status": _resolve_reportability_status(cfg, bool(abstention_reason)),
         }
 
         if abstention_reason:

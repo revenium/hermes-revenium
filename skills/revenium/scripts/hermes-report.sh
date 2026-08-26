@@ -3135,12 +3135,91 @@ def _s(v, maxlen=None):
     return v
 
 
+# Phase 43 (EGV-18, D-05/D-06/CF-1/CF-3): resolve reportability BEFORE the
+# value scalars below are computed. hermes-report.sh holds NO independent
+# reportability policy (CF-3) -- it reads and obeys reportability_status,
+# with exactly one carve-out: a correction (kind == "correction") is
+# reportable by construction. D-06: a correction is filed by an operator
+# under explicit human authorisation, so EGV-18's gate over naked-LLM
+# estimates does not apply to it -- this is the reasoning that keeps
+# test_last_match_wins_ships_newest_correction_low_bound green, untouched
+# by this change. Otherwise the record's own reportability_status must
+# equal the reportable literal exactly; anything else (absent, "candidate",
+# or a malformed value) is NOT reportable.
+_REPORTABILITY_REPORTABLE = 'reportable'
+_REPORTABILITY_STATUSES = frozenset({'reportable', 'candidate'})
+_is_correction = found.get('kind') == 'correction'
+_reportable = _is_correction or found.get('reportability_status') == _REPORTABILITY_REPORTABLE
+
+# CR-01 (43-REVIEW.md): the value family and the function that removes it are
+# declared ONCE, and every refusal branch calls it. Two independent gates
+# refuse a value here -- the reportability gate below and the CF-2
+# evidence_class allow-list further down -- and the allow-list branch
+# originally cleared only the two CLI scalars, leaving value_low/base/high,
+# bounds_source and assumptions in the transported record. A record that was
+# reportable but carried an out-of-set evidence_class (a hand-edited sidecar:
+# precisely the threat CF-2 exists to catch) therefore had its flags refused
+# while the estimate still rode out in --metadata. Fixing it as one shared
+# stripper rather than a second copy of the tuple is deliberate: a third
+# refusal branch added later cannot forget the family, because there is
+# nothing to forget -- it calls the same function.
+_VALUE_OMIT_FAMILY = ('value_low', 'value_base', 'value_high', 'bounds_source',
+                      'currency', 'estimated_value', 'assumptions')
+
+
+def _strip_value_family(rec):
+    """Remove every value-bearing key from the transported record.
+
+    Withholding --outcome-value/--outcome-currency alone does NOT withhold
+    the value: the bounds and the assumptions object (whose
+    estimated_hours_saved * assumed_loaded_rate product IS the estimate)
+    ride into --metadata via their own forwarders. Deleting them from the
+    blob means no current or future forwarder can reintroduce the leak.
+    Provenance (evidence_class, evaluator, evaluator_version, model, the
+    version family) and confidence are deliberately KEPT -- D-05 withholds
+    the VALUE, not the fact that an estimate happened.
+    """
+    for _k in _VALUE_OMIT_FAMILY:
+        rec.pop(_k, None)
+
+
+_not_reportable_reason = ''
+if not _reportable:
+    # T-43-01: sanitize the TRANSPORTED RECORD, not the forwarder list.
+    # Withholding --outcome-value/--outcome-currency alone does NOT
+    # withhold the value: value_low/value_base/value_high/bounds_source and
+    # assumptions (whose estimated_hours_saved * assumed_loaded_rate
+    # product IS the estimate) already ride into --metadata via the
+    # forwarders further below in the metadata heredoc. Deleting them here,
+    # from the blob itself, means no current or future forwarder can
+    # reintroduce the leak -- exactly the same omit family D-11 already
+    # established on the classifier's abstention path (value_low,
+    # value_base, value_high, bounds_source, currency, estimated_value,
+    # assumptions), applied here by the other half of the pipeline.
+    # confidence and every provenance field (evidence_class, evaluator,
+    # evaluator_version, model, the four version fields) are deliberately
+    # KEPT: D-05 withholds the VALUE, not the fact that an estimate
+    # happened.
+    _strip_value_family(found)
+    _not_reportable_reason = 'not_reportable'
+
+# An unrecognized reportability_status must never cross the wire -- only
+# the two locked D-05 values are meaningful downstream, so a future or
+# hand-edited status word is dropped rather than forwarded unexamined.
+if found.get('reportability_status') not in _REPORTABILITY_STATUSES:
+    found.pop('reportability_status', None)
+
 # D-08: --outcome-value carries the LOW bound, not base -- understates
 # rather than overstates. All three bounds still ride in --metadata via
 # ASSESSMENT_JSON below, so the range stays recoverable. Read-side defense
 # against a hand-edited or corrupt sidecar record, carried over intact from
 # the marker reader (WR-02): a non-numeric value or an unsupported/
-# malformed currency drops BOTH flags together, never one alone.
+# malformed currency drops BOTH flags together, never one alone. Phase 43:
+# ANDed with _reportable, stated explicitly rather than relying only on the
+# sanitizer above having already emptied value_low -- the D-09 second-site
+# comment elsewhere in this file names exactly this trap (a partial clear
+# that relies on downstream/incidental behavior instead of stating intent
+# locally).
 _SUPPORTED_CURRENCIES = frozenset({'USD', 'EUR', 'GBP', 'CAD', 'AUD', 'JPY', 'CHF'})
 _raw_value = found.get('value_low', '')
 _raw_currency = found.get('currency', '')
@@ -3154,12 +3233,83 @@ _currency_ok = (
     isinstance(_raw_currency, str)
     and _raw_currency.strip().upper() in _SUPPORTED_CURRENCIES
 )
-if _value_ok and _currency_ok:
+if _reportable and _value_ok and _currency_ok:
     value_out = _s(_raw_value)
     currency_out = _s(_raw_currency, maxlen=32)
 else:
     value_out = ''
     currency_out = ''
+
+# Phase 43 (C-02, CF-2): the reporter's OWN independent evidence_class
+# allow-list -- defense in depth immediately before the value is emitted,
+# NOT a duplicate resolver (CF-3: hermes-report.sh holds no reportability
+# policy of its own). This is the gate a hand-edited sidecar or a future
+# rogue evaluator would otherwise reach the wire through entirely; C-02
+# accepts the one duplication with classifier.py's own EVIDENCE_CLASSES for
+# that reason. Declared and checked exactly ONCE in this file.
+#
+# NOT case-folded, unlike the currency allow-list just above: these are
+# upper-snake constants compared for identity, not user-typed currency
+# codes. A .strip().upper() here would quietly accept a lowercase spelling
+# classifier.py would never produce -- exactly the drift this allow-list
+# exists to catch, so this check deliberately diverges from the currency
+# precedent rather than copying it blind.
+#
+# ABSENT vs INVALID: a kind:"correction" record carries no evidence_class
+# key at all -- correct-assessment.sh has never written one (see its
+# record literal). An absent field is NOT a rejection: there is nothing to
+# forward, so there is nothing to refuse, and the record's value is
+# governed by the reportability gate above, not this check. Only a field
+# that IS PRESENT and outside the nine is a rejection. Getting this
+# backwards would clear the value on every operator-filed correction and
+# turn test_last_match_wins_ships_newest_correction_low_bound
+# (tests/test_phase42_assessment_contract.py) red -- treat that as the
+# signal this branch is inverted, never as a test to adjust.
+_EVIDENCE_CLASSES = frozenset({
+    'ACTIVITY_MEASURED', 'OUTPUT_OBSERVED', 'OUTCOME_OBSERVED',
+    'MODEL_ESTIMATED_DEMO', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
+    'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
+})
+# WR-02 (43-REVIEW.md): scope the absent-is-permissible exception to the
+# record kind that actually earns it. Only a kind:"correction" record
+# legitimately carries no evidence_class -- correct-assessment.sh has never
+# written one. classifier.py populates it unconditionally on every
+# job_assessment via _forced_evidence_class(), so an ABSENT field on a
+# job_assessment is not a normal state: it is a hand-edited or truncated
+# line, the same bypass CR-01 came in through. Treating absence as
+# permissible for every kind let exactly that record sail through with no
+# rejection at all.
+_raw_evidence_class = found.get('evidence_class', None)
+_evidence_class_missing = _raw_evidence_class is None
+if _evidence_class_missing and not _is_correction:
+    # A job_assessment with no evidence_class is refused like an invalid
+    # one: there is no provenance to forward and no basis to ship a value.
+    _reject_evidence_class = True
+elif _evidence_class_missing:
+    _reject_evidence_class = False
+else:
+    _reject_evidence_class = (
+        not isinstance(_raw_evidence_class, str)
+        or _raw_evidence_class not in _EVIDENCE_CLASSES
+    )
+if _reject_evidence_class:
+    # Reject: remove the key from the resolved record before ASSESSMENT_JSON
+    # is dumped below -- the --metadata heredoc's existing conditional-emit
+    # rule already adds no key for a field absent from the record, so one
+    # declaration and one check here is sufficient; no second copy of the
+    # nine labels lives in the metadata heredoc. Clear both value scalars
+    # together, never one alone -- the same trap this file's own D-09
+    # second-site comment (further below) already documents.
+    found.pop('evidence_class', None)
+    value_out = ''
+    currency_out = ''
+    # CR-01: strip the value family here too. Clearing the two CLI scalars
+    # is not enough -- the bounds and assumptions have their own --metadata
+    # forwarders, so a rejected record would otherwise ship the estimate it
+    # was just refused.
+    _strip_value_family(found)
+    if not _not_reportable_reason:
+        _not_reportable_reason = 'evidence_class_unrecognized'
 
 # Phase 42 (C-04): the whole resolved sidecar record rides as ONE JSON
 # blob -- replacing the eight separate KEY=value prints the marker reader
@@ -3169,6 +3319,14 @@ else:
 # VALUE/CURRENCY still ride as their own scalar lines because
 # outcome_cmd+=(--outcome-value ...) below runs BEFORE the metadata heredoc
 # that parses ASSESSMENT_JSON.
+# Phase 43: print the not_reportable REASON exactly once, only when it
+# exists -- the shell captures REASON with a `sed` filter (see
+# outcome_reason= below) that would concatenate two matching lines. The
+# earlier REASON prints in this same heredoc (sidecar_unavailable,
+# schema_unrecognized, ...) all `raise SystemExit(0)` before reaching here,
+# so at most one REASON line is ever emitted per run.
+if _not_reportable_reason:
+    print(f"REASON={_not_reportable_reason}")
 print(f"VALUE={value_out}")
 print(f"CURRENCY={currency_out}")
 print(f"ASSESSMENT_JSON={json.dumps(found, separators=(',', ':'))}")
@@ -3266,6 +3424,12 @@ print('true' if ok else 'false')
                 ;;
               bounds_invalid)
                 warn "assessment bounds reversed, negative, or non-finite at the second site, reporting status-only: id=${outcome_id}"
+                ;;
+              not_reportable)
+                warn "assessment not reportable per EGV-18 gate, reporting status-only: id=${outcome_id}"
+                ;;
+              evidence_class_unrecognized)
+                warn "assessment evidence_class unrecognized, reporting status-only: id=${outcome_id}"
                 ;;
               *)
                 warn "assessment unvalued (${outcome_reason}), reporting status-only: id=${outcome_id}"
@@ -3384,6 +3548,34 @@ if assessment_raw:
         evidence_class = record.get('evidence_class')
         if isinstance(evidence_class, str) and evidence_class:
             meta['evidence_class'] = evidence_class[:32]
+        # Phase 43 (EGV-18, T-43-04): forwards the reportability decision
+        # itself, not just its effect -- without this, a row withheld by
+        # the gate above is indistinguishable on the tenant from a row
+        # dropped for bounds or schema reasons. Same conditional-emit rule:
+        # absent from the record (or already stripped/dropped by the gate
+        # above for an unrecognized value) adds no key to meta. 16 bytes is
+        # ample for both locked D-05 words ("reportable"/"candidate").
+        reportability_status = record.get('reportability_status')
+        if isinstance(reportability_status, str) and reportability_status:
+            meta['reportability_status'] = reportability_status[:16]
+        # Phase 43 (D-06, T-43-17): a correction stays reportable by
+        # construction -- the reader's carve-out above never consults the
+        # reportability gate for it -- but Finding 4 / C-06 established that
+        # `jobs roi` surfaces the corrected value indistinguishably from an
+        # original. `jobs roi` will not surface this marker either, but with
+        # it the distinguishing signal exists in data Revenium HOLDS rather
+        # than only in the local sidecar, which is the compensating control
+        # C-06 asked this phase for. Emitted ONLY when the resolved record's
+        # kind is a correction -- same conditional-emit rule as every other
+        # field here: a key absent from the record adds no key to meta, and
+        # an ORIGINAL assessment must never carry a marker saying it is not
+        # one. `sequence` guarded by the same non-bool numeric check the
+        # version fields above already use.
+        if record.get('kind') == 'correction':
+            meta['corrected'] = True
+            sequence_raw = record.get('sequence')
+            if isinstance(sequence_raw, (int, float)) and not isinstance(sequence_raw, bool):
+                meta['correction_sequence'] = int(sequence_raw)
         evaluator = record.get('evaluator')
         if isinstance(evaluator, str) and evaluator:
             meta['evaluator'] = evaluator[:64]
