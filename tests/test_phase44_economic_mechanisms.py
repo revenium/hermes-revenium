@@ -711,5 +711,195 @@ class MechanismGuardScopeTests(unittest.TestCase):
         self.assertNotIn('economic_mechanism', _PROMOTION_FORBIDDEN_KEYS)
 
 
+# ---------------------------------------------------------------------------
+# Plan 44-02 — EGV-14 (net value across every supplied cost) and EGV-15
+# (zero/unknown denominators explicit, no ratio ever emitted).
+# ---------------------------------------------------------------------------
+
+
+def _nv_raw(**over):
+    raw = {
+        'economic_mechanism': 'labor_substitution',
+        'inferred_role': 'engineer', 'estimated_hours_saved': 3.5,
+        'assumed_loaded_rate': 150.0, 'currency': 'USD',
+        'basis': 'time avoided', 'confidence': 0.5,
+    }
+    raw.update(over)
+    return raw
+
+
+def _nv_valid(job_id, job_type='bug_fix'):
+    return {'agentic_job_id': job_id, 'job_type': job_type, 'status': 'SUCCESS'}
+
+
+class NetValueTests(unittest.TestCase):
+    """EGV-14, D-06/D-08/D-09 -- net_value subtracts every supplied cost
+    category (not AI cost alone), is absent from an abstained record while
+    supplied_costs/cost_coverage remain present, is not clamped at zero,
+    and no ratio is ever emitted alongside it. Exercised over the REAL
+    _validate_assessment/_build_job_assessment constructors, never a
+    hand-authored record literal."""
+
+    def setUp(self):
+        self.mod = _load_classifier({})
+
+    def _record(self, job_id, cfg, job_type='bug_fix'):
+        raw = _nv_raw()
+        assessment = self.mod._validate_assessment(raw, cfg, 'llm', 'v1')
+        self.assertIsNotNone(assessment, 'fixture must validate for this test to prove anything')
+        rec = self.mod._build_job_assessment(
+            _nv_valid(job_id, job_type), assessment, raw, cfg, 'llm', 'v1')
+        self.assertIsNotNone(rec)
+        return rec
+
+    def test_no_costs_configured_net_value_equals_estimated_value(self):
+        rec = self._record('nv44-job-001', {})
+        self.assertEqual(rec['net_value'], rec['estimated_value'])
+        self.assertEqual(rec['supplied_costs'], {})
+        self.assertEqual(rec['cost_coverage']['included'], [])
+        self.assertEqual(
+            rec['cost_coverage']['unknown'], list(self.mod.COST_CATEGORIES))
+        self.assertEqual(rec['cost_coverage']['excluded'], ['metered_ai_cost'])
+
+    def test_partial_costs_subtract_only_the_supplied_categories(self):
+        cfg = {'costs': {'bug_fix': {'human_review': 25, 'integration': 10}}}
+        rec = self._record('nv44-job-002', cfg)
+        self.assertEqual(
+            rec['supplied_costs'], {'human_review': 25.0, 'integration': 10.0})
+        self.assertEqual(rec['net_value'], round(rec['estimated_value'] - 35.0, 2))
+
+    def test_costs_configured_for_a_different_job_type_do_not_apply(self):
+        """PA-06: there is no fleet-wide default cost bucket -- an absent
+        job-type key means every category is unknown for THIS job type,
+        exactly as if no costs were configured at all."""
+        cfg = {'costs': {'other_type': {'human_review': 999}}}
+        rec = self._record('nv44-job-003', cfg, job_type='bug_fix')
+        self.assertEqual(rec['supplied_costs'], {})
+        self.assertEqual(
+            rec['cost_coverage']['unknown'], list(self.mod.COST_CATEGORIES))
+
+    def test_costs_exceeding_the_estimate_produce_a_negative_net_value_not_clamped(self):
+        cfg = {'costs': {'bug_fix': {
+            'human_review': 100000, 'rework_or_error': 100000,
+            'integration': 100000, 'training_or_change': 100000,
+        }}}
+        rec = self._record('nv44-job-004', cfg)
+        self.assertLess(rec['net_value'], 0)
+
+    def test_no_ratio_field_is_ever_emitted(self):
+        rec = self._record('nv44-job-005', {})
+        for forbidden in ('roi', 'net_over_cost', 'roi_ratio', 'ratio'):
+            self.assertNotIn(forbidden, rec)
+
+    def test_net_value_absent_from_an_abstained_record_but_costs_present(self):
+        valid = _nv_valid('nv44-job-006')
+        cfg = {'costs': {'bug_fix': {'human_review': 25}}}
+        rec = self.mod._build_job_assessment(
+            valid, None, {}, cfg, 'llm', 'v1',
+            abstention_reason='not_evaluated_non_success',
+        )
+        self.assertIsNotNone(rec)
+        self.assertNotIn('net_value', rec)
+        self.assertIn('supplied_costs', rec)
+        self.assertIn('cost_coverage', rec)
+        self.assertEqual(rec['supplied_costs'], {'human_review': 25.0})
+
+    def test_malformed_cost_values_resolve_to_unknown_not_zero(self):
+        bad_values = [-5, float('nan'), float('inf'), True, None, '25', {'x': 1}]
+        for bad in bad_values:
+            with self.subTest(value=bad):
+                supplied, coverage = self.mod._resolve_supplied_costs(
+                    {'costs': {'bug_fix': {'human_review': bad}}}, 'bug_fix')
+                self.assertNotIn('human_review', supplied)
+                self.assertIn('human_review', coverage['unknown'])
+                self.assertNotIn('human_review', coverage['included'])
+                self.assertNotIn('human_review', coverage['known_zero'])
+
+    def test_unrecognised_cost_key_is_ignored_entirely(self):
+        supplied, coverage = self.mod._resolve_supplied_costs(
+            {'costs': {'bug_fix': {'made_up_category': 10}}}, 'bug_fix')
+        self.assertNotIn('made_up_category', supplied)
+        for lst in coverage.values():
+            self.assertNotIn('made_up_category', lst)
+
+    def test_resolve_supplied_costs_signature_has_no_raw_parameter(self):
+        """T-44-06: structurally, not just by convention, the resolver
+        cannot read evaluator output."""
+        import inspect
+        params = list(inspect.signature(self.mod._resolve_supplied_costs).parameters)
+        self.assertNotIn('raw', params)
+
+
+class DenominatorTests(unittest.TestCase):
+    """EGV-15, D-09/D-10 -- a supplied 0 and an absent category are
+    different and both explicit; no ratio is ever emitted so there is no
+    denominator to be null."""
+
+    def setUp(self):
+        self.mod = _load_classifier({})
+
+    def test_supplied_zero_distinguishable_from_absent_category(self):
+        """The load-bearing negative check (44-02-PLAN.md warning 3): this
+        assertion pair is what actually distinguishes D-10's two adjacent
+        cases -- deleting the known-zero branch in _resolve_supplied_costs
+        must make this test fail."""
+        empty_supplied, empty_coverage = self.mod._resolve_supplied_costs({}, 'bug_fix')
+        zero_supplied, zero_coverage = self.mod._resolve_supplied_costs(
+            {'costs': {'bug_fix': {'human_review': 0}}}, 'bug_fix')
+
+        self.assertEqual(empty_coverage['known_zero'], [])
+        self.assertEqual(zero_coverage['known_zero'], ['human_review'])
+
+        self.assertEqual(len(empty_coverage['unknown']), 4)
+        self.assertEqual(len(zero_coverage['unknown']), 3)
+
+        self.assertNotIn('human_review', empty_supplied)
+        self.assertIn('human_review', zero_supplied)
+        self.assertEqual(zero_supplied['human_review'], 0.0)
+        self.assertIn('human_review', zero_coverage['included'])
+
+    def test_no_ratio_is_emitted_anywhere_in_a_real_record(self):
+        mod = self.mod
+        raw = _nv_raw()
+        valid = _nv_valid('dn44-job-001')
+        assessment = mod._validate_assessment(raw, {}, 'llm', 'v1')
+        self.assertIsNotNone(assessment)
+        rec = mod._build_job_assessment(valid, assessment, raw, {}, 'llm', 'v1')
+        self.assertIsNotNone(rec)
+        for key in rec:
+            self.assertNotIn('roi', key.lower())
+            self.assertNotIn('ratio', key.lower())
+
+
+class CoverageOrderTests(unittest.TestCase):
+    """EGV-14 ordering probe edge -- coverage list member order IS
+    specified and IS stable: the fixed COST_CATEGORIES declaration order,
+    never dict/set iteration order, so two records built from the same
+    config are byte-identical across interpreters."""
+
+    def test_included_and_unknown_follow_cost_categories_declaration_order(self):
+        mod = _load_classifier({})
+        cfg = {'costs': {'bug_fix': {
+            'training_or_change': 5, 'human_review': 10,
+        }}}
+        supplied, coverage = mod._resolve_supplied_costs(cfg, 'bug_fix')
+        self.assertEqual(coverage['included'], ['human_review', 'training_or_change'])
+        self.assertEqual(coverage['unknown'], ['rework_or_error', 'integration'])
+        self.assertEqual(list(supplied.keys()), ['human_review', 'training_or_change'])
+
+    def test_byte_identical_serialization_across_two_separate_module_loads(self):
+        mod1 = _load_classifier({})
+        mod2 = _load_classifier({})
+        cfg = {'costs': {'bug_fix': {'human_review': 0, 'integration': 15}}}
+        s1, c1 = mod1._resolve_supplied_costs(cfg, 'bug_fix')
+        s2, c2 = mod2._resolve_supplied_costs(cfg, 'bug_fix')
+        self.assertEqual(json.dumps(s1), json.dumps(s2))
+        self.assertEqual(json.dumps(c1), json.dumps(c2))
+        # And the exact expected order/content, not merely self-consistency.
+        self.assertEqual(s1, {'human_review': 0.0, 'integration': 15.0})
+        self.assertEqual(c1['included'], ['human_review', 'integration'])
+        self.assertEqual(c1['known_zero'], ['human_review'])
+
+
 if __name__ == '__main__':
     unittest.main()

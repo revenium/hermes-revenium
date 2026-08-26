@@ -1298,6 +1298,32 @@ assert EVALUATOR_MECHANISMS.isdisjoint(OPERATOR_ONLY_MECHANISMS), (
     "authority split has been violated at import time"
 )
 
+# Phase 44 (EGV-14, D-05/D-06): the four cost categories EGV-14 requires
+# net_value to account for -- human review, rework or error, integration,
+# and training or change. A TUPLE, not a frozenset: EGV-14's ordering probe
+# edge requires cost_coverage's lists to emit in a FIXED, stable order so
+# two records built from the same config are byte-identical across
+# interpreters, and a frozenset's iteration order is not part of any
+# language guarantee. The four strings mirror the cost families named in
+# 44-CONTEXT.md D-05/D-06 verbatim; hermes-report.sh hand-syncs the same
+# four strings as _COST_CATEGORIES, held equal by
+# tests/test_phase44_economic_mechanisms.py::CostCategoryDriftTests (an
+# ORDERED comparison, unlike MechanismDriftTests' set comparison, because
+# order is part of this contract).
+COST_CATEGORIES = (
+    "human_review",
+    "rework_or_error",
+    "integration",
+    "training_or_change",
+)
+
+# D-08: metered AI cost is the one cost family this classifier never nets
+# -- Revenium already holds it and completes the subtraction on its side.
+# cost_coverage's "excluded" list always names exactly this one literal;
+# netting AI cost here would make the classifier the one place both
+# numbers coexist and turn it into a policy site, which CF-3 forbids.
+COST_COVERAGE_EXCLUDED_AI = "metered_ai_cost"
+
 # Phase 43 (EGV-18, D-05/D-09): the two locked reportability_status values.
 # D-09: this is a straight rename of Phase 42's REPORTABILITY_STATUS_DEFAULT
 # placeholder ("local_only") -- no migration shim, because that field was
@@ -1412,6 +1438,85 @@ def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
     return (study_id, study_version)
 
 
+def _resolve_supplied_costs(cfg: "dict | None", job_type: str) -> "tuple[dict, dict]":
+    """Resolve EGV-14's supplied_costs / cost_coverage pair for one job type.
+
+    Sourced from `cfg` (the llmOutcomeEvaluation object) ONLY -- costs are
+    read from configuration and from NOWHERE else, in particular never from
+    `raw` (the untrusted evaluator response), mirroring
+    _resolve_study_reference's exact discipline immediately above (an
+    LLM-invented cost smuggled through the `basis` or
+    `counterfactual_assumption` narrative fields is the threat, and parsing
+    a narrative for a dollar figure is the shortcut that must never be
+    taken). This function does not even take a `raw` parameter --
+    structurally, not just by convention, it cannot read evaluator output.
+    There is no adversarial model output to bound here (PA-05): the
+    evaluator cannot observe an operator's own cost figures from a
+    transcript, so letting it supply them would repeat D-01's objection one
+    field over.
+
+    A supplied `0` and an absent category are DIFFERENT and both explicit
+    (D-10): a supplied `0` is knowledge ("we reviewed this and it cost
+    nothing") and participates in the subtraction, landing in both
+    supplied_costs and cost_coverage["known_zero"]; an absent category is
+    unknown, never participates, and lands only in
+    cost_coverage["unknown"]. Collapsing the two would be EGV-15's silent
+    substitution one level down.
+
+    cost_coverage["excluded"] always names COST_COVERAGE_EXCLUDED_AI
+    (metered AI cost): Revenium already holds the metered cost and
+    completes the subtraction on its side (D-08) -- netting it here would
+    make this the one place both numbers coexist and turn it into a policy
+    site, which CF-3 forbids.
+
+    A malformed cost value (non-finite, boolean, negative, wrong type) --
+    or a category this install's job type never configured at all -- fails
+    closed to "unknown", never to zero: a zero would silently corrupt the
+    subtraction, while a zero-shaped unknown stays legible. No upper
+    ceiling is applied (PA-05): the maxHoursSaved/maxLoadedRate ceilings
+    bound adversarial MODEL output, and there is no model here to bound
+    against. An unrecognised key inside the job type's cost object (one
+    outside COST_CATEGORIES) is ignored entirely -- absent from
+    supplied_costs, from every coverage list, and from the subtraction.
+
+    Every list (included, known_zero, unknown) is built by iterating
+    COST_CATEGORIES in its declared order, so all three -- and the returned
+    supplied_costs dict's insertion order -- are stable across interpreters
+    (the EGV-14 ordering probe edge). Never raises: a pure function of a
+    dict-or-None and a string, no I/O.
+
+    Returns (supplied_costs, cost_coverage).
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    costs_cfg = cfg.get("costs")
+    job_costs = costs_cfg.get(job_type) if isinstance(costs_cfg, dict) else None
+    if not isinstance(job_costs, dict):
+        job_costs = {}
+
+    supplied_costs: dict = {}
+    included: list = []
+    known_zero: list = []
+    unknown: list = []
+
+    for category in COST_CATEGORIES:
+        value = _finite_number(job_costs.get(category))
+        if value is None or value < 0:
+            unknown.append(category)
+            continue
+        supplied_costs[category] = value
+        included.append(category)
+        if value == 0:
+            known_zero.append(category)
+
+    cost_coverage = {
+        "included": included,
+        "known_zero": known_zero,
+        "unknown": unknown,
+        "excluded": [COST_COVERAGE_EXCLUDED_AI],
+    }
+    return supplied_costs, cost_coverage
+
+
 def _build_job_assessment(
     valid: dict,
     assessment: "dict | None",
@@ -1448,6 +1553,16 @@ def _build_job_assessment(
     provenance, and the state quartet, is still populated, so an abstained
     evaluation is auditable rather than indistinguishable from a broken
     sidecar write.
+
+    Phase 44 (EGV-14): net_value joins that same omit family on abstention
+    -- it is model-derived money, computed from an accepted `assessment`
+    that does not exist on this path. supplied_costs and cost_coverage
+    deliberately do NOT join it: they are operator-supplied, sourced from
+    `cfg` alone, and present on EVERY path including abstention (D-14's
+    shape stated one plan early) -- a record that abstains from value still
+    retains its costs and its coverage list, which is what keeps negative
+    ROI visible downstream without this skill asserting a negative number
+    it never measured.
     """
     try:
         raw = raw if isinstance(raw, dict) else {}
@@ -1473,6 +1588,14 @@ def _build_job_assessment(
         # dict literal, per the same Phase 43 EGV-18 pattern already
         # established for reportability_status) carry the same reference.
         study_id, study_version = _resolve_study_reference(cfg)
+
+        # Phase 44 (EGV-14, D-05/D-06): resolved from cfg ONLY, never from
+        # raw -- see _resolve_supplied_costs's own docstring for the full
+        # rationale. Computed once here, keyed by job_type, so both the
+        # abstention early-return and the success-path continuation below
+        # carry the same coverage -- D-14's shape stated one plan early: an
+        # abstained record still retains its costs and its coverage list.
+        supplied_costs, cost_coverage = _resolve_supplied_costs(cfg, job_type)
 
         record: dict = {
             "kind": "job_assessment",
@@ -1511,6 +1634,15 @@ def _build_job_assessment(
             # ECONOMIC_MECHANISM_UNKNOWN there -- the D-04 correction, not a
             # regression.
             "economic_mechanism": _resolve_economic_mechanism(raw),
+
+            # Phase 44 (EGV-14, D-06/D-14): present on EVERY path including
+            # abstention -- a record that abstains from value still retains
+            # its costs and its coverage list, which is what keeps negative
+            # ROI visible downstream without this skill asserting a
+            # negative number it never measured. net_value itself is added
+            # only on the success path further below.
+            "supplied_costs": supplied_costs,
+            "cost_coverage": cost_coverage,
 
             # Observation window: the naked-LLM evaluator cannot observe
             # past the transcript's own boundaries. Defaulting to the arc
@@ -1585,14 +1717,26 @@ def _build_job_assessment(
             )
             return None
         value_low, value_base, value_high, bounds_source = bounds
+        estimated_value = assessment.get("estimated_value", value_base)
+        # Phase 44 (EGV-14, D-06/D-08/D-09): net_value subtracts EVERY
+        # supplied cost category, not AI cost alone -- Revenium already
+        # holds the metered AI cost and completes that half of the
+        # subtraction on its side (D-08). Not clamped at zero: supplied
+        # costs exceeding the gross estimate is an honest arithmetic result
+        # over an operator's own numbers, and clamping would hide it. No
+        # ratio is derived here or anywhere in this module (D-09) -- value,
+        # costs and coverage ship; Revenium derives ratios from operands it
+        # already holds.
+        net_value = round(estimated_value - sum(supplied_costs.values()), 2)
         record.update({
             "value_low": value_low,
             "value_base": value_base,
             "value_high": value_high,
             "bounds_source": bounds_source,
             "currency": assessment.get("currency", ""),
-            "estimated_value": assessment.get("estimated_value", value_base),
+            "estimated_value": estimated_value,
             "assumptions": assessment.get("assumptions", {}),
+            "net_value": net_value,
         })
         return record
     except Exception as exc:

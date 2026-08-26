@@ -1046,8 +1046,16 @@ class SidecarBudgetTests(unittest.TestCase):
         raw = self._worst_case_raw(narrative_char)
         assessment = mod._validate_assessment(raw, {}, evaluator, evaluator_version)
         self.assertIsNotNone(assessment, 'max-bound inputs must be accepted, not rejected')
+        valid = self._worst_case_valid(job_id)
+        # Phase 44 (EGV-14): worst-case cost config for THIS job_type -- every
+        # category supplied as a literal 0, so each one lands in BOTH
+        # "included" and "known_zero" simultaneously (D-10), which costs
+        # MORE serialized bytes than a large nonzero value would (a
+        # populated known_zero list costs more bytes than a few extra
+        # numeric digits) -- the genuine worst case for this shape.
+        cfg = {'costs': {valid['job_type']: {cat: 0 for cat in mod.COST_CATEGORIES}}}
         rec = mod._build_job_assessment(
-            self._worst_case_valid(job_id), assessment, raw, {}, evaluator, evaluator_version)
+            valid, assessment, raw, cfg, evaluator, evaluator_version)
         self.assertIsNotNone(rec, 'worst-case record construction must succeed')
         return rec
 
@@ -1203,6 +1211,13 @@ class RecordShapeTests(unittest.TestCase):
         'execution_status', 'output_status', 'acceptance_status', 'adoption_status',
         'candidate_downstream_outcome', 'counterfactual_assumption', 'basis',
         'economic_mechanism',
+        # Phase 44 (EGV-14/EGV-15, plan 44-02): net_value subtracts every
+        # supplied cost category; supplied_costs and cost_coverage are the
+        # operator-supplied operands and the coverage list naming what was
+        # included/known-zero/unknown/excluded. Added deliberately here,
+        # not discovered by a failing test, per D-02's "not a test bent to
+        # fit code" instruction.
+        'net_value', 'supplied_costs', 'cost_coverage',
         'value_low', 'value_base', 'value_high', 'bounds_source', 'currency',
         'estimated_value', 'assumptions',
         'observation_window_start', 'observation_window_end',
