@@ -122,6 +122,38 @@ def _sidecar_record(job_id, **overrides):
     return record
 
 
+# Phase 43 Plan 05 (D-06): a correction sidecar line, shaped exactly like
+# correct-assessment.sh's own `record = {...}` literal (Step 5) --
+# tests/test_phase42_assessment_contract.py's SidecarBudgetTests extracts
+# that exact field list from live source via _extract_correction_record_fields
+# rather than a hand-typed guess; this fixture mirrors that list rather than
+# inventing one. Deliberately carries NEITHER evidence_class NOR
+# reportability_status: correct-assessment.sh has never written either, and a
+# fixture that quietly added one would test a shape production never sends
+# (Pitfall 3 in its exact recurring form) -- the whole point of the D-06
+# tests below is that a correction lacking both still ships.
+def _correction_sidecar_record(job_id, sequence=1, **overrides):
+    record = {
+        "kind": "correction",
+        "ts": 1715516010.0,
+        "agentic_job_id": job_id,
+        "assessment_id": f"{job_id}:{sequence}",
+        "sequence": sequence,
+        "assessment_schema_version": 1,
+        "prior_value_low": 446.25,
+        "prior_value_base": 525.0,
+        "prior_value_high": 603.75,
+        "prior_currency": "USD",
+        "value_low": 100.0,
+        "value_base": 110.0,
+        "value_high": 120.0,
+        "currency": "USD",
+        "reason": "operator correction",
+    }
+    record.update(overrides)
+    return record
+
+
 class TestPhase38ReporterPath(unittest.TestCase):
     def _run_one_outcome(self, sid, job_id, status, failure_reason='', source='test',
                           assessment=None, raw_agentic_job_id=None,
@@ -673,6 +705,85 @@ class TestPhase38ReporterPath(unittest.TestCase):
         # Phase 42 (D-10): marker-only fixture -- no provenance either.
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta, {'source': 'test'})
+
+    # -- Plan 05 (D-06): a correction stays reportable and says so ---------
+
+    def test_correction_ships_its_own_low_bound_with_no_reporting_opt_in(self):
+        """D-06, behavior 1. The original assessment is written CANDIDATE --
+        the shape classifier.py produces with no experimentalReportEstimates
+        opt-in configured -- and a correction line follows it. Scan-to-end
+        (41-CARRIER-DECISION.md Part 2) resolves `found` to the correction
+        record alone, and the correction carve-out at the reader (D-06) never
+        consults reportability_status at all, so both value flags ship
+        carrying the correction's OWN low bound (100.0) -- never the
+        original's candidate-withheld 446.25."""
+        job_id = 'd06-job-001'
+        argv = self._run_one_outcome(
+            'd06-sid-001', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=[
+                _sidecar_record(job_id, reportability_status='candidate'),
+                _correction_sidecar_record(job_id),
+            ],
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '100.0')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+
+    def test_correction_metadata_carries_corrected_marker_and_sequence(self):
+        """D-06, behavior 2. The same invocation as the prior test's
+        --metadata carries the corrected marker plus the correction's own
+        sequence -- the only signal on the customer's tenant distinguishing
+        this value from an original, since `jobs roi` surfaces neither
+        (Finding 4 / C-06)."""
+        job_id = 'd06-job-002'
+        argv = self._run_one_outcome(
+            'd06-sid-002', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=[
+                _sidecar_record(job_id, reportability_status='candidate'),
+                _correction_sidecar_record(job_id, sequence=1),
+            ],
+        )
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIs(meta.get('corrected'), True)
+        self.assertEqual(meta.get('correction_sequence'), 1)
+
+    def test_ordinary_assessment_metadata_carries_neither_correction_key(self):
+        """D-06, behavior 3. An ORIGINAL assessment (no correction line at
+        all) must not carry a marker saying it is one -- the corrected
+        marker and sequence are emitted ONLY when the resolved record's kind
+        is a correction."""
+        job_id = 'd06-job-003'
+        argv = self._run_one_outcome(
+            'd06-sid-003', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record(job_id),
+        )
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('corrected', meta)
+        self.assertNotIn('correction_sequence', meta)
+
+    def test_correction_ships_even_when_the_reportability_gate_is_closed(self):
+        """D-06, behavior 4 -- the test that would have caught the
+        regression this plan exists to prevent. Plan 43-01 introduced a
+        reportability gate whose DEFAULT is to withhold an ordinary
+        estimate's value; a correction is precisely the record that must
+        not be caught by it. The gate is framed as explicitly CLOSED here
+        (reportability_status='candidate' on the original, not merely
+        absent/unset), so a future change to the resolver's default cannot
+        make this assertion vacuous. The gate and the correction path do
+        not interact: the correction ships regardless of what the gate
+        would have done to an ordinary estimate in the same sidecar."""
+        job_id = 'd06-job-004'
+        argv = self._run_one_outcome(
+            'd06-sid-004', job_id, 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=[
+                _sidecar_record(job_id, reportability_status='candidate'),
+                _correction_sidecar_record(job_id, sequence=2, value_low=50.0),
+            ],
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '50.0')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIs(meta.get('corrected'), True)
+        self.assertEqual(meta.get('correction_sequence'), 2)
 
 
 # ---------------------------------------------------------------------------
