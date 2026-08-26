@@ -263,6 +263,37 @@ class NarrativeClampTests(unittest.TestCase):
                 self.assertLess(len(got[field]), len(overlong))
 
 
+    def test_assumptions_and_diagnostics_list_items_are_clamped(self):
+        """WR-01 (43-REVIEW.md): every narrative field in the contract is
+        byte-clamped, but `assumptions` and `diagnostics` list ITEMS were
+        copied verbatim -- the only unclamped strings in the module. Not
+        exploitable today (nothing imports impact_study.py yet), but a real
+        gap for whichever Phase 45 fixture becomes its first caller.
+
+        The fix was made by inspection; the phase verifier correctly flagged
+        that no test proved it. This is that test.
+
+        BEHAVIOURAL, on the real validate() return. Not an impossibility
+        claim -- a future edit could stop clamping and only this test would
+        notice."""
+        long_item = 'x' * (self.mod.NARRATIVE_CLAMP_BYTES * 3)
+        got = self.mod.validate(self._study(
+            assumptions=[long_item, 'short one'],
+            diagnostics=[long_item],
+        ))
+        self.assertIsNotNone(got, 'an over-long list item must not be a rejection')
+        for field in ('assumptions', 'diagnostics'):
+            for item in got[field]:
+                self.assertLessEqual(
+                    len(item.encode('utf-8')), self.mod.NARRATIVE_CLAMP_BYTES,
+                    f'WR-01: {field} item exceeded the clamp: {len(item)} chars',
+                )
+        self.assertEqual(
+            got['assumptions'][1], 'short one',
+            'a short item must pass through unchanged',
+        )
+
+
 class NeverRaisesTests(unittest.TestCase):
     """Behavior 13 -- validate() never raises, for any adversarial input.
 
