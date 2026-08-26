@@ -1,15 +1,31 @@
-"""Phase 43 Plan 01 — the EGV-18 resolver and the reporter gate it drives.
+"""Phase 43 Plans 01 & 02 — the EGV-18 reportability gate and the EGV-10
+nine-label evidence-class vocabulary.
 
 An estimate produced without explicit experimental opt-in is retained locally
-as a candidate; its number never leaves the machine. This module tests the
-resolver classifier.py computes it with (`_resolve_reportability_status`) and
-the fixture-fidelity guarantee that keeps the golden fixture honest.
+as a candidate; its number never leaves the machine. Plan 01's classes test
+the resolver classifier.py computes it with (`_resolve_reportability_status`)
+and the fixture-fidelity guarantee that keeps the golden fixture honest.
+Plan 02's classes (`LabelTests`, `LabelDriftTests`) test the nine EGV-10
+claim labels themselves -- that they exist as one flat, unordered set, what
+is genuinely impossible about that shape versus what is merely absent from
+today's code, and that the hand-synced pair in classifier.py and
+hermes-report.sh cannot drift apart silently.
 
 Requirements covered:
+  EGV-10 — the nine claim labels are representable as a flat, unordered set;
+           customer confirmation, observation, and configuration are not
+           comparable and must never be modelled as a confidence ladder.
   EGV-18 — reportability_status gates whether an estimate's VALUE (not its
            provenance) reaches Revenium.
 
 Decisions this module exercises (43-CONTEXT.md):
+  D-01 — the nine labels are a flat frozenset; ordering is not merely
+         unused, it is unrepresentable as a type (not indexable) or absent
+         from today's code (never sorted) -- the two are NOT the same
+         guarantee and LabelTests says so explicitly.
+  D-02 — the label list is a hand-synced pair (classifier.py /
+         hermes-report.sh) with a drift test SUPPORTED_CURRENCIES' own
+         hand-synced pair does not have today.
   D-05 — reportable | candidate; a candidate withholds value_low/value_base/
          value_high/bounds_source/currency/estimated_value/assumptions but
          keeps evidence_class/evaluator/evaluator_version/model/the version
@@ -24,12 +40,18 @@ Decisions this module exercises (43-CONTEXT.md):
   D-12 — the config key is llmOutcomeEvaluation.experimentalReportEstimates,
          literal-JSON-true only (mirrors ROI-01's "enabled" discipline).
 
-Guarantee class (43-VALIDATION.md's honesty rule): every assertion in this
-module is BEHAVIOURAL. It proves the resolver and the reporter withhold the
-value on the paths exercised here. It makes no structural or impossibility
-claim -- the structural guards (ast-based promotion/inheritance guards) land
-in plans 43-02 and 43-03.
+Guarantee class (43-VALIDATION.md's honesty rule): Plan 01's classes
+(ResolverTests, FixtureFidelityTests, AbstentionTests) are entirely
+BEHAVIOURAL -- they prove the resolver and the reporter withhold the value
+on the paths exercised here, no structural or impossibility claim. Plan 02's
+LabelTests is MIXED and says which of its three tests is which kind in each
+test's own docstring: not-indexable is IMPOSSIBLE-class (a frozenset has no
+__getitem__), never-sorted is STATIC-class (proves absence in the two files
+scanned today, not impossibility -- Python's str is orderable). LabelDriftTests
+is BEHAVIOURAL: it proves the two live declarations agree right now, not that
+they can never diverge in the future.
 """
+import ast
 import importlib.util
 import os
 import unittest
@@ -37,6 +59,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
+CLASSIFIER_SOURCE_PATH = PLUGIN / 'classifier.py'
+HERMES_REPORT_PATH = ROOT / 'skills' / 'revenium' / 'scripts' / 'hermes-report.sh'
 
 
 def _load_classifier(env: dict | None = None):
@@ -237,6 +261,317 @@ class AbstentionTests(unittest.TestCase):
                 f'D-11 omit family key {omitted_key!r} must be absent on an abstained record',
             )
         self.assertEqual(record['abstention_reason'], 'abstained')
+
+
+# -- Plan 43-02, Task 3: EGV-10 label extraction helpers --------------------
+#
+# ast, never regex, for the same reason
+# tests/test_phase42_assessment_contract.py's _extract_correction_record_fields
+# abandoned a regex predecessor (that module's own docstring, and its
+# Greptile P2 note): a regex recognising one quoting style silently
+# under-matches a collection literal the moment its quoting style changes,
+# leaving `fields`/labels non-empty and the caller none the wiser. Both
+# extractors below REFUSE (return None) on anything but exactly one
+# unambiguous match, so a moved or reshaped declaration fails the caller
+# loudly instead of silently comparing a partial or stale set.
+
+_ORDERING_BUILTINS = frozenset({'sorted', 'min', 'max'})
+_ORDERING_COMPARISONS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+
+
+def _extract_frozenset_from_module(tree, target_name):
+    """Read `target_name = frozenset({...})`'s string elements straight out
+    of a parsed ast.Module -- the whole-module-parse half of D-02's
+    extraction (classifier.py is ordinary Python end to end, so parsing the
+    whole file and finding the one matching top-level assignment is the
+    natural shape here; contrast
+    _extract_frozenset_assignment_fragment below, used for hermes-report.sh,
+    which is bash and cannot be parsed as a whole).
+
+    Refuses (returns None) if there are zero or more than one matching
+    assignment, or if any element is not a plain string constant.
+    """
+    matches = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+            continue
+        if node.targets[0].id != target_name:
+            continue
+        value = node.value
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == 'frozenset'
+            and len(value.args) == 1
+            and isinstance(value.args[0], ast.Set)
+        ):
+            continue
+        matches.append(value.args[0])
+    if len(matches) != 1:
+        return None
+    elements = []
+    for elt in matches[0].elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, str):
+            return None
+        elements.append(elt.value)
+    return set(elements)
+
+
+def _extract_frozenset_assignment_fragment(text, target_name):
+    """Isolate the ONE `target_name = frozenset({...})` assignment out of a
+    larger text blob -- hermes-report.sh as a whole is bash with embedded
+    Python heredocs, not directly ast.parse-able, so D-02's instruction is
+    to isolate just this one assignment (not the whole heredoc) and parse
+    that fragment on its own. Distinct from
+    _extract_frozenset_from_module above, which parses classifier.py's
+    entire module because that file IS ordinary Python throughout.
+
+    Refuses (returns None) if the anchor text does not appear exactly
+    once, or if the isolated fragment does not parse as a single
+    `NAME = frozenset({...})` assignment of string constants.
+    """
+    anchor = f'{target_name} = frozenset({{'
+    occurrences = [i for i in range(len(text)) if text.startswith(anchor, i)]
+    if len(occurrences) != 1:
+        return None
+    start = occurrences[0]
+    end = text.find('})', start)
+    if end == -1:
+        return None
+    fragment = text[start:end + len('})')]
+    try:
+        tree = ast.parse(fragment)
+    except SyntaxError:
+        return None
+    return _extract_frozenset_from_module(tree, target_name)
+
+
+def _hermes_report_evidence_class_heredoc():
+    """Isolate the ONE Python heredoc body in hermes-report.sh that declares
+    _EVIDENCE_CLASSES, so it can be ast.parse'd as a self-contained
+    fragment for the ordering-usage scan below. hermes-report.sh as a WHOLE
+    is bash and cannot be ast.parse'd directly; this specific heredoc
+    (the sidecar reader) was confirmed to compile standalone via
+    `python3 -m py_compile` at Plan 43-02 execution time -- it is a
+    complete, self-contained Python script embedded in the surrounding
+    bash, not a fragment.
+
+    _EVIDENCE_CLASSES is a local variable scoped to this one heredoc (bash
+    heredocs share no Python namespace with each other), so scanning this
+    single span for ordering usage of the name is equivalent to scanning
+    "anywhere in hermes-report.sh" -- no other heredoc in the file can
+    reference a name this one never exports.
+
+    Refuses (returns None) if the anchor is not found in exactly one
+    heredoc span.
+    """
+    text = HERMES_REPORT_PATH.read_text()
+    anchor = '_EVIDENCE_CLASSES = frozenset({'
+    spans = []
+    pos = 0
+    while True:
+        start = text.find("<<'PY'", pos)
+        if start == -1:
+            break
+        body_start = text.index('\n', start) + 1
+        end = text.find('\nPY\n', body_start)
+        if end == -1:
+            break
+        spans.append((body_start, end))
+        pos = end + 1
+    matching = [text[s:e] for s, e in spans if anchor in text[s:e]]
+    if len(matching) != 1:
+        return None
+    return matching[0]
+
+
+def _references_name(node, names):
+    return any(
+        isinstance(sub, ast.Name) and sub.id in names
+        for sub in ast.walk(node)
+    )
+
+
+def _find_label_ordering_offenses(tree, filename, names):
+    """Walk `tree` for calls to sorted/min/max, or comparisons using an
+    ordering operator (<, <=, >, >=), whose operands reference any name in
+    `names` -- the label constant this test is proving is never ordered.
+    Returns a list of human-readable "file:line: ..." offense strings, not
+    just a count, per Task 3's instruction.
+
+    Equality (==, !=) and membership (in, not in) are deliberately NOT
+    flagged -- both are used legitimately throughout this codebase to check
+    set membership (e.g. `x in EVIDENCE_CLASSES`), and neither imposes an
+    order.
+    """
+    offenders = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _ORDERING_BUILTINS
+            and any(_references_name(arg, names) for arg in node.args)
+        ):
+            offenders.append(
+                f'{filename}:{getattr(node, "lineno", "?")}: '
+                f'{node.func.id}(...) applied to {sorted(names)!r}'
+            )
+        if isinstance(node, ast.Compare) and any(
+            isinstance(op, _ORDERING_COMPARISONS) for op in node.ops
+        ):
+            operands = [node.left] + list(node.comparators)
+            if any(_references_name(operand, names) for operand in operands):
+                offenders.append(
+                    f'{filename}:{getattr(node, "lineno", "?")}: '
+                    f'ordering comparison applied to {sorted(names)!r}'
+                )
+    return offenders
+
+
+class LabelTests(unittest.TestCase):
+    """EGV-10 (D-01) -- the nine claim labels, as a flat, unordered
+    frozenset. Behaviors 1-3 from 43-02-PLAN.md's Task 3.
+
+    Guarantee-class honesty (43-VALIDATION.md): test_labels_are_not_indexable
+    proves a genuine type-level IMPOSSIBILITY -- a frozenset has no
+    __getitem__ at all. test_labels_never_sorted_in_source proves only that
+    an ordering operation is ABSENT from the two files this guard scans
+    TODAY (STATIC-class) -- Python's str is orderable, so nothing in the
+    language prevents a future edit from sorting these labels; this guard
+    would catch such an edit only within the files it scans.
+    43-VALIDATION.md's honesty rule and 42-LEARNINGS' three
+    narrowed-not-closed failures both exist because a green test was once
+    read as a stronger guarantee than it was -- these docstrings are
+    deliberately not softened.
+    """
+
+    def setUp(self):
+        self.mod = _load_classifier()
+
+    def test_labels_are_exactly_the_nine_egv_10_strings(self):
+        """Behavior 1: EVIDENCE_CLASSES holds exactly the nine EGV-10
+        strings, COMPARED AS A SET -- deliberately `set(...)`-cast rather
+        than compared directly, so this test isolates CONTENT (are these
+        the right nine strings) from CONTAINER TYPE (which
+        test_labels_are_not_indexable below owns). A direct `assertEqual`
+        against a set literal would also fail if the container were ever
+        changed to something merely order-preserving but still unindexable
+        -- conflating this test's failure with that one's, exactly what the
+        mutation check in 43-02-PLAN.md's verification section (c) is
+        built to keep separate."""
+        self.assertEqual(
+            set(self.mod.EVIDENCE_CLASSES),
+            {
+                'ACTIVITY_MEASURED', 'OUTPUT_OBSERVED', 'OUTCOME_OBSERVED',
+                'MODEL_ESTIMATED_DEMO', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
+                'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
+            },
+        )
+
+    def test_labels_are_not_indexable(self):
+        """Behavior 2. IMPOSSIBLE-class: a frozenset has no __getitem__ at
+        all, so a subscript raises from the type system itself, not from a
+        check anyone wrote -- this test is entitled to claim impossibility.
+        Both the raise AND the missing attribute are asserted: the attribute
+        check is what keeps this test meaningful if the container type is
+        ever changed to something ordered whose __getitem__ happens to also
+        raise for an out-of-range index (a bare raise-only assertion would
+        stay green through that regression)."""
+        self.assertFalse(hasattr(self.mod.EVIDENCE_CLASSES, '__getitem__'))
+        with self.assertRaises(TypeError):
+            self.mod.EVIDENCE_CLASSES[0]
+
+    def test_labels_never_sorted_in_source(self):
+        """Behavior 3. STATIC-class, honestly labelled: this proves an
+        ordering operation is ABSENT FROM THE CODE THAT EXISTS TODAY in
+        classifier.py and hermes-report.sh's _EVIDENCE_CLASSES heredoc --
+        NOT that ordering these labels is impossible. Python's str is
+        orderable, so nothing prevents a future edit from sorting,
+        ranking, or min/max-ing this set; this guard catches such an edit
+        only within the two files and the one heredoc region it scans.
+
+        ast, never a substring scan: EVIDENCE_CLASSES' own explanatory
+        comment in classifier.py states in prose that the labels are never
+        ordered, so a text search for e.g. "sorted" near the constant would
+        match that very comment and fail on a fully compliant file --
+        the same trap tests/test_phase36_evaluator_seam.py's
+        test_module_does_not_import_classifier names for its own ast-vs-grep
+        choice."""
+        offenders = []
+
+        classifier_tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        offenders.extend(_find_label_ordering_offenses(
+            classifier_tree, 'classifier.py', frozenset({'EVIDENCE_CLASSES'}),
+        ))
+
+        heredoc_text = _hermes_report_evidence_class_heredoc()
+        self.assertIsNotNone(
+            heredoc_text,
+            'the _EVIDENCE_CLASSES heredoc in hermes-report.sh could not be '
+            'isolated -- the declaration or its heredoc moved and this '
+            'extractor needs updating, not this assertion',
+        )
+        heredoc_tree = ast.parse(heredoc_text)
+        offenders.extend(_find_label_ordering_offenses(
+            heredoc_tree, 'hermes-report.sh', frozenset({'_EVIDENCE_CLASSES'}),
+        ))
+
+        self.assertEqual(
+            offenders, [],
+            f'ordering operation(s) applied to the label constant: {offenders!r}',
+        )
+
+
+class LabelDriftTests(unittest.TestCase):
+    """D-02 -- the hand-synced label pair (classifier.py's EVIDENCE_CLASSES,
+    hermes-report.sh's _EVIDENCE_CLASSES) must never drift silently apart.
+    This is the drift test SUPPORTED_CURRENCIES' otherwise-identical
+    hand-synced pair (classifier.py's SUPPORTED_CURRENCIES /
+    hermes-report.sh's _SUPPORTED_CURRENCIES) does NOT have today -- Phase
+    43 closes that gap for the new pair rather than reproducing it.
+
+    Guarantee class: BEHAVIOURAL. This proves the two live declarations
+    agree right now, read directly from source on every run -- not that
+    they can never diverge in the future. A future hand-edit to either side
+    alone is exactly what this test exists to catch, on its next run.
+    """
+
+    def test_classifier_and_reporter_label_sets_agree(self):
+        """Behavior 4: extract classifier.py's EVIDENCE_CLASSES by
+        ast-parsing the whole module, extract hermes-report.sh's
+        _EVIDENCE_CLASSES by isolating and ast-parsing just that one
+        assignment, and compare. Either extractor returning None means the
+        declaration moved -- fail loudly and say so, rather than silently
+        comparing an empty/stale set (matching
+        _extract_correction_record_fields's refuse-rather-than-under-match
+        discipline)."""
+        classifier_tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        classifier_labels = _extract_frozenset_from_module(
+            classifier_tree, 'EVIDENCE_CLASSES',
+        )
+        self.assertIsNotNone(
+            classifier_labels,
+            'EVIDENCE_CLASSES could not be extracted from classifier.py -- '
+            'the declaration moved and this extractor needs updating',
+        )
+
+        reporter_text = HERMES_REPORT_PATH.read_text()
+        reporter_labels = _extract_frozenset_assignment_fragment(
+            reporter_text, '_EVIDENCE_CLASSES',
+        )
+        self.assertIsNotNone(
+            reporter_labels,
+            '_EVIDENCE_CLASSES could not be extracted from hermes-report.sh '
+            '-- the declaration moved and this extractor needs updating',
+        )
+
+        self.assertEqual(
+            classifier_labels, reporter_labels,
+            'classifier.py and hermes-report.sh have drifted on the '
+            'nine-label set',
+        )
 
 
 if __name__ == '__main__':
