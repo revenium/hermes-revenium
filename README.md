@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/hermes-revenium.png" alt="Hermes × Revenium — Revenium Labs" width="620">
+<img src="assets/hermes-revenium-nous-research.png" alt="Hermes × Revenium — Revenium Labs" width="620">
 
 # Hermes Revenium
 
