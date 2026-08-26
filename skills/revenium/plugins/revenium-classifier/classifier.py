@@ -1143,6 +1143,61 @@ def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:
     return REPORTABILITY_CANDIDATE
 
 
+# Phase 43 (EGV-13, D-08): a modest ceiling on the operator-configured
+# studyId string -- an identifier, not narrative text, so this sits closer
+# to evaluator_version's 16-byte clamp than basis's 200-byte one. Widened
+# only if a real operator study-id naming scheme needs more room.
+STUDY_ID_MAX_BYTES = 100
+
+
+def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
+    """Resolve EGV-13's study_id/study_version reference for one JobAssessment
+    record.
+
+    Sourced from `cfg` (the llmOutcomeEvaluation object) ONLY -- studyId and
+    studyVersion are read from configuration and from NOWHERE else, in
+    particular never from `raw` (the untrusted evaluator response). An
+    operator declaring "jobs on this install relate to study S" is the only
+    legitimate source of a study reference on this path: the naked-LLM
+    evaluator cannot know of a study it was never told about, and a response
+    that CLAIMS one is exactly the attack
+    tests/test_phase43_evidence_grading.py's PromotionTests (A3) exercises.
+    Reading the reference from the evaluator response instead would make the
+    reference travel as data through a validator -- D-03 already rules that
+    out for evidence_class, and the same reasoning covers this field.
+
+    Returns (study_id, study_version). study_id is a clamped, non-empty
+    string, or "" for anything else (missing, wrong type, or blank after
+    stripping). study_version is a plain non-bool int >= 1, or 0 for
+    anything else. Never raises: a pure function of one dict-or-None
+    argument, no I/O.
+
+    D-08: the two fields returned here are the ENTIRE study reference a job
+    assessment may ever carry. This function does not read, and
+    _build_job_assessment's caller has no way to obtain, the study's
+    identification_method, its validity_scope, its effect estimate, or
+    anything else about the study -- classifier.py does not even import the
+    module that would let it (see impact_study.py's own module docstring
+    and tests/test_phase43_evidence_grading.py's NonInheritanceTests). The
+    job's own evidence_class is always set by _forced_evidence_class(),
+    completely independent of whatever study_id/study_version this function
+    returns; referencing a study can never change it.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+
+    study_id = cfg.get("studyId")
+    if isinstance(study_id, str) and study_id.strip():
+        study_id = _clamp_assessment_text(study_id, STUDY_ID_MAX_BYTES)
+    else:
+        study_id = ""
+
+    study_version = cfg.get("studyVersion")
+    if isinstance(study_version, bool) or not isinstance(study_version, int) or study_version < 1:
+        study_version = 0
+
+    return (study_id, study_version)
+
+
 def _build_job_assessment(
     valid: dict,
     assessment: "dict | None",
@@ -1197,6 +1252,14 @@ def _build_job_assessment(
         job_started_at = valid.get("job_started_at", now)
         job_ended_at = valid.get("job_ended_at", now)
 
+        # Phase 43 (EGV-13, D-08): resolved from cfg ONLY, never from raw --
+        # see _resolve_study_reference's own docstring for the full
+        # rationale. Computed once here so both the abstention early-return
+        # and the success-path continuation below (which share this single
+        # dict literal, per the same Phase 43 EGV-18 pattern already
+        # established for reportability_status) carry the same reference.
+        study_id, study_version = _resolve_study_reference(cfg)
+
         record: dict = {
             "kind": "job_assessment",
             "ts": now,
@@ -1243,6 +1306,12 @@ def _build_job_assessment(
             # output (ROI-04, D-03): provenance a model can assert is not
             # provenance.
             "evidence_class": _forced_evidence_class(),
+            # Phase 43 (EGV-13, D-08): the study reference, and NOTHING else
+            # about the study -- resolved above via _resolve_study_reference
+            # from cfg only. Referencing a study never changes evidence_class
+            # above, which is forced independently of these two fields.
+            "study_id": study_id,
+            "study_version": study_version,
 
             "evaluator": _clamp_assessment_text(evaluator, 32),
             "evaluator_version": _clamp_assessment_text(evaluator_version, 16),

@@ -1187,6 +1187,12 @@ class RecordShapeTests(unittest.TestCase):
         'estimated_value', 'assumptions',
         'observation_window_start', 'observation_window_end',
         'evidence_references', 'evidence_class',
+        # Phase 43 (EGV-13, D-08): the study reference a job assessment may
+        # carry -- sourced from operator configuration only, never from
+        # evaluator output. Added deliberately here, not discovered by a
+        # failing test: this comment IS the intent, matching D-02's own
+        # "not a test bent to fit code" instruction.
+        'study_id', 'study_version',
         'evaluator', 'evaluator_version', 'model', 'prompt_version', 'policy_version',
         'confidence', 'abstention_reason', 'reportability_status',
     }
