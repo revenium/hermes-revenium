@@ -3151,6 +3151,38 @@ _REPORTABILITY_STATUSES = frozenset({'reportable', 'candidate'})
 _is_correction = found.get('kind') == 'correction'
 _reportable = _is_correction or found.get('reportability_status') == _REPORTABILITY_REPORTABLE
 
+# CR-01 (43-REVIEW.md): the value family and the function that removes it are
+# declared ONCE, and every refusal branch calls it. Two independent gates
+# refuse a value here -- the reportability gate below and the CF-2
+# evidence_class allow-list further down -- and the allow-list branch
+# originally cleared only the two CLI scalars, leaving value_low/base/high,
+# bounds_source and assumptions in the transported record. A record that was
+# reportable but carried an out-of-set evidence_class (a hand-edited sidecar:
+# precisely the threat CF-2 exists to catch) therefore had its flags refused
+# while the estimate still rode out in --metadata. Fixing it as one shared
+# stripper rather than a second copy of the tuple is deliberate: a third
+# refusal branch added later cannot forget the family, because there is
+# nothing to forget -- it calls the same function.
+_VALUE_OMIT_FAMILY = ('value_low', 'value_base', 'value_high', 'bounds_source',
+                      'currency', 'estimated_value', 'assumptions')
+
+
+def _strip_value_family(rec):
+    """Remove every value-bearing key from the transported record.
+
+    Withholding --outcome-value/--outcome-currency alone does NOT withhold
+    the value: the bounds and the assumptions object (whose
+    estimated_hours_saved * assumed_loaded_rate product IS the estimate)
+    ride into --metadata via their own forwarders. Deleting them from the
+    blob means no current or future forwarder can reintroduce the leak.
+    Provenance (evidence_class, evaluator, evaluator_version, model, the
+    version family) and confidence are deliberately KEPT -- D-05 withholds
+    the VALUE, not the fact that an estimate happened.
+    """
+    for _k in _VALUE_OMIT_FAMILY:
+        rec.pop(_k, None)
+
+
 _not_reportable_reason = ''
 if not _reportable:
     # T-43-01: sanitize the TRANSPORTED RECORD, not the forwarder list.
@@ -3168,9 +3200,7 @@ if not _reportable:
     # evaluator_version, model, the four version fields) are deliberately
     # KEPT: D-05 withholds the VALUE, not the fact that an estimate
     # happened.
-    for _k in ('value_low', 'value_base', 'value_high', 'bounds_source',
-               'currency', 'estimated_value', 'assumptions'):
-        found.pop(_k, None)
+    _strip_value_family(found)
     _not_reportable_reason = 'not_reportable'
 
 # An unrecognized reportability_status must never cross the wire -- only
@@ -3255,6 +3285,11 @@ if _raw_evidence_class is not None and (
     found.pop('evidence_class', None)
     value_out = ''
     currency_out = ''
+    # CR-01: strip the value family here too. Clearing the two CLI scalars
+    # is not enough -- the bounds and assumptions have their own --metadata
+    # forwarders, so a rejected record would otherwise ship the estimate it
+    # was just refused.
+    _strip_value_family(found)
     if not _not_reportable_reason:
         _not_reportable_reason = 'evidence_class_unrecognized'
 

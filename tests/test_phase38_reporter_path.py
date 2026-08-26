@@ -518,6 +518,47 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertNotIn('evidence_class', meta)
 
+    def test_rejected_evidence_class_also_withholds_the_value_family(self):
+        """CR-01 (43-REVIEW.md): a record REJECTED by the allow-list must
+        withhold the estimate itself, not merely the two CLI scalars.
+
+        The two refusal gates in hermes-report.sh are independent: the
+        reportability gate strips the value family from the transported
+        record, while the allow-list originally cleared only value_out /
+        currency_out. So a record that was `reportable` but carried an
+        out-of-set evidence_class -- a hand-edited sidecar, precisely the
+        threat CF-2 exists to catch -- had its flags refused while
+        value_low/value_base/value_high, bounds_source and the assumptions
+        object still rode out in --metadata. assumptions is the sharpest
+        part: estimated_hours_saved * assumed_loaded_rate IS the estimate.
+
+        The two tests above assert only flag and evidence_class absence,
+        which is why this shipped untested -- an assertion that checks the
+        fields anyone thought of, again.
+
+        BEHAVIOURAL, on real constructed argv. Not an impossibility claim."""
+        argv = self._run_one_outcome(
+            'ec43-sid-003', 'ec43-job-003', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record(
+                'ec43-job-003',
+                evidence_class='ANECDOTAL_VIBES',
+                reportability_status='reportable',
+            ),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+        for leaked in ('value_low', 'value_base', 'value_high',
+                       'bounds_source', 'currency', 'estimated_value',
+                       'assumptions'):
+            self.assertNotIn(
+                leaked, meta,
+                f'CR-01: {leaked!r} rode into --metadata on a record the '
+                f'allow-list rejected -- the value was refused at the flags '
+                f'and shipped in the blob: {meta}',
+            )
+
     def test_absent_evidence_class_is_not_a_rejection(self):
         """Behavior 3 -- the trap this check exists to avoid inverting
         (D-11's note, and the reporter-side echo of 43-CONTEXT's absent-
