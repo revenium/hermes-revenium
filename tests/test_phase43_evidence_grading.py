@@ -1,5 +1,5 @@
-"""Phase 43 Plans 01 & 02 — the EGV-18 reportability gate and the EGV-10
-nine-label evidence-class vocabulary.
+"""Phase 43 Plans 01, 02 & 04 — the EGV-18 reportability gate, the EGV-10
+nine-label evidence-class vocabulary, and EGV-11's promotion fixture.
 
 An estimate produced without explicit experimental opt-in is retained locally
 as a candidate; its number never leaves the machine. Plan 01's classes test
@@ -9,12 +9,20 @@ Plan 02's classes (`LabelTests`, `LabelDriftTests`) test the nine EGV-10
 claim labels themselves -- that they exist as one flat, unordered set, what
 is genuinely impossible about that shape versus what is merely absent from
 today's code, and that the hand-synced pair in classifier.py and
-hermes-report.sh cannot drift apart silently.
+hermes-report.sh cannot drift apart silently. Plan 04 Task 2 adds
+`PromotionTests` -- the behavioural half of EGV-11's two-instrument proof
+(D-04): a hostile evaluator response, seven simultaneous attacks, fed
+through the REAL construction path. The static half (a scoped ast-guard) and
+EGV-13's non-inheritance proof land in Plan 04 Task 3, appended to this same
+module.
 
 Requirements covered:
   EGV-10 — the nine claim labels are representable as a flat, unordered set;
            customer confirmation, observation, and configuration are not
            comparable and must never be modelled as a confidence ladder.
+  EGV-11 — a hostile evaluator response cannot promote its own claim
+           strength. This module's `PromotionTests` (Plan 04 Task 2) is the
+           BEHAVIOURAL half of D-04's two-instrument proof.
   EGV-18 — reportability_status gates whether an estimate's VALUE (not its
            provenance) reaches Revenium.
 
@@ -26,6 +34,13 @@ Decisions this module exercises (43-CONTEXT.md):
   D-02 — the label list is a hand-synced pair (classifier.py /
          hermes-report.sh) with a drift test SUPPORTED_CURRENCIES' own
          hand-synced pair does not have today.
+  D-03 — evidence_class is blocked by never consulting evaluator output
+         for it -- there is no field to attack.
+  D-04 — EGV-11 is proven twice: an adversarial fixture through the REAL
+         construction path (this class), AND a scoped ast-guard over
+         classifier.py (Plan 04 Task 3, appended below). The fixture
+         proves today's code ignores the field; only the guard catches a
+         future edit that starts reading it.
   D-05 — reportable | candidate; a candidate withholds value_low/value_base/
          value_high/bounds_source/currency/estimated_value/assumptions but
          keeps evidence_class/evaluator/evaluator_version/model/the version
@@ -49,7 +64,12 @@ test's own docstring: not-indexable is IMPOSSIBLE-class (a frozenset has no
 __getitem__), never-sorted is STATIC-class (proves absence in the two files
 scanned today, not impossibility -- Python's str is orderable). LabelDriftTests
 is BEHAVIOURAL: it proves the two live declarations agree right now, not that
-they can never diverge in the future.
+they can never diverge in the future. Plan 04's `PromotionTests` (this
+addition) is entirely BEHAVIOURAL: it proves the code that exists TODAY
+ignores every attacked key when fed a hostile-but-accepted response through
+the real construction path. It does NOT prove a future edit cannot start
+reading one of these keys -- that stronger, static claim belongs to Task 3's
+ast-guard, appended to this same class in the next commit.
 """
 import ast
 import importlib.util
@@ -261,6 +281,142 @@ class AbstentionTests(unittest.TestCase):
                 f'D-11 omit family key {omitted_key!r} must be absent on an abstained record',
             )
         self.assertEqual(record['abstention_reason'], 'abstained')
+
+
+# -- Plan 43-04, Task 2: the adversarial evaluator response -----------------
+
+def _hostile_evaluator_response():
+    """One evaluator response, seven simultaneous promotion attempts
+    (A1-A7 in 43-04-PLAN.md's Task 2 behavior list), layered ON TOP of the
+    six legitimate keys _validate_assessment actually reads plus the two
+    narrative keys _build_job_assessment reads directly off raw -- together
+    enough for the assessment to be ACCEPTED, not abstained. Accepting
+    matters: an attack that lands on the abstention path proves only that
+    abstention works, not that acceptance resists promotion.
+
+    This fixture fixes 43-RESEARCH.md's Open Question 1 (the adversarial
+    fixture's exact key shape) in this ONE place -- Task 3's ast-guard
+    forbidden-key set is derived from these same seven attacks, not
+    guessed at separately.
+    """
+    return {
+        # Legitimate keys, nominal in-bounds values -- the ACCEPT path.
+        'inferred_role': 'senior engineer',
+        'estimated_hours_saved': 3.0,
+        'assumed_loaded_rate': 120.0,
+        'currency': 'USD',
+        'basis': 'time avoided reviewing a large diff',
+        'confidence': 0.7,
+        'candidate_downstream_outcome': 'PR merged to main',
+        'counterfactual_assumption': 'a human reviewer would have taken the same time',
+        # A1 -- direct label promotion: the strongest impact label.
+        'evidence_class': 'EXPERIMENTAL_IMPACT',
+        # A2 -- differently-named impact key.
+        'impact_class': 'QUASI_EXPERIMENTAL_IMPACT',
+        # A3 -- study-reference spoof (the D-08 inheritance vector).
+        'study_id': 'attacker-injected-study',
+        'study_version': 999,
+        # A4 -- self-granted reportability.
+        'reportability_status': 'reportable',
+        # A5 -- evidence-pointer spoof, naming an impact label.
+        'evidence_references': ['EXPERIMENTAL_IMPACT'],
+        # A6 -- provenance spoof.
+        'evaluator': 'attacker-controlled-evaluator',
+        'evaluator_version': 'attacker-v99',
+        'model': 'gpt-attacker-9000',
+        # A7 -- value spoof, far above the derived hours*rate product (360.0).
+        'estimated_value': 999999999.0,
+    }
+
+
+class PromotionTests(unittest.TestCase):
+    """EGV-11 (D-04) -- the BEHAVIOURAL half of the two-instrument proof.
+    This class's seven attack methods and the closing key-set method prove
+    the code that exists TODAY ignores every one of these keys when a
+    hostile response is fed through the REAL _validate_assessment ->
+    _build_job_assessment construction path. They do NOT prove a future
+    edit cannot start reading one of these keys -- that is what Task 3's
+    scoped ast-guard (appended to this same class in the next commit) is
+    for, and D-04 requires both: the fixture proves today's code is safe;
+    the guard proves a future edit that starts reading a forbidden key
+    turns red. Neither makes the other's claim -- a mutation that adds a
+    fallback read (value if present, else the forced constant) would turn
+    the guard red without turning this fixture red, because the fallback
+    still yields the same value on this fixture's inputs. That asymmetry
+    is exactly why D-04 requires both instruments.
+    """
+
+    def setUp(self):
+        self.mod = _load_classifier()
+        self.raw = _hostile_evaluator_response()
+        self.valid_job = {
+            'agentic_job_id': 'promotion-job-001', 'job_type': 'code_review', 'status': 'SUCCESS',
+        }
+        # cfg carries NEITHER a study reference NOR the reporting opt-in --
+        # the plan's own instruction for this fixture's config.
+        self.cfg = {}
+        self.validated = self.mod._validate_assessment(self.raw, self.cfg, 'stub-evaluator', 'v1')
+        self.assertIsNotNone(
+            self.validated,
+            'the hostile fixture must be ACCEPTED for this test to be meaningful -- '
+            'an attack that lands on the abstention path proves only that '
+            'abstention works, not that acceptance resists promotion',
+        )
+        self.record = self.mod._build_job_assessment(
+            self.valid_job, self.validated, self.raw, self.cfg, 'stub-evaluator', 'v1')
+        self.assertIsNotNone(self.record)
+
+    # -- A1-A7: one assertion method per attack, so a failure names the
+    #    vector rather than a row number. --
+
+    def test_a1_direct_label_promotion_is_ignored(self):
+        self.assertEqual(self.record['evidence_class'], self.mod.EVIDENCE_CLASS_MODEL_ESTIMATED)
+
+    def test_a2_differently_named_impact_key_does_not_exist_in_the_record(self):
+        self.assertNotIn('impact_class', self.record)
+
+    def test_a3_study_reference_spoof_stays_at_configured_defaults(self):
+        # cfg carried no studyId/studyVersion above -- the configured
+        # defaults ("" and 0) must win over the raw response's spoofed ones.
+        self.assertEqual(self.record['study_id'], '')
+        self.assertEqual(self.record['study_version'], 0)
+
+    def test_a4_self_granted_reportability_is_ignored(self):
+        self.assertEqual(self.record['reportability_status'], self.mod.REPORTABILITY_CANDIDATE)
+
+    def test_a5_evidence_pointer_spoof_stays_empty(self):
+        self.assertEqual(self.record['evidence_references'], [])
+
+    def test_a6_provenance_spoof_keeps_caller_supplied_identity(self):
+        # evaluator/evaluator_version come from the FUNCTION ARGUMENTS this
+        # setUp passed ('stub-evaluator'/'v1'), never from raw -- the
+        # attacker-controlled values inside raw are simply never consulted.
+        self.assertEqual(self.record['evaluator'], 'stub-evaluator')
+        self.assertEqual(self.record['evaluator_version'], 'v1')
+        self.assertEqual(self.record['model'], self.mod.PROVENANCE_MODEL_UNKNOWN)
+
+    def test_a7_value_spoof_ships_the_derived_product_not_the_supplied_total(self):
+        self.assertEqual(self.record['estimated_value'], 360.0)  # 3.0 hours * 120.0 rate
+
+    def test_record_key_set_matches_declared_contract_exactly(self):
+        """The closing assertion: nothing was smuggled in under a key
+        nobody thought to check -- an assertion that only checks the keys
+        anyone thought of is exactly the "test proves less than it appears
+        to" pattern this project keeps hitting. Imports
+        RecordShapeTests.DECLARED_KEYS directly from
+        test_phase42_assessment_contract.py rather than retyping it here,
+        matching FixtureFidelityTests' own precedent (plan 43-01) of
+        importing a plain name across test modules -- so the two key sets
+        cannot silently drift apart from each other."""
+        from tests.test_phase42_assessment_contract import RecordShapeTests
+
+        got_keys = set(self.record.keys())
+        declared_keys = RecordShapeTests.DECLARED_KEYS
+        self.assertEqual(
+            got_keys, declared_keys,
+            f'record key set does not match the declared contract exactly -- '
+            f'missing={declared_keys - got_keys!r}, extra={got_keys - declared_keys!r}',
+        )
 
 
 # -- Plan 43-02, Task 3: EGV-10 label extraction helpers --------------------
