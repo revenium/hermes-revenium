@@ -440,6 +440,92 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-currency', argv)
         self.assertNotIn('--outcome-type', argv)
 
+    # -- Plan 43-02 Task 2: the reporter's own evidence_class allow-list --
+
+    def test_evidence_class_outside_the_nine_is_not_forwarded(self):
+        """Plan 43-02, Task 2, behavior 1 (CF-2 reject, D-11 exercised): a
+        sidecar record identical to the nominal fixture except that
+        evidence_class holds a value outside the nine labels must not have
+        that value forwarded into --metadata, and takes both value flags
+        down with it. Single-adversarial-field style, matching
+        test_negative_low_bound_ships_no_value /
+        test_non_numeric_bound_ships_no_value in
+        tests/test_phase42_assessment_contract.py -- everything except
+        evidence_class stays exactly what _sidecar_record's nominal
+        default sends, so a failure here is attributable to this one
+        field. Asserted on the PARSED --metadata object, never a raw
+        string search -- a substring match on the rejected label would
+        pass for the wrong reason if it happened to appear anywhere else
+        in the payload.
+
+        Guarantee class: BEHAVIOURAL. A runtime membership check over
+        untrusted sidecar content, proven on the paths exercised here --
+        not a structural or impossibility claim."""
+        argv = self._run_one_outcome(
+            'ec43-sid-001', 'ec43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('ec43-job-001', evidence_class='ANECDOTAL_VIBES'),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+
+    def test_evidence_class_non_string_is_not_forwarded(self):
+        """Behavior 2: a numeric evidence_class is rejected the same way a
+        misspelled string one is -- the allow-list checks isinstance(str)
+        before membership, not membership alone (a bare `in` test against
+        a frozenset of strings would already reject a non-string via
+        __eq__/__hash__ mismatch, but the explicit isinstance keeps the
+        rejection reason legible rather than incidental)."""
+        argv = self._run_one_outcome(
+            'ec43-sid-002', 'ec43-job-002', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('ec43-job-002', evidence_class=7),
+        )
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+
+    def test_absent_evidence_class_is_not_a_rejection(self):
+        """Behavior 3 -- the trap this check exists to avoid inverting
+        (D-11's note, and the reporter-side echo of 43-CONTEXT's absent-
+        vs-invalid distinction): a kind:"correction" record carries NO
+        evidence_class key at all, because correct-assessment.sh has never
+        written one. This test pins that absence is permissible on the
+        sidecar-record path directly (a check that rejected absence would
+        silently downgrade every human-authorised correction, and
+        test_last_match_wins_ships_newest_correction_low_bound in
+        tests/test_phase42_assessment_contract.py -- run alongside this
+        module per the plan's own verification list -- would go red).
+        Whether the value ships is decided by reportability_status alone,
+        unaffected by this check."""
+        record = _sidecar_record('ec43-job-003')
+        del record['evidence_class']
+        argv = self._run_one_outcome(
+            'ec43-sid-003', 'ec43-job-003', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=record,
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('evidence_class', meta)
+
+    def test_nominal_evidence_class_still_ships_unaffected_by_the_new_check(self):
+        """Behavior 4, the accept-branch regression pin: the nominal
+        fixture's MODEL_ESTIMATED_DEMO still forwards both value flags and
+        the label itself, unchanged by the new allow-list. Tests 3 and 4
+        are not padding -- they are what stops Test 1 from being satisfied
+        by an over-broad check that rejects everything, including absence
+        and the nominal case."""
+        argv = self._run_one_outcome(
+            'ec43-sid-004', 'ec43-job-004', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
+            sidecar=_sidecar_record('ec43-job-004'),
+        )
+        self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
+        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
     def test_golden_valued_outcome_matches_new_fixture(self):

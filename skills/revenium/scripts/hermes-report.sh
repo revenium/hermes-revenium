@@ -3210,6 +3210,54 @@ else:
     value_out = ''
     currency_out = ''
 
+# Phase 43 (C-02, CF-2): the reporter's OWN independent evidence_class
+# allow-list -- defense in depth immediately before the value is emitted,
+# NOT a duplicate resolver (CF-3: hermes-report.sh holds no reportability
+# policy of its own). This is the gate a hand-edited sidecar or a future
+# rogue evaluator would otherwise reach the wire through entirely; C-02
+# accepts the one duplication with classifier.py's own EVIDENCE_CLASSES for
+# that reason. Declared and checked exactly ONCE in this file.
+#
+# NOT case-folded, unlike the currency allow-list just above: these are
+# upper-snake constants compared for identity, not user-typed currency
+# codes. A .strip().upper() here would quietly accept a lowercase spelling
+# classifier.py would never produce -- exactly the drift this allow-list
+# exists to catch, so this check deliberately diverges from the currency
+# precedent rather than copying it blind.
+#
+# ABSENT vs INVALID: a kind:"correction" record carries no evidence_class
+# key at all -- correct-assessment.sh has never written one (see its
+# record literal). An absent field is NOT a rejection: there is nothing to
+# forward, so there is nothing to refuse, and the record's value is
+# governed by the reportability gate above, not this check. Only a field
+# that IS PRESENT and outside the nine is a rejection. Getting this
+# backwards would clear the value on every operator-filed correction and
+# turn test_last_match_wins_ships_newest_correction_low_bound
+# (tests/test_phase42_assessment_contract.py) red -- treat that as the
+# signal this branch is inverted, never as a test to adjust.
+_EVIDENCE_CLASSES = frozenset({
+    'ACTIVITY_MEASURED', 'OUTPUT_OBSERVED', 'OUTCOME_OBSERVED',
+    'MODEL_ESTIMATED_DEMO', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
+    'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
+})
+_raw_evidence_class = found.get('evidence_class', None)
+if _raw_evidence_class is not None and (
+    not isinstance(_raw_evidence_class, str)
+    or _raw_evidence_class not in _EVIDENCE_CLASSES
+):
+    # Reject: remove the key from the resolved record before ASSESSMENT_JSON
+    # is dumped below -- the --metadata heredoc's existing conditional-emit
+    # rule already adds no key for a field absent from the record, so one
+    # declaration and one check here is sufficient; no second copy of the
+    # nine labels lives in the metadata heredoc. Clear both value scalars
+    # together, never one alone -- the same trap this file's own D-09
+    # second-site comment (further below) already documents.
+    found.pop('evidence_class', None)
+    value_out = ''
+    currency_out = ''
+    if not _not_reportable_reason:
+        _not_reportable_reason = 'evidence_class_unrecognized'
+
 # Phase 42 (C-04): the whole resolved sidecar record rides as ONE JSON
 # blob -- replacing the eight separate KEY=value prints the marker reader
 # used. Fields holding lists/dicts (evidence_references, correction_history,
@@ -3326,6 +3374,9 @@ print('true' if ok else 'false')
                 ;;
               not_reportable)
                 warn "assessment not reportable per EGV-18 gate, reporting status-only: id=${outcome_id}"
+                ;;
+              evidence_class_unrecognized)
+                warn "assessment evidence_class unrecognized, reporting status-only: id=${outcome_id}"
                 ;;
               *)
                 warn "assessment unvalued (${outcome_reason}), reporting status-only: id=${outcome_id}"
