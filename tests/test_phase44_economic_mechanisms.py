@@ -33,6 +33,7 @@ argv, the same no-shift shim + synthetic state.db harness
 tests/test_phase38_reporter_path.py and tests/test_jobs_outcome_metadata.py
 already use for this stage.
 """
+import ast
 import asyncio
 import importlib.util
 import json
@@ -563,6 +564,151 @@ class MechanismWireTests(unittest.TestCase):
         # not treated like an out-of-set evidence_class (which strips the
         # whole value family); only the mechanism key itself is withheld.
         self.assertIn('value_low', meta)
+
+
+class MechanismAuthorityTests(unittest.TestCase):
+    """D-01/D-03 -- the three OPERATOR_ONLY_MECHANISMS values are provably
+    unreachable from evaluator output, over the REAL constructors
+    (_validate_assessment and _build_job_assessment), not merely by
+    inspecting _resolve_economic_mechanism in isolation."""
+
+    def setUp(self):
+        self.mod = _load_classifier({})
+
+    def _otherwise_valid_raw(self, mechanism):
+        return {
+            'economic_mechanism': mechanism,
+            'inferred_role': 'engineer',
+            'estimated_hours_saved': 2.5,
+            'assumed_loaded_rate': 150.0,
+            'currency': 'USD',
+            'basis': 'time avoided',
+            'confidence': 0.5,
+        }
+
+    def test_each_operator_only_mechanism_is_rejected_by_validate_assessment(self):
+        # A shrunken OPERATOR_ONLY_MECHANISMS would silently skip cases
+        # below rather than fail loudly -- assert the count first.
+        self.assertEqual(
+            len(self.mod.OPERATOR_ONLY_MECHANISMS), 3,
+            'OPERATOR_ONLY_MECHANISMS must have exactly 3 members for this '
+            'test to cover all of D-01\'s operator-only mechanisms',
+        )
+        for mechanism in self.mod.OPERATOR_ONLY_MECHANISMS:
+            with self.subTest(mechanism=mechanism):
+                got = self.mod._validate_assessment(
+                    self._otherwise_valid_raw(mechanism), {}, 'llm', 'v1')
+                self.assertIsNone(
+                    got,
+                    f'{mechanism!r} is operator-only and must abstain even '
+                    'when every other field is in-bounds',
+                )
+
+    def test_each_operator_only_mechanism_never_reaches_the_record(self):
+        for mechanism in self.mod.OPERATOR_ONLY_MECHANISMS:
+            with self.subTest(mechanism=mechanism):
+                raw = self._otherwise_valid_raw(mechanism)
+                valid = {
+                    'agentic_job_id': f'auth-{mechanism}',
+                    'job_type': 'code_review', 'status': 'SUCCESS',
+                }
+                # abstention_reason set directly (bypassing
+                # _validate_assessment, which already proved None above) --
+                # economic_mechanism is resolved unconditionally in
+                # _build_job_assessment's record literal, ahead of the
+                # abstention early return, so this still exercises the
+                # resolution this test is about.
+                record = self.mod._build_job_assessment(
+                    valid, None, raw, {}, 'llm', 'v1',
+                    abstention_reason='rejected',
+                )
+                self.assertIsNotNone(record)
+                self.assertEqual(
+                    record['economic_mechanism'], self.mod.ECONOMIC_MECHANISM_UNKNOWN,
+                )
+                self.assertNotEqual(
+                    record['economic_mechanism'], mechanism,
+                    f'record must never carry the operator-only value {mechanism!r} '
+                    'the response named',
+                )
+
+    def test_whitespace_stripped_accepted_case_mismatch_rejected(self):
+        """The resolver strips but does not case-fold -- coercion is what
+        D-03 forbids."""
+        self.assertEqual(
+            self.mod._resolve_economic_mechanism(
+                {'economic_mechanism': '  labor_substitution  '}),
+            'labor_substitution',
+        )
+        self.assertEqual(
+            self.mod._resolve_economic_mechanism(
+                {'economic_mechanism': 'Labor_Substitution'}),
+            self.mod.ECONOMIC_MECHANISM_UNKNOWN,
+        )
+
+
+class MechanismDriftTests(unittest.TestCase):
+    """D-01/D-02 -- classifier.py's ECONOMIC_MECHANISMS and
+    hermes-report.sh's _ECONOMIC_MECHANISMS are a HAND-SYNCED pair.
+    CLAUDE.md names sharing code between classifier.py and the bash
+    sidecars as an anti-pattern, so this test -- replicating
+    tests/test_phase43_evidence_grading.py::LabelDriftTests' shape exactly
+    -- is the only thing holding the two declarations equal. Deleting it
+    silently re-opens the drift.
+
+    Guarantee class: BEHAVIOURAL. This proves the two live declarations
+    agree right now, read directly from source on every run -- not that
+    they can never diverge in the future.
+    """
+
+    def test_classifier_and_reporter_mechanism_sets_agree(self):
+        from tests.test_phase43_evidence_grading import (
+            _extract_frozenset_assignment_fragment,
+            _extract_frozenset_from_module,
+        )
+
+        classifier_tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        classifier_mechanisms = _extract_frozenset_from_module(
+            classifier_tree, 'ECONOMIC_MECHANISMS',
+        )
+        self.assertIsNotNone(
+            classifier_mechanisms,
+            'ECONOMIC_MECHANISMS could not be extracted from classifier.py '
+            '-- the declaration moved and this extractor needs updating',
+        )
+
+        reporter_text = HERMES_REPORT_PATH.read_text()
+        reporter_mechanisms = _extract_frozenset_assignment_fragment(
+            reporter_text, '_ECONOMIC_MECHANISMS',
+        )
+        self.assertIsNotNone(
+            reporter_mechanisms,
+            '_ECONOMIC_MECHANISMS could not be extracted from '
+            'hermes-report.sh -- the declaration moved and this extractor '
+            'needs updating',
+        )
+
+        self.assertEqual(
+            classifier_mechanisms, reporter_mechanisms,
+            'classifier.py and hermes-report.sh have drifted on the '
+            'six-mechanism set',
+        )
+
+
+class MechanismGuardScopeTests(unittest.TestCase):
+    """D-03 -- economic_mechanism is deliberately ABSENT from
+    tests/test_phase43_evidence_grading.py's _PROMOTION_FORBIDDEN_KEYS.
+    D-03 PERMITS reading this key off `raw`; the guarantee is over the
+    accepted VALUE SET (proven by MechanismAuthorityTests above), not over
+    the key. Without this test a future reviewer "tightening" the guard by
+    adding this key would silently break mechanism selection entirely, and
+    the failure would look like an evaluator problem rather than a guard
+    problem."""
+
+    def test_economic_mechanism_is_not_a_promotion_forbidden_key(self):
+        from tests.test_phase43_evidence_grading import _PROMOTION_FORBIDDEN_KEYS
+
+        self.assertNotIn('economic_mechanism', _PROMOTION_FORBIDDEN_KEYS)
 
 
 if __name__ == '__main__':

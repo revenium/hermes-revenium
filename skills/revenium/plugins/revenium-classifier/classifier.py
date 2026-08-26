@@ -1251,13 +1251,22 @@ ECONOMIC_MECHANISM_RISK_AVOIDANCE = "risk_avoidance"
 ECONOMIC_MECHANISM_INCREMENTAL_REVENUE = "incremental_revenue"
 ECONOMIC_MECHANISM_UNKNOWN = "unknown"  # abstain sentinel -- NOT a member of ECONOMIC_MECHANISMS
 
+# A frozenset literal of plain strings, deliberately -- matching
+# EVIDENCE_CLASSES' own declaration shape (classifier.py:799) rather than a
+# set of the named constants above, so the same source-derived extractor
+# (tests/test_phase43_evidence_grading.py::_extract_frozenset_from_module,
+# reused by tests/test_phase44_economic_mechanisms.py::MechanismDriftTests)
+# can read this declaration and prove it agrees with hermes-report.sh's
+# hand-synced _ECONOMIC_MECHANISMS. A frozenset of ast.Name references
+# would ast-parse to Name nodes, not Constant strings, and the extractor
+# would refuse to match it.
 ECONOMIC_MECHANISMS = frozenset({
-    ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
-    ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
-    ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
-    ECONOMIC_MECHANISM_QUALITY_DECISION_IMPROVEMENT,
-    ECONOMIC_MECHANISM_RISK_AVOIDANCE,
-    ECONOMIC_MECHANISM_INCREMENTAL_REVENUE,
+    "labor_substitution",
+    "augmentation_capacity_expansion",
+    "newly_enabled_work",
+    "quality_decision_improvement",
+    "risk_avoidance",
+    "incremental_revenue",
 })
 
 # D-01: the naked-LLM evaluator may select ONLY these three -- the
