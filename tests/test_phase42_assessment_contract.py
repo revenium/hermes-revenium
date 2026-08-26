@@ -3040,5 +3040,342 @@ class SidecarRetentionTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------------------
+# Follow-up to PR #94 (Greptile P1, accepted): correct-assessment.sh and
+# prune-markers.sh now coordinate on ONE per-sidecar lock, held by
+# correct-assessment.sh continuously from its D-14 check through its
+# remote ship, and taken non-blocking by prune-markers.sh's job-assessments
+# pass immediately before it may unlink. These tests exercise both halves
+# directly against prune-markers.sh, then prove they compose end to end.
+# ---------------------------------------------------------------------------
+import fcntl
+
+
+class SidecarPruneLockCoordinationTests(unittest.TestCase):
+    """Prune's job-assessments pass, in isolation: skip (never block) when
+    the per-file lock is contended, and decide staleness only AFTER that
+    lock is actually held -- never from a value read (or cached) earlier."""
+
+    def test_prune_skips_a_locked_sidecar(self):
+        """A stale sidecar currently locked by someone else (a real
+        correction, or -- as here -- the test itself holding the SAME
+        flock a correction would) must survive a prune run untouched, and
+        the skip must be reported, not silently swallowed."""
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            old_ts = time.time() - 91 * 86400  # stale under the 90-day default
+            path = _write_sidecar_record(assessments_dir, 'locked-job', old_ts)
+
+            fd = os.open(path, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                rc, out, err = _run_prune_markers(env)
+                self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+                self.assertTrue(
+                    os.path.exists(path),
+                    'a sidecar file locked by a concurrent correction must '
+                    'survive a prune run regardless of its age -- prune '
+                    'must never block waiting for the lock to free up',
+                )
+                log_text = _read_log(state_dir)
+                self.assertIn(
+                    'skipped (locked, correction in progress)', log_text,
+                    f'prune must report the skip, not silently pass over '
+                    f'the file: {log_text!r}',
+                )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_prune_rechecks_staleness_under_the_lock_not_before(self):
+        """The specific half a pre-lock decision gets wrong: a file that
+        looks stale when prune lists it must survive if, by the time prune
+        actually holds the per-file lock, the mtime has been refreshed.
+
+        Proven via a real prune-markers.sh subprocess, paused (through the
+        test-only REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_* checkpoint in
+        prune-markers.sh's own source) at the exact point AFTER flock()
+        has succeeded but BEFORE the mtime is read. The test refreshes the
+        mtime while prune sits there holding the lock -- a correct
+        (post-lock) implementation reads fresh and keeps the file; an
+        implementation that captured mtime earlier (e.g. from the
+        os.listdir() scan, or before acquiring the lock) would still see
+        the stale value and delete it. This mirrors the deterministic
+        blocking-checkpoint technique correct-assessment.sh's own WR-02
+        tests use via a revenium CLI shim; prune-markers.sh has no
+        external command to intercept a call to, so the checkpoint is an
+        inline, env-var-gated no-op in production.
+        """
+        tmpdir, env, state_dir, assessments_dir, markers_dir = _build_sidecar_prune_tree()
+        try:
+            old_ts = time.time() - 91 * 86400
+            path = _write_sidecar_record(assessments_dir, 'race-job', old_ts)
+
+            entered_file = os.path.join(tmpdir, 'hook-entered')
+            release_file = os.path.join(tmpdir, 'hook-release')
+            hook_env = {
+                **env,
+                'REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_ENTERED': entered_file,
+                'REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_RELEASE': release_file,
+            }
+
+            proc = subprocess.Popen(
+                ['bash', str(PRUNE_MARKERS_SH)],
+                env=hook_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 10
+                while not os.path.exists(entered_file):
+                    self.assertLess(
+                        time.time(), deadline,
+                        'prune never reached the post-lock hook checkpoint '
+                        '-- the race window this test targets was never '
+                        'entered',
+                    )
+                    time.sleep(0.02)
+
+                # prune now holds the per-file lock and is paused BEFORE
+                # reading mtime. Refresh the file's mtime externally --
+                # os.utime needs no lock of its own (flock is advisory,
+                # and only serializes against OTHER flock() callers, not
+                # against arbitrary syscalls like utime()).
+                fresh_ts = time.time()
+                os.utime(path, (fresh_ts, fresh_ts))
+
+                Path(release_file).touch()
+                out, err = proc.communicate(timeout=30)
+                rc = proc.returncode
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertTrue(
+                os.path.exists(path),
+                'a file refreshed to a fresh mtime WHILE prune held the '
+                'lock must survive -- the staleness decision must be made '
+                'under the lock, not from a value read before it',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class CorrectionSurvivesConcurrentPruneTests(unittest.TestCase):
+    """The end-to-end proof that Part A (correct-assessment.sh's
+    continuous per-sidecar lock) and Part B (prune-markers.sh's
+    lock-and-recheck) compose: whichever of an in-flight correction or a
+    concurrent prune gets the lock first, the outcome is always consistent
+    -- either the correction completes AND its local record survives, or
+    it is refused and nothing is shipped. There is no interleaving that
+    ships a remote correction while losing the local record.
+
+    Both orderings are exercised deterministically (via the same
+    blocking-checkpoint technique WR-02 already established in this file),
+    rather than relying on a bare, schedule-dependent race -- so each
+    branch of the "either / or" invariant this task specifies is actually
+    proven, not just hoped for."""
+
+    def test_correction_wins_the_lock_first_and_survives_a_concurrent_prune(self):
+        sid, job_id = 'p42c-sid-conc-001', 'p42c-job-conc-001'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            # Stale under a tight retention window, so an uncoordinated
+            # prune run against this exact file would delete it the moment
+            # it got the chance.
+            old_ts = time.time() - 2 * 86400
+            os.utime(sidecar_path, (old_ts, old_ts))
+            prune_env = {**env, 'REVENIUM_ASSESSMENT_RETENTION_DAYS': '1'}
+
+            bin_dir = env['PATH'].split(os.pathsep)[0]
+            shim = os.path.join(bin_dir, 'revenium')
+            entered_file = os.path.join(tmpdir, 'probe-entered')
+            release_file = os.path.join(tmpdir, 'probe-release')
+            _build_toctou_race_shim(shim, entered_file, release_file)
+
+            proc = subprocess.Popen(
+                ['bash', str(CORRECT_ASSESSMENT_SH),
+                 '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                 '--reason', 'concurrent prune race -- correction first'],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 10
+                while not os.path.exists(entered_file):
+                    self.assertLess(
+                        time.time(), deadline,
+                        'correct-assessment.sh never reached the blocking '
+                        'probe -- it should already hold the per-sidecar '
+                        'lock (acquired well before this point) by now',
+                    )
+                    time.sleep(0.02)
+
+                # correct-assessment.sh holds the fd9 lock now, acquired
+                # before its D-14 check (Part A). Run a REAL
+                # prune-markers.sh concurrently against the same stale
+                # file -- it must skip, not block and not delete.
+                rc_prune, out_prune, err_prune = _run_prune_markers(prune_env)
+                self.assertEqual(rc_prune, 0, f'stdout={out_prune!r} stderr={err_prune!r}')
+                self.assertTrue(
+                    os.path.exists(sidecar_path),
+                    'a stale sidecar currently locked by an in-flight '
+                    'correction must survive a concurrent prune run',
+                )
+                log_text = _read_log(state_dir)
+                self.assertIn(
+                    'skipped (locked, correction in progress)', log_text,
+                )
+
+                Path(release_file).touch()
+                out, err = proc.communicate(timeout=30)
+                rc = proc.returncode
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.communicate()
+
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+            self.assertIn('Correction shipped to Revenium', out)
+
+            lines = _read_sidecar_lines(sidecar_path)
+            self.assertEqual(
+                len(lines), 2,
+                'a shipped correction must leave a surviving 2-line local '
+                f'record (original + correction), got {len(lines)} line(s)',
+            )
+            self.assertEqual(json.loads(lines[1]).get('kind'), 'correction')
+
+            with open(jobs_ledger) as f:
+                ledger_content = f.read()
+            self.assertIn(f'JOB:{job_id}:correction:1:', ledger_content)
+
+            # A SECOND prune, run only after the correction has released
+            # the lock, must find the file fresh (the append just
+            # refreshed its mtime, per C-01) and keep it under the SAME
+            # tight retention window -- proving the earlier survival was
+            # specifically the lock at work, not an accident of timing.
+            rc_prune2, out_prune2, err_prune2 = _run_prune_markers(prune_env)
+            self.assertEqual(rc_prune2, 0, f'stdout={out_prune2!r} stderr={err_prune2!r}')
+            self.assertTrue(
+                os.path.exists(sidecar_path),
+                'the correction append refreshed the mtime -- the record '
+                'must still read as fresh under the same retention window',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_prune_wins_the_lock_first_and_correction_refuses_cleanly(self):
+        sid, job_id = 'p42c-sid-conc-002', 'p42c-job-conc-002'
+        record = _tracer_assessment_record(job_id)
+        tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
+            _build_correction_tree(sid, job_id, sidecar_lines=[record])
+        )
+        try:
+            old_ts = time.time() - 91 * 86400  # stale under the 90-day default
+            os.utime(sidecar_path, (old_ts, old_ts))
+
+            entered_file = os.path.join(tmpdir, 'prune-hook-entered')
+            release_file = os.path.join(tmpdir, 'prune-hook-release')
+            prune_env = {
+                **env,
+                'REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_ENTERED': entered_file,
+                'REVENIUM_TEST_ASSESSMENT_PRUNE_HOOK_RELEASE': release_file,
+            }
+
+            prune_proc = subprocess.Popen(
+                ['bash', str(PRUNE_MARKERS_SH)],
+                env=prune_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.time() + 10
+                while not os.path.exists(entered_file):
+                    self.assertLess(
+                        time.time(), deadline,
+                        'prune never reached the post-lock hook checkpoint',
+                    )
+                    time.sleep(0.02)
+
+                # prune holds the per-file lock now, paused before its
+                # unlink. Start a REAL correct-assessment.sh concurrently
+                # -- its own flock(LOCK_EX) acquisition must BLOCK behind
+                # prune's, so it must not still be running to completion
+                # this quickly.
+                correct_proc = subprocess.Popen(
+                    ['bash', str(CORRECT_ASSESSMENT_SH),
+                     '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                     '--reason', 'concurrent prune race -- prune first'],
+                    env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    time.sleep(0.3)
+                    self.assertIsNone(
+                        correct_proc.poll(),
+                        'correct-assessment.sh must be BLOCKED waiting for '
+                        'the lock while prune still holds it, not racing '
+                        'ahead and completing independently',
+                    )
+
+                    # Release prune: it re-checks staleness under its own
+                    # lock (still old -- correct-assessment.sh has not
+                    # touched anything, it is blocked), deletes the file,
+                    # and releases the lock on exit.
+                    Path(release_file).touch()
+                    prune_out, prune_err = prune_proc.communicate(timeout=30)
+                    prune_rc = prune_proc.returncode
+                finally:
+                    if correct_proc.poll() is None:
+                        # Should not happen on the success path, but do not
+                        # leave an orphaned process if an assertion above
+                        # already failed.
+                        pass
+
+                    correct_out, correct_err = correct_proc.communicate(timeout=30)
+                    correct_rc = correct_proc.returncode
+            finally:
+                if prune_proc.poll() is None:
+                    prune_proc.kill()
+                    prune_proc.communicate()
+
+            self.assertEqual(prune_rc, 0, f'stdout={prune_out!r} stderr={prune_err!r}')
+            self.assertFalse(
+                os.path.exists(sidecar_path),
+                'prune must have deleted the (still stale) file once it '
+                'won the lock race',
+            )
+
+            self.assertNotEqual(
+                correct_rc, 0,
+                f'a correction that loses the lock race to a prune that '
+                f'deletes the record must refuse, not report success: '
+                f'stdout={correct_out!r} stderr={correct_err!r}',
+            )
+            self.assertIn('D-14', correct_err)
+            self.assertNotIn('Correction shipped to Revenium', correct_out)
+
+            with open(jobs_ledger) as f:
+                ledger_content = f.read()
+            self.assertNotIn(
+                f'JOB:{job_id}:correction:', ledger_content,
+                'no ledger line may be written when the record was pruned '
+                'out from under the correction',
+            )
+            self.assertEqual(
+                _jobs_log_invocations(jobs_log), [],
+                'no remote outcome-update may be shipped when the local '
+                'record was lost to a concurrent, lock-winning prune',
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 if __name__ == '__main__':
     unittest.main()
