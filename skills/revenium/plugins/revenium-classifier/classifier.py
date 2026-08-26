@@ -414,6 +414,15 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
         "deal size, or downstream business impact — only the work a person would "
         "otherwise have done.\n\n"
         "Output ONLY a JSON object with these fields:\n"
+        # Phase 44 (EGV-05, D-01/D-02): the mechanism field is FIRST in this
+        # list -- plan 44-01 Task 2 turns that ordering into a real branch
+        # selector, one instruction block per permitted mechanism. Only the
+        # three EVALUATOR_MECHANISMS values are offered here; the other
+        # three (quality_decision_improvement, risk_avoidance,
+        # incremental_revenue) are operator-declared only (D-01) and are
+        # never named in this prompt.
+        "  - economic_mechanism: exactly one of \"labor_substitution\", "
+        "\"augmentation_capacity_expansion\", or \"newly_enabled_work\"\n"
         "  - inferred_role: the human role that would otherwise have done this "
         "work (short noun phrase)\n"
         "  - estimated_hours_saved: a number, greater than 0 and at most "
@@ -843,6 +852,45 @@ def _forced_evidence_class() -> str:
     return EVIDENCE_CLASS_MODEL_ESTIMATED
 
 
+def _resolve_economic_mechanism(raw) -> str:
+    """Resolve EGV-05's evaluator-selected economic_mechanism from `raw`.
+
+    D-01's authority rule, restated as a structural guarantee: the three
+    OPERATOR_ONLY_MECHANISMS values (quality_decision_improvement,
+    risk_avoidance, incremental_revenue) are UNREACHABLE from this function
+    by construction -- the membership test below is against
+    EVALUATOR_MECHANISMS, not ECONOMIC_MECHANISMS, so there is no code path
+    here that can ever return one of the operator-only three, whatever
+    `raw` claims. That is the whole structural guarantee behind D-01.
+
+    Accepts only a `str` whose `.strip()` is a member of
+    EVALUATOR_MECHANISMS. `.strip()` is applied deliberately; `.lower()` is
+    deliberately NOT -- per D-03 an out-of-set value ABSTAINS rather than
+    being coerced to a working default, and case-folding is coercion.
+    Anything else -- a missing key, a non-string value, a wrong-case or
+    unrecognised spelling, or a non-dict `raw` -- resolves to
+    ECONOMIC_MECHANISM_UNKNOWN. Never raises: a pure function over one
+    already-parsed argument.
+
+    Deliberately NOT covered by
+    tests/test_phase43_evidence_grading.py's _PROMOTION_FORBIDDEN_KEYS
+    ast-guard: D-03 PERMITS reading "economic_mechanism" off `raw` -- the
+    guarantee here is over the ACCEPTED VALUE SET, not over the key, so it
+    is proven behaviourally (see
+    tests/test_phase44_economic_mechanisms.py's MechanismAuthorityTests)
+    rather than statically. Adding this key to that frozenset would be
+    wrong and would break mechanism selection entirely.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    mechanism = raw.get("economic_mechanism")
+    if not isinstance(mechanism, str):
+        return ECONOMIC_MECHANISM_UNKNOWN
+    mechanism = mechanism.strip()
+    if mechanism in EVALUATOR_MECHANISMS:
+        return mechanism
+    return ECONOMIC_MECHANISM_UNKNOWN
+
+
 # Bound defaults (ROI-05). Overridable per install through llmOutcomeEvaluation.
 # These are judgement, not measurement — chosen to keep a demo credible. Phase 40
 # reports whether real sessions cluster anywhere near them.
@@ -1098,7 +1146,60 @@ NARRATIVE_CLAMP_BYTES = 500
 # where only a later phase implements its semantics -- a field is never
 # silently dropped because "nothing populates it yet").
 STATE_QUARTET_UNKNOWN = "unknown"  # output_status/acceptance_status/adoption_status: 42-RESEARCH.md Section 1 Assumption A2, the current evaluator has no mechanism to assess these
-ECONOMIC_MECHANISM_LABOR_SUBSTITUTION = "labor_substitution"  # only mechanism derivable from today's prompt; Phase 44 (EGV-05) widens to the full six-mechanism enum
+
+# Phase 44 (EGV-05, D-01/D-02/D-03): the six economic mechanisms an agentic
+# job's value can be attributed to. Three (EVALUATOR_MECHANISMS) are
+# reachable from the outcome-evaluation prompt; the other three
+# (OPERATOR_ONLY_MECHANISMS) are reachable only through operator
+# configuration or a study reference, never from evaluator output -- D-01's
+# authority split. ECONOMIC_MECHANISM_UNKNOWN is the abstain sentinel,
+# deliberately NOT a member of ECONOMIC_MECHANISMS: it is not a seventh
+# mechanism, and including it would let an abstention masquerade as a claim.
+ECONOMIC_MECHANISM_LABOR_SUBSTITUTION = "labor_substitution"
+ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION = "augmentation_capacity_expansion"
+ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK = "newly_enabled_work"
+ECONOMIC_MECHANISM_QUALITY_DECISION_IMPROVEMENT = "quality_decision_improvement"
+ECONOMIC_MECHANISM_RISK_AVOIDANCE = "risk_avoidance"
+ECONOMIC_MECHANISM_INCREMENTAL_REVENUE = "incremental_revenue"
+ECONOMIC_MECHANISM_UNKNOWN = "unknown"  # abstain sentinel -- NOT a member of ECONOMIC_MECHANISMS
+
+ECONOMIC_MECHANISMS = frozenset({
+    ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+    ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
+    ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
+    ECONOMIC_MECHANISM_QUALITY_DECISION_IMPROVEMENT,
+    ECONOMIC_MECHANISM_RISK_AVOIDANCE,
+    ECONOMIC_MECHANISM_INCREMENTAL_REVENUE,
+})
+
+# D-01: the naked-LLM evaluator may select ONLY these three -- the
+# mechanisms a transcript-only evaluator can responsibly infer without
+# asserting revenue, deal size, or a study it was never told about.
+EVALUATOR_MECHANISMS = frozenset({
+    ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+    ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
+    ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
+})
+
+# The remaining three: reachable only through operator configuration or a
+# study reference, never from evaluator output (D-01/D-03).
+OPERATOR_ONLY_MECHANISMS = ECONOMIC_MECHANISMS - EVALUATOR_MECHANISMS
+
+# Import-time invariants, same bare-assert posture as
+# EVIDENCE_CLASS_MODEL_ESTIMATED's own assert above: no caller and no
+# request in flight, so refusing to load at all on drift is the plainest
+# spelling of the guarantee. D-01's authority split is enforced STRUCTURALLY
+# by _resolve_economic_mechanism's membership test below, and these two
+# asserts are what keep that structural guarantee from silently drifting
+# out of true if the two frozensets above are ever hand-edited.
+assert EVALUATOR_MECHANISMS <= ECONOMIC_MECHANISMS, (
+    "EVALUATOR_MECHANISMS is not a subset of ECONOMIC_MECHANISMS -- the "
+    "declared mechanism vocabulary has drifted"
+)
+assert EVALUATOR_MECHANISMS.isdisjoint(OPERATOR_ONLY_MECHANISMS), (
+    "EVALUATOR_MECHANISMS and OPERATOR_ONLY_MECHANISMS overlap -- D-01's "
+    "authority split has been violated at import time"
+)
 
 # Phase 43 (EGV-18, D-05/D-09): the two locked reportability_status values.
 # D-09: this is a straight rename of Phase 42's REPORTABILITY_STATUS_DEFAULT
@@ -1303,7 +1404,16 @@ def _build_job_assessment(
                 NARRATIVE_CLAMP_BYTES,
             ),
 
-            "economic_mechanism": ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+            # Phase 44 (EGV-05, D-01/D-03): resolved from the untrusted
+            # evaluator response via _resolve_economic_mechanism, not
+            # hardcoded. Behaviour change this fixes: before this plan, the
+            # literal sat above the abstention early-return below, so every
+            # abstained record still claimed labor_substitution even though
+            # no mechanism was ever selected. raw is {} on those paths, so
+            # _resolve_economic_mechanism(raw) now correctly resolves to
+            # ECONOMIC_MECHANISM_UNKNOWN there -- the D-04 correction, not a
+            # regression.
+            "economic_mechanism": _resolve_economic_mechanism(raw),
 
             # Observation window: the naked-LLM evaluator cannot observe
             # past the transcript's own boundaries. Defaulting to the arc

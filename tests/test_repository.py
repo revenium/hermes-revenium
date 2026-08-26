@@ -192,6 +192,9 @@ class RepositoryTests(unittest.TestCase):
             # prefix is unmatchable by the ordinary path's OUTCOME-01/OUTCOME-04
             # grep gates before any correction-authoring code exists.
             ROOT / 'tests' / 'test_phase42_assessment_contract.py',
+            # Phase 44 Plan 01 (EGV-05) — the six-mechanism vocabulary, the
+            # D-01 authority split, and the mechanism's own wire path.
+            ROOT / 'tests' / 'test_phase44_economic_mechanisms.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',

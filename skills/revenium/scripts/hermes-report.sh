@@ -3558,6 +3558,46 @@ if assessment_raw:
         reportability_status = record.get('reportability_status')
         if isinstance(reportability_status, str) and reportability_status:
             meta['reportability_status'] = reportability_status[:16]
+        # Phase 44 (EGV-05, D-01/D-03, T-44-02): the economic-mechanism
+        # forwarder block this plan opens. Plans 44-02 (net_value,
+        # supplied_costs, cost_coverage) and 44-03 (double_counting_group)
+        # append to this SAME contiguous block, in that order, immediately
+        # below -- meter-completion-assessment.golden.json pins --metadata's
+        # key order with an anchored pattern, so appending here keeps every
+        # plan's re-pin a pure insertion instead of three competing
+        # reorderings.
+        #
+        # Unlike evidence_class above (whose single allow-list check lives
+        # upstream in the sidecar re-read stage, and whose forwarder simply
+        # trusts the already-sanitized record), T-44-02's mitigation puts
+        # this allow-list AT THE FORWARDER: an out-of-set economic_mechanism
+        # drops silently from --metadata (no key added at all), while the
+        # rest of the record -- value, currency, every other provenance
+        # field -- still ships normally. That is a deliberately different
+        # shape from evidence_class's whole-record rejection, so it cannot
+        # reuse that stage's check. This heredoc is its own independent
+        # python3 process (a separate subshell from the sidecar re-read
+        # heredoc above, connected only through shell variables, never
+        # through a shared Python namespace), so the six-string vocabulary
+        # is declared fresh here rather than "shared" from that heredoc --
+        # there is no runtime mechanism by which it could be. Hand-synced
+        # against classifier.py's ECONOMIC_MECHANISMS; the drift test in
+        # tests/test_phase44_economic_mechanisms.py::MechanismDriftTests is
+        # what holds the two declarations equal, and its own extractor
+        # requires this exact anchor to appear exactly once in this file --
+        # so this is the ONLY declaration of _ECONOMIC_MECHANISMS in
+        # hermes-report.sh.
+        _ECONOMIC_MECHANISMS = frozenset({
+            'labor_substitution', 'augmentation_capacity_expansion',
+            'newly_enabled_work', 'quality_decision_improvement',
+            'risk_avoidance', 'incremental_revenue',
+        })
+        economic_mechanism = record.get('economic_mechanism')
+        if (
+            isinstance(economic_mechanism, str)
+            and economic_mechanism in _ECONOMIC_MECHANISMS
+        ):
+            meta['economic_mechanism'] = economic_mechanism[:64]
         # Phase 43 (D-06, T-43-17): a correction stays reportable by
         # construction -- the reader's carve-out above never consults the
         # reportability gate for it -- but Finding 4 / C-06 established that

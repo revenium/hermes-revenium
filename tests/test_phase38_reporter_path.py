@@ -27,6 +27,7 @@ across ticks (deferred-create survival, the double-outcome/409 paths) and the
 ROI-13 canary sweep across every persisted artifact — the marker, all three
 ledgers, the log, and the argv itself, not just the marker Phase 37 checked.
 """
+import ast
 import asyncio
 import importlib.util
 import json
@@ -110,6 +111,14 @@ def _sidecar_record(job_id, **overrides):
             "estimated_hours_saved": 3.5,
             "assumed_loaded_rate": 150.0,
         },
+        # Phase 44 (EGV-05): classifier.py's _build_job_assessment populates
+        # this key UNCONDITIONALLY on every record it builds, and plan 44-01
+        # makes hermes-report.sh forward it, so a fixture without it pins a
+        # wire shape production never sends (WR-04's fourth recurrence,
+        # PA-12). "labor_substitution" is the honest value for this fixture
+        # because the record it describes IS a labor-substitution
+        # assessment -- 3.5 hours of senior engineer review at $150/h.
+        "economic_mechanism": "labor_substitution",
         # Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
         # populates this UNCONDITIONALLY on every record it builds (Phase 42
         # onward). Default here is the reportable literal so every existing
@@ -871,6 +880,112 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertIs(meta.get('corrected'), True)
         self.assertEqual(meta.get('correction_sequence'), 2)
+
+
+# ---------------------------------------------------------------------------
+# Phase 44 Plan 01 (PA-12) — the WR-04 fixture-fidelity defect, closed for
+# good with a source-derived guard rather than a fourth manual review.
+# ---------------------------------------------------------------------------
+
+def _extract_forwarder_record_keys(script_text):
+    """Pull every literal `record.get('<key>')` argument out of
+    hermes-report.sh's assessment --metadata forwarder heredoc, by
+    ast-parsing the WHOLE heredoc body -- it is a syntactically complete,
+    standalone python3 script (that is literally what executes), so unlike
+    _extract_correction_record_fields's mid-function fragment, no slicing
+    or dedenting is needed. Following the same "read the live source, don't
+    retype the plan" discipline that helper and
+    tests/test_phase42_assessment_contract.py::_extract_grep_pattern both
+    use. Returns None -- never a partial or guessed list -- if the anchor
+    has moved or the isolated body no longer parses, so a real drift fails
+    the caller loudly instead of silently testing a stale shape again.
+
+    LOWER BOUND, not a complete inventory: the bound family
+    (value_low/value_base/value_high) is read through a loop variable
+    (`record.get(_bound_key)`), not a literal `record.get('value_low')`, so
+    this ast walk over literal string arguments cannot see it -- those
+    three are already covered by meter-completion-assessment.golden.json's
+    own anchored pattern.
+    """
+    anchor = 'outcome_metadata=$('
+    start_marker = script_text.find(anchor)
+    if start_marker == -1:
+        return None
+    heredoc_start = script_text.find("<<'PY'", start_marker)
+    if heredoc_start == -1:
+        return None
+    body_start = script_text.find('\n', heredoc_start) + 1
+    body_end = script_text.find('\nPY\n', body_start)
+    if body_end == -1:
+        return None
+    body = script_text[body_start:body_end]
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return None
+    keys = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'get'
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'record'
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            keys.append(node.args[0].value)
+    return keys
+
+
+class SidecarFixtureFidelityTests(unittest.TestCase):
+    """PA-12 (44-01-PLAN.md Task 1) -- the durable guard that makes
+    _sidecar_record() staying hand-authored SAFE. This is the fourth
+    recurrence of a fixture pinning what the TEST produces rather than what
+    production sends (WR-04 in Phase 42, the reportability_status gap in
+    Phase 43 Plan 01, and this plan's own economic_mechanism gap that
+    research correction 4 caught before it shipped). The previous three
+    were caught by human review after the fact; this converts that review
+    into a failing test. Deleting it re-opens the defect silently.
+
+    Guarantee class: BEHAVIOURAL, and explicitly a LOWER BOUND (see
+    _extract_forwarder_record_keys's own docstring) -- it proves every
+    literally-keyed forwarder has a matching fixture key today, not that no
+    future forwarder could ever escape it (a loop-variable-keyed forwarder,
+    like the bound family already in this file, would not be caught here).
+    """
+
+    # Only a kind:"correction" record carries `sequence` --
+    # _correction_sidecar_record() supplies it, not _sidecar_record(). Every
+    # future addition to this exemption set needs the same kind of written
+    # justification: a growing exemption set is how this guard would rot
+    # back into the defect it exists to catch.
+    _SEQUENCE_ONLY_ON_CORRECTIONS = frozenset({'sequence'})
+
+    def test_every_forwardable_key_is_present_in_sidecar_record(self):
+        script_text = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
+        keys = _extract_forwarder_record_keys(script_text)
+        self.assertIsNotNone(
+            keys,
+            'could not extract record.get(...) keys from hermes-report.sh '
+            '-- the --metadata forwarder heredoc moved and '
+            '_extract_forwarder_record_keys needs updating',
+        )
+        self.assertTrue(
+            keys,
+            'extracted zero forwarder keys -- the forwarder block moved or '
+            'the extractor is broken',
+        )
+        record = _sidecar_record('fidelity-probe-job')
+        missing = (set(keys) - self._SEQUENCE_ONLY_ON_CORRECTIONS) - set(record.keys())
+        self.assertEqual(
+            missing, set(),
+            f'_sidecar_record() is missing forwardable keys: {missing} -- '
+            'add them to _sidecar_record(), or '
+            'meter-completion-assessment.golden.json will describe a wire '
+            'shape production never actually sends',
+        )
 
 
 # ---------------------------------------------------------------------------
