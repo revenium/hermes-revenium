@@ -41,11 +41,12 @@ registered, `2` registered but inert.
 | Command | What it does |
 |---|---|
 | `clear-halt.sh` | Clear an active halt. `--rule-id <id>` clears one rule. This is the only thing that clears a halt — nothing auto-clears. |
-| `prune-markers.sh` | Remove marker files older than 30 days, plus the warn-flag sentinel directories (`.warn`, `.fallback-warn`, `.outcome-warn`, `.probe-warn`) — these accumulate one zero-byte file per suppressed condition and are never pruned automatically. `--dry-run` previews. Deliberately not wired into cron; run it periodically by hand. |
+| `prune-markers.sh` | Remove marker files older than 30 days — and job-assessment sidecars on their own, longer clock (`REVENIUM_ASSESSMENT_RETENTION_DAYS`, 90 days by default), skipping any sidecar a correction currently holds locked — plus the warn-flag sentinel directories (`.warn`, `.fallback-warn`, `.outcome-warn`, `.probe-warn`) — these accumulate one zero-byte file per suppressed condition and are never pruned automatically. `--dry-run` previews. Deliberately not wired into cron; run it periodically by hand. |
 | `install-cron.sh` / `uninstall-cron.sh` | Manage the per-minute crontab entry |
 | `install-hooks.sh` / `uninstall-hooks.sh` | Manage the three shell hooks in `config.yaml` |
 | `install-plugin.sh` | Copy the classifier into `~/.hermes/plugins/` and restart the gateway |
 | `setup-guardrails.sh` | Create the budget rules |
+| `correct-assessment.sh` | Append a correction to a job's value assessment. Requires `--job-id`, `--value`, `--currency` and `--reason`; `--value-low` / `--value-high` are optional and default to equal bounds. The correction **appends** — locally as a new line in the job's sidecar, remotely as a new revision via `revenium jobs outcome-update` — and the original stays byte-identical and readable. `--dry-run` previews without writing anything, locally or remotely. Operator-only and deliberately not wired into cron. Exits non-zero, loudly, on a `revenium` CLI that lacks `jobs outcome-update`. |
 
 A halt clear buys one tick. If the rule is still breached, the next tick re-halts.
 

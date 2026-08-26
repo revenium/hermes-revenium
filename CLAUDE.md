@@ -26,12 +26,16 @@ bash install.sh
 bash ~/.hermes/skills/revenium/scripts/install.sh
 
 # Drive the runtime pieces manually after install
-bash ~/.hermes/skills/revenium/scripts/cron.sh              # one tick: plugin health + meter + guardrails + tool events
+bash ~/.hermes/skills/revenium/scripts/cron.sh              # one tick: all six stages
 bash ~/.hermes/skills/revenium/scripts/hermes-report.sh     # completion metering only
 bash ~/.hermes/skills/revenium/scripts/guardrail-check.sh   # guardrail evaluation only
 bash ~/.hermes/skills/revenium/scripts/tool-event-report.sh # tool-event metering only
+bash ~/.hermes/skills/revenium/scripts/api-event-report.sh  # api-event metering only
+bash ~/.hermes/skills/revenium/scripts/drain-status.sh      # spool drain health (alert-only)
 bash ~/.hermes/skills/revenium/scripts/clear-halt.sh        # clear all halts (--rule-id <id> for one)
-bash ~/.hermes/skills/revenium/scripts/prune-markers.sh --dry-run   # marker GC (manual, never in cron)
+bash ~/.hermes/skills/revenium/scripts/prune-markers.sh --dry-run   # marker + assessment GC (manual, never in cron)
+bash ~/.hermes/skills/revenium/scripts/correct-assessment.sh --job-id <id> --value <n> \
+  --currency USD --reason <text> [--dry-run]   # append a correction (operator-only, never in cron)
 
 # Per-concern install / diagnostics
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh    # classifier plugin into the profile's plugins/
@@ -55,7 +59,7 @@ The skill has three parts. Nothing calls anything else across the boundaries —
 
 2. **State files (`~/.hermes/state/revenium/`).** The whole public interface: `config.json`, `guardrail-status.json`, `plugin-status.json`, `markers/`, `tool-events/`, the ledgers, the taxonomies, the log. Every process re-reads what it needs; there is no shared memory and no IPC.
 
-3. **The cron pipeline (every minute, out of process).** `cron.sh` takes `cron.lock`, then runs plugin health → completion metering → guardrail evaluation → tool-event metering. This is the only part that talks to the Revenium API, and (via one `hermes chat` call on a new halt) the only part that talks back to Hermes.
+3. **The cron pipeline (every minute, out of process).** `cron.sh` takes `cron.lock`, then runs six stages: plugin health → completion metering → guardrail evaluation → tool-event metering → api-event metering → drain status. (A conditional legacy `alertId` migration runs first when one is present; it is not one of the six.) This is the only part that talks to the Revenium API, and (via one `hermes chat` call on a new halt) the only part that talks back to Hermes.
 
 ```mermaid
 flowchart TB
@@ -64,7 +68,7 @@ flowchart TB
         PLC["pre_llm_call.sh<br/>halt directive + warn band"]
         PTC["pre_tool_call.sh<br/>block tool calls when halted"]
         POSTTC["post_tool_call.sh<br/>pure observer"]
-        PLUG["revenium-classifier plugin<br/>on_session_end / on_session_finalize / post_llm_call"]
+        PLUG["revenium-classifier plugin<br/>on_session_end / on_session_finalize<br/>post_llm_call / post_api_request"]
         AUX["aux LLM<br/>agent.auxiliary_client.call_llm"]
         PLUG -->|"transcript to task_type + job"| AUX
     end
@@ -146,7 +150,7 @@ Two dimension names are deliberately distinct and both default through `common.s
 
 ### Classification pipeline (markers)
 
-The `revenium-classifier` plugin (`skills/revenium/plugins/revenium-classifier/`) registers three Hermes hooks — `on_session_end`, `on_session_finalize`, and `post_llm_call` — so that every session shape (gateway-served, CLI, interactive, ACP, cron) gets classified. `classifier.py` reads the session transcript from `state.db`, asks an auxiliary LLM for a `task_type` (and, for agentic work, a job), validates the label against `LABEL_RE` plus `TRIVIAL_BLOCKLIST`, persists new labels into `task-taxonomy.json` / `job-taxonomy.json`, and writes a `GUARDRAIL` + `CHAT` marker pair to `markers/<sid>.jsonl` under a single `fcntl.LOCK_EX`. Marker records carry `{muid, ts, sid, task_type, operation_type, trace_id}` plus `agentic_job_id` for subagent sessions.
+The `revenium-classifier` plugin (`skills/revenium/plugins/revenium-classifier/`) registers four Hermes hooks — `on_session_end`, `on_session_finalize`, `post_llm_call`, and `post_api_request` (the last added in Phase 32 for the per-API-call event spool) — so that every session shape (gateway-served, CLI, interactive, ACP, cron) gets classified. `classifier.py` reads the session transcript from `state.db`, asks an auxiliary LLM for a `task_type` (and, for agentic work, a job), validates the label against `LABEL_RE` plus `TRIVIAL_BLOCKLIST`, persists new labels into `task-taxonomy.json` / `job-taxonomy.json`, and writes a `GUARDRAIL` + `CHAT` marker pair to `markers/<sid>.jsonl` under a single `fcntl.LOCK_EX`. Marker records carry `{muid, ts, sid, task_type, operation_type, trace_id}` plus `agentic_job_id` for subagent sessions.
 
 Two invariants:
 
@@ -360,6 +364,7 @@ protocol works.
 | `WARN_FLAGS_DIR` | `${MARKERS_DIR}/.warn` |
 | `FALLBACK_WARN_FLAGS_DIR` | `${MARKERS_DIR}/.fallback-warn` |
 | `TOOL_EVENTS_DIR` | `${STATE_DIR}/tool-events` |
+| `JOB_ASSESSMENTS_DIR` | `${STATE_DIR}/job-assessments` |
 | `TAXONOMY_FILE` | `${STATE_DIR}/task-taxonomy.json` |
 | `JOB_TAXONOMY_FILE` | `${STATE_DIR}/job-taxonomy.json` |
 | `LOG_FILE` | `${STATE_DIR}/revenium-metering.log` |
@@ -438,13 +443,14 @@ See the mermaid diagram under "Architecture" above for the component and data-fl
 | Pre-tool hook | Block tool calls while halted; write a `CANCELLED` job marker | `skills/revenium/scripts/pre_tool_call.sh` |
 | Post-tool hook | Append a tool-event record; never blocks, never calls out | `skills/revenium/scripts/post_tool_call.sh` |
 | Path resolver / shared helpers | Single source of truth for state paths; `ensure_path`, logging, rotation, capability probes, session-identity helpers | `skills/revenium/scripts/common.sh` |
-| Cron orchestrator | Take `cron.lock`, source `env`, rotate the log, run the four stages with `\|\| true` | `skills/revenium/scripts/cron.sh` |
+| Cron orchestrator | Take `cron.lock`, source `env`, rotate the log, run the six stages with `\|\| true` | `skills/revenium/scripts/cron.sh` |
 | Metering reporter | Read `state.db`, diff vs ledger, split the delta across markers, create/close jobs, ship completions, append ledgers | `skills/revenium/scripts/hermes-report.sh` |
 | Split strategies | Conservation-exact delta splitting across N markers | `skills/revenium/scripts/split_strategies.py` |
 | Guardrail checker | Poll rules, write `guardrail-status.json`, detect new halts, notify with the embedded enforcement event | `skills/revenium/scripts/guardrail-check.sh` |
 | Tool-event reporter | Ship unledgered tool events | `skills/revenium/scripts/tool-event-report.sh` |
 | Rule setup / migration | Create budget rules; migrate a legacy `alertId` to `ruleIds` | `skills/revenium/scripts/setup-guardrails.sh` |
 | Halt clearer | Clear `halted` (all rules, or one via `--rule-id`) | `skills/revenium/scripts/clear-halt.sh` |
+| Assessment corrector | Append a correction to a job's assessment, locally and via `revenium jobs outcome-update`; operator-only, never in cron | `skills/revenium/scripts/correct-assessment.sh` |
 | Marker GC | Prune stale marker files by ledger timestamp, falling back to mtime | `skills/revenium/scripts/prune-markers.sh` |
 | Health checks | Report plugin registration and hook registration state | `skills/revenium/scripts/plugin-status.sh`, `hooks-status.sh` |
 | Installers | One-command setup and per-concern install/uninstall | `skills/revenium/scripts/install.sh`, `install-plugin.sh`, `install-hooks.sh`, `install-cron.sh`, and their `uninstall-` pairs |
@@ -497,7 +503,7 @@ See the mermaid diagram under "Architecture" above for the component and data-fl
 |-------------|---------|----------------|
 | `install.sh` (repo root) | human, after clone | copy the bundle, then delegate to the bundled installer |
 | `skills/revenium/scripts/install.sh` | human | credentials, plugin, hooks, rules, cron, gateway restart |
-| `scripts/cron.sh` | per-minute crontab entry | lock, rotate, migrate, then the four stages |
+| `scripts/cron.sh` | per-minute crontab entry | lock, rotate, migrate, then the six stages |
 | `scripts/hermes-report.sh` | cron or direct | completion metering + agentic jobs |
 | `scripts/guardrail-check.sh` | cron or direct | guardrail state + halt notification |
 | `scripts/tool-event-report.sh` | cron or direct | tool-event metering |
