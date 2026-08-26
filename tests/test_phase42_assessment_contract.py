@@ -25,6 +25,7 @@ Decision defended:
 Every test in this module runs OFFLINE: no network, no revenium CLI, no
 subprocess other than a real `grep` invocation against a real temp file.
 """
+import ast
 import re
 import subprocess
 import tempfile
@@ -60,6 +61,64 @@ def _extract_grep_pattern(script_text, gate_comment, job_id):
     if not match:
         return None
     return match.group(1).replace('${outcome_id}', job_id)
+
+
+def _extract_correction_record_fields(script_text):
+    """Pull the correction record's key names, in source order, straight out
+    of correct-assessment.sh's own `record = {...}` dict literal (Step 5) --
+    the same "read the live source, don't retype the plan" discipline
+    `_extract_grep_pattern` uses above for the ledger gate patterns (IN-01,
+    42-REVIEW.md). Returns None -- never a partial or guessed list -- if the
+    block has moved or no longer parses as expected, so a real drift fails
+    the caller loudly instead of silently testing a stale shape again.
+    """
+    # Greptile P2 (PR #96): the first version scanned for `'(\w+)':` with a
+    # regex, which recognised single-quoted keys only and returned whatever
+    # subset it happened to match. A double-quoted key -- a pure formatting
+    # change -- would have been dropped silently, leaving `fields` non-empty
+    # and the byte-budget test measuring a SMALLER record while still
+    # passing. An extractor that can quietly under-match defeats the whole
+    # point of reading the live source instead of retyping it.
+    #
+    # Parsing the literal with `ast` removes the quoting question entirely:
+    # the keys come from the parse tree, so any valid Python spelling is
+    # read correctly or the parse fails outright. `ast.literal_eval` is not
+    # usable here -- the values are live expressions like
+    # `_num(os.environ.get(...))` -- but `ast.parse` handles them fine, and
+    # only the keys are read.
+    occurrences = [
+        i for i in range(len(script_text))
+        if script_text.startswith('record = {', i)
+    ]
+    if len(occurrences) != 1:
+        # Zero: the block moved. More than one: which is the correction
+        # record is now ambiguous. Either way, refuse rather than guess.
+        return None
+    start = occurrences[0]
+    end = script_text.find('\n    }', start)
+    if end == -1:
+        return None
+
+    literal = script_text[start:end] + '\n    }'
+    try:
+        tree = ast.parse(literal)
+    except SyntaxError:
+        return None
+    if not tree.body or not isinstance(tree.body[0], ast.Assign):
+        return None
+    node = tree.body[0].value
+    if not isinstance(node, ast.Dict):
+        return None
+
+    fields = []
+    for key in node.keys:
+        # A non-constant or non-str key (e.g. `**spread`, which parses as a
+        # None key) means the shape is no longer a flat literal this test
+        # can reason about -- refuse loudly rather than silently skip it.
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            return None
+        fields.append(key.value)
+    return fields or None
 
 
 def _grep_matching_lines(pattern, ledger_path):
@@ -1003,26 +1062,68 @@ class SidecarBudgetTests(unittest.TestCase):
                 print(f'[42-03 SidecarBudgetTests] worst-case {label} record: {total} bytes, margin {margin}')
 
     def test_worst_case_correction_line_fits_8192_bytes_with_margin(self):
-        """The kind:"correction" shape plan 42-06 will append -- built here
-        directly, since that script does not exist yet, so the reader's
-        per-line 8192-byte guard is proven adequate for BOTH line kinds
-        before the correction path is built (per this task's own action
-        text). Shape per 41-CARRIER-DECISION.md Part 3: job id, timestamp,
-        a 500-byte reason, and prior/new bound values -- measured there at
-        672 bytes for a much smaller reason; this is the WORST case."""
+        """The REAL kind:"correction" shape correct-assessment.sh's Step 5
+        writes -- as of plan 42-06 shipping, that script exists, so this
+        test now reads its field list straight from the shipped source
+        (_extract_correction_record_fields) rather than hand-retyping a
+        plan sketch. IN-01 (42-REVIEW.md): the sketch this replaced used
+        new_value_low/new_value_base/new_value_high and an `operator` field
+        that never shipped, and omitted assessment_id/
+        assessment_schema_version/prior_currency, which did -- this
+        extraction makes that drift impossible to reintroduce silently: a
+        field correct-assessment.sh writes but this test has no worst-case
+        value for fails loudly (see the `missing` assertion below) instead
+        of quietly measuring the wrong shape.
+
+        Values themselves are still hand-picked worst cases (deriving those
+        from source too would require re-implementing correct-assessment.sh's
+        own validation/clamping in Python, which is what CLAUDE.md's
+        no-shared-code rule already argues against) -- reason is real-clamped
+        via NARRATIVE_CLAMP_BYTES, job id and sequence match the ceiling
+        `SidecarBudgetTests._worst_case_valid` uses for the ordinary
+        job_assessment shape. Shape per 41-CARRIER-DECISION.md Part 3: job
+        id, timestamp, a 500-byte reason, and prior/new bound values --
+        measured there at 672 bytes for a much smaller reason; this is the
+        WORST case.
+        """
+        script_text = CORRECT_ASSESSMENT_SH.read_text()
+        fields = _extract_correction_record_fields(script_text)
+        self.assertIsNotNone(
+            fields,
+            'IN-01: could not extract the correction record fields from '
+            "correct-assessment.sh's `record = {...}` block -- it moved or "
+            'changed shape; update the extraction before trusting this test.',
+        )
+
         mod, _ev = _load_classifier({})
         reason = mod._clamp_assessment_text('r' * 2000, mod.NARRATIVE_CLAMP_BYTES)
-        correction = {
+        job_id = 'x' * 48 + '_a1b2'
+        worst_case_values = {
             'kind': 'correction',
             'ts': 1756000000.123456,
+            'agentic_job_id': job_id,
+            'assessment_id': f'{job_id}:999',
             'sequence': 999,
-            'agentic_job_id': 'x' * 48 + '_a1b2',
-            'reason': reason,
-            'prior_value_low': 999999.99, 'prior_value_base': 999999.99, 'prior_value_high': 999999.99,
-            'new_value_low': 999999.99, 'new_value_base': 999999.99, 'new_value_high': 999999.99,
+            'assessment_schema_version': 1,
+            'prior_value_low': 999999.99,
+            'prior_value_base': 999999.99,
+            'prior_value_high': 999999.99,
+            'prior_currency': 'USD',
+            'value_low': 999999.99,
+            'value_base': 999999.99,
+            'value_high': 999999.99,
             'currency': 'USD',
-            'operator': 'o' * 80,
+            'reason': reason,
         }
+        missing = [k for k in fields if k not in worst_case_values]
+        self.assertEqual(
+            missing, [],
+            'IN-01: correct-assessment.sh writes a field this test has no '
+            f'worst-case value for: {missing!r} -- add one before trusting '
+            'the byte budget.',
+        )
+        correction = {k: worst_case_values[k] for k in fields}
+
         total = len(json.dumps(correction, separators=(',', ':'), ensure_ascii=True).encode('utf-8')) + 1
         self.assertLess(total, 8192, f'worst-case correction line is {total} bytes')
         margin = 8192 - total
@@ -1962,6 +2063,36 @@ def _build_toctou_race_shim(shim_path, entered_file, release_file):
     os.chmod(shim_path, 0o755)
 
 
+def _sidecar_component_for(job_id):
+    """Run the REAL `_sidecar_filename_component` transform, extracted
+    verbatim from correct-assessment.sh's own source (not retyped) --
+    same extraction technique
+    `test_path_traversal_job_id_creates_no_file_outside_assessments_dir`
+    uses. Lets a fixture using a punctuated job id name its sidecar file
+    exactly as the shipped script would resolve it, without hand-
+    duplicating the transform and risking it silently drifting from the
+    source it is meant to mirror."""
+    script_text = CORRECT_ASSESSMENT_SH.read_text()
+    func_src = script_text[
+        script_text.index('def _clean(v):'):
+        script_text.index('component = _sidecar_filename_component(raw_job_id)')
+    ]
+    probe = (
+        'import re, sys\n' + func_src +
+        '\nprint(_sidecar_filename_component(sys.argv[1]))\n'
+    )
+    result = subprocess.run(
+        ['python3', '-c', probe, job_id],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f'_sidecar_filename_component probe failed for {job_id!r}: '
+            f'{result.stderr}'
+        )
+    return result.stdout.strip()
+
+
 class CorrectionAppendTests(unittest.TestCase):
     """Phase 42 Plan 06 -- EGV-09/D-01/D-02/D-03/D-04/D-14: correct-assessment.sh
     appends a `kind:"correction"` sidecar line, never destructively rewrites
@@ -2186,6 +2317,134 @@ class CorrectionAppendTests(unittest.TestCase):
                 f'created line, never the correction line, got {outcome_04_matches!r}',
             )
             self.assertTrue(outcome_04_matches[0].startswith(f'JOB:{job_id}:created:'))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_correction_ledger_line_shares_id_with_ordinary_path_for_punctuated_job_id(self):
+        """WR-01 (42-REVIEW.md): the ledger-line id must track the ordinary
+        path's narrow five-character transform, not the fuller filename-safe
+        COMPONENT.
+
+        Uses a job id carrying an apostrophe and parentheses -- punctuation
+        outside hermes-report.sh's `_bad_chars` list (`:`, ` `, tab, `\\n`,
+        `\\r`) but inside `_sidecar_filename_component`'s A-Za-z0-9._-
+        filename-safety pass, so the two transforms disagree by construction.
+        Before the WR-01 fix, the correction line's `<id>` substring diverged
+        from the ordinary path's `created:` line for this same job,
+        silently breaking a `^JOB:<id>:` grep for the job's full history.
+        """
+        sid = 'p42c-sid-012'
+        job_id = "p42c-job-012's(x)"
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase42-correction-punct-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+
+            # The ordinary path's `created:` line keeps punctuation
+            # verbatim -- job_id has no colon/space/tab/newline/CR, so
+            # hermes-report.sh's narrow transform is a no-op, matching
+            # clean_id/outcome_id there exactly.
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            # The sidecar FILENAME must use the filename-safe COMPONENT
+            # transform -- extracted from the shipped script (see
+            # _sidecar_component_for), not retyped, so this fixture stays
+            # correct even if the transform's exact substitution changes.
+            component = _sidecar_component_for(job_id)
+            sidecar_path = os.path.join(assessments_dir, f'{component}.jsonl')
+            record = _tracer_assessment_record(job_id)
+            with open(sidecar_path, 'w') as f:
+                f.write(json.dumps(record, separators=(',', ':')) + '\n')
+
+            task_marker = {
+                'muid': f'{component}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            job_marker = {
+                'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+                'agentic_job_id': job_id, 'job_name': 'Punctuated job id',
+                'job_type': 'code_review', 'status': 'SUCCESS',
+            }
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            _build_correction_shim(shim)
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+
+            rc, out, err = _run_correct_assessment(env, [
+                '--job-id', job_id, '--value', '400', '--currency', 'USD',
+                '--reason', 'punctuated job id correlation',
+            ])
+            self.assertEqual(rc, 0, f'stdout={out!r} stderr={err!r}')
+
+            with open(jobs_ledger) as f:
+                ledger_lines = [line.rstrip('\n') for line in f if line.strip()]
+
+            created_lines = [l for l in ledger_lines if ':created:' in l]
+            correction_lines = [l for l in ledger_lines if ':correction:' in l]
+            self.assertEqual(len(created_lines), 1, ledger_lines)
+            self.assertEqual(len(correction_lines), 1, ledger_lines)
+
+            created_id = created_lines[0].split(':', 2)[1]
+            correction_id = correction_lines[0].split(':', 2)[1]
+            self.assertEqual(
+                created_id, job_id,
+                'sanity: the pre-seeded created: line must carry the raw '
+                f'punctuated job id verbatim, got {created_id!r}',
+            )
+            self.assertEqual(
+                correction_id, created_id,
+                'WR-01: the correction: line must carry the SAME <id> '
+                f'substring as the created: line for the same job -- got '
+                f'correction id {correction_id!r} vs created id '
+                f'{created_id!r}',
+            )
+
+            # The full-history grep itself, through a real ledger file --
+            # what an operator auditing this job would actually run.
+            full_history = _grep_matching_lines(
+                f'^JOB:{job_id}:', Path(jobs_ledger))
+            self.assertEqual(
+                len(full_history), 2,
+                'WR-01: `^JOB:<id>:` must return BOTH the created: and '
+                f'correction: lines for a punctuated job id, got '
+                f'{full_history!r}',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

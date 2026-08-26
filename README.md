@@ -41,7 +41,9 @@ done by a plugin, three shell hooks, and a cron.**
 Hermes reports token totals per session. That tells you what you spent and nothing about
 what you bought. This closes that gap: every metered completion is labelled with what the
 agent was actually doing, each task arc is tracked as a billable job, every tool call is
-metered, and the agent is halted structurally when a budget rule blocks.
+metered, and the agent is halted structurally when a budget rule blocks. A successful job
+can also carry an estimated economic value, which Revenium combines with metered cost into
+a displayed ROI.
 
 ## What you get
 
@@ -51,24 +53,39 @@ metered, and the agent is halted structurally when a budget rule blocks.
 | **Agentic job tracking** | Discrete task arcs become Revenium jobs with immutable, once-only outcomes, and their transactions are linked back via `--agentic-job-id`. |
 | **Tool-event metering** | Every Hermes tool call is metered — name, duration, success, error — through `revenium meter tool-event`. |
 | **Structural budget guardrails** | Hermes shell hooks read a local guardrail snapshot before every LLM call and every tool call, so enforcement does not depend on the agent choosing to comply. |
+| **Job value estimation** *(experimental, opt-in, off by default)* | On a `SUCCESS` arc only, one bounded LLM call on your own provider estimates the job's economic value from two independently capped inputs. It is an **unverified model estimate**, not measured ROI. Absent or malformed config fails closed, so an existing install meters byte-identically to before. |
+
+> **Which number crosses the wire.** When value estimation is enabled, `--outcome-value`
+> ships the **low** bound of the low/base/high band — the conservative figure, not the base.
+> All three bounds and their provenance ride in `--metadata`, so the full range stays
+> recoverable. The estimate understates by design rather than overstating, which means the
+> value on a Revenium dashboard is deliberately the floor of the range.
 
 ## What's actually installed
 
-"Skill" is how this is packaged and installed, not what does the work. Four pieces land on
+"Skill" is how this is packaged and installed, not what does the work. Five pieces land on
 the host, and only one of them is the skill:
 
 | Piece | What Hermes calls it | Where it lives | What it does |
 |---|---|---|---|
-| `revenium-classifier` | **plugin** — Python, `register(ctx)`, four lifecycle hooks | `~/.hermes/plugins/` | All classification, and the per-API-call event spool |
+| `revenium-classifier` | **plugin** — Python, `register(ctx)`, four lifecycle hooks | `~/.hermes/plugins/` (per **profile** on a fleet) | All classification, and the per-API-call event spool |
 | `pre_llm_call`, `pre_tool_call`, `post_tool_call` | **shell hooks** registered in `config.yaml` | `~/.hermes/skills/revenium/scripts/` | All budget enforcement, and tool-call capture |
 | `cron.sh` and its six stages | **cron job**, out of process | `~/.hermes/skills/revenium/scripts/` | Everything that talks to the Revenium API |
 | `SKILL.md` | **skill** — markdown loaded into the agent's context | `~/.hermes/skills/revenium/` | A halt-check backstop, by its own description defense-in-depth only |
+| `job-assessments/` | **state** — one append-only JSONL file per job | `~/.hermes/state/revenium/` | The record of record for a job's assessment and its correction history. Kept 90 days (`REVENIUM_ASSESSMENT_RETENTION_DAYS`), against 30 for markers |
 
 This matters operationally. Hermes loads plugins from `~/.hermes/plugins/` and skills from
 `~/.hermes/skills/` — different roots, different loaders — and `hermes skills install`
 carries only the second. That is why installing the skill is not enough on its own, and why
 the bootstrap exists. It is also why a stale plugin copy is the most common silent failure
 on a multi-profile host: the skill tree is shared, the plugin is not.
+
+An assessment is never rewritten. If a value turns out to be wrong,
+`scripts/correct-assessment.sh` appends a correction — locally as a new line in the job's
+sidecar, and remotely through `revenium jobs outcome-update`, which adds a revision rather
+than replacing one. The original stays byte-identical and readable. It is operator-only and
+deliberately unreachable from cron, and `--dry-run` shows what it would do without writing
+anything, locally or remotely.
 
 ## Quick start
 
@@ -118,6 +135,7 @@ python3 --version
 | [Upgrading](docs/upgrading.md) | Four upgrade paths and what must be re-run after each |
 | [Operations](docs/operations.md) | Manual commands, diagnostics, uninstall, and the test suite |
 | [Event metering](docs/event-metering.md) | The v1.5 event path in depth: mechanism, cutover, and rollback |
+| [Plugin interface](docs/plugin-interface.md) | The Hermes plugin surfaces the classifier registers against, and what each one can and cannot see |
 | [Migrations](docs/migration-guardrails.md) | [Guardrails](docs/migration-guardrails.md) · [AGENT dimension](docs/migration-agent-dimension.md) |
 
 Reference material that ships inside the skill bundle lives at
