@@ -25,6 +25,7 @@ Decision defended:
 Every test in this module runs OFFLINE: no network, no revenium CLI, no
 subprocess other than a real `grep` invocation against a real temp file.
 """
+import ast
 import re
 import subprocess
 import tempfile
@@ -71,13 +72,52 @@ def _extract_correction_record_fields(script_text):
     block has moved or no longer parses as expected, so a real drift fails
     the caller loudly instead of silently testing a stale shape again.
     """
-    start = script_text.find('record = {')
-    if start == -1:
+    # Greptile P2 (PR #96): the first version scanned for `'(\w+)':` with a
+    # regex, which recognised single-quoted keys only and returned whatever
+    # subset it happened to match. A double-quoted key -- a pure formatting
+    # change -- would have been dropped silently, leaving `fields` non-empty
+    # and the byte-budget test measuring a SMALLER record while still
+    # passing. An extractor that can quietly under-match defeats the whole
+    # point of reading the live source instead of retyping it.
+    #
+    # Parsing the literal with `ast` removes the quoting question entirely:
+    # the keys come from the parse tree, so any valid Python spelling is
+    # read correctly or the parse fails outright. `ast.literal_eval` is not
+    # usable here -- the values are live expressions like
+    # `_num(os.environ.get(...))` -- but `ast.parse` handles them fine, and
+    # only the keys are read.
+    occurrences = [
+        i for i in range(len(script_text))
+        if script_text.startswith('record = {', i)
+    ]
+    if len(occurrences) != 1:
+        # Zero: the block moved. More than one: which is the correction
+        # record is now ambiguous. Either way, refuse rather than guess.
         return None
+    start = occurrences[0]
     end = script_text.find('\n    }', start)
     if end == -1:
         return None
-    fields = re.findall(r"'(\w+)':", script_text[start:end])
+
+    literal = script_text[start:end] + '\n    }'
+    try:
+        tree = ast.parse(literal)
+    except SyntaxError:
+        return None
+    if not tree.body or not isinstance(tree.body[0], ast.Assign):
+        return None
+    node = tree.body[0].value
+    if not isinstance(node, ast.Dict):
+        return None
+
+    fields = []
+    for key in node.keys:
+        # A non-constant or non-str key (e.g. `**spread`, which parses as a
+        # None key) means the shape is no longer a flat literal this test
+        # can reason about -- refuse loudly rather than silently skip it.
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            return None
+        fields.append(key.value)
     return fields or None
 
 
