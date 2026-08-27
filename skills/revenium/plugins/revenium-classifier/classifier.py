@@ -2562,13 +2562,27 @@ async def _classify_via_llm(context: dict, response_preview: str,
 
 def _validate_label(label: str) -> str:
     """Returns label if it matches LABEL_RE AND is not in TRIVIAL_BLOCKLIST,
-    else returns 'unclassified'. D-09 enforcement at the classifier boundary."""
+    else returns 'unclassified'. D-09 enforcement at the classifier boundary.
+
+    Phase 45 (EGV-01, PA-14): this is the SAME validation every classification
+    implementation's output passes through, built-in or not -- a registered
+    classifier cannot write a label the built-in path would have rejected. A
+    LABEL_RE failure is logged with %r on the raw label, mirroring
+    _validate_job's identical rejection log -- never %s and never an
+    f-string, because the label may be model- or operator-derived text, and
+    a newline embedded in it must not be able to forge a second log record
+    (T-28-07)."""
     if not label:
         return "unclassified"
     cleaned = label.strip().lower()
     if cleaned in TRIVIAL_BLOCKLIST:
         return "unclassified"
     if not LABEL_RE.match(cleaned):
+        logger.warning(
+            "revenium-classifier: rejected task_type classification, label "
+            "failed validation: %r",
+            label,
+        )
         return "unclassified"
     return cleaned
 
