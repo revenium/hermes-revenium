@@ -3541,8 +3541,13 @@ if status == 'FAILED' and reason:
     meta['failure_reason'] = reason
 
 # Phase 42 (C-04): the sidecar's resolved assessment record, parsed once
-# from ASSESSMENT_JSON. Present only when the sidecar re-read above found
-# one (SUCCESS arcs only) — an empty/malformed blob degrades to an empty
+# from ASSESSMENT_JSON. Present whenever the sidecar re-read above found
+# one. NOT SUCCESS-only since Phase 44 Plan 03: that gate was widened from
+# `outcome_status == "SUCCESS"` to `-n "${outcome_sid}"` precisely so a
+# FAILED/CANCELLED job's non-evaluated abstention record (which carries
+# costs and coverage and omits the whole value family) reaches this block
+# too. Every consumer below is status-agnostic by construction, so no
+# status test belongs here — an empty/malformed blob degrades to an empty
 # contribution here, never crashes the heredoc (2>/dev/null || true above
 # is the outer belt; the try/except is the inner suspenders). Conditional-
 # emit rule preserved: a field absent from the record adds no key to meta.
