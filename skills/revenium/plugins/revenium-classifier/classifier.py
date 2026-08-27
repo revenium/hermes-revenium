@@ -378,6 +378,61 @@ _EVAL_INVALID = _EvalOutcomeSentinel("invalid")
 _EVAL_TIMED_OUT = _EvalOutcomeSentinel("timed-out")
 
 
+def _mechanism_instruction_block(
+    mechanism: str, max_hours: float, max_rate: float, currency: str,
+) -> str:
+    """Return the per-mechanism output-shape fragment for one member of
+    EVALUATOR_MECHANISMS (D-02), or the empty string for anything else.
+
+    labor_substitution and augmentation_capacity_expansion share the same
+    counterfactual-role-and-rate shape -- both mechanisms genuinely have a
+    counterfactual human doing the work by hand, so both ask for a human
+    role, bounded hours, and a bounded loaded rate.
+
+    newly_enabled_work drops that demand ENTIRELY rather than softening it
+    (41-ARCHITECTURE.md Finding 3, D-02): this mechanism has no
+    counterfactual human role BY DEFINITION -- the work would not have
+    happened at all without an AI agent, so asking for a role/hours/rate
+    invites an invented number for work nobody would ever have done by
+    hand. This arc's value is not priced on this path (D-04); only a
+    narrative basis is solicited.
+
+    Never raises: a pure function over four already-bounded/validated
+    arguments.
+    """
+    if mechanism in (
+        ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+        ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
+    ):
+        return (
+            f"If economic_mechanism is \"{mechanism}\", also supply:\n"
+            "  - inferred_role: the human role that would otherwise have "
+            "done this work (short noun phrase)\n"
+            "  - estimated_hours_saved: a number, greater than 0 and at "
+            f"most {max_hours}\n"
+            "  - assumed_loaded_rate: the fully-loaded hourly cost for "
+            f"that role, a number greater than 0 and at most {max_rate}\n"
+            f"  - currency: must be exactly {currency}\n"
+            "  - basis: one sentence naming what work was avoided\n\n"
+        )
+    if mechanism == ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK:
+        # Deliberately does NOT spell out inferred_role / estimated_hours_
+        # saved / assumed_loaded_rate as field names -- naming them here,
+        # even to say "do not supply", would still put those exact tokens
+        # in front of the model and risks the same copy-verbatim anchoring
+        # quick-260815-r39 already measured for prompt examples. Describes
+        # what to withhold in plain language instead.
+        return (
+            f"If economic_mechanism is \"{mechanism}\": this mechanism has "
+            "NO counterfactual human role BY DEFINITION. Do NOT supply a "
+            "human role, an hours estimate, a loaded rate, or a currency "
+            "-- this arc's value is not priced on this path.\n"
+            "  - basis: one sentence naming the work that would not have "
+            "happened at all without an AI agent\n\n"
+        )
+    return ""
+
+
 def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -> str:
     """Build the outcome-value evaluation prompt.
 
@@ -398,6 +453,18 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     Follows quick-260815-r39, as the job prompt does: describe the shape, give NO
     concrete example values. Example labels were measured getting copied verbatim
     onto unrelated work; an example dollar figure would do the same with money.
+
+    Phase 44 (EGV-05, D-01/D-02): the flat field list is now THREE labelled
+    branches, one per EVALUATOR_MECHANISMS member, built by
+    _mechanism_instruction_block in a FIXED declared order (labor
+    substitution, augmentation/capacity expansion, newly enabled work) --
+    never by iterating the frozenset, whose order is not stable. The
+    revenue prohibition, the transcript-is-data framing, the abstention
+    offer, and the "do not output a total" instruction are
+    mechanism-independent BY DESIGN and stay in the shared preamble/
+    trailer, present exactly once regardless of which branch the model
+    follows -- the abstention offer in particular must survive in every
+    branch.
     """
     cfg = config if isinstance(config, dict) else {}
     currency = cfg.get("currency", "USD")
@@ -406,26 +473,39 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     transcript_preview = (transcript or "")[:_EVAL_TRANSCRIPT_LIMIT]
     job_type = (job or {}).get("job_type", "")
     job_name = (job or {}).get("job_name", "")
-    return (
+
+    preamble = (
         "You are estimating the economic value of one completed task arc performed "
         "by an AI agent, so that it can be compared against what the arc cost to "
         "run.\n\n"
         "Estimate the HUMAN EFFORT this arc avoided. Do not estimate revenue, "
         "deal size, or downstream business impact — only the work a person would "
         "otherwise have done.\n\n"
-        "Output ONLY a JSON object with these fields:\n"
-        "  - inferred_role: the human role that would otherwise have done this "
-        "work (short noun phrase)\n"
-        "  - estimated_hours_saved: a number, greater than 0 and at most "
-        f"{max_hours}\n"
-        "  - assumed_loaded_rate: the fully-loaded hourly cost for that role, a "
-        f"number greater than 0 and at most {max_rate}\n"
-        f"  - currency: must be exactly {currency}\n"
-        "  - basis: one sentence naming what work was avoided\n"
+        "Output ONLY a JSON object. First choose exactly one economic_mechanism "
+        "from the three below, then supply ONLY the fields listed under that "
+        "mechanism's own block below -- do not mix fields from a different "
+        "block.\n\n"
+        "  - economic_mechanism: exactly one of \"labor_substitution\", "
+        "\"augmentation_capacity_expansion\", or \"newly_enabled_work\"\n\n"
+    )
+
+    # D-02: fixed order, not a frozenset iteration -- EVALUATOR_MECHANISMS'
+    # own iteration order is not a stable contract.
+    mechanism_blocks = "".join(
+        _mechanism_instruction_block(mechanism, max_hours, max_rate, currency)
+        for mechanism in (
+            ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+            ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
+            ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
+        )
+    )
+
+    trailer = (
         "  - confidence: a number from 0 to 1 reflecting how well the transcript "
         "supports this estimate\n\n"
         "Do NOT output a total or a monetary value. The value is computed from "
-        "your hours and rate; any total you provide is discarded.\n\n"
+        "your hours and rate where the chosen mechanism supplies them; any total "
+        "you provide is discarded.\n\n"
         "If the transcript does not support a responsible estimate — the work is "
         "unclear, trivial, or you would be guessing — output exactly: null\n"
         "Abstaining is a correct and expected answer. Do not invent a number to "
@@ -438,6 +518,8 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
         f"Session transcript:\n{transcript_preview}\n\n"
         "JSON object or null:"
     )
+
+    return preamble + mechanism_blocks + trailer
 
 
 def _parse_job_array(raw: str) -> list:
@@ -843,6 +925,45 @@ def _forced_evidence_class() -> str:
     return EVIDENCE_CLASS_MODEL_ESTIMATED
 
 
+def _resolve_economic_mechanism(raw) -> str:
+    """Resolve EGV-05's evaluator-selected economic_mechanism from `raw`.
+
+    D-01's authority rule, restated as a structural guarantee: the three
+    OPERATOR_ONLY_MECHANISMS values (quality_decision_improvement,
+    risk_avoidance, incremental_revenue) are UNREACHABLE from this function
+    by construction -- the membership test below is against
+    EVALUATOR_MECHANISMS, not ECONOMIC_MECHANISMS, so there is no code path
+    here that can ever return one of the operator-only three, whatever
+    `raw` claims. That is the whole structural guarantee behind D-01.
+
+    Accepts only a `str` whose `.strip()` is a member of
+    EVALUATOR_MECHANISMS. `.strip()` is applied deliberately; `.lower()` is
+    deliberately NOT -- per D-03 an out-of-set value ABSTAINS rather than
+    being coerced to a working default, and case-folding is coercion.
+    Anything else -- a missing key, a non-string value, a wrong-case or
+    unrecognised spelling, or a non-dict `raw` -- resolves to
+    ECONOMIC_MECHANISM_UNKNOWN. Never raises: a pure function over one
+    already-parsed argument.
+
+    Deliberately NOT covered by
+    tests/test_phase43_evidence_grading.py's _PROMOTION_FORBIDDEN_KEYS
+    ast-guard: D-03 PERMITS reading "economic_mechanism" off `raw` -- the
+    guarantee here is over the ACCEPTED VALUE SET, not over the key, so it
+    is proven behaviourally (see
+    tests/test_phase44_economic_mechanisms.py's MechanismAuthorityTests)
+    rather than statically. Adding this key to that frozenset would be
+    wrong and would break mechanism selection entirely.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    mechanism = raw.get("economic_mechanism")
+    if not isinstance(mechanism, str):
+        return ECONOMIC_MECHANISM_UNKNOWN
+    mechanism = mechanism.strip()
+    if mechanism in EVALUATOR_MECHANISMS:
+        return mechanism
+    return ECONOMIC_MECHANISM_UNKNOWN
+
+
 # Bound defaults (ROI-05). Overridable per install through llmOutcomeEvaluation.
 # These are judgement, not measurement — chosen to keep a demo credible. Phase 40
 # reports whether real sessions cluster anywhere near them.
@@ -952,6 +1073,21 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     if not isinstance(raw, dict):
         return None
     cfg = config if isinstance(config, dict) else {}
+
+    # Phase 44 (EGV-05, D-01/D-03): the mechanism gate runs FIRST, ahead of
+    # the hours/rate check below, so a response naming a bad mechanism
+    # abstains for the mechanism reason rather than a downstream one.
+    # _resolve_economic_mechanism's own membership test is against
+    # EVALUATOR_MECHANISMS, so this gate structurally cannot accept one of
+    # the three OPERATOR_ONLY_MECHANISMS values -- D-01's authority split,
+    # enforced here rather than merely documented.
+    if _resolve_economic_mechanism(raw) == ECONOMIC_MECHANISM_UNKNOWN:
+        logger.warning(
+            "revenium-classifier: rejected assessment, unrecognised or "
+            "operator-only economic_mechanism: %r",
+            raw.get("economic_mechanism"),
+        )
+        return None
 
     hours = _finite_number(raw.get("estimated_hours_saved"))
     rate = _finite_number(raw.get("assumed_loaded_rate"))
@@ -1098,7 +1234,95 @@ NARRATIVE_CLAMP_BYTES = 500
 # where only a later phase implements its semantics -- a field is never
 # silently dropped because "nothing populates it yet").
 STATE_QUARTET_UNKNOWN = "unknown"  # output_status/acceptance_status/adoption_status: 42-RESEARCH.md Section 1 Assumption A2, the current evaluator has no mechanism to assess these
-ECONOMIC_MECHANISM_LABOR_SUBSTITUTION = "labor_substitution"  # only mechanism derivable from today's prompt; Phase 44 (EGV-05) widens to the full six-mechanism enum
+
+# Phase 44 (EGV-05, D-01/D-02/D-03): the six economic mechanisms an agentic
+# job's value can be attributed to. Three (EVALUATOR_MECHANISMS) are
+# reachable from the outcome-evaluation prompt; the other three
+# (OPERATOR_ONLY_MECHANISMS) are reachable only through operator
+# configuration or a study reference, never from evaluator output -- D-01's
+# authority split. ECONOMIC_MECHANISM_UNKNOWN is the abstain sentinel,
+# deliberately NOT a member of ECONOMIC_MECHANISMS: it is not a seventh
+# mechanism, and including it would let an abstention masquerade as a claim.
+ECONOMIC_MECHANISM_LABOR_SUBSTITUTION = "labor_substitution"
+ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION = "augmentation_capacity_expansion"
+ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK = "newly_enabled_work"
+ECONOMIC_MECHANISM_QUALITY_DECISION_IMPROVEMENT = "quality_decision_improvement"
+ECONOMIC_MECHANISM_RISK_AVOIDANCE = "risk_avoidance"
+ECONOMIC_MECHANISM_INCREMENTAL_REVENUE = "incremental_revenue"
+ECONOMIC_MECHANISM_UNKNOWN = "unknown"  # abstain sentinel -- NOT a member of ECONOMIC_MECHANISMS
+
+# A frozenset literal of plain strings, deliberately -- matching
+# EVIDENCE_CLASSES' own declaration shape (classifier.py:799) rather than a
+# set of the named constants above, so the same source-derived extractor
+# (tests/test_phase43_evidence_grading.py::_extract_frozenset_from_module,
+# reused by tests/test_phase44_economic_mechanisms.py::MechanismDriftTests)
+# can read this declaration and prove it agrees with hermes-report.sh's
+# hand-synced _ECONOMIC_MECHANISMS. A frozenset of ast.Name references
+# would ast-parse to Name nodes, not Constant strings, and the extractor
+# would refuse to match it.
+ECONOMIC_MECHANISMS = frozenset({
+    "labor_substitution",
+    "augmentation_capacity_expansion",
+    "newly_enabled_work",
+    "quality_decision_improvement",
+    "risk_avoidance",
+    "incremental_revenue",
+})
+
+# D-01: the naked-LLM evaluator may select ONLY these three -- the
+# mechanisms a transcript-only evaluator can responsibly infer without
+# asserting revenue, deal size, or a study it was never told about.
+EVALUATOR_MECHANISMS = frozenset({
+    ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+    ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
+    ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
+})
+
+# The remaining three: reachable only through operator configuration or a
+# study reference, never from evaluator output (D-01/D-03).
+OPERATOR_ONLY_MECHANISMS = ECONOMIC_MECHANISMS - EVALUATOR_MECHANISMS
+
+# Import-time invariants, same bare-assert posture as
+# EVIDENCE_CLASS_MODEL_ESTIMATED's own assert above: no caller and no
+# request in flight, so refusing to load at all on drift is the plainest
+# spelling of the guarantee. D-01's authority split is enforced STRUCTURALLY
+# by _resolve_economic_mechanism's membership test below, and these two
+# asserts are what keep that structural guarantee from silently drifting
+# out of true if the two frozensets above are ever hand-edited.
+assert EVALUATOR_MECHANISMS <= ECONOMIC_MECHANISMS, (
+    "EVALUATOR_MECHANISMS is not a subset of ECONOMIC_MECHANISMS -- the "
+    "declared mechanism vocabulary has drifted"
+)
+assert EVALUATOR_MECHANISMS.isdisjoint(OPERATOR_ONLY_MECHANISMS), (
+    "EVALUATOR_MECHANISMS and OPERATOR_ONLY_MECHANISMS overlap -- D-01's "
+    "authority split has been violated at import time"
+)
+
+# Phase 44 (EGV-14, D-05/D-06): the four cost categories EGV-14 requires
+# net_value to account for -- human review, rework or error, integration,
+# and training or change. A TUPLE, not a frozenset: EGV-14's ordering probe
+# edge requires cost_coverage's lists to emit in a FIXED, stable order so
+# two records built from the same config are byte-identical across
+# interpreters, and a frozenset's iteration order is not part of any
+# language guarantee. The four strings mirror the cost families named in
+# 44-CONTEXT.md D-05/D-06 verbatim; hermes-report.sh hand-syncs the same
+# four strings as _COST_CATEGORIES, held equal by
+# tests/test_phase44_economic_mechanisms.py::CostCategoryDriftTests (an
+# ORDERED comparison, unlike MechanismDriftTests' set comparison, because
+# order is part of this contract).
+COST_CATEGORIES = (
+    "human_review",
+    "rework_or_error",
+    "integration",
+    "training_or_change",
+)
+
+# D-08: metered AI cost is the one cost family this classifier never nets
+# -- Revenium already holds it and completes the subtraction on its side.
+# cost_coverage's "excluded" list always names exactly this one literal;
+# netting AI cost here would make the classifier the one place both
+# numbers coexist and turn it into a policy site, which CF-3 forbids.
+COST_COVERAGE_EXCLUDED_AI = "metered_ai_cost"
 
 # Phase 43 (EGV-18, D-05/D-09): the two locked reportability_status values.
 # D-09: this is a straight rename of Phase 42's REPORTABILITY_STATUS_DEFAULT
@@ -1148,6 +1372,12 @@ def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:
 # to evaluator_version's 16-byte clamp than basis's 200-byte one. Widened
 # only if a real operator study-id naming scheme needs more room.
 STUDY_ID_MAX_BYTES = 100
+
+# Phase 44 (EGV-16, D-12/D-13): an identifier clamp, closer to
+# evaluator_version's 16-byte clamp than basis's 200-byte narrative one --
+# double_counting_group carries a Hermes session id (structural identity),
+# never freeform narrative text.
+DOUBLE_COUNTING_GROUP_MAX_BYTES = 64
 
 
 def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
@@ -1214,6 +1444,85 @@ def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
     return (study_id, study_version)
 
 
+def _resolve_supplied_costs(cfg: "dict | None", job_type: str) -> "tuple[dict, dict]":
+    """Resolve EGV-14's supplied_costs / cost_coverage pair for one job type.
+
+    Sourced from `cfg` (the llmOutcomeEvaluation object) ONLY -- costs are
+    read from configuration and from NOWHERE else, in particular never from
+    `raw` (the untrusted evaluator response), mirroring
+    _resolve_study_reference's exact discipline immediately above (an
+    LLM-invented cost smuggled through the `basis` or
+    `counterfactual_assumption` narrative fields is the threat, and parsing
+    a narrative for a dollar figure is the shortcut that must never be
+    taken). This function does not even take a `raw` parameter --
+    structurally, not just by convention, it cannot read evaluator output.
+    There is no adversarial model output to bound here (PA-05): the
+    evaluator cannot observe an operator's own cost figures from a
+    transcript, so letting it supply them would repeat D-01's objection one
+    field over.
+
+    A supplied `0` and an absent category are DIFFERENT and both explicit
+    (D-10): a supplied `0` is knowledge ("we reviewed this and it cost
+    nothing") and participates in the subtraction, landing in both
+    supplied_costs and cost_coverage["known_zero"]; an absent category is
+    unknown, never participates, and lands only in
+    cost_coverage["unknown"]. Collapsing the two would be EGV-15's silent
+    substitution one level down.
+
+    cost_coverage["excluded"] always names COST_COVERAGE_EXCLUDED_AI
+    (metered AI cost): Revenium already holds the metered cost and
+    completes the subtraction on its side (D-08) -- netting it here would
+    make this the one place both numbers coexist and turn it into a policy
+    site, which CF-3 forbids.
+
+    A malformed cost value (non-finite, boolean, negative, wrong type) --
+    or a category this install's job type never configured at all -- fails
+    closed to "unknown", never to zero: a zero would silently corrupt the
+    subtraction, while a zero-shaped unknown stays legible. No upper
+    ceiling is applied (PA-05): the maxHoursSaved/maxLoadedRate ceilings
+    bound adversarial MODEL output, and there is no model here to bound
+    against. An unrecognised key inside the job type's cost object (one
+    outside COST_CATEGORIES) is ignored entirely -- absent from
+    supplied_costs, from every coverage list, and from the subtraction.
+
+    Every list (included, known_zero, unknown) is built by iterating
+    COST_CATEGORIES in its declared order, so all three -- and the returned
+    supplied_costs dict's insertion order -- are stable across interpreters
+    (the EGV-14 ordering probe edge). Never raises: a pure function of a
+    dict-or-None and a string, no I/O.
+
+    Returns (supplied_costs, cost_coverage).
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    costs_cfg = cfg.get("costs")
+    job_costs = costs_cfg.get(job_type) if isinstance(costs_cfg, dict) else None
+    if not isinstance(job_costs, dict):
+        job_costs = {}
+
+    supplied_costs: dict = {}
+    included: list = []
+    known_zero: list = []
+    unknown: list = []
+
+    for category in COST_CATEGORIES:
+        value = _finite_number(job_costs.get(category))
+        if value is None or value < 0:
+            unknown.append(category)
+            continue
+        supplied_costs[category] = value
+        included.append(category)
+        if value == 0:
+            known_zero.append(category)
+
+    cost_coverage = {
+        "included": included,
+        "known_zero": known_zero,
+        "unknown": unknown,
+        "excluded": [COST_COVERAGE_EXCLUDED_AI],
+    }
+    return supplied_costs, cost_coverage
+
+
 def _build_job_assessment(
     valid: dict,
     assessment: "dict | None",
@@ -1222,6 +1531,7 @@ def _build_job_assessment(
     evaluator: str,
     evaluator_version: str,
     abstention_reason: "str | None" = None,
+    double_counting_group: str = "",
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -1250,6 +1560,35 @@ def _build_job_assessment(
     provenance, and the state quartet, is still populated, so an abstained
     evaluation is auditable rather than indistinguishable from a broken
     sidecar write.
+
+    Phase 44 (EGV-14): net_value joins that same omit family on abstention
+    -- it is model-derived money, computed from an accepted `assessment`
+    that does not exist on this path. supplied_costs and cost_coverage
+    deliberately do NOT join it: they are operator-supplied, sourced from
+    `cfg` alone, and present on EVERY path including abstention (D-14's
+    shape stated one plan early) -- a record that abstains from value still
+    retains its costs and its coverage list, which is what keeps negative
+    ROI visible downstream without this skill asserting a negative number
+    it never measured.
+
+    Phase 44 (EGV-16, D-12/D-13): double_counting_group is caller-supplied
+    structural identity, never a monetary claim, so it does NOT join
+    D-11's omit family here and must NOT join _VALUE_OMIT_FAMILY on the
+    reporter side -- it is present on the abstention early return exactly
+    as it is on the success path. Scope, stated plainly so a future reader
+    does not infer more than this field delivers: the id groups jobs
+    inferred from ONE session's transcript, because _infer_jobs_via_llm
+    returns a list and one transcript can legitimately yield several jobs
+    serving one outcome. It does NOT group a subagent's jobs with its
+    root's -- run_classification_async Step 7's `root_sid == session_id`
+    gate means a subagent session never independently reaches job
+    inference and therefore never produces a second assessment record to
+    relate to a root session's. That is a known, documented gap, not an
+    oversight; do not read cross-session coverage into this field's name.
+    The squad dimension (REVENIUM_SQUAD_NAME) was rejected as the
+    identity source for the same reason evaluated in 44-RESEARCH.md
+    Finding 7: it is a per-profile config default, so many unrelated
+    outcomes on one profile would share one squad name and over-group.
     """
     try:
         raw = raw if isinstance(raw, dict) else {}
@@ -1275,6 +1614,14 @@ def _build_job_assessment(
         # dict literal, per the same Phase 43 EGV-18 pattern already
         # established for reportability_status) carry the same reference.
         study_id, study_version = _resolve_study_reference(cfg)
+
+        # Phase 44 (EGV-14, D-05/D-06): resolved from cfg ONLY, never from
+        # raw -- see _resolve_supplied_costs's own docstring for the full
+        # rationale. Computed once here, keyed by job_type, so both the
+        # abstention early-return and the success-path continuation below
+        # carry the same coverage -- D-14's shape stated one plan early: an
+        # abstained record still retains its costs and its coverage list.
+        supplied_costs, cost_coverage = _resolve_supplied_costs(cfg, job_type)
 
         record: dict = {
             "kind": "job_assessment",
@@ -1303,7 +1650,33 @@ def _build_job_assessment(
                 NARRATIVE_CLAMP_BYTES,
             ),
 
-            "economic_mechanism": ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
+            # Phase 44 (EGV-05, D-01/D-03): resolved from the untrusted
+            # evaluator response via _resolve_economic_mechanism, not
+            # hardcoded. Behaviour change this fixes: before this plan, the
+            # literal sat above the abstention early-return below, so every
+            # abstained record still claimed labor_substitution even though
+            # no mechanism was ever selected. raw is {} on those paths, so
+            # _resolve_economic_mechanism(raw) now correctly resolves to
+            # ECONOMIC_MECHANISM_UNKNOWN there -- the D-04 correction, not a
+            # regression.
+            "economic_mechanism": _resolve_economic_mechanism(raw),
+
+            # Phase 44 (EGV-16, D-12/D-13): caller-supplied structural
+            # identity, never read from raw -- see this function's own
+            # docstring for the field's same-session-only scope. Present
+            # on the abstention early return as well as the success path,
+            # exactly like economic_mechanism immediately above.
+            "double_counting_group": _clamp_assessment_text(
+                double_counting_group, DOUBLE_COUNTING_GROUP_MAX_BYTES),
+
+            # Phase 44 (EGV-14, D-06/D-14): present on EVERY path including
+            # abstention -- a record that abstains from value still retains
+            # its costs and its coverage list, which is what keeps negative
+            # ROI visible downstream without this skill asserting a
+            # negative number it never measured. net_value itself is added
+            # only on the success path further below.
+            "supplied_costs": supplied_costs,
+            "cost_coverage": cost_coverage,
 
             # Observation window: the naked-LLM evaluator cannot observe
             # past the transcript's own boundaries. Defaulting to the arc
@@ -1378,14 +1751,26 @@ def _build_job_assessment(
             )
             return None
         value_low, value_base, value_high, bounds_source = bounds
+        estimated_value = assessment.get("estimated_value", value_base)
+        # Phase 44 (EGV-14, D-06/D-08/D-09): net_value subtracts EVERY
+        # supplied cost category, not AI cost alone -- Revenium already
+        # holds the metered AI cost and completes that half of the
+        # subtraction on its side (D-08). Not clamped at zero: supplied
+        # costs exceeding the gross estimate is an honest arithmetic result
+        # over an operator's own numbers, and clamping would hide it. No
+        # ratio is derived here or anywhere in this module (D-09) -- value,
+        # costs and coverage ship; Revenium derives ratios from operands it
+        # already holds.
+        net_value = round(estimated_value - sum(supplied_costs.values()), 2)
         record.update({
             "value_low": value_low,
             "value_base": value_base,
             "value_high": value_high,
             "bounds_source": bounds_source,
             "currency": assessment.get("currency", ""),
-            "estimated_value": assessment.get("estimated_value", value_base),
+            "estimated_value": estimated_value,
             "assumptions": assessment.get("assumptions", {}),
+            "net_value": net_value,
         })
         return record
     except Exception as exc:
@@ -2028,7 +2413,9 @@ def _write_marker_pair(sid: str, task_type: str, paths: "_Paths | None" = None) 
     return marker_path
 
 
-async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> None:
+async def _attach_assessment(
+    valid: dict, transcript: str, paths: "_Paths", double_counting_group: str = "",
+) -> None:
     """Evaluate one SUCCESS arc and attach a validated assessment, or nothing.
 
     Wrapped in its own try/except on top of the caller's: one job's evaluation
@@ -2049,6 +2436,12 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
     failed" distinguishable on disk (D-10/D-11), rather than colliding into
     identical wire output. _build_job_assessment never raises (D-04), so no
     additional try/except is needed around any individual call below.
+
+    Phase 44 (EGV-16, D-12/D-13): double_counting_group is threaded through
+    UNCHANGED to every one of the nine _build_job_assessment calls below --
+    the six early-return branches, both exception handlers, and the
+    success branch -- so every record this function produces for one job
+    carries the same group id its caller resolved.
     """
     # Pre-bound before the try so the exception handlers can reference them
     # even if the failure happened before _llm_evaluation_config or the
@@ -2072,6 +2465,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="unknown_evaluator",
+                double_counting_group=double_counting_group,
             )
             return
         raw = fn(valid, transcript, cfg)
@@ -2092,6 +2486,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="invalid",
+                double_counting_group=double_counting_group,
             )
             return
         if raw is _EVAL_TIMED_OUT:
@@ -2102,6 +2497,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="timed_out",
+                double_counting_group=double_counting_group,
             )
             return
         if raw is None:
@@ -2112,12 +2508,29 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="abstained",
+                double_counting_group=double_counting_group,
             )
             return
         # The version comes from the REGISTRY, not from a name comparison here.
         # Special-casing "llm" dropped every other evaluator's version -- the
         # exact coupling this seam exists to prevent (Greptile P1 on #89).
         evaluator_version = _ev.resolve_version(name)
+        # Phase 44 (EGV-05, D-04): the newly-enabled-work branch, placed
+        # BEFORE _validate_assessment so this mechanism's abstention reason
+        # is distinct from a generic validation rejection. D-04 requires
+        # the record to retain the mechanism and its narrative basis while
+        # omitting the entire value family -- this is the ONLY abstention
+        # branch in this function that passes `raw` rather than `None` to
+        # _build_job_assessment, deliberately, for that reason. Must never
+        # set valid["assessment"], so the frozen marker shape and the
+        # status-only outcome path stay untouched.
+        if _resolve_economic_mechanism(raw) == ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK:
+            valid["_assessment_record"] = _build_job_assessment(
+                valid, None, raw, cfg, name, evaluator_version,
+                abstention_reason="mechanism_abstains_from_value",
+                double_counting_group=double_counting_group,
+            )
+            return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version)
         if assessment:
             valid["assessment"] = assessment
@@ -2129,6 +2542,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             # `assessment` object above.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, assessment, raw, cfg, name, evaluator_version,
+                double_counting_group=double_counting_group,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -2144,6 +2558,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, raw if isinstance(raw, dict) else None, cfg, name,
                 evaluator_version, abstention_reason="rejected",
+                double_counting_group=double_counting_group,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -2171,6 +2586,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         # sentinel check above -- two code sites, one distinct meaning.
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="timed_out",
+            double_counting_group=double_counting_group,
         )
     except Exception as exc:
         logger.warning(
@@ -2179,6 +2595,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         )
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="failed",
+            double_counting_group=double_counting_group,
         )
 
 
@@ -2293,7 +2710,80 @@ async def run_classification_async(
                                     valid["status"] == "SUCCESS"
                                     and _llm_evaluation_enabled(paths=p)
                                 ):
-                                    await _attach_assessment(valid, transcript, p)
+                                    # Phase 44 (EGV-16, D-12/D-13): session_id
+                                    # is the group id. At this call site
+                                    # root_sid == session_id is already true
+                                    # by construction -- the enclosing `if
+                                    # root_sid == session_id` gate above has
+                                    # asserted it -- so sourcing the id from
+                                    # either name yields the same value;
+                                    # session_id is used because it is the
+                                    # parameter already in scope and needs no
+                                    # second resolution. Do not widen the
+                                    # gate to "fix" this.
+                                    await _attach_assessment(
+                                        valid, transcript, p,
+                                        double_counting_group=session_id,
+                                    )
+                                elif (
+                                    valid["status"] != "SUCCESS"
+                                    and _llm_evaluation_enabled(paths=p)
+                                ):
+                                    # Phase 44 (EGV-17, D-14): a FAILED,
+                                    # CANCELLED or otherwise non-SUCCESS job
+                                    # now gets its own abstention sidecar
+                                    # record -- built DIRECTLY, never
+                                    # through _attach_assessment. Written as
+                                    # "not SUCCESS" rather than an explicit
+                                    # FAILED-or-CANCELLED membership test so
+                                    # a status word introduced later is
+                                    # covered by default, rather than
+                                    # silently falling through to no record
+                                    # at all -- the failure mode this branch
+                                    # exists to close.
+                                    #
+                                    # ROI-09 constraint (stated here, not
+                                    # just above): this branch must NEVER
+                                    # call _attach_assessment and must NEVER
+                                    # resolve or import the evaluator
+                                    # registry. Routing a non-SUCCESS arc
+                                    # through _attach_assessment would break
+                                    # ROI-09's guarantee even though the LLM
+                                    # call would only be reached
+                                    # conditionally -- the cheapest way to
+                                    # guarantee "never evaluated" is to never
+                                    # reach the code that could call out.
+                                    #
+                                    # evaluator_version is deliberately left
+                                    # empty rather than resolved from the
+                                    # registry: resolving it is a pure
+                                    # lookup with no I/O, but importing the
+                                    # evaluators module from a path that by
+                                    # definition never evaluates weakens the
+                                    # "never reach the code that could call
+                                    # out" property for no provenance gain --
+                                    # abstention_reason already makes the
+                                    # record's nature legible.
+                                    #
+                                    # The _llm_evaluation_enabled gate here
+                                    # is load-bearing for backward
+                                    # compatibility: with the feature off,
+                                    # today no assessment sidecar record is
+                                    # written for any job at any status, and
+                                    # a feature-off install must behave
+                                    # byte-identically. Do not drop this
+                                    # condition to "always write an
+                                    # abstention record".
+                                    _non_success_cfg = _llm_evaluation_config(paths=p)
+                                    _non_success_evaluator = (
+                                        _non_success_cfg.get("evaluator") or "llm"
+                                    )
+                                    valid["_assessment_record"] = _build_job_assessment(
+                                        valid, None, None, _non_success_cfg,
+                                        _non_success_evaluator, "",
+                                        abstention_reason="not_evaluated_non_success",
+                                        double_counting_group=session_id,
+                                    )
                                 # Phase 42 (D-12): sidecar FIRST, then the job
                                 # marker. A crash between the two appends
                                 # leaves an orphan sidecar record that

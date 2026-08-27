@@ -134,7 +134,13 @@ Absent from `config.json` is the same as disabled.
     "evaluator": "llm",
     "currency": "USD",
     "maxHoursSaved": 40,
-    "maxLoadedRate": 500
+    "maxLoadedRate": 500,
+    "costs": {
+      "bug_fix": {
+        "human_review": 25,
+        "integration": 0
+      }
+    }
   }
 }
 ```
@@ -149,6 +155,65 @@ Absent from `config.json` is the same as disabled.
 | `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. |
 | `studyId` | `""` | A non-empty string naming an `ImpactStudyResult` this install's job assessments reference. Recorded on every assessment this install produces; never changes an assessment's own `evidence_class` (EGV-13, D-08). |
 | `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. The pair is **all-or-none in both directions**: if either field is missing or malformed (a blank `studyId`, a non-integer or `< 1` `studyVersion`), both resolve to their absent defaults. A half-reference could never name a real `ImpactStudyResult`, so none is recorded. |
+| `costs` | `{}` | An object keyed by job type (EGV-14). Each job type's value is an object whose keys are drawn from the four `COST_CATEGORIES` names — `human_review`, `rework_or_error`, `integration`, `training_or_change`. There is **no fleet-wide default bucket**: an absent job-type key means every category is unknown for that job type, exactly as if `costs` were absent entirely. A supplied `0` is knowledge and participates in the subtraction as a known zero; an absent category is unknown and does not participate (D-10) — these are different and both explicit. A malformed, non-numeric, boolean, or negative value resolves that category to unknown, never to zero. |
+
+### Economic mechanisms (EGV-05)
+
+Every job assessment names an `economic_mechanism` — a claim about *how* the
+work produced its value, not just how much. Six mechanisms exist:
+
+- `labor_substitution`
+- `augmentation_capacity_expansion`
+- `newly_enabled_work`
+- `quality_decision_improvement`
+- `risk_avoidance`
+- `incremental_revenue`
+
+The evaluator may select only the first three. A mechanism is a claim about
+the work, which the session transcript evidences, so the model may choose
+among the three it can evidence from what it actually observed. The remaining
+three — `quality_decision_improvement`, `risk_avoidance`, and
+`incremental_revenue` — are claims the transcript cannot support, so they are
+never reachable from evaluator output. An unrecognised value, or one of these
+three operator-only mechanisms, appearing in an evaluator response resolves to
+the `unknown` abstain sentinel — the job's mechanism is absent from the
+assessment rather than clamped to a working default.
+
+**These three are reserved, not yet assignable.** As of Phase 44 they are
+declared, accepted by the reporter's allow-list, and would forward on the wire
+if a record carried one — but no producer exists: there is no configuration key
+and no CLI flag that sets a job's mechanism, and `correct-assessment.sh` does
+not carry one either. The record can *represent* all six (EGV-05); an operator
+cannot yet *assert* the operator-only three. The intended path is a study
+reference (`studyId`/`studyVersion`), which is Phase 45 work. Do not configure
+against this today — nothing reads it.
+
+### Net value and cost coverage (EGV-14, EGV-15)
+
+`estimated_value` remains the GROSS figure and keeps its existing meaning.
+`net_value` is a new sibling field, not a redefinition of `estimated_value` —
+the assessment schema version is unchanged. It subtracts every cost category
+supplied via the `costs` block above from `estimated_value`.
+
+The record names, in a fixed order, which cost categories were included
+(supplied and non-negative), which of those were supplied as a known zero,
+which are unknown (never configured for this job type, or malformed), and
+which are deliberately excluded. A partial net is honest as long as its
+partiality is legible — an unnamed partial net is the silent substitution
+EGV-15 forbids.
+
+Metered AI cost is deliberately excluded and is named as such in the
+coverage list (`metered_ai_cost`). Revenium already holds the metered cost
+for a job and completes that half of the subtraction on its side; this
+skill never nets AI cost itself.
+
+No ROI ratio is emitted anywhere in the record. The skill ships the
+operands — value, costs and coverage — and Revenium derives ratios from
+figures it already holds. There is therefore no denominator here to divide
+by zero, which is how a genuinely `$0.00`-cost job is represented by its
+operands rather than papered over by a null ratio — see
+[`job-declaration.md`](job-declaration.md) for the standing regression test
+built from that real run.
 
 The read **fails closed**: a missing, unreadable, or malformed `config.json`
 resolves to disabled. This is the deliberate inverse of `guardrail-status.json`,

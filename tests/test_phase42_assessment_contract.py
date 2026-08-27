@@ -866,6 +866,11 @@ class BoundsOrderingTests(unittest.TestCase):
 
     def _raw(self, **over):
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
             'assumed_loaded_rate': 150.0, 'currency': 'USD',
             'basis': 'time avoided', 'confidence': 0.5,
@@ -1017,6 +1022,14 @@ class SidecarBudgetTests(unittest.TestCase):
 
     def _worst_case_raw(self, narrative_char='n'):
         return {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- and this is the worst-case byte-budget fixture, so
+            # it uses the LONGEST of the three evaluator-selectable
+            # mechanisms (augmentation_capacity_expansion, 32 bytes) rather
+            # than labor_substitution, to keep measuring a genuine worst
+            # case rather than an accidentally-smaller one.
+            'economic_mechanism': 'augmentation_capacity_expansion',
             'inferred_role': narrative_char * 60,
             'estimated_hours_saved': 40.0,   # DEFAULT_MAX_HOURS_SAVED, the real bound
             'assumed_loaded_rate': 500.0,    # DEFAULT_MAX_LOADED_RATE, the real bound
@@ -1033,8 +1046,20 @@ class SidecarBudgetTests(unittest.TestCase):
         raw = self._worst_case_raw(narrative_char)
         assessment = mod._validate_assessment(raw, {}, evaluator, evaluator_version)
         self.assertIsNotNone(assessment, 'max-bound inputs must be accepted, not rejected')
+        valid = self._worst_case_valid(job_id)
+        # Phase 44 (EGV-14): worst-case cost config for THIS job_type -- every
+        # category supplied as a literal 0, so each one lands in BOTH
+        # "included" and "known_zero" simultaneously (D-10), which costs
+        # MORE serialized bytes than a large nonzero value would (a
+        # populated known_zero list costs more bytes than a few extra
+        # numeric digits) -- the genuine worst case for this shape.
+        cfg = {'costs': {valid['job_type']: {cat: 0 for cat in mod.COST_CATEGORIES}}}
+        # Phase 44 (EGV-16): a full 64-byte group id -- the DOUBLE_COUNTING_
+        # GROUP_MAX_BYTES ceiling -- so the worst case includes this field
+        # too, not just the fields declared before this plan.
         rec = mod._build_job_assessment(
-            self._worst_case_valid(job_id), assessment, raw, {}, evaluator, evaluator_version)
+            valid, assessment, raw, cfg, evaluator, evaluator_version,
+            double_counting_group='g' * 64)
         self.assertIsNotNone(rec, 'worst-case record construction must succeed')
         return rec
 
@@ -1190,6 +1215,19 @@ class RecordShapeTests(unittest.TestCase):
         'execution_status', 'output_status', 'acceptance_status', 'adoption_status',
         'candidate_downstream_outcome', 'counterfactual_assumption', 'basis',
         'economic_mechanism',
+        # Phase 44 (EGV-16, plan 44-03): the double-counting group id --
+        # caller-supplied structural identity, present unconditionally
+        # (empty string when unresolvable) on every record including
+        # abstention, exactly like economic_mechanism above. Added
+        # deliberately here, not discovered by a failing test.
+        'double_counting_group',
+        # Phase 44 (EGV-14/EGV-15, plan 44-02): net_value subtracts every
+        # supplied cost category; supplied_costs and cost_coverage are the
+        # operator-supplied operands and the coverage list naming what was
+        # included/known-zero/unknown/excluded. Added deliberately here,
+        # not discovered by a failing test, per D-02's "not a test bent to
+        # fit code" instruction.
+        'net_value', 'supplied_costs', 'cost_coverage',
         'value_low', 'value_base', 'value_high', 'bounds_source', 'currency',
         'estimated_value', 'assumptions',
         'observation_window_start', 'observation_window_end',
@@ -1209,6 +1247,11 @@ class RecordShapeTests(unittest.TestCase):
 
     def _raw(self, **over):
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
             'assumed_loaded_rate': 150.0, 'currency': 'USD',
             'basis': 'time avoided', 'confidence': 0.5,

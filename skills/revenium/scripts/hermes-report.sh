@@ -913,6 +913,14 @@ PY
 
   local reported_count=0
   local skipped_count=0
+  # Phase 44 Plan 04 (EGV-17/D-15): per-tick attribution accumulator, one
+  # "bucket|input|output|cache_read|cache_write|total|cost" line per observed
+  # row. Fed by a herestring loop below (not a pipe), same discipline as
+  # fallback_tick_count above -- this shell, not a subshell, so it survives
+  # to the summary heredoc that reads it. ACCUMULATE-ONLY (CF-3/PA-10):
+  # nothing in the metering decision path reads this variable -- it feeds
+  # exactly one `info` reconciliation line in the end-of-run summary below.
+  local attribution_rows=""
   # quick-260813-wnz (LOG-01/D-02): fed by a herestring (`done <<< "${sessions}"`
   # at the loop's close below), NOT a pipe -- the loop body therefore runs in
   # THIS shell, so a counter incremented inside it survives to the aggregate
@@ -2706,11 +2714,17 @@ PY
           echo "HERMES:${sid}:${total_tokens}:${now_ts}:${muid}" >> "${LEDGER_FILE}"
           ((reported_count++)) || true
           info "Reported: session=${sid} muid=${muid} task_type=${t_type} op_type=${op_type} in=${d_in} out=${d_out}"
+          # Phase 44 Plan 04 (EGV-17): classified bucket -- attributed to a
+          # real marker.
+          attribution_rows+="classified|${d_in}|${d_out}|${d_cr}|${d_cw}|${d_tot}|${d_cost}"$'\n'
         else
           # Pitfall 8: on failure, do NOT append a ledger row. The next tick
           # re-reads the marker (still absent from prior_muids) and retries.
           warn "Failed: session=${sid} muid=${muid} exit=${cmd_exit} output=${cmd_output}"
           warn "Command: ${cmd[*]}"
+          # Phase 44 Plan 04 (EGV-17): unallocated bucket -- this report
+          # attempt did not result in a ledger line.
+          attribution_rows+="unallocated|${d_in}|${d_out}|${d_cr}|${d_cw}|${d_tot}|${d_cost}"$'\n'
         fi
       done <<< "${split_rows}"
     else
@@ -2834,9 +2848,14 @@ PY
         echo "HERMES:${sid}:${total_tokens}:${now_ts}:${synthetic_muid}" >> "${LEDGER_FILE}"
         ((reported_count++)) || true
         info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}"
+        # Phase 44 Plan 04 (EGV-17): unclassified bucket -- the markerless path.
+        attribution_rows+="unclassified|${delta_input}|${delta_output}|${delta_cache_read}|${delta_cache_write}|${delta_total}|${delta_cost}"$'\n'
       else
         warn "Failed: session=${sid} exit=${cmd_exit} output=${cmd_output}"
         warn "Command: ${cmd[*]}"
+        # Phase 44 Plan 04 (EGV-17): unallocated bucket -- this report
+        # attempt did not result in a ledger line.
+        attribution_rows+="unallocated|${delta_input}|${delta_output}|${delta_cache_read}|${delta_cache_write}|${delta_total}|${delta_cost}"$'\n'
       fi
     fi
     fi # LEGACY_COMPLETIONS_SKIP + session_event_owned guard (Phase 32 Plan 03 C-11/D-13; quick-260817-tfe OWN-01)
@@ -2953,26 +2972,40 @@ except Exception:
           ;;
       esac
 
-      # Phase 42 (C-01/C-04/D-10): resolve an accepted assessment for
-      # SUCCESS arcs only — FAILED/CANCELLED are never evaluated
-      # (classifier.py gates _attach_assessment on status == SUCCESS before
-      # this stage ever runs), so this guard is defensive belt-and-
-      # suspenders, not the only gate. The assessment is now re-read from
-      # the job-assessments SIDECAR, never from the job marker's own 9-key
-      # `assessment` summary (D-10) — C-01 demoted that object to
-      # pointer-and-summary, not the record of record. An absent,
-      # unreadable, over-SIDECAR_LINE_MAX_BYTES, or pruned sidecar record
-      # reports the outcome status-only, with no --outcome-value, and never
-      # falls back to the marker. The sidecar directory is resolved
-      # per-session below (not read off JOB_ASSESSMENTS_DIR) because a
-      # multiplexed gateway owns each session's state under its own profile
-      # home — the same per-session resolution pattern resolve_markers_dir
-      # already provides for the marker directory.
+      # Phase 42 (C-01/C-04/D-10): resolve an accepted assessment. The
+      # assessment is re-read from the job-assessments SIDECAR, never from
+      # the job marker's own 9-key `assessment` summary (D-10) — C-01
+      # demoted that object to pointer-and-summary, not the record of
+      # record. An absent, unreadable, over-SIDECAR_LINE_MAX_BYTES, or
+      # pruned sidecar record reports the outcome status-only, with no
+      # --outcome-value, and never falls back to the marker. The sidecar
+      # directory is resolved per-session below (not read off
+      # JOB_ASSESSMENTS_DIR) because a multiplexed gateway owns each
+      # session's state under its own profile home — the same per-session
+      # resolution pattern resolve_markers_dir already provides for the
+      # marker directory.
+      #
+      # Phase 44 (EGV-17, D-14): this gate USED to be
+      # `outcome_status == "SUCCESS"` on the premise that FAILED/CANCELLED
+      # are never evaluated, so no sidecar could exist for them. That
+      # premise is now FALSE — classifier.py's run_classification_async
+      # Step 7 gained a non-SUCCESS abstention branch (44-03-PLAN.md Task
+      # 2) that writes a sidecar record for a FAILED or CANCELLED job too
+      # (never through _attach_assessment, so the evaluator is still never
+      # reached; only the RECORD side changed). Gating this read on
+      # outcome_status would silently orphan every non-SUCCESS record's
+      # supplied_costs/cost_coverage/double_counting_group from ever
+      # reaching --metadata, defeating EGV-17's whole point (cost stays
+      # visible even when there is no value). The read below is otherwise
+      # unchanged and remains status-agnostic past this point: a
+      # non-SUCCESS abstention record carries no value_low/currency, so
+      # _value_ok resolves false and no --outcome-value flag is ever built
+      # for it, exactly as an unvalued SUCCESS record already behaves.
       outcome_value=""
       outcome_currency=""
       outcome_assessment_json=""
       outcome_reason=""
-      if [[ "${outcome_status}" == "SUCCESS" && -n "${outcome_sid}" ]]; then
+      if [[ -n "${outcome_sid}" ]]; then
         outcome_assessment_dir="$(resolve_assessments_dir "${outcome_sid}")"
         [[ -z "${outcome_assessment_dir}" ]] && outcome_assessment_dir="${JOB_ASSESSMENTS_DIR}"
         # D-10 diagnostic reason word: resolve the SAME per-session markers
@@ -3163,8 +3196,16 @@ _reportable = _is_correction or found.get('reportability_status') == _REPORTABIL
 # stripper rather than a second copy of the tuple is deliberate: a third
 # refusal branch added later cannot forget the family, because there is
 # nothing to forget -- it calls the same function.
+#
+# Phase 44 (EGV-14/EGV-15, D-07): 'net_value' joins this tuple because it is
+# MODEL-DERIVED MONEY -- the same reason estimated_value is already in the
+# family. supplied_costs and cost_coverage deliberately do NOT join it: they
+# are OPERATOR input, not model output, and withholding them is what would
+# make a null ROI unreadable (D-07's second sentence) -- they ship
+# unconditionally via their own --metadata forwarders further below,
+# regardless of reportability_status.
 _VALUE_OMIT_FAMILY = ('value_low', 'value_base', 'value_high', 'bounds_source',
-                      'currency', 'estimated_value', 'assumptions')
+                      'currency', 'estimated_value', 'assumptions', 'net_value')
 
 
 def _strip_value_family(rec):
@@ -3500,8 +3541,13 @@ if status == 'FAILED' and reason:
     meta['failure_reason'] = reason
 
 # Phase 42 (C-04): the sidecar's resolved assessment record, parsed once
-# from ASSESSMENT_JSON. Present only when the sidecar re-read above found
-# one (SUCCESS arcs only) — an empty/malformed blob degrades to an empty
+# from ASSESSMENT_JSON. Present whenever the sidecar re-read above found
+# one. NOT SUCCESS-only since Phase 44 Plan 03: that gate was widened from
+# `outcome_status == "SUCCESS"` to `-n "${outcome_sid}"` precisely so a
+# FAILED/CANCELLED job's non-evaluated abstention record (which carries
+# costs and coverage and omits the whole value family) reaches this block
+# too. Every consumer below is status-agnostic by construction, so no
+# status test belongs here — an empty/malformed blob degrades to an empty
 # contribution here, never crashes the heredoc (2>/dev/null || true above
 # is the outer belt; the try/except is the inner suspenders). Conditional-
 # emit rule preserved: a field absent from the record adds no key to meta.
@@ -3558,6 +3604,133 @@ if assessment_raw:
         reportability_status = record.get('reportability_status')
         if isinstance(reportability_status, str) and reportability_status:
             meta['reportability_status'] = reportability_status[:16]
+        # Phase 44 (EGV-05, D-01/D-03, T-44-02): the economic-mechanism
+        # forwarder block this plan opens. Plans 44-02 (net_value,
+        # supplied_costs, cost_coverage) and 44-03 (double_counting_group)
+        # append to this SAME contiguous block, in that order, immediately
+        # below -- meter-completion-assessment.golden.json pins --metadata's
+        # key order with an anchored pattern, so appending here keeps every
+        # plan's re-pin a pure insertion instead of three competing
+        # reorderings.
+        #
+        # Unlike evidence_class above (whose single allow-list check lives
+        # upstream in the sidecar re-read stage, and whose forwarder simply
+        # trusts the already-sanitized record), T-44-02's mitigation puts
+        # this allow-list AT THE FORWARDER: an out-of-set economic_mechanism
+        # drops silently from --metadata (no key added at all), while the
+        # rest of the record -- value, currency, every other provenance
+        # field -- still ships normally. That is a deliberately different
+        # shape from evidence_class's whole-record rejection, so it cannot
+        # reuse that stage's check. This heredoc is its own independent
+        # python3 process (a separate subshell from the sidecar re-read
+        # heredoc above, connected only through shell variables, never
+        # through a shared Python namespace), so the six-string vocabulary
+        # is declared fresh here rather than "shared" from that heredoc --
+        # there is no runtime mechanism by which it could be. Hand-synced
+        # against classifier.py's ECONOMIC_MECHANISMS; the drift test in
+        # tests/test_phase44_economic_mechanisms.py::MechanismDriftTests is
+        # what holds the two declarations equal, and its own extractor
+        # requires this exact anchor to appear exactly once in this file --
+        # so this is the ONLY declaration of _ECONOMIC_MECHANISMS in
+        # hermes-report.sh.
+        _ECONOMIC_MECHANISMS = frozenset({
+            'labor_substitution', 'augmentation_capacity_expansion',
+            'newly_enabled_work', 'quality_decision_improvement',
+            'risk_avoidance', 'incremental_revenue',
+        })
+
+        # Phase 44 (EGV-14/EGV-15, D-05/D-06, T-44-09): the same four cost
+        # categories classifier.py declares as COST_CATEGORIES, hand-synced
+        # exactly like _ECONOMIC_MECHANISMS immediately above -- a TUPLE,
+        # not a frozenset, because emission order is part of the contract
+        # (EGV-14's ordering probe edge) and
+        # tests/test_phase44_economic_mechanisms.py::CostCategoryDriftTests
+        # compares the two as an ORDERED sequence, not a set (unlike
+        # MechanismDriftTests' set comparison). This is the ONLY
+        # declaration of _COST_CATEGORIES in hermes-report.sh.
+        _COST_CATEGORIES = (
+            'human_review', 'rework_or_error', 'integration', 'training_or_change',
+        )
+        economic_mechanism = record.get('economic_mechanism')
+        if (
+            isinstance(economic_mechanism, str)
+            and economic_mechanism in _ECONOMIC_MECHANISMS
+        ):
+            meta['economic_mechanism'] = economic_mechanism[:64]
+
+        # Phase 44 (EGV-14/EGV-15, D-06/D-07/D-08): APPENDED to the same
+        # contiguous Phase 44 forwarder block plan 44-01 opened above, in
+        # the fixed order net_value / supplied_costs / cost_coverage --
+        # order and placement are contract, not style:
+        # meter-completion-assessment.golden.json's anchored pattern pins
+        # --metadata's key order, so appending here keeps this plan's
+        # re-pin a pure insertion.
+        #
+        # net_value survives to this point ONLY when the record was
+        # reportable -- D-07 strips it from `record` through the single
+        # shared _strip_value_family(), never a second per-forwarder gate.
+        net_value_raw = record.get('net_value')
+        if net_value_raw is not None:
+            try:
+                meta['net_value'] = float(net_value_raw)
+            except (TypeError, ValueError):
+                pass
+
+        # supplied_costs and cost_coverage are OPERATOR input, not model
+        # output, and are deliberately NEVER in _VALUE_OMIT_FAMILY (D-07's
+        # second half) -- they ship regardless of reportability, because
+        # withholding them is what would make a null ROI unreadable.
+        # T-44-09: an allow-list rebuild against _COST_CATEGORIES, key by
+        # key, so a hand-edited sidecar cannot smuggle an unknown key or a
+        # non-numeric value onto the wire; a value that fails float() is
+        # dropped rather than crashing this heredoc.
+        supplied_costs_raw = record.get('supplied_costs')
+        if isinstance(supplied_costs_raw, dict):
+            _rebuilt_costs = {}
+            for _category in _COST_CATEGORIES:
+                if _category not in supplied_costs_raw:
+                    continue
+                try:
+                    _rebuilt_costs[_category] = float(supplied_costs_raw[_category])
+                except (TypeError, ValueError):
+                    continue
+            if _rebuilt_costs:
+                meta['supplied_costs'] = _rebuilt_costs
+
+        cost_coverage_raw = record.get('cost_coverage')
+        if isinstance(cost_coverage_raw, dict):
+            _COST_COVERAGE_EXCLUDED_AI = 'metered_ai_cost'
+            _rebuilt_coverage = {}
+            for _list_key in ('included', 'known_zero', 'unknown'):
+                _raw_list = cost_coverage_raw.get(_list_key)
+                if isinstance(_raw_list, list):
+                    _filtered = [v for v in _raw_list if v in _COST_CATEGORIES]
+                    if _filtered:
+                        _rebuilt_coverage[_list_key] = _filtered
+            _raw_excluded = cost_coverage_raw.get('excluded')
+            if isinstance(_raw_excluded, list):
+                _filtered_excluded = [
+                    v for v in _raw_excluded if v == _COST_COVERAGE_EXCLUDED_AI
+                ]
+                if _filtered_excluded:
+                    _rebuilt_coverage['excluded'] = _filtered_excluded
+            if _rebuilt_coverage:
+                meta['cost_coverage'] = _rebuilt_coverage
+
+        # Phase 44 (EGV-16, D-12/D-13, T-44-12): APPENDED to the END of the
+        # contiguous Phase 44 forwarder block plans 44-01/44-02 built above
+        # -- this closes the block; no later field in this phase follows
+        # it. double_counting_group is caller-supplied structural identity
+        # (a Hermes session id), never a monetary claim, so it is not in
+        # _VALUE_OMIT_FAMILY and ships regardless of reportability_status,
+        # exactly like supplied_costs/cost_coverage above. No allow-list
+        # applies here -- unlike economic_mechanism's fixed six-value set,
+        # this is a free-form identifier -- so this forwarder relies on the
+        # isinstance/non-empty check plus the 64-byte slice, plus the
+        # existing _s() transport sanitiser downstream.
+        double_counting_group = record.get('double_counting_group')
+        if isinstance(double_counting_group, str) and double_counting_group:
+            meta['double_counting_group'] = double_counting_group[:64]
         # Phase 43 (D-06, T-43-17): a correction stays reportable by
         # construction -- the reader's carve-out above never consults the
         # reportability gate for it -- but Finding 4 / C-06 established that
@@ -3717,6 +3890,64 @@ PY
       info "legacy declined to claim ${claim_abstained_count} session(s) this tick — emission is suppressed for them and neither ledger holds rows; the event path is live and claims them this same tick"
     else
       warn "legacy declined to claim ${claim_abstained_count} session(s) this tick — emission is suppressed for them and neither ledger holds rows, and the event path is NOT live, so nobody will claim or bill them this tick. Recovery is bounded, not permanent: flip REVENIUM_EVENT_METERING_MODE=live (recovers from the event spool, bounded by REVENIUM_MARKER_RETENTION_DAYS from each session's last event, only when the manual pruner has been run) or set REVENIUM_LEGACY_COMPLETIONS=enabled (recovers from state.db, which this skill never prunes). Do not wait on this — act on one of the two remedies."
+    fi
+  fi
+
+  # Phase 44 Plan 04 (EGV-17/D-15): one per-tick reconciliation line naming
+  # the classified/unclassified/unallocated cost totals, built by
+  # partition_by_attribution over the rows accumulated above. ACCUMULATE-ONLY
+  # (CF-3/PA-10): this heredoc reads attribution_rows and prints a summary --
+  # it makes no ledger write, no CLI call and influences no metering
+  # decision. Wrapped so a failure degrades to "no reconciliation line"
+  # rather than aborting the tick, matching this file's existing discipline
+  # for non-critical heredocs -- this file runs `set -uo pipefail`,
+  # deliberately without `-e`, precisely so a per-item failure never aborts
+  # the run. Skipped entirely when the accumulator is empty, so a quiet tick
+  # stays quiet.
+  if [[ -n "${attribution_rows}" ]]; then
+    local recon_output
+    recon_output=$(
+      ATTRIBUTION_ROWS="${attribution_rows}" \
+      SCRIPT_DIR="${SCRIPT_DIR}" \
+      python3 - <<'PY' 2>/dev/null
+import os, sys
+try:
+    sys.path.insert(0, os.environ['SCRIPT_DIR'])
+    from split_strategies import partition_by_attribution
+    rows = []
+    for line in os.environ.get('ATTRIBUTION_ROWS', '').splitlines():
+        if not line:
+            continue
+        parts = line.split('|')
+        if len(parts) != 7:
+            continue
+        bucket, i, o, cr, cw, tot, cost = parts
+        rows.append((bucket, {
+            "input": int(i), "output": int(o), "cache_read": int(cr),
+            "cache_write": int(cw), "total": int(tot), "cost": cost,
+        }))
+    result = partition_by_attribution(rows)
+    for bucket in ("classified", "unclassified", "unallocated"):
+        b = result[bucket]
+        print(f"{bucket.upper()}_COST={b['cost']}")
+        print(f"{bucket.upper()}_TOTAL={b['total']}")
+except Exception as exc:
+    print(f"RECON_ERROR={exc}", file=sys.stderr)
+    sys.exit(1)
+PY
+    ) || recon_output=""
+    if [[ -n "${recon_output}" ]]; then
+      local recon_classified_cost recon_unclassified_cost recon_unallocated_cost
+      local recon_classified_total recon_unclassified_total recon_unallocated_total
+      recon_classified_cost=$(echo "${recon_output}" | sed -n 's/^CLASSIFIED_COST=//p')
+      recon_classified_total=$(echo "${recon_output}" | sed -n 's/^CLASSIFIED_TOTAL=//p')
+      recon_unclassified_cost=$(echo "${recon_output}" | sed -n 's/^UNCLASSIFIED_COST=//p')
+      recon_unclassified_total=$(echo "${recon_output}" | sed -n 's/^UNCLASSIFIED_TOTAL=//p')
+      recon_unallocated_cost=$(echo "${recon_output}" | sed -n 's/^UNALLOCATED_COST=//p')
+      recon_unallocated_total=$(echo "${recon_output}" | sed -n 's/^UNALLOCATED_TOTAL=//p')
+      if [[ -n "${recon_classified_cost}" && -n "${recon_unclassified_cost}" && -n "${recon_unallocated_cost}" ]]; then
+        info "cost reconciliation this tick: classified=${recon_classified_cost} (tokens=${recon_classified_total}) unclassified=${recon_unclassified_cost} (tokens=${recon_unclassified_total}) unallocated=${recon_unallocated_cost} (tokens=${recon_unallocated_total})"
+      fi
     fi
   fi
 

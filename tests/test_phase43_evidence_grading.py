@@ -67,7 +67,7 @@ __getitem__), never-sorted is STATIC-class (proves absence in the two files
 scanned today, not impossibility -- Python's str is orderable). LabelDriftTests
 is BEHAVIOURAL: it proves the two live declarations agree right now, not that
 they can never diverge in the future. Plan 04's PromotionTests is MIXED: its
-seven attack methods and the closing key-set method are BEHAVIOURAL (today's
+eight attack methods and the closing key-set method are BEHAVIOURAL (today's
 code ignores these keys); its two guard methods are STATIC, current-code-only
 (no future edit that starts reading a forbidden key survives them, but
 neither proves such an edit is impossible to write). NonInheritanceTests is
@@ -264,6 +264,11 @@ class StudyReferenceTests(unittest.TestCase):
         persist "" / 0 on the sidecar record."""
         mod = self.mod
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer',
             'estimated_hours_saved': 2.0,
             'assumed_loaded_rate': 100.0,
@@ -327,6 +332,11 @@ class FixtureFidelityTests(unittest.TestCase):
 
         mod = _load_classifier()
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'senior software engineer',
             'estimated_hours_saved': 3.5,
             'assumed_loaded_rate': 150.0,
@@ -404,7 +414,7 @@ class AbstentionTests(unittest.TestCase):
 # -- Plan 43-04, Task 2: the adversarial evaluator response -----------------
 
 def _hostile_evaluator_response():
-    """One evaluator response, seven simultaneous promotion attempts
+    """One evaluator response, eight simultaneous promotion attempts
     (A1-A7 in 43-04-PLAN.md's Task 2 behavior list), layered ON TOP of the
     six legitimate keys _validate_assessment actually reads plus the two
     narrative keys _build_job_assessment reads directly off raw -- together
@@ -414,11 +424,19 @@ def _hostile_evaluator_response():
 
     This fixture fixes 43-RESEARCH.md's Open Question 1 (the adversarial
     fixture's exact key shape) in this ONE place -- Task 3's ast-guard
-    forbidden-key set is derived from these same seven attacks, not
+    forbidden-key set is derived from these same eight attacks, not
     guessed at separately.
     """
     return {
         # Legitimate keys, nominal in-bounds values -- the ACCEPT path.
+        # Phase 44 (EGV-05): after the mechanism gate lands in
+        # _validate_assessment, a raw response with no mechanism abstains --
+        # this fixture must carry one to keep describing a production
+        # success path. Not one of the eight promotion attacks below: D-03
+        # permits reading this key off raw (MechanismGuardScopeTests in
+        # tests/test_phase44_economic_mechanisms.py proves it is
+        # deliberately absent from _PROMOTION_FORBIDDEN_KEYS).
+        'economic_mechanism': 'labor_substitution',
         'inferred_role': 'senior engineer',
         'estimated_hours_saved': 3.0,
         'assumed_loaded_rate': 120.0,
@@ -444,19 +462,36 @@ def _hostile_evaluator_response():
         'model': 'gpt-attacker-9000',
         # A7 -- value spoof, far above the derived hours*rate product (360.0).
         'estimated_value': 999999999.0,
+        # A8 -- group-id spoof (Phase 44, D-13). Unlike economic_mechanism
+        # immediately above (which D-03 deliberately lets the model
+        # select, and which MechanismGuardScopeTests records as
+        # deliberately excluded from _PROMOTION_FORBIDDEN_KEYS),
+        # double_counting_group is purely structural -- caller-supplied
+        # from session identity, never read off raw -- so it belongs in
+        # the forbidden set below, not alongside economic_mechanism.
+        # GroupIdStructuralTests in tests/test_phase44_economic_mechanisms.py
+        # proves the record carries the CALLER's value, not this one.
+        'double_counting_group': 'attacker-injected-group',
     }
 
 
 # -- Plan 43-04, Task 3: the scoped ast key-read guard ----------------------
 #
 # The forbidden-key set the guard below scans classifier.py for, taken
-# VERBATIM from the seven attacks _hostile_evaluator_response() builds
+# VERBATIM from the eight attacks _hostile_evaluator_response() builds
 # above -- the guard's coverage is derived from a concrete, reviewed attack
 # shape, not guessed at. A3/A6 each contribute more than one key.
 _PROMOTION_FORBIDDEN_KEYS = frozenset({
     'evidence_class', 'impact_class', 'study_id', 'study_version',
     'reportability_status', 'evidence_references',
     'evaluator', 'evaluator_version', 'model', 'estimated_value',
+    # Phase 44 (D-13): double_counting_group is purely structural identity
+    # under D-13 and must never be readable off the untrusted response --
+    # unlike economic_mechanism, which D-03 deliberately lets the model
+    # select and which MechanismGuardScopeTests
+    # (tests/test_phase44_economic_mechanisms.py) proves is deliberately
+    # EXCLUDED from this set. Do not "harmonise" the two treatments.
+    'double_counting_group',
 })
 
 # The three functions that legitimately hold the untrusted evaluator
@@ -590,7 +625,7 @@ def _find_forbidden_raw_reads(tree, filename):
 
 class PromotionTests(unittest.TestCase):
     """EGV-11 (D-04) -- proven twice, and both instruments live in this one
-    class. The seven attack methods and the closing key-set method above
+    class. The eight attack methods and the closing key-set method above
     are the BEHAVIOURAL half: they prove the code that exists TODAY
     ignores every one of these keys when a hostile response is fed through
     the REAL _validate_assessment -> _build_job_assessment construction
@@ -659,6 +694,14 @@ class PromotionTests(unittest.TestCase):
     def test_a7_value_spoof_ships_the_derived_product_not_the_supplied_total(self):
         self.assertEqual(self.record['estimated_value'], 360.0)  # 3.0 hours * 120.0 rate
 
+    def test_a8_group_id_spoof_stays_at_caller_supplied_default(self):
+        # setUp's _build_job_assessment call passes no double_counting_group
+        # kwarg, so the caller-supplied default ("") must win over the raw
+        # response's spoofed 'attacker-injected-group' -- the attacker's
+        # value is simply never consulted (D-13).
+        self.assertEqual(self.record['double_counting_group'], '')
+        self.assertNotEqual(self.record['double_counting_group'], 'attacker-injected-group')
+
     def test_record_key_set_matches_declared_contract_exactly(self):
         """The closing assertion: nothing was smuggled in under a key
         nobody thought to check -- an assertion that only checks the keys
@@ -698,7 +741,7 @@ class PromotionTests(unittest.TestCase):
         prove such a read is impossible to write -- that is a claim only
         NonInheritanceTests' import-boundary guard below is entitled to
         make, and only for a different question (whether a study's own
-        fields can reach a job assessment at all). Paired with the seven
+        fields can reach a job assessment at all). Paired with the eight
         behavioural attack methods above: the fixture proves today's code
         ignores these keys; this guard proves a future edit that starts
         reading one turns red.
@@ -784,6 +827,11 @@ class NonInheritanceTests(unittest.TestCase):
 
         mod = _load_classifier()
         raw = {
+            # Phase 44 (EGV-05): after the mechanism gate lands in
+            # _validate_assessment, a raw response with no mechanism
+            # abstains -- this fixture must carry one to keep describing a
+            # production success path.
+            'economic_mechanism': 'labor_substitution',
             'inferred_role': 'engineer',
             'estimated_hours_saved': 2.0,
             'assumed_loaded_rate': 100.0,
