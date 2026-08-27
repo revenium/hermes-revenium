@@ -97,6 +97,18 @@ def _sidecar_record(job_id, **overrides):
         "prompt_version": 1,
         "policy_version": 1,
         "model": "unknown",
+        # Phase 46 (EGV-21, plan 46-02 Task 4): classifier.py's
+        # _build_job_assessment populates these two keys UNCONDITIONALLY on
+        # every record it builds (D-06/D-07), and this plan makes
+        # hermes-report.sh forward both -- another WR-04 fixture-fidelity
+        # site (PA-12), closed the same way every prior recurrence was:
+        # SidecarFixtureFidelityTests' _sidecar_record() gains the fixture
+        # keys, never a widened exemption set. "openrouter"/"public" is the
+        # exact worked example from 46-RESEARCH.md Q3
+        # (https://openrouter.ai/api/v1 -> public) -- a real, honest pairing
+        # rather than an invented placeholder.
+        "inference_provider": "openrouter",
+        "inference_address_class": "public",
         "value_low": 446.25,
         "value_base": 525.0,
         "value_high": 603.75,

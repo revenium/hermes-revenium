@@ -309,6 +309,204 @@ class NoLocalityClaimTests(unittest.TestCase):
             self.assertNotIn(phrase, locality_source)
 
 
+def _extract_outcome_metadata_heredoc(script_text):
+    """Duplicated (not imported) from
+    tests/test_phase46_metadata_envelope.py::_extract_outcome_metadata_heredoc
+    -- per that module's own docstring, importing it would reopen its
+    documented os.environ-mutation-at-import env-bleed trap, and this
+    repo's stated preference is duplication across independent test/
+    reporter concerns (CLAUDE.md "Module design") over a shared import.
+    Returns None -- never a partial or guessed body -- if the anchor has
+    moved, so a real drift fails the caller loudly instead of silently
+    testing a stale shape."""
+    anchor = 'outcome_metadata=$('
+    start = script_text.find(anchor)
+    if start == -1:
+        return None
+    heredoc_start = script_text.find("<<'PY'", start)
+    if heredoc_start == -1:
+        return None
+    body_start = script_text.find('\n', heredoc_start) + 1
+    body_end = script_text.find('\nPY\n', body_start)
+    if body_end == -1:
+        return None
+    return script_text[body_start:body_end]
+
+
+def _extract_ceiling_bytes(body):
+    import re as _re
+    match = _re.search(r'_METADATA_CEILING_BYTES\s*=\s*(\d+)', body)
+    return int(match.group(1)) if match else None
+
+
+def _run_forwarder(body, env):
+    """Execute the extracted heredoc body as a standalone python3 script
+    against an explicit environment, matching the real subshell invocation's
+    input contract (OUTCOME_SOURCE / OUTCOME_STATUS / OUTCOME_FAILURE_REASON
+    / ASSESSMENT_JSON)."""
+    import subprocess as _subprocess
+    return _subprocess.run(
+        [_sys.executable, '-'], input=body, env=env,
+        capture_output=True, text=True,
+    )
+
+
+def _forwarder_env(assessment, source='prod', status='SUCCESS', failure_reason=''):
+    return {
+        'OUTCOME_SOURCE': source,
+        'OUTCOME_STATUS': status,
+        'OUTCOME_FAILURE_REASON': failure_reason,
+        'ASSESSMENT_JSON': json.dumps(assessment) if assessment is not None else '',
+    }
+
+
+class WireForwardingTests(unittest.TestCase):
+    """Task 4 (checkpoint decision: ship-both) behaviors 1-3 and 5 -- the
+    two allow-listed --metadata forwarders in hermes-report.sh's
+    outcome_metadata heredoc, driven end to end against the REAL heredoc
+    body extracted live from the shipped script text, never a
+    reimplementation of its field selection (same discipline plan 46-01's
+    MetadataEnvelopeTruncationTests already established)."""
+
+    HERMES_REPORT_SH = ROOT / 'skills' / 'revenium' / 'scripts' / 'hermes-report.sh'
+
+    def setUp(self):
+        self.script_text = self.HERMES_REPORT_SH.read_text()
+        self.body = _extract_outcome_metadata_heredoc(self.script_text)
+        self.assertIsNotNone(
+            self.body,
+            "outcome_metadata=$( ... <<'PY' ... \\nPY\\n anchor moved in "
+            'hermes-report.sh -- update the extraction before trusting this test',
+        )
+        self.ceiling = _extract_ceiling_bytes(self.body)
+        self.assertIsNotNone(
+            self.ceiling, '_METADATA_CEILING_BYTES not found in the extracted heredoc body')
+
+    def _forward(self, assessment, **kwargs):
+        env = _forwarder_env(assessment, **kwargs)
+        result = _run_forwarder(self.body, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout.strip())
+
+    # Behavior 1: a sidecar record carrying inference_address_class set to
+    # loopback produces a --metadata payload containing that key with that
+    # value.
+    def test_loopback_address_class_forwarded(self):
+        meta = self._forward({'inference_address_class': 'loopback'})
+        self.assertEqual(meta.get('inference_address_class'), 'loopback')
+
+    def test_private_and_public_address_classes_forwarded(self):
+        for value in ('private', 'public', 'unset'):
+            with self.subTest(value):
+                meta = self._forward({'inference_address_class': value})
+                self.assertEqual(meta.get('inference_address_class'), value)
+
+    # Behavior 2: an out-of-set value is DROPPED -- the key is absent from
+    # meta, never passed through.
+    def test_out_of_set_address_class_dropped(self):
+        for bad in ('LOCAL', 'intranet', '', 'Loopback', 'loopback ', 123, None, [], {}):
+            with self.subTest(repr(bad)):
+                meta = self._forward({'inference_address_class': bad})
+                self.assertNotIn(
+                    'inference_address_class', meta,
+                    f'out-of-set value {bad!r} was forwarded, not dropped',
+                )
+
+    # Behavior 3: inference_provider is forwarded when it is a non-empty
+    # string and byte-sliced at 32; a non-string or empty value adds no key.
+    def test_provider_forwarded_and_sliced_at_32(self):
+        meta = self._forward({'inference_provider': 'openrouter'})
+        self.assertEqual(meta.get('inference_provider'), 'openrouter')
+
+        overlong = 'p' * 100
+        meta = self._forward({'inference_provider': overlong})
+        self.assertEqual(meta.get('inference_provider'), 'p' * 32)
+        self.assertEqual(len(meta['inference_provider'].encode('utf-8')), 32)
+
+    def test_empty_or_non_string_provider_not_forwarded(self):
+        for bad in ('', 123, None, [], {}):
+            with self.subTest(repr(bad)):
+                meta = self._forward({'inference_provider': bad})
+                self.assertNotIn(
+                    'inference_provider', meta,
+                    f'empty/non-string provider {bad!r} was forwarded, not dropped',
+                )
+
+    # Behavior 5: the two keys survive plan 46-01's truncation stage 1
+    # (value family dropped) and are dropped only at stage 2 (alongside the
+    # rest of provenance).
+    def test_survives_value_family_drop_stage_one(self):
+        """A record whose VALUE family alone pushes it over the ceiling
+        (mirroring plan 46-01's own _over_ceiling_assessment() shape,
+        duplicated here rather than imported per this file's own stated
+        no-shared-fixture convention) still carries both locality keys
+        after the value-family-only drop."""
+        record = {
+            'value_low': 10.5, 'value_base': 20.5, 'value_high': 30.5,
+            'bounds_source': 'model_estimate',
+            'net_value': 15.25,
+            'assumptions': {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+            'supplied_costs': {
+                'human_review': 10.0, 'rework_or_error': 5.0,
+                'integration': 2.0, 'training_or_change': 1.0,
+            },
+            'cost_coverage': {
+                'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                'known_zero': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                'unknown': [],
+                'excluded': ['metered_ai_cost'],
+            },
+            'evaluator': 'naked-llm-evaluator-name', 'evaluator_version': 'v1.0.0',
+            'model': 'some-model-string-id',
+            'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+            'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
+            'double_counting_group': 'g' * 64,
+            'inference_provider': 'openrouter',
+            'inference_address_class': 'public',
+        }
+        reason = 'r' * 3500  # matches plan 46-01's _OVER_CEILING_FAILURE_REASON_LEN
+        meta = self._forward(record, status='FAILED', failure_reason=reason)
+        self.assertIs(meta.get('metadata_truncated'), True)
+        # Value family gone (tier 1 popped).
+        for key in ('value_low', 'value_base', 'value_high', 'net_value'):
+            self.assertNotIn(key, meta, f'{key} (value family) survived truncation')
+        # Provenance -- including the two locality keys -- still present.
+        self.assertEqual(meta.get('inference_provider'), 'openrouter')
+        self.assertEqual(meta.get('inference_address_class'), 'public')
+        self.assertIn('evaluator', meta)
+
+    def test_dropped_only_at_provenance_stage_two(self):
+        """A record big enough that even the value-family-only drop is not
+        enough (a failure_reason larger than the ceiling itself, on top of
+        the same full-field record) forces the SECOND drop tier, and only
+        then are the two locality keys gone, alongside the rest of
+        provenance."""
+        record = {
+            'value_low': 10.5, 'value_base': 20.5, 'value_high': 30.5,
+            'bounds_source': 'model_estimate',
+            'net_value': 15.25,
+            'assumptions': {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+            'evaluator': 'naked-llm-evaluator-name', 'evaluator_version': 'v1.0.0',
+            'model': 'some-model-string-id',
+            'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+            'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
+            'double_counting_group': 'g' * 64,
+            'inference_provider': 'openrouter',
+            'inference_address_class': 'public',
+        }
+        reason = 'r' * (self.ceiling + 2000)  # dwarfs the ceiling by itself
+        meta = self._forward(record, status='FAILED', failure_reason=reason)
+        self.assertIs(meta.get('metadata_truncated'), True)
+        self.assertNotIn('inference_provider', meta)
+        self.assertNotIn('inference_address_class', meta)
+        self.assertNotIn('evaluator', meta)
+        self.assertNotIn('value_low', meta)
+        # Base metering never yields, even though the final blob is still
+        # over the ceiling (the failure_reason alone exceeds it) -- D-02.
+        self.assertIn('source', meta)
+        self.assertIn('failure_reason', meta)
+
+
 def _p46loc_attach_env(tmpdir, evaluator_name, base_url, provider):
     """A minimal, fully isolated state tree -- own HERMES_HOME + config.yaml
     (deterministic locality) AND own REVENIUM_STATE_DIR + config.json

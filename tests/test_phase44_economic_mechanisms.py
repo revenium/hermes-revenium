@@ -1821,10 +1821,30 @@ class PhaseFieldInventoryTests(unittest.TestCase):
         'net_value', 'supplied_costs', 'cost_coverage', 'double_counting_group',
     })
 
+    # Phase 46 (EGV-21, plan 46-02 Task 2, commit 5283db3) added
+    # inference_provider/inference_address_class to DECLARED_KEYS -- this
+    # gate is scoped to Phase 44's own four fields (see class docstring), so
+    # a LATER phase's additions are excluded from the comparison below
+    # rather than left to silently fail this Phase-44-scoped assertion.
+    # This is the fix for a real gap: Phase 46 Task 2's own acceptance
+    # criteria ran this same discover command and should have caught the
+    # drift, but the interleaving of this test's assertion failure (on
+    # stderr) with MetadataEnvelopeBudgetTests' print() output (on stdout)
+    # pushed "FAILED (failures=1)" out of the `tail -3` window that
+    # acceptance criterion checks -- discovered instead during plan 46-02
+    # Task 4's own full-discover verification.
+    _KNOWN_LATER_PHASE_FIELDS = frozenset({
+        'inference_provider', 'inference_address_class',
+    })
+
     def test_declared_keys_gained_exactly_the_four_phase_44_fields(self):
         from tests.test_phase42_assessment_contract import RecordShapeTests
 
-        gained = RecordShapeTests.DECLARED_KEYS - self._PHASE_43_BASELINE_DECLARED_KEYS
+        gained = (
+            RecordShapeTests.DECLARED_KEYS
+            - self._PHASE_43_BASELINE_DECLARED_KEYS
+            - self._KNOWN_LATER_PHASE_FIELDS
+        )
         self.assertEqual(
             gained, self._PHASE_44_NEW_FIELDS,
             f'DECLARED_KEYS gained {gained!r} relative to the Phase 43 baseline; '

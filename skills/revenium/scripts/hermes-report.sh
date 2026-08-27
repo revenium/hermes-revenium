@@ -3600,6 +3600,14 @@ _PROVENANCE_FAMILY_META_KEYS = (
     'evaluator', 'evaluator_version', 'model', 'evidence_class',
     'reportability_status', 'study_id', 'study_version', 'confidence',
     'economic_mechanism', 'double_counting_group', 'correction_sequence',
+    # Phase 46 (EGV-21, D-06/D-07, plan 46-02 Task 4, checkpoint decision
+    # ship-both): the two locality facts join the provenance tier, not the
+    # value tier and not the always-kept set -- they describe WHERE the
+    # evaluation was configured to run, the same footing as evaluator/model
+    # above, so a truncated record still says where inference was
+    # configured to go for as long as any provenance survives, and only
+    # yields alongside the rest of provenance at tier 2.
+    'inference_provider', 'inference_address_class',
 )
 
 meta = {}
@@ -3834,6 +3842,33 @@ if assessment_raw:
         model_field = record.get('model')
         if isinstance(model_field, str) and model_field:
             meta['model'] = model_field[:64]
+        # Phase 46 (EGV-21, D-06/D-07, plan 46-02 Task 4, checkpoint
+        # decision ship-both): the two locality facts, immediately after
+        # model above -- same caller-supplied-provenance footing, forwarded
+        # under two different disciplines. inference_provider mirrors
+        # evaluator's isinstance + non-empty + slice shape (32 bytes,
+        # matching classifier.py's INFERENCE_PROVIDER_MAX_BYTES). A hand-
+        # edited or corrupt sidecar value that is a non-empty non-string
+        # (or simply absent) adds no key -- same conditional-emit rule as
+        # every other field here.
+        inference_provider = record.get('inference_provider')
+        if isinstance(inference_provider, str) and inference_provider:
+            meta['inference_provider'] = inference_provider[:32]
+        # inference_address_class uses an allow-list-then-drop discipline,
+        # exactly like _ECONOMIC_MECHANISMS above (T-46-02): an out-of-set
+        # string, an empty string, a non-string, or a hand-edited/corrupt
+        # sidecar value is DROPPED SILENTLY -- never passed through. Unlike
+        # _ECONOMIC_MECHANISMS' six-string vocabulary, this frozenset is not
+        # hand-synced against classifier.py by a drift test -- it mirrors
+        # classifier.py's own _ADDRESS_CLASSES literally (D-12: exactly
+        # four values, no fifth "unknown" bucket).
+        _INFERENCE_ADDRESS_CLASSES = frozenset({'loopback', 'private', 'public', 'unset'})
+        inference_address_class = record.get('inference_address_class')
+        if (
+            isinstance(inference_address_class, str)
+            and inference_address_class in _INFERENCE_ADDRESS_CLASSES
+        ):
+            meta['inference_address_class'] = inference_address_class
         confidence_raw = record.get('confidence')
         if confidence_raw is not None:
             try:
