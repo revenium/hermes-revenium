@@ -2725,6 +2725,65 @@ async def run_classification_async(
                                         valid, transcript, p,
                                         double_counting_group=session_id,
                                     )
+                                elif (
+                                    valid["status"] != "SUCCESS"
+                                    and _llm_evaluation_enabled(paths=p)
+                                ):
+                                    # Phase 44 (EGV-17, D-14): a FAILED,
+                                    # CANCELLED or otherwise non-SUCCESS job
+                                    # now gets its own abstention sidecar
+                                    # record -- built DIRECTLY, never
+                                    # through _attach_assessment. Written as
+                                    # "not SUCCESS" rather than an explicit
+                                    # FAILED-or-CANCELLED membership test so
+                                    # a status word introduced later is
+                                    # covered by default, rather than
+                                    # silently falling through to no record
+                                    # at all -- the failure mode this branch
+                                    # exists to close.
+                                    #
+                                    # ROI-09 constraint (stated here, not
+                                    # just above): this branch must NEVER
+                                    # call _attach_assessment and must NEVER
+                                    # resolve or import the evaluator
+                                    # registry. Routing a non-SUCCESS arc
+                                    # through _attach_assessment would break
+                                    # ROI-09's guarantee even though the LLM
+                                    # call would only be reached
+                                    # conditionally -- the cheapest way to
+                                    # guarantee "never evaluated" is to never
+                                    # reach the code that could call out.
+                                    #
+                                    # evaluator_version is deliberately left
+                                    # empty rather than resolved from the
+                                    # registry: resolving it is a pure
+                                    # lookup with no I/O, but importing the
+                                    # evaluators module from a path that by
+                                    # definition never evaluates weakens the
+                                    # "never reach the code that could call
+                                    # out" property for no provenance gain --
+                                    # abstention_reason already makes the
+                                    # record's nature legible.
+                                    #
+                                    # The _llm_evaluation_enabled gate here
+                                    # is load-bearing for backward
+                                    # compatibility: with the feature off,
+                                    # today no assessment sidecar record is
+                                    # written for any job at any status, and
+                                    # a feature-off install must behave
+                                    # byte-identically. Do not drop this
+                                    # condition to "always write an
+                                    # abstention record".
+                                    _non_success_cfg = _llm_evaluation_config(paths=p)
+                                    _non_success_evaluator = (
+                                        _non_success_cfg.get("evaluator") or "llm"
+                                    )
+                                    valid["_assessment_record"] = _build_job_assessment(
+                                        valid, None, None, _non_success_cfg,
+                                        _non_success_evaluator, "",
+                                        abstention_reason="not_evaluated_non_success",
+                                        double_counting_group=session_id,
+                                    )
                                 # Phase 42 (D-12): sidecar FIRST, then the job
                                 # marker. A crash between the two appends
                                 # leaves an orphan sidecar record that
