@@ -3531,6 +3531,53 @@ print('true' if ok else 'false')
         ASSESSMENT_JSON="${outcome_assessment_json}" \
         python3 - <<'PY' 2>/dev/null || true
 import json, os
+
+# Phase 46 (EGV-19, D-01/D-03/D-11): the --metadata envelope's own byte
+# ceiling, enforced HERE and only here -- this is the single emit site
+# where the actual wire bytes exist before they leave the machine (D-03).
+# The classifier must never predict this number; grep -c on that file for
+# this name is a phase-46 acceptance criterion. Derivation, not a guess:
+#   - pre-fix measured worst case (before this same plan's classifier.py
+#     failure_reason byte-clamp fix) was 6,976 bytes for a 500-EMOJI
+#     failure_reason alone, 7,734 bytes with a 64-emoji `source` on top --
+#     both driven by a character-count clamp under-counting by up to 12x
+#     under ensure_ascii=True, not by anything Phases 42-45 added.
+#   - the ASCII baseline for the WHOLE Phase 42-45 field set (every
+#     provenance + value + cost key this heredoc can emit) measured 956
+#     bytes -- comfortably under any reasonable ceiling once the clamp
+#     driving the worst case is fixed.
+#   - there is NO observed Revenium server-side --metadata limit to derive
+#     a ceiling from, so 4096 is chosen defensively, not measured against a
+#     documented server bound.
+# Two alternatives considered and rejected:
+#   - 8192: collides numerically with SIDECAR_LINE_MAX_BYTES
+#     (classifier.py) and would invite exactly the sidecar-vs-envelope
+#     conflation this phase must not make -- these are two different
+#     ceilings for two different transports.
+#   - a config-tunable value: rejected per D-11 -- D-09 deliberately froze
+#     the llmOutcomeEvaluation opt-in surface at five knobs, and a sixth
+#     would widen that surface for a transport bound, not a policy choice.
+#
+# CF-3 restated (D-03): this is a TRANSPORT bound, not a value or
+# reportability judgment. The reporter still only READS reportability_status
+# upstream (see the reader stage above) -- this decides only what physically
+# fits on the wire, and it must live here because nowhere else in the
+# pipeline has the serialized bytes to measure.
+_METADATA_CEILING_BYTES = 4096
+
+# The two ordered drop tiers, in the order they are popped below: the
+# enrichment yields before base metering ever does (D-02). `source` and
+# `failure_reason` are the base metering keys and are never in either tuple.
+_VALUE_FAMILY_META_KEYS = (
+    'value_low', 'value_base', 'value_high', 'bounds_source',
+    'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
+)
+_PROVENANCE_FAMILY_META_KEYS = (
+    'evaluator', 'evaluator_version', 'model', 'evidence_class',
+    'reportability_status', 'study_id', 'study_version', 'confidence',
+    'economic_mechanism', 'double_counting_group', 'correction_sequence',
+)
+
 meta = {}
 source = os.environ.get('OUTCOME_SOURCE', '').strip()
 if source:
@@ -3787,8 +3834,30 @@ if assessment_raw:
         if assumptions:
             meta['assumptions'] = assumptions
 
+# Phase 46 (EGV-19, D-01/D-02/D-03): bounded emit -- the single place the
+# actual wire bytes are measured before the payload leaves the machine.
+# Base metering (source, failure_reason) is NEVER popped; only the Phase
+# 42-45 enrichment yields, value family first, then provenance, in that
+# order (D-02: metering never breaks, the enrichment is what gives way).
+# metadata_truncated marks a partial payload so a consumer can distinguish
+# "this job had no net_value" (both keys absent) from "net_value did not
+# fit" (net_value absent, metadata_truncated present) -- an unmarked
+# partial record is the silent substitution this milestone exists to
+# prevent. AMEND-D-02: this key lives ONLY in this transport dict -- never
+# in the sidecar record and never in _VALUE_OMIT_FAMILY, which governs an
+# earlier pipeline stage that can never see it.
 if meta:
-    print(json.dumps(meta, separators=(',', ':')))
+    blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+    if len(blob) > _METADATA_CEILING_BYTES:
+        for _k in _VALUE_FAMILY_META_KEYS:
+            meta.pop(_k, None)
+        meta['metadata_truncated'] = True
+        blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+        if len(blob) > _METADATA_CEILING_BYTES:
+            for _k in _PROVENANCE_FAMILY_META_KEYS:
+                meta.pop(_k, None)
+            blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+    print(blob.decode('utf-8'))
 PY
       )
       outcome_metadata="${outcome_metadata%%$'\n'*}"

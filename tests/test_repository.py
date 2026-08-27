@@ -234,6 +234,10 @@ class RepositoryTests(unittest.TestCase):
             # separately from evaluator identity and unspoofable via the
             # reserved-key carrier.
             ROOT / 'tests' / 'test_phase45_model_provenance.py',
+            # Phase 46 Plan 01 (EGV-19) — the --metadata envelope's byte
+            # ceiling and truncation marker, proven against the REAL
+            # forwarder heredoc extracted live from hermes-report.sh.
+            ROOT / 'tests' / 'test_phase46_metadata_envelope.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',

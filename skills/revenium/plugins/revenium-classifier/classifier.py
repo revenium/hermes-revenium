@@ -996,14 +996,19 @@ def _validate_job(job: dict) -> "dict | None":
     aid = agentic_job_id.strip() + "_" + secrets.token_hex(2)
     # failure_reason is meaningful only for FAILED arcs. Coerce non-str / wrong-status
     # values to empty so SUCCESS/CANCELLED markers stay byte-identical to pre-change
-    # output (the writer omits the key when empty). Cap length defensively so a runaway
-    # LLM response cannot bloat the marker line or the downstream --metadata CLI arg.
+    # output (the writer omits the key when empty). Phase 46 (D-10): clamped by
+    # SERIALIZED BYTES via _clamp_assessment_text, not character count -- a
+    # character clamp under-counts by up to 12x under ensure_ascii=True (see that
+    # function's docstring), and this field is model-controlled free text that
+    # rides all the way to the --metadata transport, so an under-counted clamp
+    # here was the actual driver of EGV-19's measured worst case. This also
+    # brings the pipe/newline/CR strip to the producer, which
+    # _clamp_assessment_text's own docstring already claims happens here --
+    # replacing the separate .strip() this block used to do.
     failure_reason = job.get("failure_reason", "")
     if not isinstance(failure_reason, str) or status != "FAILED":
         failure_reason = ""
-    failure_reason = failure_reason.strip()
-    if len(failure_reason) > 500:
-        failure_reason = failure_reason[:500]
+    failure_reason = _clamp_assessment_text(failure_reason, FAILURE_REASON_CLAMP_BYTES)
     return {
         "agentic_job_id": aid,
         "job_name": (job.get("job_name") or ""),
@@ -1610,6 +1615,13 @@ POLICY_VERSION = 1
 # _clamp_assessment_text). Applies independently to all three of
 # candidate_downstream_outcome, counterfactual_assumption, and basis.
 NARRATIVE_CLAMP_BYTES = 500
+
+# Phase 46 (D-10): _validate_job's failure_reason clamp, in serialized bytes.
+# Same value as NARRATIVE_CLAMP_BYTES but a DISTINCT constant, deliberately --
+# these are two independently-justified budgets (a job-outcome reason vs. a
+# job-assessment narrative field) that must be able to diverge later without
+# one edit silently changing the other.
+FAILURE_REASON_CLAMP_BYTES = 500
 
 # Declared-only defaults (D-06: every EGV-04 field family is declared even
 # where only a later phase implements its semantics -- a field is never
