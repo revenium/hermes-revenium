@@ -881,6 +881,70 @@ def _register_valuation_impl() -> None:
 _register_valuation_impl()
 
 
+def _register_evidence_impl() -> None:
+    """Register the `config_opt_in` reportability policy into the evidence
+    registry (evidence.py, Phase 45 EGV-01) at import time.
+
+    Registration lives HERE, not in evidence.py, for the same reason
+    _register_llm_evaluator/_register_classification_impl/
+    _register_valuation_impl register their own built-ins in this module
+    rather than in evaluators.py/classification.py/valuation.py: the
+    dependency runs one way, classifier imports evidence, never the
+    reverse, which is what keeps evidence.py importable with no Hermes
+    venv present.
+
+    Import failure is swallowed: a classifier that cannot register a
+    reportability implementation must still resolve reportability (D-04)
+    -- _resolve_reportability_status's own resolve step treats a failed
+    import the same as an unresolved name and falls back to the inline
+    config-opt-in rule, exactly as if this registration had never run.
+    """
+    try:
+        from . import evidence as _evd
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import evidence as _evd  # type: ignore
+        except Exception:
+            return
+
+    def _config_opt_in(request: dict, config: dict) -> "dict | None":
+        """The evidence boundary's `config_opt_in` registrant: the SAME
+        rule _resolve_reportability_status has always applied, moved
+        behind the resolved-implementation call so the built-in is
+        provably just another registrant, not a hardcoded special case.
+        `request` carries `abstained`/`agentic_job_id`/`job_type`
+        (caller-constructed, never `raw`); this registrant reads only
+        `abstained` off it and `experimentalReportEstimates` off `config`
+        -- reproducing today's rule exactly: reportable only when config
+        is a dict and `experimentalReportEstimates` is the literal JSON
+        boolean true, identity-compared. An operator editing config.json
+        by hand must not be able to switch money reporting on with a
+        near-miss like the string "true" or the integer 1."""
+        req = request if isinstance(request, dict) else {}
+        cfg = config if isinstance(config, dict) else {}
+        if req.get("abstained"):
+            return {"reportability_status": REPORTABILITY_CANDIDATE}
+        if cfg.get("experimentalReportEstimates") is True:
+            return {"reportability_status": REPORTABILITY_REPORTABLE}
+        return {"reportability_status": REPORTABILITY_CANDIDATE}
+
+    # Phase 45 (D-06 AMENDED): this call runs at the SAME point in module
+    # execution as _register_llm_evaluator()'s, _register_classification_impl()'s
+    # and _register_valuation_impl()'s own calls above -- beside them, per
+    # this plan's action -- which is BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED
+    # (declared further down this module) exists as a global. Reuses the
+    # SAME forced literal those three functions already established for
+    # exactly this reason, rather than the not-yet-defined name -- see
+    # _register_llm_evaluator's own comment for the identical constraint.
+    # The built-in config-opt-in policy is a fixed rule over model-derived
+    # numbers, so the honest class either way is MODEL_ESTIMATED_DEMO.
+    _evd.register("config_opt_in", _config_opt_in, "1",
+                  evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
+
+_register_evidence_impl()
+
+
 def _validate_job(job: dict) -> "dict | None":
     """Validate and normalize a job dict from the LLM response.
 
@@ -1110,11 +1174,21 @@ def _declared_evidence_class(evaluator: str) -> str:
     a registry against an allow-list, and only ever sees the caller-supplied
     evaluator name, never `raw`.
 
+    Phase 45 (D-06 AMENDED, plan 06, PA-19): the membership test itself now
+    lives in evidence.py as evidence.resolve_declared_class -- the rule
+    that decides which evidence labels an implementation may claim belongs
+    with the boundary that owns evidence, not scattered across the host
+    module that carves the other five boundaries out. The guarantee this
+    function provides is UNCHANGED by that move: it still takes only the
+    caller-supplied evaluator NAME, still reads the declaration from the
+    evaluators registry (never from evidence.py, which owns the allow-list
+    rule but not the declaration itself), and still never raises.
+
     Every outcome other than "a str member of EVIDENCE_CLASSES" -- an
     unregistered name, an empty declaration, a non-string declaration, a
     label outside the nine, a non-string `evaluator` argument, or any
-    exception raised while importing evaluators.py or looking the name up
-    -- falls back to _forced_evidence_class(). Never raises.
+    exception raised while importing evaluators.py/evidence.py or looking
+    the name up -- falls back to _forced_evidence_class(). Never raises.
     """
     try:
         if not isinstance(evaluator, str):
@@ -1127,9 +1201,14 @@ def _declared_evidence_class(evaluator: str) -> str:
             except Exception:
                 return _forced_evidence_class()
         declared = _ev.resolve_evidence_class(evaluator)
-        if isinstance(declared, str) and declared in EVIDENCE_CLASSES:
-            return declared
-        return _forced_evidence_class()
+        try:
+            from . import evidence as _evd
+        except Exception:  # pragma: no cover - relative import outside a package
+            try:
+                import evidence as _evd  # type: ignore
+            except Exception:
+                return _forced_evidence_class()
+        return _evd.resolve_declared_class(declared, EVIDENCE_CLASSES, _forced_evidence_class())
     except Exception:
         return _forced_evidence_class()
 
@@ -1692,30 +1771,95 @@ def _resolve_served_model(response) -> str:
         return PROVENANCE_MODEL_UNKNOWN
 
 
-def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:
+def _resolve_reportability_status(
+    cfg: "dict | None", abstained: bool, job: "dict | None" = None
+) -> str:
     """Resolve EGV-18's reportability_status for one JobAssessment record.
 
-    Returns REPORTABILITY_REPORTABLE only when ALL of:
-      - abstained is False (D-05: an abstained assessment is never reportable,
-        whatever the config says -- checked first, unconditionally)
-      - cfg is a dict
-      - cfg["experimentalReportEstimates"] is True -- a literal JSON boolean,
-        identity-compared exactly like _llm_evaluation_enabled's "enabled"
-        check above, and for the same recorded reason (D-12): an operator
-        editing config.json by hand must not be able to switch money
-        reporting on with a near-miss like the string "true" or the int 1.
+    Phase 45 (D-06 AMENDED, EGV-01): the POLICY that decides
+    REPORTABILITY_REPORTABLE vs REPORTABILITY_CANDIDATE is now resolved
+    through the evidence boundary registry (evidence.py), with the
+    built-in `config_opt_in` policy registered as just another registrant
+    -- not a hardcoded special case. `job` is an OPTIONAL trailing
+    parameter, a plain dict carrying `agentic_job_id`/`job_type`, so every
+    pre-Phase-45 two-argument caller and test is unchanged.
 
-    Everything else -- including a non-dict/None cfg and a missing key --
-    resolves to REPORTABILITY_CANDIDATE. Never raises: this is a pure
-    function of its two arguments, no I/O.
+    THE ABSTENTION CHECK RUNS FIRST, UNCONDITIONALLY, BEFORE ANY REGISTERED
+    IMPLEMENTATION IS CONSULTED. This position is LOAD-BEARING (PA-18,
+    D-05): moving it below the resolution step would let a registered
+    implementation make an ABSTAINED assessment reportable, whatever the
+    config says -- exactly the elevation-of-privilege T-45-15 names. A
+    confirmation workflow registered here can decide that a REAL estimate
+    is reportable; it cannot decide that an ABSENT estimate is.
+
+    After the abstention check, the operator-selected implementation is
+    resolved by name via `_boundary_impl_name("evidence", "config_opt_in")`
+    and called with a CALLER-CONSTRUCTED request (`abstained`, plus the job
+    id/type taken from `job` when it is a dict) -- never `raw`, and never
+    `cfg` handed through unexamined either; `cfg` still crosses as the
+    `config` argument the contract documents. The returned value is
+    accepted ONLY when it is a dict whose `reportability_status` is one of
+    the two known literals (REPORTABILITY_REPORTABLE or
+    REPORTABILITY_CANDIDATE); a None return, a non-dict, an unknown
+    literal, a raised exception, an unresolvable implementation name, or a
+    failed module import all fall back to the ORIGINAL inline
+    config-opt-in rule below, logging the fallback with %r on the
+    requested implementation name -- never %s, never an f-string (T-28-07).
+
+    THE INLINE FALLBACK RULE, preserved byte-for-byte from before this
+    plan: REPORTABILITY_REPORTABLE only when cfg is a dict and
+    cfg["experimentalReportEstimates"] is True -- a literal JSON boolean,
+    identity-compared exactly like _llm_evaluation_enabled's "enabled"
+    check above, and for the same recorded reason (D-12): an operator
+    editing config.json by hand must not be able to switch money reporting
+    on with a near-miss like the string "true" or the int 1. Everything
+    else -- including a non-dict/None cfg and a missing key -- resolves to
+    REPORTABILITY_CANDIDATE.
+
+    Never raises: the whole body runs inside a try/except that treats any
+    internal failure exactly like an unresolved implementation, falling
+    through to the inline rule.
 
     D-05: reportable ships the estimate's VALUE to Revenium; candidate keeps
     the value local but still ships provenance (evidence_class, evaluator,
     evaluator_version, model, and the version family) -- hermes-report.sh
     enforces that split when it reads this field, not this function.
     """
+    # Load-bearing position (PA-18, D-05): unconditional, before the
+    # resolution step below runs at all. Do not move this check.
     if abstained:
         return REPORTABILITY_CANDIDATE
+
+    impl_name = "config_opt_in"
+    resolved_status = None
+    try:
+        impl_name = _boundary_impl_name("evidence", "config_opt_in")
+        evidence_mod = _load_evidence_module()
+        impl = evidence_mod.resolve(impl_name) if evidence_mod is not None else None
+        if impl is not None:
+            job_dict = job if isinstance(job, dict) else {}
+            request = {
+                "abstained": abstained,
+                "agentic_job_id": job_dict.get("agentic_job_id", ""),
+                "job_type": job_dict.get("job_type", ""),
+            }
+            result = impl(request, cfg if isinstance(cfg, dict) else {})
+            if isinstance(result, dict) and result.get("reportability_status") in (
+                REPORTABILITY_REPORTABLE, REPORTABILITY_CANDIDATE,
+            ):
+                resolved_status = result["reportability_status"]
+    except Exception:
+        resolved_status = None
+
+    if resolved_status is not None:
+        return resolved_status
+
+    logger.warning(
+        "revenium-classifier: evidence boundary implementation %r did not "
+        "resolve to a valid reportability_status; falling back to the "
+        "inline config-opt-in rule",
+        impl_name,
+    )
     if not isinstance(cfg, dict):
         return REPORTABILITY_CANDIDATE
     if cfg.get("experimentalReportEstimates") is True:
@@ -2102,7 +2246,14 @@ def _build_job_assessment(
             # still carries this key, valued REPORTABILITY_CANDIDATE --
             # the absence of a value is itself something the reporter must
             # be able to read, not merely infer from a missing field.
-            "reportability_status": _resolve_reportability_status(cfg, bool(abstention_reason)),
+            # Phase 45 (D-06 AMENDED, PA-20): the optional `job` argument
+            # is threaded HERE, at this one shared call site, built from
+            # the job_id/job_type locals already resolved above -- both
+            # the abstention early return and the success continuation
+            # get it, because both read from this same dict literal.
+            "reportability_status": _resolve_reportability_status(
+                cfg, bool(abstention_reason), job={"agentic_job_id": job_id, "job_type": job_type},
+            ),
         }
 
         if abstention_reason:
@@ -2589,6 +2740,28 @@ def _load_valuation_module():
         except Exception:
             return None
     return _val
+
+
+def _load_evidence_module():
+    """Import evidence.py (Phase 45, EGV-01), the SAME two-step import
+    dance _register_evidence_impl uses at import time, reused here at
+    _resolve_reportability_status's own resolve step, which resolves a
+    NAMED implementation per assessment rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    evidence boundary module must still resolve reportability (D-04) --
+    _resolve_reportability_status's own resolve step treats None as
+    "unresolved" and falls back to the inline config-opt-in rule, exactly
+    as an unknown implementation NAME would.
+    """
+    try:
+        from . import evidence as _evd
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import evidence as _evd  # type: ignore
+        except Exception:
+            return None
+    return _evd
 
 
 def _read_taxonomy_labels(paths: "_Paths | None" = None) -> list:
