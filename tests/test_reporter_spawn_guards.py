@@ -72,7 +72,21 @@ REAL_PYTHON3 = sys.executable
 # hot-path cost quick-260814-e7c cut; the relational property below (fewer
 # spawns than a marker-present session) is what actually polices runaway
 # per-session growth.
-NO_MARKER_SPAWN_CEILING = 13
+#
+# Phase 44 Plan 04 (EGV-17/D-15) raises it once more, to 14: the end-of-run
+# summary block gained ONE python3 heredoc that calls partition_by_attribution
+# over the tick's accumulated attribution_rows and prints the classified/
+# unclassified/unallocated reconciliation line. Same shape as the Phase 32
+# Plan 03 exemption above -- it runs ONCE PER TICK after the session loop
+# closes, not once per session, so it does not scale with fleet size. It is
+# also not avoidable in bash: Decimal-exact cost summation across an
+# unbounded row count is exactly the arithmetic split_strategies.py already
+# owns, and duplicating it in bash would defeat the single-source-of-truth
+# point of that module. A markerless single-session tick (this test's "no
+# marker" fixture) still populates attribution_rows (unclassified +
+# possibly unallocated rows), so the extra spawn lands on BOTH sides of the
+# relational comparison below and the strictly-fewer property still holds.
+NO_MARKER_SPAWN_CEILING = 14
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):
