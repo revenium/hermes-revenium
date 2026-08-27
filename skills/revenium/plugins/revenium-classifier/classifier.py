@@ -817,6 +817,70 @@ def _register_classification_impl() -> None:
 _register_classification_impl()
 
 
+def _register_valuation_impl() -> None:
+    """Register the `hours_times_rate` valuation into the valuation
+    registry (valuation.py, Phase 45 EGV-01) at import time.
+
+    Registration lives HERE, not in valuation.py, for the same reason
+    _register_llm_evaluator/_register_classification_impl register their
+    own built-ins in this module rather than in evaluators.py/
+    classification.py: the dependency runs one way, classifier imports
+    valuation, never the reverse, which is what keeps valuation.py
+    importable with no Hermes venv present.
+
+    Import failure is swallowed: a classifier that cannot register a
+    valuation implementation must still validate assessments (D-04) --
+    _validate_assessment's own resolve step treats a failed import the
+    same as an unresolved name and falls back to computing the product
+    inline, exactly as if this registration had never run.
+    """
+    try:
+        from . import valuation as _val
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import valuation as _val  # type: ignore
+        except Exception:
+            return
+
+    def _hours_times_rate(assumptions: dict, config: dict) -> "dict | None":
+        """The valuation boundary's `hours_times_rate` registrant: the SAME
+        derivation _validate_assessment has always performed, moved behind
+        the resolved-implementation call so the built-in is provably just
+        another registrant, not a hardcoded special case. `assumptions`
+        carries only already-validated, already-clamped fields (PA-15) --
+        this function trusts hours/rate are already finite and positive,
+        but re-checks defensively anyway (D-04: never raise) since the
+        contract permits any registered caller to invoke it."""
+        a = assumptions if isinstance(assumptions, dict) else {}
+        hours = a.get("estimated_hours_saved")
+        rate = a.get("assumed_loaded_rate")
+        if isinstance(hours, bool) or not isinstance(hours, (int, float)):
+            return None
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+            return None
+        return {
+            "estimated_value": round(hours * rate, 2),
+            "currency": a.get("currency"),
+        }
+
+    # Phase 45 (D-06 AMENDED): this call runs at the SAME point in module
+    # execution as _register_llm_evaluator()'s and
+    # _register_classification_impl()'s own calls above -- beside them, per
+    # this plan's action -- which is BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED
+    # (declared further down this module) exists as a global. Reuses the
+    # SAME forced literal those two functions already established for
+    # exactly this reason, rather than the not-yet-defined name -- see
+    # _register_llm_evaluator's own comment for the identical constraint.
+    # Deriving from a model's own hours-and-rate assumptions is a model
+    # estimate whatever the arithmetic, so the honest class either way is
+    # MODEL_ESTIMATED_DEMO.
+    _val.register("hours_times_rate", _hours_times_rate, "1",
+                  evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
+
+_register_valuation_impl()
+
+
 def _validate_job(job: dict) -> "dict | None":
     """Validate and normalize a job dict from the LLM response.
 
@@ -1290,17 +1354,84 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         )
         return None
 
-    # ROI-05: the value is DERIVED. A supplied estimated_value is discarded —
-    # accepting one is exactly the path that lets an unbounded total through
-    # while the bound checks guard inputs nobody used.
-    estimated_value = round(hours * rate, 2)
+    # ROI-05 / Phase 45 (EGV-01, PA-15/PA-16): the value is DERIVED, and the
+    # derivation is resolved through the valuation boundary rather than
+    # computed inline. `assumptions` -- NOT `raw` -- is what crosses the
+    # boundary: a plain dict built from locals this function has ALREADY
+    # VALIDATED AND CLAMPED above (the mechanism gate, the hours/rate bound
+    # checks, the confidence check, the value-bounds abstain gate and the
+    # currency check all already ran, before any of this). This is what
+    # keeps a registered valuation implementation from ever seeing a key
+    # the validator did not vet (PA-15).
+    inferred_role = _clamp_assessment_text(raw.get("inferred_role"), 60)
+    assumptions = {
+        "estimated_hours_saved": hours,
+        "assumed_loaded_rate": rate,
+        "currency": currency,
+        "economic_mechanism": _resolve_economic_mechanism(raw),
+        "inferred_role": inferred_role,
+    }
+
+    impl_name = _boundary_impl_name("valuation", "hours_times_rate")
+    valuation_mod = _load_valuation_module()
+    impl = valuation_mod.resolve(impl_name) if valuation_mod is not None else None
+    fall_back_to_builtin = impl is None
+    derived = None
+    if impl is None:
+        logger.warning(
+            "revenium-classifier: valuation implementation %r unresolved, "
+            "falling back to the built-in derivation", impl_name,
+        )
+    else:
+        try:
+            derived = impl(assumptions, cfg)
+        except Exception:
+            logger.warning(
+                "revenium-classifier: valuation implementation %r raised, "
+                "falling back to the built-in derivation", impl_name,
+            )
+            fall_back_to_builtin = True
+
+    if fall_back_to_builtin:
+        # A supplied estimated_value is discarded — accepting one is
+        # exactly the path that lets an unbounded total through while the
+        # bound checks guard inputs nobody used.
+        estimated_value = round(hours * rate, 2)
+    else:
+        # Phase 45 (T-45-13): the caller RE-CHECKS a registered
+        # implementation's returned amount at all -- registration is
+        # trusted code for the purpose of declaring an identity, but it is
+        # not trusted to widen a bound the operator configured, and an
+        # implementation that can hand back an unbounded number would make
+        # the input bound checks above guard the wrong quantity. The same
+        # reasoning evaluators.py records for discarding a model-supplied
+        # total. The comparison is made against the ceiling ROUNDED to the
+        # same two decimal places the derivation itself rounds to, so an
+        # amount exactly AT the ceiling is accepted rather than lost to a
+        # rounding artefact.
+        amount = (
+            _finite_number(derived.get("estimated_value"))
+            if isinstance(derived, dict) else None
+        )
+        returned_currency = derived.get("currency") if isinstance(derived, dict) else None
+        ceiling = round(max_hours * max_rate, 2)
+        if amount is None or returned_currency != currency or not (0 < amount <= ceiling):
+            # Distinct wording from the hours/rate bound abstention above,
+            # so this abstention reason is distinguishable from that one.
+            logger.warning(
+                "revenium-classifier: assessment abstained, valuation "
+                "implementation %r returned an invalid or out-of-bounds "
+                "value: %r", impl_name, derived,
+            )
+            return None
+        estimated_value = amount
 
     return {
         "estimated_value": estimated_value,
         "currency": currency,
         "basis": _clamp_assessment_text(raw.get("basis"), 200),
         "assumptions": {
-            "inferred_role": _clamp_assessment_text(raw.get("inferred_role"), 60),
+            "inferred_role": inferred_role,
             "estimated_hours_saved": hours,
             "assumed_loaded_rate": rate,
         },
@@ -2436,6 +2567,28 @@ def _resolve_classification_impl(paths: "_Paths"):
     mod = _load_classification_module()
     impl = mod.resolve(name) if mod is not None else None
     return impl, name
+
+
+def _load_valuation_module():
+    """Import valuation.py (Phase 45, EGV-01), the SAME two-step import
+    dance _register_valuation_impl uses at import time, reused here at
+    _validate_assessment's own resolve step, which resolves a NAMED
+    implementation per assessment rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    valuation boundary module must still validate assessments (D-04) --
+    _validate_assessment's own resolve step treats None as "unresolved"
+    and falls back to computing the product inline, exactly as an unknown
+    implementation NAME would.
+    """
+    try:
+        from . import valuation as _val
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import valuation as _val  # type: ignore
+        except Exception:
+            return None
+    return _val
 
 
 def _read_taxonomy_labels(paths: "_Paths | None" = None) -> list:
