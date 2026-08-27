@@ -71,6 +71,32 @@ no ROI ratio is ever emitted — in the full schema below.
 The full schema is in
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md).
 
+### Opt-in surfaces and how they compose (D-09, EGV-23)
+
+Everything under `llmOutcomeEvaluation` — including the `boundaries` object
+below, which selects an implementation for one of its assessment steps — is
+**experimental**. Five surfaces make up the whole opt-in feature, each
+governing a genuinely different thing:
+
+| Surface | Governs |
+|---|---|
+| `enabled` | Whether evaluation happens at all. |
+| `experimentalReportEstimates` | Whether a computed value is *reportable* to Revenium — independent of `enabled`, because a value can be computed and withheld from the wire. |
+| `boundaries` | Which registered implementation serves each pluggable contract (classification, valuation, evidence). |
+| `costs` | Operator-supplied inputs that net against a computed estimate. |
+| `studyId` / `studyVersion` | Reference an impact study; referencing one never changes an assessment's own evidence class. |
+
+These five are **independent and compose deliberately — there is no master
+flag, and none of them will be renamed.**
+
+No master flag exists because adding a new gate to the billing path risks
+becoming a second way to disable metering, and would conflate fail-open
+enrichment with deterministic budget enforcement — the exact conflation
+EGV-22's own clause forbids. No surface will be renamed because `enabled` and
+`experimentalReportEstimates` are already set in live installs; renaming
+either is a breaking config change for exactly the installs this milestone
+promises unchanged behaviour to.
+
 ### Pluggable boundaries (experimental)
 
 ```json
