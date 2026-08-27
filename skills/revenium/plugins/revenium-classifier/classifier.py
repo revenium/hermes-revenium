@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import inspect
+import ipaddress
 import json
 import math
 import logging
@@ -26,6 +27,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 # Lazy import — keeps the module importable in the test environment where
 # Hermes' venv is not available. Tests patch classifier.call_llm directly.
@@ -1622,6 +1624,144 @@ NARRATIVE_CLAMP_BYTES = 500
 # job-assessment narrative field) that must be able to diverge later without
 # one edit silently changing the other.
 FAILURE_REASON_CLAMP_BYTES = 500
+
+# Phase 46 (EGV-21, D-06/D-07/D-12): the address-class vocabulary. Exactly
+# four values -- a fifth "unknown" bucket was explicitly rejected (D-12) so
+# that "we could not determine this" (unset) is never confusable with a
+# genuine classification. ADDRESS_CLASS_UNSET is exported so callers never
+# hand-spell the literal.
+ADDRESS_CLASS_UNSET = "unset"
+_ADDRESS_CLASSES = frozenset({"loopback", "private", "public", ADDRESS_CLASS_UNSET})
+
+# Phase 46 (EGV-21): the resolved inference provider name, clamped in
+# serialized bytes via _clamp_assessment_text -- an operator-environment
+# string (e.g. "openrouter", "openai"), never the raw base_url it was
+# derived alongside.
+INFERENCE_PROVIDER_MAX_BYTES = 32
+
+
+def _address_class(base_url: "str | None") -> str:
+    """loopback | private | public | unset -- derived, never the raw base_url.
+
+    Phase 46 (EGV-21, D-06/D-07): the skill may observe at most where
+    inference was CONFIGURED to go; it never asserts where data stayed, was
+    logged, or was retained (D-06). This function converts a base_url into
+    one of exactly four coarse facts and nothing else -- the input string
+    itself is never returned, stored, or logged by any caller.
+
+    No DNS resolution is performed anywhere in this function, deliberately:
+    (1) a hostname-resolution syscall is a blocking network call and this
+    classifier runs inside an asyncio event loop (run_classification_async,
+    D-04's "MUST NEVER raise" path) -- every other blocking-I/O concern in
+    this module is wrapped in asyncio.to_thread or avoided outright, and a
+    bare blocking DNS call here would reintroduce exactly that hazard; (2) even a
+    successful resolution is only a snapshot at record time and is not a
+    guarantee about the connection actually used for any given call; (3)
+    defaulting an unresolved/unverifiable hostname to "public" is the
+    conservative direction -- classifying an unverified host as loopback or
+    private would itself be the unverified locality claim EGV-21 forbids, so
+    an unresolved symbolic hostname always takes the safe (public) branch.
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return ADDRESS_CLASS_UNSET
+
+    try:
+        parts = urlsplit(raw)
+        # Unix domain sockets are inherently local by construction.
+        if parts.scheme in ("unix", "http+unix"):
+            return "loopback"
+
+        host = parts.hostname
+        if host is None and "://" not in raw:
+            # Bare "host:port" (or a bare hostname) with no scheme -- urlsplit
+            # only populates .hostname when it sees a netloc ("//"). Without
+            # this retry, urlsplit("localhost:8080").hostname is None
+            # (misparsed as scheme="localhost"), and the single most common
+            # bare host:port config shape would silently fall through to
+            # "unset".
+            host = urlsplit("//" + raw).hostname
+
+        if not host:
+            return ADDRESS_CLASS_UNSET
+
+        host = unquote(host)
+        if host == "localhost":
+            return "loopback"
+
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            # A symbolic hostname we did not resolve. No DNS lookup is
+            # performed (see the docstring above) -- an unverified hostname
+            # defaults to the safe direction (public), never loopback/private.
+            return "public"
+
+        # Order matters: loopback addresses are ALSO is_private == True, so
+        # the more specific class must be tested first.
+        if ip.is_loopback:
+            return "loopback"
+        if ip.is_private:  # covers RFC1918, link-local (fe80::), unspecified
+            return "private"
+        return "public"
+    except Exception:
+        # urlsplit itself can raise (e.g. an unbalanced "[" in the netloc,
+        # ValueError: Invalid IPv6 URL). Garbage input must never raise out
+        # of this function (behavior 7) -- an unparseable string is exactly
+        # as unverifiable as an unresolved hostname, so it takes the same
+        # safe (public) direction, never loopback/private/unset.
+        return "public"
+
+
+def _resolve_inference_locality(paths: "_Paths") -> "tuple[str, str]":
+    """Return (provider, address_class) for the profile owning `paths`.
+
+    Phase 46 (EGV-21, D-06/D-07). AMEND-D-07: every call_llm(...) site in
+    this module deliberately omits base_url=/provider=/model= kwargs
+    (ROI-07 -- that omission is what keeps the call on the operator's
+    configured provider), and the aux client's response object never
+    surfaces a .base_url back to this module -- so, unlike EGV-08's
+    served-model (sourced from the response), the address class CANNOT be
+    sourced from anything this module observes about the call itself. The
+    only available source is a STATIC, profile-scoped read of Hermes'
+    config.yaml `model:` block. This records what the operator CONFIGURED,
+    not what the SDK actually connected to for this particular call --
+    credential pools, fallback_providers, and mid-flight
+    healed_model/refreshed_model reroutes are invisible to it. The address
+    class therefore reflects the configured model.base_url, not a verified
+    connection, and a mid-flight provider failover is not observed by this
+    field. This limitation must be stated in docs (plan 46-06), not silently
+    absorbed.
+
+    `paths` is the _Paths object _paths_for_session already resolves, so a
+    multiplexed gateway reads the OWNING profile's config.yaml rather than
+    the process-level one -- never read HERMES_HOME / "config.yaml" directly
+    from this function.
+
+    Stdlib-only, re-based extraction (no PyYAML -- the install-hooks.sh:
+    195-236 precedent for reading/patching this exact file shape). The raw
+    base_url is passed through _address_class and then DISCARDED: it is
+    never returned, stored in an attribute, logged, or included in any
+    exception message (D-07 -- only a derived class may leave the machine).
+
+    Fail-open (D-04), matching _paths_for_session's own posture: any error,
+    including a missing or unreadable config.yaml, returns
+    ("", ADDRESS_CLASS_UNSET) rather than raising.
+    """
+    try:
+        text = (paths.hermes_home / "config.yaml").read_text(encoding="utf-8")
+        model_block_m = re.search(r"(?m)^model:[ \t]*\n((?:[ \t]+.*\n?)*)", text)
+        block = model_block_m.group(1) if model_block_m else ""
+        base_url_m = re.search(r"(?m)^[ \t]+base_url:[ \t]*(.+?)[ \t]*$", block)
+        provider_m = re.search(r"(?m)^[ \t]+provider:[ \t]*(.+?)[ \t]*$", block)
+        raw_base_url = base_url_m.group(1).strip().strip("'\"") if base_url_m else ""
+        raw_provider = provider_m.group(1).strip().strip("'\"") if provider_m else ""
+        address_class = _address_class(raw_base_url)
+        provider = _clamp_assessment_text(raw_provider, INFERENCE_PROVIDER_MAX_BYTES)
+        return provider, address_class
+    except Exception:
+        return "", ADDRESS_CLASS_UNSET
+
 
 # Declared-only defaults (D-06: every EGV-04 field family is declared even
 # where only a later phase implements its semantics -- a field is never
