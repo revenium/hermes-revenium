@@ -166,6 +166,11 @@ class RepositoryTests(unittest.TestCase):
             # registry: zero registrants shipped, plus a fixture proving the
             # seam accepts one.
             SKILL / 'plugins' / 'revenium-classifier' / 'cohort_impact.py',
+            # Phase 45 Plan 03 (EGV-01, D-02 AMENDED) — the Revenium
+            # reporting contract: what any reporter must emit, no live
+            # adapter, proven by a conformance test against the pinned
+            # jobs-outcome golden.
+            SKILL / 'plugins' / 'revenium-classifier' / 'reporting.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
