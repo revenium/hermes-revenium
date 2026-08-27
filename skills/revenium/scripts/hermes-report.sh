@@ -1412,41 +1412,23 @@ import json
 import os
 from pathlib import Path
 
-# Phase 46 (D-10): byte-safe clamp, duplicated from
-# classifier.py::_clamp_assessment_text -- this is a standalone python3
-# subprocess body inside a bash heredoc and cannot import that module, and
-# this repo's convention is deliberate duplication for isolation between
-# the fail-open in-session code and the out-of-process reporter. Measures
-# SERIALIZED BYTES (json.dumps ensure_ascii=True), not characters, since a
-# character clamp under-counts by up to 12x for non-ASCII text. Binary
-# search over code-point slices so a surrogate pair is never split.
 def _clamp_bytes(value, limit):
-    if not isinstance(value, str):
-        value = '' if value is None else str(value)
-
-    def _serialized_len(s):
-        return len(json.dumps(s, ensure_ascii=True).encode('utf-8')) - 2
-
-    if _serialized_len(value) <= limit:
-        return value
+    # D-10 byte-safe clamp; mirrors classifier.py::_clamp_assessment_text (duplicated -- this heredoc cannot import it).
+    def _slen(s): return len(json.dumps(s, ensure_ascii=True).encode('utf-8')) - 2
+    if _slen(value) <= limit: return value
     lo, hi = 0, len(value)
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if _serialized_len(value[:mid]) <= limit:
-            lo = mid
-        else:
-            hi = mid - 1
+        if _slen(value[:mid]) <= limit: lo = mid
+        else: hi = mid - 1
     return value[:lo]
 
 markers_dir = os.environ.get('MARKERS_DIR', '')
 sid = os.environ.get('SID', '')
-
-if not markers_dir or not sid:
-    raise SystemExit(0)
+if not markers_dir or not sid: raise SystemExit(0)
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
-if not marker_path.is_file():
-    raise SystemExit(0)
+if not marker_path.is_file(): raise SystemExit(0)
 
 JOB_REQUIRED = ("agentic_job_id", "job_type", "status")
 _bad_chars = (':', ' ', '\t', '\n', '\r')
@@ -1484,15 +1466,12 @@ try:
             for _bad in ('|', '\n', '\r'):
                 job_name = job_name.replace(_bad, '_')
                 job_type = job_type.replace(_bad, '_')
-            # Phase 10: emit status and marker ts as 4th and 5th pipe fields
-            # for the outcome-queue accumulator (OUTCOME-05, D-07).
+            # Phase 10: emit status and marker ts as 4th/5th pipe fields for the outcome-queue accumulator (OUTCOME-05, D-07).
             status = m.get('status', '') or ''
             for _bad in ('|', '\n', '\r'):
                 status = status.replace(_bad, '_')
             marker_ts = m.get('ts', 0) or 0
-            # Phase 24 (quick-260531-n4i): carry failure_reason (FAILED arcs only)
-            # so the post-loop outcome stage can ship it as --metadata. Free-text
-            # prose — strip pipe/newline/CR (IFS='|' transport safety) and cap length.
+            # Phase 24 (quick-260531-n4i): carry failure_reason (FAILED arcs only) for --metadata; strip IFS chars, cap length.
             failure_reason = m.get('failure_reason', '') or ''
             if not isinstance(failure_reason, str):
                 failure_reason = ''
@@ -1506,19 +1485,14 @@ PY
       )
 
       if [[ -n "${precheck_job_rows}" ]]; then
-        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip
-        # BOTH the outcome queue push and the jobs create call. The root's ledger
-        # entry is the single create per arc; the root's session loop ships the
-        # outcome exactly once. Top-level sessions take the v1.3 path byte-identically.
+        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip BOTH the outcome queue push and the jobs
+        # create call -- the root's ledger entry is the single create per arc; outcome ships once; top-level takes the v1.3 path.
         if [[ "${root_sid}" == "${sid}" ]]; then
           local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason
           while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason; do
             [[ -z "${precheck_clean_job_id}" ]] && continue
 
-            # Phase 10: push to outcome queue for every job row — regardless of create outcome.
-            # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
-            # Push before the create-gated continue so already-created jobs are also queued.
-            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs; field 6 (sid) is Phase 38's addition (ROI-10, see below).
+            # Phase 10: push every row to the outcome queue regardless of create outcome (JOB:<id>:outcome: gate dedupes; field 6 = sid, Phase 38 ROI-10).
             job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
