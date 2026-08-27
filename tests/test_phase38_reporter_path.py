@@ -1793,6 +1793,23 @@ class TestPhase38Canary(unittest.TestCase):
     # be (D-05's own prohibition).
     _TRANSCRIPT_SOURCE_EXEMPT = ('state.db',)
 
+    # Task 3 (D-04): the byte-tuning lever tests/test_compat_jobs_outcome.py
+    # ::TestCompatJobsOutcomeMetadataTruncated already proved against this
+    # SAME `outcome_metadata` heredoc -- reused verbatim (not re-derived) so
+    # this class's over-ceiling fixture lands pre-drop ~4300-4400 bytes
+    # (over the 4096 ceiling) and post-tier-1-drop ~3700-3800 bytes (under
+    # it, so tier 2 never fires). json.dumps' default ensure_ascii=True
+    # escapes one astral codepoint to a 12-ASCII-byte \\uXXXX\\uXXXX
+    # surrogate pair, turning a 58-CHARACTER slice into ~696 wire bytes.
+    _P38_TRUNC_EMOJI = '\U0001F600'
+    _P38_TRUNC_MODEL_CHARS = 58
+    _P38_TRUNC_EVALUATOR_CHARS = 58
+    _P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS = 58
+    _P38_TRUNC_INFERENCE_PROVIDER_CHARS = 29
+    _P38_TRUNC_EVALUATOR_VERSION_CHARS = 15
+    _P38_TRUNC_BOUNDS_SOURCE_CHARS = 15
+    _P38_TRUNC_SOURCE_CHARS = 61
+
     def tearDown(self):
         # _load_classifier touches REVENIUM_STATE_DIR/MARKERS_DIR/CONFIG_FILE
         # as PROCESS env vars pointing into this test's tmpdir, which is
@@ -2446,6 +2463,314 @@ class TestPhase38Canary(unittest.TestCase):
             f'got: {self._TRANSCRIPT_SOURCE_EXEMPT!r}',
         )
         self.assertEqual(self._TRANSCRIPT_SOURCE_EXEMPT, ('state.db',))
+
+    def test_evaluator_prose_never_reaches_metadata_argv(self):
+        """Task 3 (D-04): the SAME four EVALUATOR-PROSE canaries this class
+        already proves PRESENT in the sidecar
+        (test_canary_evaluator_prose_persists_clamped_and_ifs_clean) are
+        proven, here, ABSENT from the wire --metadata argv -- a second,
+        complementary claim about the SAME values in a DIFFERENT carrier,
+        not the absence-vs-presence collision this class's other canary
+        comments warn against. Also pins the exclusion STRUCTURALLY (the
+        forwarder's literal record.get(...) keys contain none of the four
+        prose field names) and proves the truncation marker itself is
+        VISIBLE to a sweep when a record actually exceeds the ceiling."""
+        prose_canaries = (
+            self.EVALUATOR_BASIS_CANARY, self.EVALUATOR_ROLE_CANARY,
+            self.EVALUATOR_OUTCOME_CANARY, self.EVALUATOR_COUNTERFACTUAL_CANARY,
+        )
+
+        # Test 3 (behavior 3), checked FIRST since it needs no driven run:
+        # pinned structurally, not just behaviourally -- the forwarder's
+        # own literal record.get(...) key set (a LOWER BOUND -- see
+        # _extract_forwarder_record_keys's own docstring, this is one of
+        # two independent claims here, not a complete inventory) contains
+        # none of the four prose field names.
+        script_text = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
+        keys = _extract_forwarder_record_keys(script_text)
+        self.assertIsNotNone(
+            keys,
+            '_extract_forwarder_record_keys could not find the outcome_metadata '
+            'heredoc -- the anchor moved and this structural claim needs updating',
+        )
+        for field in (
+            'basis', 'candidate_downstream_outcome',
+            'counterfactual_assumption', 'inferred_role',
+        ):
+            self.assertNotIn(
+                field, keys,
+                f'{field} must never be a literal forwarder key (LOWER BOUND: '
+                'see _extract_forwarder_record_keys\'s own docstring)',
+            )
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-prose-argv-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            sid = 'p38-canary-prose-argv-sid-001'
+            job_id = 'p38-canary-prose-argv-job-001'
+
+            _job, _marker_path, sidecar_path = self._attach_and_write(
+                sid, job_id, state_dir, markers_dir,
+            )
+            self.assertIsNotNone(sidecar_path)
+            sidecar_text = sidecar_path.read_text()
+
+            # Test 1 (behavior 1): presence, IFS-clean, and clamped is
+            # already proven per-field by
+            # test_canary_evaluator_prose_persists_clamped_and_ifs_clean;
+            # this minimal re-check is what makes the ABSENCE-from-argv
+            # claim below meaningful -- a canary the sidecar never
+            # received would trivially be "absent" from argv too.
+            for canary in prose_canaries:
+                self.assertIn(
+                    canary, sidecar_text,
+                    f'{canary} must reach the sidecar or this test proves nothing',
+                )
+
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+            existing = open(marker_file).read()
+            with open(marker_file, 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(existing)
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+            result = subprocess.run(
+                ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+                env=base_env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'hermes-report.sh failed: {result.stdout}{result.stderr}',
+            )
+
+            jobs_text = open(jobs_log).read() if os.path.exists(jobs_log) else ''
+            self.assertTrue(
+                jobs_text, 'jobs.log must be non-empty or this absence claim proves nothing',
+            )
+            # Test 2 (behavior 2): the envelope structurally excludes every
+            # free-prose field -- none of the four canaries reach the
+            # captured jobs create/outcome argv (incl. --metadata).
+            for canary in prose_canaries:
+                self.assertNotIn(
+                    canary, jobs_text,
+                    f'{canary} must never reach the --metadata argv',
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # _load_classifier (used by _attach_and_write above) mutates
+        # os.environ directly (REVENIUM_MARKERS_DIR et al.), tracked for
+        # restore only at this test's own tearDown -- restoring HERE,
+        # before Part B's independent driven tick builds its own base_env
+        # from **os.environ, is required: without it, Part B's subprocess
+        # would inherit Part A's now-deleted markers_dir and silently find
+        # no session to report (the exact env-bleed trap this class's own
+        # module docstring documents for TestPhase38ReporterPath/
+        # TestPhase38MultiTick, encountered here for the first time WITHIN
+        # a single test method rather than across classes).
+        _restore_env()
+
+        # Test 4 (behavior 4): the truncation state itself must be VISIBLE
+        # to the sweep, not an unswept corner of it -- a separate,
+        # deliberately over-ceiling driven tick.
+        self._assert_truncated_tick_carries_metadata_truncated_and_no_prose_canary(
+            prose_canaries,
+        )
+
+    def _assert_truncated_tick_carries_metadata_truncated_and_no_prose_canary(self, prose_canaries):
+        """Task 3, Test 4: a job-assessments sidecar sized (via the SAME
+        emoji-padding lever tests/test_compat_jobs_outcome.py's
+        TestCompatJobsOutcomeMetadataTruncated proved against this exact
+        heredoc) to exceed _METADATA_CEILING_BYTES, carrying the four
+        EVALUATOR-PROSE canaries in its own non-forwarded fields (basis,
+        candidate_downstream_outcome, counterfactual_assumption,
+        assumptions.inferred_role). Drives one real hermes-report.sh tick
+        and asserts the captured `jobs outcome` --metadata carries
+        metadata_truncated=true (Phase 46's new transport state is visible
+        to this sweep) while still carrying none of the four canaries."""
+        emoji = self._P38_TRUNC_EMOJI
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-prose-trunc-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            sid = 'p38-canary-prose-trunc-sid-001'
+            job_id = 'p38-canary-prose-trunc-job-001'
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6',
+                'source': emoji * self._P38_TRUNC_SOURCE_CHARS,
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            job_marker = {
+                'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+                'agentic_job_id': job_id, 'job_name': 'Prose Truncation Canary Job',
+                'job_type': 'code_review', 'status': 'SUCCESS',
+            }
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            basis_canary, role_canary, outcome_canary, cf_canary = prose_canaries
+            # D-10: the job-assessments SIDECAR is the ONLY value/provenance
+            # source the outcome stage reads. Every character-sliced
+            # provenance field is emoji-padded to its forwarder's own
+            # slice length (mirrors
+            # _build_over_ceiling_sidecar_record in
+            # tests/test_compat_jobs_outcome.py); basis/
+            # candidate_downstream_outcome/counterfactual_assumption/
+            # assumptions.inferred_role carry their OWN canaries raw --
+            # these four are never forwarded at all (Test 3 above), so
+            # this record does not need to run them through
+            # _clamp_assessment_text; the earlier real-classifier-driven
+            # scenario in this same test already proves clamping.
+            record = {
+                'kind': 'job_assessment', 'ts': 1715516002.5,
+                'agentic_job_id': job_id, 'assessment_id': f'{job_id}:0',
+                'assessment_schema_version': 1, 'taxonomy_version': 1,
+                'prompt_version': 1, 'policy_version': 1,
+                'model': emoji * self._P38_TRUNC_MODEL_CHARS,
+                'inference_provider': emoji * self._P38_TRUNC_INFERENCE_PROVIDER_CHARS,
+                'inference_address_class': 'private',
+                'value_low': 100.25, 'value_base': 200.5, 'value_high': 300.75,
+                'bounds_source': emoji * self._P38_TRUNC_BOUNDS_SOURCE_CHARS,
+                'currency': 'USD', 'estimated_value': 200.5,
+                'evaluator': emoji * self._P38_TRUNC_EVALUATOR_CHARS,
+                'evaluator_version': emoji * self._P38_TRUNC_EVALUATOR_VERSION_CHARS,
+                'confidence': 0.789, 'evidence_class': 'MODEL_ESTIMATED_DEMO',
+                'assumptions': {
+                    'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0,
+                    'inferred_role': role_canary + '|role\nbreak\r' + ('Y' * 20),
+                },
+                'economic_mechanism': 'augmentation_capacity_expansion',
+                'net_value': 150.25,
+                'supplied_costs': {
+                    'human_review': 10.0, 'rework_or_error': 5.0,
+                    'integration': 2.0, 'training_or_change': 1.0,
+                },
+                'cost_coverage': {
+                    'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    'known_zero': [], 'unknown': [], 'excluded': ['metered_ai_cost'],
+                },
+                'double_counting_group': emoji * self._P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS,
+                'reportability_status': 'reportable',
+                'basis': basis_canary + '|basis\nbreak\r' + ('Z' * 20),
+                'candidate_downstream_outcome': outcome_canary + '|outcome\nbreak\r' + ('W' * 20),
+                'counterfactual_assumption': cf_canary + '|cf\nbreak\r' + ('V' * 20),
+            }
+            with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
+                f.write(json.dumps(record, separators=(',', ':')) + '\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+            result = subprocess.run(
+                ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+                env=base_env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'hermes-report.sh failed: {result.stdout}{result.stderr}',
+            )
+
+            jobs_text = open(jobs_log).read() if os.path.exists(jobs_log) else ''
+            outcome_argv = None
+            for line in jobs_text.splitlines():
+                argv = shlex.split(line)
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome':
+                    outcome_argv = argv
+                    break
+            self.assertIsNotNone(
+                outcome_argv, f'expected a "jobs outcome" invocation, got: {jobs_text!r}',
+            )
+            meta = None
+            for i, tok in enumerate(outcome_argv):
+                if tok == '--metadata' and i + 1 < len(outcome_argv):
+                    meta = json.loads(outcome_argv[i + 1])
+            self.assertIsNotNone(meta, f'expected --metadata in {outcome_argv!r}')
+            self.assertIs(
+                meta.get('metadata_truncated'), True,
+                'this record was sized to exceed the ceiling -- if metadata_truncated '
+                f'is absent, the truncation path is invisible to this sweep, got: {meta!r}',
+            )
+
+            for canary in prose_canaries:
+                self.assertNotIn(
+                    canary, jobs_text,
+                    f'{canary} must never reach the argv even under truncation',
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _load_llm_evaluator_classifier(self, state_dir, markers_dir):
         """Load the classifier configured for the built-in `llm` evaluator --
