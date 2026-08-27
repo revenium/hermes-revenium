@@ -77,8 +77,8 @@ The full schema is in
 {
   "boundaries": {
     "classification": "llm",
-    "valuation": "llm",
-    "evidence": "llm"
+    "valuation": "hours_times_rate",
+    "evidence": "config_opt_in"
   }
 }
 ```

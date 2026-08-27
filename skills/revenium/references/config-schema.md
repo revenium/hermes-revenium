@@ -265,8 +265,8 @@ non-built-in implementation for one of these three, by the name it registered un
 {
   "boundaries": {
     "classification": "llm",
-    "valuation": "llm",
-    "evidence": "llm"
+    "valuation": "hours_times_rate",
+    "evidence": "config_opt_in"
   }
 }
 ```
@@ -274,8 +274,8 @@ non-built-in implementation for one of these three, by the name it registered un
 | field | default | purpose |
 |---|---|---|
 | `classification` | `"llm"` | Which registered classifier resolves BOTH turn-level `task_type` labelling and job/arc inference (`classification.py`). The built-in `llm` registrant is the naked-LLM classifier this skill has always shipped; `keyword_classification_fixture` is a shipped, deterministic, non-LLM alternative that makes no model call. |
-| `valuation` | `"llm"` | Which registered implementation resolves an outcome's economic valuation. |
-| `evidence` | `"llm"` | Which registered implementation resolves an assessment's evidence grading. |
+| `valuation` | `"hours_times_rate"` | Which registered implementation resolves an outcome's economic valuation. The built-in `hours_times_rate` registrant is the `hours x rate` derivation this skill has always shipped; `rate_card_valuation_fixture` is a shipped, operator-configured alternative that reads a role rate card and makes no model call. |
+| `evidence` | `"config_opt_in"` | Which registered implementation resolves an assessment's reportability. The built-in `config_opt_in` registrant is the config-opt-in rule this skill has always applied; `confirmation_workflow_evidence_fixture` is a shipped alternative modelling an explicit customer-confirmation workflow. |
 
 **Fail-open, every way.** The `boundaries` object itself, any one of its members, an empty
 string value, or a name that does not resolve to a registered implementation — all four fall
