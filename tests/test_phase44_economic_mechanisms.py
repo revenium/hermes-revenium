@@ -1089,6 +1089,30 @@ class ReporterStripTests(unittest.TestCase):
         self.assertIn('supplied_costs', meta)
         self.assertIn('cost_coverage', meta)
 
+    def test_double_counting_group_ships_on_a_candidate_row(self):
+        # Plan 44-03: unlike net_value, double_counting_group is caller-
+        # supplied structural identity, not model output, so it ships
+        # regardless of reportability_status -- proven end-to-end here
+        # exactly as supplied_costs/cost_coverage already are above.
+        record = _cost_sidecar_record(
+            'rs44-job-007', reportability_status='candidate',
+            double_counting_group='rs44-sid-007')
+        argv = self._run_one_outcome('rs44-sid-007', 'rs44-job-007', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('net_value', meta)
+        self.assertIn('double_counting_group', meta)
+        self.assertEqual(meta['double_counting_group'], 'rs44-sid-007')
+
+    def test_double_counting_group_ships_on_a_reportable_row(self):
+        record = _cost_sidecar_record(
+            'rs44-job-008', reportability_status='reportable',
+            double_counting_group='rs44-sid-008')
+        argv = self._run_one_outcome('rs44-sid-008', 'rs44-job-008', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIn('net_value', meta)
+        self.assertIn('double_counting_group', meta)
+        self.assertEqual(meta['double_counting_group'], 'rs44-sid-008')
+
     def test_evidence_class_rejected_row_still_ships_costs_not_net_value(self):
         record = _cost_sidecar_record(
             'rs44-job-003', reportability_status='reportable',
@@ -1227,6 +1251,159 @@ class CostCategoryDriftTests(unittest.TestCase):
             'classifier.py and hermes-report.sh have drifted on the '
             'four-cost-category tuple, or their declared order differs',
         )
+
+
+# ---------------------------------------------------------------------------
+# Plan 44-03 — EGV-16 (double-counting group id, no allocation) and EGV-17
+# (a failed/cancelled job still carries its cost, never its evaluator).
+# ---------------------------------------------------------------------------
+
+import unittest.mock  # noqa: E402  (mid-file import matches this repo's
+# established convention -- see tests/test_phase42_assessment_contract.py's
+# own mid-file `import unittest.mock` for the precedent this follows)
+
+
+class GroupIdTests(unittest.TestCase):
+    """EGV-16 (D-12/D-13) -- the double_counting_group id, driven through
+    the REAL run_classification_async job-inference loop (not merely
+    through _build_job_assessment in isolation), so this proves the id
+    that actually lands on disk for two jobs inferred from one session's
+    transcript, not just that the constructor accepts a parameter.
+
+    PA-08 (scope, stated here verbatim in substance so a future reader
+    extending this class does not write a cross-session assertion that
+    cannot pass): the group id groups jobs inferred from ONE session's
+    transcript ONLY, because _infer_jobs_via_llm returns a list and one
+    transcript can legitimately yield several jobs serving one outcome.
+    It does NOT group a subagent's jobs with its root's -- job inference
+    (classifier.py Step 7) only runs when root_sid == session_id, so a
+    subagent session never independently reaches job inference and
+    therefore never produces a second assessment record to relate to a
+    root session's. Do not extend this class with a real-subagent-dispatch
+    case expecting two grouped records across sessions; no second record
+    would exist to compare against, and the assertion would fail by
+    construction under this phase's own scope.
+    """
+
+    def tearDown(self):
+        _restore_env()
+
+    def _run_jobs(self, tmpdir, sid, jobs):
+        state_dir = os.path.join(tmpdir, 'state')
+        os.makedirs(state_dir, exist_ok=True)
+        config_file = os.path.join(state_dir, 'config.json')
+        with open(config_file, 'w') as f:
+            json.dump({'llmOutcomeEvaluation': {
+                'enabled': True, 'evaluator': 'p44-group-stub', 'currency': 'USD',
+            }}, f)
+        env = {'REVENIUM_STATE_DIR': state_dir, 'REVENIUM_CONFIG_FILE': config_file}
+        c, ev = _load_classifier_package(env)
+        ev.register('p44-group-stub', lambda job, transcript, cfg: {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'engineer', 'estimated_hours_saved': 1.0,
+            'assumed_loaded_rate': 100.0, 'currency': 'USD',
+            'basis': 'stub', 'confidence': 0.6,
+        })
+
+        task_resp = unittest.mock.MagicMock()
+        task_resp.choices = [unittest.mock.MagicMock()]
+        task_resp.choices[0].message.content = 'code_review'
+        job_array_resp = unittest.mock.MagicMock()
+        job_array_resp.choices = [unittest.mock.MagicMock()]
+        job_array_resp.choices[0].message.content = json.dumps(jobs)
+
+        with unittest.mock.patch.object(c, 'call_llm', side_effect=[task_resp, job_array_resp]), \
+             unittest.mock.patch.object(c, '_read_session_transcript',
+                                         return_value='user: fix\nassistant: done'):
+            asyncio.run(c.run_classification_async(
+                session_id=sid, message='fix the bug', response='fixed',
+            ))
+
+        assessments_dir = Path(state_dir) / 'job-assessments'
+        records = []
+        for path in sorted(assessments_dir.glob('*.jsonl')):
+            for line in path.read_text().splitlines():
+                if line.strip():
+                    records.append(json.loads(line))
+        return records
+
+    def test_two_jobs_from_one_session_share_the_group_id(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase44-group-')
+        try:
+            sid = 'p44-group-sid-001'
+            jobs = [
+                {'agentic_job_id': 'job-a', 'job_name': 'a',
+                 'job_type': 'bug_fix', 'status': 'SUCCESS'},
+                {'agentic_job_id': 'job-b', 'job_name': 'b',
+                 'job_type': 'bug_fix', 'status': 'SUCCESS'},
+            ]
+            records = self._run_jobs(tmpdir, sid, jobs)
+            self.assertEqual(len(records), 2, records)
+            group_ids = {r['double_counting_group'] for r in records}
+            self.assertEqual(
+                len(group_ids), 1,
+                f'expected one shared group id across both jobs, got {group_ids!r}',
+            )
+            self.assertEqual(group_ids, {sid})
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_single_job_session_carries_a_non_empty_group_id(self):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase44-group-single-')
+        try:
+            sid = 'p44-group-sid-002'
+            jobs = [
+                {'agentic_job_id': 'job-only', 'job_name': 'only',
+                 'job_type': 'bug_fix', 'status': 'SUCCESS'},
+            ]
+            records = self._run_jobs(tmpdir, sid, jobs)
+            self.assertEqual(len(records), 1, records)
+            self.assertEqual(records[0]['double_counting_group'], sid)
+            self.assertNotEqual(records[0]['double_counting_group'], '')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class NoAllocationTests(unittest.TestCase):
+    """D-12 -- the skill marks the relationship rather than inventing a
+    split. An allocation fraction is a causal claim, and a naked LLM does
+    not get to make those -- this asserts, over the REAL record's key
+    set, that no key names an allocation, fraction, share, weight,
+    percentage or ordinal concept. The executable form of D-12's refusal,
+    not merely a prose promise."""
+
+    _FORBIDDEN_SUBSTRINGS = ('alloc', 'fraction', 'share', 'weight', 'percent', 'ordinal')
+
+    def tearDown(self):
+        _restore_env()
+
+    def test_record_key_set_names_no_allocation_concept(self):
+        mod = _load_classifier({})
+        raw = {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'engineer', 'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 100.0, 'currency': 'USD',
+            'basis': 'time avoided', 'confidence': 0.5,
+        }
+        assessment = mod._validate_assessment(raw, {}, 'stub', 'v1')
+        self.assertIsNotNone(assessment)
+        valid = {
+            'agentic_job_id': 'noalloc-job-001', 'job_type': 'bug_fix', 'status': 'SUCCESS',
+        }
+        record = mod._build_job_assessment(
+            valid, assessment, raw, {}, 'stub', 'v1',
+            double_counting_group='noalloc-sid-001',
+        )
+        self.assertIsNotNone(record)
+        for key in record:
+            lowered = key.lower()
+            for forbidden in self._FORBIDDEN_SUBSTRINGS:
+                self.assertNotIn(
+                    forbidden, lowered,
+                    f'record key {key!r} names an allocation concept '
+                    f'({forbidden!r}) -- D-12 forbids an allocation fraction; '
+                    'the skill marks the relationship, it does not invent a split',
+                )
 
 
 if __name__ == '__main__':

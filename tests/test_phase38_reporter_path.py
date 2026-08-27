@@ -140,6 +140,16 @@ def _sidecar_record(job_id, **overrides):
             "unknown": ["rework_or_error", "integration", "training_or_change"],
             "excluded": ["metered_ai_cost"],
         },
+        # Phase 44 (EGV-16, plan 44-03): classifier.py's
+        # _build_job_assessment populates this key UNCONDITIONALLY (empty
+        # string when unresolvable), and this plan makes hermes-report.sh
+        # forward it -- another WR-04 fixture-fidelity site (PA-12), closed
+        # the same way plan 44-01/44-02 closed theirs. "g38-sid-002" is the
+        # session id this golden test's own harness drives (see
+        # test_golden_valued_outcome_matches_new_fixture below), so the
+        # fixture's group id is the value production would actually carry
+        # for that arc rather than an invented string.
+        "double_counting_group": "g38-sid-002",
         # Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
         # populates this UNCONDITIONALLY on every record it builds (Phase 42
         # onward). Default here is the reportable literal so every existing

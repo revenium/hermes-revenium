@@ -1054,8 +1054,12 @@ class SidecarBudgetTests(unittest.TestCase):
         # populated known_zero list costs more bytes than a few extra
         # numeric digits) -- the genuine worst case for this shape.
         cfg = {'costs': {valid['job_type']: {cat: 0 for cat in mod.COST_CATEGORIES}}}
+        # Phase 44 (EGV-16): a full 64-byte group id -- the DOUBLE_COUNTING_
+        # GROUP_MAX_BYTES ceiling -- so the worst case includes this field
+        # too, not just the fields declared before this plan.
         rec = mod._build_job_assessment(
-            valid, assessment, raw, cfg, evaluator, evaluator_version)
+            valid, assessment, raw, cfg, evaluator, evaluator_version,
+            double_counting_group='g' * 64)
         self.assertIsNotNone(rec, 'worst-case record construction must succeed')
         return rec
 
@@ -1211,6 +1215,12 @@ class RecordShapeTests(unittest.TestCase):
         'execution_status', 'output_status', 'acceptance_status', 'adoption_status',
         'candidate_downstream_outcome', 'counterfactual_assumption', 'basis',
         'economic_mechanism',
+        # Phase 44 (EGV-16, plan 44-03): the double-counting group id --
+        # caller-supplied structural identity, present unconditionally
+        # (empty string when unresolvable) on every record including
+        # abstention, exactly like economic_mechanism above. Added
+        # deliberately here, not discovered by a failing test.
+        'double_counting_group',
         # Phase 44 (EGV-14/EGV-15, plan 44-02): net_value subtracts every
         # supplied cost category; supplied_costs and cost_coverage are the
         # operator-supplied operands and the coverage list naming what was

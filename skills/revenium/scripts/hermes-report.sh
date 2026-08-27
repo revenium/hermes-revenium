@@ -3678,6 +3678,21 @@ if assessment_raw:
                     _rebuilt_coverage['excluded'] = _filtered_excluded
             if _rebuilt_coverage:
                 meta['cost_coverage'] = _rebuilt_coverage
+
+        # Phase 44 (EGV-16, D-12/D-13, T-44-12): APPENDED to the END of the
+        # contiguous Phase 44 forwarder block plans 44-01/44-02 built above
+        # -- this closes the block; no later field in this phase follows
+        # it. double_counting_group is caller-supplied structural identity
+        # (a Hermes session id), never a monetary claim, so it is not in
+        # _VALUE_OMIT_FAMILY and ships regardless of reportability_status,
+        # exactly like supplied_costs/cost_coverage above. No allow-list
+        # applies here -- unlike economic_mechanism's fixed six-value set,
+        # this is a free-form identifier -- so this forwarder relies on the
+        # isinstance/non-empty check plus the 64-byte slice, plus the
+        # existing _s() transport sanitiser downstream.
+        double_counting_group = record.get('double_counting_group')
+        if isinstance(double_counting_group, str) and double_counting_group:
+            meta['double_counting_group'] = double_counting_group[:64]
         # Phase 43 (D-06, T-43-17): a correction stays reportable by
         # construction -- the reader's carve-out above never consults the
         # reportability gate for it -- but Finding 4 / C-06 established that

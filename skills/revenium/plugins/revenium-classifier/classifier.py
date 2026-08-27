@@ -1373,6 +1373,12 @@ def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:
 # only if a real operator study-id naming scheme needs more room.
 STUDY_ID_MAX_BYTES = 100
 
+# Phase 44 (EGV-16, D-12/D-13): an identifier clamp, closer to
+# evaluator_version's 16-byte clamp than basis's 200-byte narrative one --
+# double_counting_group carries a Hermes session id (structural identity),
+# never freeform narrative text.
+DOUBLE_COUNTING_GROUP_MAX_BYTES = 64
+
 
 def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
     """Resolve EGV-13's study_id/study_version reference for one JobAssessment
@@ -1525,6 +1531,7 @@ def _build_job_assessment(
     evaluator: str,
     evaluator_version: str,
     abstention_reason: "str | None" = None,
+    double_counting_group: str = "",
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -1563,6 +1570,25 @@ def _build_job_assessment(
     retains its costs and its coverage list, which is what keeps negative
     ROI visible downstream without this skill asserting a negative number
     it never measured.
+
+    Phase 44 (EGV-16, D-12/D-13): double_counting_group is caller-supplied
+    structural identity, never a monetary claim, so it does NOT join
+    D-11's omit family here and must NOT join _VALUE_OMIT_FAMILY on the
+    reporter side -- it is present on the abstention early return exactly
+    as it is on the success path. Scope, stated plainly so a future reader
+    does not infer more than this field delivers: the id groups jobs
+    inferred from ONE session's transcript, because _infer_jobs_via_llm
+    returns a list and one transcript can legitimately yield several jobs
+    serving one outcome. It does NOT group a subagent's jobs with its
+    root's -- run_classification_async Step 7's `root_sid == session_id`
+    gate means a subagent session never independently reaches job
+    inference and therefore never produces a second assessment record to
+    relate to a root session's. That is a known, documented gap, not an
+    oversight; do not read cross-session coverage into this field's name.
+    The squad dimension (REVENIUM_SQUAD_NAME) was rejected as the
+    identity source for the same reason evaluated in 44-RESEARCH.md
+    Finding 7: it is a per-profile config default, so many unrelated
+    outcomes on one profile would share one squad name and over-group.
     """
     try:
         raw = raw if isinstance(raw, dict) else {}
@@ -1634,6 +1660,14 @@ def _build_job_assessment(
             # ECONOMIC_MECHANISM_UNKNOWN there -- the D-04 correction, not a
             # regression.
             "economic_mechanism": _resolve_economic_mechanism(raw),
+
+            # Phase 44 (EGV-16, D-12/D-13): caller-supplied structural
+            # identity, never read from raw -- see this function's own
+            # docstring for the field's same-session-only scope. Present
+            # on the abstention early return as well as the success path,
+            # exactly like economic_mechanism immediately above.
+            "double_counting_group": _clamp_assessment_text(
+                double_counting_group, DOUBLE_COUNTING_GROUP_MAX_BYTES),
 
             # Phase 44 (EGV-14, D-06/D-14): present on EVERY path including
             # abstention -- a record that abstains from value still retains
@@ -2379,7 +2413,9 @@ def _write_marker_pair(sid: str, task_type: str, paths: "_Paths | None" = None) 
     return marker_path
 
 
-async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> None:
+async def _attach_assessment(
+    valid: dict, transcript: str, paths: "_Paths", double_counting_group: str = "",
+) -> None:
     """Evaluate one SUCCESS arc and attach a validated assessment, or nothing.
 
     Wrapped in its own try/except on top of the caller's: one job's evaluation
@@ -2400,6 +2436,12 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
     failed" distinguishable on disk (D-10/D-11), rather than colliding into
     identical wire output. _build_job_assessment never raises (D-04), so no
     additional try/except is needed around any individual call below.
+
+    Phase 44 (EGV-16, D-12/D-13): double_counting_group is threaded through
+    UNCHANGED to every one of the nine _build_job_assessment calls below --
+    the six early-return branches, both exception handlers, and the
+    success branch -- so every record this function produces for one job
+    carries the same group id its caller resolved.
     """
     # Pre-bound before the try so the exception handlers can reference them
     # even if the failure happened before _llm_evaluation_config or the
@@ -2423,6 +2465,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="unknown_evaluator",
+                double_counting_group=double_counting_group,
             )
             return
         raw = fn(valid, transcript, cfg)
@@ -2443,6 +2486,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="invalid",
+                double_counting_group=double_counting_group,
             )
             return
         if raw is _EVAL_TIMED_OUT:
@@ -2453,6 +2497,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="timed_out",
+                double_counting_group=double_counting_group,
             )
             return
         if raw is None:
@@ -2463,6 +2508,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="abstained",
+                double_counting_group=double_counting_group,
             )
             return
         # The version comes from the REGISTRY, not from a name comparison here.
@@ -2482,6 +2528,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, raw, cfg, name, evaluator_version,
                 abstention_reason="mechanism_abstains_from_value",
+                double_counting_group=double_counting_group,
             )
             return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version)
@@ -2495,6 +2542,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             # `assessment` object above.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, assessment, raw, cfg, name, evaluator_version,
+                double_counting_group=double_counting_group,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -2510,6 +2558,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, raw if isinstance(raw, dict) else None, cfg, name,
                 evaluator_version, abstention_reason="rejected",
+                double_counting_group=double_counting_group,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -2537,6 +2586,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         # sentinel check above -- two code sites, one distinct meaning.
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="timed_out",
+            double_counting_group=double_counting_group,
         )
     except Exception as exc:
         logger.warning(
@@ -2545,6 +2595,7 @@ async def _attach_assessment(valid: dict, transcript: str, paths: "_Paths") -> N
         )
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="failed",
+            double_counting_group=double_counting_group,
         )
 
 
@@ -2659,7 +2710,21 @@ async def run_classification_async(
                                     valid["status"] == "SUCCESS"
                                     and _llm_evaluation_enabled(paths=p)
                                 ):
-                                    await _attach_assessment(valid, transcript, p)
+                                    # Phase 44 (EGV-16, D-12/D-13): session_id
+                                    # is the group id. At this call site
+                                    # root_sid == session_id is already true
+                                    # by construction -- the enclosing `if
+                                    # root_sid == session_id` gate above has
+                                    # asserted it -- so sourcing the id from
+                                    # either name yields the same value;
+                                    # session_id is used because it is the
+                                    # parameter already in scope and needs no
+                                    # second resolution. Do not widen the
+                                    # gate to "fix" this.
+                                    await _attach_assessment(
+                                        valid, transcript, p,
+                                        double_counting_group=session_id,
+                                    )
                                 # Phase 42 (D-12): sidecar FIRST, then the job
                                 # marker. A crash between the two appends
                                 # leaves an orphan sidecar record that
