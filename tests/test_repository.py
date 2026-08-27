@@ -182,6 +182,12 @@ class RepositoryTests(unittest.TestCase):
             # fixture that prices from an operator's approved rate card
             # instead of hours times rate.
             SKILL / 'plugins' / 'revenium-classifier' / 'valuation.py',
+            # Phase 45 Plan 06 (EGV-01) — the sixth and last boundary: evidence
+            # resolution and reportability, with a shipped confirmation-workflow
+            # fixture and the resolve_declared_class allow-list rule that
+            # classifier._declared_evidence_class delegates its membership
+            # test to (PA-19).
+            SKILL / 'plugins' / 'revenium-classifier' / 'evidence.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
