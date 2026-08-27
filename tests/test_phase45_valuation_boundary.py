@@ -243,5 +243,247 @@ class RateCardFixtureTests(unittest.TestCase):
         self.assertEqual(set(), imported & forbidden)
 
 
+# ---------------------------------------------------------------------------
+# DerivationDelegationTests / BoundReassertionTests -- driving the REAL
+# _validate_assessment end to end, with a resolvable registered valuation
+# implementation. PLUGIN is placed on sys.path for this section only (class
+# setUpClass/tearDownClass), so classifier.py's own `import valuation`
+# fallback -- used by both _register_valuation_impl (at import time) and
+# _validate_assessment's own resolve step -- resolves to the SAME cached
+# 'valuation' module this section registers throwaway implementations into,
+# mirroring tests/test_phase45_boundary_registry.py's
+# DeclaredEvidenceClassTests.
+# ---------------------------------------------------------------------------
+
+_THROWAWAY_SEQ = [0]
+
+
+def _shared_valuation_module():
+    """Bare `import valuation` -- the SAME cached sys.modules entry
+    classifier.py's own `_load_valuation_module()` bare-import fallback
+    resolves to once PLUGIN is on sys.path. Registering a throwaway
+    implementation here is what makes it resolvable BY NAME from the real
+    _validate_assessment call inside a classifier module loaded standalone
+    via _load_classifier()."""
+    import valuation as _val  # type: ignore
+    return _val
+
+
+def _write_config(config_path: Path, boundaries=None, rate_card=None):
+    cfg = {}
+    if boundaries is not None:
+        cfg['boundaries'] = boundaries
+    if rate_card is not None:
+        cfg['llmOutcomeEvaluation'] = {'rateCard': rate_card}
+    config_path.write_text(json.dumps(cfg))
+
+
+class _ValuationBoundaryTestCase(unittest.TestCase):
+    """Shared sys.path management and fixture helpers for the two classes
+    below. No test_* methods of its own."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._path_added = str(PLUGIN) not in sys.path
+        if cls._path_added:
+            sys.path.insert(0, str(PLUGIN))
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._path_added and str(PLUGIN) in sys.path:
+            sys.path.remove(str(PLUGIN))
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='gsd-p45-05-valuation-')
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.config_path = Path(self.tmp) / 'config.json'
+
+    def _raw(self, **over):
+        raw = {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'senior_engineer',
+            'estimated_hours_saved': 2.5,
+            'assumed_loaded_rate': 150.0,
+            'currency': 'USD',
+            'basis': 'time avoided',
+            'confidence': 0.5,
+        }
+        raw.update(over)
+        return raw
+
+    def _load(self, boundaries=None, rate_card=None):
+        _write_config(self.config_path, boundaries=boundaries, rate_card=rate_card)
+        return _load_classifier({'REVENIUM_CONFIG_FILE': str(self.config_path)})
+
+
+class DerivationDelegationTests(_ValuationBoundaryTestCase):
+    """The REAL _validate_assessment, end to end, with a temp state dir and
+    a config.json carrying the `boundaries` object and the rate card. One
+    method per positive behavior bullet of 45-05-PLAN.md Task 3."""
+
+    def test_rate_card_displaces_the_hours_times_rate_product(self):
+        mod = self._load(
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            rate_card={'senior_engineer': 480.0},
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(480.0, got['estimated_value'])
+        self.assertNotEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+
+    def test_role_the_card_does_not_name_abstains(self):
+        mod = self._load(
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            rate_card={'junior_engineer': 100.0},
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(
+            self._raw(inferred_role='senior_engineer'), cfg, 'stub', 'v1')
+        self.assertIsNone(got)
+
+    def test_boundaries_absent_is_byte_identical_to_before_this_plan(self):
+        mod = self._load(boundaries=None, rate_card=None)
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(375.0, got['estimated_value'])
+
+    def test_value_reaches_the_sidecar_record_through_build_job_assessment(self):
+        mod = self._load(
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            rate_card={'senior_engineer': 480.0},
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        valid_job = {
+            'agentic_job_id': 'valuation-proof-001', 'job_type': 'code_review',
+            'status': 'SUCCESS',
+        }
+        record = mod._build_job_assessment(valid_job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(480.0, record['estimated_value'])
+
+
+class BoundReassertionTests(_ValuationBoundaryTestCase):
+    """The adversarial half. These are BEHAVIOURAL proofs that today's code
+    refuses each of these returns; they do not prove a future edit cannot
+    remove the re-check, and no static guard here claims otherwise.
+
+    Every test registers a throwaway implementation into the shared
+    'valuation' module's registry under a name unique to this call (via
+    _THROWAWAY_SEQ) and restores it in tearDown, for the same reason
+    45-04-PLAN.md requires it: last-registration-wins means a leaked
+    registrant would let these tests lie to each other.
+    """
+
+    def _register_throwaway(self, fn):
+        _THROWAWAY_SEQ[0] += 1
+        name = f'throwaway_bound_reassertion_{_THROWAWAY_SEQ[0]}'
+        val = _shared_valuation_module()
+        val.register(name, fn, '1', evidence_class='CUSTOMER_CONFIGURED')
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        return name
+
+    def _run(self, name):
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        return mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+
+    def _default_ceiling(self):
+        mod = self._load(boundaries=None)
+        return round(mod.DEFAULT_MAX_HOURS_SAVED * mod.DEFAULT_MAX_LOADED_RATE, 2)
+
+    def test_amount_above_ceiling_abstains(self):
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': 10_000_000.0, 'currency': 'USD'})
+        self.assertIsNone(self._run(name))
+
+    def test_zero_amount_abstains(self):
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': 0.0, 'currency': 'USD'})
+        self.assertIsNone(self._run(name))
+
+    def test_negative_amount_abstains(self):
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': -50.0, 'currency': 'USD'})
+        self.assertIsNone(self._run(name))
+
+    def test_non_finite_amount_abstains(self):
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': float('nan'), 'currency': 'USD'})
+        self.assertIsNone(self._run(name))
+
+    def test_boolean_amount_abstains(self):
+        """isinstance(True, int) is True in Python -- a naive read would
+        coerce a returned `True` to the number 1 rather than rejecting
+        it."""
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': True, 'currency': 'USD'})
+        self.assertIsNone(self._run(name))
+
+    def test_non_dict_return_abstains(self):
+        name = self._register_throwaway(lambda a, c: 'not-a-dict')
+        self.assertIsNone(self._run(name))
+
+    def test_foreign_currency_abstains(self):
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': 100.0, 'currency': 'EUR'})
+        self.assertIsNone(self._run(name))
+
+    def test_raising_implementation_falls_back_to_builtin(self):
+        def _raiser(a, c):
+            raise RuntimeError('boom -- this implementation always raises')
+
+        name = self._register_throwaway(_raiser)
+        got = self._run(name)
+        self.assertIsNotNone(got)
+        self.assertEqual(375.0, got['estimated_value'])
+
+    def test_unregistered_name_falls_back_to_builtin(self):
+        got = self._run('no_such_valuation_implementation')
+        self.assertIsNotNone(got)
+        self.assertEqual(375.0, got['estimated_value'])
+
+    def test_amount_exactly_at_ceiling_is_accepted(self):
+        ceiling = self._default_ceiling()
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': ceiling, 'currency': 'USD'})
+        got = self._run(name)
+        self.assertIsNotNone(got)
+        self.assertEqual(ceiling, got['estimated_value'])
+
+    def test_amount_one_cent_above_ceiling_abstains(self):
+        over = round(self._default_ceiling() + 0.01, 2)
+        name = self._register_throwaway(
+            lambda a, c: {'estimated_value': over, 'currency': 'USD'})
+        self.assertIsNone(self._run(name))
+
+    def test_refusal_log_line_is_distinguishable_and_uses_repr(self):
+        refused = {'estimated_value': -999.0, 'currency': 'USD'}
+        name = self._register_throwaway(lambda a, c: dict(refused))
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        with self.assertLogs('revenium_classifier', level='WARNING') as cm:
+            got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNone(got)
+        messages = [r.getMessage() for r in cm.records]
+        self.assertFalse(
+            any('bound exceeded' in m for m in messages),
+            'the valuation refusal log line must be distinguishable from '
+            'the hours/rate bound abstention above it',
+        )
+        self.assertTrue(
+            any('valuation' in m and 'out-of-bounds' in m for m in messages),
+            f'expected a distinct valuation-refusal log line, got: {messages}',
+        )
+        self.assertTrue(
+            any(repr(refused) in m for m in messages),
+            f'expected the refused value rendered with %r, got: {messages}',
+        )
+
+
 if __name__ == '__main__':  # pragma: no cover
     unittest.main()
