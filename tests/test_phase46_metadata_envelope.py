@@ -359,7 +359,7 @@ class FailureReasonClampTests(unittest.TestCase):
         reporter's OWN byte-safe clamp defends independently (defense in
         depth for an operator-writable file, per T-46-02). Encoded with
         ensure_ascii=False so the on-disk line stays comfortably under the
-        pre-existing 4096-CHARACTER line-length reader gate (T-03-04,
+        pre-existing large-CHARACTER line-length reader gate (T-03-04,
         unrelated to and unmodified by this plan) even for a long emoji
         failure_reason -- that gate operates on raw line length before this
         clamp is ever reached, so it must not be the thing under test here.
@@ -465,6 +465,201 @@ class FailureReasonClassifierClampTests(unittest.TestCase):
             f'failure_reason clamped to {serialized} serialized bytes, over the '
             f'{mod.FAILURE_REASON_CLAMP_BYTES}-byte budget',
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — the worst-case measurement matrix and the ceiling's stated
+# margin. Mirrors tests.test_phase42_assessment_contract.SidecarBudgetTests'
+# measurement discipline method for method (compute the worst case
+# PROGRAMMATICALLY, call the REAL constructor, assert acceptance before
+# measuring, serialize exactly as the writer does, assert under budget AND
+# a stated minimum margin, sweep non-ASCII input) but against
+# _METADATA_CEILING_BYTES and the REAL forwarder heredoc, not
+# SIDECAR_LINE_MAX_BYTES and the sidecar writer.
+# ---------------------------------------------------------------------------
+def _extract_value_omit_family(script_text):
+    """Extract `_VALUE_OMIT_FAMILY`'s member list from the live script text
+    rather than retyping it, so a future edit to that tuple cannot silently
+    desync from this negative-inventory assertion (AMEND-D-02)."""
+    import re
+    match = re.search(r'_VALUE_OMIT_FAMILY\s*=\s*\(([^)]*)\)', script_text, re.DOTALL)
+    if not match:
+        return None
+    return re.findall(r"'([^']*)'", match.group(1))
+
+
+class MetadataEnvelopeBudgetTests(unittest.TestCase):
+    """Task 3 behaviors 1-5."""
+
+    # 25% of _METADATA_CEILING_BYTES -- the same proportional-margin
+    # discipline SidecarBudgetTests uses (its 1024-byte MARGIN_BYTES is
+    # ~12.5% of SIDECAR_LINE_MAX_BYTES' 8192); a failure here means a real
+    # regression, not a tight fit.
+    MARGIN_BYTES = 1024
+
+    def setUp(self):
+        self.script_text = HERMES_REPORT_SH.read_text()
+        self.body = _extract_outcome_metadata_heredoc(self.script_text)
+        self.assertIsNotNone(
+            self.body,
+            "outcome_metadata=$( ... <<'PY' ... \\nPY\\n anchor moved in "
+            'hermes-report.sh -- update the extraction before trusting this test',
+        )
+        self.ceiling = _extract_ceiling_bytes(self.body)
+        self.assertIsNotNone(
+            self.ceiling,
+            '_METADATA_CEILING_BYTES not found in the extracted heredoc body',
+        )
+
+    def tearDown(self):
+        _restore_env()
+
+    # -- worst-case JobAssessment construction, mirroring SidecarBudgetTests
+    # method for method against THIS module's own isolated-import idiom --
+
+    def _worst_case_valid(self, job_id):
+        return {
+            'agentic_job_id': job_id,
+            'job_type': 'a' + 'b' * 46 + 'c',
+            'status': 'FAILED',
+        }
+
+    def _worst_case_raw(self, narrative_char='n'):
+        return {
+            'economic_mechanism': 'augmentation_capacity_expansion',
+            'inferred_role': narrative_char * 60,
+            'estimated_hours_saved': 40.0,
+            'assumed_loaded_rate': 500.0,
+            'currency': 'USD',
+            'basis': narrative_char * 1000,
+            'confidence': 0.999999,
+            'candidate_downstream_outcome': narrative_char * 1000,
+            'counterfactual_assumption': narrative_char * 1000,
+        }
+
+    def _worst_case_record(self, mod, job_id, narrative_char='n'):
+        raw = self._worst_case_raw(narrative_char)
+        # Overlong on purpose -- _build_job_assessment's own internal
+        # clamps (32/16/64/64 bytes respectively) are the real ceilings;
+        # passing something longer proves those internal clamps, not a
+        # value this test guessed, are what bounds the record.
+        evaluator = 'e' * 100
+        evaluator_version = 'v' * 100
+        model = 'm' * 100
+        assessment = mod._validate_assessment(raw, {}, evaluator, evaluator_version)
+        self.assertIsNotNone(assessment, 'max-bound inputs must be accepted, not rejected')
+        valid = self._worst_case_valid(job_id)
+        # Every cost category as a literal 0 -- lands in BOTH "included" and
+        # "known_zero" simultaneously, which costs MORE serialized bytes
+        # than a large nonzero value would (SidecarBudgetTests' own D-10
+        # finding, reused here for the same reason).
+        cfg = {'costs': {valid['job_type']: {cat: 0 for cat in mod.COST_CATEGORIES}}}
+        rec = mod._build_job_assessment(
+            valid, assessment, raw, cfg, evaluator, evaluator_version,
+            double_counting_group='g' * 100, model=model)
+        self.assertIsNotNone(rec, 'worst-case record construction must succeed')
+        return rec
+
+    def _measure(self, mod, narrative_char):
+        rec = self._worst_case_record(mod, job_id=f'p46-budget-{narrative_char!r}', narrative_char=narrative_char)
+        failure_reason = mod._clamp_assessment_text(narrative_char * 1000, mod.FAILURE_REASON_CLAMP_BYTES)
+        env = _assessment_env(assessment=rec, source='prod', status='FAILED', failure_reason=failure_reason)
+        result = _run_forwarder(self.body, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.strip()
+        json.loads(out)  # must parse
+        return len(out.encode('utf-8'))
+
+    _ENCODINGS = (('ascii', 'n'), ('accented', 'é'), ('cjk', '漢'), ('emoji', '😀'), ('mixed', 'a😀é漢'))
+
+    def test_worst_case_swept_across_encodings_stays_under_ceiling(self):
+        """Behavior 1."""
+        mod, _ev = _load_classifier({})
+        for label, ch in self._ENCODINGS:
+            with self.subTest(label):
+                measured = self._measure(mod, ch)
+                self.assertLessEqual(
+                    measured, self.ceiling,
+                    f'{label} worst case is {measured} bytes, over the {self.ceiling}-byte ceiling',
+                )
+                print(f'[46-01 MetadataEnvelopeBudgetTests] {label} worst-case envelope: {measured} bytes')
+
+    def test_margin_asserted_not_assumed(self):
+        """Behavior 2: the largest measured worst case plus MARGIN_BYTES is
+        still at or under the ceiling -- the headroom is asserted, not
+        assumed."""
+        mod, _ev = _load_classifier({})
+        largest = max(self._measure(mod, ch) for _label, ch in self._ENCODINGS)
+        self.assertLessEqual(
+            largest + self.MARGIN_BYTES, self.ceiling,
+            f'largest measured worst case ({largest} bytes) + {self.MARGIN_BYTES}-byte margin '
+            f'exceeds the {self.ceiling}-byte ceiling -- re-derive the ceiling or the clamps',
+        )
+        print(f'[46-01 MetadataEnvelopeBudgetTests] largest worst-case envelope: {largest} bytes, '
+              f'margin {self.ceiling - largest}')
+
+    def test_correction_record_carries_correction_fields_and_stays_far_under_ceiling(self):
+        """Behavior 3: a kind:"correction" record (the shape
+        correct-assessment.sh writes, duplicated here rather than imported
+        per this repo's no-shared-code-between-producer-and-test-fixture
+        convention -- see test_phase42_assessment_contract.py's own
+        docstring on the same point) still carries `corrected` and
+        `correction_sequence`, and stays far under the ceiling."""
+        record = {
+            'kind': 'correction',
+            'ts': 1715516010.0,
+            'agentic_job_id': 'p46-correction-job',
+            'assessment_id': 'p46-correction-job:2',
+            'sequence': 2,
+            'assessment_schema_version': 1,
+            'prior_value_low': 446.25,
+            'prior_value_base': 525.0,
+            'prior_value_high': 603.75,
+            'prior_currency': 'USD',
+            'value_low': 100.0,
+            'value_base': 110.0,
+            'value_high': 120.0,
+            'currency': 'USD',
+            'reason': 'operator correction',
+        }
+        env = _assessment_env(assessment=record, source='prod', status='SUCCESS')
+        result = _run_forwarder(self.body, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.strip()
+        meta = json.loads(out)
+        self.assertIs(meta.get('corrected'), True)
+        self.assertEqual(meta.get('correction_sequence'), 2)
+        total = len(out.encode('utf-8'))
+        self.assertLess(
+            total, self.ceiling // 2,
+            f'correction record is {total} bytes -- expected far under the {self.ceiling}-byte ceiling',
+        )
+
+    def test_metadata_truncated_absent_from_sidecar_declared_keys(self):
+        """Behavior 4: `metadata_truncated` belongs to the transport, not
+        the sidecar (AMEND-D-02)."""
+        from tests.test_phase42_assessment_contract import RecordShapeTests
+        self.assertNotIn(
+            'metadata_truncated', RecordShapeTests.DECLARED_KEYS,
+            'AMEND-D-02: metadata_truncated is a --metadata TRANSPORT key, '
+            "computed in hermes-report.sh's outcome_metadata heredoc -- a "
+            "different Python subprocess connected to the sidecar's "
+            "DECLARED_KEYS contract only through shell variables. It must "
+            'never join the sidecar contract.',
+        )
+
+    def test_metadata_truncated_absent_from_value_omit_family(self):
+        """Behavior 5: `metadata_truncated` is absent from
+        `_VALUE_OMIT_FAMILY` in hermes-report.sh -- that tuple governs an
+        earlier pipeline stage (the sidecar re-read) that can never see a
+        marker computed downstream at the transport emit site (AMEND-D-02)."""
+        family = _extract_value_omit_family(self.script_text)
+        self.assertIsNotNone(
+            family,
+            '_VALUE_OMIT_FAMILY anchor moved in hermes-report.sh -- update '
+            'the extraction before trusting this test',
+        )
+        self.assertNotIn('metadata_truncated', family)
 
 
 if __name__ == '__main__':
