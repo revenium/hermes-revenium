@@ -71,6 +71,33 @@ no ROI ratio is ever emitted — in the full schema below.
 The full schema is in
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md).
 
+### Pluggable boundaries (experimental)
+
+```json
+{
+  "boundaries": {
+    "classification": "llm",
+    "valuation": "llm",
+    "evidence": "llm"
+  }
+}
+```
+
+Phase 45 (EGV-01) turned six seams inside the classifier plugin into named, pluggable
+contracts, each backed by its own registry. `boundaries` selects a non-built-in
+implementation for one of them, by the name it registered under — `classification` covers
+both turn-level task-type labelling and job/arc inference as one contract; `valuation` and
+`evidence` are separate boundaries. The object, any one of its members, an empty value, or a
+name that resolves to nothing all fall back to the built-in implementation and change
+nothing else — a typo here degrades to today's behaviour, it never stops classification.
+
+`llmOutcomeEvaluation.evaluator` above stays the selector for the output/outcome-assessment
+boundary and is deliberately not part of this object, because moving it would be a breaking
+config change for every install that already sets it.
+
+The full schema, including the shipped non-LLM classifier fixture, is in
+[`references/config-schema.md`](../skills/revenium/references/config-schema.md).
+
 ## Environment variables
 
 Every value below has a working default in `scripts/common.sh`. Set one only when you have

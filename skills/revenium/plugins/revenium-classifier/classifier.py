@@ -759,6 +759,64 @@ _LLM_EVIDENCE_CLASS_LITERAL = "MODEL_ESTIMATED_DEMO"
 _register_llm_evaluator()
 
 
+def _register_classification_impl() -> None:
+    """Register the `llm` classifier into the classification registry
+    (classification.py, Phase 45 EGV-01/D-13) at import time.
+
+    Registration lives HERE, not in classification.py, for the same reason
+    _register_llm_evaluator registers the `llm` evaluator in this module
+    rather than in evaluators.py: the dependency runs one way, classifier
+    imports classification, never the reverse, which is what keeps
+    classification.py importable with no Hermes venv present.
+
+    Import failure is swallowed: a classifier that cannot register a
+    classification implementation must still classify (D-04) -- the two
+    run_classification_async call sites both fall back to calling
+    _classify_via_llm / _infer_jobs_via_llm directly when resolution fails,
+    exactly as if this registration had never run.
+    """
+    try:
+        from . import classification as _cl
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import classification as _cl  # type: ignore
+        except Exception:
+            return
+
+    async def _llm_classify(request: dict, config: dict) -> "dict | None":
+        """The classification boundary's `llm` registrant. Dispatches on
+        request['kind'] -- D-13's single contract covering both halves of
+        the classification concern -- onto the SAME two functions the
+        pre-Phase-45 call sites always used."""
+        req = request if isinstance(request, dict) else {}
+        kind = req.get("kind")
+        if kind == "task_type":
+            raw_label = await _classify_via_llm(
+                req.get("context"), req.get("response_preview"),
+                labels=req.get("labels"),
+            )
+            return {"task_type": raw_label}
+        if kind == "jobs":
+            jobs = await _infer_jobs_via_llm(req.get("transcript"), req.get("labels"))
+            return {"jobs": jobs}
+        return None
+
+    # Phase 45 (D-06 AMENDED): this call runs at the SAME point in module
+    # execution as _register_llm_evaluator()'s own call above -- beside it,
+    # per this plan's action -- which is BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED
+    # (declared further down this module) exists as a global. Reuses the
+    # SAME forced literal _register_llm_evaluator() already established for
+    # exactly this reason, rather than the not-yet-defined name -- see that
+    # function's own comment for the identical constraint. The naked-LLM
+    # classifier's honest evidence class is the same MODEL_ESTIMATED_DEMO
+    # value either way.
+    _cl.register("llm", _llm_classify, LLM_EVALUATOR_VERSION,
+                 evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
+
+_register_classification_impl()
+
+
 def _validate_job(job: dict) -> "dict | None":
     """Validate and normalize a job dict from the LLM response.
 
@@ -2314,6 +2372,72 @@ def _llm_evaluation_config(paths: "_Paths | None" = None) -> dict:
         return {}
 
 
+def _boundary_impl_name(key: str, default: str, paths: "_Paths | None" = None) -> str:
+    """Return the operator-selected implementation name for boundary `key`
+    (Phase 45, EGV-01), or `default` on any failure.
+
+    Mirrors _llm_evaluation_config's shape exactly: read config.json, take
+    its `boundaries` object when that is a dict, take `key` off it, and
+    return it only when it is a non-empty str. Everything else -- a missing
+    file, unreadable JSON, a missing `boundaries` object, a missing key, a
+    non-string value, or any exception -- returns `default`. Never raises.
+
+    `default` is always the built-in implementation's registered name, so a
+    typo in config.json, or an install with no `boundaries` object at all,
+    degrades to today's behaviour rather than stopping classification --
+    the same fail-open discipline _llm_evaluation_config already uses for
+    the (unrelated) llmOutcomeEvaluation object.
+    """
+    try:
+        data = json.loads((paths or _module_paths()).config_file.read_text(encoding="utf-8"))
+        boundaries = data.get("boundaries")
+        if not isinstance(boundaries, dict):
+            return default
+        name = boundaries.get(key)
+        if isinstance(name, str) and name:
+            return name
+        return default
+    except Exception:
+        return default
+
+
+def _load_classification_module():
+    """Import classification.py (Phase 45, EGV-01/D-13), the SAME two-step
+    import dance _register_classification_impl uses at import time, reused
+    here at the two run_classification_async call sites that resolve a
+    NAMED implementation per turn/session rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    classification boundary module must still classify (D-04) -- the
+    caller's own resolve step treats None as "unresolved" and falls back
+    to calling the built-in _classify_via_llm / _infer_jobs_via_llm
+    directly, exactly as an unknown implementation NAME would.
+    """
+    try:
+        from . import classification as _cl
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import classification as _cl  # type: ignore
+        except Exception:
+            return None
+    return _cl
+
+
+def _resolve_classification_impl(paths: "_Paths"):
+    """Return (impl_callable_or_None, impl_name) for the classification
+    boundary, per _boundary_impl_name's fail-open name resolution.
+
+    A None impl covers BOTH failure modes the caller must treat alike: the
+    module failed to import, or the resolved name is not registered. Either
+    way the caller falls back to the built-in call -- an unresolvable name
+    must never stop classification (Phase 45 threat register, T-45-12).
+    """
+    name = _boundary_impl_name("classification", "llm", paths=paths)
+    mod = _load_classification_module()
+    impl = mod.resolve(name) if mod is not None else None
+    return impl, name
+
+
 def _read_taxonomy_labels(paths: "_Paths | None" = None) -> list:
     """Read TAXONOMY_FILE and return labels sorted recent-first, alpha within ties.
 
@@ -2388,17 +2512,29 @@ def _build_classification_prompt(user_msg: str, assistant_resp: str, labels: lis
 
 
 async def _classify_via_llm(context: dict, response_preview: str,
-                            paths: "_Paths | None" = None) -> str:
+                            paths: "_Paths | None" = None,
+                            labels: "list | None" = None) -> str:
     """Invoke the user's main budgeted LLM via agent.auxiliary_client.call_llm.
     Per Pitfall 8 + A3 + D-06: NO `task=` argument so the call uses the user's
     main provider+model from config.yaml. Returns the LLM-emitted raw string;
-    caller validates against LABEL_RE + TRIVIAL_BLOCKLIST via _validate_label."""
+    caller validates against LABEL_RE + TRIVIAL_BLOCKLIST via _validate_label.
+
+    Phase 45 (EGV-01, PA-13): `labels` is an OPTIONAL trailing keyword. When
+    it is None this function reads the taxonomy itself, exactly as it always
+    has -- every pre-Phase-45 caller is unaffected. When the caller supplies
+    a list, that list is used and the read is skipped, so the caller's own
+    taxonomy read (host I/O) stays on the host side of the classification
+    boundary and this function's portable half (build the prompt, call the
+    model, return the raw string) does not need to read a file to run.
+    """
     if call_llm is None:
         return "unclassified"
-    labels = _read_taxonomy_labels(paths)
+    if labels is None:
+        labels = _read_taxonomy_labels(paths)
+    context = context if isinstance(context, dict) else {}
     prompt = _build_classification_prompt(
         context.get("message", "") or "",
-        response_preview,
+        response_preview or "",
         labels,
     )
     try:
@@ -2905,11 +3041,55 @@ async def run_classification_async(
                 asst_resp = response or db_asst
             else:
                 user_msg, asst_resp = message, response
-            raw_label = await _classify_via_llm(
-                {"message": user_msg},
-                asst_resp or "",
-                paths=p,
-            )
+
+            # Phase 45 (EGV-01, D-13): route through the classification
+            # boundary registry. The taxonomy read happens ONCE, here, at
+            # the call site -- host I/O stays on the host side of the
+            # boundary (PA-13) -- and the same label list is handed to
+            # whichever implementation resolves, built-in or not.
+            task_labels = _read_taxonomy_labels(paths=p)
+            classification_cfg = _llm_evaluation_config(paths=p)
+            task_impl, task_impl_name = _resolve_classification_impl(p)
+            raw_label = None
+            used_builtin_task_classifier = True
+            if task_impl is not None:
+                try:
+                    task_result = task_impl(
+                        {
+                            "kind": "task_type",
+                            "context": {"message": user_msg},
+                            "response_preview": asst_resp or "",
+                            "labels": task_labels,
+                        },
+                        classification_cfg,
+                    )
+                    if inspect.isawaitable(task_result):
+                        task_result = await task_result
+                    used_builtin_task_classifier = False
+                    raw_label = (
+                        task_result.get("task_type")
+                        if isinstance(task_result, dict) else None
+                    )
+                except Exception as exc:
+                    # T-28-07: %r on the implementation name -- caller/
+                    # operator-supplied, and a newline in it must not be
+                    # able to forge a second log record.
+                    logger.warning(
+                        "revenium-classifier: classification implementation "
+                        "%r raised for task_type, falling back to built-in: %r",
+                        task_impl_name, exc,
+                    )
+            if used_builtin_task_classifier:
+                if task_impl is None:
+                    logger.warning(
+                        "revenium-classifier: classification implementation "
+                        "%r unresolved for task_type, falling back to built-in",
+                        task_impl_name,
+                    )
+                raw_label = await _classify_via_llm(
+                    {"message": user_msg}, asst_resp or "", paths=p,
+                    labels=task_labels,
+                )
             task_type = _validate_label(raw_label)
 
             # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
@@ -2930,7 +3110,49 @@ async def run_classification_async(
                 transcript = _read_session_transcript(session_id, paths=p)
                 if transcript:
                     job_labels = _read_job_taxonomy_labels(paths=p)
-                    jobs = await _infer_jobs_via_llm(transcript, job_labels)
+
+                    # Phase 45 (EGV-01, D-13): the SAME classification
+                    # boundary the task-type call site above resolves,
+                    # dispatched here with kind="jobs" instead.
+                    job_classification_cfg = _llm_evaluation_config(paths=p)
+                    job_impl, job_impl_name = _resolve_classification_impl(p)
+                    jobs = []
+                    used_builtin_job_classifier = True
+                    if job_impl is not None:
+                        try:
+                            job_result = job_impl(
+                                {
+                                    "kind": "jobs",
+                                    "transcript": transcript,
+                                    "labels": job_labels,
+                                },
+                                job_classification_cfg,
+                            )
+                            if inspect.isawaitable(job_result):
+                                job_result = await job_result
+                            used_builtin_job_classifier = False
+                            jobs = (
+                                job_result.get("jobs")
+                                if isinstance(job_result, dict) else []
+                            )
+                            if not isinstance(jobs, list):
+                                jobs = []
+                        except Exception as exc:
+                            logger.warning(
+                                "revenium-classifier: classification "
+                                "implementation %r raised for job "
+                                "inference, falling back to built-in: %r",
+                                job_impl_name, exc,
+                            )
+                    if used_builtin_job_classifier:
+                        if job_impl is None:
+                            logger.warning(
+                                "revenium-classifier: classification "
+                                "implementation %r unresolved for job "
+                                "inference, falling back to built-in",
+                                job_impl_name,
+                            )
+                        jobs = await _infer_jobs_via_llm(transcript, job_labels)
                     for job in jobs:
                         try:
                             valid = _validate_job(job)
