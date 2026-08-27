@@ -31,6 +31,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -261,6 +262,181 @@ class CarrierTests(unittest.TestCase):
         result = asyncio.run(
             self.c._evaluate_outcome_via_llm(self._job(), 'transcript', {}))
         self.assertIs(result, self.c._EVAL_TIMED_OUT)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — the whole path, driven through the REAL _attach_assessment,
+# never a mock of it. Analog: tests/test_phase39_log_taxonomy.py's _ctx
+# temp-state-dir helper and the asyncio.run(c._attach_assessment(...))
+# driving idiom; tests/test_phase42_assessment_contract.py's
+# _p42_shape_env for the config-file shape.
+# ---------------------------------------------------------------------------
+
+def _job():
+    return {'agentic_job_id': 'p45-02-job', 'job_name': 'n',
+            'job_type': 'bug_fix', 'status': 'SUCCESS'}
+
+
+def _success_content():
+    return json.dumps({
+        'economic_mechanism': 'labor_substitution',
+        'inferred_role': 'engineer', 'estimated_hours_saved': 2.0,
+        'assumed_loaded_rate': 100.0, 'currency': 'USD',
+        'basis': 'x', 'confidence': 0.5,
+    })
+
+
+def _ctx(evaluator='llm'):
+    """A minimal state tree with LLM outcome evaluation opted in for
+    `evaluator` -- mirrors tests/test_phase42_assessment_contract.py's
+    _p42_shape_env / tests/test_phase39_log_taxonomy.py's _ctx shape.
+    Caller owns cleanup of the returned tmpdir."""
+    tmp = tempfile.mkdtemp(prefix='gsd-p45-02-')
+    state_dir = os.path.join(tmp, 'state')
+    os.makedirs(state_dir, exist_ok=True)
+    config_file = os.path.join(state_dir, 'config.json')
+    with open(config_file, 'w') as f:
+        json.dump({'llmOutcomeEvaluation': {
+            'enabled': True, 'evaluator': evaluator, 'currency': 'USD',
+        }}, f)
+    c, ev = _load({'REVENIUM_STATE_DIR': state_dir, 'REVENIUM_CONFIG_FILE': config_file})
+    return c, ev, tmp
+
+
+def _run_attach(c, job=None):
+    job = job if job is not None else _job()
+    asyncio.run(c._attach_assessment(job, 'transcript', c._module_paths()))
+    return job
+
+
+class RecordProvenanceTests(unittest.TestCase):
+    """End-to-end through the REAL _attach_assessment path -- one method per
+    behavior bullet in 45-02-PLAN.md Task 3 concerning the happy path, the
+    clamp, and evaluator/evaluator_version's independence from `model`."""
+
+    def test_dated_model_identifier_survives_verbatim_unclamped(self):
+        c, ev, tmp = _ctx(evaluator='llm')
+        try:
+            model = 'claude-sonnet-4-5-20250929'
+            self.assertEqual(len(model), 26, 'fixture sanity: this dated snapshot identifier is 26 characters, well under the 64-byte clamp')
+            c.call_llm = _Recorder(content=_success_content(), model=model)
+            job = _run_attach(c)
+            self.assertEqual(job['_assessment_record']['model'], model)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_evaluator_and_evaluator_version_are_independent_of_model(self):
+        c, ev, tmp = _ctx(evaluator='llm')
+        try:
+            c.call_llm = _Recorder(
+                content=_success_content(), model='claude-sonnet-4-5-20250929')
+            job = _run_attach(c)
+            record = job['_assessment_record']
+            self.assertEqual(record['evaluator'], 'llm')
+            self.assertEqual(record['evaluator_version'], c.LLM_EVALUATOR_VERSION)
+            # The two provenance sources are independent: swapping the
+            # scripted model does not touch evaluator/evaluator_version.
+            self.assertEqual(record['model'], 'claude-sonnet-4-5-20250929')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_overlength_model_identifier_is_clamped_byte_based(self):
+        c, ev, tmp = _ctx(evaluator='llm')
+        try:
+            long_model = 'x' * 100
+            c.call_llm = _Recorder(content=_success_content(), model=long_model)
+            job = _run_attach(c)
+            record_model = job['_assessment_record']['model']
+            self.assertEqual(record_model, 'x' * c.PROVENANCE_MODEL_MAX_BYTES)
+            self.assertEqual(len(record_model), c.PROVENANCE_MODEL_MAX_BYTES)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_frozen_nested_marker_assessment_object_has_no_model_key(self):
+        c, ev, tmp = _ctx(evaluator='llm')
+        try:
+            c.call_llm = _Recorder(
+                content=_success_content(), model='claude-sonnet-4-5-20250929')
+            job = _run_attach(c)
+            self.assertIn('assessment', job)
+            self.assertNotIn(
+                'model', job['assessment'],
+                'this phase changed the sidecar record only -- the frozen '
+                'nested marker `assessment` object has never carried model')
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class ScopeBoundaryTests(unittest.TestCase):
+    """The negative half -- D-12's non-LLM-evaluator case, the reserved-key
+    spoof, the four abstention/failure paths, and the frozen marker check."""
+
+    def test_non_llm_evaluator_records_unknown_model(self):
+        # D-12: system_of_record_assessment_fixture (registered in
+        # skills/revenium/plugins/revenium-classifier/evaluators.py by
+        # 45-01) makes no model call at all.
+        c, ev, tmp = _ctx(evaluator='system_of_record_assessment_fixture')
+        try:
+            job = _run_attach(c)
+            self.assertEqual(job['_assessment_record']['model'], c.PROVENANCE_MODEL_UNKNOWN)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_reserved_key_spoof_by_a_registered_evaluator_is_rejected(self):
+        # A registered (non-LLM) evaluator that returns an otherwise-valid
+        # assessment carrying a PLAIN STRING under the reserved key -- the
+        # carrier's TYPE is the gate, not the key's mere presence.
+        c, ev, tmp = _ctx(evaluator='throwaway_spoof_evaluator')
+        try:
+            def _spoof_fn(job, transcript, config):
+                if not isinstance(job, dict) or job.get('status') != 'SUCCESS':
+                    return None
+                record = json.loads(_success_content())
+                record[c._SERVED_MODEL_KEY] = 'attacker-plain-string-not-a-carrier'
+                return record
+
+            ev.register('throwaway_spoof_evaluator', _spoof_fn, '1',
+                         evidence_class='OUTCOME_OBSERVED')
+            job = _run_attach(c)
+            self.assertEqual(job['_assessment_record']['model'], c.PROVENANCE_MODEL_UNKNOWN)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_abstained_path_records_unknown_model(self):
+        c, ev, tmp = _ctx(evaluator='llm')
+        try:
+            c.call_llm = _Recorder(content='null', model='claude-sonnet-4-5-20250929')
+            job = _run_attach(c)
+            self.assertEqual(job['_assessment_record']['model'], c.PROVENANCE_MODEL_UNKNOWN)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_invalid_path_records_unknown_model(self):
+        c, ev, tmp = _ctx(evaluator='llm')
+        try:
+            c.call_llm = _Recorder(
+                content='Sorry, I cannot help.', model='claude-sonnet-4-5-20250929')
+            job = _run_attach(c)
+            self.assertEqual(job['_assessment_record']['model'], c.PROVENANCE_MODEL_UNKNOWN)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_timed_out_path_records_unknown_model(self):
+        c, ev, tmp = _ctx(evaluator='llm')
+        try:
+            c.call_llm = _Recorder(raises=TimeoutError('boom'))
+            job = _run_attach(c)
+            self.assertEqual(job['_assessment_record']['model'], c.PROVENANCE_MODEL_UNKNOWN)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_unknown_evaluator_path_records_unknown_model(self):
+        c, ev, tmp = _ctx(evaluator='definitely_not_registered_xyz')
+        try:
+            job = _run_attach(c)
+            self.assertEqual(job['_assessment_record']['model'], c.PROVENANCE_MODEL_UNKNOWN)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == '__main__':
