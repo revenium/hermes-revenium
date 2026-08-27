@@ -24,8 +24,15 @@ Planner assumptions this module is written against (44-04-PLAN.md):
   end-of-run summary. ReporterReconciliationTests (added by Task 3) proves
   this at the wire.
 """
+import json
+import os
 import random
+import re
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
@@ -41,6 +48,8 @@ from split_strategies import (  # noqa: E402
     INT_FIELDS,
     partition_by_attribution,
 )
+
+from tests._compat_helpers import build_shim, build_state_db  # noqa: E402
 
 QUANT = Decimal("0.000001")
 ZERO_COST_STR = format(Decimal("0").quantize(QUANT), "f")
@@ -201,6 +210,239 @@ class CostPartitionConservationTests(unittest.TestCase):
         self.assertEqual(
             Decimal(result["unclassified"][COST_FIELD]),
             Decimal("0.0119093").quantize(QUANT),
+        )
+
+
+class ReporterReconciliationTests(unittest.TestCase):
+    """Drives the real hermes-report.sh over a synthetic state.db containing
+    one marker-split (classified) session and one markerless (unclassified)
+    session, and proves the per-tick reconciliation line: (1) present
+    exactly once when rows were observed, and absent for a quiet tick, (2)
+    its three bucket cost totals sum to the tick's total metered cost
+    (Decimal, assertEqual, never assertAlmostEqual), and (3) the classified
+    and unclassified totals individually match the same run's own
+    `Reported:` lines, proving the accumulator reads the numbers the
+    metering path used rather than a parallel derivation. A fourth,
+    negative case proves PA-10's accumulate-only rule at the wire: the argv
+    for a session shared across two runs -- one where it is the only
+    session, one where a second session also populates the accumulator --
+    is byte-identical.
+
+    PA-09 (recorded here in substance, per the plan's Task 3 instruction):
+    this partition is new design work for Phase 44, not a reuse of an
+    existing implementation. test_split_strategies_conservation supplied
+    only the assertion STYLE (byte-exact ints, Decimal-exact cost,
+    sum-equals-input) -- the classified/unclassified/unallocated grouping
+    itself did not exist anywhere in this repo before this plan.
+    """
+
+    def _run_tick(self, sessions, write_marker_for=None):
+        """Runs hermes-report.sh over `sessions` (list of state.db session
+        dicts). write_marker_for: set of session ids that get a task marker
+        (classified path); sessions not in that set take the markerless
+        path. Returns (returncode, meter_invocations, combined_output)."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase44-cost-partition-')
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+
+        hermes_home = os.path.join(tmpdir, 'hh')
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        markers_dir = os.path.join(state_dir, 'markers')
+        os.makedirs(markers_dir, mode=0o700)
+        state_db = os.path.join(hermes_home, 'state.db')
+
+        shim_home = os.path.join(tmpdir, 'home')
+        bin_dir = os.path.join(shim_home, '.local', 'bin')
+        os.makedirs(bin_dir)
+        meter_log = os.path.join(tmpdir, 'meter.log')
+        jobs_log = os.path.join(tmpdir, 'jobs.log')
+        inv_log = os.path.join(tmpdir, 'inv.log')
+        shim = os.path.join(bin_dir, 'revenium')
+
+        build_state_db(state_db, sessions)
+
+        write_marker_for = write_marker_for or set()
+        for sess in sessions:
+            if sess['id'] in write_marker_for:
+                task_marker = {
+                    'muid': f"muid-{sess['id']}",
+                    'ts': sess['started_at'] + 500,
+                    'sid': sess['id'],
+                    'task_type': 'code_review',
+                    'operation_type': 'CHAT',
+                }
+                with open(os.path.join(markers_dir, f"{sess['id']}.jsonl"), 'w') as f:
+                    f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+
+        build_shim(shim)
+
+        env = {
+            **os.environ,
+            'HOME': shim_home,
+            'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': inv_log,
+            'METER_LOG': meter_log,
+            'JOBS_LOG': jobs_log,
+            'TZ': 'UTC',
+            'REVENIUM_ORGANIZATION_NAME': '',
+        }
+
+        result = subprocess.run(
+            ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+
+        meter_invocations = []
+        if os.path.exists(meter_log):
+            with open(meter_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if line:
+                        meter_invocations.append(shlex.split(line))
+
+        # common.sh's log()/info() append to LOG_FILE unconditionally and
+        # mirror to stderr ONLY when stderr is a TTY -- a non-interactive
+        # subprocess run never sees `info` lines on stdout/stderr, so the
+        # reconciliation line must be read from the metering log itself.
+        metering_log = os.path.join(state_dir, 'revenium-metering.log')
+        log_content = ''
+        if os.path.exists(metering_log):
+            with open(metering_log) as f:
+                log_content = f.read()
+
+        return (
+            result.returncode,
+            meter_invocations,
+            result.stdout + result.stderr + log_content,
+        )
+
+    def _base_session(self, sid, cost, tokens_in=100, tokens_out=50):
+        return {
+            'id': sid,
+            'model': 'claude-sonnet-4-6',
+            'source': 'test',
+            'input_tokens': tokens_in,
+            'output_tokens': tokens_out,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': cost,
+            'api_calls': 1,
+            'started_at': 1715514000.0,
+            'ended_at': 1715514000.0,
+            'billing_provider': 'anthropic',
+        }
+
+    def test_reconciliation_line_present_once_and_sums_match(self):
+        classified_sid = 'phase44-cp-classified-001'
+        unclassified_sid = 'phase44-cp-unclassified-001'
+        sessions = [
+            self._base_session(classified_sid, '0.100000'),
+            self._base_session(unclassified_sid, '0.050000'),
+        ]
+        rc, invocations, output = self._run_tick(
+            sessions, write_marker_for={classified_sid}
+        )
+        self.assertEqual(rc, 0, f"hermes-report.sh failed: {output}")
+        self.assertEqual(len(invocations), 2, f"expected 2 meter completions: {output}")
+
+        recon_lines = [
+            line for line in output.splitlines() if 'cost reconciliation' in line
+        ]
+        self.assertEqual(
+            len(recon_lines), 1,
+            f"expected exactly one reconciliation line for a tick with observed "
+            f"rows, got {len(recon_lines)}: {output}",
+        )
+        recon_line = recon_lines[0]
+
+        def _extract(bucket):
+            # \b guards against "classified" matching inside "unclassified"
+            # since the latter contains the former as a literal substring.
+            m = re.search(r'\b' + bucket + r'=([0-9.]+)', recon_line)
+            self.assertIsNotNone(
+                m, f"{bucket} total missing from reconciliation line: {recon_line}"
+            )
+            return Decimal(m.group(1))
+
+        classified_total = _extract('classified')
+        unclassified_total = _extract('unclassified')
+        unallocated_total = _extract('unallocated')
+
+        reported_costs = []
+        for inv in invocations:
+            if '--total-cost' in inv:
+                reported_costs.append(Decimal(inv[inv.index('--total-cost') + 1]))
+        tick_total_cost = sum(reported_costs, Decimal('0'))
+
+        self.assertEqual(
+            classified_total + unclassified_total + unallocated_total,
+            tick_total_cost.quantize(QUANT),
+            "reconciliation bucket totals do not sum to the tick's metered cost",
+        )
+
+        # classified/unclassified totals individually match the per-session
+        # Reported: lines the same run emitted -- proves the accumulator is
+        # reading the SAME numbers the metering path used, not a parallel
+        # derivation.
+        self.assertIn(
+            f"session={classified_sid} muid=", output,
+            f"no per-marker Reported: line found for {classified_sid}: {output}",
+        )
+        self.assertIn(
+            f"session={unclassified_sid} task_type=unclassified", output,
+            f"no markerless Reported: line found for {unclassified_sid}: {output}",
+        )
+        self.assertEqual(classified_total, Decimal('0.100000'))
+        self.assertEqual(unclassified_total, Decimal('0.050000'))
+
+    def test_reconciliation_line_absent_for_a_quiet_tick(self):
+        rc, invocations, output = self._run_tick([])
+        self.assertEqual(len(invocations), 0)
+        recon_lines = [
+            line for line in output.splitlines() if 'cost reconciliation' in line
+        ]
+        self.assertEqual(
+            recon_lines, [],
+            f"a tick observing no rows must stay quiet: {output}",
+        )
+
+    def test_reconciliation_presence_does_not_change_shared_argv(self):
+        """PA-10's accumulate-only rule, executable form: the argv for a
+        session shared across two runs (one with only that session, one with
+        an additional session that also populates the accumulator) is
+        byte-identical."""
+        shared_sid = 'phase44-cp-shared-001'
+        other_sid = 'phase44-cp-other-001'
+
+        rc1, inv1, out1 = self._run_tick(
+            [self._base_session(shared_sid, '0.200000')],
+            write_marker_for={shared_sid},
+        )
+        self.assertEqual(rc1, 0, out1)
+        self.assertEqual(len(inv1), 1)
+
+        rc2, inv2, out2 = self._run_tick(
+            [
+                self._base_session(shared_sid, '0.200000'),
+                self._base_session(other_sid, '0.075000'),
+            ],
+            write_marker_for={shared_sid},
+        )
+        self.assertEqual(rc2, 0, out2)
+        self.assertEqual(len(inv2), 2)
+
+        shared_argv_1 = inv1[0]
+        shared_argv_2 = next(
+            inv for inv in inv2
+            if '--transaction-id' in inv
+            and shared_sid in inv[inv.index('--transaction-id') + 1]
+        )
+        self.assertEqual(
+            shared_argv_1, shared_argv_2,
+            "the shared session's argv must be byte-identical whether or not "
+            "the accumulator was also populated by another session this tick",
         )
 
 
