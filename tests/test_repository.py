@@ -154,10 +154,40 @@ class RepositoryTests(unittest.TestCase):
             # Phase 36 — the outcome-value evaluator seam (ROI-03), kept as its
             # own module so the evaluation boundary is a file boundary.
             SKILL / 'plugins' / 'revenium-classifier' / 'evaluators.py',
+            # Phase 45 Plan 01 (EGV-01/D-04) — the shared BoundaryRegistry
+            # primitive every one of the six Phase 45 boundaries instantiates,
+            # generalized from evaluators.py's own register/resolve shape.
+            SKILL / 'plugins' / 'revenium-classifier' / 'boundary_registry.py',
             # Phase 43 Plan 03 (EGV-12) — the ImpactStudyResult contract:
             # TypedDict + validate(), no estimator, no experiment
             # orchestration, imported by nothing in the shipped skill.
             SKILL / 'plugins' / 'revenium-classifier' / 'impact_study.py',
+            # Phase 45 Plan 03 (EGV-01, D-03) — the cohort-impact estimator
+            # registry: zero registrants shipped, plus a fixture proving the
+            # seam accepts one.
+            SKILL / 'plugins' / 'revenium-classifier' / 'cohort_impact.py',
+            # Phase 45 Plan 03 (EGV-01, D-02 AMENDED) — the Revenium
+            # reporting contract: what any reporter must emit, no live
+            # adapter, proven by a conformance test against the pinned
+            # jobs-outcome golden.
+            SKILL / 'plugins' / 'revenium-classifier' / 'reporting.py',
+            # Phase 45 Plan 04 (EGV-01, D-13) — the classification boundary:
+            # ONE contract covering both turn-level task_type labelling and
+            # job/arc inference, with a shipped deterministic keyword fixture
+            # that displaces the built-in `llm` classifier end to end.
+            SKILL / 'plugins' / 'revenium-classifier' / 'classification.py',
+            # Phase 45 Plan 05 (EGV-01, PA-15/PA-16) — the economic
+            # valuation boundary: the derivation step carved out of
+            # classifier._validate_assessment, with a shipped rate-card
+            # fixture that prices from an operator's approved rate card
+            # instead of hours times rate.
+            SKILL / 'plugins' / 'revenium-classifier' / 'valuation.py',
+            # Phase 45 Plan 06 (EGV-01) — the sixth and last boundary: evidence
+            # resolution and reportability, with a shipped confirmation-workflow
+            # fixture and the resolve_declared_class allow-list rule that
+            # classifier._declared_evidence_class delegates its membership
+            # test to (PA-19).
+            SKILL / 'plugins' / 'revenium-classifier' / 'evidence.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
@@ -199,6 +229,11 @@ class RepositoryTests(unittest.TestCase):
             # unallocated cost partition's conservation test and the driven-tick
             # proof that the reporter's reconciliation line stays accumulate-only.
             ROOT / 'tests' / 'test_phase44_cost_partition.py',
+            # Phase 45 Plan 02 (EGV-08) — the deciding model, read off the
+            # served response rather than the requested one, recorded
+            # separately from evaluator identity and unspoofable via the
+            # reserved-key carrier.
+            ROOT / 'tests' / 'test_phase45_model_provenance.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',

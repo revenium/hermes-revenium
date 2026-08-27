@@ -252,6 +252,41 @@ plugin on the `revenium_classifier` Python logger, not into `revenium-metering.l
 land wherever Hermes' own logging is configured. `diagnose.sh` names where they are; it does
 not show them.
 
+## `boundaries` (v1.6, optional)
+
+Phase 45 (EGV-01) generalized six seams inside the classifier plugin into named, pluggable
+contracts, each backed by its own registry: `classification` (task_type labelling and job/arc
+inference, one contract per D-13), `valuation`, and `evidence`. (The other three phase-45
+boundaries — cohort impact and Revenium reporting — ship with zero registrants or no live
+adapter and have no operator-selectable name today.) `boundaries` is how an operator selects a
+non-built-in implementation for one of these three, by the name it registered under:
+
+```json
+{
+  "boundaries": {
+    "classification": "llm",
+    "valuation": "hours_times_rate",
+    "evidence": "config_opt_in"
+  }
+}
+```
+
+| field | default | purpose |
+|---|---|---|
+| `classification` | `"llm"` | Which registered classifier resolves BOTH turn-level `task_type` labelling and job/arc inference (`classification.py`). The built-in `llm` registrant is the naked-LLM classifier this skill has always shipped; `keyword_classification_fixture` is a shipped, deterministic, non-LLM alternative that makes no model call. |
+| `valuation` | `"hours_times_rate"` | Which registered implementation resolves an outcome's economic valuation. The built-in `hours_times_rate` registrant is the `hours x rate` derivation this skill has always shipped; `rate_card_valuation_fixture` is a shipped, operator-configured alternative that reads a role rate card and makes no model call. |
+| `evidence` | `"config_opt_in"` | Which registered implementation resolves an assessment's reportability. The built-in `config_opt_in` registrant is the config-opt-in rule this skill has always applied; `confirmation_workflow_evidence_fixture` is a shipped alternative modelling an explicit customer-confirmation workflow. |
+
+**Fail-open, every way.** The `boundaries` object itself, any one of its members, an empty
+string value, or a name that does not resolve to a registered implementation — all four fall
+back to the built-in implementation and change nothing else about classification. A typo in
+`config.json`, or an install with no `boundaries` object at all, degrades to today's behaviour
+rather than stopping classification.
+
+`llmOutcomeEvaluation.evaluator` (documented above) remains the selector for the
+output/outcome-assessment boundary (`evaluators.py`) and is deliberately NOT moved into this
+object — moving it would be a breaking config change for every install that already sets it.
+
 ---
 
 # Job Assessment Sidecar (Phase 42)

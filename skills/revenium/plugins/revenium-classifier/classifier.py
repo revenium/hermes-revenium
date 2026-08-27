@@ -634,7 +634,17 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
             raw = response.choices[0].message.content
         except AttributeError:
             raw = response["choices"][0]["message"]["content"]
-        return _parse_assessment_object(raw or "")
+        parsed = _parse_assessment_object(raw or "")
+        if isinstance(parsed, dict):
+            # Phase 45 (EGV-08, D-10/PA-07): unconditional -- overwrites
+            # anything the model itself emitted under this key. THAT
+            # unconditional overwrite is the defence: a hostile response
+            # cannot pre-seed the reserved key with its own claim and have
+            # it survive to _attach_assessment's pop. Never attached to a
+            # non-dict return (abstention/_EVAL_INVALID), so those stay
+            # byte-identical to before this change.
+            parsed[_SERVED_MODEL_KEY] = _ServedModel(_resolve_served_model(response))
+        return parsed
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): a real provider timeout, distinguished from the
         # generic failure below so the caller's log taxonomy can tell them
@@ -725,12 +735,214 @@ def _register_llm_evaluator() -> None:
             return None
         return await _evaluate_outcome_via_llm(job, transcript, config)
 
-    _ev.register("llm", _llm_evaluate, LLM_EVALUATOR_VERSION)
+    # Phase 45 (D-06 AMENDED): the naked-LLM path's honest evidence class is
+    # unchanged -- pinning it here explicitly (rather than leaving it to
+    # evaluators.py's default "") is what keeps every existing record
+    # byte-identical. Passed as the literal _LLM_EVIDENCE_CLASS_LITERAL, NOT
+    # as EVIDENCE_CLASS_MODEL_ESTIMATED: this function is called immediately
+    # below, at import time, BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED is
+    # assigned further down this module -- referencing the not-yet-defined
+    # name here would raise NameError and crash the whole module at import.
+    # The import-time assert beside EVIDENCE_CLASS_MODEL_ESTIMATED's own
+    # declaration pins the two values equal so they cannot silently drift.
+    _ev.register("llm", _llm_evaluate, LLM_EVALUATOR_VERSION,
+                 evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
     globals()["LLM_EVALUATOR_VERSION"] = "1"
 
 
 LLM_EVALUATOR_VERSION = "1"
+# See _register_llm_evaluator's own comment above for why this must be a
+# literal, duplicated from EVIDENCE_CLASS_MODEL_ESTIMATED (declared and
+# pinned equal to this literal further down this module), rather than a
+# reference to that not-yet-defined name.
+_LLM_EVIDENCE_CLASS_LITERAL = "MODEL_ESTIMATED_DEMO"
 _register_llm_evaluator()
+
+
+def _register_classification_impl() -> None:
+    """Register the `llm` classifier into the classification registry
+    (classification.py, Phase 45 EGV-01/D-13) at import time.
+
+    Registration lives HERE, not in classification.py, for the same reason
+    _register_llm_evaluator registers the `llm` evaluator in this module
+    rather than in evaluators.py: the dependency runs one way, classifier
+    imports classification, never the reverse, which is what keeps
+    classification.py importable with no Hermes venv present.
+
+    Import failure is swallowed: a classifier that cannot register a
+    classification implementation must still classify (D-04) -- the two
+    run_classification_async call sites both fall back to calling
+    _classify_via_llm / _infer_jobs_via_llm directly when resolution fails,
+    exactly as if this registration had never run.
+    """
+    try:
+        from . import classification as _cl
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import classification as _cl  # type: ignore
+        except Exception:
+            return
+
+    async def _llm_classify(request: dict, config: dict) -> "dict | None":
+        """The classification boundary's `llm` registrant. Dispatches on
+        request['kind'] -- D-13's single contract covering both halves of
+        the classification concern -- onto the SAME two functions the
+        pre-Phase-45 call sites always used."""
+        req = request if isinstance(request, dict) else {}
+        kind = req.get("kind")
+        if kind == "task_type":
+            raw_label = await _classify_via_llm(
+                req.get("context"), req.get("response_preview"),
+                labels=req.get("labels"),
+            )
+            return {"task_type": raw_label}
+        if kind == "jobs":
+            jobs = await _infer_jobs_via_llm(req.get("transcript"), req.get("labels"))
+            return {"jobs": jobs}
+        return None
+
+    # Phase 45 (D-06 AMENDED): this call runs at the SAME point in module
+    # execution as _register_llm_evaluator()'s own call above -- beside it,
+    # per this plan's action -- which is BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED
+    # (declared further down this module) exists as a global. Reuses the
+    # SAME forced literal _register_llm_evaluator() already established for
+    # exactly this reason, rather than the not-yet-defined name -- see that
+    # function's own comment for the identical constraint. The naked-LLM
+    # classifier's honest evidence class is the same MODEL_ESTIMATED_DEMO
+    # value either way.
+    _cl.register("llm", _llm_classify, LLM_EVALUATOR_VERSION,
+                 evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
+
+_register_classification_impl()
+
+
+def _register_valuation_impl() -> None:
+    """Register the `hours_times_rate` valuation into the valuation
+    registry (valuation.py, Phase 45 EGV-01) at import time.
+
+    Registration lives HERE, not in valuation.py, for the same reason
+    _register_llm_evaluator/_register_classification_impl register their
+    own built-ins in this module rather than in evaluators.py/
+    classification.py: the dependency runs one way, classifier imports
+    valuation, never the reverse, which is what keeps valuation.py
+    importable with no Hermes venv present.
+
+    Import failure is swallowed: a classifier that cannot register a
+    valuation implementation must still validate assessments (D-04) --
+    _validate_assessment's own resolve step treats a failed import the
+    same as an unresolved name and falls back to computing the product
+    inline, exactly as if this registration had never run.
+    """
+    try:
+        from . import valuation as _val
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import valuation as _val  # type: ignore
+        except Exception:
+            return
+
+    def _hours_times_rate(assumptions: dict, config: dict) -> "dict | None":
+        """The valuation boundary's `hours_times_rate` registrant: the SAME
+        derivation _validate_assessment has always performed, moved behind
+        the resolved-implementation call so the built-in is provably just
+        another registrant, not a hardcoded special case. `assumptions`
+        carries only already-validated, already-clamped fields (PA-15) --
+        this function trusts hours/rate are already finite and positive,
+        but re-checks defensively anyway (D-04: never raise) since the
+        contract permits any registered caller to invoke it."""
+        a = assumptions if isinstance(assumptions, dict) else {}
+        hours = a.get("estimated_hours_saved")
+        rate = a.get("assumed_loaded_rate")
+        if isinstance(hours, bool) or not isinstance(hours, (int, float)):
+            return None
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+            return None
+        return {
+            "estimated_value": round(hours * rate, 2),
+            "currency": a.get("currency"),
+        }
+
+    # Phase 45 (D-06 AMENDED): this call runs at the SAME point in module
+    # execution as _register_llm_evaluator()'s and
+    # _register_classification_impl()'s own calls above -- beside them, per
+    # this plan's action -- which is BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED
+    # (declared further down this module) exists as a global. Reuses the
+    # SAME forced literal those two functions already established for
+    # exactly this reason, rather than the not-yet-defined name -- see
+    # _register_llm_evaluator's own comment for the identical constraint.
+    # Deriving from a model's own hours-and-rate assumptions is a model
+    # estimate whatever the arithmetic, so the honest class either way is
+    # MODEL_ESTIMATED_DEMO.
+    _val.register("hours_times_rate", _hours_times_rate, "1",
+                  evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
+
+_register_valuation_impl()
+
+
+def _register_evidence_impl() -> None:
+    """Register the `config_opt_in` reportability policy into the evidence
+    registry (evidence.py, Phase 45 EGV-01) at import time.
+
+    Registration lives HERE, not in evidence.py, for the same reason
+    _register_llm_evaluator/_register_classification_impl/
+    _register_valuation_impl register their own built-ins in this module
+    rather than in evaluators.py/classification.py/valuation.py: the
+    dependency runs one way, classifier imports evidence, never the
+    reverse, which is what keeps evidence.py importable with no Hermes
+    venv present.
+
+    Import failure is swallowed: a classifier that cannot register a
+    reportability implementation must still resolve reportability (D-04)
+    -- _resolve_reportability_status's own resolve step treats a failed
+    import the same as an unresolved name and falls back to the inline
+    config-opt-in rule, exactly as if this registration had never run.
+    """
+    try:
+        from . import evidence as _evd
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import evidence as _evd  # type: ignore
+        except Exception:
+            return
+
+    def _config_opt_in(request: dict, config: dict) -> "dict | None":
+        """The evidence boundary's `config_opt_in` registrant: the SAME
+        rule _resolve_reportability_status has always applied, moved
+        behind the resolved-implementation call so the built-in is
+        provably just another registrant, not a hardcoded special case.
+        `request` carries `abstained`/`agentic_job_id`/`job_type`
+        (caller-constructed, never `raw`); this registrant reads only
+        `abstained` off it and `experimentalReportEstimates` off `config`
+        -- reproducing today's rule exactly: reportable only when config
+        is a dict and `experimentalReportEstimates` is the literal JSON
+        boolean true, identity-compared. An operator editing config.json
+        by hand must not be able to switch money reporting on with a
+        near-miss like the string "true" or the integer 1."""
+        req = request if isinstance(request, dict) else {}
+        cfg = config if isinstance(config, dict) else {}
+        if req.get("abstained"):
+            return {"reportability_status": REPORTABILITY_CANDIDATE}
+        if cfg.get("experimentalReportEstimates") is True:
+            return {"reportability_status": REPORTABILITY_REPORTABLE}
+        return {"reportability_status": REPORTABILITY_CANDIDATE}
+
+    # Phase 45 (D-06 AMENDED): this call runs at the SAME point in module
+    # execution as _register_llm_evaluator()'s, _register_classification_impl()'s
+    # and _register_valuation_impl()'s own calls above -- beside them, per
+    # this plan's action -- which is BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED
+    # (declared further down this module) exists as a global. Reuses the
+    # SAME forced literal those three functions already established for
+    # exactly this reason, rather than the not-yet-defined name -- see
+    # _register_llm_evaluator's own comment for the identical constraint.
+    # The built-in config-opt-in policy is a fixed rule over model-derived
+    # numbers, so the honest class either way is MODEL_ESTIMATED_DEMO.
+    _evd.register("config_opt_in", _config_opt_in, "1",
+                  evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
+
+_register_evidence_impl()
 
 
 def _validate_job(job: dict) -> "dict | None":
@@ -905,6 +1117,19 @@ assert EVIDENCE_CLASS_MODEL_ESTIMATED in EVIDENCE_CLASSES, (
     "out of the label set it is supposed to belong to"
 )
 
+# Phase 45 (D-06 AMENDED): _register_llm_evaluator() (above, executed at
+# import time before this module-level assignment exists) cannot reference
+# EVIDENCE_CLASS_MODEL_ESTIMATED by name, so it registers the "llm" evaluator
+# with a duplicated literal, _LLM_EVIDENCE_CLASS_LITERAL, instead. This
+# assert is the drift guard for that duplication -- the same role
+# EVIDENCE_CLASS_MODEL_ESTIMATED's own assert above plays for EVIDENCE_CLASSES.
+assert _LLM_EVIDENCE_CLASS_LITERAL == EVIDENCE_CLASS_MODEL_ESTIMATED, (
+    f"_LLM_EVIDENCE_CLASS_LITERAL ({_LLM_EVIDENCE_CLASS_LITERAL!r}) has "
+    f"drifted from EVIDENCE_CLASS_MODEL_ESTIMATED "
+    f"({EVIDENCE_CLASS_MODEL_ESTIMATED!r}) -- the naked-LLM evaluator's "
+    "registered evidence_class no longer matches the forced constant"
+)
+
 
 def _forced_evidence_class() -> str:
     """Return the ONE evidence_class this construction path may ever emit --
@@ -923,6 +1148,69 @@ def _forced_evidence_class() -> str:
     function's shape provides.
     """
     return EVIDENCE_CLASS_MODEL_ESTIMATED
+
+
+def _declared_evidence_class(evaluator: str) -> str:
+    """Return the evidence_class the named `evaluator` DECLARED at
+    registration, falling back to _forced_evidence_class() for every other
+    outcome.
+
+    Guarantee class: this function takes exactly ONE parameter, the
+    caller-supplied evaluator NAME, and no parameter carrying evaluator
+    OUTPUT -- so it structurally cannot read evaluator output, the same
+    class of guarantee _forced_evidence_class() provides above, preserved
+    rather than weakened. The value it resolves comes from a
+    REGISTRATION-TIME declaration made by TRUSTED CODE at import time (a
+    boundary module's own top-level `register(...)` call) -- a different
+    threat model from the untrusted model output _forced_evidence_class()
+    defends against (Phase 45, D-06 AMENDED).
+
+    The membership test against EVIDENCE_CLASSES is what keeps a registrant
+    from declaring a label outside the nine, mirroring
+    _resolve_economic_mechanism's allow-list discipline above -- while
+    being a THIRD, distinct pattern, not a repeat of that one:
+    _resolve_economic_mechanism resolves an untrusted VALUE off `raw`
+    against an allow-list; this function resolves a TRUSTED DECLARATION off
+    a registry against an allow-list, and only ever sees the caller-supplied
+    evaluator name, never `raw`.
+
+    Phase 45 (D-06 AMENDED, plan 06, PA-19): the membership test itself now
+    lives in evidence.py as evidence.resolve_declared_class -- the rule
+    that decides which evidence labels an implementation may claim belongs
+    with the boundary that owns evidence, not scattered across the host
+    module that carves the other five boundaries out. The guarantee this
+    function provides is UNCHANGED by that move: it still takes only the
+    caller-supplied evaluator NAME, still reads the declaration from the
+    evaluators registry (never from evidence.py, which owns the allow-list
+    rule but not the declaration itself), and still never raises.
+
+    Every outcome other than "a str member of EVIDENCE_CLASSES" -- an
+    unregistered name, an empty declaration, a non-string declaration, a
+    label outside the nine, a non-string `evaluator` argument, or any
+    exception raised while importing evaluators.py/evidence.py or looking
+    the name up -- falls back to _forced_evidence_class(). Never raises.
+    """
+    try:
+        if not isinstance(evaluator, str):
+            return _forced_evidence_class()
+        try:
+            from . import evaluators as _ev
+        except Exception:  # pragma: no cover - relative import outside a package
+            try:
+                import evaluators as _ev  # type: ignore
+            except Exception:
+                return _forced_evidence_class()
+        declared = _ev.resolve_evidence_class(evaluator)
+        try:
+            from . import evidence as _evd
+        except Exception:  # pragma: no cover - relative import outside a package
+            try:
+                import evidence as _evd  # type: ignore
+            except Exception:
+                return _forced_evidence_class()
+        return _evd.resolve_declared_class(declared, EVIDENCE_CLASSES, _forced_evidence_class())
+    except Exception:
+        return _forced_evidence_class()
 
 
 def _resolve_economic_mechanism(raw) -> str:
@@ -1145,24 +1433,117 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         )
         return None
 
-    # ROI-05: the value is DERIVED. A supplied estimated_value is discarded —
-    # accepting one is exactly the path that lets an unbounded total through
-    # while the bound checks guard inputs nobody used.
-    estimated_value = round(hours * rate, 2)
+    # ROI-05 / Phase 45 (EGV-01, PA-15/PA-16): the value is DERIVED, and the
+    # derivation is resolved through the valuation boundary rather than
+    # computed inline. `assumptions` -- NOT `raw` -- is what crosses the
+    # boundary: a plain dict built from locals this function has ALREADY
+    # VALIDATED AND CLAMPED above (the mechanism gate, the hours/rate bound
+    # checks, the confidence check, the value-bounds abstain gate and the
+    # currency check all already ran, before any of this). This is what
+    # keeps a registered valuation implementation from ever seeing a key
+    # the validator did not vet (PA-15).
+    inferred_role = _clamp_assessment_text(raw.get("inferred_role"), 60)
+    assumptions = {
+        "estimated_hours_saved": hours,
+        "assumed_loaded_rate": rate,
+        "currency": currency,
+        "economic_mechanism": _resolve_economic_mechanism(raw),
+        "inferred_role": inferred_role,
+    }
+
+    impl_name = _boundary_impl_name("valuation", "hours_times_rate")
+    valuation_mod = _load_valuation_module()
+    impl = valuation_mod.resolve(impl_name) if valuation_mod is not None else None
+    fall_back_to_builtin = impl is None
+    derived = None
+    if impl is None:
+        logger.warning(
+            "revenium-classifier: valuation implementation %r unresolved, "
+            "falling back to the built-in derivation", impl_name,
+        )
+    else:
+        try:
+            derived = impl(assumptions, cfg)
+        except Exception:
+            logger.warning(
+                "revenium-classifier: valuation implementation %r raised, "
+                "falling back to the built-in derivation", impl_name,
+            )
+            fall_back_to_builtin = True
+
+    if fall_back_to_builtin:
+        # A supplied estimated_value is discarded — accepting one is
+        # exactly the path that lets an unbounded total through while the
+        # bound checks guard inputs nobody used.
+        estimated_value = round(hours * rate, 2)
+    else:
+        # Phase 45 (T-45-13): the caller RE-CHECKS a registered
+        # implementation's returned amount at all -- registration is
+        # trusted code for the purpose of declaring an identity, but it is
+        # not trusted to widen a bound the operator configured, and an
+        # implementation that can hand back an unbounded number would make
+        # the input bound checks above guard the wrong quantity. The same
+        # reasoning evaluators.py records for discarding a model-supplied
+        # total. The comparison is made against the ceiling ROUNDED to the
+        # same two decimal places the derivation itself rounds to, so an
+        # amount exactly AT the ceiling is accepted rather than lost to a
+        # rounding artefact.
+        amount = (
+            _finite_number(derived.get("estimated_value"))
+            if isinstance(derived, dict) else None
+        )
+        returned_currency = derived.get("currency") if isinstance(derived, dict) else None
+        ceiling = round(max_hours * max_rate, 2)
+        # CR-01 (phase-45 code review): the lower bound is exclusive for a
+        # THIRD-PARTY registrant and inclusive for the BUILT-IN derivation,
+        # and the difference is deliberate.
+        #
+        # The built-in hours_times_rate derivation is itself a registrant, so
+        # the DEFAULT unconfigured path reaches this re-check. A valid input
+        # pair (0 < hours <= max, 0 < rate <= max) can still yield a product
+        # that rounds to 0.00 -- e.g. hours=0.001, rate=1.0. `main` shipped
+        # that record via an unconditional round(hours * rate, 2) with no
+        # lower bound at all, so refusing it here would break CLAUDE.md's
+        # "feature-off meters byte-identically" invariant and would hide the
+        # zero-value work EGV-17 requires to stay VISIBLE with its cost.
+        #
+        # A third-party implementation returning a literal 0.0 is a different
+        # claim: an implementation asserting work was worth exactly nothing is
+        # far more likely broken than truthful, and it has not earned the
+        # trust the built-in has by being the same code main ran. It still
+        # abstains. Negative amounts are refused from everyone -- the skill
+        # must never assert a negative value it never measured (phase 44 D-14).
+        _is_builtin = impl_name == "hours_times_rate"
+        _lower_ok = (amount is not None) and (
+            amount >= 0 if _is_builtin else amount > 0
+        )
+        if amount is None or returned_currency != currency or not _lower_ok or amount > ceiling:
+            # Distinct wording from the hours/rate bound abstention above,
+            # so this abstention reason is distinguishable from that one.
+            logger.warning(
+                "revenium-classifier: assessment abstained, valuation "
+                "implementation %r returned an invalid or out-of-bounds "
+                "value: %r", impl_name, derived,
+            )
+            return None
+        estimated_value = amount
 
     return {
         "estimated_value": estimated_value,
         "currency": currency,
         "basis": _clamp_assessment_text(raw.get("basis"), 200),
         "assumptions": {
-            "inferred_role": _clamp_assessment_text(raw.get("inferred_role"), 60),
+            "inferred_role": inferred_role,
             "estimated_hours_saved": hours,
             "assumed_loaded_rate": rate,
         },
         "confidence": confidence,
         "evaluator": _clamp_assessment_text(evaluator, 32),
         "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-        "evidence_class": _forced_evidence_class(),
+        # Phase 45 (D-06 AMENDED): the evidence class the RESOLVED evaluator
+        # declared at registration, falling back to the forced constant --
+        # still never read from evaluator output (ROI-04, D-03).
+        "evidence_class": _declared_evidence_class(evaluator),
     }
 
 
@@ -1333,33 +1714,175 @@ COST_COVERAGE_EXCLUDED_AI = "metered_ai_cost"
 REPORTABILITY_REPORTABLE = "reportable"
 REPORTABILITY_CANDIDATE = "candidate"
 
-PROVENANCE_MODEL_UNKNOWN = "unknown"  # Phase 45 (EGV-08) owns which model produced the assessment; the naked-LLM path has no reliable model identity to report today
+PROVENANCE_MODEL_UNKNOWN = "unknown"  # Phase 45 (EGV-08, D-10): the FAIL-OPEN
+# default -- used whenever the served model is genuinely absent from the
+# response, whenever the evaluator made no model call at all (D-12), or
+# whenever anything on the extraction path fails. This is NOT a claim that
+# model identity is unavailable: D-10 verified against the live aux client
+# (~/.hermes/hermes-agent/agent/auxiliary_client.py) that response.model
+# carries it, and _resolve_served_model below reads it from there.
+
+# Phase 45 (EGV-08, D-11): deliberately NOT evaluator_version's 16-byte
+# clamp -- a dated snapshot identifier (e.g. "claude-sonnet-4-5-20250929",
+# 27 characters) IS the deciding model and must survive verbatim, or EGV-08's
+# whole point (recording precisely which model decided) is defeated by
+# truncation. 64 also matches the width hermes-report.sh's existing
+# --metadata forwarder already accepts (model_field[:64]), so this
+# producer-side clamp never relies on that consumer's clamp to avoid
+# truncating mid-identifier.
+PROVENANCE_MODEL_MAX_BYTES = 64
+
+# Phase 45 (EGV-08, D-10/PA-07): the reserved key _evaluate_outcome_via_llm
+# uses to carry the served model out of the LLM call, through the parsed
+# (and therefore untrusted) assessment dict, to _attach_assessment.
+_SERVED_MODEL_KEY = "_revenium_served_model"
 
 
-def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:
+class _ServedModel:
+    """Module-private carrier for one outcome-evaluation call's served model.
+
+    SECURITY PROPERTY (PA-07): the served model must not travel to
+    _build_job_assessment inside the untrusted `raw` dict -- 'model' is a
+    member of Phase 43's _PROMOTION_FORBIDDEN_KEYS
+    (tests/test_phase43_evidence_grading.py) and the Phase 43 hostile
+    fixture already spoofs raw['model'] as 'gpt-attacker-9000'. An INSTANCE
+    of this class travels under _SERVED_MODEL_KEY instead of a bare string
+    because a JSON-parsed evaluator response cannot construct one: a
+    response that guesses the reserved key name and assigns a plain string
+    under it still cannot inject a value, because _attach_assessment's pop
+    accepts only this type.
+    """
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+def _resolve_served_model(response) -> str:
+    """Return the model that actually SERVED `response`, or the unknown
+    sentinel.
+
+    Reads response.model first, then falls back to response["model"] when
+    response is a dict -- the same dual object/dict handling this module
+    already applies to response.choices at every call_llm site. Returns the
+    sentinel for a None response, a missing model, a None model, a
+    non-string model, and an empty or whitespace-only string.
+
+    Deliberately NOT sourced from the outgoing request's model kwarg: the
+    live aux client's healed_model/refreshed_model paths rewrite the
+    REQUESTED model mid-flight on a provider failover -- precisely the case
+    EGV-08 exists to fix, where the requested model would keep writing
+    identical provenance across a live failover that changed who actually
+    answered. response.model is the SERVED model, already in hand at the
+    one call site that matters (D-10).
+
+    The whole body runs inside one try/except returning the sentinel --
+    including for a .model property that itself raises on access, since
+    getattr's default only covers AttributeError, not an arbitrary raise --
+    because a broken response object must never turn "no provenance" into
+    "broken turn" (ROI-08's fail-open rule, extended here).
+    """
+    try:
+        model = getattr(response, "model", None)
+        if model is None and isinstance(response, dict):
+            model = response.get("model")
+        if isinstance(model, str):
+            model = model.strip()
+            if model:
+                return model
+        return PROVENANCE_MODEL_UNKNOWN
+    except Exception:
+        return PROVENANCE_MODEL_UNKNOWN
+
+
+def _resolve_reportability_status(
+    cfg: "dict | None", abstained: bool, job: "dict | None" = None
+) -> str:
     """Resolve EGV-18's reportability_status for one JobAssessment record.
 
-    Returns REPORTABILITY_REPORTABLE only when ALL of:
-      - abstained is False (D-05: an abstained assessment is never reportable,
-        whatever the config says -- checked first, unconditionally)
-      - cfg is a dict
-      - cfg["experimentalReportEstimates"] is True -- a literal JSON boolean,
-        identity-compared exactly like _llm_evaluation_enabled's "enabled"
-        check above, and for the same recorded reason (D-12): an operator
-        editing config.json by hand must not be able to switch money
-        reporting on with a near-miss like the string "true" or the int 1.
+    Phase 45 (D-06 AMENDED, EGV-01): the POLICY that decides
+    REPORTABILITY_REPORTABLE vs REPORTABILITY_CANDIDATE is now resolved
+    through the evidence boundary registry (evidence.py), with the
+    built-in `config_opt_in` policy registered as just another registrant
+    -- not a hardcoded special case. `job` is an OPTIONAL trailing
+    parameter, a plain dict carrying `agentic_job_id`/`job_type`, so every
+    pre-Phase-45 two-argument caller and test is unchanged.
 
-    Everything else -- including a non-dict/None cfg and a missing key --
-    resolves to REPORTABILITY_CANDIDATE. Never raises: this is a pure
-    function of its two arguments, no I/O.
+    THE ABSTENTION CHECK RUNS FIRST, UNCONDITIONALLY, BEFORE ANY REGISTERED
+    IMPLEMENTATION IS CONSULTED. This position is LOAD-BEARING (PA-18,
+    D-05): moving it below the resolution step would let a registered
+    implementation make an ABSTAINED assessment reportable, whatever the
+    config says -- exactly the elevation-of-privilege T-45-15 names. A
+    confirmation workflow registered here can decide that a REAL estimate
+    is reportable; it cannot decide that an ABSENT estimate is.
+
+    After the abstention check, the operator-selected implementation is
+    resolved by name via `_boundary_impl_name("evidence", "config_opt_in")`
+    and called with a CALLER-CONSTRUCTED request (`abstained`, plus the job
+    id/type taken from `job` when it is a dict) -- never `raw`, and never
+    `cfg` handed through unexamined either; `cfg` still crosses as the
+    `config` argument the contract documents. The returned value is
+    accepted ONLY when it is a dict whose `reportability_status` is one of
+    the two known literals (REPORTABILITY_REPORTABLE or
+    REPORTABILITY_CANDIDATE); a None return, a non-dict, an unknown
+    literal, a raised exception, an unresolvable implementation name, or a
+    failed module import all fall back to the ORIGINAL inline
+    config-opt-in rule below, logging the fallback with %r on the
+    requested implementation name -- never %s, never an f-string (T-28-07).
+
+    THE INLINE FALLBACK RULE, preserved byte-for-byte from before this
+    plan: REPORTABILITY_REPORTABLE only when cfg is a dict and
+    cfg["experimentalReportEstimates"] is True -- a literal JSON boolean,
+    identity-compared exactly like _llm_evaluation_enabled's "enabled"
+    check above, and for the same recorded reason (D-12): an operator
+    editing config.json by hand must not be able to switch money reporting
+    on with a near-miss like the string "true" or the int 1. Everything
+    else -- including a non-dict/None cfg and a missing key -- resolves to
+    REPORTABILITY_CANDIDATE.
+
+    Never raises: the whole body runs inside a try/except that treats any
+    internal failure exactly like an unresolved implementation, falling
+    through to the inline rule.
 
     D-05: reportable ships the estimate's VALUE to Revenium; candidate keeps
     the value local but still ships provenance (evidence_class, evaluator,
     evaluator_version, model, and the version family) -- hermes-report.sh
     enforces that split when it reads this field, not this function.
     """
+    # Load-bearing position (PA-18, D-05): unconditional, before the
+    # resolution step below runs at all. Do not move this check.
     if abstained:
         return REPORTABILITY_CANDIDATE
+
+    impl_name = "config_opt_in"
+    resolved_status = None
+    try:
+        impl_name = _boundary_impl_name("evidence", "config_opt_in")
+        evidence_mod = _load_evidence_module()
+        impl = evidence_mod.resolve(impl_name) if evidence_mod is not None else None
+        if impl is not None:
+            job_dict = job if isinstance(job, dict) else {}
+            request = {
+                "abstained": abstained,
+                "agentic_job_id": job_dict.get("agentic_job_id", ""),
+                "job_type": job_dict.get("job_type", ""),
+            }
+            result = impl(request, cfg if isinstance(cfg, dict) else {})
+            if isinstance(result, dict) and result.get("reportability_status") in (
+                REPORTABILITY_REPORTABLE, REPORTABILITY_CANDIDATE,
+            ):
+                resolved_status = result["reportability_status"]
+    except Exception:
+        resolved_status = None
+
+    if resolved_status is not None:
+        return resolved_status
+
+    logger.warning(
+        "revenium-classifier: evidence boundary implementation %r did not "
+        "resolve to a valid reportability_status; falling back to the "
+        "inline config-opt-in rule",
+        impl_name,
+    )
     if not isinstance(cfg, dict):
         return REPORTABILITY_CANDIDATE
     if cfg.get("experimentalReportEstimates") is True:
@@ -1532,6 +2055,7 @@ def _build_job_assessment(
     evaluator_version: str,
     abstention_reason: "str | None" = None,
     double_counting_group: str = "",
+    model: str = PROVENANCE_MODEL_UNKNOWN,
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -1589,6 +2113,18 @@ def _build_job_assessment(
     identity source for the same reason evaluated in 44-RESEARCH.md
     Finding 7: it is a per-profile config default, so many unrelated
     outcomes on one profile would share one squad name and over-group.
+
+    Phase 45 (EGV-08, D-10/D-11, PA-07): `model` is CALLER-SUPPLIED, for the
+    same reason `evaluator` and `evaluator_version` are -- provenance a
+    model can assert is not provenance. This is why the value does not
+    arrive on `raw`, which is the untrusted parameter Phase 43's static
+    guard (_PROMOTION_FORBIDDEN_KEYS, _find_forbidden_raw_reads in
+    tests/test_phase43_evidence_grading.py) scopes to; 'model' is a member
+    of that forbidden set and the hostile fixture already spoofs
+    raw['model'] as 'gpt-attacker-9000'. The caller (_attach_assessment)
+    resolves the real value from a module-private _ServedModel carrier
+    popped off raw BEFORE raw ever reaches this function, never from raw
+    itself.
     """
     try:
         raw = raw if isinstance(raw, dict) else {}
@@ -1691,10 +2227,12 @@ def _build_job_assessment(
             # belongs to evidence_class below; see EVIDENCE_CLASSES'
             # declaration above for where it lives and D-01's rationale.
             "evidence_references": [],
-            # Forced via _forced_evidence_class(), never read from evaluator
-            # output (ROI-04, D-03): provenance a model can assert is not
-            # provenance.
-            "evidence_class": _forced_evidence_class(),
+            # Phase 45 (D-06 AMENDED): declared by the REGISTERED
+            # implementation at registration time, defaulted to the forced
+            # constant when unregistered/undeclared/non-string/out-of-set --
+            # still never read from evaluator output (ROI-04, D-03):
+            # provenance a model can assert is not provenance.
+            "evidence_class": _declared_evidence_class(evaluator),
             # Phase 43 (EGV-13, D-08): the study reference, and NOTHING else
             # about the study -- resolved above via _resolve_study_reference
             # from cfg only. Referencing a study never changes evidence_class
@@ -1704,7 +2242,12 @@ def _build_job_assessment(
 
             "evaluator": _clamp_assessment_text(evaluator, 32),
             "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-            "model": PROVENANCE_MODEL_UNKNOWN,
+            # Phase 45 (EGV-08, D-10/D-11, PA-07): caller-supplied, same
+            # footing as evaluator/evaluator_version above -- never read off
+            # raw. Clamped at PROVENANCE_MODEL_MAX_BYTES (64), deliberately
+            # NOT evaluator_version's 16-byte width, so a dated snapshot
+            # identifier survives verbatim.
+            "model": _clamp_assessment_text(model, PROVENANCE_MODEL_MAX_BYTES),
             "prompt_version": PROMPT_VERSION,
             "policy_version": POLICY_VERSION,
 
@@ -1726,7 +2269,14 @@ def _build_job_assessment(
             # still carries this key, valued REPORTABILITY_CANDIDATE --
             # the absence of a value is itself something the reporter must
             # be able to read, not merely infer from a missing field.
-            "reportability_status": _resolve_reportability_status(cfg, bool(abstention_reason)),
+            # Phase 45 (D-06 AMENDED, PA-20): the optional `job` argument
+            # is threaded HERE, at this one shared call site, built from
+            # the job_id/job_type locals already resolved above -- both
+            # the abstention early return and the success continuation
+            # get it, because both read from this same dict literal.
+            "reportability_status": _resolve_reportability_status(
+                cfg, bool(abstention_reason), job={"agentic_job_id": job_id, "job_type": job_type},
+            ),
         }
 
         if abstention_reason:
@@ -2127,6 +2677,116 @@ def _llm_evaluation_config(paths: "_Paths | None" = None) -> dict:
         return {}
 
 
+def _boundary_impl_name(key: str, default: str, paths: "_Paths | None" = None) -> str:
+    """Return the operator-selected implementation name for boundary `key`
+    (Phase 45, EGV-01), or `default` on any failure.
+
+    Mirrors _llm_evaluation_config's shape exactly: read config.json, take
+    its `boundaries` object when that is a dict, take `key` off it, and
+    return it only when it is a non-empty str. Everything else -- a missing
+    file, unreadable JSON, a missing `boundaries` object, a missing key, a
+    non-string value, or any exception -- returns `default`. Never raises.
+
+    `default` is always the built-in implementation's registered name, so a
+    typo in config.json, or an install with no `boundaries` object at all,
+    degrades to today's behaviour rather than stopping classification --
+    the same fail-open discipline _llm_evaluation_config already uses for
+    the (unrelated) llmOutcomeEvaluation object.
+    """
+    try:
+        data = json.loads((paths or _module_paths()).config_file.read_text(encoding="utf-8"))
+        boundaries = data.get("boundaries")
+        if not isinstance(boundaries, dict):
+            return default
+        name = boundaries.get(key)
+        if isinstance(name, str) and name:
+            return name
+        return default
+    except Exception:
+        return default
+
+
+def _load_classification_module():
+    """Import classification.py (Phase 45, EGV-01/D-13), the SAME two-step
+    import dance _register_classification_impl uses at import time, reused
+    here at the two run_classification_async call sites that resolve a
+    NAMED implementation per turn/session rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    classification boundary module must still classify (D-04) -- the
+    caller's own resolve step treats None as "unresolved" and falls back
+    to calling the built-in _classify_via_llm / _infer_jobs_via_llm
+    directly, exactly as an unknown implementation NAME would.
+    """
+    try:
+        from . import classification as _cl
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import classification as _cl  # type: ignore
+        except Exception:
+            return None
+    return _cl
+
+
+def _resolve_classification_impl(paths: "_Paths"):
+    """Return (impl_callable_or_None, impl_name) for the classification
+    boundary, per _boundary_impl_name's fail-open name resolution.
+
+    A None impl covers BOTH failure modes the caller must treat alike: the
+    module failed to import, or the resolved name is not registered. Either
+    way the caller falls back to the built-in call -- an unresolvable name
+    must never stop classification (Phase 45 threat register, T-45-12).
+    """
+    name = _boundary_impl_name("classification", "llm", paths=paths)
+    mod = _load_classification_module()
+    impl = mod.resolve(name) if mod is not None else None
+    return impl, name
+
+
+def _load_valuation_module():
+    """Import valuation.py (Phase 45, EGV-01), the SAME two-step import
+    dance _register_valuation_impl uses at import time, reused here at
+    _validate_assessment's own resolve step, which resolves a NAMED
+    implementation per assessment rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    valuation boundary module must still validate assessments (D-04) --
+    _validate_assessment's own resolve step treats None as "unresolved"
+    and falls back to computing the product inline, exactly as an unknown
+    implementation NAME would.
+    """
+    try:
+        from . import valuation as _val
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import valuation as _val  # type: ignore
+        except Exception:
+            return None
+    return _val
+
+
+def _load_evidence_module():
+    """Import evidence.py (Phase 45, EGV-01), the SAME two-step import
+    dance _register_evidence_impl uses at import time, reused here at
+    _resolve_reportability_status's own resolve step, which resolves a
+    NAMED implementation per assessment rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    evidence boundary module must still resolve reportability (D-04) --
+    _resolve_reportability_status's own resolve step treats None as
+    "unresolved" and falls back to the inline config-opt-in rule, exactly
+    as an unknown implementation NAME would.
+    """
+    try:
+        from . import evidence as _evd
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import evidence as _evd  # type: ignore
+        except Exception:
+            return None
+    return _evd
+
+
 def _read_taxonomy_labels(paths: "_Paths | None" = None) -> list:
     """Read TAXONOMY_FILE and return labels sorted recent-first, alpha within ties.
 
@@ -2201,17 +2861,29 @@ def _build_classification_prompt(user_msg: str, assistant_resp: str, labels: lis
 
 
 async def _classify_via_llm(context: dict, response_preview: str,
-                            paths: "_Paths | None" = None) -> str:
+                            paths: "_Paths | None" = None,
+                            labels: "list | None" = None) -> str:
     """Invoke the user's main budgeted LLM via agent.auxiliary_client.call_llm.
     Per Pitfall 8 + A3 + D-06: NO `task=` argument so the call uses the user's
     main provider+model from config.yaml. Returns the LLM-emitted raw string;
-    caller validates against LABEL_RE + TRIVIAL_BLOCKLIST via _validate_label."""
+    caller validates against LABEL_RE + TRIVIAL_BLOCKLIST via _validate_label.
+
+    Phase 45 (EGV-01, PA-13): `labels` is an OPTIONAL trailing keyword. When
+    it is None this function reads the taxonomy itself, exactly as it always
+    has -- every pre-Phase-45 caller is unaffected. When the caller supplies
+    a list, that list is used and the read is skipped, so the caller's own
+    taxonomy read (host I/O) stays on the host side of the classification
+    boundary and this function's portable half (build the prompt, call the
+    model, return the raw string) does not need to read a file to run.
+    """
     if call_llm is None:
         return "unclassified"
-    labels = _read_taxonomy_labels(paths)
+    if labels is None:
+        labels = _read_taxonomy_labels(paths)
+    context = context if isinstance(context, dict) else {}
     prompt = _build_classification_prompt(
         context.get("message", "") or "",
-        response_preview,
+        response_preview or "",
         labels,
     )
     try:
@@ -2239,13 +2911,27 @@ async def _classify_via_llm(context: dict, response_preview: str,
 
 def _validate_label(label: str) -> str:
     """Returns label if it matches LABEL_RE AND is not in TRIVIAL_BLOCKLIST,
-    else returns 'unclassified'. D-09 enforcement at the classifier boundary."""
+    else returns 'unclassified'. D-09 enforcement at the classifier boundary.
+
+    Phase 45 (EGV-01, PA-14): this is the SAME validation every classification
+    implementation's output passes through, built-in or not -- a registered
+    classifier cannot write a label the built-in path would have rejected. A
+    LABEL_RE failure is logged with %r on the raw label, mirroring
+    _validate_job's identical rejection log -- never %s and never an
+    f-string, because the label may be model- or operator-derived text, and
+    a newline embedded in it must not be able to forge a second log record
+    (T-28-07)."""
     if not label:
         return "unclassified"
     cleaned = label.strip().lower()
     if cleaned in TRIVIAL_BLOCKLIST:
         return "unclassified"
     if not LABEL_RE.match(cleaned):
+        logger.warning(
+            "revenium-classifier: rejected task_type classification, label "
+            "failed validation: %r",
+            label,
+        )
         return "unclassified"
     return cleaned
 
@@ -2442,6 +3128,12 @@ async def _attach_assessment(
     the six early-return branches, both exception handlers, and the
     success branch -- so every record this function produces for one job
     carries the same group id its caller resolved.
+
+    Phase 45 (EGV-08, D-10/D-12, PA-07): served_model is popped off `raw`
+    immediately after it resolves (see the pop below) and threaded to the
+    three branches that follow a REAL outcome-evaluation call -- see each
+    call site's own comment for which three and why the other six take the
+    sentinel default.
     """
     # Pre-bound before the try so the exception handlers can reference them
     # even if the failure happened before _llm_evaluation_config or the
@@ -2449,6 +3141,10 @@ async def _attach_assessment(
     cfg: dict = {}
     name = ""
     raw = None
+    # Phase 45 (EGV-08, D-10/D-12): pre-bound alongside cfg/name/raw above --
+    # the exception handlers must be able to reference it even when the
+    # failure happened before the evaluator ran.
+    served_model = PROVENANCE_MODEL_UNKNOWN
     try:
         cfg = _llm_evaluation_config(paths=paths)
         name = cfg.get("evaluator") or "llm"
@@ -2462,6 +3158,9 @@ async def _attach_assessment(
                 "revenium-classifier: outcome evaluation skipped, unknown "
                 "evaluator: %r", name,
             )
+            # Phase 45 (D-12): deliberately excluded from served_model --
+            # this branch returns before any evaluator runs, so there is no
+            # response to have served anything.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="unknown_evaluator",
@@ -2471,6 +3170,31 @@ async def _attach_assessment(
         raw = fn(valid, transcript, cfg)
         if inspect.isawaitable(raw):
             raw = await raw
+        # Phase 45 (EGV-08, D-10/D-12, PA-07): pop the reserved served-model
+        # carrier off raw BEFORE raw ever reaches _validate_assessment or
+        # _build_job_assessment -- both treat raw as UNTRUSTED evaluator
+        # output and 'model' is a member of Phase 43's
+        # _PROMOTION_FORBIDDEN_KEYS (tests/test_phase43_evidence_grading.py).
+        # Popping -- not reading -- is deliberate: the reserved key must
+        # never still be present on raw when raw is later handed to either
+        # guarded function. Accepting only a _ServedModel INSTANCE is
+        # deliberate too: a registered non-LLM evaluator that returns a
+        # plain string under the reserved key contributes nothing, which is
+        # what makes D-12's "a non-LLM evaluator records unknown"
+        # structural rather than conventional -- only
+        # _evaluate_outcome_via_llm's unconditional assignment can ever
+        # produce a _ServedModel, and JSON cannot construct one.
+        #
+        # D-12 scope boundary, stated explicitly: task-type classification
+        # and job inference also call the aux LLM and their provenance
+        # stays unrecorded here -- threading it there would be a marker
+        # wire-shape change against the 1024-byte cap and the schema
+        # test_marker_file_schema pins. Documented scope boundary, not an
+        # oversight.
+        if isinstance(raw, dict):
+            _carrier = raw.pop(_SERVED_MODEL_KEY, None)
+            if isinstance(_carrier, _ServedModel):
+                served_model = _carrier.value
         # Phase 39 (ROI-14): identity-compared BEFORE the `raw is None`
         # abstention check, so a broken response or a timeout from the
         # built-in `llm` path never falls through and gets misreported as an
@@ -2525,10 +3249,14 @@ async def _attach_assessment(
         # set valid["assessment"], so the frozen marker shape and the
         # status-only outcome path stay untouched.
         if _resolve_economic_mechanism(raw) == ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK:
+            # Phase 45 (D-12): this branch follows a real outcome-evaluation
+            # call, so the model that produced the response is honest
+            # provenance even though the mechanism gate abstains from value.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, raw, cfg, name, evaluator_version,
                 abstention_reason="mechanism_abstains_from_value",
                 double_counting_group=double_counting_group,
+                model=served_model,
             )
             return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version)
@@ -2543,6 +3271,7 @@ async def _attach_assessment(
             valid["_assessment_record"] = _build_job_assessment(
                 valid, assessment, raw, cfg, name, evaluator_version,
                 double_counting_group=double_counting_group,
+                model=served_model,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -2555,10 +3284,15 @@ async def _attach_assessment(
                 "revenium-classifier: outcome evaluation rejected for job=%s",
                 valid.get("agentic_job_id", ""),
             )
+            # Phase 45 (D-12): this branch also follows a real
+            # outcome-evaluation call -- the response was ultimately
+            # refused by _validate_assessment, but the model that produced
+            # it is still honest provenance.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, raw if isinstance(raw, dict) else None, cfg, name,
                 evaluator_version, abstention_reason="rejected",
                 double_counting_group=double_counting_group,
+                model=served_model,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -2670,11 +3404,55 @@ async def run_classification_async(
                 asst_resp = response or db_asst
             else:
                 user_msg, asst_resp = message, response
-            raw_label = await _classify_via_llm(
-                {"message": user_msg},
-                asst_resp or "",
-                paths=p,
-            )
+
+            # Phase 45 (EGV-01, D-13): route through the classification
+            # boundary registry. The taxonomy read happens ONCE, here, at
+            # the call site -- host I/O stays on the host side of the
+            # boundary (PA-13) -- and the same label list is handed to
+            # whichever implementation resolves, built-in or not.
+            task_labels = _read_taxonomy_labels(paths=p)
+            classification_cfg = _llm_evaluation_config(paths=p)
+            task_impl, task_impl_name = _resolve_classification_impl(p)
+            raw_label = None
+            used_builtin_task_classifier = True
+            if task_impl is not None:
+                try:
+                    task_result = task_impl(
+                        {
+                            "kind": "task_type",
+                            "context": {"message": user_msg},
+                            "response_preview": asst_resp or "",
+                            "labels": task_labels,
+                        },
+                        classification_cfg,
+                    )
+                    if inspect.isawaitable(task_result):
+                        task_result = await task_result
+                    used_builtin_task_classifier = False
+                    raw_label = (
+                        task_result.get("task_type")
+                        if isinstance(task_result, dict) else None
+                    )
+                except Exception as exc:
+                    # T-28-07: %r on the implementation name -- caller/
+                    # operator-supplied, and a newline in it must not be
+                    # able to forge a second log record.
+                    logger.warning(
+                        "revenium-classifier: classification implementation "
+                        "%r raised for task_type, falling back to built-in: %r",
+                        task_impl_name, exc,
+                    )
+            if used_builtin_task_classifier:
+                if task_impl is None:
+                    logger.warning(
+                        "revenium-classifier: classification implementation "
+                        "%r unresolved for task_type, falling back to built-in",
+                        task_impl_name,
+                    )
+                raw_label = await _classify_via_llm(
+                    {"message": user_msg}, asst_resp or "", paths=p,
+                    labels=task_labels,
+                )
             task_type = _validate_label(raw_label)
 
             # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
@@ -2695,7 +3473,49 @@ async def run_classification_async(
                 transcript = _read_session_transcript(session_id, paths=p)
                 if transcript:
                     job_labels = _read_job_taxonomy_labels(paths=p)
-                    jobs = await _infer_jobs_via_llm(transcript, job_labels)
+
+                    # Phase 45 (EGV-01, D-13): the SAME classification
+                    # boundary the task-type call site above resolves,
+                    # dispatched here with kind="jobs" instead.
+                    job_classification_cfg = _llm_evaluation_config(paths=p)
+                    job_impl, job_impl_name = _resolve_classification_impl(p)
+                    jobs = []
+                    used_builtin_job_classifier = True
+                    if job_impl is not None:
+                        try:
+                            job_result = job_impl(
+                                {
+                                    "kind": "jobs",
+                                    "transcript": transcript,
+                                    "labels": job_labels,
+                                },
+                                job_classification_cfg,
+                            )
+                            if inspect.isawaitable(job_result):
+                                job_result = await job_result
+                            used_builtin_job_classifier = False
+                            jobs = (
+                                job_result.get("jobs")
+                                if isinstance(job_result, dict) else []
+                            )
+                            if not isinstance(jobs, list):
+                                jobs = []
+                        except Exception as exc:
+                            logger.warning(
+                                "revenium-classifier: classification "
+                                "implementation %r raised for job "
+                                "inference, falling back to built-in: %r",
+                                job_impl_name, exc,
+                            )
+                    if used_builtin_job_classifier:
+                        if job_impl is None:
+                            logger.warning(
+                                "revenium-classifier: classification "
+                                "implementation %r unresolved for job "
+                                "inference, falling back to built-in",
+                                job_impl_name,
+                            )
+                        jobs = await _infer_jobs_via_llm(transcript, job_labels)
                     for job in jobs:
                         try:
                             valid = _validate_job(job)
