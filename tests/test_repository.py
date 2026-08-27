@@ -171,6 +171,11 @@ class RepositoryTests(unittest.TestCase):
             # adapter, proven by a conformance test against the pinned
             # jobs-outcome golden.
             SKILL / 'plugins' / 'revenium-classifier' / 'reporting.py',
+            # Phase 45 Plan 04 (EGV-01, D-13) — the classification boundary:
+            # ONE contract covering both turn-level task_type labelling and
+            # job/arc inference, with a shipped deterministic keyword fixture
+            # that displaces the built-in `llm` classifier end to end.
+            SKILL / 'plugins' / 'revenium-classifier' / 'classification.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
