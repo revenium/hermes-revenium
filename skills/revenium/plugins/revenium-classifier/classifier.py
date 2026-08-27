@@ -634,7 +634,17 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
             raw = response.choices[0].message.content
         except AttributeError:
             raw = response["choices"][0]["message"]["content"]
-        return _parse_assessment_object(raw or "")
+        parsed = _parse_assessment_object(raw or "")
+        if isinstance(parsed, dict):
+            # Phase 45 (EGV-08, D-10/PA-07): unconditional -- overwrites
+            # anything the model itself emitted under this key. THAT
+            # unconditional overwrite is the defence: a hostile response
+            # cannot pre-seed the reserved key with its own claim and have
+            # it survive to _attach_assessment's pop. Never attached to a
+            # non-dict return (abstention/_EVAL_INVALID), so those stay
+            # byte-identical to before this change.
+            parsed[_SERVED_MODEL_KEY] = _ServedModel(_resolve_served_model(response))
+        return parsed
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): a real provider timeout, distinguished from the
         # generic failure below so the caller's log taxonomy can tell them
@@ -1413,7 +1423,84 @@ COST_COVERAGE_EXCLUDED_AI = "metered_ai_cost"
 REPORTABILITY_REPORTABLE = "reportable"
 REPORTABILITY_CANDIDATE = "candidate"
 
-PROVENANCE_MODEL_UNKNOWN = "unknown"  # Phase 45 (EGV-08) owns which model produced the assessment; the naked-LLM path has no reliable model identity to report today
+PROVENANCE_MODEL_UNKNOWN = "unknown"  # Phase 45 (EGV-08, D-10): the FAIL-OPEN
+# default -- used whenever the served model is genuinely absent from the
+# response, whenever the evaluator made no model call at all (D-12), or
+# whenever anything on the extraction path fails. This is NOT a claim that
+# model identity is unavailable: D-10 verified against the live aux client
+# (~/.hermes/hermes-agent/agent/auxiliary_client.py) that response.model
+# carries it, and _resolve_served_model below reads it from there.
+
+# Phase 45 (EGV-08, D-11): deliberately NOT evaluator_version's 16-byte
+# clamp -- a dated snapshot identifier (e.g. "claude-sonnet-4-5-20250929",
+# 27 characters) IS the deciding model and must survive verbatim, or EGV-08's
+# whole point (recording precisely which model decided) is defeated by
+# truncation. 64 also matches the width hermes-report.sh's existing
+# --metadata forwarder already accepts (model_field[:64]), so this
+# producer-side clamp never relies on that consumer's clamp to avoid
+# truncating mid-identifier.
+PROVENANCE_MODEL_MAX_BYTES = 64
+
+# Phase 45 (EGV-08, D-10/PA-07): the reserved key _evaluate_outcome_via_llm
+# uses to carry the served model out of the LLM call, through the parsed
+# (and therefore untrusted) assessment dict, to _attach_assessment.
+_SERVED_MODEL_KEY = "_revenium_served_model"
+
+
+class _ServedModel:
+    """Module-private carrier for one outcome-evaluation call's served model.
+
+    SECURITY PROPERTY (PA-07): the served model must not travel to
+    _build_job_assessment inside the untrusted `raw` dict -- 'model' is a
+    member of Phase 43's _PROMOTION_FORBIDDEN_KEYS
+    (tests/test_phase43_evidence_grading.py) and the Phase 43 hostile
+    fixture already spoofs raw['model'] as 'gpt-attacker-9000'. An INSTANCE
+    of this class travels under _SERVED_MODEL_KEY instead of a bare string
+    because a JSON-parsed evaluator response cannot construct one: a
+    response that guesses the reserved key name and assigns a plain string
+    under it still cannot inject a value, because _attach_assessment's pop
+    accepts only this type.
+    """
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+def _resolve_served_model(response) -> str:
+    """Return the model that actually SERVED `response`, or the unknown
+    sentinel.
+
+    Reads response.model first, then falls back to response["model"] when
+    response is a dict -- the same dual object/dict handling this module
+    already applies to response.choices at every call_llm site. Returns the
+    sentinel for a None response, a missing model, a None model, a
+    non-string model, and an empty or whitespace-only string.
+
+    Deliberately NOT sourced from the outgoing request's model kwarg: the
+    live aux client's healed_model/refreshed_model paths rewrite the
+    REQUESTED model mid-flight on a provider failover -- precisely the case
+    EGV-08 exists to fix, where the requested model would keep writing
+    identical provenance across a live failover that changed who actually
+    answered. response.model is the SERVED model, already in hand at the
+    one call site that matters (D-10).
+
+    The whole body runs inside one try/except returning the sentinel --
+    including for a .model property that itself raises on access, since
+    getattr's default only covers AttributeError, not an arbitrary raise --
+    because a broken response object must never turn "no provenance" into
+    "broken turn" (ROI-08's fail-open rule, extended here).
+    """
+    try:
+        model = getattr(response, "model", None)
+        if model is None and isinstance(response, dict):
+            model = response.get("model")
+        if isinstance(model, str):
+            model = model.strip()
+            if model:
+                return model
+        return PROVENANCE_MODEL_UNKNOWN
+    except Exception:
+        return PROVENANCE_MODEL_UNKNOWN
 
 
 def _resolve_reportability_status(cfg: "dict | None", abstained: bool) -> str:

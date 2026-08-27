@@ -203,6 +203,11 @@ class RepositoryTests(unittest.TestCase):
             # unallocated cost partition's conservation test and the driven-tick
             # proof that the reporter's reconciliation line stays accumulate-only.
             ROOT / 'tests' / 'test_phase44_cost_partition.py',
+            # Phase 45 Plan 02 (EGV-08) — the deciding model, read off the
+            # served response rather than the requested one, recorded
+            # separately from evaluator identity and unspoofable via the
+            # reserved-key carrier.
+            ROOT / 'tests' / 'test_phase45_model_provenance.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
