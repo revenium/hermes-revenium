@@ -16,12 +16,31 @@ This module also exposes parse_prior_state, a shared reader helper for the
 revenium-hermes.ledger file. Both hermes-report.sh (via Python heredoc) and
 tests/test_repository.py invoke it directly so production logic and tests are
 load-bearing on the same code path.
+
+Phase 44 Plan 04 (EGV-17/D-15) adds a second, INVERSE conservation invariant
+owned by this file: equal_split() conserves DOWNWARD — one observed delta is
+split across N markers, and the N parts sum back to the whole. partition_by_
+attribution() conserves UPWARD — N observed rows are merged into exactly
+three attribution buckets, and the three buckets sum back to the row-set
+total. Both are asserted byte-exact for integer fields and Decimal-exact for
+cost, at the same Decimal("0.000001") quantum.
+
+The three buckets, in ATTRIBUTION_BUCKETS declaration order:
+    classified   -- metered cost the reporter split across real markers
+                    carrying an attribution.
+    unclassified -- metered cost on a session with no marker at all -- the
+                    existing synthetic unclassified-<epoch> markerless path.
+    unallocated  -- metered cost the reporter observed but did not attribute
+                    this tick -- a row whose report attempt did not result in
+                    a ledger line.
 """
 from decimal import Decimal
 
 
 INT_FIELDS = ("input", "output", "cache_read", "cache_write", "total")
 COST_FIELD = "cost"  # Decimal string in input; Decimal string in output
+
+ATTRIBUTION_BUCKETS = ("classified", "unclassified", "unallocated")
 
 
 def equal_split(delta: dict, n: int) -> list:
@@ -66,6 +85,73 @@ def equal_split(delta: dict, n: int) -> list:
     # Conservation check (Decimal-exact against the quantized input)
     assert sum(Decimal(s[COST_FIELD]) for s in splits) == cost, "conservation violated for cost"
     return splits
+
+
+def partition_by_attribution(rows) -> dict:
+    """Partition observed metered-cost rows into three attribution buckets.
+
+    rows: an iterable of (bucket, delta) pairs. bucket MUST be a member of
+    ATTRIBUTION_BUCKETS ("classified", "unclassified", "unallocated"); delta
+    is a dict shaped like equal_split's own input ({"input": int, "output":
+    int, "cache_read": int, "cache_write": int, "total": int, "cost": str
+    (Decimal-parseable)}).
+
+    Returns a dict keyed by every member of ATTRIBUTION_BUCKETS, always all
+    three, always in ATTRIBUTION_BUCKETS declaration order, even when a
+    bucket received no rows (its totals are all-zero, not absent). A missing
+    field in a delta defaults to 0 for an integer field and "0" for cost,
+    matching equal_split's own delta.get(k, 0) tolerance.
+
+    Conservation invariant (the inverse of equal_split's, asserted
+    byte-exact for INT_FIELDS and Decimal-exact for COST_FIELD, both
+    internally before returning and by the external conservation test):
+        for every key K,
+            sum(result[b][K] for b in ATTRIBUTION_BUCKETS) == sum(delta[K] for _, delta in rows)
+
+    A row naming a bucket outside ATTRIBUTION_BUCKETS raises ValueError
+    naming the offending value -- never a silent drop and never a fallback
+    bucket, because a dropped row is exactly what would make totals
+    reconcile falsely, which is the failure EGV-17's reconciliation clause
+    exists to prevent.
+    """
+    quant = Decimal("0.000001")
+    zero_cost = Decimal("0").quantize(quant)
+
+    int_totals = {bucket: {k: 0 for k in INT_FIELDS} for bucket in ATTRIBUTION_BUCKETS}
+    cost_totals = {bucket: zero_cost for bucket in ATTRIBUTION_BUCKETS}
+
+    grand_int_totals = {k: 0 for k in INT_FIELDS}
+    grand_cost_total = zero_cost
+
+    for bucket, delta in rows:
+        if bucket not in ATTRIBUTION_BUCKETS:
+            raise ValueError(
+                "unknown attribution bucket: {0!r} (must be one of {1})".format(
+                    bucket, ATTRIBUTION_BUCKETS
+                )
+            )
+        for k in INT_FIELDS:
+            v = int(delta.get(k, 0))
+            int_totals[bucket][k] += v
+            grand_int_totals[k] += v
+        cost = Decimal(str(delta.get(COST_FIELD, "0"))).quantize(quant)
+        cost_totals[bucket] += cost
+        grand_cost_total += cost
+
+    result = {}
+    for bucket in ATTRIBUTION_BUCKETS:
+        result[bucket] = {k: int_totals[bucket][k] for k in INT_FIELDS}
+        result[bucket][COST_FIELD] = format(cost_totals[bucket], "f")
+
+    for k in INT_FIELDS:
+        assert (
+            sum(int_totals[b][k] for b in ATTRIBUTION_BUCKETS) == grand_int_totals[k]
+        ), "conservation violated for {0}".format(k)
+    assert (
+        sum(cost_totals[b] for b in ATTRIBUTION_BUCKETS) == grand_cost_total
+    ), "conservation violated for cost"
+
+    return result
 
 
 def parse_prior_state(ledger_path, sid, total_tokens):
