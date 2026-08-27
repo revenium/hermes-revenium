@@ -1699,6 +1699,7 @@ def _build_job_assessment(
     evaluator_version: str,
     abstention_reason: "str | None" = None,
     double_counting_group: str = "",
+    model: str = PROVENANCE_MODEL_UNKNOWN,
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -1756,6 +1757,18 @@ def _build_job_assessment(
     identity source for the same reason evaluated in 44-RESEARCH.md
     Finding 7: it is a per-profile config default, so many unrelated
     outcomes on one profile would share one squad name and over-group.
+
+    Phase 45 (EGV-08, D-10/D-11, PA-07): `model` is CALLER-SUPPLIED, for the
+    same reason `evaluator` and `evaluator_version` are -- provenance a
+    model can assert is not provenance. This is why the value does not
+    arrive on `raw`, which is the untrusted parameter Phase 43's static
+    guard (_PROMOTION_FORBIDDEN_KEYS, _find_forbidden_raw_reads in
+    tests/test_phase43_evidence_grading.py) scopes to; 'model' is a member
+    of that forbidden set and the hostile fixture already spoofs
+    raw['model'] as 'gpt-attacker-9000'. The caller (_attach_assessment)
+    resolves the real value from a module-private _ServedModel carrier
+    popped off raw BEFORE raw ever reaches this function, never from raw
+    itself.
     """
     try:
         raw = raw if isinstance(raw, dict) else {}
@@ -1873,7 +1886,12 @@ def _build_job_assessment(
 
             "evaluator": _clamp_assessment_text(evaluator, 32),
             "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-            "model": PROVENANCE_MODEL_UNKNOWN,
+            # Phase 45 (EGV-08, D-10/D-11, PA-07): caller-supplied, same
+            # footing as evaluator/evaluator_version above -- never read off
+            # raw. Clamped at PROVENANCE_MODEL_MAX_BYTES (64), deliberately
+            # NOT evaluator_version's 16-byte width, so a dated snapshot
+            # identifier survives verbatim.
+            "model": _clamp_assessment_text(model, PROVENANCE_MODEL_MAX_BYTES),
             "prompt_version": PROMPT_VERSION,
             "policy_version": POLICY_VERSION,
 
@@ -2611,6 +2629,12 @@ async def _attach_assessment(
     the six early-return branches, both exception handlers, and the
     success branch -- so every record this function produces for one job
     carries the same group id its caller resolved.
+
+    Phase 45 (EGV-08, D-10/D-12, PA-07): served_model is popped off `raw`
+    immediately after it resolves (see the pop below) and threaded to the
+    three branches that follow a REAL outcome-evaluation call -- see each
+    call site's own comment for which three and why the other six take the
+    sentinel default.
     """
     # Pre-bound before the try so the exception handlers can reference them
     # even if the failure happened before _llm_evaluation_config or the
@@ -2618,6 +2642,10 @@ async def _attach_assessment(
     cfg: dict = {}
     name = ""
     raw = None
+    # Phase 45 (EGV-08, D-10/D-12): pre-bound alongside cfg/name/raw above --
+    # the exception handlers must be able to reference it even when the
+    # failure happened before the evaluator ran.
+    served_model = PROVENANCE_MODEL_UNKNOWN
     try:
         cfg = _llm_evaluation_config(paths=paths)
         name = cfg.get("evaluator") or "llm"
@@ -2631,6 +2659,9 @@ async def _attach_assessment(
                 "revenium-classifier: outcome evaluation skipped, unknown "
                 "evaluator: %r", name,
             )
+            # Phase 45 (D-12): deliberately excluded from served_model --
+            # this branch returns before any evaluator runs, so there is no
+            # response to have served anything.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="unknown_evaluator",
@@ -2640,6 +2671,31 @@ async def _attach_assessment(
         raw = fn(valid, transcript, cfg)
         if inspect.isawaitable(raw):
             raw = await raw
+        # Phase 45 (EGV-08, D-10/D-12, PA-07): pop the reserved served-model
+        # carrier off raw BEFORE raw ever reaches _validate_assessment or
+        # _build_job_assessment -- both treat raw as UNTRUSTED evaluator
+        # output and 'model' is a member of Phase 43's
+        # _PROMOTION_FORBIDDEN_KEYS (tests/test_phase43_evidence_grading.py).
+        # Popping -- not reading -- is deliberate: the reserved key must
+        # never still be present on raw when raw is later handed to either
+        # guarded function. Accepting only a _ServedModel INSTANCE is
+        # deliberate too: a registered non-LLM evaluator that returns a
+        # plain string under the reserved key contributes nothing, which is
+        # what makes D-12's "a non-LLM evaluator records unknown"
+        # structural rather than conventional -- only
+        # _evaluate_outcome_via_llm's unconditional assignment can ever
+        # produce a _ServedModel, and JSON cannot construct one.
+        #
+        # D-12 scope boundary, stated explicitly: task-type classification
+        # and job inference also call the aux LLM and their provenance
+        # stays unrecorded here -- threading it there would be a marker
+        # wire-shape change against the 1024-byte cap and the schema
+        # test_marker_file_schema pins. Documented scope boundary, not an
+        # oversight.
+        if isinstance(raw, dict):
+            _carrier = raw.pop(_SERVED_MODEL_KEY, None)
+            if isinstance(_carrier, _ServedModel):
+                served_model = _carrier.value
         # Phase 39 (ROI-14): identity-compared BEFORE the `raw is None`
         # abstention check, so a broken response or a timeout from the
         # built-in `llm` path never falls through and gets misreported as an
@@ -2694,10 +2750,14 @@ async def _attach_assessment(
         # set valid["assessment"], so the frozen marker shape and the
         # status-only outcome path stay untouched.
         if _resolve_economic_mechanism(raw) == ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK:
+            # Phase 45 (D-12): this branch follows a real outcome-evaluation
+            # call, so the model that produced the response is honest
+            # provenance even though the mechanism gate abstains from value.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, raw, cfg, name, evaluator_version,
                 abstention_reason="mechanism_abstains_from_value",
                 double_counting_group=double_counting_group,
+                model=served_model,
             )
             return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version)
@@ -2712,6 +2772,7 @@ async def _attach_assessment(
             valid["_assessment_record"] = _build_job_assessment(
                 valid, assessment, raw, cfg, name, evaluator_version,
                 double_counting_group=double_counting_group,
+                model=served_model,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -2724,10 +2785,15 @@ async def _attach_assessment(
                 "revenium-classifier: outcome evaluation rejected for job=%s",
                 valid.get("agentic_job_id", ""),
             )
+            # Phase 45 (D-12): this branch also follows a real
+            # outcome-evaluation call -- the response was ultimately
+            # refused by _validate_assessment, but the model that produced
+            # it is still honest provenance.
             valid["_assessment_record"] = _build_job_assessment(
                 valid, None, raw if isinstance(raw, dict) else None, cfg, name,
                 evaluator_version, abstention_reason="rejected",
                 double_counting_group=double_counting_group,
+                model=served_model,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
