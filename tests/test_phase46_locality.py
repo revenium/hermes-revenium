@@ -22,7 +22,9 @@ tests/test_phase38_reporter_path.py:1678-1719 rather than imported, matching
 this repo's stated preference for duplication across fail-open in-session
 vs. out-of-process reporter code (CLAUDE.md "Module design").
 """
+import asyncio
 import importlib.util
+import json
 import os
 import sys as _sys
 import tempfile
@@ -61,7 +63,7 @@ def tearDownModule():
 
 
 def _load_classifier(env=None):
-    """Import the revenium-classifier plugin fresh; return the classifier module."""
+    """Import the revenium-classifier plugin fresh; return (classifier, evaluators)."""
     for k, v in (env or {}).items():
         os.environ[k] = v
         _ENV_TOUCHED.add(k)
@@ -74,7 +76,7 @@ def _load_classifier(env=None):
     mod = importlib.util.module_from_spec(spec)
     _sys.modules[name] = mod
     spec.loader.exec_module(mod)
-    return _sys.modules[f'{name}.classifier']
+    return _sys.modules[f'{name}.classifier'], _sys.modules[f'{name}.evaluators']
 
 
 def _build_paths(classifier_mod, home: Path):
@@ -102,7 +104,7 @@ class AddressClassTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.classifier = _load_classifier({})
+        cls.classifier, cls.evaluators = _load_classifier({})
 
     def tearDown(self):
         _restore_env()
@@ -171,7 +173,7 @@ class LocalityResolutionTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.classifier = _load_classifier({})
+        cls.classifier, cls.evaluators = _load_classifier({})
 
     def tearDown(self):
         _restore_env()
@@ -256,7 +258,7 @@ class NoLocalityClaimTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.classifier = _load_classifier({})
+        cls.classifier, cls.evaluators = _load_classifier({})
 
     def tearDown(self):
         _restore_env()
@@ -305,6 +307,172 @@ class NoLocalityClaimTests(unittest.TestCase):
         )
         for phrase in forbidden_phrases:
             self.assertNotIn(phrase, locality_source)
+
+
+def _p46loc_attach_env(tmpdir, evaluator_name, base_url, provider):
+    """A minimal, fully isolated state tree -- own HERMES_HOME + config.yaml
+    (deterministic locality) AND own REVENIUM_STATE_DIR + config.json
+    (llmOutcomeEvaluation opted in). Unlike test_phase42_assessment_contract's
+    `_p42_shape_env`, HERMES_HOME is overridden too, so _attach_assessment's
+    locality resolution never reads the real host's ~/.hermes/config.yaml --
+    load-bearing for deterministic assertions on the resolved values below."""
+    home = os.path.join(tmpdir, 'home')
+    os.makedirs(home, exist_ok=True)
+    with open(os.path.join(home, 'config.yaml'), 'w', encoding='utf-8') as f:
+        f.write(f'model:\n  provider: {provider}\n  base_url: {base_url}\n')
+    state_dir = os.path.join(tmpdir, 'state')
+    os.makedirs(state_dir, exist_ok=True)
+    config_file = os.path.join(state_dir, 'config.json')
+    with open(config_file, 'w', encoding='utf-8') as f:
+        json.dump({'llmOutcomeEvaluation': {
+            'enabled': True, 'evaluator': evaluator_name, 'currency': 'USD',
+        }}, f)
+    return {
+        'HERMES_HOME': home,
+        'REVENIUM_STATE_DIR': state_dir,
+        'REVENIUM_CONFIG_FILE': config_file,
+    }
+
+
+class AssessmentLocalityFieldsTests(unittest.TestCase):
+    """Task 2, behaviors 1 and 5 -- every record `_build_job_assessment`
+    returns via `_attach_assessment` (the six early-return abstention
+    branches, both exception handlers, and the success branch) carries both
+    `inference_provider` and `inference_address_class`, resolved from a
+    deterministic, isolated config.yaml -- and no record contains the raw
+    base_url used to derive the class.
+
+    Mirrors test_phase42_assessment_contract.py's AbstentionRecordTests
+    `_run_case` shape (same six behaviors driven through the same seam) --
+    duplicated, not imported, per this module's own isolated-import idiom."""
+
+    BASE_URL = 'http://127.0.0.1:9009/v1'
+    PROVIDER = 'p46loc-test-provider'
+    SECRET_MARKER = '9009'  # a substring of BASE_URL that must never leak
+
+    def tearDown(self):
+        _restore_env()
+
+    def _run_case(self, label, behavior, evaluator_name=None):
+        evaluator_name = evaluator_name or f'p46loc-attach-{label}'
+        with tempfile.TemporaryDirectory(prefix=f'gsd-p46loc-attach-{label}-') as tmpdir:
+            env = _p46loc_attach_env(tmpdir, evaluator_name, self.BASE_URL, self.PROVIDER)
+            mod, ev = _load_classifier(env)
+
+            if behavior == 'invalid':
+                ev.register(evaluator_name, lambda job, t, c: mod._EVAL_INVALID, version='v1')
+            elif behavior == 'timed_out':
+                ev.register(evaluator_name, lambda job, t, c: mod._EVAL_TIMED_OUT, version='v1')
+            elif behavior == 'abstained':
+                ev.register(evaluator_name, lambda job, t, c: None, version='v1')
+            elif behavior == 'rejected':
+                ev.register(evaluator_name, lambda job, t, c: {
+                    'inferred_role': 'x', 'estimated_hours_saved': -1.0,
+                    'assumed_loaded_rate': 100.0, 'currency': 'USD',
+                    'basis': 'x', 'confidence': 0.5,
+                }, version='v1')
+            elif behavior == 'failed':
+                def _boom(job, t, c):
+                    raise RuntimeError('boom')
+                ev.register(evaluator_name, _boom, version='v1')
+            elif behavior == 'mechanism_abstains_from_value':
+                ev.register(evaluator_name, lambda job, t, c: {
+                    'economic_mechanism': 'newly_enabled_work',
+                    'inferred_role': 'x', 'basis': 'x', 'confidence': 0.5,
+                }, version='v1')
+            elif behavior == 'success':
+                ev.register(evaluator_name, lambda job, t, c: {
+                    'economic_mechanism': 'labor_substitution',
+                    'inferred_role': 'engineer', 'estimated_hours_saved': 2.5,
+                    'assumed_loaded_rate': 150.0, 'currency': 'USD',
+                    'basis': 'time avoided', 'confidence': 0.5,
+                }, version='v1')
+            elif behavior is None:
+                pass  # unknown_evaluator: evaluator_name is deliberately never registered
+            else:
+                raise AssertionError(f'unknown behavior {behavior!r}')
+
+            valid = {'agentic_job_id': f'p46loc-{label}-job', 'job_name': 'n',
+                      'job_type': 'bug_fix', 'status': 'SUCCESS'}
+            paths = mod._module_paths()
+            asyncio.run(mod._attach_assessment(valid, 'user: x\nassistant: y', paths))
+            return valid.get('_assessment_record')
+
+    def _assert_locality_present(self, rec, expected_reason):
+        self.assertIsNotNone(rec, f'{expected_reason}: expected a real record, not None')
+        self.assertIn('inference_provider', rec, f'{expected_reason}: missing inference_provider')
+        self.assertIn(
+            'inference_address_class', rec,
+            f'{expected_reason}: missing inference_address_class',
+        )
+        self.assertEqual(rec['inference_provider'], self.PROVIDER)
+        self.assertEqual(rec['inference_address_class'], 'loopback')
+        # Behavior 2: always a member of the four-value set.
+        self.assertIn('inference_address_class', rec)
+        # Behavior 5: no record contains the raw base_url anywhere.
+        serialized = json.dumps(rec)
+        self.assertNotIn(self.BASE_URL, serialized)
+        self.assertNotIn(self.SECRET_MARKER, serialized)
+
+    def test_unknown_evaluator_carries_locality(self):
+        rec = self._run_case(
+            'unknown_evaluator', None, evaluator_name='p46loc-attach-never-registered')
+        self.assertEqual(rec['abstention_reason'], 'unknown_evaluator')
+        self._assert_locality_present(rec, 'unknown_evaluator')
+
+    def test_invalid_response_carries_locality(self):
+        rec = self._run_case('invalid', 'invalid')
+        self.assertEqual(rec['abstention_reason'], 'invalid')
+        self._assert_locality_present(rec, 'invalid')
+
+    def test_timed_out_sentinel_carries_locality(self):
+        rec = self._run_case('timed_out', 'timed_out')
+        self.assertEqual(rec['abstention_reason'], 'timed_out')
+        self._assert_locality_present(rec, 'timed_out')
+
+    def test_abstained_carries_locality(self):
+        rec = self._run_case('abstained', 'abstained')
+        self.assertEqual(rec['abstention_reason'], 'abstained')
+        self._assert_locality_present(rec, 'abstained')
+
+    def test_mechanism_abstains_from_value_carries_locality(self):
+        rec = self._run_case('mechanism_abstains_from_value', 'mechanism_abstains_from_value')
+        self.assertEqual(rec['abstention_reason'], 'mechanism_abstains_from_value')
+        self._assert_locality_present(rec, 'mechanism_abstains_from_value')
+
+    def test_rejected_carries_locality(self):
+        rec = self._run_case('rejected', 'rejected')
+        self.assertEqual(rec['abstention_reason'], 'rejected')
+        self._assert_locality_present(rec, 'rejected')
+
+    def test_exception_timed_out_carries_locality(self):
+        # The SECOND timed_out site -- a registered evaluator raising a
+        # timeout directly, caught by _attach_assessment's own except clause.
+        evaluator_name = 'p46loc-attach-exc-timed-out'
+        with tempfile.TemporaryDirectory(prefix='gsd-p46loc-attach-exctimeout-') as tmpdir:
+            env = _p46loc_attach_env(tmpdir, evaluator_name, self.BASE_URL, self.PROVIDER)
+            mod, ev = _load_classifier(env)
+
+            def _timeout(job, t, c):
+                raise TimeoutError('timed out')
+            ev.register(evaluator_name, _timeout, version='v1')
+            valid = {'agentic_job_id': 'p46loc-exctimeout-job', 'job_name': 'n',
+                      'job_type': 'bug_fix', 'status': 'SUCCESS'}
+            paths = mod._module_paths()
+            asyncio.run(mod._attach_assessment(valid, 'user: x\nassistant: y', paths))
+            rec = valid.get('_assessment_record')
+        self.assertEqual(rec['abstention_reason'], 'timed_out')
+        self._assert_locality_present(rec, 'exception_timed_out')
+
+    def test_generic_exception_carries_locality(self):
+        rec = self._run_case('failed', 'failed')
+        self.assertEqual(rec['abstention_reason'], 'failed')
+        self._assert_locality_present(rec, 'failed')
+
+    def test_success_carries_locality(self):
+        rec = self._run_case('success', 'success')
+        self.assertEqual(rec['abstention_reason'], '')
+        self._assert_locality_present(rec, 'success')
 
 
 if __name__ == '__main__':

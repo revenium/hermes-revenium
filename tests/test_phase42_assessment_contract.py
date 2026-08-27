@@ -1239,6 +1239,14 @@ class RecordShapeTests(unittest.TestCase):
         # "not a test bent to fit code" instruction.
         'study_id', 'study_version',
         'evaluator', 'evaluator_version', 'model', 'prompt_version', 'policy_version',
+        # Phase 46 (EGV-21, D-06/D-07): the two locality facts -- the
+        # resolved inference provider name plus a derived four-value address
+        # class. Present on every record including abstention, on the same
+        # caller-supplied-provenance footing as model above. These ARE
+        # sidecar fields (unlike plan 46-01's metadata_truncated, which
+        # belongs only to the --metadata transport and must stay out of
+        # this set).
+        'inference_provider', 'inference_address_class',
         'confidence', 'abstention_reason', 'reportability_status',
     }
 

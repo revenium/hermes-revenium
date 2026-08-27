@@ -2208,6 +2208,8 @@ def _build_job_assessment(
     abstention_reason: "str | None" = None,
     double_counting_group: str = "",
     model: str = PROVENANCE_MODEL_UNKNOWN,
+    inference_provider: str = "",
+    inference_address_class: str = ADDRESS_CLASS_UNSET,
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -2400,6 +2402,26 @@ def _build_job_assessment(
             # NOT evaluator_version's 16-byte width, so a dated snapshot
             # identifier survives verbatim.
             "model": _clamp_assessment_text(model, PROVENANCE_MODEL_MAX_BYTES),
+            # Phase 46 (EGV-21, D-06/D-07): caller-supplied, resolved ONCE
+            # via _resolve_inference_locality (by _attach_assessment, or by
+            # the non-SUCCESS branch in the caller's own job loop) and
+            # threaded UNCHANGED here, on the same caller-supplied-provenance
+            # footing as model/evaluator/evaluator_version above -- never
+            # read off raw. These are NOT part of D-11's value-omit family:
+            # an abstained record still carries them, exactly like evaluator
+            # and reportability_status do, because they describe where the
+            # evaluation was configured to run whether or not it produced a
+            # value. inference_address_class is defended against a corrupt
+            # or out-of-set caller value by falling back to
+            # ADDRESS_CLASS_UNSET, the same direction _resolve_inference_locality
+            # itself fails open to.
+            "inference_provider": _clamp_assessment_text(
+                inference_provider, INFERENCE_PROVIDER_MAX_BYTES),
+            "inference_address_class": (
+                inference_address_class
+                if inference_address_class in _ADDRESS_CLASSES
+                else ADDRESS_CLASS_UNSET
+            ),
             "prompt_version": PROMPT_VERSION,
             "policy_version": POLICY_VERSION,
 
@@ -3286,6 +3308,13 @@ async def _attach_assessment(
     three branches that follow a REAL outcome-evaluation call -- see each
     call site's own comment for which three and why the other six take the
     sentinel default.
+
+    Phase 46 (EGV-21, D-06/D-07): inference_provider/inference_address_class
+    are resolved ONCE, before the try, via _resolve_inference_locality(paths)
+    -- unlike served_model, locality reaches ALL nine _build_job_assessment
+    calls below, because it is a fact about the configured endpoint,
+    available regardless of whether an evaluator ran or a failure happened
+    before one could.
     """
     # Pre-bound before the try so the exception handlers can reference them
     # even if the failure happened before _llm_evaluation_config or the
@@ -3297,6 +3326,11 @@ async def _attach_assessment(
     # the exception handlers must be able to reference it even when the
     # failure happened before the evaluator ran.
     served_model = PROVENANCE_MODEL_UNKNOWN
+    # Phase 46 (EGV-21, D-06/D-07): resolved once, unconditionally -- this
+    # is a fact about the configured endpoint, not about the outcome of the
+    # evaluation that follows, so it is bound before the try alongside
+    # served_model and threaded UNCHANGED to every branch below.
+    inference_provider, inference_address_class = _resolve_inference_locality(paths)
     try:
         cfg = _llm_evaluation_config(paths=paths)
         name = cfg.get("evaluator") or "llm"
@@ -3317,6 +3351,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="unknown_evaluator",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         raw = fn(valid, transcript, cfg)
@@ -3363,6 +3399,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="invalid",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         if raw is _EVAL_TIMED_OUT:
@@ -3374,6 +3412,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="timed_out",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         if raw is None:
@@ -3385,6 +3425,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="abstained",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         # The version comes from the REGISTRY, not from a name comparison here.
@@ -3409,6 +3451,8 @@ async def _attach_assessment(
                 abstention_reason="mechanism_abstains_from_value",
                 double_counting_group=double_counting_group,
                 model=served_model,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version)
@@ -3424,6 +3468,8 @@ async def _attach_assessment(
                 valid, assessment, raw, cfg, name, evaluator_version,
                 double_counting_group=double_counting_group,
                 model=served_model,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -3445,6 +3491,8 @@ async def _attach_assessment(
                 evaluator_version, abstention_reason="rejected",
                 double_counting_group=double_counting_group,
                 model=served_model,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -3473,6 +3521,8 @@ async def _attach_assessment(
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="timed_out",
             double_counting_group=double_counting_group,
+            inference_provider=inference_provider,
+            inference_address_class=inference_address_class,
         )
     except Exception as exc:
         logger.warning(
@@ -3482,6 +3532,8 @@ async def _attach_assessment(
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="failed",
             double_counting_group=double_counting_group,
+            inference_provider=inference_provider,
+            inference_address_class=inference_address_class,
         )
 
 
@@ -3750,11 +3802,26 @@ async def run_classification_async(
                                     _non_success_evaluator = (
                                         _non_success_cfg.get("evaluator") or "llm"
                                     )
+                                    # Phase 46 (EGV-21, D-06/D-07): this
+                                    # branch never calls _attach_assessment
+                                    # (see the comment block above), so
+                                    # locality is resolved directly here
+                                    # rather than inherited from that
+                                    # function's own pre-bound pair -- same
+                                    # fail-open call, same profile-scoped
+                                    # `p`, same reasoning: a fact about the
+                                    # configured endpoint, available
+                                    # regardless of evaluation status.
+                                    _non_success_provider, _non_success_class = (
+                                        _resolve_inference_locality(p)
+                                    )
                                     valid["_assessment_record"] = _build_job_assessment(
                                         valid, None, None, _non_success_cfg,
                                         _non_success_evaluator, "",
                                         abstention_reason="not_evaluated_non_success",
                                         double_counting_group=session_id,
+                                        inference_provider=_non_success_provider,
+                                        inference_address_class=_non_success_class,
                                     )
                                 # Phase 42 (D-12): sidecar FIRST, then the job
                                 # marker. A crash between the two appends
