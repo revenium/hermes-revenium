@@ -1839,5 +1839,133 @@ class PhaseFieldInventoryTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Plan 44-05 — the previous milestone's genuinely-$0.00 live run as a
+# standing regression test (D-11, PA-11, 44-RESEARCH.md Finding 11).
+# ---------------------------------------------------------------------------
+
+
+class LiveShapeRegressionTests(unittest.TestCase):
+    """EGV-15's live '$0.00 metered cost / non-null value' case, turned into
+    a standing regression test rather than a remembered anecdote.
+
+    The inputs below are the REAL values captured live during Phase 40 --
+    quoted verbatim from
+    .planning/phases/40-live-verification/40-EVIDENCE.md:501 (the job
+    marker's own frozen `assessment` summary) and :990-1166 (the
+    `revenium jobs roi compute_transaction_summary_stats_c946` read-back
+    against session 20260824_120402_f1d4d1). NO raw `job_assessment` sidecar
+    JSON line exists for this run: Phase 40 ran before Phase 41/42
+    introduced the sidecar format entirely, so this fixture cannot be and is
+    not a captured record -- a grep for "job_assessment" or "value_low" in
+    40-EVIDENCE.md returns zero matches (44-RESEARCH.md Finding 11,
+    [VERIFIED]). The record this test asserts on is therefore produced by
+    TODAY's real _validate_assessment / _build_job_assessment constructors,
+    fed the real observed inputs -- the only honest way to combine real
+    captured inputs with a schema that did not exist when they were
+    observed. This repo has a documented, repeated defect of fixtures
+    pinning what the TEST produces rather than what production sends; this
+    fixture is written specifically not to make that five.
+
+    One field genuinely did not exist at capture time and has no real value
+    to quote: `economic_mechanism` (added this phase, Plan 44-01). The
+    fixture supplies `labor_substitution` -- not an invented number, but the
+    mechanism the real run's own shape already matches: a named
+    counterfactual human role ("software engineer") plus an hours/rate pair
+    is exactly what labor_substitution represents, and it is the ONLY
+    evaluator-selectable mechanism today's D-01 mechanism gate would accept
+    for this shape without inventing an assumption the real run does not
+    support.
+    """
+
+    # Real observed inputs, quoted verbatim from 40-EVIDENCE.md:501 (the
+    # marker's frozen `assessment` summary) -- fed through the real
+    # constructors below as a RAW EVALUATOR RESPONSE. The constructed record
+    # is never hand-authored and never snapshotted.
+    _REAL_JOB_ID = 'compute_transaction_summary_stats_c946'
+    _REAL_JOB_TYPE = 'code_generation_and_testing'
+    _REAL_BASIS = (
+        'Wrote a transaction statistics function with error handling for '
+        'unparsable strings and a 7-case test suite covering valid, '
+        'malformed, and empty inputs, then ran and verified all tests.'
+    )
+
+    def _real_raw(self):
+        return {
+            'economic_mechanism': 'labor_substitution',  # see class docstring
+            'inferred_role': 'software engineer',
+            'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 125.0,
+            'currency': 'USD',
+            'basis': self._REAL_BASIS,
+            'confidence': 0.9,
+        }
+
+    def _real_valid(self):
+        return {
+            'agentic_job_id': self._REAL_JOB_ID,
+            'job_type': self._REAL_JOB_TYPE,
+            'status': 'SUCCESS',
+        }
+
+    def _real_record(self, mod):
+        raw = self._real_raw()
+        # Call the real constructor and assert acceptance BEFORE asserting
+        # anything about the record -- an assertion that silently ran
+        # against None is how a fixture stops testing anything.
+        assessment = mod._validate_assessment(raw, {}, 'llm', '1')
+        self.assertIsNotNone(
+            assessment,
+            "the real observed Phase 40 inputs must be accepted by today's "
+            '_validate_assessment, not rejected',
+        )
+        rec = mod._build_job_assessment(
+            self._real_valid(), assessment, raw, {}, 'llm', '1')
+        self.assertIsNotNone(rec, 'record construction over the real inputs must succeed')
+        return rec
+
+    def test_live_shape_stays_coherent_through_todays_constructors(self):
+        mod = _load_classifier({})
+        rec = self._real_record(mod)
+
+        # Mechanism present, value present -- the live run's headline pairing.
+        self.assertEqual(rec['estimated_value'], 250.0)
+        self.assertEqual(rec['evidence_class'], 'MODEL_ESTIMATED_DEMO')
+        self.assertIn(rec['economic_mechanism'], mod.EVALUATOR_MECHANISMS)
+        self.assertNotEqual(rec['economic_mechanism'], mod.ECONOMIC_MECHANISM_UNKNOWN)
+
+        # AI cost named excluded -- the genuinely $0.00 metered cost is
+        # represented as a deliberate exclusion, not a missing operand.
+        self.assertIn(mod.COST_COVERAGE_EXCLUDED_AI, rec['cost_coverage']['excluded'])
+
+        # No operator costs configured for this test -> net_value equals
+        # gross, and all four categories are unknown (no costs block was
+        # supplied at all, so nothing is known-zero either).
+        self.assertEqual(rec['net_value'], rec['estimated_value'])
+        self.assertEqual(len(rec['cost_coverage']['unknown']), 4)
+
+        # No ratio to be null anywhere in the record -- EGV-15's structural
+        # form. The live run's `null` ROI existed because Revenium computed
+        # a ratio over a $0.00 denominator; the fix is that no ratio is
+        # computed here at all, so there is nothing that CAN be null.
+        for key in rec:
+            lowered = key.lower()
+            self.assertNotIn('roi', lowered)
+            self.assertNotIn('ratio', lowered)
+            self.assertNotIn('percent', lowered)
+
+    def test_live_shape_record_clears_the_sidecar_byte_ceiling(self):
+        """Reuses SidecarBudgetTests' own encoding (compact separators,
+        ensure_ascii=True, UTF-8, plus the trailing newline byte) -- a byte
+        assertion against a different encoder measures the wrong thing."""
+        mod = _load_classifier({})
+        rec = self._real_record(mod)
+
+        serialized = len(
+            json.dumps(rec, separators=(',', ':'), ensure_ascii=True).encode('utf-8')
+        ) + 1
+        self.assertLess(serialized, 8192, f'live-shape record is {serialized} bytes')
+
+
 if __name__ == '__main__':
     unittest.main()
