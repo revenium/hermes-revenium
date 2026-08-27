@@ -176,6 +176,12 @@ class RepositoryTests(unittest.TestCase):
             # job/arc inference, with a shipped deterministic keyword fixture
             # that displaces the built-in `llm` classifier end to end.
             SKILL / 'plugins' / 'revenium-classifier' / 'classification.py',
+            # Phase 45 Plan 05 (EGV-01, PA-15/PA-16) — the economic
+            # valuation boundary: the derivation step carved out of
+            # classifier._validate_assessment, with a shipped rate-card
+            # fixture that prices from an operator's approved rate card
+            # instead of hours times rate.
+            SKILL / 'plugins' / 'revenium-classifier' / 'valuation.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
