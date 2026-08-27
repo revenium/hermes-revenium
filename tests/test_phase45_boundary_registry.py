@@ -178,5 +178,56 @@ class BoundaryRegistryImportGuardTests(unittest.TestCase):
         self.assertEqual({'logging'}, imported)
 
 
+class SeamMigrationTests(unittest.TestCase):
+    """Phase 45 Plan 01 Task 2 -- evaluators.py migrated onto BoundaryRegistry
+    (D-04), and carries its first non-masquerading fixture (D-05/D-06 AMENDED).
+
+    Deliberately scoped to evaluators.py alone, with NO classifier.py
+    integration: `resolve_evidence_class('llm')`'s value depends on whether
+    classifier.py's `_register_llm_evaluator` has pinned an explicit
+    evidence_class, which is this plan's Task 3, not Task 2 -- asserting it
+    here would make this test's pass/fail depend on task ORDER within the
+    plan rather than on what Task 2 alone changed. The equivalent guarantee
+    for 'llm' (that classifier._declared_evidence_class('llm') resolves to
+    MODEL_ESTIMATED_DEMO) is Task 3's DeclaredEvidenceClassTests' job, and it
+    exercises the real production code path (_declared_evidence_class), not
+    a raw registry lookup.
+    """
+
+    def setUp(self):
+        self.ev = _load_evaluators()
+
+    def test_free_functions_still_exist_and_behave(self):
+        self.assertIsNotNone(self.ev.resolve('stub'))
+        self.assertIsNone(self.ev.resolve('nope'))
+        self.assertIsNone(self.ev.resolve(None))
+        self.assertIn('stub', self.ev.registered())
+
+    def test_registry_is_a_boundary_registry_for_output_assessment(self):
+        reg = self.ev._REGISTRY
+        self.assertEqual('BoundaryRegistry', type(reg).__name__)
+        self.assertEqual('output_assessment', reg.boundary)
+
+    def test_stub_declares_the_masquerade_class(self):
+        self.assertEqual('MODEL_ESTIMATED_DEMO', self.ev.resolve_evidence_class('stub'))
+
+    def test_fixture_declares_outcome_observed_not_masquerade_class(self):
+        got = self.ev.resolve_evidence_class('system_of_record_assessment_fixture')
+        self.assertEqual('OUTCOME_OBSERVED', got)
+        self.assertNotEqual('MODEL_ESTIMATED_DEMO', got)
+
+    def test_fixture_abstains_on_failed_and_cancelled(self):
+        fixture = self.ev.resolve('system_of_record_assessment_fixture')
+        self.assertIsNotNone(fixture)
+        self.assertIsNone(fixture({'status': 'FAILED'}, '', {}))
+        self.assertIsNone(fixture({'status': 'CANCELLED'}, '', {}))
+
+    def test_fixture_returns_a_dict_on_success(self):
+        fixture = self.ev.resolve('system_of_record_assessment_fixture')
+        got = fixture({'status': 'SUCCESS'}, '', {})
+        self.assertIsInstance(got, dict)
+        self.assertEqual('labor_substitution', got['economic_mechanism'])
+
+
 if __name__ == '__main__':
     unittest.main()
