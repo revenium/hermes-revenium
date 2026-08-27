@@ -136,3 +136,126 @@ is ranked above or below another.
 `assessment` key, no value. They keep their metered cost and so remain eligible
 to show zero or negative ROI. Success is never inferred from a transcript that
 merely sounds productive.
+
+See "Abstention and the non-SUCCESS record" below: this statement is about
+the marker's `assessment` key, which stays absent exactly as described here.
+A separate sidecar record is now written for these arcs too — its shape is
+covered there, not here.
+
+---
+
+## The economic mechanism, net value, and cost reconciliation (Phase 44)
+
+Everything in this section describes the **`job_assessment` sidecar record**
+(`${STATE_DIR}/job-assessments/<sanitized_job_id>.jsonl`, see the "Job
+Assessment Sidecar" section of
+[`config-schema.md`](config-schema.md)), not the job marker documented above.
+This phase adds nothing to the frozen `kind: "job"` marker shape shown in the
+JSON example above — its `assessment` key stays the same 9-key summary it has
+been since v1.5, byte-unchanged. A reader looking for `net_value`,
+`supplied_costs`, `cost_coverage`, `economic_mechanism`, or
+`double_counting_group` on the marker line will not find them there; they
+live on the sidecar record `hermes-report.sh` reads to build `--metadata`.
+
+### The six economic mechanisms (EGV-05)
+
+Every sidecar record names an `economic_mechanism` — a claim about *how* the
+work produced its value, not just how much. Six flat, unordered values exist,
+mirroring the shape of the nine evidence-class labels above: `labor_substitution`,
+`augmentation_capacity_expansion`, `newly_enabled_work`,
+`quality_decision_improvement`, `risk_avoidance`, `incremental_revenue`.
+
+Three are evaluator-selectable — `labor_substitution`,
+`augmentation_capacity_expansion`, `newly_enabled_work` — and three are
+operator-declared only — `quality_decision_improvement`, `risk_avoidance`,
+`incremental_revenue`. A mechanism is a claim about the work, which the
+session transcript evidences, so the naked-LLM evaluator may choose among the
+three it can evidence from what it actually observed. Revenue, risk
+avoidance, and quality or decision improvement are claims a transcript cannot
+support, so only operator configuration or a study reference may assert
+them.
+
+An unrecognised value, or one of the three operator-only mechanisms,
+appearing in an evaluator response resolves to the `unknown` sentinel and
+abstains — the field is absent from the record's asserted mechanism claim
+rather than clamped to a working default.
+
+### Net value and the coverage list (EGV-14, EGV-15)
+
+A successful, evaluated record carries `net_value`, `supplied_costs`, and
+`cost_coverage` alongside the existing `estimated_value`. `estimated_value`
+remains the gross figure — unchanged in meaning. `net_value` is a sibling
+field that subtracts every operator-supplied cost category
+(`skills/revenium/references/config-schema.md`'s `costs` block) from
+`estimated_value`.
+
+`cost_coverage` names, in a fixed order, which categories were included,
+which of those were supplied as a known zero, which are unknown, and which
+are deliberately excluded. Metered AI cost is the one deliberately-excluded
+category — Revenium already holds the metered cost for the job and completes
+that half of the subtraction on its side; this skill never nets AI cost
+itself. No ratio is emitted here: the skill ships the operands (value,
+costs, coverage), and Revenium derives ratios from figures it already holds.
+
+### Abstention and the non-SUCCESS record (EGV-05, EGV-17)
+
+A `newly_enabled_work` arc records its mechanism and omits the entire value
+family — no `value_low`/`value_base`/`value_high`/`bounds_source`/
+`currency`/`estimated_value`/`assumptions`/`net_value`. That mechanism has no
+counterfactual human role by definition, and asking for one is exactly what
+produces invented numbers. This abstention carries `abstention_reason:
+"mechanism_abstains_from_value"`.
+
+A `FAILED` or `CANCELLED` job now gets its own sidecar record too — built
+directly, never through the evaluator — carrying its `supplied_costs`, its
+`cost_coverage`, and its `double_counting_group`, with the same value family
+absent (`abstention_reason: "not_evaluated_non_success"`). This is how
+negative ROI stays visible downstream WITHOUT this skill asserting a negative
+number it never measured: the job's real cost is present, and no
+manufactured value sits opposite it. The marker-level statement in "Failed
+and cancelled arcs" above — no evaluator call, no `assessment` key on the
+marker — is unchanged; this is the separate sidecar record that now exists
+alongside that marker.
+
+### double_counting_group (EGV-16)
+
+Several jobs inferred from ONE session's transcript carry the same
+`double_counting_group` id, so a consumer can see they must not be summed
+naively. **Known gap, stated in the same paragraph as the capability:**
+`double_counting_group` groups same-session, multi-job records only. It does
+**not** resolve cross-session or root-plus-subagent attribution — job
+inference runs only when the session is its own root
+(`root_sid == session_id`), so a subagent session never independently
+produces a second assessment record to relate to its root's. Deliberately
+absent from the record: any allocation fraction, share, or weight. An
+allocation is a causal claim, and a naked LLM does not get to make one — the
+skill marks the relationship and stops there.
+
+### The classified/unclassified/unallocated cost reconciliation (EGV-17)
+
+EGV-17's second half is the metered-cost reconciliation, produced by
+`hermes-report.sh`, not by the classifier. Every tick, the reporter
+partitions the metered cost it observed into three `ATTRIBUTION_BUCKETS`:
+
+- `classified` — metered cost the reporter split across real markers
+  carrying an attribution.
+- `unclassified` — metered cost on a session with no marker at all.
+- `unallocated` — metered cost the reporter observed but did not attribute
+  this tick.
+
+The reporter emits ONE reconciliation line per tick in
+`revenium-metering.log`, naming all three totals. The three sum back to the
+observed total exactly — byte-exact for token fields, `Decimal`-exact for
+cost. That is what "totals still reconcile" means in operational terms: an
+operator can see how much metered spend this skill attributed and how much
+it did not, rather than inferring attribution coverage from a number that
+silently omits what it could not place.
+
+The partition is observability only. Nothing in the metering decision path
+consults it, and no ledger line, CLI argument, or reportability outcome
+depends on it. `unallocated` covers only rows for which a real
+`revenium meter completion` invocation was attempted and failed — it does
+not cover the several pre-attempt skip sites already in the reporter
+(already-ledgered, the growth guard, a zero delta, or empty-split-rows), so
+expect it to read `0.000000` on a healthy tick and become nonzero only when
+a `revenium` invocation genuinely fails mid-tick.
