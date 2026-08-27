@@ -36,6 +36,37 @@ the entire v1.x release line.
   byte-identical when no root agent value exists — the "no observable
   change" claim in `docs/migration-agent-dimension.md` made falsifiable.
 
+## jobs-outcome-metadata-truncated.golden.json — the over-ceiling `--metadata` shape (Phase 46)
+
+- **jobs-outcome-metadata-truncated.golden.json** — a seventh fixture, added
+  in Phase 46 Plan 03 (EGV-19, D-02/D-03), that is NOT part of the
+  immutability contract above. Loaded by
+  `tests/test_compat_jobs_outcome.py::TestCompatJobsOutcomeMetadataTruncated`.
+  It pins a `revenium jobs outcome` invocation whose `--metadata` payload
+  exceeded `hermes-report.sh`'s byte ceiling (plan 46-01's
+  `_METADATA_CEILING_BYTES`) before the reporter's two-tier ordered drop:
+  the payload carries `metadata_truncated: true`, every value-family key
+  (`value_low`, `value_base`, `value_high`, `bounds_source`, `net_value`,
+  `assumptions`, `supplied_costs`, `cost_coverage`) absent, and the base
+  key (`source`) plus every surviving provenance key (`evaluator`,
+  `evaluator_version`, `model`, `evidence_class`, `reportability_status`,
+  `inference_provider`, `inference_address_class`) still present. It has
+  the same additive standing as `meter-completion-markerless.golden.json`,
+  `meter-completion-assessment.golden.json`, and
+  `jobs-outcome-update.golden.json` above — it is eligible for change and
+  is not enforced by the v1.4 umbrella meta suite
+  (`tests/test_compat_v1_4_meta.py`).
+
+  This fixture pins a payload **shape**, not a payload **size**: the byte
+  ceiling itself lives in `hermes-report.sh`'s `_METADATA_CEILING_BYTES`
+  and is asserted by `tests/test_phase46_metadata_envelope.py`, so raising
+  the ceiling later does not require editing this fixture — only
+  re-capturing it if the truncated key set changes (and, per
+  `TestCompatJobsOutcomeMetadataTruncated`'s own untruncated-payload
+  assertion, a ceiling raise that stops this fixture's record from
+  exceeding the new ceiling fails that test loudly rather than leaving
+  this fixture silently unexercised).
+
 ## Immutability contract
 
 These fixtures are **IMMUTABLE** across the v1.x line (v1.0 through
