@@ -103,6 +103,41 @@ Every outcome also carries a `--metadata` blob holding the deployment `source`, 
 the session's source column. `FAILED` arcs add a `failure_reason`: a short plain-text cause
 inferred by the classifier. `SUCCESS` and `CANCELLED` arcs carry source alone.
 
+### The bounded `--metadata` envelope (D-01/D-02/D-03, EGV-19)
+
+`--metadata` is not a new transport — it is the existing, real `jobs outcome` CLI flag
+above, carrying one flat JSON object. This section formalizes what already ships; no API
+capability is invented here.
+
+**Key inventory.** Three groups of keys can appear in the object:
+
+- **Base keys** — `source` (the deployment source) and `failure_reason` (a `FAILED` arc's
+  short cause). These are base metering and are never dropped.
+- **The value family** — `value_low`, `value_base`, `value_high`, `bounds_source`,
+  `net_value`, `assumptions`, `supplied_costs`, `cost_coverage`. The economic estimate and
+  its inputs.
+- **The provenance family** — `evaluator`, `evaluator_version`, `model`, `evidence_class`,
+  `reportability_status`, `study_id`, `study_version`, `confidence`, `economic_mechanism`,
+  `double_counting_group`, `correction_sequence`, `inference_provider`, and
+  `inference_address_class`. Who or what produced the estimate, and where it was configured
+  to run.
+
+**A byte ceiling is enforced once, in the reporter, at emit** — the one place the actual
+wire bytes exist before the payload leaves the machine. The ceiling's authoritative value
+lives in `skills/revenium/scripts/hermes-report.sh` as `_METADATA_CEILING_BYTES`; read it
+there rather than trusting a number repeated in prose.
+
+**When a payload exceeds the ceiling**, the value family is dropped first, the provenance
+family second, and base metering is never dropped — metering never breaks, only the
+enrichment yields. A record whose payload was cut carries `metadata_truncated: true`, so a
+consumer can tell "this job had no value" (both value keys and the marker absent) from "the
+value did not fit" (`metadata_truncated` present). An unmarked partial record would be the
+silent substitution this milestone exists to prevent.
+
+**Transport, not policy.** The ceiling decides only what physically fits on the wire — it
+makes no judgment about what is worth reporting. The reportability decision (EGV-18) is made
+upstream, by the resolver; the reporter only reads that decision and never computes it.
+
 ## LLM outcome-value evaluation (experimental)
 
 Opt-in, off by default. When enabled and a job's arc completes `SUCCESS`, the classifier
@@ -204,6 +239,32 @@ One provenance limit is worth stating alongside the metadata above. `evaluator` 
 estimate — the evaluator issues an unpinned call and the host routes it, so a provider
 failover can change the deciding model without changing either field. An estimate's metadata
 therefore establishes that a model produced it under stated assumptions, not which one.
+
+### Inference locality facts (D-06, AMEND-D-07, EGV-21)
+
+Every job assessment records two observable facts about the configured LLM: the resolved
+inference provider name, and a derived address class taking exactly one of four values —
+`loopback`, `private`, `public`, or `unset`. Both are read from a profile-scoped
+`config.yaml`.
+
+The address class is **derived from the configured endpoint, and the endpoint itself is
+then discarded** — never stored, never transmitted. A `base_url` can embed an internal
+hostname, a port, a path, or credentials, so only the derived class crosses the wire, never
+the raw string. The class is derived without any name resolution, so an endpoint named by a
+hostname the skill cannot verify is recorded in the conservative direction (`public`), never
+guessed as `private` or `loopback`.
+
+**This limit matches the one stated above for the deciding model.** The class reflects the
+CONFIGURED endpoint at the moment it was read, not a verified connection — exactly as
+`evaluator`/`evaluator_version` above identify the implementation, not the model that
+actually answered. A mid-flight provider failover is not observed by this field.
+
+**What these two facts are NOT.** They are inputs to an operator's own judgment about their
+deployment, not a conclusion about it. The skill can observe only where inference was
+configured to go; it cannot observe the preprocessing, logging, or retention halves of the
+path, so it records the part it can see and draws no conclusion from it. No statement here
+should be read as saying where data went, was kept, was logged, or was retained — in either
+a stated or a negated form.
 
 ## Tool-event metering
 
