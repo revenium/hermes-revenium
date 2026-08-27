@@ -2953,26 +2953,40 @@ except Exception:
           ;;
       esac
 
-      # Phase 42 (C-01/C-04/D-10): resolve an accepted assessment for
-      # SUCCESS arcs only — FAILED/CANCELLED are never evaluated
-      # (classifier.py gates _attach_assessment on status == SUCCESS before
-      # this stage ever runs), so this guard is defensive belt-and-
-      # suspenders, not the only gate. The assessment is now re-read from
-      # the job-assessments SIDECAR, never from the job marker's own 9-key
-      # `assessment` summary (D-10) — C-01 demoted that object to
-      # pointer-and-summary, not the record of record. An absent,
-      # unreadable, over-SIDECAR_LINE_MAX_BYTES, or pruned sidecar record
-      # reports the outcome status-only, with no --outcome-value, and never
-      # falls back to the marker. The sidecar directory is resolved
-      # per-session below (not read off JOB_ASSESSMENTS_DIR) because a
-      # multiplexed gateway owns each session's state under its own profile
-      # home — the same per-session resolution pattern resolve_markers_dir
-      # already provides for the marker directory.
+      # Phase 42 (C-01/C-04/D-10): resolve an accepted assessment. The
+      # assessment is re-read from the job-assessments SIDECAR, never from
+      # the job marker's own 9-key `assessment` summary (D-10) — C-01
+      # demoted that object to pointer-and-summary, not the record of
+      # record. An absent, unreadable, over-SIDECAR_LINE_MAX_BYTES, or
+      # pruned sidecar record reports the outcome status-only, with no
+      # --outcome-value, and never falls back to the marker. The sidecar
+      # directory is resolved per-session below (not read off
+      # JOB_ASSESSMENTS_DIR) because a multiplexed gateway owns each
+      # session's state under its own profile home — the same per-session
+      # resolution pattern resolve_markers_dir already provides for the
+      # marker directory.
+      #
+      # Phase 44 (EGV-17, D-14): this gate USED to be
+      # `outcome_status == "SUCCESS"` on the premise that FAILED/CANCELLED
+      # are never evaluated, so no sidecar could exist for them. That
+      # premise is now FALSE — classifier.py's run_classification_async
+      # Step 7 gained a non-SUCCESS abstention branch (44-03-PLAN.md Task
+      # 2) that writes a sidecar record for a FAILED or CANCELLED job too
+      # (never through _attach_assessment, so the evaluator is still never
+      # reached; only the RECORD side changed). Gating this read on
+      # outcome_status would silently orphan every non-SUCCESS record's
+      # supplied_costs/cost_coverage/double_counting_group from ever
+      # reaching --metadata, defeating EGV-17's whole point (cost stays
+      # visible even when there is no value). The read below is otherwise
+      # unchanged and remains status-agnostic past this point: a
+      # non-SUCCESS abstention record carries no value_low/currency, so
+      # _value_ok resolves false and no --outcome-value flag is ever built
+      # for it, exactly as an unvalued SUCCESS record already behaves.
       outcome_value=""
       outcome_currency=""
       outcome_assessment_json=""
       outcome_reason=""
-      if [[ "${outcome_status}" == "SUCCESS" && -n "${outcome_sid}" ]]; then
+      if [[ -n "${outcome_sid}" ]]; then
         outcome_assessment_dir="$(resolve_assessments_dir "${outcome_sid}")"
         [[ -z "${outcome_assessment_dir}" ]] && outcome_assessment_dir="${JOB_ASSESSMENTS_DIR}"
         # D-10 diagnostic reason word: resolve the SAME per-session markers

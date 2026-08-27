@@ -1567,5 +1567,277 @@ class NonSuccessAssessmentTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _non_success_sidecar_record(job_id, execution_status='FAILED', **overrides):
+    """A FAILED/CANCELLED job's abstention assessment sidecar record --
+    the shape Task 2's non-SUCCESS branch produces: no value family at
+    all, costs and coverage retained, abstention_reason naming the cause.
+    reportability_status is 'candidate' unconditionally here because
+    _resolve_reportability_status returns REPORTABILITY_CANDIDATE
+    whenever abstained is True, whatever the config says (D-05) -- an
+    abstained record is never reportable."""
+    record = {
+        'kind': 'job_assessment',
+        'ts': 1715516002.5,
+        'agentic_job_id': job_id,
+        'assessment_id': f'{job_id}:0',
+        'assessment_schema_version': 1,
+        'taxonomy_version': 1,
+        'prompt_version': 1,
+        'policy_version': 1,
+        'model': 'unknown',
+        'evaluator': 'llm',
+        'evaluator_version': 'v1',
+        'confidence': 0.0,
+        'evidence_class': 'MODEL_ESTIMATED_DEMO',
+        'execution_status': execution_status,
+        'abstention_reason': 'not_evaluated_non_success',
+        'reportability_status': 'candidate',
+        'economic_mechanism': 'unknown',
+        'supplied_costs': {'human_review': 10.0},
+        'cost_coverage': {
+            'included': ['human_review'],
+            'known_zero': [],
+            'unknown': ['rework_or_error', 'integration', 'training_or_change'],
+            'excluded': ['metered_ai_cost'],
+        },
+        'double_counting_group': 'ns44-sid-group',
+    }
+    record.update(overrides)
+    return record
+
+
+class NonSuccessReportabilityTests(unittest.TestCase):
+    """EGV-17's "no positive value while retaining cost" proven AT THE
+    WIRE, not merely at the record -- driven through the REAL
+    hermes-report.sh over a non-SUCCESS assessment sidecar record via the
+    no-shift shim + synthetic state.db harness (same shape as
+    ReporterStripTests above)."""
+
+    def _run_one_outcome(self, sid, job_id, record, status='FAILED'):
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase44-nonsuccess-wire-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            shim = os.path.join(bin_dir, 'revenium')
+
+            build_state_db(state_db, [{
+                'id': sid,
+                'model': 'claude-sonnet-4-6',
+                'source': 'test',
+                'input_tokens': 100,
+                'output_tokens': 50,
+                'cache_read': 0,
+                'cache_write': 0,
+                'reasoning': 0,
+                'estimated_cost': '0',
+                'api_calls': 1,
+                'started_at': 1715514000.0,
+                'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+
+            os.makedirs(os.path.dirname(jobs_ledger), exist_ok=True)
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            task_marker = {
+                'muid': f'{job_id}-task',
+                'ts': 1715516000.5,
+                'sid': sid,
+                'task_type': 'code_review',
+                'operation_type': 'CHAT',
+            }
+            job_marker = {
+                'kind': 'job',
+                'ts': 1715516002.0,
+                'sid': sid,
+                'agentic_job_id': job_id,
+                'job_name': 'Phase 44 Non-Success Wire Test',
+                'job_type': 'code_review',
+                'status': status,
+            }
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
+                f.write(json.dumps(record, separators=(',', ':')) + '\n')
+
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'INVOCATIONS_LOG': inv_log,
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+
+            rc, _ignored, output = run_script(
+                SCRIPTS_DIR / 'hermes-report.sh', base_env, inv_log)
+            self.assertEqual(rc, 0, f'hermes-report.sh failed (rc={rc}): {output}')
+
+            outcome_inv = []
+            if os.path.exists(jobs_log):
+                with open(jobs_log) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if not line:
+                            continue
+                        argv = shlex.split(line)
+                        if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome':
+                            outcome_inv.append(argv)
+
+            self.assertEqual(
+                len(outcome_inv), 1,
+                f'expected exactly 1 "jobs outcome" invocation, got '
+                f'{len(outcome_inv)}: {outcome_inv!r}\nOutput: {output}'
+            )
+            return outcome_inv[0]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _metadata_value(argv):
+        for i, tok in enumerate(argv):
+            if tok == '--metadata' and i + 1 < len(argv):
+                return argv[i + 1]
+        return None
+
+    def test_failed_arc_still_reports_with_its_real_status_no_value_flags(self):
+        record = _non_success_sidecar_record('ns44-job-001', execution_status='FAILED')
+        argv = self._run_one_outcome('ns44-sid-001', 'ns44-job-001', record, status='FAILED')
+        self.assertIn('--result', argv)
+        self.assertEqual(argv[argv.index('--result') + 1], 'FAILED')
+        self.assertNotIn('--outcome-value', argv)
+        self.assertNotIn('--outcome-currency', argv)
+
+    def test_failed_arc_metadata_ships_costs_and_group_id_no_value_family(self):
+        record = _non_success_sidecar_record('ns44-job-002', execution_status='FAILED')
+        argv = self._run_one_outcome('ns44-sid-002', 'ns44-job-002', record, status='FAILED')
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIn('supplied_costs', meta)
+        self.assertIn('cost_coverage', meta)
+        self.assertIn('double_counting_group', meta)
+        for key in (
+            'net_value', 'estimated_value', 'value_low', 'value_base', 'value_high',
+        ):
+            self.assertNotIn(key, meta)
+
+    def test_cancelled_arc_also_reports_with_its_real_status_no_value(self):
+        record = _non_success_sidecar_record('ns44-job-003', execution_status='CANCELLED')
+        argv = self._run_one_outcome('ns44-sid-003', 'ns44-job-003', record, status='CANCELLED')
+        self.assertIn('--result', argv)
+        self.assertEqual(argv[argv.index('--result') + 1], 'CANCELLED')
+        self.assertNotIn('--outcome-value', argv)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertIn('supplied_costs', meta)
+        self.assertNotIn('net_value', meta)
+
+
+class GroupIdStructuralTests(unittest.TestCase):
+    """D-13 -- double_counting_group is caller-supplied structural
+    identity, never read off the untrusted evaluator response.
+    Parameterised alongside MechanismAuthorityTests' shape above: both
+    prove a structural-authority guarantee over the REAL
+    _build_job_assessment constructor, not merely by inspecting a
+    resolver in isolation."""
+
+    def test_hostile_response_naming_a_group_id_does_not_override_the_caller(self):
+        mod = _load_classifier({})
+        raw = {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'engineer', 'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 100.0, 'currency': 'USD',
+            'basis': 'time avoided', 'confidence': 0.5,
+            # The attack: a hostile response naming its own group id.
+            'double_counting_group': 'attacker-injected-group',
+        }
+        assessment = mod._validate_assessment(raw, {}, 'stub', 'v1')
+        self.assertIsNotNone(assessment)
+        valid = {
+            'agentic_job_id': 'group-structural-job-001',
+            'job_type': 'bug_fix', 'status': 'SUCCESS',
+        }
+        record = mod._build_job_assessment(
+            valid, assessment, raw, {}, 'stub', 'v1',
+            double_counting_group='caller-supplied-group',
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record['double_counting_group'], 'caller-supplied-group')
+        self.assertNotEqual(record['double_counting_group'], 'attacker-injected-group')
+
+
+class PhaseFieldInventoryTests(unittest.TestCase):
+    """The executable form of the quality gate 'every new record field is
+    added to DECLARED_KEYS in the same task that introduces it': a field
+    added later without a DECLARED_KEYS entry fails the symmetric diff in
+    RecordShapeTests; a DECLARED_KEYS entry added without a matching field
+    fails THIS inventory. Computed as a set difference against a LITERAL
+    baseline (the Phase 43 shape of DECLARED_KEYS, before any of this
+    phase's plans ran), not derived from the four new field names --
+    a derived baseline could not catch a fifth field slipping in
+    undetected."""
+
+    # DECLARED_KEYS as it stood at the end of Phase 43 -- economic_mechanism
+    # and study_id/study_version already existed by then (Phase 42 declared
+    # economic_mechanism as a placeholder; Phase 43 added the study
+    # reference), so neither is one of THIS phase's four new fields.
+    _PHASE_43_BASELINE_DECLARED_KEYS = {
+        'kind', 'ts', 'assessment_id', 'sequence', 'agentic_job_id',
+        'assessment_schema_version',
+        'job_type', 'taxonomy_version', 'job_started_at', 'job_ended_at',
+        'execution_status', 'output_status', 'acceptance_status', 'adoption_status',
+        'candidate_downstream_outcome', 'counterfactual_assumption', 'basis',
+        'economic_mechanism',
+        'value_low', 'value_base', 'value_high', 'bounds_source', 'currency',
+        'estimated_value', 'assumptions',
+        'observation_window_start', 'observation_window_end',
+        'evidence_references', 'evidence_class',
+        'study_id', 'study_version',
+        'evaluator', 'evaluator_version', 'model', 'prompt_version', 'policy_version',
+        'confidence', 'abstention_reason', 'reportability_status',
+    }
+
+    _PHASE_44_NEW_FIELDS = frozenset({
+        'net_value', 'supplied_costs', 'cost_coverage', 'double_counting_group',
+    })
+
+    def test_declared_keys_gained_exactly_the_four_phase_44_fields(self):
+        from tests.test_phase42_assessment_contract import RecordShapeTests
+
+        gained = RecordShapeTests.DECLARED_KEYS - self._PHASE_43_BASELINE_DECLARED_KEYS
+        self.assertEqual(
+            gained, self._PHASE_44_NEW_FIELDS,
+            f'DECLARED_KEYS gained {gained!r} relative to the Phase 43 baseline; '
+            f'expected exactly {self._PHASE_44_NEW_FIELDS!r} -- a field added '
+            'without a DECLARED_KEYS entry, or a DECLARED_KEYS entry added '
+            'without a matching field, would show up here',
+        )
+        lost = self._PHASE_43_BASELINE_DECLARED_KEYS - RecordShapeTests.DECLARED_KEYS
+        self.assertEqual(
+            lost, set(),
+            f'DECLARED_KEYS lost pre-existing baseline field(s): {lost!r}',
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
