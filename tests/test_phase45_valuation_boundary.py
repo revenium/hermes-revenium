@@ -487,3 +487,78 @@ class BoundReassertionTests(_ValuationBoundaryTestCase):
 
 if __name__ == '__main__':  # pragma: no cover
     unittest.main()
+
+
+class ZeroRoundingBackCompatTests(unittest.TestCase):
+    """CR-01 (phase-45 code review): a hours*rate product that ROUNDS to
+    $0.00 must still produce a record, not an abstention.
+
+    Why this exists as a standing test rather than a one-line fix: the
+    built-in `hours_times_rate` derivation is ITSELF a registrant, so the
+    default, unconfigured path runs through the valuation boundary's
+    post-call re-check. That re-check originally used a strict `0 < amount`
+    lower bound, which silently abstained a case `main` shipped -- its
+    derivation was an unconditional `round(hours * rate, 2)` with no lower
+    bound at all.
+
+    Two project rules make the abstention wrong, not merely different:
+    CLAUDE.md requires a feature-off install to meter byte-identically to
+    before, and EGV-17 requires zero and negative work to stay VISIBLE with
+    its cost rather than disappear. An abstention hides it.
+
+    The upper bound is what the re-check is actually for -- an
+    implementation handing back an unbounded number -- and a zero is not
+    that. A NEGATIVE amount is still refused, because the skill must never
+    assert a negative value it never measured (phase 44 D-14).
+    """
+
+    def setUp(self):
+        self.cls = _load_classifier()
+
+    def _raw(self, hours, rate):
+        return {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'engineer',
+            'estimated_hours_saved': hours,
+            'assumed_loaded_rate': rate,
+            'currency': 'USD',
+            'basis': 'rounds-to-zero back-compat case',
+            'confidence': 0.5,
+        }
+
+    def test_product_rounding_to_zero_still_produces_a_record(self):
+        # Passes every input gate: 0 < hours <= max and 0 < rate <= max.
+        # round(0.001 * 1.0, 2) == 0.0.
+        result = self.cls._validate_assessment(self._raw(0.001, 1.0), {})
+        self.assertIsNotNone(
+            result,
+            'a hours*rate product that rounds to $0.00 must still produce a '
+            'record -- main shipped one, and abstaining here breaks both the '
+            'byte-identical feature-off invariant and EGV-17',
+        )
+        self.assertEqual(0.0, result['estimated_value'])
+        self.assertEqual('USD', result['currency'])
+
+    def test_matches_mains_unconditional_rounding_across_several_pairs(self):
+        for hours, rate in ((0.001, 1.0), (0.0001, 10.0), (0.004, 1.0),
+                            (0.01, 0.4), (2.5, 150.0), (1.0, 0.01)):
+            with self.subTest(hours=hours, rate=rate):
+                result = self.cls._validate_assessment(self._raw(hours, rate), {})
+                self.assertIsNotNone(result, 'no valid input pair may abstain here')
+                self.assertEqual(round(hours * rate, 2), result['estimated_value'])
+
+    def test_negative_amount_from_an_implementation_is_still_refused(self):
+        # The lower bound was widened to accept zero, NOT to accept negatives.
+        val = _load_valuation()
+        self.assertIsNone(
+            val._rate_card_valuation_fixture(
+                {
+                    'estimated_hours_saved': 1.0,
+                    'assumed_loaded_rate': 1.0,
+                    'currency': 'USD',
+                    'inferred_role': 'engineer',
+                },
+                {'rateCard': {'engineer': -5.0}},
+            ),
+            'a negative rate-card amount must still abstain',
+        )

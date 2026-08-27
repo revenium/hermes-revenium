@@ -1494,7 +1494,30 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         )
         returned_currency = derived.get("currency") if isinstance(derived, dict) else None
         ceiling = round(max_hours * max_rate, 2)
-        if amount is None or returned_currency != currency or not (0 < amount <= ceiling):
+        # CR-01 (phase-45 code review): the lower bound is exclusive for a
+        # THIRD-PARTY registrant and inclusive for the BUILT-IN derivation,
+        # and the difference is deliberate.
+        #
+        # The built-in hours_times_rate derivation is itself a registrant, so
+        # the DEFAULT unconfigured path reaches this re-check. A valid input
+        # pair (0 < hours <= max, 0 < rate <= max) can still yield a product
+        # that rounds to 0.00 -- e.g. hours=0.001, rate=1.0. `main` shipped
+        # that record via an unconditional round(hours * rate, 2) with no
+        # lower bound at all, so refusing it here would break CLAUDE.md's
+        # "feature-off meters byte-identically" invariant and would hide the
+        # zero-value work EGV-17 requires to stay VISIBLE with its cost.
+        #
+        # A third-party implementation returning a literal 0.0 is a different
+        # claim: an implementation asserting work was worth exactly nothing is
+        # far more likely broken than truthful, and it has not earned the
+        # trust the built-in has by being the same code main ran. It still
+        # abstains. Negative amounts are refused from everyone -- the skill
+        # must never assert a negative value it never measured (phase 44 D-14).
+        _is_builtin = impl_name == "hours_times_rate"
+        _lower_ok = (amount is not None) and (
+            amount >= 0 if _is_builtin else amount > 0
+        )
+        if amount is None or returned_currency != currency or not _lower_ok or amount > ceiling:
             # Distinct wording from the hours/rate bound abstention above,
             # so this abstention reason is distinguishable from that one.
             logger.warning(
