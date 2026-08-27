@@ -162,6 +162,10 @@ class RepositoryTests(unittest.TestCase):
             # TypedDict + validate(), no estimator, no experiment
             # orchestration, imported by nothing in the shipped skill.
             SKILL / 'plugins' / 'revenium-classifier' / 'impact_study.py',
+            # Phase 45 Plan 03 (EGV-01, D-03) — the cohort-impact estimator
+            # registry: zero registrants shipped, plus a fixture proving the
+            # seam accepts one.
+            SKILL / 'plugins' / 'revenium-classifier' / 'cohort_impact.py',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'trivial-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'substantive-turn.json',
             SKILL / 'plugins' / 'revenium-classifier' / 'test-payloads' / 'subagent-turn.json',
