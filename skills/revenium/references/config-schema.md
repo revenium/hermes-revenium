@@ -174,11 +174,19 @@ the work, which the session transcript evidences, so the model may choose
 among the three it can evidence from what it actually observed. The remaining
 three — `quality_decision_improvement`, `risk_avoidance`, and
 `incremental_revenue` — are claims the transcript cannot support, so they are
-reachable only through operator configuration or a study reference, never
-from evaluator output. An unrecognised value, or one of these three
-operator-only mechanisms, appearing in an evaluator response resolves to the
-`unknown` abstain sentinel — the job's mechanism is absent from the
+never reachable from evaluator output. An unrecognised value, or one of these
+three operator-only mechanisms, appearing in an evaluator response resolves to
+the `unknown` abstain sentinel — the job's mechanism is absent from the
 assessment rather than clamped to a working default.
+
+**These three are reserved, not yet assignable.** As of Phase 44 they are
+declared, accepted by the reporter's allow-list, and would forward on the wire
+if a record carried one — but no producer exists: there is no configuration key
+and no CLI flag that sets a job's mechanism, and `correct-assessment.sh` does
+not carry one either. The record can *represent* all six (EGV-05); an operator
+cannot yet *assert* the operator-only three. The intended path is a study
+reference (`studyId`/`studyVersion`), which is Phase 45 work. Do not configure
+against this today — nothing reads it.
 
 ### Net value and cost coverage (EGV-14, EGV-15)
 
