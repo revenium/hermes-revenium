@@ -725,11 +725,27 @@ def _register_llm_evaluator() -> None:
             return None
         return await _evaluate_outcome_via_llm(job, transcript, config)
 
-    _ev.register("llm", _llm_evaluate, LLM_EVALUATOR_VERSION)
+    # Phase 45 (D-06 AMENDED): the naked-LLM path's honest evidence class is
+    # unchanged -- pinning it here explicitly (rather than leaving it to
+    # evaluators.py's default "") is what keeps every existing record
+    # byte-identical. Passed as the literal _LLM_EVIDENCE_CLASS_LITERAL, NOT
+    # as EVIDENCE_CLASS_MODEL_ESTIMATED: this function is called immediately
+    # below, at import time, BEFORE EVIDENCE_CLASS_MODEL_ESTIMATED is
+    # assigned further down this module -- referencing the not-yet-defined
+    # name here would raise NameError and crash the whole module at import.
+    # The import-time assert beside EVIDENCE_CLASS_MODEL_ESTIMATED's own
+    # declaration pins the two values equal so they cannot silently drift.
+    _ev.register("llm", _llm_evaluate, LLM_EVALUATOR_VERSION,
+                 evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
     globals()["LLM_EVALUATOR_VERSION"] = "1"
 
 
 LLM_EVALUATOR_VERSION = "1"
+# See _register_llm_evaluator's own comment above for why this must be a
+# literal, duplicated from EVIDENCE_CLASS_MODEL_ESTIMATED (declared and
+# pinned equal to this literal further down this module), rather than a
+# reference to that not-yet-defined name.
+_LLM_EVIDENCE_CLASS_LITERAL = "MODEL_ESTIMATED_DEMO"
 _register_llm_evaluator()
 
 
@@ -905,6 +921,19 @@ assert EVIDENCE_CLASS_MODEL_ESTIMATED in EVIDENCE_CLASSES, (
     "out of the label set it is supposed to belong to"
 )
 
+# Phase 45 (D-06 AMENDED): _register_llm_evaluator() (above, executed at
+# import time before this module-level assignment exists) cannot reference
+# EVIDENCE_CLASS_MODEL_ESTIMATED by name, so it registers the "llm" evaluator
+# with a duplicated literal, _LLM_EVIDENCE_CLASS_LITERAL, instead. This
+# assert is the drift guard for that duplication -- the same role
+# EVIDENCE_CLASS_MODEL_ESTIMATED's own assert above plays for EVIDENCE_CLASSES.
+assert _LLM_EVIDENCE_CLASS_LITERAL == EVIDENCE_CLASS_MODEL_ESTIMATED, (
+    f"_LLM_EVIDENCE_CLASS_LITERAL ({_LLM_EVIDENCE_CLASS_LITERAL!r}) has "
+    f"drifted from EVIDENCE_CLASS_MODEL_ESTIMATED "
+    f"({EVIDENCE_CLASS_MODEL_ESTIMATED!r}) -- the naked-LLM evaluator's "
+    "registered evidence_class no longer matches the forced constant"
+)
+
 
 def _forced_evidence_class() -> str:
     """Return the ONE evidence_class this construction path may ever emit --
@@ -923,6 +952,54 @@ def _forced_evidence_class() -> str:
     function's shape provides.
     """
     return EVIDENCE_CLASS_MODEL_ESTIMATED
+
+
+def _declared_evidence_class(evaluator: str) -> str:
+    """Return the evidence_class the named `evaluator` DECLARED at
+    registration, falling back to _forced_evidence_class() for every other
+    outcome.
+
+    Guarantee class: this function takes exactly ONE parameter, the
+    caller-supplied evaluator NAME, and no parameter carrying evaluator
+    OUTPUT -- so it structurally cannot read evaluator output, the same
+    class of guarantee _forced_evidence_class() provides above, preserved
+    rather than weakened. The value it resolves comes from a
+    REGISTRATION-TIME declaration made by TRUSTED CODE at import time (a
+    boundary module's own top-level `register(...)` call) -- a different
+    threat model from the untrusted model output _forced_evidence_class()
+    defends against (Phase 45, D-06 AMENDED).
+
+    The membership test against EVIDENCE_CLASSES is what keeps a registrant
+    from declaring a label outside the nine, mirroring
+    _resolve_economic_mechanism's allow-list discipline above -- while
+    being a THIRD, distinct pattern, not a repeat of that one:
+    _resolve_economic_mechanism resolves an untrusted VALUE off `raw`
+    against an allow-list; this function resolves a TRUSTED DECLARATION off
+    a registry against an allow-list, and only ever sees the caller-supplied
+    evaluator name, never `raw`.
+
+    Every outcome other than "a str member of EVIDENCE_CLASSES" -- an
+    unregistered name, an empty declaration, a non-string declaration, a
+    label outside the nine, a non-string `evaluator` argument, or any
+    exception raised while importing evaluators.py or looking the name up
+    -- falls back to _forced_evidence_class(). Never raises.
+    """
+    try:
+        if not isinstance(evaluator, str):
+            return _forced_evidence_class()
+        try:
+            from . import evaluators as _ev
+        except Exception:  # pragma: no cover - relative import outside a package
+            try:
+                import evaluators as _ev  # type: ignore
+            except Exception:
+                return _forced_evidence_class()
+        declared = _ev.resolve_evidence_class(evaluator)
+        if isinstance(declared, str) and declared in EVIDENCE_CLASSES:
+            return declared
+        return _forced_evidence_class()
+    except Exception:
+        return _forced_evidence_class()
 
 
 def _resolve_economic_mechanism(raw) -> str:
@@ -1162,7 +1239,10 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "confidence": confidence,
         "evaluator": _clamp_assessment_text(evaluator, 32),
         "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-        "evidence_class": _forced_evidence_class(),
+        # Phase 45 (D-06 AMENDED): the evidence class the RESOLVED evaluator
+        # declared at registration, falling back to the forced constant --
+        # still never read from evaluator output (ROI-04, D-03).
+        "evidence_class": _declared_evidence_class(evaluator),
     }
 
 
@@ -1691,10 +1771,12 @@ def _build_job_assessment(
             # belongs to evidence_class below; see EVIDENCE_CLASSES'
             # declaration above for where it lives and D-01's rationale.
             "evidence_references": [],
-            # Forced via _forced_evidence_class(), never read from evaluator
-            # output (ROI-04, D-03): provenance a model can assert is not
-            # provenance.
-            "evidence_class": _forced_evidence_class(),
+            # Phase 45 (D-06 AMENDED): declared by the REGISTERED
+            # implementation at registration time, defaulted to the forced
+            # constant when unregistered/undeclared/non-string/out-of-set --
+            # still never read from evaluator output (ROI-04, D-03):
+            # provenance a model can assert is not provenance.
+            "evidence_class": _declared_evidence_class(evaluator),
             # Phase 43 (EGV-13, D-08): the study reference, and NOTHING else
             # about the study -- resolved above via _resolve_study_reference
             # from cfg only. Referencing a study never changes evidence_class

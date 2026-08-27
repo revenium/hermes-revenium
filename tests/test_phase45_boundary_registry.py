@@ -229,5 +229,125 @@ class SeamMigrationTests(unittest.TestCase):
         self.assertEqual('labor_substitution', got['economic_mechanism'])
 
 
+class DeclaredEvidenceClassTests(unittest.TestCase):
+    """Phase 45 Plan 01 Task 3 -- classifier._declared_evidence_class(evaluator)
+    carries a registered implementation's own declared evidence_class into
+    the persisted record, and a returned `evidence_class` key on the
+    untrusted response is still ignored (D-06 AMENDED).
+
+    PLUGIN is put on sys.path for this class only, so classifier.py's own
+    `import evaluators as _ev` fallback (used by both _register_llm_evaluator
+    and _declared_evidence_class) resolves to the SAME 'evaluators' module
+    that registers 'stub' and 'system_of_record_assessment_fixture' at its
+    own import time -- mirroring tests/test_repository.py's
+    _setup_plugin_env/_restore_plugin_env pattern.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import sys
+        cls._path_added = str(PLUGIN) not in sys.path
+        if cls._path_added:
+            sys.path.insert(0, str(PLUGIN))
+
+    @classmethod
+    def tearDownClass(cls):
+        import sys
+        if cls._path_added and str(PLUGIN) in sys.path:
+            sys.path.remove(str(PLUGIN))
+
+    def setUp(self):
+        self.mod = _load_classifier({})
+
+    # 1. Every path that worked before this phase is unchanged.
+    def test_llm_and_stub_are_both_model_estimated_demo(self):
+        self.assertEqual('MODEL_ESTIMATED_DEMO', self.mod._declared_evidence_class('llm'))
+        self.assertEqual('MODEL_ESTIMATED_DEMO', self.mod._declared_evidence_class('stub'))
+
+    # 2. The registered non-LLM fixture's own declaration reaches through.
+    def test_fixture_is_outcome_observed(self):
+        self.assertEqual(
+            'OUTCOME_OBSERVED',
+            self.mod._declared_evidence_class('system_of_record_assessment_fixture'),
+        )
+
+    # 3. Every other outcome falls back to the forced constant.
+    def test_unregistered_and_malformed_names_fall_back_to_forced(self):
+        forced = self.mod._forced_evidence_class()
+        self.assertEqual(forced, self.mod._declared_evidence_class('never-registered'))
+        self.assertEqual(forced, self.mod._declared_evidence_class(None))
+        self.assertEqual(forced, self.mod._declared_evidence_class(42))
+        # A registrant deliberately registered with a label outside the nine.
+        import evaluators as _ev
+        _ev.register('out_of_set_fixture', lambda *a: None, '1',
+                      evidence_class='NOT_A_REAL_LABEL')
+        self.assertEqual(forced, self.mod._declared_evidence_class('out_of_set_fixture'))
+
+    # 4. THE END-TO-END PROOF: real construction path, ACCEPTED not abstained.
+    def test_end_to_end_record_carries_outcome_observed(self):
+        import evaluators as _ev
+        fixture = _ev.resolve('system_of_record_assessment_fixture')
+        raw = fixture({'status': 'SUCCESS'}, '', {})
+        self.assertIsNotNone(raw)
+
+        valid_job = {
+            'agentic_job_id': 'sor-proof-001', 'job_type': 'code_review', 'status': 'SUCCESS',
+        }
+        cfg = {}
+        validated = self.mod._validate_assessment(
+            raw, cfg, 'system_of_record_assessment_fixture', '1')
+        self.assertIsNotNone(
+            validated,
+            'the fixture output must be ACCEPTED for this test to be meaningful',
+        )
+        self.assertEqual('OUTCOME_OBSERVED', validated['evidence_class'])
+
+        record = self.mod._build_job_assessment(
+            valid_job, validated, raw, cfg, 'system_of_record_assessment_fixture', '1')
+        self.assertIsNotNone(record)
+        self.assertEqual('OUTCOME_OBSERVED', record['evidence_class'])
+        # `evaluator` is byte-clamped to 32 (_clamp_assessment_text, same as
+        # every other evaluator name) -- 'system_of_record_assessment_fixture'
+        # is 35 ASCII bytes, so the record legitimately carries the clamped
+        # prefix, not the full registrant name.
+        self.assertEqual(
+            self.mod._clamp_assessment_text('system_of_record_assessment_fixture', 32),
+            record['evaluator'],
+        )
+
+    # 5. THE ANTI-MASQUERADE PROOF: a returned key is ignored.
+    def test_returned_evidence_class_key_is_ignored(self):
+        import evaluators as _ev
+        fixture = _ev.resolve('system_of_record_assessment_fixture')
+        raw = fixture({'status': 'SUCCESS'}, '', {})
+        raw = dict(raw, evidence_class='EXPERIMENTAL_IMPACT')
+
+        valid_job = {
+            'agentic_job_id': 'sor-proof-002', 'job_type': 'code_review', 'status': 'SUCCESS',
+        }
+        cfg = {}
+        validated = self.mod._validate_assessment(
+            raw, cfg, 'system_of_record_assessment_fixture', '1')
+        self.assertIsNotNone(validated)
+        record = self.mod._build_job_assessment(
+            valid_job, validated, raw, cfg, 'system_of_record_assessment_fixture', '1')
+        self.assertIsNotNone(record)
+        self.assertEqual('OUTCOME_OBSERVED', record['evidence_class'])
+        self.assertNotEqual('EXPERIMENTAL_IMPACT', record['evidence_class'])
+
+    # 6. Phase 43's own static guard, re-run against this module unmodified.
+    def test_phase43_static_guards_report_no_offenders(self):
+        import ast
+        from tests.test_phase43_evidence_grading import (
+            _assert_functions_declare_untrusted_param,
+            _find_forbidden_raw_reads,
+        )
+        tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        param_offenders = _assert_functions_declare_untrusted_param(tree, 'classifier.py')
+        self.assertEqual([], param_offenders)
+        read_offenders = _find_forbidden_raw_reads(tree, 'classifier.py')
+        self.assertEqual([], read_offenders)
+
+
 if __name__ == '__main__':
     unittest.main()
