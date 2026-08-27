@@ -23,8 +23,11 @@ matrix and the ceiling's stated margin.
 import importlib.util
 import json
 import os
+import pathlib
+import shutil
 import subprocess
 import sys as _sys
+import tempfile
 import unittest
 
 from tests._compat_helpers import ROOT, SCRIPTS_DIR
@@ -285,6 +288,157 @@ def _load_classifier(env=None):
     _sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return _sys.modules[f'{name}.classifier'], _sys.modules[f'{name}.evaluators']
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — the two reporter mirror sites (marker-row, job-row heredocs).
+# Each extracted by its OWN distinct anchor per the plan's instruction, not
+# shared with _extract_outcome_metadata_heredoc above. `job_rows=$(` is
+# deliberately anchored with a leading newline + fixed indent so it does not
+# false-match the `precheck_job_rows=$(` anchor, which contains the same
+# substring.
+# ---------------------------------------------------------------------------
+def _extract_marker_row_heredoc(script_text):
+    anchor = 'precheck_job_rows=$('
+    start = script_text.find(anchor)
+    if start == -1:
+        return None
+    heredoc_start = script_text.find("<<'PY'", start)
+    if heredoc_start == -1:
+        return None
+    body_start = script_text.find('\n', heredoc_start) + 1
+    body_end = script_text.find('\nPY\n', body_start)
+    if body_end == -1:
+        return None
+    return script_text[body_start:body_end]
+
+
+def _extract_job_row_heredoc(script_text):
+    anchor = '\n      job_rows=$('
+    start = script_text.find(anchor)
+    if start == -1:
+        return None
+    heredoc_start = script_text.find("<<'PY'", start)
+    if heredoc_start == -1:
+        return None
+    body_start = script_text.find('\n', heredoc_start) + 1
+    body_end = script_text.find('\nPY\n', body_start)
+    if body_end == -1:
+        return None
+    return script_text[body_start:body_end]
+
+
+class FailureReasonClampTests(unittest.TestCase):
+    """Task 2 behaviors 1-4: the two reporter mirror sites -- the marker-row
+    heredoc (reads markers/<sid>.jsonl, an operator-writable file per this
+    plan's T-46-02 threat register entry) and the job-row heredoc (reads the
+    JOBS_JSON env var) -- both clamp failure_reason by SERIALIZED BYTES, not
+    characters (D-10), independent of the classifier's own producer-side
+    clamp (FailureReasonClassifierClampTests above)."""
+
+    def setUp(self):
+        script_text = HERMES_REPORT_SH.read_text()
+        self.marker_body = _extract_marker_row_heredoc(script_text)
+        self.assertIsNotNone(
+            self.marker_body,
+            "precheck_job_rows=$( ... <<'PY' ... \\nPY\\n anchor moved in "
+            'hermes-report.sh -- update the extraction before trusting this test',
+        )
+        self.job_body = _extract_job_row_heredoc(script_text)
+        self.assertIsNotNone(
+            self.job_body,
+            "job_rows=$( ... <<'PY' ... \\nPY\\n anchor moved in "
+            'hermes-report.sh -- update the extraction before trusting this test',
+        )
+        self._tmpdir = tempfile.mkdtemp(prefix='p46-marker-row-')
+        self.addCleanup(shutil.rmtree, self._tmpdir, True)
+
+    def _run_marker_row(self, failure_reason, status='FAILED'):
+        """Write a hand-crafted markers/<sid>.jsonl line directly -- NOT
+        through the classifier's own writer/clamp -- so this test proves the
+        reporter's OWN byte-safe clamp defends independently (defense in
+        depth for an operator-writable file, per T-46-02). Encoded with
+        ensure_ascii=False so the on-disk line stays comfortably under the
+        pre-existing 4096-CHARACTER line-length reader gate (T-03-04,
+        unrelated to and unmodified by this plan) even for a long emoji
+        failure_reason -- that gate operates on raw line length before this
+        clamp is ever reached, so it must not be the thing under test here.
+        """
+        sid = 'p46-clamp-sid'
+        marker_path = pathlib.Path(self._tmpdir) / f'{sid}.jsonl'
+        record = {
+            'kind': 'job', 'agentic_job_id': 'p46-clamp-job',
+            'job_type': 'bug_fix', 'status': status,
+            'failure_reason': failure_reason,
+        }
+        marker_path.write_text(json.dumps(record, ensure_ascii=False) + '\n', encoding='utf-8')
+        env = {'MARKERS_DIR': self._tmpdir, 'SID': sid}
+        return _run_forwarder(self.marker_body, env)
+
+    def _run_job_row(self, failure_reason, status='FAILED', source='prod'):
+        jobs = [{
+            'agentic_job_id': 'p46-clamp-job', 'job_type': 'bug_fix',
+            'status': status, 'failure_reason': failure_reason,
+        }]
+        env = {'JOBS_JSON': json.dumps(jobs), 'SOURCE': source}
+        return _run_forwarder(self.job_body, env)
+
+    def test_marker_row_500_emoji_failure_reason_clamped_to_500_bytes(self):
+        """Behavior 1."""
+        reason = '\U0001F600' * 500
+        result = self._run_marker_row(reason)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = result.stdout.strip()
+        self.assertTrue(line, f'expected one pipe row, got empty stdout (stderr={result.stderr!r})')
+        fields = line.split('|')
+        self.assertEqual(len(fields), 6, f'expected 6 pipe fields, got {len(fields)}: {fields!r}')
+        emitted = fields[5]
+        serialized = len(json.dumps(emitted, ensure_ascii=True).encode('utf-8')) - 2
+        self.assertLessEqual(
+            serialized, 500,
+            f'marker-row failure_reason is {serialized} serialized bytes, over the 500-byte budget',
+        )
+
+    def test_job_row_500_emoji_failure_reason_clamped_to_500_bytes(self):
+        """Behavior 2: the same input through the job-row heredoc gives the
+        same bound."""
+        reason = '\U0001F600' * 500
+        result = self._run_job_row(reason)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = result.stdout.strip()
+        self.assertTrue(line, f'expected one pipe row, got empty stdout (stderr={result.stderr!r})')
+        fields = line.split('|')
+        self.assertEqual(len(fields), 7, f'expected 7 pipe fields, got {len(fields)}: {fields!r}')
+        emitted = fields[6]
+        serialized = len(json.dumps(emitted, ensure_ascii=True).encode('utf-8')) - 2
+        self.assertLessEqual(
+            serialized, 500,
+            f'job-row failure_reason is {serialized} serialized bytes, over the 500-byte budget',
+        )
+
+    def test_ascii_failure_reason_under_budget_passes_through_unchanged(self):
+        """Behavior 3: no drift on the ordinary path."""
+        reason = 'ordinary ascii failure reason well under the byte budget'
+        marker_result = self._run_marker_row(reason)
+        job_result = self._run_job_row(reason)
+        self.assertEqual(marker_result.returncode, 0, marker_result.stderr)
+        self.assertEqual(job_result.returncode, 0, job_result.stderr)
+        self.assertEqual(marker_result.stdout.strip().split('|')[5], reason)
+        self.assertEqual(job_result.stdout.strip().split('|')[6], reason)
+
+    def test_pipe_newline_cr_failure_reason_emits_one_row_with_expected_field_count(self):
+        """Behavior 4."""
+        reason = 'a|b\nc\rd'
+        marker_result = self._run_marker_row(reason)
+        job_result = self._run_job_row(reason)
+        self.assertEqual(marker_result.returncode, 0, marker_result.stderr)
+        self.assertEqual(job_result.returncode, 0, job_result.stderr)
+        marker_lines = [l for l in marker_result.stdout.splitlines() if l.strip()]
+        job_lines = [l for l in job_result.stdout.splitlines() if l.strip()]
+        self.assertEqual(len(marker_lines), 1, f'marker-row: expected 1 line, got {marker_lines!r}')
+        self.assertEqual(len(job_lines), 1, f'job-row: expected 1 line, got {job_lines!r}')
+        self.assertEqual(len(marker_lines[0].split('|')), 6)
+        self.assertEqual(len(job_lines[0].split('|')), 7)
 
 
 class FailureReasonClassifierClampTests(unittest.TestCase):

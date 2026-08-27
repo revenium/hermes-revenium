@@ -1412,6 +1412,32 @@ import json
 import os
 from pathlib import Path
 
+# Phase 46 (D-10): byte-safe clamp, duplicated from
+# classifier.py::_clamp_assessment_text -- this is a standalone python3
+# subprocess body inside a bash heredoc and cannot import that module, and
+# this repo's convention is deliberate duplication for isolation between
+# the fail-open in-session code and the out-of-process reporter. Measures
+# SERIALIZED BYTES (json.dumps ensure_ascii=True), not characters, since a
+# character clamp under-counts by up to 12x for non-ASCII text. Binary
+# search over code-point slices so a surrogate pair is never split.
+def _clamp_bytes(value, limit):
+    if not isinstance(value, str):
+        value = '' if value is None else str(value)
+
+    def _serialized_len(s):
+        return len(json.dumps(s, ensure_ascii=True).encode('utf-8')) - 2
+
+    if _serialized_len(value) <= limit:
+        return value
+    lo, hi = 0, len(value)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _serialized_len(value[:mid]) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return value[:lo]
+
 markers_dir = os.environ.get('MARKERS_DIR', '')
 sid = os.environ.get('SID', '')
 
@@ -1472,8 +1498,7 @@ try:
                 failure_reason = ''
             for _bad in ('|', '\n', '\r'):
                 failure_reason = failure_reason.replace(_bad, ' ')
-            if len(failure_reason) > 500:
-                failure_reason = failure_reason[:500]
+            failure_reason = _clamp_bytes(failure_reason, 500)
             print(f"{clean_id}|{job_name}|{job_type}|{status}|{marker_ts}|{failure_reason}")
 except OSError:
     pass
@@ -2327,6 +2352,32 @@ PY
         python3 - <<'PY' 2>/dev/null || true
 import json, os, sys
 
+# Phase 46 (D-10): byte-safe clamp, duplicated from
+# classifier.py::_clamp_assessment_text -- this is a standalone python3
+# subprocess body inside a bash heredoc and cannot import that module, and
+# this repo's convention is deliberate duplication for isolation between
+# the fail-open in-session code and the out-of-process reporter. Measures
+# SERIALIZED BYTES (json.dumps ensure_ascii=True), not characters, since a
+# character clamp under-counts by up to 12x for non-ASCII text. Binary
+# search over code-point slices so a surrogate pair is never split.
+def _clamp_bytes(value, limit):
+    if not isinstance(value, str):
+        value = '' if value is None else str(value)
+
+    def _serialized_len(s):
+        return len(json.dumps(s, ensure_ascii=True).encode('utf-8')) - 2
+
+    if _serialized_len(value) <= limit:
+        return value
+    lo, hi = 0, len(value)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _serialized_len(value[:mid]) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return value[:lo]
+
 jobs = []
 try:
     jobs = json.loads(os.environ.get('JOBS_JSON', '[]'))
@@ -2371,8 +2422,7 @@ for job in jobs:
         failure_reason = ''
     for _bad in ('|', '\n', '\r'):
         failure_reason = failure_reason.replace(_bad, ' ')
-    if len(failure_reason) > 500:
-        failure_reason = failure_reason[:500]
+    failure_reason = _clamp_bytes(failure_reason, 500)
     print(f"{clean_id}|{job_name}|{job_type}|{source_clean}|{status}|{marker_ts}|{failure_reason}")
 PY
       )
