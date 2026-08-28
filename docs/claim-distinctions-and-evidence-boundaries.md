@@ -137,3 +137,146 @@ What `MODEL_ESTIMATED_DEMO` means in full, and the rule that a future non-LLM ev
 report its own, different evidence class rather than widening this one, is owned by
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)'s "What
 `MODEL_ESTIMATED_DEMO` means" section — read it there.
+
+## The vocabulary this project uses
+
+Five phrases are the allowed vocabulary for describing what this skill's numbers are, drawn
+directly from this project's requirements. Each is right for a specific claim:
+
+- **"model-estimated value"** — the right term for the naked-LLM path's output: a number a
+  model derived, not one anyone observed.
+- **"configured value estimate"** — the right term when describing a valuation produced by an
+  operator-configured, non-LLM boundary (a rate-card fixture, for example) rather than the
+  naked-LLM evaluator.
+- **"observed outcome"** — the right term only when this skill (or a system-of-record adapter
+  it does not yet ship) has actually seen the outcome occur, not merely inferred or assumed it.
+- **"associational result"** — the right term for a correlation-shaped finding that stops short
+  of a causal claim — an `ASSOCIATIONAL` evidence-class record, for example.
+- **"estimated ROI under stated assumptions"** — the right term for a ratio derived from a
+  model-estimated value, when the assumptions the estimate rests on are stated alongside it.
+
+A second, prohibited set of phrases also exists, and it is machine-enforced across every
+shipped text file in this repository — not just documentation. Rather than quote the five
+prohibited phrases here (which would defeat the guard's own purpose the moment this page
+shipped), this page describes what each one asserts: a claim of measurement where none was
+taken, a claim of realized saving where only an estimate exists, a claim of agent causation
+where no identification strategy ran, a claim of established business value where only a
+hypothesis exists, and a claim of causal effect where at most an association was observed.
+For the exact literal strings, read
+[`tests/test_repository.py::test_no_prohibited_claim_language_left`](../tests/test_repository.py)
+— the disallowed strings live in that test's own pattern list, exactly as `CLAUDE.md`'s
+"Legacy naming guards" section already instructs for this repository's legacy-branding list.
+
+The allowed vocabulary above is guidance only — no test asserts that any of the five allowed
+phrases appears anywhere in shipped text, and that is deliberate. A presence assertion would
+either pass vacuously (nothing requires prose to use these exact words to be honest) or force
+stilted, repetitive writing every time a number is mentioned. The prohibited list is a floor;
+the allowed list is a suggestion for clearing it comfortably.
+
+## Configuration and privacy modes
+
+The whole `llmOutcomeEvaluation` feature is opt-in and off by default, and every read of its
+configuration fails closed: a missing, unreadable, or malformed config resolves to disabled,
+never to estimating money by accident. A second, separate switch decides whether a computed
+value may be reported to Revenium at all — a value can be computed and retained locally while
+its number is withheld from the wire, which is a different question from whether evaluation
+runs in the first place. Cost inputs (a `costs` block, keyed by job type and cost category)
+are entirely operator-supplied and net against the computed estimate; this skill invents no
+cost figure of its own. The exact key names, defaults, and validation rules for all of this
+are owned by [`docs/configuration.md`](configuration.md) and
+[`references/config-schema.md`](../skills/revenium/references/config-schema.md) — this page
+links to them rather than restating them.
+
+Separately, every job assessment records two observable facts about the configured LLM: the
+resolved inference provider name, and a derived address class describing where inference was
+**configured** to run. Both describe the CONFIGURED endpoint, not anything this skill actually
+watched happen along the way. The skill can observe only where inference was configured to go;
+it cannot observe the preprocessing, logging, or retention parts of that path, so it records
+only the part it can see and draws no conclusion from the rest. Nothing on this page, or
+anywhere else this skill ships, should be read as a statement about where data went, was kept,
+was logged, or was retained — in either a stated or a negated form. The two configured-locality
+facts are inputs to an operator's own judgment about their own deployment, not a conclusion
+this skill draws on the operator's behalf.
+
+## Plugin contracts
+
+Six pluggable boundaries exist as named contracts a later implementation can fit behind:
+classification (turn-level `task_type` labelling and job/arc inference), output/outcome
+assessment (the evaluator that produces or withholds an `assessment`), economic valuation (how
+an accepted outcome converts to a number), evidence resolution and reportability (which
+`evidence_class` a boundary declares and whether the result may be reported), cohort impact
+(a contract only — no estimator ships), and Revenium reporting. Each is a registry: a
+implementation registers a name, and an operator selects among registered implementations by
+that name.
+
+The rule that gives these contracts their value: **a non-LLM implementation reports its OWN
+evidence class rather than masquerading as an LLM evaluator.** A deterministic rate-card
+valuation does not borrow the naked-LLM path's evidence class just because it produces a
+similar-looking number; it declares its own, honest label. This is what makes "fits without
+masquerading" a structural property rather than a promise — a later ONNX classifier,
+deterministic policy, vertical model, or system-of-record adapter can be added behind these
+contracts without ever pretending to be the model that isn't there.
+
+The selector keys an operator sets to choose among registered implementations — the
+`boundaries` object's `classification`/`valuation`/`evidence` fields, and
+`llmOutcomeEvaluation.evaluator` for the output/outcome-assessment boundary — are owned by
+[`references/config-schema.md`](../skills/revenium/references/config-schema.md); the nine
+evidence-class labels and the resolution rule that assigns one to an assessment are owned by
+[`references/job-declaration.md`](../skills/revenium/references/job-declaration.md).
+
+## Correction and audit
+
+This section is written from what a real, currently-passing test observes, not from prose —
+per D-18, so the worked example cannot drift from what the code actually does. The source is
+[`tests/test_phase47_end_to_end.py::test_operator_correction_appends_a_revision_and_ships_its_marker`](../tests/test_phase47_end_to_end.py).
+A future reader can check the description below against that test directly; if the two ever
+disagree, the test is the one to trust.
+
+An operator corrects a job's assessment through `correct-assessment.sh`, a human-facing
+terminal command that requires `--job-id`, `--value`, `--currency`, and `--reason`. The
+correction **appends** a revision line to the job's assessment sidecar record; the observed
+test confirms the original line is byte-unchanged after the append — a correction is never a
+rewrite. Each appended revision carries a `sequence` number that orders it relative to any
+earlier corrections, starting at `1` for the first correction against a given job. The
+appended revision also carries the record it superseded (`prior_value_low`,
+`prior_value_base`, `prior_value_high`, `prior_currency`), so the append is a complete history,
+not just a new number replacing an old one.
+
+The corrected bound is what ships: the observed test confirms the wire call's
+`--outcome-value` equals the appended record's own corrected low bound, read off the record
+that was just written — never a value retyped anywhere else. The wire call's `--metadata`
+carries the same `sequence` number and the same prior-value fields the local record carries —
+this is the marker a downstream consumer uses to tell a revision from an original, since an
+ordinary, uncorrected `jobs outcome` payload never carries a `sequence` key at all.
+
+The correction path is deliberately unreachable from the per-minute cron pipeline —
+`correct-assessment.sh` is never named in `cron.sh` or `install-cron.sh`. It exists only as an
+action a human operator takes at a terminal, on purpose, never as something the automated
+pipeline could trigger on its own.
+
+## Abstention, zero, and negative value
+
+Three distinct "no positive number" outcomes exist, and this skill keeps them visibly distinct
+from each other and from an ordinary valued outcome — each is driven and observed by its own
+test in `tests/test_phase47_end_to_end.py`.
+
+- **The evaluator declines.** When the evaluator abstains rather than producing an assessment,
+  the job's outcome still reports to Revenium, carrying provenance (`evaluator`,
+  `evaluator_version`) but no value flags at all — a real, provenance-bearing record, not a
+  silently dropped report. Observed by
+  `test_abstention_path_ships_outcome_with_provenance_and_no_value`.
+- **The reportability gate is closed.** When a value is computed but the separate reportability
+  switch is off, the estimate is computed and retained locally — the sidecar carries a real
+  `value_low` — while the number itself is withheld from the wire; provenance
+  (`evidence_class`, `evaluator`, `evaluator_version`, `model`) still ships, and
+  `reportability_status` reads `candidate` rather than `reportable`. Observed by
+  `test_withheld_candidate_path_withholds_value_and_keeps_provenance`.
+- **Supplied costs meet or exceed the estimate.** When an operator-supplied cost is at or above
+  the derived value, `net_value` goes to or below zero — and the record stays visible on both
+  the sidecar and the wire, rather than being clamped to zero, suppressed, or dropped. Observed
+  by `test_negative_net_value_stays_visible_with_the_value_family_intact`.
+
+Why this matters: work that produced no value and work that was never valued must not look the
+same in the data. An abstained outcome, a withheld candidate, and a negative net value are each
+a different, honest fact about a job — collapsing any of them into a blank or a zero would
+erase the distinction between "nothing to report" and "something to report, but not this way."
