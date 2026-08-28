@@ -1,3 +1,4 @@
+import ast
 import re
 import subprocess
 import unittest
@@ -69,6 +70,163 @@ def _load_root_walk_helper():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _isolate_outcome_metadata_heredoc_body(script_text):
+    """Phase 47 Plan 06 (D-17a/D-17b) — shared isolation step both doc-fidelity
+    guards below build on. Duplicates (never imports —
+    tests/test_phase38_reporter_path.py mutates the environment at import
+    time, so this repo's own convention is duplicating cross-module test
+    helpers rather than creating test-to-test imports) the anchor-string +
+    heredoc-isolation shape of
+    tests/test_phase38_reporter_path.py::_extract_forwarder_record_keys.
+
+    Anchors on hermes-report.sh's `outcome_metadata=$(` forwarder
+    assignment, finds the immediately following quoted `<<'PY'` heredoc
+    opener, and isolates the body between the line after that opener and
+    the literal `\nPY\n` closer. Returns the isolated body text, or None —
+    never a partial slice — if the anchor moved or the closer could not be
+    found, so callers fail loudly on real drift instead of silently
+    re-testing a stale shape.
+
+    Factored out here (Task 2, D-17b) so both D-17 guards share this one
+    isolation step rather than each duplicating it — both live in this same
+    module, so sharing inside the module is fine; what must not happen is a
+    cross-module import.
+    """
+    anchor = 'outcome_metadata=$('
+    start_marker = script_text.find(anchor)
+    if start_marker == -1:
+        return None
+    heredoc_start = script_text.find("<<'PY'", start_marker)
+    if heredoc_start == -1:
+        return None
+    body_start = script_text.find('\n', heredoc_start) + 1
+    body_end = script_text.find('\nPY\n', body_start)
+    if body_end == -1:
+        return None
+    return script_text[body_start:body_end]
+
+
+def _extract_metadata_family_keys(script_text):
+    """Phase 47 Plan 06 (D-17a) — the doc-side analogue of
+    SidecarFixtureFidelityTests: the guard that would have caught D-14's
+    locality-disclosure understatement on its own.
+
+    There is no single symbol literally named for "the envelope's key
+    inventory" in hermes-report.sh. The real targets are two Python tuple
+    literals, `_VALUE_FAMILY_META_KEYS` and `_PROVENANCE_FAMILY_META_KEYS`,
+    assigned inside the SAME `outcome_metadata=$( ... <<'PY' ... PY )`
+    heredoc `_isolate_outcome_metadata_heredoc_body` isolates above. This
+    function `ast.parse`s that isolated body and `ast.walk`s it for
+    assignments to those two tuple names, collecting their string elements.
+
+    The base metering keys (`source`, `failure_reason`) belong to neither
+    family and are deliberately excluded from the returned set — the
+    documentation draws exactly that distinction, and the caller must draw
+    it too.
+
+    Returns the UNION of both tuples' string contents, or None — never a
+    partial or guessed set — if the heredoc could not be isolated, the body
+    did not parse, or either tuple assignment was not found. A None return
+    means real drift the caller must fail on, not a shape to route around.
+    """
+    body = _isolate_outcome_metadata_heredoc_body(script_text)
+    if body is None:
+        return None
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return None
+    target_names = {'_VALUE_FAMILY_META_KEYS', '_PROVENANCE_FAMILY_META_KEYS'}
+    found = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id in target_names
+            and isinstance(node.value, ast.Tuple)
+        ):
+            keys = [
+                elt.value for elt in node.value.elts
+                if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+            ]
+            found[node.targets[0].id] = keys
+    if target_names - set(found.keys()):
+        return None
+    union = set()
+    for keys in found.values():
+        union.update(keys)
+    return union
+
+
+def _docs_envelope_key_inventory(doc_text):
+    """Phase 47 Plan 06 (D-17a) — doc-side half of the envelope-key-inventory
+    pin. Locates docs/how-it-works.md's "Key inventory" paragraph and
+    extracts every backtick-delimited token from the value-family bullet and
+    the provenance-family bullet SPECIFICALLY — never from the base-keys
+    bullet, since `source`/`failure_reason` belong to neither family tuple
+    and the documentation draws that exact distinction.
+
+    Returns the two bullets' tokens as one set, or None — never a partial
+    or narrowed set — if either bullet's anchor text cannot be located, so a
+    restructured document fails this guard rather than silently checking
+    less than it used to.
+    """
+    value_anchor = '**The value family**'
+    provenance_anchor = '**The provenance family**'
+    ceiling_anchor = '**A byte ceiling'
+    value_start = doc_text.find(value_anchor)
+    provenance_start = doc_text.find(provenance_anchor)
+    if value_start == -1 or provenance_start == -1:
+        return None
+    ceiling_start = doc_text.find(ceiling_anchor, provenance_start)
+    if ceiling_start == -1:
+        return None
+    value_segment = doc_text[value_start:provenance_start]
+    provenance_segment = doc_text[provenance_start:ceiling_start]
+    value_keys = set(re.findall(r'`([^`]+)`', value_segment))
+    provenance_keys = set(re.findall(r'`([^`]+)`', provenance_segment))
+    if not value_keys or not provenance_keys:
+        return None
+    return value_keys | provenance_keys
+
+
+def _extract_metadata_ceiling_bytes(script_text):
+    """Phase 47 Plan 06 (D-17b) — pins the documented byte ceiling to its
+    live source constant, `_METADATA_CEILING_BYTES`, assigned inside the
+    same `outcome_metadata=$(...)` heredoc
+    `_isolate_outcome_metadata_heredoc_body` isolates above. Reuses that
+    same isolation step so both D-17 guards share one heredoc-parsing
+    strategy rather than two.
+
+    Returns the constant's integer value, or None — never a guessed or
+    partial value — if the heredoc could not be isolated, the body did not
+    parse, the assignment was not found, or its value was not a plain
+    integer literal (a bool is technically an int subclass in Python and is
+    deliberately rejected here, since `_METADATA_CEILING_BYTES` is never a
+    bool in the real source).
+    """
+    body = _isolate_outcome_metadata_heredoc_body(script_text)
+    if body is None:
+        return None
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == '_METADATA_CEILING_BYTES'
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, int)
+            and not isinstance(node.value.value, bool)
+        ):
+            return node.value.value
+    return None
 
 
 class RepositoryTests(unittest.TestCase):
@@ -1836,6 +1994,191 @@ exit 0
             f'records where inference was configured to run and draws no '
             f'conclusion about retention; a sentence like this reads as a '
             f'guarantee the skill cannot make',
+        )
+
+    def test_docs_envelope_key_inventory_matches_reporter_source(self):
+        """D-17(a): the documented `--metadata` envelope key inventory in
+        docs/how-it-works.md is pinned to the reporter's live source — the
+        UNION of hermes-report.sh's `_VALUE_FAMILY_META_KEYS` and
+        `_PROVENANCE_FAMILY_META_KEYS` tuples. CONTEXT.md's informal
+        shorthand for "the reporter's declared key inventory" does not name
+        an actual symbol in the reporter source; those two family tuples
+        are the real targets.
+
+        The base metering keys (`source`, `failure_reason`) are deliberately
+        excluded from this comparison on both sides — they belong to neither
+        family tuple, and the documentation draws exactly that distinction
+        in its own "Base keys" bullet, which this guard does not touch.
+
+        This is the doc-side analogue of
+        tests/test_phase38_reporter_path.py::SidecarFixtureFidelityTests —
+        the guard that would have caught D-14's locality-disclosure
+        understatement (docs/how-it-works.md previously read as though only
+        the derived address class crossed the wire, omitting
+        `inference_provider`) on its own, rather than by human review after
+        the fact.
+        """
+        script_text = (SKILL / 'scripts' / 'hermes-report.sh').read_text()
+        source_keys = _extract_metadata_family_keys(script_text)
+        self.assertIsNotNone(
+            source_keys,
+            '_extract_metadata_family_keys could not isolate the '
+            'outcome_metadata heredoc or find both family tuples in '
+            'hermes-report.sh — the anchor may have moved (see '
+            '_extract_metadata_family_keys\'s own docstring)',
+        )
+        self.assertTrue(
+            source_keys,
+            'the extracted union of _VALUE_FAMILY_META_KEYS and '
+            '_PROVENANCE_FAMILY_META_KEYS was empty',
+        )
+
+        doc_text = (ROOT / 'docs' / 'how-it-works.md').read_text()
+        doc_keys = _docs_envelope_key_inventory(doc_text)
+        self.assertIsNotNone(
+            doc_keys,
+            '_docs_envelope_key_inventory could not locate the value-family '
+            'or provenance-family bullet in docs/how-it-works.md — the '
+            '"Key inventory" paragraph may have been restructured',
+        )
+
+        missing_from_docs = source_keys - doc_keys
+        self.assertEqual(
+            missing_from_docs, set(),
+            f'a metadata key ships that the docs do not describe: '
+            f'{sorted(missing_from_docs)}',
+        )
+        missing_from_source = doc_keys - source_keys
+        self.assertEqual(
+            missing_from_source, set(),
+            f'the docs describe a metadata key that no longer ships: '
+            f'{sorted(missing_from_source)}',
+        )
+
+    def test_docs_metadata_ceiling_matches_reporter_source(self):
+        """D-17(b): the byte figure quoted in docs/how-it-works.md's ceiling
+        paragraph is pinned to `_METADATA_CEILING_BYTES` in
+        hermes-report.sh, so changing one alone turns the suite red.
+
+        Quoting the value in prose is only safe BECAUSE of this guard —
+        plan 47-05 reversed the paragraph's earlier defer-only stance
+        ("read it there rather than trusting a number repeated in prose")
+        specifically on the understanding that this guard would exist. The
+        same drift shape (a doc-side claim silently outliving the source
+        constant it described) has bitten this repo four times on the
+        fixture side; this is the doc side getting a source-derived pin
+        instead of a fifth recurrence.
+        """
+        script_text = (SKILL / 'scripts' / 'hermes-report.sh').read_text()
+        source_ceiling = _extract_metadata_ceiling_bytes(script_text)
+        self.assertIsNotNone(
+            source_ceiling,
+            '_extract_metadata_ceiling_bytes could not isolate the '
+            'outcome_metadata heredoc or find _METADATA_CEILING_BYTES in '
+            'hermes-report.sh — the anchor may have moved',
+        )
+        self.assertIsInstance(source_ceiling, int)
+
+        doc_text = (ROOT / 'docs' / 'how-it-works.md').read_text()
+        # Anchor on the stable lead-in phrase plan 47-05's rewrite preserved,
+        # and scope strictly to that one paragraph (up to the next blank
+        # line) — not the whole ceiling section — so the second, unrelated
+        # figure in the very next paragraph (the ~1,000-byte measured ASCII
+        # baseline) can never be mistaken for a second ceiling figure.
+        ceiling_anchor = '**A byte ceiling is enforced once'
+        anchor_start = doc_text.find(ceiling_anchor)
+        self.assertNotEqual(
+            anchor_start, -1,
+            'could not find the ceiling paragraph\'s stable lead-in phrase '
+            'in docs/how-it-works.md — the paragraph may have been reworded',
+        )
+        paragraph_end = doc_text.find('\n\n', anchor_start)
+        self.assertNotEqual(
+            paragraph_end, -1,
+            'could not find the end of the ceiling paragraph',
+        )
+        paragraph = doc_text[anchor_start:paragraph_end]
+        figures = [
+            int(token.replace(',', ''))
+            for token in re.findall(r'\d[\d,]*', paragraph)
+        ]
+        self.assertEqual(
+            len(figures), 1,
+            f'the ceiling paragraph quotes {len(figures)} numeric figures '
+            f'({figures}) — a second number in the same paragraph makes the '
+            f'pin ambiguous',
+        )
+        self.assertEqual(
+            figures[0], source_ceiling,
+            f'the documented ceiling ({figures[0]}) and '
+            f'_METADATA_CEILING_BYTES ({source_ceiling}) must move '
+            f'together — update whichever one changed to match the other',
+        )
+
+    def test_no_prohibited_claim_language_left(self):
+        """EGV-25: the five prohibited phrases must not appear anywhere in
+        the shipped tree.
+
+        D-04 chose the WIDER seven-extension sweep `test_no_legacy_branding_left`
+        uses (rglob everything, `.md/.sh/.py/.txt/.json/.yml/.yaml`, skip
+        `.planning/`) over the narrower `.md`-only idiom
+        `test_docs_make_no_data_locality_claim` uses above, so a claim
+        smuggled into a code comment or a log string cannot ship unguarded.
+
+        This is a literal pattern scan. It does not attempt to detect negation,
+        qualification, or sentence boundaries — a sentence that names a
+        forbidden claim while denying it ("not measured ROI") still matches,
+        by design (D-01). The same-sentence-qualifier alternative was
+        rejected because negation detection is precisely where guards in this
+        repo have historically broken.
+
+        Per D-05, the five phrases below exist in literal form ONLY inside
+        this file — the self-exclusion by filename is therefore load-bearing,
+        not incidental, exactly as CLAUDE.md's "Legacy naming guards" section
+        already instructs for the branding list: read the disallowed strings
+        in the test's regex rather than reproducing them elsewhere.
+
+        The allowed vocabulary EGV-25 also enumerates ("model-estimated
+        value", "configured value estimate", "observed outcome", etc.) is
+        deliberately NOT asserted here (D-03) — a presence assertion for it
+        would either pass vacuously or force stilted prose into shipped text.
+
+        No exemption of any kind exists beyond the self-exclusion below. Per
+        this repo's rule, an exemption set is never widened to make
+        something pass — a failure here means the offending sentence gets
+        rewritten, not that this guard grows a path exemption.
+        """
+        forbidden = [
+            r'\bmeasured ROI\b',
+            r'\bactual savings\b',
+            r'\bthe agent caused\b',
+            r'\bproven business value\b',
+            r'\bcausal impact\b',
+        ]
+        # Same discovery/exclusion idiom as test_no_legacy_branding_left below
+        # (rglob everything, seven-extension allowlist, skip .planning/, skip
+        # this test file itself) — see that test's own comment for why
+        # .planning/ is excluded.
+        offenders = []
+        for path in ROOT.rglob('*'):
+            if not path.is_file():
+                continue
+            if path.suffix not in {'.md', '.sh', '.py', '.txt', '.json', '.yml', '.yaml'}:
+                continue
+            if path.name == 'test_repository.py':
+                continue
+            rel = path.relative_to(ROOT)
+            if rel.parts and rel.parts[0] == '.planning':
+                continue
+            text = path.read_text(errors='ignore')
+            for pattern in forbidden:
+                if re.search(pattern, text, re.IGNORECASE):
+                    offenders.append((str(rel), pattern))
+        self.assertEqual(
+            offenders, [],
+            f'found prohibited claim language: {offenders} — rewrite the '
+            f'offending sentence using EGV-25\'s allowed vocabulary instead '
+            f'of widening this guard\'s exemption set',
         )
 
     def test_no_legacy_branding_left(self):

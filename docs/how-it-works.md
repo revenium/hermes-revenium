@@ -123,9 +123,21 @@ capability is invented here.
   to run.
 
 **A byte ceiling is enforced once, in the reporter, at emit** — the one place the actual
-wire bytes exist before the payload leaves the machine. The ceiling's authoritative value
-lives in `skills/revenium/scripts/hermes-report.sh` as `_METADATA_CEILING_BYTES`; read it
-there rather than trusting a number repeated in prose.
+wire bytes exist before the payload leaves the machine. The ceiling is **4096 bytes**. This
+figure is quoted here safely because a guard test pins it to the source constant
+(`_METADATA_CEILING_BYTES` in `skills/revenium/scripts/hermes-report.sh`) — the two can't
+drift apart without the guard failing.
+
+The figure is a **defensive** choice, not a measured server bound: there is no observed
+Revenium server-side `--metadata` limit to derive a ceiling from. What DOES stand behind it
+is a measurement of this skill's own output — the ASCII baseline for the whole Phase 42-45
+field set (every provenance, value, and cost key this envelope can emit) measures under
+1,000 bytes, comfortably below the 4096-byte ceiling. So the number is bounded by measurement
+of what this skill actually sends, even though it is not bounded by any documented Revenium
+contract.
+
+The source constant remains the authoritative place the value lives; the number here is a
+convenience for the reader, kept honest by the guard, not a second source of truth.
 
 **When a payload exceeds the ceiling**, the value family is dropped first, the provenance
 family second, and base metering is never dropped — metering never breaks, only the
@@ -235,10 +247,12 @@ reported value was proven end to end; the ratio Revenium computes from that valu
 metered cost was not.
 
 One provenance limit is worth stating alongside the metadata above. `evaluator` and
-`evaluator_version` identify the evaluator *implementation*, not the model that produced the
-estimate — the evaluator issues an unpinned call and the host routes it, so a provider
-failover can change the deciding model without changing either field. An estimate's metadata
-therefore establishes that a model produced it under stated assumptions, not which one.
+`evaluator_version` identify the evaluator *implementation*, not the deciding model — the
+evaluator issues an unpinned call and the host routes it, so a provider failover can change
+the deciding model without changing either field. A third, separately recorded field closes
+that gap: `model` is read directly from the LLM response (`response.model`) and clamped to a
+fixed byte budget before persistence, so an estimate's metadata establishes not just that a
+model produced it under stated assumptions, but which one served the call.
 
 ### Inference locality facts (D-06, AMEND-D-07, EGV-21)
 
@@ -249,15 +263,19 @@ inference provider name, and a derived address class taking exactly one of four 
 
 The address class is **derived from the configured endpoint, and the endpoint itself is
 then discarded** — never stored, never transmitted. A `base_url` can embed an internal
-hostname, a port, a path, or credentials, so only the derived class crosses the wire, never
-the raw string. The class is derived without any name resolution, so an endpoint named by a
-hostname the skill cannot verify is recorded in the conservative direction (`public`), never
-guessed as `private` or `loopback`.
+hostname, a port, a path, or credentials, so the raw endpoint never crosses the wire. What
+does cross is the derived address class together with the resolved provider name — the same
+`inference_provider` key named in the provenance-family bullet above — never the raw string.
+The class is derived without any name resolution, so an endpoint named by a hostname the
+skill cannot verify is recorded in the conservative direction (`public`), never guessed as
+`private` or `loopback`.
 
 **This limit matches the one stated above for the deciding model.** The class reflects the
 CONFIGURED endpoint at the moment it was read, not a verified connection — exactly as
-`evaluator`/`evaluator_version` above identify the implementation, not the model that
-actually answered. A mid-flight provider failover is not observed by this field.
+`evaluator`/`evaluator_version` above identify the implementation, not the deciding model.
+A mid-flight provider failover is not observed by this field, the same way it is not
+observed by `evaluator`/`evaluator_version` — only the separate `model` field, read from the
+response itself, can capture it.
 
 **What these two facts are NOT.** They are inputs to an operator's own judgment about their
 deployment, not a conclusion about it. The skill can observe only where inference was
