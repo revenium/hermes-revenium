@@ -205,7 +205,7 @@ classification (turn-level `task_type` labelling and job/arc inference), output/
 assessment (the evaluator that produces or withholds an `assessment`), economic valuation (how
 an accepted outcome converts to a number), evidence resolution and reportability (which
 `evidence_class` a boundary declares and whether the result may be reported), cohort impact
-(a contract only — no estimator ships), and Revenium reporting. Each is a registry: a
+(a contract only — no estimator ships), and Revenium reporting. Each is a registry: an
 implementation registers a name, and an operator selects among registered implementations by
 that name.
 
