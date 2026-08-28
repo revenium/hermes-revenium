@@ -72,33 +72,27 @@ def _load_root_walk_helper():
     return mod
 
 
-def _extract_metadata_family_keys(script_text):
-    """Phase 47 Plan 06 (D-17a) — the doc-side analogue of
-    SidecarFixtureFidelityTests: the guard that would have caught D-14's
-    locality-disclosure understatement on its own.
+def _isolate_outcome_metadata_heredoc_body(script_text):
+    """Phase 47 Plan 06 (D-17a/D-17b) — shared isolation step both doc-fidelity
+    guards below build on. Duplicates (never imports —
+    tests/test_phase38_reporter_path.py mutates the environment at import
+    time, so this repo's own convention is duplicating cross-module test
+    helpers rather than creating test-to-test imports) the anchor-string +
+    heredoc-isolation shape of
+    tests/test_phase38_reporter_path.py::_extract_forwarder_record_keys.
 
-    There is no single symbol literally named for "the envelope's key
-    inventory" in hermes-report.sh. The real targets are two Python tuple
-    literals, `_VALUE_FAMILY_META_KEYS` and `_PROVENANCE_FAMILY_META_KEYS`,
-    assigned inside the SAME `outcome_metadata=$( ... <<'PY' ... PY )`
-    heredoc that `_extract_forwarder_record_keys`
-    (tests/test_phase38_reporter_path.py) already isolates and parses.
-    Duplicates (never imports — that module mutates the environment at
-    import time, so this repo's own convention is duplicating cross-module
-    test helpers rather than creating test-to-test imports) that same
-    anchor-string + heredoc-isolation + `ast.parse` shape, then `ast.walk`s
-    the isolated body for assignments to those two tuple names, collecting
-    their string elements.
+    Anchors on hermes-report.sh's `outcome_metadata=$(` forwarder
+    assignment, finds the immediately following quoted `<<'PY'` heredoc
+    opener, and isolates the body between the line after that opener and
+    the literal `\nPY\n` closer. Returns the isolated body text, or None —
+    never a partial slice — if the anchor moved or the closer could not be
+    found, so callers fail loudly on real drift instead of silently
+    re-testing a stale shape.
 
-    The base metering keys (`source`, `failure_reason`) belong to neither
-    family and are deliberately excluded from the returned set — the
-    documentation draws exactly that distinction, and the caller must draw
-    it too.
-
-    Returns the UNION of both tuples' string contents, or None — never a
-    partial or guessed set — if the anchor moved, the isolated body did not
-    parse, or either tuple assignment was not found. A None return means
-    real drift the caller must fail on, not a shape to route around.
+    Factored out here (Task 2, D-17b) so both D-17 guards share this one
+    isolation step rather than each duplicating it — both live in this same
+    module, so sharing inside the module is fine; what must not happen is a
+    cross-module import.
     """
     anchor = 'outcome_metadata=$('
     start_marker = script_text.find(anchor)
@@ -111,7 +105,35 @@ def _extract_metadata_family_keys(script_text):
     body_end = script_text.find('\nPY\n', body_start)
     if body_end == -1:
         return None
-    body = script_text[body_start:body_end]
+    return script_text[body_start:body_end]
+
+
+def _extract_metadata_family_keys(script_text):
+    """Phase 47 Plan 06 (D-17a) — the doc-side analogue of
+    SidecarFixtureFidelityTests: the guard that would have caught D-14's
+    locality-disclosure understatement on its own.
+
+    There is no single symbol literally named for "the envelope's key
+    inventory" in hermes-report.sh. The real targets are two Python tuple
+    literals, `_VALUE_FAMILY_META_KEYS` and `_PROVENANCE_FAMILY_META_KEYS`,
+    assigned inside the SAME `outcome_metadata=$( ... <<'PY' ... PY )`
+    heredoc `_isolate_outcome_metadata_heredoc_body` isolates above. This
+    function `ast.parse`s that isolated body and `ast.walk`s it for
+    assignments to those two tuple names, collecting their string elements.
+
+    The base metering keys (`source`, `failure_reason`) belong to neither
+    family and are deliberately excluded from the returned set — the
+    documentation draws exactly that distinction, and the caller must draw
+    it too.
+
+    Returns the UNION of both tuples' string contents, or None — never a
+    partial or guessed set — if the heredoc could not be isolated, the body
+    did not parse, or either tuple assignment was not found. A None return
+    means real drift the caller must fail on, not a shape to route around.
+    """
+    body = _isolate_outcome_metadata_heredoc_body(script_text)
+    if body is None:
+        return None
     try:
         tree = ast.parse(body)
     except SyntaxError:
@@ -169,6 +191,42 @@ def _docs_envelope_key_inventory(doc_text):
     if not value_keys or not provenance_keys:
         return None
     return value_keys | provenance_keys
+
+
+def _extract_metadata_ceiling_bytes(script_text):
+    """Phase 47 Plan 06 (D-17b) — pins the documented byte ceiling to its
+    live source constant, `_METADATA_CEILING_BYTES`, assigned inside the
+    same `outcome_metadata=$(...)` heredoc
+    `_isolate_outcome_metadata_heredoc_body` isolates above. Reuses that
+    same isolation step so both D-17 guards share one heredoc-parsing
+    strategy rather than two.
+
+    Returns the constant's integer value, or None — never a guessed or
+    partial value — if the heredoc could not be isolated, the body did not
+    parse, the assignment was not found, or its value was not a plain
+    integer literal (a bool is technically an int subclass in Python and is
+    deliberately rejected here, since `_METADATA_CEILING_BYTES` is never a
+    bool in the real source).
+    """
+    body = _isolate_outcome_metadata_heredoc_body(script_text)
+    if body is None:
+        return None
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == '_METADATA_CEILING_BYTES'
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, int)
+            and not isinstance(node.value.value, bool)
+        ):
+            return node.value.value
+    return None
 
 
 class RepositoryTests(unittest.TestCase):
@@ -1995,6 +2053,66 @@ exit 0
             missing_from_source, set(),
             f'the docs describe a metadata key that no longer ships: '
             f'{sorted(missing_from_source)}',
+        )
+
+    def test_docs_metadata_ceiling_matches_reporter_source(self):
+        """D-17(b): the byte figure quoted in docs/how-it-works.md's ceiling
+        paragraph is pinned to `_METADATA_CEILING_BYTES` in
+        hermes-report.sh, so changing one alone turns the suite red.
+
+        Quoting the value in prose is only safe BECAUSE of this guard —
+        plan 47-05 reversed the paragraph's earlier defer-only stance
+        ("read it there rather than trusting a number repeated in prose")
+        specifically on the understanding that this guard would exist. The
+        same drift shape (a doc-side claim silently outliving the source
+        constant it described) has bitten this repo four times on the
+        fixture side; this is the doc side getting a source-derived pin
+        instead of a fifth recurrence.
+        """
+        script_text = (SKILL / 'scripts' / 'hermes-report.sh').read_text()
+        source_ceiling = _extract_metadata_ceiling_bytes(script_text)
+        self.assertIsNotNone(
+            source_ceiling,
+            '_extract_metadata_ceiling_bytes could not isolate the '
+            'outcome_metadata heredoc or find _METADATA_CEILING_BYTES in '
+            'hermes-report.sh — the anchor may have moved',
+        )
+        self.assertIsInstance(source_ceiling, int)
+
+        doc_text = (ROOT / 'docs' / 'how-it-works.md').read_text()
+        # Anchor on the stable lead-in phrase plan 47-05's rewrite preserved,
+        # and scope strictly to that one paragraph (up to the next blank
+        # line) — not the whole ceiling section — so the second, unrelated
+        # figure in the very next paragraph (the ~1,000-byte measured ASCII
+        # baseline) can never be mistaken for a second ceiling figure.
+        ceiling_anchor = '**A byte ceiling is enforced once'
+        anchor_start = doc_text.find(ceiling_anchor)
+        self.assertNotEqual(
+            anchor_start, -1,
+            'could not find the ceiling paragraph\'s stable lead-in phrase '
+            'in docs/how-it-works.md — the paragraph may have been reworded',
+        )
+        paragraph_end = doc_text.find('\n\n', anchor_start)
+        self.assertNotEqual(
+            paragraph_end, -1,
+            'could not find the end of the ceiling paragraph',
+        )
+        paragraph = doc_text[anchor_start:paragraph_end]
+        figures = [
+            int(token.replace(',', ''))
+            for token in re.findall(r'\d[\d,]*', paragraph)
+        ]
+        self.assertEqual(
+            len(figures), 1,
+            f'the ceiling paragraph quotes {len(figures)} numeric figures '
+            f'({figures}) — a second number in the same paragraph makes the '
+            f'pin ambiguous',
+        )
+        self.assertEqual(
+            figures[0], source_ceiling,
+            f'the documented ceiling ({figures[0]}) and '
+            f'_METADATA_CEILING_BYTES ({source_ceiling}) must move '
+            f'together — update whichever one changed to match the other',
         )
 
     def test_no_prohibited_claim_language_left(self):
