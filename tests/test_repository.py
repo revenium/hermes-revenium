@@ -250,6 +250,13 @@ class RepositoryTests(unittest.TestCase):
             # enforcement. It was briefly untracked with the evidence tree.
             ROOT / 'docs' / 'plugin-interface.md',
             ROOT / 'docs' / 'upgrading.md',
+            # Milestone closeout records. Deliberately NOT under docs/internal/
+            # — that tree is gitignored (see .gitignore), so a closeout placed
+            # there dies with the working tree, which is what forced the
+            # 2026-06-06 roadmap reconstruction. Pinned here for the same
+            # reason docs/auxiliary-usage-sizing.md was: registering the file
+            # makes deleting it turn the suite red.
+            ROOT / 'docs' / 'internal-milestones.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
