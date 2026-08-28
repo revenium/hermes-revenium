@@ -9,7 +9,116 @@ this repository.
 
 ## [Unreleased]
 
-### Added
+Two rounds of work on the same experimental feature. The first shipped LLM outcome
+evaluation; the second replaced most of its internals so a model estimate can no longer
+read as an observed result. The feature stays **opt-in and off by default** throughout,
+and an install that leaves it off meters byte-identically to before.
+
+### Added — evidence grading and economic mechanisms
+
+- **Nine evidence labels** (`evidence_class`), replacing the single forced constant.
+  They are deliberately **not** a confidence ladder: customer confirmation can be
+  commercially authoritative yet causally weak, observation proves that something
+  happened rather than what produced it, and configuration establishes an approved rate
+  rather than hours actually spent. The naked-LLM path always resolves to
+  `MODEL_ESTIMATED_DEMO` and **cannot** promote itself to any observed,
+  customer-confirmed, associational, or impact label — enforced structurally, and proven
+  by adversarial fixtures rather than asserted. Exact spellings and the resolution rule
+  are in [`references/job-declaration.md`](skills/revenium/references/job-declaration.md).
+- **Six economic mechanisms** (`economic_mechanism`) in place of the previous
+  hours-times-rate assumption: labor substitution, augmentation or capacity expansion,
+  quality or decision improvement, risk avoidance, newly enabled work, and incremental
+  revenue. The evaluator may select three of them; the other three are operator-declared
+  (see Known limitations).
+- **Net value across supplied costs** (`net_value`). A new `costs` config block, keyed by
+  job type, subtracts `human_review`, `rework_or_error`, `integration`, and
+  `training_or_change` from the estimated value. A supplied `0` and an absent category are
+  different things and both are explicit in the record. There is no fleet-wide default —
+  an unconfigured job type nets nothing.
+- **Explicit zero and unknown denominators.** AI cost is never silently substituted when
+  the claim concerns total workflow investment; no ratio is emitted.
+- **Double-counting controls** (`double_counting_group`) so one outcome cannot be fully
+  credited to several jobs, or claimed twice across overlapping mechanisms.
+- **Zero and negative work stays visible.** Failed, cancelled, abandoned, and unclassified
+  jobs receive no positive value by default while retaining their metered and allocated
+  cost, so negative net value remains legible instead of disappearing.
+- **Bounded low/base/high estimates** in preference to false precision. Reversed or
+  unordered bounds abstain rather than guess.
+
+### Added — persistence, corrections, and provenance
+
+- **A sidecar assessment record** under `${STATE_DIR}/job-assessments/`, keyed by job id.
+  The richer assessment no longer competes for the 1024-byte marker line, which a
+  six-field assessment had already filled to about 70%.
+- **Append-only corrections.** `correct-assessment.sh` writes a `kind:"correction"` line
+  locally and calls `revenium jobs outcome-update` server-side. The original assessment is
+  preserved; nothing is destructively replaced. Operator-only, never run from cron.
+- **Provenance that survives deferral and retry.** Model, prompt, taxonomy, policy, and
+  schema versions persist through a failed job creation and its retry, so a later
+  taxonomy or prompt change never silently rewrites history.
+- **The deciding model is recorded** separately from `evaluator`/`evaluator_version`,
+  which identify the implementation rather than the model that produced the estimate.
+- **`studyId` / `studyVersion`** config keys let an install name an impact study its
+  assessments reference. Referencing a study never changes an assessment's own
+  `evidence_class`.
+
+### Added — boundaries, reporting, and privacy
+
+- **Six pluggable boundaries as real contracts** — classification, output/outcome
+  assessment, economic valuation, evidence resolution and reportability, cohort impact
+  (contract only), and Revenium reporting — selected through a `boundaries` config object.
+  A non-LLM implementation can be added behind any of them without masquerading as an LLM
+  evaluator. The contracts are host-agnostic, so the core can later be extracted.
+- **`ImpactStudyResult` as a contract only** — fields for study identity, estimand,
+  identification method, effect interval, assumptions, and validity scope. No estimators
+  and no experiment orchestration ship here.
+- **`experimentalReportEstimates`**, a second literal-boolean gate independent of
+  `enabled`. Left off, an estimate is computed and recorded locally but its value is
+  withheld from Revenium — the outcome and provenance still report
+  (`reportability_status: "candidate"`). Turned on, the value ships as well
+  (`reportability_status: "reportable"`). The resolver decides this, never the evaluator.
+- **A bounded `--metadata` envelope** with a byte ceiling, tier-ordered shedding, and a
+  `metadata_truncated` marker when a tier actually drops keys. An over-ceiling payload
+  never ships unmarked, and base metering never breaks on a field the API does not know.
+- **Inference-locality provenance.** A derived address class and provider are recorded;
+  the raw `base_url` is consumed and discarded, never persisted or transmitted. The docs
+  state plainly that this records where inference was **configured** to go, not where data
+  stayed.
+- **No raw prompt or transcript text** reaches any marker, ledger, queue, log, or
+  `--metadata` field, proven by a dynamically enumerated canary sweep whose
+  vacuous-pass guard is itself proven binding by a negative control.
+
+### Added — documentation and guards
+
+- **[Claim distinctions and evidence boundaries](docs/claim-distinctions-and-evidence-boundaries.md)** —
+  output vs. outcome vs. valuation vs. impact vs. ROI, the results chain, the
+  product-truth boundary, correction and audit behaviour, abstention and negative value,
+  and what this work deliberately does not ship.
+- **A prohibited-claim-language guard** (`test_no_prohibited_claim_language_left`) in the
+  shape of the existing legacy-name guards, scanning the whole shipped tree rather than
+  Markdown alone, so an overreaching claim cannot ship in a code comment or a log string.
+- **Two source-derived documentation guards** pinning the documented envelope key
+  inventory and byte ceiling to the reporter's live constants, so the docs cannot drift
+  from the code.
+
+### Known limitations
+
+- `quality_decision_improvement`, `risk_avoidance`, and `incremental_revenue` are
+  representable and forward correctly on the wire, but nothing can currently select them:
+  no config key, no CLI flag, and `correct-assessment.sh` does not set a mechanism. A
+  study reference is the intended producer.
+- When a configured `boundaries.valuation` or `boundaries.evidence` implementation
+  declares its own `evidence_class`, the persisted record still shows the evaluator's
+  class. The effect is conservative — `MODEL_ESTIMATED_DEMO` is the weakest label, so the
+  record under-claims — and no promotion path is opened. Resolving it needs a
+  cross-boundary precedence rule.
+- `revenium jobs roi` surfaces no provenance, so the evidence label and assumptions are
+  retained in the bounded metadata envelope and locally, not shown in that view. Use
+  `revenium jobs outcome-history` to read them back.
+- This round has not been exercised against a live tenant. The end-to-end proof is a
+  fixture harness driving the real classifier and reporter with a stubbed model response.
+
+### Added — LLM outcome evaluation (initial)
 - Opt-in, off-by-default **LLM outcome evaluation** (`llmOutcomeEvaluation` in
   `config.json`): on a `SUCCESS` job arc, estimates the job's economic value via one
   bounded LLM call on the user's own provider. The result is an unverified model
