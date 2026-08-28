@@ -123,9 +123,21 @@ capability is invented here.
   to run.
 
 **A byte ceiling is enforced once, in the reporter, at emit** — the one place the actual
-wire bytes exist before the payload leaves the machine. The ceiling's authoritative value
-lives in `skills/revenium/scripts/hermes-report.sh` as `_METADATA_CEILING_BYTES`; read it
-there rather than trusting a number repeated in prose.
+wire bytes exist before the payload leaves the machine. The ceiling is **4096 bytes**. This
+figure is quoted here safely because a guard test pins it to the source constant
+(`_METADATA_CEILING_BYTES` in `skills/revenium/scripts/hermes-report.sh`) — the two can't
+drift apart without the guard failing.
+
+The figure is a **defensive** choice, not a measured server bound: there is no observed
+Revenium server-side `--metadata` limit to derive a ceiling from. What DOES stand behind it
+is a measurement of this skill's own output — the ASCII baseline for the whole Phase 42-45
+field set (every provenance, value, and cost key this envelope can emit) measures under
+1,000 bytes, comfortably below the 4096-byte ceiling. So the number is bounded by measurement
+of what this skill actually sends, even though it is not bounded by any documented Revenium
+contract.
+
+The source constant remains the authoritative place the value lives; the number here is a
+convenience for the reader, kept honest by the guard, not a second source of truth.
 
 **When a payload exceeds the ceiling**, the value family is dropped first, the provenance
 family second, and base metering is never dropped — metering never breaks, only the
