@@ -209,6 +209,17 @@ def _extract_forwarder_record_keys(script_text):
 _UNREACHABLE_ON_THE_NAKED_LLM_VALUED_PATH = frozenset()
 
 
+# Plan 47-02 (Task 1): the two outcome-value-family CLI flags
+# hermes-report.sh appends together or not at all (never one alone --
+# see the "Both flags are added together or not at all" comment at
+# skills/revenium/scripts/hermes-report.sh:3555-3558). Spelled exactly as
+# the script appends them; all three D-07 paths this plan drives (path 2
+# abstention, path 3 withheld/candidate, path 4 negative net value's
+# reportable-but-still-worth-checking shape) assert against this ONE
+# shared constant rather than three independent literal spellings.
+_VALUE_FLAG_TOKENS = ('--outcome-value', '--outcome-currency')
+
+
 def _outcome_invocations(jobs_argv):
     return [
         argv for argv in jobs_argv
@@ -636,6 +647,55 @@ class TestPhase47EndToEnd(unittest.TestCase):
             'a missing key means the docs and the wire fixtures describe a '
             f'shape the produced artifact never carries. record={record!r}',
         )
+
+    # -- Plan 47-02 Task 1: the abstention path (D-07 path 2) --------------
+
+    def test_abstention_path_ships_outcome_with_provenance_and_no_value(self):
+        """D-07 path 2: a SUCCESS arc whose evaluator DECLINES (the third
+        call_llm response is the evaluator's literal abstention token,
+        `'null'` -- pinned by tests/test_phase37_llm_evaluator.py's own
+        `test_prompt_shape` asserting the prompt says "output exactly:
+        null") still ships exactly one `jobs outcome` invocation, carrying
+        NO outcome-value flag and NO outcome-currency flag, but STILL
+        carrying provenance (evaluator, evaluator_version) in --metadata.
+
+        Load-bearing (Phase 40's live run): an evaluator that never
+        abstains is indistinguishable from one that assigns a number to
+        every successful arc regardless of merit. Proving the abstention
+        path ships a real, provenance-bearing record -- not a dropped
+        report -- is what makes a later observed valuation meaningful
+        rather than assumed. `_drive_produced_arc`'s own default config
+        (llmOutcomeEvaluation.enabled=True,
+        experimentalReportEstimates=True) is reused unmodified: the only
+        difference from path 1 (the valued happy path) is the evaluator's
+        own response, never the config."""
+        result = self._drive_produced_arc(
+            sid='p47e2e-abstain-sid-001', job_id='p47e2e-abstain-job-001',
+            task_type='code_review',
+            # eval_payload=None (the default) drives _drive_classifier's
+            # own literal 'null' abstention response -- never retyped here.
+        )
+
+        outcomes = _outcome_invocations(result['jobs_argv'])
+        self.assertEqual(
+            len(outcomes), 1,
+            f'expected exactly one jobs outcome invocation for job='
+            f'{result["job_id"]!r} across both ticks: {result["jobs_argv"]}',
+        )
+        argv = outcomes[0]
+        self.assertEqual(argv[2], result['job_id'])
+
+        for flag in _VALUE_FLAG_TOKENS:
+            self.assertNotIn(
+                flag, argv,
+                f'abstained arc must not ship {flag!r}: argv={argv!r}',
+            )
+
+        metadata_raw = _metadata_of(argv)
+        self.assertIsNotNone(metadata_raw, argv)
+        meta = json.loads(metadata_raw)
+        self.assertIn('evaluator', meta, meta)
+        self.assertIn('evaluator_version', meta, meta)
 
 
 if __name__ == '__main__':
