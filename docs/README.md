@@ -27,7 +27,9 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 
 - **[Claim distinctions and evidence boundaries](claim-distinctions-and-evidence-boundaries.md)**
   — output vs. outcome vs. valuation vs. impact vs. ROI, the results chain, the product-truth
-  boundary, and what this milestone deliberately does not ship.
+  boundary, and what the experimental value path deliberately does not ship. Start here
+  before enabling it; [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)
+  has the label and mechanism reference it points to.
 
 ## Going deeper
 
@@ -53,6 +55,10 @@ skill rather than here:
 - [`references/troubleshooting.md`](../skills/revenium/references/troubleshooting.md) — failure modes
 - [`references/task-taxonomy.md`](../skills/revenium/references/task-taxonomy.md) — the controlled vocabulary
 - [`references/config-schema.md`](../skills/revenium/references/config-schema.md) — `config.json` schema
+- [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md) — what makes a
+  job arc, and the reference for the experimental value path: the nine evidence-class
+  labels with their exact spellings, the six economic mechanisms, `double_counting_group`,
+  and the sidecar assessment record
 - [`references/halt-survivability.md`](../skills/revenium/references/halt-survivability.md) — the manual halt-check runbook
 
 ## Release history
