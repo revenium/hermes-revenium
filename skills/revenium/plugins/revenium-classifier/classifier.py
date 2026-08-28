@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import inspect
+import ipaddress
 import json
 import math
 import logging
@@ -26,6 +27,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 # Lazy import — keeps the module importable in the test environment where
 # Hermes' venv is not available. Tests patch classifier.call_llm directly.
@@ -996,14 +998,19 @@ def _validate_job(job: dict) -> "dict | None":
     aid = agentic_job_id.strip() + "_" + secrets.token_hex(2)
     # failure_reason is meaningful only for FAILED arcs. Coerce non-str / wrong-status
     # values to empty so SUCCESS/CANCELLED markers stay byte-identical to pre-change
-    # output (the writer omits the key when empty). Cap length defensively so a runaway
-    # LLM response cannot bloat the marker line or the downstream --metadata CLI arg.
+    # output (the writer omits the key when empty). Phase 46 (D-10): clamped by
+    # SERIALIZED BYTES via _clamp_assessment_text, not character count -- a
+    # character clamp under-counts by up to 12x under ensure_ascii=True (see that
+    # function's docstring), and this field is model-controlled free text that
+    # rides all the way to the --metadata transport, so an under-counted clamp
+    # here was the actual driver of EGV-19's measured worst case. This also
+    # brings the pipe/newline/CR strip to the producer, which
+    # _clamp_assessment_text's own docstring already claims happens here --
+    # replacing the separate .strip() this block used to do.
     failure_reason = job.get("failure_reason", "")
     if not isinstance(failure_reason, str) or status != "FAILED":
         failure_reason = ""
-    failure_reason = failure_reason.strip()
-    if len(failure_reason) > 500:
-        failure_reason = failure_reason[:500]
+    failure_reason = _clamp_assessment_text(failure_reason, FAILURE_REASON_CLAMP_BYTES)
     return {
         "agentic_job_id": aid,
         "job_name": (job.get("job_name") or ""),
@@ -1611,6 +1618,151 @@ POLICY_VERSION = 1
 # candidate_downstream_outcome, counterfactual_assumption, and basis.
 NARRATIVE_CLAMP_BYTES = 500
 
+# Phase 46 (D-10): _validate_job's failure_reason clamp, in serialized bytes.
+# Same value as NARRATIVE_CLAMP_BYTES but a DISTINCT constant, deliberately --
+# these are two independently-justified budgets (a job-outcome reason vs. a
+# job-assessment narrative field) that must be able to diverge later without
+# one edit silently changing the other.
+FAILURE_REASON_CLAMP_BYTES = 500
+
+# Phase 46 (EGV-21, D-06/D-07/D-12): the address-class vocabulary. Exactly
+# four values -- a fifth "unknown" bucket was explicitly rejected (D-12) so
+# that "we could not determine this" (unset) is never confusable with a
+# genuine classification. ADDRESS_CLASS_UNSET is exported so callers never
+# hand-spell the literal.
+ADDRESS_CLASS_UNSET = "unset"
+_ADDRESS_CLASSES = frozenset({"loopback", "private", "public", ADDRESS_CLASS_UNSET})
+
+# Phase 46 (EGV-21): the resolved inference provider name, clamped in
+# serialized bytes via _clamp_assessment_text -- an operator-environment
+# string (e.g. "openrouter", "openai"), never the raw base_url it was
+# derived alongside.
+INFERENCE_PROVIDER_MAX_BYTES = 32
+
+
+def _address_class(base_url: "str | None") -> str:
+    """loopback | private | public | unset -- derived, never the raw base_url.
+
+    Phase 46 (EGV-21, D-06/D-07): the skill may observe at most where
+    inference was CONFIGURED to go; it never asserts where data stayed, was
+    logged, or was retained (D-06). This function converts a base_url into
+    one of exactly four coarse facts and nothing else -- the input string
+    itself is never returned, stored, or logged by any caller.
+
+    No DNS resolution is performed anywhere in this function, deliberately:
+    (1) a hostname-resolution syscall is a blocking network call and this
+    classifier runs inside an asyncio event loop (run_classification_async,
+    D-04's "MUST NEVER raise" path) -- every other blocking-I/O concern in
+    this module is wrapped in asyncio.to_thread or avoided outright, and a
+    bare blocking DNS call here would reintroduce exactly that hazard; (2) even a
+    successful resolution is only a snapshot at record time and is not a
+    guarantee about the connection actually used for any given call; (3)
+    defaulting an unresolved/unverifiable hostname to "public" is the
+    conservative direction -- classifying an unverified host as loopback or
+    private would itself be the unverified locality claim EGV-21 forbids, so
+    an unresolved symbolic hostname always takes the safe (public) branch.
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return ADDRESS_CLASS_UNSET
+
+    try:
+        parts = urlsplit(raw)
+        # Unix domain sockets are inherently local by construction.
+        if parts.scheme in ("unix", "http+unix"):
+            return "loopback"
+
+        host = parts.hostname
+        if host is None and "://" not in raw:
+            # Bare "host:port" (or a bare hostname) with no scheme -- urlsplit
+            # only populates .hostname when it sees a netloc ("//"). Without
+            # this retry, urlsplit("localhost:8080").hostname is None
+            # (misparsed as scheme="localhost"), and the single most common
+            # bare host:port config shape would silently fall through to
+            # "unset".
+            host = urlsplit("//" + raw).hostname
+
+        if not host:
+            return ADDRESS_CLASS_UNSET
+
+        host = unquote(host)
+        if host == "localhost":
+            return "loopback"
+
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            # A symbolic hostname we did not resolve. No DNS lookup is
+            # performed (see the docstring above) -- an unverified hostname
+            # defaults to the safe direction (public), never loopback/private.
+            return "public"
+
+        # Order matters: loopback addresses are ALSO is_private == True, so
+        # the more specific class must be tested first.
+        if ip.is_loopback:
+            return "loopback"
+        if ip.is_private:  # covers RFC1918, link-local (fe80::), unspecified
+            return "private"
+        return "public"
+    except Exception:
+        # urlsplit itself can raise (e.g. an unbalanced "[" in the netloc,
+        # ValueError: Invalid IPv6 URL). Garbage input must never raise out
+        # of this function (behavior 7) -- an unparseable string is exactly
+        # as unverifiable as an unresolved hostname, so it takes the same
+        # safe (public) direction, never loopback/private/unset.
+        return "public"
+
+
+def _resolve_inference_locality(paths: "_Paths") -> "tuple[str, str]":
+    """Return (provider, address_class) for the profile owning `paths`.
+
+    Phase 46 (EGV-21, D-06/D-07). AMEND-D-07: every call_llm(...) site in
+    this module deliberately omits base_url=/provider=/model= kwargs
+    (ROI-07 -- that omission is what keeps the call on the operator's
+    configured provider), and the aux client's response object never
+    surfaces a .base_url back to this module -- so, unlike EGV-08's
+    served-model (sourced from the response), the address class CANNOT be
+    sourced from anything this module observes about the call itself. The
+    only available source is a STATIC, profile-scoped read of Hermes'
+    config.yaml `model:` block. This records what the operator CONFIGURED,
+    not what the SDK actually connected to for this particular call --
+    credential pools, fallback_providers, and mid-flight
+    healed_model/refreshed_model reroutes are invisible to it. The address
+    class therefore reflects the configured model.base_url, not a verified
+    connection, and a mid-flight provider failover is not observed by this
+    field. This limitation must be stated in docs (plan 46-06), not silently
+    absorbed.
+
+    `paths` is the _Paths object _paths_for_session already resolves, so a
+    multiplexed gateway reads the OWNING profile's config.yaml rather than
+    the process-level one -- never read HERMES_HOME / "config.yaml" directly
+    from this function.
+
+    Stdlib-only, re-based extraction (no PyYAML -- the install-hooks.sh:
+    195-236 precedent for reading/patching this exact file shape). The raw
+    base_url is passed through _address_class and then DISCARDED: it is
+    never returned, stored in an attribute, logged, or included in any
+    exception message (D-07 -- only a derived class may leave the machine).
+
+    Fail-open (D-04), matching _paths_for_session's own posture: any error,
+    including a missing or unreadable config.yaml, returns
+    ("", ADDRESS_CLASS_UNSET) rather than raising.
+    """
+    try:
+        text = (paths.hermes_home / "config.yaml").read_text(encoding="utf-8")
+        model_block_m = re.search(r"(?m)^model:[ \t]*\n((?:[ \t]+.*\n?)*)", text)
+        block = model_block_m.group(1) if model_block_m else ""
+        base_url_m = re.search(r"(?m)^[ \t]+base_url:[ \t]*(.+?)[ \t]*$", block)
+        provider_m = re.search(r"(?m)^[ \t]+provider:[ \t]*(.+?)[ \t]*$", block)
+        raw_base_url = base_url_m.group(1).strip().strip("'\"") if base_url_m else ""
+        raw_provider = provider_m.group(1).strip().strip("'\"") if provider_m else ""
+        address_class = _address_class(raw_base_url)
+        provider = _clamp_assessment_text(raw_provider, INFERENCE_PROVIDER_MAX_BYTES)
+        return provider, address_class
+    except Exception:
+        return "", ADDRESS_CLASS_UNSET
+
+
 # Declared-only defaults (D-06: every EGV-04 field family is declared even
 # where only a later phase implements its semantics -- a field is never
 # silently dropped because "nothing populates it yet").
@@ -2056,6 +2208,8 @@ def _build_job_assessment(
     abstention_reason: "str | None" = None,
     double_counting_group: str = "",
     model: str = PROVENANCE_MODEL_UNKNOWN,
+    inference_provider: str = "",
+    inference_address_class: str = ADDRESS_CLASS_UNSET,
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -2248,6 +2402,26 @@ def _build_job_assessment(
             # NOT evaluator_version's 16-byte width, so a dated snapshot
             # identifier survives verbatim.
             "model": _clamp_assessment_text(model, PROVENANCE_MODEL_MAX_BYTES),
+            # Phase 46 (EGV-21, D-06/D-07): caller-supplied, resolved ONCE
+            # via _resolve_inference_locality (by _attach_assessment, or by
+            # the non-SUCCESS branch in the caller's own job loop) and
+            # threaded UNCHANGED here, on the same caller-supplied-provenance
+            # footing as model/evaluator/evaluator_version above -- never
+            # read off raw. These are NOT part of D-11's value-omit family:
+            # an abstained record still carries them, exactly like evaluator
+            # and reportability_status do, because they describe where the
+            # evaluation was configured to run whether or not it produced a
+            # value. inference_address_class is defended against a corrupt
+            # or out-of-set caller value by falling back to
+            # ADDRESS_CLASS_UNSET, the same direction _resolve_inference_locality
+            # itself fails open to.
+            "inference_provider": _clamp_assessment_text(
+                inference_provider, INFERENCE_PROVIDER_MAX_BYTES),
+            "inference_address_class": (
+                inference_address_class
+                if inference_address_class in _ADDRESS_CLASSES
+                else ADDRESS_CLASS_UNSET
+            ),
             "prompt_version": PROMPT_VERSION,
             "policy_version": POLICY_VERSION,
 
@@ -3134,6 +3308,13 @@ async def _attach_assessment(
     three branches that follow a REAL outcome-evaluation call -- see each
     call site's own comment for which three and why the other six take the
     sentinel default.
+
+    Phase 46 (EGV-21, D-06/D-07): inference_provider/inference_address_class
+    are resolved ONCE, before the try, via _resolve_inference_locality(paths)
+    -- unlike served_model, locality reaches ALL nine _build_job_assessment
+    calls below, because it is a fact about the configured endpoint,
+    available regardless of whether an evaluator ran or a failure happened
+    before one could.
     """
     # Pre-bound before the try so the exception handlers can reference them
     # even if the failure happened before _llm_evaluation_config or the
@@ -3145,6 +3326,11 @@ async def _attach_assessment(
     # the exception handlers must be able to reference it even when the
     # failure happened before the evaluator ran.
     served_model = PROVENANCE_MODEL_UNKNOWN
+    # Phase 46 (EGV-21, D-06/D-07): resolved once, unconditionally -- this
+    # is a fact about the configured endpoint, not about the outcome of the
+    # evaluation that follows, so it is bound before the try alongside
+    # served_model and threaded UNCHANGED to every branch below.
+    inference_provider, inference_address_class = _resolve_inference_locality(paths)
     try:
         cfg = _llm_evaluation_config(paths=paths)
         name = cfg.get("evaluator") or "llm"
@@ -3165,6 +3351,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="unknown_evaluator",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         raw = fn(valid, transcript, cfg)
@@ -3211,6 +3399,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="invalid",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         if raw is _EVAL_TIMED_OUT:
@@ -3222,6 +3412,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="timed_out",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         if raw is None:
@@ -3233,6 +3425,8 @@ async def _attach_assessment(
                 valid, None, None, cfg, name, _ev.resolve_version(name),
                 abstention_reason="abstained",
                 double_counting_group=double_counting_group,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         # The version comes from the REGISTRY, not from a name comparison here.
@@ -3257,6 +3451,8 @@ async def _attach_assessment(
                 abstention_reason="mechanism_abstains_from_value",
                 double_counting_group=double_counting_group,
                 model=served_model,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version)
@@ -3272,6 +3468,8 @@ async def _attach_assessment(
                 valid, assessment, raw, cfg, name, evaluator_version,
                 double_counting_group=double_counting_group,
                 model=served_model,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -3293,6 +3491,8 @@ async def _attach_assessment(
                 evaluator_version, abstention_reason="rejected",
                 double_counting_group=double_counting_group,
                 model=served_model,
+                inference_provider=inference_provider,
+                inference_address_class=inference_address_class,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -3321,6 +3521,8 @@ async def _attach_assessment(
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="timed_out",
             double_counting_group=double_counting_group,
+            inference_provider=inference_provider,
+            inference_address_class=inference_address_class,
         )
     except Exception as exc:
         logger.warning(
@@ -3330,6 +3532,8 @@ async def _attach_assessment(
         valid["_assessment_record"] = _build_job_assessment(
             valid, None, None, cfg, name, "", abstention_reason="failed",
             double_counting_group=double_counting_group,
+            inference_provider=inference_provider,
+            inference_address_class=inference_address_class,
         )
 
 
@@ -3598,11 +3802,26 @@ async def run_classification_async(
                                     _non_success_evaluator = (
                                         _non_success_cfg.get("evaluator") or "llm"
                                     )
+                                    # Phase 46 (EGV-21, D-06/D-07): this
+                                    # branch never calls _attach_assessment
+                                    # (see the comment block above), so
+                                    # locality is resolved directly here
+                                    # rather than inherited from that
+                                    # function's own pre-bound pair -- same
+                                    # fail-open call, same profile-scoped
+                                    # `p`, same reasoning: a fact about the
+                                    # configured endpoint, available
+                                    # regardless of evaluation status.
+                                    _non_success_provider, _non_success_class = (
+                                        _resolve_inference_locality(p)
+                                    )
                                     valid["_assessment_record"] = _build_job_assessment(
                                         valid, None, None, _non_success_cfg,
                                         _non_success_evaluator, "",
                                         abstention_reason="not_evaluated_non_success",
                                         double_counting_group=session_id,
+                                        inference_provider=_non_success_provider,
+                                        inference_address_class=_non_success_class,
                                     )
                                 # Phase 42 (D-12): sidecar FIRST, then the job
                                 # marker. A crash between the two appends

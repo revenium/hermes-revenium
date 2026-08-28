@@ -234,6 +234,15 @@ class RepositoryTests(unittest.TestCase):
             # separately from evaluator identity and unspoofable via the
             # reserved-key carrier.
             ROOT / 'tests' / 'test_phase45_model_provenance.py',
+            # Phase 46 Plan 01 (EGV-19) — the --metadata envelope's byte
+            # ceiling and truncation marker, proven against the REAL
+            # forwarder heredoc extracted live from hermes-report.sh.
+            ROOT / 'tests' / 'test_phase46_metadata_envelope.py',
+            # Phase 46 (PR #101, Greptile) — the --environment dimension stays
+            # RAW on both jobs-create paths while --metadata's source stays
+            # clamped; pins the divergence so a later 'consistency fix' cannot
+            # silently re-clamp a dimension that has no byte ceiling.
+            ROOT / 'tests' / 'test_phase46_environment_divergence.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
@@ -1720,6 +1729,114 @@ exit 0
                 f'the live-verification section of docs/how-it-works.md contains '
                 f'a {label}: {match.group(0) if match else ""!r}',
             )
+
+    def test_llm_outcome_evaluation_family_is_labelled_experimental_in_both_docs(self):
+        """D-09/EGV-23: every llmOutcomeEvaluation-family section header in
+        BOTH config documents must say "experimental" — scoped to exactly
+        the two headers this gap concerns, not a general docs-parity
+        framework.
+
+        The narrative operator guide and the full reference schema already
+        disagreed about whether `boundaries` was experimental (one said
+        "(v1.6, optional)", the other said "(experimental)") and nothing
+        caught it. This test is deliberately NOT a structural cross-file
+        diff — a diff would fail on every legitimate difference between a
+        narrative guide and a reference schema. It only pins the word
+        "experimental" onto four specific, named headers.
+        """
+        headers = {
+            ('docs/configuration.md', r'^### LLM outcome evaluation.*$'),
+            ('docs/configuration.md', r'^### Pluggable boundaries.*$'),
+            ('skills/revenium/references/config-schema.md',
+             r'^## `llmOutcomeEvaluation`.*$'),
+            ('skills/revenium/references/config-schema.md',
+             r'^## `boundaries`.*$'),
+        }
+        for relpath, pattern in headers:
+            text = (ROOT / relpath).read_text(errors='ignore')
+            match = re.search(pattern, text, re.M)
+            self.assertIsNotNone(
+                match, f'{relpath} is missing a header matching {pattern!r}',
+            )
+            self.assertIn(
+                'experimental', match.group(0).lower(),
+                f'{relpath} header {match.group(0)!r} lost the "experimental" '
+                f'label — this is the exact drift that already shipped once '
+                f'(boundaries) and went uncaught',
+            )
+
+        # Negative control: the parity check must be able to fail. Mutate a
+        # copy of one file's text in memory, strip the label from the
+        # boundaries header, and prove the SAME extraction then fails —
+        # otherwise this test could silently rot into a tautology.
+        schema_path = ROOT / 'skills/revenium/references/config-schema.md'
+        mutated = re.sub(
+            r'^## `boundaries`.*$',
+            '## `boundaries` (v1.6, optional)',
+            schema_path.read_text(errors='ignore'),
+            count=1, flags=re.M,
+        )
+        mutated_match = re.search(r'^## `boundaries`.*$', mutated, re.M)
+        self.assertIsNotNone(mutated_match, 'negative control setup broke: '
+                              'the mutated text lost the boundaries header entirely')
+        self.assertNotIn(
+            'experimental', mutated_match.group(0).lower(),
+            'negative control did not reproduce the drift — the parity test '
+            'would never actually fail and is a tautology',
+        )
+
+    def test_docs_make_no_data_locality_claim(self):
+        """D-06/AMEND-D-07/EGV-21: no shipped documentation or reference file
+        may assert where prompt data stayed, was logged, or was retained —
+        the skill records only where inference was CONFIGURED to run and
+        draws no conclusion about retention.
+
+        This is a guard against a specific class of reassuring sentence, not
+        a general language filter — the forbidden list stays small and
+        explicit, following the shape of test_no_legacy_branding_left and
+        test_no_legacy_budget_status_references above.
+
+        Scoped to `.md` files only (documentation and reference files, per
+        this test's own name), not the full multi-extension sweep those two
+        guards use. Source and test files legitimately discuss this same
+        rule in their own words — `tests/test_phase46_locality.py` carries
+        an equivalent source-level guard for `classifier.py`, and quotes the
+        very phrases this list forbids as ITS OWN forbidden-phrase tuple, a
+        false positive under the wider extension set that has nothing to do
+        with a documentation page misleading a reader.
+        """
+        forbidden = [
+            r'never leaves (?:the|your|this) (?:network|machine|device)',
+            r'stays? (?:on|within) (?:your|the|this) (?:network|machine|device)',
+            r'nothing leaves the network',
+            r'\bdata\b.{0,30}\b(?:stayed|remained|stays|remains)\b.{0,30}'
+            r'\b(?:local(?:ly)?|on[- ]network|on the network|within the network)\b',
+            r'\b(?:prompt|inference|llm)\b.{0,40}\bwas not (?:logged|retained)\b',
+            r'\bwas not (?:logged|retained) anywhere\b',
+        ]
+        # Same discovery/exclusion idiom as test_no_legacy_branding_left
+        # (rglob everything, exclude .planning/ internal planning state),
+        # narrowed to .md per this test's own documentation-only scope.
+        offenders = []
+        for path in ROOT.rglob('*'):
+            if not path.is_file():
+                continue
+            if path.suffix != '.md':
+                continue
+            rel = path.relative_to(ROOT)
+            if rel.parts and rel.parts[0] == '.planning':
+                continue
+            text = path.read_text(errors='ignore')
+            for pattern in forbidden:
+                if re.search(pattern, text, re.IGNORECASE):
+                    offenders.append((str(rel), pattern))
+        self.assertEqual(
+            offenders, [],
+            f'found a data-locality guarantee claim: {offenders} — the skill '
+            f'records where inference was configured to run and draws no '
+            f'conclusion about retention; a sentence like this reads as a '
+            f'guarantee the skill cannot make',
+        )
 
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,

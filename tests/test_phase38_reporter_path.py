@@ -38,6 +38,7 @@ import subprocess
 import sys as _sys
 import tempfile
 import unittest
+from pathlib import Path
 
 from tests._compat_helpers import (
     assert_argv_matches_golden,
@@ -97,6 +98,18 @@ def _sidecar_record(job_id, **overrides):
         "prompt_version": 1,
         "policy_version": 1,
         "model": "unknown",
+        # Phase 46 (EGV-21, plan 46-02 Task 4): classifier.py's
+        # _build_job_assessment populates these two keys UNCONDITIONALLY on
+        # every record it builds (D-06/D-07), and this plan makes
+        # hermes-report.sh forward both -- another WR-04 fixture-fidelity
+        # site (PA-12), closed the same way every prior recurrence was:
+        # SidecarFixtureFidelityTests' _sidecar_record() gains the fixture
+        # keys, never a widened exemption set. "openrouter"/"public" is the
+        # exact worked example from 46-RESEARCH.md Q3
+        # (https://openrouter.ai/api/v1 -> public) -- a real, honest pairing
+        # rather than an invented placeholder.
+        "inference_provider": "openrouter",
+        "inference_address_class": "public",
         "value_low": 446.25,
         "value_base": 525.0,
         "value_high": 603.75,
@@ -1757,6 +1770,75 @@ class TestPhase38Canary(unittest.TestCase):
     # presence assertion), and reusing it here for an absence assertion
     # would make the two tests contradict each other.
     RESPONSE_BODY_CANARY = 'MMCANARY-9d21f-BROKEN-RESPONSE'
+    # Phase 46 (EGV-20/EGV-21, D-04/D-07): the raw base_url an operator's
+    # config.yaml carries. Another ABSENCE canary, deliberately its own
+    # constant like RESPONSE_BODY_CANARY above and NOT a reuse of
+    # TRANSCRIPT_CANARY (a different absence claim, about a different
+    # source) or any EVALUATOR-PROSE canary (those are PRESENCE claims) --
+    # an absence assertion and a presence assertion sharing one constant
+    # would make the two tests contradict each other.
+    BASE_URL_CANARY = 'NNCANARY-2a84e-RAW-ENDPOINT'
+
+    # D-05: the ONE deliberately named exemption from every absence sweep in
+    # this class -- the Hermes session database itself (state.db), the
+    # genuine source of session transcripts (classifier.py's
+    # _read_session_messages/_read_session_transcript read it read-only).
+    # CLAUDE.md: "No writes to state.db" -- this skill is a pure read-only
+    # CONSUMER of it, so a sweep that flagged transcript text found INSIDE
+    # this file would be flagging its own input, not a leak. Exempt by
+    # explicit filename membership, never by file extension and never by
+    # the accidental UnicodeDecodeError-skip a binary SQLite file would
+    # otherwise fall through on -- kept at exactly ONE member so this
+    # tuple cannot rot back into the defect a growing exemption set would
+    # be (D-05's own prohibition).
+    _TRANSCRIPT_SOURCE_EXEMPT = ('state.db',)
+
+    # Task 3 (D-04): the byte-tuning lever tests/test_compat_jobs_outcome.py
+    # ::TestCompatJobsOutcomeMetadataTruncated already proved against this
+    # SAME `outcome_metadata` heredoc -- reused verbatim (not re-derived) so
+    # this class's over-ceiling fixture lands pre-drop 4109 bytes (over the
+    # 4096 ceiling by 13) and post-tier-1-drop 3361 bytes (comfortably
+    # under it, so tier 2 never fires) -- the same measured numbers as that
+    # class's own CR-01 retune, since this fixture forwards the identical
+    # field set at the identical values (basis/candidate_downstream_outcome/
+    # counterfactual_assumption/assumptions.inferred_role below are never
+    # forwarded into --metadata at all, so they do not affect this count).
+    # json.dumps' default ensure_ascii=True escapes one astral codepoint to
+    # a 12-ASCII-byte \\uXXXX\\uXXXX surrogate pair, turning a 64-CHARACTER
+    # slice into 768 wire bytes.
+    _P38_TRUNC_EMOJI = '\U0001F600'
+    # CR-01 (46-REVIEW.md) retune: hermes-report.sh now clamps `source` to
+    # 64 serialized bytes at the producer (job-row heredoc), before it ever
+    # reaches this heredoc -- source used to be this fixture's biggest
+    # lever (61 emoji chars, ~732 bytes) and no longer contributes past
+    # ~60 bytes regardless of _P38_TRUNC_SOURCE_CHARS below. Every OTHER
+    # character-capped field now runs at its real forwarder maximum (not a
+    # margin-preserving 90%) to replace the difference -- same retune,
+    # same measured numbers, as
+    # tests/test_compat_jobs_outcome.py::TestCompatJobsOutcomeMetadataTruncated
+    # (this fixture is documented above as reusing that exact lever
+    # verbatim, so it must be retuned in lockstep, not independently).
+    # evidence_class cannot be emoji-padded (hermes-report.sh gates it
+    # against a 9-string allow-list before this heredoc runs -- an
+    # out-of-set value strips the whole value family AND --outcome-value
+    # instead of forwarding), so _P38_TRUNC_EVIDENCE_CLASS below is the
+    # longest of the nine real literals instead of an emoji multiplier. An
+    # earlier draft of this retune reached for sys.float_info.max on the
+    # value bounds instead -- rejected, in lockstep with the same rejection
+    # in tests/test_compat_jobs_outcome.py (see its class-level comment):
+    # value_low is bounded by maxHoursSaved * maxLoadedRate per the
+    # assessment contract, so production can never emit that value, and a
+    # fixture built on it stops proving anything about a reachable record.
+    # The replacement lever is cost_coverage.unknown, populated below
+    # exactly like the compat fixture's own retune.
+    _P38_TRUNC_MODEL_CHARS = 64
+    _P38_TRUNC_EVALUATOR_CHARS = 64
+    _P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS = 64
+    _P38_TRUNC_INFERENCE_PROVIDER_CHARS = 32
+    _P38_TRUNC_EVALUATOR_VERSION_CHARS = 16
+    _P38_TRUNC_BOUNDS_SOURCE_CHARS = 16
+    _P38_TRUNC_SOURCE_CHARS = 61
+    _P38_TRUNC_EVIDENCE_CLASS = 'QUASI_EXPERIMENTAL_IMPACT'
 
     def tearDown(self):
         # _load_classifier touches REVENIUM_STATE_DIR/MARKERS_DIR/CONFIG_FILE
@@ -1804,7 +1886,7 @@ class TestPhase38Canary(unittest.TestCase):
             'counterfactual_assumption': counterfactual_raw,
         }
 
-    def _attach_and_write(self, sid, job_id, state_dir, markers_dir):
+    def _attach_and_write(self, sid, job_id, state_dir, markers_dir, extra_env=None):
         os.makedirs(state_dir, exist_ok=True)
         config_file = os.path.join(state_dir, 'config.json')
         with open(config_file, 'w') as f:
@@ -1816,6 +1898,12 @@ class TestPhase38Canary(unittest.TestCase):
             'REVENIUM_MARKERS_DIR': markers_dir,
             'REVENIUM_CONFIG_FILE': config_file,
         }
+        # Phase 46 (D-07): callers that need _resolve_inference_locality to
+        # read a specific hermes_home/config.yaml (e.g. the base_url canary
+        # sweep) pass HERMES_HOME here -- every other existing caller keeps
+        # passing extra_env=None, unaffected.
+        if extra_env:
+            env.update(extra_env)
         c, ev = _load_classifier(env)
         ev.register('p38-canary', self._canary_evaluator)
 
@@ -1842,6 +1930,68 @@ class TestPhase38Canary(unittest.TestCase):
             self.assertIsNotNone(sidecar_path, 'the canary fixture must produce a real sidecar write')
         marker_path = c._write_job_marker(sid, job, c._module_paths())
         return job, marker_path, sidecar_path
+
+    @staticmethod
+    def _touch_ready_sentinel(markers_dir, sid):
+        """D-21: the plugin's own completion sentinel -- an EMPTY file at
+        <markers_dir>/.ready/<sid> (see revenium-classifier/__init__.py's
+        docstring). None of this class's fixtures drive the real
+        run_classification_async hook that would touch this file, so every
+        driven-tick fixture that needs it present (for D-05's vacuous-pass
+        guard) touches it explicitly here, matching what a real tick
+        produces rather than inventing a differently-shaped stand-in."""
+        ready_dir = os.path.join(markers_dir, '.ready')
+        os.makedirs(ready_dir, exist_ok=True)
+        open(os.path.join(ready_dir, sid), 'w').close()
+
+    def _expected_artifacts_for_run(self, state_dir, tmpdir, sid, job_id):
+        """The absolute paths ONE driven hermes-report.sh tick is expected
+        to produce (D-05, T-46-08's vacuous-pass guard). Every sweep in
+        this class that needs an existence/non-emptiness check calls this
+        SAME helper -- derived from the SAME state_dir/tmpdir/sid/job_id
+        variables each caller already computes, never a second hand-typed
+        copy of the state-dir layout.
+
+        Returns (path, must_be_nonempty) pairs. must_be_nonempty is False
+        for exactly ONE artifact -- the `.ready` sentinel, which
+        revenium-classifier/__init__.py's own docstring documents as a
+        DELIBERATELY empty file (D-21) -- asserting it non-empty would be
+        asserting a bug into existence. Every other artifact must be
+        non-empty, or this guard would pass on a run that produced nothing
+        (D-05's own binding requirement).
+        """
+        state_dir = str(state_dir)
+        tmpdir = str(tmpdir)
+        return [
+            (Path(state_dir) / 'markers' / f'{sid}.jsonl', True),
+            (Path(state_dir) / 'markers' / '.ready' / sid, False),
+            (Path(state_dir) / 'job-assessments' / f'{job_id}.jsonl', True),
+            (Path(state_dir) / 'revenium-hermes.ledger', True),
+            (Path(state_dir) / 'revenium-jobs.ledger', True),
+            (Path(state_dir) / 'revenium-metering.log', True),
+            (Path(tmpdir) / 'meter.log', True),
+            (Path(tmpdir) / 'jobs.log', True),
+        ]
+
+    def _assert_expected_artifacts_present(self, expected, swept_files):
+        """Behaviors 2+3 (T-46-08): every expected artifact EXISTS, is
+        non-empty where required, and was actually visited by the
+        recursive os.walk sweep -- not merely present on disk. An absence
+        assertion over an empty/partial directory is not evidence; this is
+        what converts a walk-everything sweep from trivially-passing into
+        load-bearing."""
+        for path, must_be_nonempty in expected:
+            self.assertTrue(path.exists(), f'expected artifact missing: {path}')
+            if must_be_nonempty:
+                self.assertGreater(
+                    path.stat().st_size, 0,
+                    f'expected artifact is empty (the run produced nothing here): {path}',
+                )
+            self.assertIn(
+                str(path), swept_files,
+                f'the recursive walk must have actually visited {path}, or this sweep '
+                'proves nothing about it',
+            )
 
     def test_canary_evaluator_prose_persists_clamped_and_ifs_clean(self):
         tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-')
@@ -1927,6 +2077,12 @@ class TestPhase38Canary(unittest.TestCase):
             _job, _marker_path, _sidecar_path = self._attach_and_write(
                 sid, job_id, state_dir, markers_dir,
             )
+            # D-05/T-46-08: a real driven tick's plugin hook also touches
+            # this empty completion sentinel (D-21) -- none of this class's
+            # lower-level fixtures drive that hook directly, so it is
+            # touched explicitly here for the expected-artifacts sweep
+            # below to have something real to find.
+            self._touch_ready_sentinel(markers_dir, sid)
 
             # Prepend the CHAT/task marker line the classifier's OTHER write
             # path produces (_write_job_marker above wrote only the job line) --
@@ -2025,6 +2181,17 @@ class TestPhase38Canary(unittest.TestCase):
                 for fname in files:
                     fpath = os.path.join(root, fname)
                     swept_files.append(fpath)
+                    if fname in self._TRANSCRIPT_SOURCE_EXEMPT:
+                        # D-05: the named, single-member transcript-source
+                        # exemption -- state.db is where transcripts
+                        # genuinely live, and this skill only ever reads it
+                        # (CLAUDE.md: "No writes to state.db"). Excluded by
+                        # EXPLICIT filename membership so the exemption is
+                        # visible and auditable, never a silent skip via
+                        # file extension or (as it happens to be today,
+                        # incidentally) a UnicodeDecodeError on the binary
+                        # SQLite format.
+                        continue
                     try:
                         with open(fpath, 'rb') as f:
                             raw_bytes = f.read()
@@ -2042,11 +2209,614 @@ class TestPhase38Canary(unittest.TestCase):
                         canary, text,
                         f'{fpath} must not carry the transcript canary (recursive sweep)',
                     )
-            self.assertIn(
-                str(_sidecar_path), swept_files,
-                'the recursive walk must have actually visited the sidecar file, or this '
-                'sweep proves nothing about the NEW artifact it exists to cover',
+            # D-05/T-46-08: the vacuous-pass guard is BINDING -- every
+            # artifact a driven tick is expected to produce must actually
+            # exist, be non-empty (barring the deliberately-empty .ready
+            # sentinel), and have been visited by the walk above. This
+            # SUPERSEDES the single sidecar-only existence check this test
+            # used to end on; _expected_artifacts_for_run is the one
+            # shared definition of "the run actually produced something",
+            # reused by every sweep in this class (Task 2, T-46-08).
+            expected = self._expected_artifacts_for_run(state_dir, tmpdir, sid, job_id)
+            self._assert_expected_artifacts_present(expected, swept_files)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_canary_base_url_absent_from_every_persisted_artifact(self):
+        """Task 1 (D-04/D-07): a driven tick whose profile config.yaml
+        carries a `model.base_url` embedding BASE_URL_CANARY in its
+        userinfo, host AND path positions -- D-07's own three reasons a raw
+        base_url must never be stored -- proves the value was CONSUMED (the
+        sidecar's derived inference_address_class), then that the raw
+        string itself reaches NO persisted artifact and no captured argv,
+        anywhere under the whole harness root, except the config.yaml this
+        test itself authored (the SOURCE of the value under test)."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-baseurl-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            sid = 'p38-canary-baseurl-sid-001'
+            job_id = 'p38-canary-baseurl-job-001'
+
+            # D-07: userinfo, host AND path positions -- the three places a
+            # raw base_url can carry sensitive text (a credential, an
+            # internal hostname, a path segment) -- all in ONE URL.
+            canary_url = (
+                f'https://user{self.BASE_URL_CANARY}:pass{self.BASE_URL_CANARY}'
+                f'@{self.BASE_URL_CANARY}.internal.example.com'
+                f'/v1/{self.BASE_URL_CANARY}'
             )
+            config_yaml_path = os.path.join(hermes_home, 'config.yaml')
+            os.makedirs(hermes_home, exist_ok=True)
+            with open(config_yaml_path, 'w') as f:
+                f.write(
+                    'model:\n'
+                    '  provider: ordinary-test-provider\n'
+                    f'  base_url: {canary_url}\n'
+                )
+
+            _job, _marker_path, sidecar_path = self._attach_and_write(
+                sid, job_id, state_dir, markers_dir,
+                extra_env={'HERMES_HOME': hermes_home},
+            )
+            self._touch_ready_sentinel(markers_dir, sid)
+
+            self.assertIsNotNone(sidecar_path, 'the fixture must produce a real sidecar write')
+            sidecar_lines = sidecar_path.read_text().strip().splitlines()
+            self.assertEqual(len(sidecar_lines), 1, f'expected exactly one sidecar line: {sidecar_lines}')
+            sidecar_record = json.loads(sidecar_lines[0])
+
+            # The value was actually CONSUMED: without this, an absence
+            # proof below would be vacuous -- the canary could be missing
+            # simply because nothing ever read config.yaml.
+            self.assertIn(
+                sidecar_record.get('inference_address_class'),
+                {'loopback', 'private', 'public', 'unset'},
+                'inference_address_class must be a real derived value, or this '
+                'absence proof is vacuous',
+            )
+            # The specific, non-vacuous value THIS url construction
+            # produces: a symbolic, non-loopback, non-private hostname
+            # resolves to "public" (46-RESEARCH.md Q3's worked example).
+            self.assertEqual(sidecar_record.get('inference_address_class'), 'public')
+            self.assertEqual(sidecar_record.get('inference_provider'), 'ordinary-test-provider')
+
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+            existing = open(marker_file).read()
+            with open(marker_file, 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(existing)
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+            result = subprocess.run(
+                ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+                env=base_env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'hermes-report.sh failed: {result.stdout}{result.stderr}',
+            )
+            self.assertNotIn(self.BASE_URL_CANARY, result.stdout)
+            self.assertNotIn(self.BASE_URL_CANARY, result.stderr)
+
+            canary = self.BASE_URL_CANARY
+            swept_files = []
+            for root, _dirs, files in os.walk(tmpdir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    swept_files.append(fpath)
+                    if fpath == config_yaml_path:
+                        # The SOURCE of the value under test -- config.yaml
+                        # is the operator input the derivation reads FROM.
+                        # Sweeping it for its own source value would be
+                        # checking the input, not the output. Exempt by
+                        # EXACT path equality only (not by extension, not
+                        # by directory).
+                        continue
+                    try:
+                        with open(fpath, 'rb') as f:
+                            raw_bytes = f.read()
+                    except OSError:
+                        continue
+                    try:
+                        text = raw_bytes.decode('utf-8')
+                    except UnicodeDecodeError:
+                        continue
+                    self.assertNotIn(
+                        canary, text,
+                        f'{fpath} must not carry the raw base_url canary (recursive sweep)',
+                    )
+
+            # Test 3: the sweep actually visited the sidecar AND both shim
+            # argv logs -- not just the state-dir tree.
+            self.assertIn(str(sidecar_path), swept_files)
+            self.assertIn(meter_log, swept_files)
+            self.assertIn(jobs_log, swept_files)
+
+            expected = self._expected_artifacts_for_run(state_dir, tmpdir, sid, job_id)
+            self._assert_expected_artifacts_present(expected, swept_files)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_sweep_asserts_expected_artifacts_exist_and_are_non_empty(self):
+        """Task 2 (D-05, T-46-08): the vacuous-pass guard is BINDING, not
+        advisory. Behaviors 1-3: the shared helper returns a stable,
+        non-empty artifact set and every expected artifact from a real
+        driven tick exists, is non-empty (barring the deliberately-empty
+        .ready sentinel), and was actually walked. Behavior 4 (the
+        negative control): deleting one expected artifact must make the
+        guard itself FAIL, proving it is not vacuous. Behavior 5: the
+        transcript-source exemption is named and has exactly one member."""
+        # Behavior 1: the helper's shape is stable and non-empty,
+        # independent of any driven run.
+        dummy_expected = self._expected_artifacts_for_run(
+            '/does-not-exist/state', '/does-not-exist/tmp', 'sid-x', 'job-x',
+        )
+        self.assertEqual(
+            len(dummy_expected), 8,
+            'the expected-artifact set changed size -- a deliberate change, '
+            'not an incidental one, must update this count',
+        )
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-vacuous-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            sid = 'p38-canary-vacuous-sid-001'
+            job_id = 'p38-canary-vacuous-job-001'
+
+            _job, _marker_path, sidecar_path = self._attach_and_write(
+                sid, job_id, state_dir, markers_dir,
+            )
+            self._touch_ready_sentinel(markers_dir, sid)
+
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+            existing = open(marker_file).read()
+            with open(marker_file, 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(existing)
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+            result = subprocess.run(
+                ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+                env=base_env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'hermes-report.sh failed: {result.stdout}{result.stderr}',
+            )
+
+            swept_files = []
+            for root, _dirs, files in os.walk(tmpdir):
+                for fname in files:
+                    swept_files.append(os.path.join(root, fname))
+
+            expected = self._expected_artifacts_for_run(state_dir, tmpdir, sid, job_id)
+
+            # Behaviors 2+3: the positive case -- a real driven tick
+            # satisfies every expectation.
+            self._assert_expected_artifacts_present(expected, swept_files)
+
+            # Behavior 4: the negative control. Remove one expected
+            # artifact (the job-assessment sidecar) and prove the SAME
+            # assertion helper now FAILS -- if it did not, the guard would
+            # be trivially satisfiable and D-05's whole point would be
+            # unproven.
+            self.assertTrue(sidecar_path.exists())
+            os.remove(sidecar_path)
+            with self.assertRaises(AssertionError):
+                self._assert_expected_artifacts_present(expected, swept_files)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # Behavior 5: the transcript-source exemption is named (a
+        # class-level tuple, not an inline literal) and kept at exactly
+        # ONE member -- a growing exemption set is how this guard would
+        # rot back into the defect it exists to catch (D-05).
+        self.assertEqual(
+            len(self._TRANSCRIPT_SOURCE_EXEMPT), 1,
+            f'_TRANSCRIPT_SOURCE_EXEMPT must stay at exactly one member, '
+            f'got: {self._TRANSCRIPT_SOURCE_EXEMPT!r}',
+        )
+        self.assertEqual(self._TRANSCRIPT_SOURCE_EXEMPT, ('state.db',))
+
+    def test_evaluator_prose_never_reaches_metadata_argv(self):
+        """Task 3 (D-04): the SAME four EVALUATOR-PROSE canaries this class
+        already proves PRESENT in the sidecar
+        (test_canary_evaluator_prose_persists_clamped_and_ifs_clean) are
+        proven, here, ABSENT from the wire --metadata argv -- a second,
+        complementary claim about the SAME values in a DIFFERENT carrier,
+        not the absence-vs-presence collision this class's other canary
+        comments warn against. Also pins the exclusion STRUCTURALLY (the
+        forwarder's literal record.get(...) keys contain none of the four
+        prose field names) and proves the truncation marker itself is
+        VISIBLE to a sweep when a record actually exceeds the ceiling."""
+        prose_canaries = (
+            self.EVALUATOR_BASIS_CANARY, self.EVALUATOR_ROLE_CANARY,
+            self.EVALUATOR_OUTCOME_CANARY, self.EVALUATOR_COUNTERFACTUAL_CANARY,
+        )
+
+        # Test 3 (behavior 3), checked FIRST since it needs no driven run:
+        # pinned structurally, not just behaviourally -- the forwarder's
+        # own literal record.get(...) key set (a LOWER BOUND -- see
+        # _extract_forwarder_record_keys's own docstring, this is one of
+        # two independent claims here, not a complete inventory) contains
+        # none of the four prose field names.
+        script_text = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
+        keys = _extract_forwarder_record_keys(script_text)
+        self.assertIsNotNone(
+            keys,
+            '_extract_forwarder_record_keys could not find the outcome_metadata '
+            'heredoc -- the anchor moved and this structural claim needs updating',
+        )
+        for field in (
+            'basis', 'candidate_downstream_outcome',
+            'counterfactual_assumption', 'inferred_role',
+        ):
+            self.assertNotIn(
+                field, keys,
+                f'{field} must never be a literal forwarder key (LOWER BOUND: '
+                'see _extract_forwarder_record_keys\'s own docstring)',
+            )
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-prose-argv-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            os.makedirs(markers_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            sid = 'p38-canary-prose-argv-sid-001'
+            job_id = 'p38-canary-prose-argv-job-001'
+
+            _job, _marker_path, sidecar_path = self._attach_and_write(
+                sid, job_id, state_dir, markers_dir,
+            )
+            self.assertIsNotNone(sidecar_path)
+            sidecar_text = sidecar_path.read_text()
+
+            # Test 1 (behavior 1): presence, IFS-clean, and clamped is
+            # already proven per-field by
+            # test_canary_evaluator_prose_persists_clamped_and_ifs_clean;
+            # this minimal re-check is what makes the ABSENCE-from-argv
+            # claim below meaningful -- a canary the sidecar never
+            # received would trivially be "absent" from argv too.
+            for canary in prose_canaries:
+                self.assertIn(
+                    canary, sidecar_text,
+                    f'{canary} must reach the sidecar or this test proves nothing',
+                )
+
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            marker_file = os.path.join(markers_dir, f'{sid}.jsonl')
+            existing = open(marker_file).read()
+            with open(marker_file, 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(existing)
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+            result = subprocess.run(
+                ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+                env=base_env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'hermes-report.sh failed: {result.stdout}{result.stderr}',
+            )
+
+            jobs_text = open(jobs_log).read() if os.path.exists(jobs_log) else ''
+            self.assertTrue(
+                jobs_text, 'jobs.log must be non-empty or this absence claim proves nothing',
+            )
+            # Test 2 (behavior 2): the envelope structurally excludes every
+            # free-prose field -- none of the four canaries reach the
+            # captured jobs create/outcome argv (incl. --metadata).
+            for canary in prose_canaries:
+                self.assertNotIn(
+                    canary, jobs_text,
+                    f'{canary} must never reach the --metadata argv',
+                )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+        # _load_classifier (used by _attach_and_write above) mutates
+        # os.environ directly (REVENIUM_MARKERS_DIR et al.), tracked for
+        # restore only at this test's own tearDown -- restoring HERE,
+        # before Part B's independent driven tick builds its own base_env
+        # from **os.environ, is required: without it, Part B's subprocess
+        # would inherit Part A's now-deleted markers_dir and silently find
+        # no session to report (the exact env-bleed trap this class's own
+        # module docstring documents for TestPhase38ReporterPath/
+        # TestPhase38MultiTick, encountered here for the first time WITHIN
+        # a single test method rather than across classes).
+        _restore_env()
+
+        # Test 4 (behavior 4): the truncation state itself must be VISIBLE
+        # to the sweep, not an unswept corner of it -- a separate,
+        # deliberately over-ceiling driven tick.
+        self._assert_truncated_tick_carries_metadata_truncated_and_no_prose_canary(
+            prose_canaries,
+        )
+
+    def _assert_truncated_tick_carries_metadata_truncated_and_no_prose_canary(self, prose_canaries):
+        """Task 3, Test 4: a job-assessments sidecar sized (via the SAME
+        emoji-padding lever tests/test_compat_jobs_outcome.py's
+        TestCompatJobsOutcomeMetadataTruncated proved against this exact
+        heredoc) to exceed _METADATA_CEILING_BYTES, carrying the four
+        EVALUATOR-PROSE canaries in its own non-forwarded fields (basis,
+        candidate_downstream_outcome, counterfactual_assumption,
+        assumptions.inferred_role). Drives one real hermes-report.sh tick
+        and asserts the captured `jobs outcome` --metadata carries
+        metadata_truncated=true (Phase 46's new transport state is visible
+        to this sweep) while still carrying none of the four canaries."""
+        emoji = self._P38_TRUNC_EMOJI
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p38-canary-prose-trunc-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+            sid = 'p38-canary-prose-trunc-sid-001'
+            job_id = 'p38-canary-prose-trunc-job-001'
+
+            build_state_db(state_db, [{
+                'id': sid, 'model': 'claude-sonnet-4-6',
+                'source': emoji * self._P38_TRUNC_SOURCE_CHARS,
+                'input_tokens': 100, 'output_tokens': 50,
+                'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+                'estimated_cost': '0', 'api_calls': 1,
+                'started_at': 1715514000.0, 'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            job_marker = {
+                'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+                'agentic_job_id': job_id, 'job_name': 'Prose Truncation Canary Job',
+                'job_type': 'code_review', 'status': 'SUCCESS',
+            }
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            basis_canary, role_canary, outcome_canary, cf_canary = prose_canaries
+            # D-10: the job-assessments SIDECAR is the ONLY value/provenance
+            # source the outcome stage reads. Every character-sliced
+            # provenance field is emoji-padded to its forwarder's own
+            # slice length (mirrors
+            # _build_over_ceiling_sidecar_record in
+            # tests/test_compat_jobs_outcome.py); basis/
+            # candidate_downstream_outcome/counterfactual_assumption/
+            # assumptions.inferred_role carry their OWN canaries raw --
+            # these four are never forwarded at all (Test 3 above), so
+            # this record does not need to run them through
+            # _clamp_assessment_text; the earlier real-classifier-driven
+            # scenario in this same test already proves clamping.
+            record = {
+                'kind': 'job_assessment', 'ts': 1715516002.5,
+                'agentic_job_id': job_id, 'assessment_id': f'{job_id}:0',
+                'assessment_schema_version': 1, 'taxonomy_version': 1,
+                'prompt_version': 1, 'policy_version': 1,
+                'model': emoji * self._P38_TRUNC_MODEL_CHARS,
+                'inference_provider': emoji * self._P38_TRUNC_INFERENCE_PROVIDER_CHARS,
+                # 'loopback' (8 chars) is the longest of the 4 real
+                # _INFERENCE_ADDRESS_CLASSES literals -- matches
+                # tests/test_compat_jobs_outcome.py's own retune.
+                'inference_address_class': 'loopback',
+                'value_low': 100.25, 'value_base': 9500.55, 'value_high': 18500.75,
+                'bounds_source': emoji * self._P38_TRUNC_BOUNDS_SOURCE_CHARS,
+                'currency': 'USD', 'estimated_value': 200.5,
+                'evaluator': emoji * self._P38_TRUNC_EVALUATOR_CHARS,
+                'evaluator_version': emoji * self._P38_TRUNC_EVALUATOR_VERSION_CHARS,
+                'confidence': 0.7853,
+                'evidence_class': self._P38_TRUNC_EVIDENCE_CLASS,
+                # 39.75 / 499.75 stay under classifier.py's
+                # DEFAULT_MAX_HOURS_SAVED (40.0) / DEFAULT_MAX_LOADED_RATE
+                # (500.0) -- their product (~19865) is what upper-bounds
+                # value_high above, matching the compat fixture's retune.
+                'assumptions': {
+                    'estimated_hours_saved': 39.75, 'assumed_loaded_rate': 499.75,
+                    'inferred_role': role_canary + '|role\nbreak\r' + ('Y' * 20),
+                },
+                'economic_mechanism': 'augmentation_capacity_expansion',
+                'net_value': 15000.25,
+                'supplied_costs': {
+                    'human_review': 125.75, 'rework_or_error': 45.55,
+                    'integration': 32.25, 'training_or_change': 18.75,
+                },
+                'cost_coverage': {
+                    'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    # CR-01 retune: known_zero AND unknown both non-empty
+                    # (matching tests/test_compat_jobs_outcome.py's own
+                    # retuned fixture) -- the forwarder omits an empty list
+                    # entirely, so leaving either `[]` after source shrank
+                    # from ~732 to ~60 bytes loses bytes this fixture needs
+                    # to clear the ceiling without resorting to an
+                    # unreachable value like sys.float_info.max (see the
+                    # class-level comment above).
+                    'known_zero': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    'unknown': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    'excluded': ['metered_ai_cost'],
+                },
+                'double_counting_group': emoji * self._P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS,
+                'reportability_status': 'reportable',
+                'basis': basis_canary + '|basis\nbreak\r' + ('Z' * 20),
+                'candidate_downstream_outcome': outcome_canary + '|outcome\nbreak\r' + ('W' * 20),
+                'counterfactual_assumption': cf_canary + '|cf\nbreak\r' + ('V' * 20),
+            }
+            with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
+                f.write(json.dumps(record, separators=(',', ':')) + '\n')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(shim)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+            result = subprocess.run(
+                ['bash', str(SCRIPTS_DIR / 'hermes-report.sh')],
+                env=base_env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(
+                result.returncode, 0,
+                f'hermes-report.sh failed: {result.stdout}{result.stderr}',
+            )
+
+            jobs_text = open(jobs_log).read() if os.path.exists(jobs_log) else ''
+            outcome_argv = None
+            for line in jobs_text.splitlines():
+                argv = shlex.split(line)
+                if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome':
+                    outcome_argv = argv
+                    break
+            self.assertIsNotNone(
+                outcome_argv, f'expected a "jobs outcome" invocation, got: {jobs_text!r}',
+            )
+            meta = None
+            for i, tok in enumerate(outcome_argv):
+                if tok == '--metadata' and i + 1 < len(outcome_argv):
+                    meta = json.loads(outcome_argv[i + 1])
+            self.assertIsNotNone(meta, f'expected --metadata in {outcome_argv!r}')
+            self.assertIs(
+                meta.get('metadata_truncated'), True,
+                'this record was sized to exceed the ceiling -- if metadata_truncated '
+                f'is absent, the truncation path is invisible to this sweep, got: {meta!r}',
+            )
+
+            for canary in prose_canaries:
+                self.assertNotIn(
+                    canary, jobs_text,
+                    f'{canary} must never reach the argv even under truncation',
+                )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

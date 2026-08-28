@@ -1406,21 +1406,31 @@ PY
       local precheck_job_rows
       precheck_job_rows=$(
         MARKERS_DIR="${session_markers_dir}" \
-        SID="${sid}" \
+        SID="${sid}" SOURCE="${source}" \
         python3 - <<'PY' 2>/dev/null || true
 import json
 import os
 from pathlib import Path
 
+def _clamp_bytes(value, limit):
+    # D-10 byte-safe clamp; mirrors classifier.py::_clamp_assessment_text (duplicated -- this heredoc cannot import it).
+    def _slen(s): return len(json.dumps(s, ensure_ascii=True).encode('utf-8')) - 2
+    if _slen(value) <= limit: return value
+    lo, hi = 0, len(value)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _slen(value[:mid]) <= limit: lo = mid
+        else: hi = mid - 1
+    return value[:lo]
+
 markers_dir = os.environ.get('MARKERS_DIR', '')
 sid = os.environ.get('SID', '')
-
-if not markers_dir or not sid:
-    raise SystemExit(0)
+if not markers_dir or not sid: raise SystemExit(0)
+# CR-01: this precheck stage's own job_outcome_queue push bypasses the job-row heredoc's SOURCE clamp entirely -- same 64-byte budget here, computed once (source is session-level, not per-job-marker-line).
+source_clean = _clamp_bytes(os.environ.get('SOURCE', '').replace('|', '_').replace('\n', '_').replace('\r', '_'), 64)
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
-if not marker_path.is_file():
-    raise SystemExit(0)
+if not marker_path.is_file(): raise SystemExit(0)
 
 JOB_REQUIRED = ("agentic_job_id", "job_type", "status")
 _bad_chars = (':', ' ', '\t', '\n', '\r')
@@ -1458,43 +1468,33 @@ try:
             for _bad in ('|', '\n', '\r'):
                 job_name = job_name.replace(_bad, '_')
                 job_type = job_type.replace(_bad, '_')
-            # Phase 10: emit status and marker ts as 4th and 5th pipe fields
-            # for the outcome-queue accumulator (OUTCOME-05, D-07).
+            # Phase 10: emit status and marker ts as 4th/5th pipe fields for the outcome-queue accumulator (OUTCOME-05, D-07).
             status = m.get('status', '') or ''
             for _bad in ('|', '\n', '\r'):
                 status = status.replace(_bad, '_')
             marker_ts = m.get('ts', 0) or 0
-            # Phase 24 (quick-260531-n4i): carry failure_reason (FAILED arcs only)
-            # so the post-loop outcome stage can ship it as --metadata. Free-text
-            # prose — strip pipe/newline/CR (IFS='|' transport safety) and cap length.
+            # Phase 24 (quick-260531-n4i): carry failure_reason (FAILED arcs only) for --metadata; strip IFS chars, cap length.
             failure_reason = m.get('failure_reason', '') or ''
             if not isinstance(failure_reason, str):
                 failure_reason = ''
             for _bad in ('|', '\n', '\r'):
                 failure_reason = failure_reason.replace(_bad, ' ')
-            if len(failure_reason) > 500:
-                failure_reason = failure_reason[:500]
-            print(f"{clean_id}|{job_name}|{job_type}|{status}|{marker_ts}|{failure_reason}")
+            failure_reason = _clamp_bytes(failure_reason, 500)
+            print(f"{clean_id}|{job_name}|{job_type}|{source_clean}|{status}|{marker_ts}|{failure_reason}")
 except OSError:
     pass
 PY
       )
 
       if [[ -n "${precheck_job_rows}" ]]; then
-        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip
-        # BOTH the outcome queue push and the jobs create call. The root's ledger
-        # entry is the single create per arc; the root's session loop ships the
-        # outcome exactly once. Top-level sessions take the v1.3 path byte-identically.
+        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip BOTH the outcome queue push and the jobs create call -- the root's ledger entry is the single create per arc; outcome ships once; top-level takes the v1.3 path.
         if [[ "${root_sid}" == "${sid}" ]]; then
-          local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason
-          while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason; do
+          local precheck_clean_job_id precheck_job_name precheck_job_type precheck_source precheck_status_raw precheck_marker_ts precheck_failure_reason
+          while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_source precheck_status_raw precheck_marker_ts precheck_failure_reason; do
             [[ -z "${precheck_clean_job_id}" ]] && continue
 
-            # Phase 10: push to outcome queue for every job row — regardless of create outcome.
-            # The JOB:<id>:outcome: gate in the post-loop stage prevents double-reporting.
-            # Push before the create-gated continue so already-created jobs are also queued.
-            # Field 5 (failure_reason) is empty for SUCCESS/CANCELLED arcs; field 6 (sid) is Phase 38's addition (ROI-10, see below).
-            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
+            # Phase 10: push every row to the outcome queue regardless of create outcome (JOB:<id>:outcome: gate dedupes; field 6 = sid, Phase 38 ROI-10). CR-01: precheck_source is the clamped field printed above, not the raw ${source}.
+            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${precheck_source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
             if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -1512,6 +1512,10 @@ PY
             if [[ -n "${precheck_job_type}" ]]; then
               precheck_jobs_cmd+=(--type "${precheck_job_type}")
             fi
+            # PR #101 / Greptile: this path was already correct — kept for contrast
+            # with the sibling in-loop stage (~line 2459), which regressed to the
+            # CLAMPED field until this fix. --environment must stay the raw ${source}
+            # on BOTH paths; only --metadata's source key has a byte ceiling.
             if [[ -n "${source}" ]]; then
               precheck_jobs_cmd+=(--environment "${source}")
             fi
@@ -2327,6 +2331,32 @@ PY
         python3 - <<'PY' 2>/dev/null || true
 import json, os, sys
 
+# Phase 46 (D-10): byte-safe clamp, duplicated from
+# classifier.py::_clamp_assessment_text -- this is a standalone python3
+# subprocess body inside a bash heredoc and cannot import that module, and
+# this repo's convention is deliberate duplication for isolation between
+# the fail-open in-session code and the out-of-process reporter. Measures
+# SERIALIZED BYTES (json.dumps ensure_ascii=True), not characters, since a
+# character clamp under-counts by up to 12x for non-ASCII text. Binary
+# search over code-point slices so a surrogate pair is never split.
+def _clamp_bytes(value, limit):
+    if not isinstance(value, str):
+        value = '' if value is None else str(value)
+
+    def _serialized_len(s):
+        return len(json.dumps(s, ensure_ascii=True).encode('utf-8')) - 2
+
+    if _serialized_len(value) <= limit:
+        return value
+    lo, hi = 0, len(value)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if _serialized_len(value[:mid]) <= limit:
+            lo = mid
+        else:
+            hi = mid - 1
+    return value[:lo]
+
 jobs = []
 try:
     jobs = json.loads(os.environ.get('JOBS_JSON', '[]'))
@@ -2358,6 +2388,21 @@ for job in jobs:
     source_clean = source
     for _bad in ('|', '\n', '\r'):
         source_clean = source_clean.replace(_bad, '_')
+    # CR-01 (46-REVIEW.md): source is the one base-metering key the
+    # --metadata ceiling's two-tier drop (D-02, ~line 3900) NEVER pops --
+    # 'base metering never yields' is unconditional, so an unclamped source
+    # is the one path that can still put an over-ceiling blob on the wire
+    # after failure_reason's own byte clamp closed that field's version of
+    # this gap. Clamp here, at the producer, exactly like failure_reason two
+    # lines below -- same _clamp_bytes helper, same heredoc. 64 bytes
+    # matches the other short caller-supplied identifiers this file already
+    # clamps to 64 (evaluator, model, double_counting_group below) -- long
+    # enough that a realistic Hermes deployment-source label (also forwarded
+    # unclamped as --environment elsewhere in this file; that flag has no
+    # ceiling of its own and is out of scope here) survives untouched, short
+    # enough that source alone can never again single-handedly exceed
+    # _METADATA_CEILING_BYTES.
+    source_clean = _clamp_bytes(source_clean, 64)
     # Phase 10: emit status and marker ts as 5th and 6th pipe fields
     # for the outcome-queue accumulator (OUTCOME-05, D-07).
     status = job.get('status', '') or ''
@@ -2371,8 +2416,7 @@ for job in jobs:
         failure_reason = ''
     for _bad in ('|', '\n', '\r'):
         failure_reason = failure_reason.replace(_bad, ' ')
-    if len(failure_reason) > 500:
-        failure_reason = failure_reason[:500]
+    failure_reason = _clamp_bytes(failure_reason, 500)
     print(f"{clean_id}|{job_name}|{job_type}|{source_clean}|{status}|{marker_ts}|{failure_reason}")
 PY
       )
@@ -2416,8 +2460,17 @@ PY
               jobs_cmd+=(--type "${job_type}")
             fi
             # Planner discretion (D-03): pass --environment from session source column.
-            if [[ -n "${job_env_source}" ]]; then
-              jobs_cmd+=(--environment "${job_env_source}")
+            # PR #101 / Greptile: --environment is a separate Revenium dimension from
+            # the --metadata transport that CR-01 (d2606f0) clamped. job_env_source is
+            # the CLAMPED pipe field (4th column of job_rows, shared with --metadata's
+            # source key) — using it here regressed --environment to a 64-byte-truncated
+            # value on this path while the precheck path (~line 1516) kept shipping the
+            # raw ${source}. Use the raw, in-scope ${source} bash variable directly (the
+            # same one lines 2653/2819/1516 already pass to --environment) so both
+            # jobs-create paths agree byte-for-byte, matching pre-d2606f0 behavior.
+            # Only --metadata has a byte ceiling; --environment has none.
+            if [[ -n "${source}" ]]; then
+              jobs_cmd+=(--environment "${source}")
             fi
             # quick-260605: pass teamId explicitly when resolved (omitted in tests).
             if [[ -n "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
@@ -3531,6 +3584,61 @@ print('true' if ok else 'false')
         ASSESSMENT_JSON="${outcome_assessment_json}" \
         python3 - <<'PY' 2>/dev/null || true
 import json, os
+
+# Phase 46 (EGV-19, D-01/D-03/D-11): the --metadata envelope's own byte
+# ceiling, enforced HERE and only here -- this is the single emit site
+# where the actual wire bytes exist before they leave the machine (D-03).
+# The classifier must never predict this number; grep -c on that file for
+# this name is a phase-46 acceptance criterion. Derivation, not a guess:
+#   - pre-fix measured worst case (before this same plan's classifier.py
+#     failure_reason byte-clamp fix) was 6,976 bytes for a 500-EMOJI
+#     failure_reason alone, 7,734 bytes with a 64-emoji `source` on top --
+#     both driven by a character-count clamp under-counting by up to 12x
+#     under ensure_ascii=True, not by anything Phases 42-45 added.
+#   - the ASCII baseline for the WHOLE Phase 42-45 field set (every
+#     provenance + value + cost key this heredoc can emit) measured 956
+#     bytes -- comfortably under any reasonable ceiling once the clamp
+#     driving the worst case is fixed.
+#   - there is NO observed Revenium server-side --metadata limit to derive
+#     a ceiling from, so 4096 is chosen defensively, not measured against a
+#     documented server bound.
+# Two alternatives considered and rejected:
+#   - 8192: collides numerically with SIDECAR_LINE_MAX_BYTES
+#     (classifier.py) and would invite exactly the sidecar-vs-envelope
+#     conflation this phase must not make -- these are two different
+#     ceilings for two different transports.
+#   - a config-tunable value: rejected per D-11 -- D-09 deliberately froze
+#     the llmOutcomeEvaluation opt-in surface at five knobs, and a sixth
+#     would widen that surface for a transport bound, not a policy choice.
+#
+# CF-3 restated (D-03): this is a TRANSPORT bound, not a value or
+# reportability judgment. The reporter still only READS reportability_status
+# upstream (see the reader stage above) -- this decides only what physically
+# fits on the wire, and it must live here because nowhere else in the
+# pipeline has the serialized bytes to measure.
+_METADATA_CEILING_BYTES = 4096
+
+# The two ordered drop tiers, in the order they are popped below: the
+# enrichment yields before base metering ever does (D-02). `source` and
+# `failure_reason` are the base metering keys and are never in either tuple.
+_VALUE_FAMILY_META_KEYS = (
+    'value_low', 'value_base', 'value_high', 'bounds_source',
+    'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
+)
+_PROVENANCE_FAMILY_META_KEYS = (
+    'evaluator', 'evaluator_version', 'model', 'evidence_class',
+    'reportability_status', 'study_id', 'study_version', 'confidence',
+    'economic_mechanism', 'double_counting_group', 'correction_sequence',
+    # Phase 46 (EGV-21, D-06/D-07, plan 46-02 Task 4, checkpoint decision
+    # ship-both): the two locality facts join the provenance tier, not the
+    # value tier and not the always-kept set -- they describe WHERE the
+    # evaluation was configured to run, the same footing as evaluator/model
+    # above, so a truncated record still says where inference was
+    # configured to go for as long as any provenance survives, and only
+    # yields alongside the rest of provenance at tier 2.
+    'inference_provider', 'inference_address_class',
+)
+
 meta = {}
 source = os.environ.get('OUTCOME_SOURCE', '').strip()
 if source:
@@ -3763,6 +3871,33 @@ if assessment_raw:
         model_field = record.get('model')
         if isinstance(model_field, str) and model_field:
             meta['model'] = model_field[:64]
+        # Phase 46 (EGV-21, D-06/D-07, plan 46-02 Task 4, checkpoint
+        # decision ship-both): the two locality facts, immediately after
+        # model above -- same caller-supplied-provenance footing, forwarded
+        # under two different disciplines. inference_provider mirrors
+        # evaluator's isinstance + non-empty + slice shape (32 bytes,
+        # matching classifier.py's INFERENCE_PROVIDER_MAX_BYTES). A hand-
+        # edited or corrupt sidecar value that is a non-empty non-string
+        # (or simply absent) adds no key -- same conditional-emit rule as
+        # every other field here.
+        inference_provider = record.get('inference_provider')
+        if isinstance(inference_provider, str) and inference_provider:
+            meta['inference_provider'] = inference_provider[:32]
+        # inference_address_class uses an allow-list-then-drop discipline,
+        # exactly like _ECONOMIC_MECHANISMS above (T-46-02): an out-of-set
+        # string, an empty string, a non-string, or a hand-edited/corrupt
+        # sidecar value is DROPPED SILENTLY -- never passed through. Unlike
+        # _ECONOMIC_MECHANISMS' six-string vocabulary, this frozenset is not
+        # hand-synced against classifier.py by a drift test -- it mirrors
+        # classifier.py's own _ADDRESS_CLASSES literally (D-12: exactly
+        # four values, no fifth "unknown" bucket).
+        _INFERENCE_ADDRESS_CLASSES = frozenset({'loopback', 'private', 'public', 'unset'})
+        inference_address_class = record.get('inference_address_class')
+        if (
+            isinstance(inference_address_class, str)
+            and inference_address_class in _INFERENCE_ADDRESS_CLASSES
+        ):
+            meta['inference_address_class'] = inference_address_class
         confidence_raw = record.get('confidence')
         if confidence_raw is not None:
             try:
@@ -3787,8 +3922,45 @@ if assessment_raw:
         if assumptions:
             meta['assumptions'] = assumptions
 
+# Phase 46 (EGV-19, D-01/D-02/D-03): bounded emit -- the single place the
+# actual wire bytes are measured before the payload leaves the machine.
+# Base metering (source, failure_reason) is NEVER popped; only the Phase
+# 42-45 enrichment yields, value family first, then provenance, in that
+# order (D-02: metering never breaks, the enrichment is what gives way).
+# metadata_truncated marks a partial payload so a consumer can distinguish
+# "this job had no net_value" (both keys absent) from "net_value did not
+# fit" (net_value absent, metadata_truncated present) -- an unmarked
+# partial record is the silent substitution this milestone exists to
+# prevent. AMEND-D-02: this key lives ONLY in this transport dict -- never
+# in the sidecar record and never in _VALUE_OMIT_FAMILY, which governs an
+# earlier pipeline stage that can never see it.
+#
+# CR-01 (46-REVIEW.md): the marker must be set ONLY when a tier actually
+# removed a key. Before source (above) was clamped, an over-ceiling blob
+# with no value-family/provenance-family keys present (e.g. driven entirely
+# by an outsized source) still walked into this branch, popped nothing from
+# either tier, and got `metadata_truncated: True` unconditionally -- a false
+# "value did not fit" signal on a record that dropped nothing. Compare
+# `meta`'s key set before/after each pop loop and only flip the marker when
+# it actually shrank; a `set(meta)` snapshot is cheap here (single digits of
+# keys) and reads as the intent directly, unlike diffing pop() return values.
 if meta:
-    print(json.dumps(meta, separators=(',', ':')))
+    blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+    if len(blob) > _METADATA_CEILING_BYTES:
+        _before_tier1 = set(meta)
+        for _k in _VALUE_FAMILY_META_KEYS:
+            meta.pop(_k, None)
+        if set(meta) != _before_tier1:
+            meta['metadata_truncated'] = True
+        blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+        if len(blob) > _METADATA_CEILING_BYTES:
+            _before_tier2 = set(meta)
+            for _k in _PROVENANCE_FAMILY_META_KEYS:
+                meta.pop(_k, None)
+            if set(meta) != _before_tier2:
+                meta['metadata_truncated'] = True
+            blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+    print(blob.decode('utf-8'))
 PY
       )
       outcome_metadata="${outcome_metadata%%$'\n'*}"
