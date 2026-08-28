@@ -235,6 +235,44 @@ def _metadata_of(argv):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Plan 47-03 Task 2 (D-09) -- coexistence proof. Duplicated -- not
+# imported -- from tests/test_phase46_feature_off.py:126-156 (itself
+# proving coexistence against tests/test_phase38_reporter_path.py's
+# TestPhase38Canary). Importing either module's copy would couple this
+# module to that module's own import-time env mutation -- the same
+# documented bleed hazard the module docstring's own-isolated-import
+# section explains.
+# ---------------------------------------------------------------------------
+def _iter_tests(suite):
+    """Flatten a (possibly nested) unittest.TestSuite into individual test cases."""
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            for sub in _iter_tests(item):
+                yield sub
+        else:
+            yield item
+
+
+# This class's own two coexistence methods, excluded by explicit
+# method-name membership -- NEVER a prefix or pattern match, so a future
+# test added to this class is INCLUDED in the coexistence sub-run by
+# default rather than silently skipped.
+_COEXISTENCE_SELF_TEST_NAMES = frozenset({
+    'test_coexists_with_phase38_and_phase46_harnesses_in_all_orders',
+    'test_coexistence_negative_control_env_guard_is_load_bearing',
+})
+
+
+def _load_case_excluding(dotted_name, exclude_names):
+    suite = unittest.TestLoader().loadTestsFromName(dotted_name)
+    filtered = unittest.TestSuite()
+    for test in _iter_tests(suite):
+        if getattr(test, '_testMethodName', None) not in exclude_names:
+            filtered.addTest(test)
+    return filtered
+
+
 class TestPhase47EndToEnd(unittest.TestCase):
     """D-06/D-07/D-08 -- the produced-artifact chain: a real state.db
     transcript drives the REAL classifier (only call_llm stubbed), which
@@ -1057,6 +1095,98 @@ class TestPhase47EndToEnd(unittest.TestCase):
             'a further ordinary tick must not re-ship an outcome for an '
             f'already-reported, already-corrected job: {further_tick["jobs_argv"]}',
         )
+
+    # -- Plan 47-03 Task 2: coexistence with Phase 38 and Phase 46 (D-09) --
+
+    def test_coexists_with_phase38_and_phase46_harnesses_in_all_orders(self):
+        """D-09: this class (with its own two coexistence methods excluded
+        via _COEXISTENCE_SELF_TEST_NAMES) runs green in ONE process
+        alongside tests.test_phase38_reporter_path.TestPhase38Canary, in
+        BOTH discovery orders, and alongside
+        tests.test_phase46_feature_off.TestPhase46FeatureOff, in BOTH
+        discovery orders -- all three modules spawn the SAME
+        hermes-report.sh and all three use the module-scoped
+        REVENIUM_STATE_DIR-bleed env-isolation idiom documented in
+        tests/test_phase38_reporter_path.py. After each of the four
+        sub-runs, this module's own _ENV_SAVED baseline is asserted
+        unchanged -- no dangling path into a deleted tmpdir survives to
+        break whichever module discovery runs next in the same process."""
+        orders = (
+            ('phase47-then-phase38', (
+                'tests.test_phase47_end_to_end.TestPhase47EndToEnd',
+                'tests.test_phase38_reporter_path.TestPhase38Canary',
+            )),
+            ('phase38-then-phase47', (
+                'tests.test_phase38_reporter_path.TestPhase38Canary',
+                'tests.test_phase47_end_to_end.TestPhase47EndToEnd',
+            )),
+            ('phase47-then-phase46', (
+                'tests.test_phase47_end_to_end.TestPhase47EndToEnd',
+                'tests.test_phase46_feature_off.TestPhase46FeatureOff',
+            )),
+            ('phase46-then-phase47', (
+                'tests.test_phase46_feature_off.TestPhase46FeatureOff',
+                'tests.test_phase47_end_to_end.TestPhase47EndToEnd',
+            )),
+        )
+        for order_name, dotted_names in orders:
+            suite = unittest.TestSuite()
+            for dotted in dotted_names:
+                if dotted.endswith('TestPhase47EndToEnd'):
+                    suite.addTest(_load_case_excluding(dotted, _COEXISTENCE_SELF_TEST_NAMES))
+                else:
+                    suite.addTest(unittest.TestLoader().loadTestsFromName(dotted))
+            stream = io.StringIO()
+            result = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
+            self.assertTrue(
+                result.wasSuccessful(),
+                f'{order_name} sub-run failed:\n{stream.getvalue()}',
+            )
+            self._assert_no_dangling_env_keys(order_name)
+
+    def _assert_no_dangling_env_keys(self, order_name):
+        for k, saved in _ENV_SAVED.items():
+            current = os.environ.get(k)
+            self.assertEqual(
+                current, saved,
+                f'{order_name}: env key {k!r} is {current!r} after the sub-run, '
+                f'expected the restored baseline {saved!r} -- a dangling path '
+                'into a deleted tmpdir would silently break a later module in '
+                'the same discover process',
+            )
+
+    def test_coexistence_negative_control_env_guard_is_load_bearing(self):
+        """D-09: prove _assert_no_dangling_env_keys is not vacuously green.
+        Neuter this module's own _restore_env, run ONE probe method in this
+        class that mutates the parent process's os.environ through
+        _load_classifier, then assert the SAME guard now raises on the
+        resulting dangling REVENIUM_STATE_DIR/HERMES_HOME -- before trusting
+        it to mean anything when it passes above.
+
+        Probe method: test_abstention_path_ships_outcome_with_provenance_and_no_value.
+        Unlike Phase 46 (where only ONE test in that class ever touches
+        os.environ, via _load_classifier, and every other test only builds
+        an explicit base_env dict for a subprocess), EVERY test method in
+        THIS class drives the real classifier via _drive_classifier ->
+        _load_classifier, so every one of them mutates os.environ -- the
+        abstention path is picked here simply as the cheapest driven arc in
+        this module to run as a probe, not because it is uniquely
+        environ-mutating."""
+        import tests.test_phase47_end_to_end as _self_mod
+        real_restore = _self_mod._restore_env
+        try:
+            _self_mod._restore_env = lambda: None
+            probe = unittest.TestLoader().loadTestsFromName(
+                'tests.test_phase47_end_to_end.TestPhase47EndToEnd.'
+                'test_abstention_path_ships_outcome_with_provenance_and_no_value'
+            )
+            stream = io.StringIO()
+            unittest.TextTestRunner(stream=stream, verbosity=0).run(probe)
+            with self.assertRaises(AssertionError):
+                self._assert_no_dangling_env_keys('negative-control')
+        finally:
+            _self_mod._restore_env = real_restore
+            _restore_env()
 
 
 if __name__ == '__main__':
