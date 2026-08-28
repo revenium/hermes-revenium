@@ -102,7 +102,7 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 | `assumptions.assumed_loaded_rate` | number | Finite, `0 < r <= maxLoadedRate` (default 500). |
 | `confidence` | number | `[0, 1]`. |
 | `evaluator`, `evaluator_version` | string | Recorded from the resolved evaluator, never read from its output. |
-| `evidence_class` | string | Always `MODEL_ESTIMATED_DEMO` on this path. Forced, never read from output. |
+| `evidence_class` | string | Resolved from the boundary registry for whichever evaluator ran, never read from its output. On the naked-LLM path that resolution always yields `MODEL_ESTIMATED_DEMO`. |
 
 Every string field has `|`, newline, and carriage return replaced with a space
 before persistence. The cron's job-outcome queue is `IFS='|'`-parsed, and one
