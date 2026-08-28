@@ -1796,19 +1796,49 @@ class TestPhase38Canary(unittest.TestCase):
     # Task 3 (D-04): the byte-tuning lever tests/test_compat_jobs_outcome.py
     # ::TestCompatJobsOutcomeMetadataTruncated already proved against this
     # SAME `outcome_metadata` heredoc -- reused verbatim (not re-derived) so
-    # this class's over-ceiling fixture lands pre-drop ~4300-4400 bytes
-    # (over the 4096 ceiling) and post-tier-1-drop ~3700-3800 bytes (under
-    # it, so tier 2 never fires). json.dumps' default ensure_ascii=True
-    # escapes one astral codepoint to a 12-ASCII-byte \\uXXXX\\uXXXX
-    # surrogate pair, turning a 58-CHARACTER slice into ~696 wire bytes.
+    # this class's over-ceiling fixture lands pre-drop 4109 bytes (over the
+    # 4096 ceiling by 13) and post-tier-1-drop 3361 bytes (comfortably
+    # under it, so tier 2 never fires) -- the same measured numbers as that
+    # class's own CR-01 retune, since this fixture forwards the identical
+    # field set at the identical values (basis/candidate_downstream_outcome/
+    # counterfactual_assumption/assumptions.inferred_role below are never
+    # forwarded into --metadata at all, so they do not affect this count).
+    # json.dumps' default ensure_ascii=True escapes one astral codepoint to
+    # a 12-ASCII-byte \\uXXXX\\uXXXX surrogate pair, turning a 64-CHARACTER
+    # slice into 768 wire bytes.
     _P38_TRUNC_EMOJI = '\U0001F600'
-    _P38_TRUNC_MODEL_CHARS = 58
-    _P38_TRUNC_EVALUATOR_CHARS = 58
-    _P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS = 58
-    _P38_TRUNC_INFERENCE_PROVIDER_CHARS = 29
-    _P38_TRUNC_EVALUATOR_VERSION_CHARS = 15
-    _P38_TRUNC_BOUNDS_SOURCE_CHARS = 15
+    # CR-01 (46-REVIEW.md) retune: hermes-report.sh now clamps `source` to
+    # 64 serialized bytes at the producer (job-row heredoc), before it ever
+    # reaches this heredoc -- source used to be this fixture's biggest
+    # lever (61 emoji chars, ~732 bytes) and no longer contributes past
+    # ~60 bytes regardless of _P38_TRUNC_SOURCE_CHARS below. Every OTHER
+    # character-capped field now runs at its real forwarder maximum (not a
+    # margin-preserving 90%) to replace the difference -- same retune,
+    # same measured numbers, as
+    # tests/test_compat_jobs_outcome.py::TestCompatJobsOutcomeMetadataTruncated
+    # (this fixture is documented above as reusing that exact lever
+    # verbatim, so it must be retuned in lockstep, not independently).
+    # evidence_class cannot be emoji-padded (hermes-report.sh gates it
+    # against a 9-string allow-list before this heredoc runs -- an
+    # out-of-set value strips the whole value family AND --outcome-value
+    # instead of forwarding), so _P38_TRUNC_EVIDENCE_CLASS below is the
+    # longest of the nine real literals instead of an emoji multiplier. An
+    # earlier draft of this retune reached for sys.float_info.max on the
+    # value bounds instead -- rejected, in lockstep with the same rejection
+    # in tests/test_compat_jobs_outcome.py (see its class-level comment):
+    # value_low is bounded by maxHoursSaved * maxLoadedRate per the
+    # assessment contract, so production can never emit that value, and a
+    # fixture built on it stops proving anything about a reachable record.
+    # The replacement lever is cost_coverage.unknown, populated below
+    # exactly like the compat fixture's own retune.
+    _P38_TRUNC_MODEL_CHARS = 64
+    _P38_TRUNC_EVALUATOR_CHARS = 64
+    _P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS = 64
+    _P38_TRUNC_INFERENCE_PROVIDER_CHARS = 32
+    _P38_TRUNC_EVALUATOR_VERSION_CHARS = 16
+    _P38_TRUNC_BOUNDS_SOURCE_CHARS = 16
     _P38_TRUNC_SOURCE_CHARS = 61
+    _P38_TRUNC_EVIDENCE_CLASS = 'QUASI_EXPERIMENTAL_IMPACT'
 
     def tearDown(self):
         # _load_classifier touches REVENIUM_STATE_DIR/MARKERS_DIR/CONFIG_FILE
@@ -2685,26 +2715,44 @@ class TestPhase38Canary(unittest.TestCase):
                 'prompt_version': 1, 'policy_version': 1,
                 'model': emoji * self._P38_TRUNC_MODEL_CHARS,
                 'inference_provider': emoji * self._P38_TRUNC_INFERENCE_PROVIDER_CHARS,
-                'inference_address_class': 'private',
-                'value_low': 100.25, 'value_base': 200.5, 'value_high': 300.75,
+                # 'loopback' (8 chars) is the longest of the 4 real
+                # _INFERENCE_ADDRESS_CLASSES literals -- matches
+                # tests/test_compat_jobs_outcome.py's own retune.
+                'inference_address_class': 'loopback',
+                'value_low': 100.25, 'value_base': 9500.55, 'value_high': 18500.75,
                 'bounds_source': emoji * self._P38_TRUNC_BOUNDS_SOURCE_CHARS,
                 'currency': 'USD', 'estimated_value': 200.5,
                 'evaluator': emoji * self._P38_TRUNC_EVALUATOR_CHARS,
                 'evaluator_version': emoji * self._P38_TRUNC_EVALUATOR_VERSION_CHARS,
-                'confidence': 0.789, 'evidence_class': 'MODEL_ESTIMATED_DEMO',
+                'confidence': 0.7853,
+                'evidence_class': self._P38_TRUNC_EVIDENCE_CLASS,
+                # 39.75 / 499.75 stay under classifier.py's
+                # DEFAULT_MAX_HOURS_SAVED (40.0) / DEFAULT_MAX_LOADED_RATE
+                # (500.0) -- their product (~19865) is what upper-bounds
+                # value_high above, matching the compat fixture's retune.
                 'assumptions': {
-                    'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0,
+                    'estimated_hours_saved': 39.75, 'assumed_loaded_rate': 499.75,
                     'inferred_role': role_canary + '|role\nbreak\r' + ('Y' * 20),
                 },
                 'economic_mechanism': 'augmentation_capacity_expansion',
-                'net_value': 150.25,
+                'net_value': 15000.25,
                 'supplied_costs': {
-                    'human_review': 10.0, 'rework_or_error': 5.0,
-                    'integration': 2.0, 'training_or_change': 1.0,
+                    'human_review': 125.75, 'rework_or_error': 45.55,
+                    'integration': 32.25, 'training_or_change': 18.75,
                 },
                 'cost_coverage': {
                     'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
-                    'known_zero': [], 'unknown': [], 'excluded': ['metered_ai_cost'],
+                    # CR-01 retune: known_zero AND unknown both non-empty
+                    # (matching tests/test_compat_jobs_outcome.py's own
+                    # retuned fixture) -- the forwarder omits an empty list
+                    # entirely, so leaving either `[]` after source shrank
+                    # from ~732 to ~60 bytes loses bytes this fixture needs
+                    # to clear the ceiling without resorting to an
+                    # unreachable value like sys.float_info.max (see the
+                    # class-level comment above).
+                    'known_zero': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    'unknown': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    'excluded': ['metered_ai_cost'],
                 },
                 'double_counting_group': emoji * self._P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS,
                 'reportability_status': 'reportable',

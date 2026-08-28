@@ -1406,7 +1406,7 @@ PY
       local precheck_job_rows
       precheck_job_rows=$(
         MARKERS_DIR="${session_markers_dir}" \
-        SID="${sid}" \
+        SID="${sid}" SOURCE="${source}" \
         python3 - <<'PY' 2>/dev/null || true
 import json
 import os
@@ -1426,6 +1426,8 @@ def _clamp_bytes(value, limit):
 markers_dir = os.environ.get('MARKERS_DIR', '')
 sid = os.environ.get('SID', '')
 if not markers_dir or not sid: raise SystemExit(0)
+# CR-01: this precheck stage's own job_outcome_queue push bypasses the job-row heredoc's SOURCE clamp entirely -- same 64-byte budget here, computed once (source is session-level, not per-job-marker-line).
+source_clean = _clamp_bytes(os.environ.get('SOURCE', '').replace('|', '_').replace('\n', '_').replace('\r', '_'), 64)
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
 if not marker_path.is_file(): raise SystemExit(0)
@@ -1478,22 +1480,21 @@ try:
             for _bad in ('|', '\n', '\r'):
                 failure_reason = failure_reason.replace(_bad, ' ')
             failure_reason = _clamp_bytes(failure_reason, 500)
-            print(f"{clean_id}|{job_name}|{job_type}|{status}|{marker_ts}|{failure_reason}")
+            print(f"{clean_id}|{job_name}|{job_type}|{source_clean}|{status}|{marker_ts}|{failure_reason}")
 except OSError:
     pass
 PY
       )
 
       if [[ -n "${precheck_job_rows}" ]]; then
-        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip BOTH the outcome queue push and the jobs
-        # create call -- the root's ledger entry is the single create per arc; outcome ships once; top-level takes the v1.3 path.
+        # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip BOTH the outcome queue push and the jobs create call -- the root's ledger entry is the single create per arc; outcome ships once; top-level takes the v1.3 path.
         if [[ "${root_sid}" == "${sid}" ]]; then
-          local precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason
-          while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_status_raw precheck_marker_ts precheck_failure_reason; do
+          local precheck_clean_job_id precheck_job_name precheck_job_type precheck_source precheck_status_raw precheck_marker_ts precheck_failure_reason
+          while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_source precheck_status_raw precheck_marker_ts precheck_failure_reason; do
             [[ -z "${precheck_clean_job_id}" ]] && continue
 
-            # Phase 10: push every row to the outcome queue regardless of create outcome (JOB:<id>:outcome: gate dedupes; field 6 = sid, Phase 38 ROI-10).
-            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
+            # Phase 10: push every row to the outcome queue regardless of create outcome (JOB:<id>:outcome: gate dedupes; field 6 = sid, Phase 38 ROI-10). CR-01: precheck_source is the clamped field printed above, not the raw ${source}.
+            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${precheck_source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
             if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -2383,6 +2384,21 @@ for job in jobs:
     source_clean = source
     for _bad in ('|', '\n', '\r'):
         source_clean = source_clean.replace(_bad, '_')
+    # CR-01 (46-REVIEW.md): source is the one base-metering key the
+    # --metadata ceiling's two-tier drop (D-02, ~line 3900) NEVER pops --
+    # 'base metering never yields' is unconditional, so an unclamped source
+    # is the one path that can still put an over-ceiling blob on the wire
+    # after failure_reason's own byte clamp closed that field's version of
+    # this gap. Clamp here, at the producer, exactly like failure_reason two
+    # lines below -- same _clamp_bytes helper, same heredoc. 64 bytes
+    # matches the other short caller-supplied identifiers this file already
+    # clamps to 64 (evaluator, model, double_counting_group below) -- long
+    # enough that a realistic Hermes deployment-source label (also forwarded
+    # unclamped as --environment elsewhere in this file; that flag has no
+    # ceiling of its own and is out of scope here) survives untouched, short
+    # enough that source alone can never again single-handedly exceed
+    # _METADATA_CEILING_BYTES.
+    source_clean = _clamp_bytes(source_clean, 64)
     # Phase 10: emit status and marker ts as 5th and 6th pipe fields
     # for the outcome-queue accumulator (OUTCOME-05, D-07).
     status = job.get('status', '') or ''
@@ -3905,16 +3921,31 @@ if assessment_raw:
 # prevent. AMEND-D-02: this key lives ONLY in this transport dict -- never
 # in the sidecar record and never in _VALUE_OMIT_FAMILY, which governs an
 # earlier pipeline stage that can never see it.
+#
+# CR-01 (46-REVIEW.md): the marker must be set ONLY when a tier actually
+# removed a key. Before source (above) was clamped, an over-ceiling blob
+# with no value-family/provenance-family keys present (e.g. driven entirely
+# by an outsized source) still walked into this branch, popped nothing from
+# either tier, and got `metadata_truncated: True` unconditionally -- a false
+# "value did not fit" signal on a record that dropped nothing. Compare
+# `meta`'s key set before/after each pop loop and only flip the marker when
+# it actually shrank; a `set(meta)` snapshot is cheap here (single digits of
+# keys) and reads as the intent directly, unlike diffing pop() return values.
 if meta:
     blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
     if len(blob) > _METADATA_CEILING_BYTES:
+        _before_tier1 = set(meta)
         for _k in _VALUE_FAMILY_META_KEYS:
             meta.pop(_k, None)
-        meta['metadata_truncated'] = True
+        if set(meta) != _before_tier1:
+            meta['metadata_truncated'] = True
         blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
         if len(blob) > _METADATA_CEILING_BYTES:
+            _before_tier2 = set(meta)
             for _k in _PROVENANCE_FAMILY_META_KEYS:
                 meta.pop(_k, None)
+            if set(meta) != _before_tier2:
+                meta['metadata_truncated'] = True
             blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
     print(blob.decode('utf-8'))
 PY

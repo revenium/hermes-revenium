@@ -197,45 +197,90 @@ class TestCompatJobsOutcome(unittest.TestCase):
 # The lever: 46-01 fixed failure_reason's clamp to be byte-safe, so it can
 # no longer alone drive the envelope over the ceiling. What remains
 # unclamped-by-bytes is every free-text field this heredoc slices by
-# CHARACTER count (`source[:64]` at the session-read stage, `evaluator[:64]`,
-# `model[:64]`, `double_counting_group[:64]`, `evaluator_version[:16]`,
-# `bounds_source[:16]`, `inference_provider[:32]` in the forwarder itself):
+# CHARACTER count (`evaluator[:64]`, `model[:64]`, `double_counting_group[:64]`,
+# `evaluator_version[:16]`, `bounds_source[:16]`, `inference_provider[:32]`):
 # json.dumps' default ensure_ascii=True escapes a single astral codepoint
 # (an emoji) to a 12-ASCII-byte \\uXXXX\\uXXXX surrogate-pair sequence, so a
 # 64-CHARACTER slice of emoji becomes 768 BYTES on the wire -- the same
 # under-count shape 46-01's own SUMMARY measured for failure_reason, now
-# exercised at the fields that were never in scope for that fix. Field
-# lengths below were tuned (not guessed) against the real forwarder so the
-# combined record clears the ceiling before any drop and lands comfortably
-# under it after the value-family tier alone is popped -- see
-# _build_over_ceiling_sidecar_record's per-field byte budget below.
-# ---------------------------------------------------------------------------
-
+# exercised at the fields that were never in scope for that fix.
+# evidence_class is NOT one of these levers -- unlike the other free-text
+# provenance fields, hermes-report.sh gates it against a 9-string
+# _EVIDENCE_CLASSES allow-list (Phase 43 C-02/CF-2) BEFORE this heredoc ever
+# runs; an out-of-set value gets the whole record's value family (and
+# --outcome-value/--outcome-currency) stripped instead of forwarded, so
+# _EVIDENCE_CLASS below must stay one of the nine real literals.
+#
+# CR-01 (46-REVIEW.md) retune: `source` used to be this class's biggest
+# single lever (a 61-emoji SOURCE_CHARS alone contributed ~732 of the
+# pre-fix ~4300-4400 pre-drop bytes) precisely BECAUSE it was the one
+# base-metering field with no byte clamp anywhere in the pipeline -- the
+# CR-01 fix closed exactly that gap (both hermes-report.sh SOURCE-processing
+# producers now clamp it to 64 bytes, ~5 emoji characters, before it ever
+# reaches this heredoc). SOURCE_CHARS stays at 61 below -- unchanged -- so
+# this class keeps exercising the "attacker still tries a huge source"
+# input; what changed is that this input no longer does the work of
+# clearing the ceiling. With every OTHER free-text field already run at its
+# real forwarder maximum (not a margin-preserving 90% as before -- source
+# can no longer make up any difference), the six capped fields alone still
+# land short of the ceiling (measured: ~4064 bytes with only
+# cost_coverage.known_zero populated). The remaining levers are NOT
+# inventing a new field or an implausible value (an earlier draft of this
+# retune used sys.float_info.max for the value bounds -- rejected:
+# value_low is bounded by maxHoursSaved * maxLoadedRate per the assessment
+# contract and production can never emit it, so a fixture built on it pins
+# a byte count no real record can reach). Instead:
+#   - cost_coverage.unknown is a real forwarder field this record already
+#     carries that was simply left empty; the four _COST_CATEGORIES entries
+#     fit in EITHER of `included`/`known_zero`/`unknown` -- the forwarder
+#     does not enforce mutual exclusivity across the three lists -- so
+#     populating it too supplies bytes from a shape the real forwarder
+#     already ships.
+#   - inference_address_class uses its longest real allow-listed value,
+#     'loopback' (8 chars), instead of 'private' (7).
+#   - value_base/value_high/net_value/confidence/estimated_hours_saved/
+#     assumed_loaded_rate/supplied_costs move off round demo numbers to
+#     cents-precision, plausible-magnitude figures, STILL held within
+#     classifier.py's DEFAULT_MAX_HOURS_SAVED (40.0) and
+#     DEFAULT_MAX_LOADED_RATE (500.0) caps (hours 39.75, rate 499.75; their
+#     product, ~19865, upper-bounds value_high at 18500.75) -- values a
+#     real classifier-computed assessment could actually carry, unlike
+#     sys.float_info.max.
+#
+# Measured against the real forwarder post-fix: pre-drop 4109 bytes (over
+# the 4096 ceiling by 13 -- a much thinner margin than the pre-CR-01 design
+# had room for, because closing source's gap removed the one field that
+# could absorb future incidental byte drift here without retuning, and
+# because every remaining lever is now capped at a value production could
+# actually emit; see
+# test_untruncated_payload_for_same_record_would_have_exceeded_ceiling,
+# which asserts this margin exists at test-run time rather than trusting
+# this comment), post-tier-1-drop 3361 bytes (comfortably under it, so
+# tier 2 still never fires and every provenance key still survives).
 _EMOJI = '\U0001F600'  # a single astral codepoint: 1 Python character,
                        # 12 bytes once json.dumps(ensure_ascii=True) escapes it.
 
-# Character counts, not byte counts -- these are what the forwarder's own
-# [:N] slices accept. Tuned empirically (scratch harness driving the real
-# extracted `outcome_metadata` heredoc) to land pre-drop ~4300-4400 bytes
-# (comfortably over the 4096 ceiling) and post-tier-1-drop ~3700-3800 bytes
-# (comfortably under it, so tier 2 never fires and every provenance key
-# survives) -- not the absolute per-field maximum, which leaves too thin a
-# margin against future incidental byte drift in this heredoc.
-_MODEL_CHARS = 58
-_EVALUATOR_CHARS = 58
-_DOUBLE_COUNTING_GROUP_CHARS = 58
-_INFERENCE_PROVIDER_CHARS = 29
-_EVALUATOR_VERSION_CHARS = 15
-_BOUNDS_SOURCE_CHARS = 15
+_MODEL_CHARS = 64
+_EVALUATOR_CHARS = 64
+_DOUBLE_COUNTING_GROUP_CHARS = 64
+_INFERENCE_PROVIDER_CHARS = 32
+_EVALUATOR_VERSION_CHARS = 16
+_BOUNDS_SOURCE_CHARS = 16
 _SOURCE_CHARS = 61
+# The longest of the 9 real _EVIDENCE_CLASSES literals (hermes-report.sh) --
+# evidence_class cannot be emoji-padded (see allow-list note above), so this
+# is the most this field can legitimately contribute.
+_EVIDENCE_CLASS = 'QUASI_EXPERIMENTAL_IMPACT'
 
 
 def _build_over_ceiling_sidecar_record(job_id):
     """A full Phase 42-45 job-assessment sidecar record whose free-text
     provenance fields are emoji-padded up to their forwarder's own
-    character slice, driving the --metadata envelope over
-    _METADATA_CEILING_BYTES (D-01/D-03) without inventing any field this
-    heredoc does not already forward -- EGV-19's own constraint."""
+    character slice and whose cost_coverage lists are fully populated,
+    driving the --metadata envelope over _METADATA_CEILING_BYTES
+    (D-01/D-03) without inventing any field this heredoc does not already
+    forward and without any value production could never emit -- EGV-19's
+    own constraint."""
     return {
         'kind': 'job_assessment',
         'ts': 1715516002.5,
@@ -247,26 +292,37 @@ def _build_over_ceiling_sidecar_record(job_id):
         'policy_version': 1,
         'model': _EMOJI * _MODEL_CHARS,
         'inference_provider': _EMOJI * _INFERENCE_PROVIDER_CHARS,
-        'inference_address_class': 'private',
-        'value_low': 100.25, 'value_base': 200.5, 'value_high': 300.75,
+        # 'loopback' (8 chars) is the longest of the 4 real
+        # _INFERENCE_ADDRESS_CLASSES literals -- 1 byte more than 'private'.
+        'inference_address_class': 'loopback',
+        'value_low': 100.25, 'value_base': 9500.55, 'value_high': 18500.75,
         'bounds_source': _EMOJI * _BOUNDS_SOURCE_CHARS,
         'currency': 'USD',
         'estimated_value': 200.5,
         'evaluator': _EMOJI * _EVALUATOR_CHARS,
         'evaluator_version': _EMOJI * _EVALUATOR_VERSION_CHARS,
-        'confidence': 0.789,
-        'evidence_class': 'MODEL_ESTIMATED_DEMO',
-        'assumptions': {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+        'confidence': 0.7853,
+        'evidence_class': _EVIDENCE_CLASS,
+        # 39.75 / 499.75 stay under classifier.py's DEFAULT_MAX_HOURS_SAVED
+        # (40.0) / DEFAULT_MAX_LOADED_RATE (500.0) -- their product (~19865)
+        # is what upper-bounds value_high above at a value production could
+        # actually compute, not an arbitrary large number.
+        'assumptions': {'estimated_hours_saved': 39.75, 'assumed_loaded_rate': 499.75},
         'economic_mechanism': 'augmentation_capacity_expansion',
-        'net_value': 150.25,
+        'net_value': 15000.25,
         'supplied_costs': {
-            'human_review': 10.0, 'rework_or_error': 5.0,
-            'integration': 2.0, 'training_or_change': 1.0,
+            'human_review': 125.75, 'rework_or_error': 45.55,
+            'integration': 32.25, 'training_or_change': 18.75,
         },
         'cost_coverage': {
+            # known_zero AND unknown both fully populated (not just
+            # known_zero) -- see the class-level comment above: this is the
+            # lever that replaces the rejected float-max approach. The
+            # forwarder does not enforce mutual exclusivity across the
+            # three lists, so this is a legal (if unusual) shape.
             'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
             'known_zero': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
-            'unknown': [],
+            'unknown': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
             'excluded': ['metered_ai_cost'],
         },
         'double_counting_group': _EMOJI * _DOUBLE_COUNTING_GROUP_CHARS,

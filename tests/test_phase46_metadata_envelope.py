@@ -236,6 +236,41 @@ class MetadataEnvelopeTruncationTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         self.assertEqual(first.stdout, second.stdout)
 
+    def test_over_ceiling_source_alone_never_marks_truncated_at_this_heredoc(self):
+        """Behavior 5 (CR-01, 46-REVIEW.md): this heredoc, in isolation,
+        does not and must not bound `source` -- D-02's 'base metering never
+        yields' means neither drop tier ever pops it, and production bounds
+        it upstream instead (see SourceClampTests above, which proves the
+        job-row/precheck-heredoc producers clamp it to 64 bytes before this
+        heredoc ever runs). Feeding a raw, unclamped 400-emoji source
+        directly into OUTCOME_SOURCE (bypassing that upstream clamp, the
+        same way a hand-edited environment or a future producer regression
+        would) reproduces the exact CR-01 defect #2 at this emit site: the
+        payload ships over the ceiling with NOTHING in either drop family
+        present, so both tier loops pop zero keys -- and metadata_truncated
+        must stay ABSENT, not fire unconditionally the way the pre-fix
+        code did. Asserting the marker's absence here, at the one emit
+        site that decides it, is what makes CR-01 defect #2 (a false
+        'something was withheld' signal on a record that withheld nothing)
+        a regression a future edit cannot silently reintroduce."""
+        huge_source = '\U0001F600' * 400
+        env = _assessment_env(assessment=None, source=huge_source)
+        result = _run_forwarder(self.body, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.strip()
+        self.assertGreater(
+            len(out.encode('utf-8')), self.ceiling,
+            'test setup invalid: a 400-emoji source no longer exceeds the '
+            'ceiling on its own -- retune the emoji count above',
+        )
+        meta = json.loads(out)
+        self.assertNotIn(
+            'metadata_truncated', meta,
+            'metadata_truncated was set even though neither drop tier '
+            'removed a key -- CR-01 defect #2 regressed',
+        )
+        self.assertIn('source', meta)
+
 
 # ---------------------------------------------------------------------------
 # Behavior 5 — the classifier's own byte-safe failure_reason clamp
@@ -353,7 +388,7 @@ class FailureReasonClampTests(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp(prefix='p46-marker-row-')
         self.addCleanup(shutil.rmtree, self._tmpdir, True)
 
-    def _run_marker_row(self, failure_reason, status='FAILED'):
+    def _run_marker_row(self, failure_reason, status='FAILED', source='prod'):
         """Write a hand-crafted markers/<sid>.jsonl line directly -- NOT
         through the classifier's own writer/clamp -- so this test proves the
         reporter's OWN byte-safe clamp defends independently (defense in
@@ -363,6 +398,10 @@ class FailureReasonClampTests(unittest.TestCase):
         unrelated to and unmodified by this plan) even for a long emoji
         failure_reason -- that gate operates on raw line length before this
         clamp is ever reached, so it must not be the thing under test here.
+
+        `source` maps to the SOURCE env var this heredoc invocation receives
+        from the bash caller (CR-01, 46-REVIEW.md) -- mirrors `_run_job_row`
+        below so both mirror sites are exercised the same way.
         """
         sid = 'p46-clamp-sid'
         marker_path = pathlib.Path(self._tmpdir) / f'{sid}.jsonl'
@@ -372,7 +411,7 @@ class FailureReasonClampTests(unittest.TestCase):
             'failure_reason': failure_reason,
         }
         marker_path.write_text(json.dumps(record, ensure_ascii=False) + '\n', encoding='utf-8')
-        env = {'MARKERS_DIR': self._tmpdir, 'SID': sid}
+        env = {'MARKERS_DIR': self._tmpdir, 'SID': sid, 'SOURCE': source}
         return _run_forwarder(self.marker_body, env)
 
     def _run_job_row(self, failure_reason, status='FAILED', source='prod'):
@@ -384,15 +423,19 @@ class FailureReasonClampTests(unittest.TestCase):
         return _run_forwarder(self.job_body, env)
 
     def test_marker_row_500_emoji_failure_reason_clamped_to_500_bytes(self):
-        """Behavior 1."""
+        """Behavior 1. CR-01 (46-REVIEW.md): 7 fields now, not 6 -- the
+        precheck/marker-row heredoc grew a clamped `source` 4th field,
+        mirroring the job-row heredoc's existing layout exactly (see
+        SourceClampTests below), so failure_reason shifted from index 5 to
+        index 6 in lockstep with the job-row heredoc's own field 6."""
         reason = '\U0001F600' * 500
         result = self._run_marker_row(reason)
         self.assertEqual(result.returncode, 0, result.stderr)
         line = result.stdout.strip()
         self.assertTrue(line, f'expected one pipe row, got empty stdout (stderr={result.stderr!r})')
         fields = line.split('|')
-        self.assertEqual(len(fields), 6, f'expected 6 pipe fields, got {len(fields)}: {fields!r}')
-        emitted = fields[5]
+        self.assertEqual(len(fields), 7, f'expected 7 pipe fields, got {len(fields)}: {fields!r}')
+        emitted = fields[6]
         serialized = len(json.dumps(emitted, ensure_ascii=True).encode('utf-8')) - 2
         self.assertLessEqual(
             serialized, 500,
@@ -423,7 +466,7 @@ class FailureReasonClampTests(unittest.TestCase):
         job_result = self._run_job_row(reason)
         self.assertEqual(marker_result.returncode, 0, marker_result.stderr)
         self.assertEqual(job_result.returncode, 0, job_result.stderr)
-        self.assertEqual(marker_result.stdout.strip().split('|')[5], reason)
+        self.assertEqual(marker_result.stdout.strip().split('|')[6], reason)
         self.assertEqual(job_result.stdout.strip().split('|')[6], reason)
 
     def test_pipe_newline_cr_failure_reason_emits_one_row_with_expected_field_count(self):
@@ -437,7 +480,112 @@ class FailureReasonClampTests(unittest.TestCase):
         job_lines = [l for l in job_result.stdout.splitlines() if l.strip()]
         self.assertEqual(len(marker_lines), 1, f'marker-row: expected 1 line, got {marker_lines!r}')
         self.assertEqual(len(job_lines), 1, f'job-row: expected 1 line, got {job_lines!r}')
-        self.assertEqual(len(marker_lines[0].split('|')), 6)
+        self.assertEqual(len(marker_lines[0].split('|')), 7)
+        self.assertEqual(len(job_lines[0].split('|')), 7)
+
+
+class SourceClampTests(unittest.TestCase):
+    """CR-01 (46-REVIEW.md): `source` is the one base-metering key the
+    `--metadata` two-tier drop NEVER pops (D-02: 'base metering never
+    yields') -- so unlike every value/provenance field, it must be bounded
+    at the PRODUCER, before it ever reaches the outcome_metadata heredoc.
+    This class proves that bound exists at both mirror sites, the same way
+    FailureReasonClampTests above proves failure_reason's -- extraction
+    idiom, tmpdir fixture, and both `_run_marker_row`/`_run_job_row` helpers
+    reused verbatim rather than reimplemented, per this module's own
+    docstring instruction ('never a reimplementation of its field
+    selection'). WR-05's own gap was that no existing sweep varied
+    `source`'s length; the CR-01 required-fix explicitly asks for this."""
+
+    def setUp(self):
+        script_text = HERMES_REPORT_SH.read_text()
+        self.marker_body = _extract_marker_row_heredoc(script_text)
+        self.assertIsNotNone(
+            self.marker_body,
+            "precheck_job_rows=$( ... <<'PY' ... \\nPY\\n anchor moved in "
+            'hermes-report.sh -- update the extraction before trusting this test',
+        )
+        self.job_body = _extract_job_row_heredoc(script_text)
+        self.assertIsNotNone(
+            self.job_body,
+            "job_rows=$( ... <<'PY' ... \\nPY\\n anchor moved in "
+            'hermes-report.sh -- update the extraction before trusting this test',
+        )
+        self._tmpdir = tempfile.mkdtemp(prefix='p46-source-clamp-')
+        self.addCleanup(shutil.rmtree, self._tmpdir, True)
+
+    # Reuses FailureReasonClampTests' own helpers -- same tmpdir/marker-file
+    # shape, same JOBS_JSON shape -- rather than a third copy of either.
+    _run_marker_row = FailureReasonClampTests._run_marker_row
+    _run_job_row = FailureReasonClampTests._run_job_row
+
+    @staticmethod
+    def _serialized_source_bytes(field):
+        """Measure a pipe field the same way hermes-report.sh's own
+        _clamp_bytes does: json.dumps(..., ensure_ascii=True) minus the two
+        quote bytes -- so this assertion assumes nothing about UTF-8 byte
+        counting that the production clamp doesn't also assume."""
+        return len(json.dumps(field, ensure_ascii=True).encode('utf-8')) - 2
+
+    def test_marker_row_long_emoji_source_clamped_to_64_bytes(self):
+        """A source long enough to have triggered CR-01 (the pre-fix
+        golden's 61-emoji SOURCE_CHARS, ~732 serialized bytes on its own)
+        must come out at or under the 64-byte producer budget through the
+        precheck/marker-row heredoc."""
+        huge_source = '\U0001F600' * 61
+        result = self._run_marker_row('', status='SUCCESS', source=huge_source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split('|')
+        self.assertEqual(len(fields), 7, f'expected 7 pipe fields, got {len(fields)}: {fields!r}')
+        emitted_source = fields[3]
+        serialized = self._serialized_source_bytes(emitted_source)
+        self.assertLessEqual(
+            serialized, 64,
+            f'marker-row source is {serialized} serialized bytes, over the 64-byte budget',
+        )
+
+    def test_job_row_long_emoji_source_clamped_to_64_bytes(self):
+        """Same input, same bound, through the job-row heredoc -- the two
+        mirror sites must agree (WR-01's own concern: divergent copies of a
+        small heredoc helper)."""
+        huge_source = '\U0001F600' * 61
+        result = self._run_job_row('', status='SUCCESS', source=huge_source)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        fields = result.stdout.strip().split('|')
+        self.assertEqual(len(fields), 7, f'expected 7 pipe fields, got {len(fields)}: {fields!r}')
+        emitted_source = fields[3]
+        serialized = self._serialized_source_bytes(emitted_source)
+        self.assertLessEqual(
+            serialized, 64,
+            f'job-row source is {serialized} serialized bytes, over the 64-byte budget',
+        )
+
+    def test_ascii_source_under_budget_passes_through_unchanged(self):
+        """No drift on the ordinary path -- a realistic deployment-source
+        label (well under 64 bytes) survives both mirror sites byte for
+        byte, matching FailureReasonClampTests' own ordinary-path
+        assertion."""
+        source = 'production-us-east-1'
+        marker_result = self._run_marker_row('', status='SUCCESS', source=source)
+        job_result = self._run_job_row('', status='SUCCESS', source=source)
+        self.assertEqual(marker_result.returncode, 0, marker_result.stderr)
+        self.assertEqual(job_result.returncode, 0, job_result.stderr)
+        self.assertEqual(marker_result.stdout.strip().split('|')[3], source)
+        self.assertEqual(job_result.stdout.strip().split('|')[3], source)
+
+    def test_pipe_newline_cr_source_sanitized(self):
+        """A source carrying pipe/newline/CR must not desync the 7-field
+        row -- mirrors failure_reason's own delimiter-safety test above."""
+        source = 'a|b\nc\rd'
+        marker_result = self._run_marker_row('', status='SUCCESS', source=source)
+        job_result = self._run_job_row('', status='SUCCESS', source=source)
+        self.assertEqual(marker_result.returncode, 0, marker_result.stderr)
+        self.assertEqual(job_result.returncode, 0, job_result.stderr)
+        marker_lines = [l for l in marker_result.stdout.splitlines() if l.strip()]
+        job_lines = [l for l in job_result.stdout.splitlines() if l.strip()]
+        self.assertEqual(len(marker_lines), 1, f'marker-row: expected 1 line, got {marker_lines!r}')
+        self.assertEqual(len(job_lines), 1, f'job-row: expected 1 line, got {job_lines!r}')
+        self.assertEqual(len(marker_lines[0].split('|')), 7)
         self.assertEqual(len(job_lines[0].split('|')), 7)
 
 
