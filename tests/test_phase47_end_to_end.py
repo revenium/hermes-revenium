@@ -45,6 +45,7 @@ with any other phase's isolated-import test module under `-p 'test_*.py'`.
 import ast
 import asyncio
 import importlib.util
+import io
 import json
 import os
 import shlex
@@ -842,6 +843,220 @@ class TestPhase47EndToEnd(unittest.TestCase):
         self.assertIn('value_high', meta, meta)
         self.assertIn('supplied_costs', meta, meta)
         self.assertIn('cost_coverage', meta, meta)
+
+    # -- Plan 47-03 Task 1: the correction path (D-18) ----------------------
+
+    def _write_outcome_update_capable_shim(self, bin_dir):
+        """A SECOND, purpose-built revenium shim, layered in FRONT of the
+        fixture's own PATH (via a prepended bin dir) for the
+        correct-assessment.sh subprocess call only -- never a modification
+        to tests/_compat_helpers.py::build_shim, which is out of this
+        plan's declared file scope (files_modified names only this file).
+
+        EMPIRICALLY CONFIRMED (dry-run before writing this helper, per this
+        phase's own discipline): build_shim's `jobs)` branch has no case
+        for `outcome-update` at all. A `jobs outcome-update --help`
+        capability probe (common.sh's supports_flag) falls through to the
+        generic capture branch, which echoes no text at all -- so
+        supports_flag resolves the probe INDETERMINATE, treats the flag as
+        unsupported, and correct-assessment.sh exits 1 with "does not
+        support 'jobs outcome-update --reason'" against the plain fixture
+        shim. This shim answers ONLY that one probe (advertising --reason)
+        and captures the real `jobs outcome-update` invocation to JOBS_LOG
+        -- nothing else; every other verb this fixture depends on
+        (`meter completion`, `jobs create`, `jobs outcome`) keeps resolving
+        through the fixture's OWN shim, since this one is prepended, not
+        substituted, and correct-assessment.sh calls only `revenium jobs
+        outcome-update` (plus `revenium config show`, short-circuited below
+        via REVENIUM_TEAM_ID so this shim never needs a `config)` case)."""
+        shim_path = os.path.join(bin_dir, 'revenium')
+        with open(shim_path, 'w') as f:
+            f.write(
+                '#!/usr/bin/env bash\n'
+                'case "$1" in\n'
+                '  jobs)\n'
+                '    if [[ "$2" == "outcome-update" && "$3" == "--help" ]]; then\n'
+                '      echo "--reason string   Reason for the correction"\n'
+                '      exit 0\n'
+                '    fi\n'
+                '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'
+                '    printf "\\n"      >> "${JOBS_LOG:-/dev/null}"\n'
+                '    exit 0\n'
+                '    ;;\n'
+                '  *) exit 0 ;;\n'
+                'esac\n'
+            )
+        os.chmod(shim_path, 0o755)
+
+    def test_operator_correction_appends_a_revision_and_ships_its_marker(self):
+        """D-18: this test is the documentation source for the
+        correction-and-audit section of the new
+        docs/claim-distinctions-and-evidence-boundaries.md page (plan
+        47-07) -- the worked example there must quote what THIS test
+        observes, not restate prose that could drift from it.
+
+        Drives one arc through the SAME produced-artifact chain every
+        other test in this module uses: an original, valued, reportable
+        assessment is classified, evaluated, and already shipped via the
+        ordinary two-tick cron path (_drive_produced_arc). The REAL
+        skills/revenium/scripts/correct-assessment.sh then runs as a
+        subprocess against the fixture's own base_env -- the SAME env the
+        reporter reads -- so the correction lands on the SAME produced
+        sidecar, never a second, hand-built one. The prohibition (never
+        write a correction record by hand) is honored literally: no line
+        below constructs a `kind: "correction"` dict.
+
+        EMPIRICAL FINDING, dry-run-verified before this assertion was
+        written (per this whole phase's own discipline): once a job's
+        FIRST outcome has already shipped via the ordinary per-tick path
+        (as it has here, by construction), hermes-report.sh's own
+        OUTCOME-01 ledger gate (`grep -q "^JOB:<id>:outcome:"`)
+        permanently skips that job on every later tick, correction or
+        not -- a further `_run_tick()` call after the correction below
+        ships ZERO jobs argv for this job (verified directly; asserted
+        below as a structural idempotency check, not merely claimed). The
+        corrected value therefore reaches Revenium EXCLUSIVELY through
+        correct-assessment.sh's own direct `jobs outcome-update` call
+        (Step 8 of that script) -- never through a further hermes-report.sh
+        tick's `jobs outcome`. This test asserts against that real call.
+        """
+        result = self._drive_produced_arc(
+            sid='p47e2e-correct-sid-001', job_id='p47e2e-correct-job-001',
+            task_type='code_review', eval_payload=self._VALUED_EVAL_PAYLOAD,
+        )
+        # The original has already shipped -- confirmed before correcting,
+        # so a later failure can never be confused with "it never shipped".
+        original_outcomes = _outcome_invocations(result['jobs_argv'])
+        self.assertEqual(len(original_outcomes), 1, result['jobs_argv'])
+
+        sidecar_path = Path(result['sidecar_path'])
+        lines_before = [l for l in sidecar_path.read_text().splitlines() if l.strip()]
+        self.assertEqual(len(lines_before), 1, lines_before)
+        original_line_bytes = lines_before[0]
+        original_record = json.loads(original_line_bytes)
+
+        corr_bin = tempfile.mkdtemp(prefix='gsd-p47e2e-corr-bin-')
+        self.addCleanup(shutil.rmtree, corr_bin, ignore_errors=True)
+        self._write_outcome_update_capable_shim(corr_bin)
+
+        correction_env = dict(result['base_env'])
+        correction_env['PATH'] = corr_bin + os.pathsep + correction_env['PATH']
+        # REVENIUM_TEAM_ID short-circuits resolve_team_id's own
+        # `revenium config show` pipeline call (common.sh) -- the
+        # correction shim above deliberately answers no `config)` case, so
+        # this is what keeps Step 8's team-id resolution from failing.
+        correction_env['REVENIUM_TEAM_ID'] = 'p47e2e-team'
+        open(result['jobs_log'], 'w').close()
+
+        corrected_value = '999.99'  # clearly different from the derived estimate (375.0)
+        proc = subprocess.run(
+            ['bash', str(SCRIPTS_DIR / 'correct-assessment.sh'),
+             '--job-id', result['job_id'], '--value', corrected_value,
+             '--currency', 'USD', '--reason', 'p47e2e fixture correction'],
+            env=correction_env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            f'correct-assessment.sh must exit 0: stdout={proc.stdout!r} '
+            f'stderr={proc.stderr!r}',
+        )
+
+        lines_after = [l for l in sidecar_path.read_text().splitlines() if l.strip()]
+        self.assertEqual(
+            len(lines_after), 2,
+            f'a correction must APPEND a second line, never replace the '
+            f'first: {lines_after}',
+        )
+        self.assertEqual(
+            lines_after[0], original_line_bytes,
+            'the original job_assessment line must be byte-unchanged after '
+            'a correction -- append-not-replace (EGV-09, D-18)',
+        )
+        correction_record = json.loads(lines_after[1])
+        self.assertEqual(correction_record.get('kind'), 'correction', correction_record)
+        self.assertEqual(correction_record.get('sequence'), 1, correction_record)
+        self.assertEqual(
+            correction_record.get('prior_value_low'), original_record['value_low'],
+            correction_record,
+        )
+        self.assertEqual(
+            correction_record.get('prior_value_base'), original_record['value_base'],
+            correction_record,
+        )
+        self.assertEqual(
+            correction_record.get('prior_value_high'), original_record['value_high'],
+            correction_record,
+        )
+        self.assertEqual(correction_record.get('value_low'), float(corrected_value), correction_record)
+        self.assertEqual(correction_record.get('value_base'), float(corrected_value), correction_record)
+        self.assertEqual(correction_record.get('value_high'), float(corrected_value), correction_record)
+        self.assertEqual(correction_record.get('currency'), 'USD', correction_record)
+
+        # The real wire call correct-assessment.sh's own Step 8 makes --
+        # the ONLY path that ships a correction once the job's first
+        # outcome has already shipped (see the docstring above).
+        correction_argv = None
+        if os.path.exists(result['jobs_log']):
+            with open(result['jobs_log']) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    argv = shlex.split(line)
+                    if (
+                        len(argv) >= 3 and argv[0] == 'jobs'
+                        and argv[1] == 'outcome-update'
+                        and argv[2] == result['job_id']
+                    ):
+                        correction_argv = argv
+        self.assertIsNotNone(
+            correction_argv,
+            f'expected one jobs outcome-update invocation for job='
+            f'{result["job_id"]!r} in {result["jobs_log"]!r}',
+        )
+        self.assertIn('--outcome-value', correction_argv, correction_argv)
+        self.assertEqual(
+            correction_argv[correction_argv.index('--outcome-value') + 1],
+            str(correction_record['value_low']),
+            'the shipped --outcome-value must equal the corrected LOW bound '
+            f'read from the APPENDED record, never a number retyped in this '
+            f'test: argv={correction_argv!r}',
+        )
+        self.assertIn('--outcome-currency', correction_argv, correction_argv)
+        self.assertEqual(
+            correction_argv[correction_argv.index('--outcome-currency') + 1], 'USD',
+        )
+        correction_metadata_raw = _metadata_of(correction_argv)
+        self.assertIsNotNone(correction_metadata_raw, correction_argv)
+        correction_meta = json.loads(correction_metadata_raw)
+        # The correction MARKER a downstream consumer greps for to tell a
+        # revision from an original: `sequence`, present here and absent
+        # from every ordinary `jobs outcome` --metadata payload this module
+        # asserts elsewhere (e.g.
+        # test_valued_happy_path_ships_outcome_value_and_model_estimated_demo's
+        # `meta`, which has no 'sequence' key at all).
+        self.assertEqual(correction_meta.get('sequence'), correction_record['sequence'], correction_meta)
+        self.assertEqual(
+            correction_meta.get('prior_value_low'), original_record['value_low'], correction_meta,
+        )
+        self.assertEqual(
+            correction_meta.get('prior_value_base'), original_record['value_base'], correction_meta,
+        )
+        self.assertEqual(
+            correction_meta.get('prior_value_high'), original_record['value_high'], correction_meta,
+        )
+
+        # Structural idempotency check backing the docstring's empirical
+        # finding: a further ordinary tick must ship NOTHING further for
+        # this job -- the correction channel and the ordinary per-tick
+        # outcome channel do not double-report.
+        further_tick = self._run_tick(result)
+        self.assertEqual(further_tick['rc'], 0, further_tick['output'])
+        self.assertEqual(
+            _outcome_invocations(further_tick['jobs_argv']), [],
+            'a further ordinary tick must not re-ship an outcome for an '
+            f'already-reported, already-corrected job: {further_tick["jobs_argv"]}',
+        )
 
 
 if __name__ == '__main__':
