@@ -42,6 +42,7 @@ module-scoped restore. This module's own module-name prefix is
 `sys.modules` keys cannot collide when discovery interleaves this module
 with any other phase's isolated-import test module under `-p 'test_*.py'`.
 """
+import ast
 import asyncio
 import importlib.util
 import json
@@ -124,6 +125,88 @@ def _load_classifier(env=None):
     _sys.modules[name] = mod
     spec.loader.exec_module(mod)
     return _sys.modules[f'{name}.classifier'], _sys.modules[f'{name}.evaluators']
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (D-06 lower-bound closure) -- duplicated, not imported, from
+# tests/test_phase38_reporter_path.py:934-983's _extract_forwarder_record_keys.
+# Same discipline: anchor on the forwarder assignment string, isolate the
+# heredoc body, ast.parse it as a standalone module, walk for
+# record.get('<literal>') calls, and return None -- never a partial or
+# guessed list -- if the anchor moved or the body no longer parses.
+# ---------------------------------------------------------------------------
+def _extract_forwarder_record_keys(script_text):
+    """LOWER BOUND, not a complete inventory (see the analog's own
+    docstring, test_phase38_reporter_path.py:934-952): the bound family
+    (value_low/value_base/value_high) is read through a loop variable
+    (`record.get(_bound_key)`), not a literal `record.get('value_low')`, so
+    this ast walk over literal string arguments cannot see it."""
+    anchor = 'outcome_metadata=$('
+    start_marker = script_text.find(anchor)
+    if start_marker == -1:
+        return None
+    heredoc_start = script_text.find("<<'PY'", start_marker)
+    if heredoc_start == -1:
+        return None
+    body_start = script_text.find('\n', heredoc_start) + 1
+    body_end = script_text.find('\nPY\n', body_start)
+    if body_end == -1:
+        return None
+    body = script_text[body_start:body_end]
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return None
+    keys = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'get'
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'record'
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            keys.append(node.args[0].value)
+    return keys
+
+
+# Task 2: which of the extracted forwarder keys can the naked-LLM VALUED
+# path (SUCCESS -> assessment -> MODEL_ESTIMATED_DEMO -> reportable)
+# structurally never produce.
+#
+# Determined EMPIRICALLY (per this plan's own instruction), not guessed:
+# _extract_forwarder_record_keys(script_text) against the live
+# hermes-report.sh returns exactly 21 keys --
+#   bounds_source, assessment_schema_version, taxonomy_version,
+#   prompt_version, policy_version, evidence_class, reportability_status,
+#   economic_mechanism, net_value, supplied_costs, cost_coverage,
+#   double_counting_group, evaluator, evaluator_version, model,
+#   inference_provider, inference_address_class, confidence, assumptions,
+#   kind, sequence
+# -- and a record produced by driving the real classifier through
+# _drive_produced_arc's SUCCESS/reportable path (below) carries every one
+# of those 21 keys, INCLUDING 'sequence' (classifier.py's
+# _build_job_assessment sets it to the literal 0 on every record it
+# builds, job_assessment and abstention alike -- not correction-only, the
+# way test_phase38_reporter_path.py's HAND-AUTHORED _sidecar_record()
+# fixture implies via its own _SEQUENCE_ONLY_ON_CORRECTIONS exemption).
+# 'study_id'/'study_version' are NOT in the extracted list at all (the
+# forwarder heredoc has no literal record.get('study_id') call today), so
+# they are not a candidate for this set either way.
+#
+# The empirical result is therefore an EMPTY set: every literally-keyed
+# forwarder the reporter reads IS present on a classifier-produced,
+# naked-LLM valued sidecar. This is the finding this plan's own action
+# anticipated as a possible outcome ("If the diff contains a key that has
+# NO such justification, that is a real finding") -- here the finding runs
+# the other way: no exemption is needed, so none is added (this repo's
+# rule that an exemption set is never widened to make something pass,
+# applied in its stronger form: it is not populated at all when the data
+# does not require it).
+_UNREACHABLE_ON_THE_NAKED_LLM_VALUED_PATH = frozenset()
 
 
 def _outcome_invocations(jobs_argv):
@@ -505,6 +588,53 @@ class TestPhase47EndToEnd(unittest.TestCase):
         self.assertNotIn(
             _SENTINEL_ASSISTANT_TEXT, joined,
             f'seeded assistant transcript text leaked into captured argv: {all_tokens}',
+        )
+
+    # -- Task 2: close SidecarFixtureFidelityTests' lower bound ------------
+
+    def test_produced_sidecar_carries_every_literally_keyed_forwarder_key(self):
+        """Closes `SidecarFixtureFidelityTests`' own documented lower bound
+        (tests/test_phase38_reporter_path.py): that test proves the
+        HAND-AUTHORED `_sidecar_record()` fixture matches
+        hermes-report.sh's forwarder heredoc; this proves the artifact
+        PRODUCTION actually writes matches it too -- the closure that
+        fixture's own docstring declines to claim.
+
+        A moved/rewritten forwarder anchor must fail this test loudly
+        (via the None/empty assertions below), never pass it vacuously."""
+        script_text = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
+        keys = _extract_forwarder_record_keys(script_text)
+        self.assertIsNotNone(
+            keys,
+            'could not extract record.get(...) keys from hermes-report.sh '
+            '-- the --metadata forwarder heredoc moved and '
+            '_extract_forwarder_record_keys needs updating',
+        )
+        self.assertTrue(
+            keys,
+            'extracted zero forwarder keys -- the forwarder block moved or '
+            'the extractor is broken',
+        )
+
+        result = self._drive_produced_arc(
+            sid='p47e2e-fidelity-sid-001', job_id='p47e2e-fidelity-job-001',
+            task_type='code_review', eval_payload=self._VALUED_EVAL_PAYLOAD,
+        )
+        sidecar_lines = [
+            line for line in Path(result['sidecar_path']).read_text().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(sidecar_lines), 1, sidecar_lines)
+        record = json.loads(sidecar_lines[0])
+
+        missing = (
+            (set(keys) - _UNREACHABLE_ON_THE_NAKED_LLM_VALUED_PATH) - set(record.keys())
+        )
+        self.assertEqual(
+            missing, set(),
+            f'the produced sidecar is missing forwardable keys: {missing} -- '
+            'a missing key means the docs and the wire fixtures describe a '
+            f'shape the produced artifact never carries. record={record!r}',
         )
 
 
