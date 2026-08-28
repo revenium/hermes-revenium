@@ -1512,6 +1512,10 @@ PY
             if [[ -n "${precheck_job_type}" ]]; then
               precheck_jobs_cmd+=(--type "${precheck_job_type}")
             fi
+            # PR #101 / Greptile: this path was already correct — kept for contrast
+            # with the sibling in-loop stage (~line 2459), which regressed to the
+            # CLAMPED field until this fix. --environment must stay the raw ${source}
+            # on BOTH paths; only --metadata's source key has a byte ceiling.
             if [[ -n "${source}" ]]; then
               precheck_jobs_cmd+=(--environment "${source}")
             fi
@@ -2456,8 +2460,17 @@ PY
               jobs_cmd+=(--type "${job_type}")
             fi
             # Planner discretion (D-03): pass --environment from session source column.
-            if [[ -n "${job_env_source}" ]]; then
-              jobs_cmd+=(--environment "${job_env_source}")
+            # PR #101 / Greptile: --environment is a separate Revenium dimension from
+            # the --metadata transport that CR-01 (d2606f0) clamped. job_env_source is
+            # the CLAMPED pipe field (4th column of job_rows, shared with --metadata's
+            # source key) — using it here regressed --environment to a 64-byte-truncated
+            # value on this path while the precheck path (~line 1516) kept shipping the
+            # raw ${source}. Use the raw, in-scope ${source} bash variable directly (the
+            # same one lines 2653/2819/1516 already pass to --environment) so both
+            # jobs-create paths agree byte-for-byte, matching pre-d2606f0 behavior.
+            # Only --metadata has a byte ceiling; --environment has none.
+            if [[ -n "${source}" ]]; then
+              jobs_cmd+=(--environment "${source}")
             fi
             # quick-260605: pass teamId explicitly when resolved (omitted in tests).
             if [[ -n "${REVENIUM_TEAM_ID_RESOLVED}" ]]; then
