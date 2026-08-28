@@ -238,6 +238,11 @@ class RepositoryTests(unittest.TestCase):
             # ceiling and truncation marker, proven against the REAL
             # forwarder heredoc extracted live from hermes-report.sh.
             ROOT / 'tests' / 'test_phase46_metadata_envelope.py',
+            # Phase 46 (PR #101, Greptile) — the --environment dimension stays
+            # RAW on both jobs-create paths while --metadata's source stays
+            # clamped; pins the divergence so a later 'consistency fix' cannot
+            # silently re-clamp a dimension that has no byte ceiling.
+            ROOT / 'tests' / 'test_phase46_environment_divergence.py',
             # Phase 32 Plan 04 — operator document for the event-driven
             # metering rollout (switches, drain gate, known differences, rollback)
             ROOT / 'docs' / 'event-metering.md',
