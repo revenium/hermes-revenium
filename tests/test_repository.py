@@ -1838,6 +1838,72 @@ exit 0
             f'guarantee the skill cannot make',
         )
 
+    def test_no_prohibited_claim_language_left(self):
+        """EGV-25: the five prohibited phrases must not appear anywhere in
+        the shipped tree.
+
+        D-04 chose the WIDER seven-extension sweep `test_no_legacy_branding_left`
+        uses (rglob everything, `.md/.sh/.py/.txt/.json/.yml/.yaml`, skip
+        `.planning/`) over the narrower `.md`-only idiom
+        `test_docs_make_no_data_locality_claim` uses above, so a claim
+        smuggled into a code comment or a log string cannot ship unguarded.
+
+        This is a literal pattern scan. It does not attempt to detect negation,
+        qualification, or sentence boundaries — a sentence that names a
+        forbidden claim while denying it ("not measured ROI") still matches,
+        by design (D-01). The same-sentence-qualifier alternative was
+        rejected because negation detection is precisely where guards in this
+        repo have historically broken.
+
+        Per D-05, the five phrases below exist in literal form ONLY inside
+        this file — the self-exclusion by filename is therefore load-bearing,
+        not incidental, exactly as CLAUDE.md's "Legacy naming guards" section
+        already instructs for the branding list: read the disallowed strings
+        in the test's regex rather than reproducing them elsewhere.
+
+        The allowed vocabulary EGV-25 also enumerates ("model-estimated
+        value", "configured value estimate", "observed outcome", etc.) is
+        deliberately NOT asserted here (D-03) — a presence assertion for it
+        would either pass vacuously or force stilted prose into shipped text.
+
+        No exemption of any kind exists beyond the self-exclusion below. Per
+        this repo's rule, an exemption set is never widened to make
+        something pass — a failure here means the offending sentence gets
+        rewritten, not that this guard grows a path exemption.
+        """
+        forbidden = [
+            r'\bmeasured ROI\b',
+            r'\bactual savings\b',
+            r'\bthe agent caused\b',
+            r'\bproven business value\b',
+            r'\bcausal impact\b',
+        ]
+        # Same discovery/exclusion idiom as test_no_legacy_branding_left below
+        # (rglob everything, seven-extension allowlist, skip .planning/, skip
+        # this test file itself) — see that test's own comment for why
+        # .planning/ is excluded.
+        offenders = []
+        for path in ROOT.rglob('*'):
+            if not path.is_file():
+                continue
+            if path.suffix not in {'.md', '.sh', '.py', '.txt', '.json', '.yml', '.yaml'}:
+                continue
+            if path.name == 'test_repository.py':
+                continue
+            rel = path.relative_to(ROOT)
+            if rel.parts and rel.parts[0] == '.planning':
+                continue
+            text = path.read_text(errors='ignore')
+            for pattern in forbidden:
+                if re.search(pattern, text, re.IGNORECASE):
+                    offenders.append((str(rel), pattern))
+        self.assertEqual(
+            offenders, [],
+            f'found prohibited claim language: {offenders} — rewrite the '
+            f'offending sentence using EGV-25\'s allowed vocabulary instead '
+            f'of widening this guard\'s exemption set',
+        )
+
     def test_no_legacy_branding_left(self):
         # Scope is everything that SHIPS with the skill: skills/, scripts, tests, docs,
         # README.md, CLAUDE.md, examples/. The .planning/ tree is internal planning
