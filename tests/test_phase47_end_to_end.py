@@ -696,6 +696,75 @@ class TestPhase47EndToEnd(unittest.TestCase):
         meta = json.loads(metadata_raw)
         self.assertIn('evaluator', meta, meta)
         self.assertIn('evaluator_version', meta, meta)
+    # -- Plan 47-02 Task 2: the withheld/candidate path (D-07 path 3) ------
+
+    def test_withheld_candidate_path_withholds_value_and_keeps_provenance(self):
+        """D-07 path 3: the SAME third stub response path 1's valued arc
+        uses (same mechanism, hours, rate, currency, confidence -- the
+        evaluator makes an identical decision), against a config that
+        differs from path 1's by exactly ONE key --
+        `experimentalReportEstimates` omitted entirely. Proves the
+        reportability GATE, not the evaluator, decides what may be
+        reported (EGV-18): the classifier still computes and PERSISTS a
+        real value band locally (the sidecar carries `value_low`), but
+        `jobs outcome` never carries either outcome-value flag, while
+        provenance (evidence_class, evaluator, evaluator_version, model)
+        still ships. `reportability_status` on the shipped --metadata
+        equals the SAME literal `_resolve_reportability_status` returns
+        for a non-abstained, gate-closed record
+        (skills/revenium/plugins/revenium-classifier/classifier.py:
+        REPORTABILITY_CANDIDATE = "candidate") -- asserted here as the
+        literal string 'candidate' so a grep for that string finds it in
+        both files."""
+        withheld_config = {
+            'llmOutcomeEvaluation': {
+                'enabled': True,
+                # experimentalReportEstimates deliberately OMITTED -- the
+                # one differing key from path 1's default config. Nothing
+                # else changes.
+                'currency': 'USD',
+                'maxHoursSaved': 40,
+                'maxLoadedRate': 500,
+                'costs': {'code_review': {'human_review': 0.0}},
+            },
+        }
+        result = self._drive_produced_arc(
+            sid='p47e2e-withheld-sid-001', job_id='p47e2e-withheld-job-001',
+            task_type='code_review', config=withheld_config,
+            eval_payload=self._VALUED_EVAL_PAYLOAD,
+        )
+
+        sidecar_lines = [
+            line for line in Path(result['sidecar_path']).read_text().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(sidecar_lines), 1, sidecar_lines)
+        sidecar = json.loads(sidecar_lines[0])
+        self.assertIn('value_low', sidecar, sidecar)
+        self.assertIsInstance(sidecar['value_low'], (int, float), sidecar)
+
+        outcomes = _outcome_invocations(result['jobs_argv'])
+        self.assertEqual(
+            len(outcomes), 1,
+            f'expected exactly one jobs outcome invocation for job='
+            f'{result["job_id"]!r} across both ticks: {result["jobs_argv"]}',
+        )
+        argv = outcomes[0]
+        self.assertEqual(argv[2], result['job_id'])
+        for flag in _VALUE_FLAG_TOKENS:
+            self.assertNotIn(
+                flag, argv,
+                f'withheld/candidate arc must not ship {flag!r}: argv={argv!r}',
+            )
+
+        metadata_raw = _metadata_of(argv)
+        self.assertIsNotNone(metadata_raw, argv)
+        meta = json.loads(metadata_raw)
+        self.assertIn('evidence_class', meta, meta)
+        self.assertIn('evaluator', meta, meta)
+        self.assertIn('evaluator_version', meta, meta)
+        self.assertIn('model', meta, meta)
+        self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
 
 
 if __name__ == '__main__':
