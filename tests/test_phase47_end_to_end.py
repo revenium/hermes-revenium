@@ -696,6 +696,7 @@ class TestPhase47EndToEnd(unittest.TestCase):
         meta = json.loads(metadata_raw)
         self.assertIn('evaluator', meta, meta)
         self.assertIn('evaluator_version', meta, meta)
+
     # -- Plan 47-02 Task 2: the withheld/candidate path (D-07 path 3) ------
 
     def test_withheld_candidate_path_withholds_value_and_keeps_provenance(self):
@@ -765,6 +766,82 @@ class TestPhase47EndToEnd(unittest.TestCase):
         self.assertIn('evaluator_version', meta, meta)
         self.assertIn('model', meta, meta)
         self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
+
+    # -- Plan 47-02 Task 3: the negative/zero net-value path (D-07 path 4) -
+
+    def test_negative_net_value_stays_visible_with_the_value_family_intact(self):
+        """D-07 path 4 (EGV-17): a supplied cost AT OR ABOVE the derived
+        estimate leaves `net_value` strictly below zero -- and the record
+        stays VISIBLE rather than clamped to zero, suppressed, or dropped.
+        The same valued third stub response as path 1
+        (estimated_hours_saved=2.5, assumed_loaded_rate=150.0, so the
+        derived estimate is 375.0) is driven with
+        `experimentalReportEstimates: true` and a `costs` entry for this
+        arc's own job type of `human_review: 500.0` -- above the derived
+        estimate. The expected net is computed from the SIDECAR's own
+        recorded `estimated_value` and `supplied_costs`, never a retyped
+        constant, so this test pins the arithmetic relationship, not a
+        number this test would then be pinning against itself.
+
+        Load-bearing: a negative result that vanished from the record
+        would look identical to a job that was never valued -- exactly
+        the substitution EGV-17 exists to prevent."""
+        negative_config = {
+            'llmOutcomeEvaluation': {
+                'enabled': True,
+                'experimentalReportEstimates': True,
+                'currency': 'USD',
+                'maxHoursSaved': 40,
+                'maxLoadedRate': 500,
+                'costs': {'code_review': {'human_review': 500.0}},
+            },
+        }
+        result = self._drive_produced_arc(
+            sid='p47e2e-negative-sid-001', job_id='p47e2e-negative-job-001',
+            task_type='code_review', config=negative_config,
+            eval_payload=self._VALUED_EVAL_PAYLOAD,
+        )
+
+        sidecar_lines = [
+            line for line in Path(result['sidecar_path']).read_text().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(sidecar_lines), 1, sidecar_lines)
+        sidecar = json.loads(sidecar_lines[0])
+
+        expected_net = round(
+            sidecar['estimated_value'] - sum(sidecar['supplied_costs'].values()), 2,
+        )
+        self.assertLess(
+            expected_net, 0,
+            f'fixture setup error -- the configured cost must exceed the '
+            f'derived estimate for this to be a negative-net probe: {sidecar!r}',
+        )
+        self.assertEqual(
+            sidecar['net_value'], expected_net,
+            f'the sidecar\'s own net_value must equal estimated_value minus '
+            f'the sum of supplied_costs: sidecar={sidecar!r}',
+        )
+
+        outcomes = _outcome_invocations(result['jobs_argv'])
+        self.assertEqual(
+            len(outcomes), 1,
+            f'a negative net value must not suppress the outcome report: '
+            f'job={result["job_id"]!r} jobs_argv={result["jobs_argv"]}',
+        )
+        argv = outcomes[0]
+        self.assertEqual(argv[2], result['job_id'])
+
+        metadata_raw = _metadata_of(argv)
+        self.assertIsNotNone(metadata_raw, argv)
+        meta = json.loads(metadata_raw)
+        self.assertIn('net_value', meta, meta)
+        self.assertEqual(meta['net_value'], sidecar['net_value'], meta)
+        self.assertIn('value_low', meta, meta)
+        self.assertIn('value_base', meta, meta)
+        self.assertIn('value_high', meta, meta)
+        self.assertIn('supplied_costs', meta, meta)
+        self.assertIn('cost_coverage', meta, meta)
 
 
 if __name__ == '__main__':
