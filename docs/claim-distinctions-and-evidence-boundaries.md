@@ -280,3 +280,59 @@ Why this matters: work that produced no value and work that was never valued mus
 same in the data. An abstained outcome, a withheld candidate, and a negative net value are each
 a different, honest fact about a job — collapsing any of them into a blank or a zero would
 erase the distinction between "nothing to report" and "something to report, but not this way."
+
+## What this milestone does not ship
+
+Every item below is stated as an absence, not as something scheduled. Nothing here is a
+commitment about what happens next; it is a record of what this tree does not contain today.
+
+**No local classifier model ships here.** Classification and outcome evaluation both run
+through an LLM call on the operator's own configured provider. Nothing in this tree runs an
+on-device or locally-hosted model of any kind.
+
+**No customer-configured value policy produces a recorded value here.** The pluggable
+boundaries exist as contracts and carry non-LLM fixtures proving they fit, but nothing in this
+tree turns an operator's own rate card, pricing table, or business rule into the class
+actually written to a persisted record.
+
+**No system-of-record outcome adapter ships here.** Nothing in this tree observes a downstream
+system — a ticketing tool, an incident tracker, a revenue system — to confirm that a claimed
+outcome occurred. Every outcome this skill records is self-reported by the classifier from the
+session transcript alone.
+
+**Nothing here produces a causal claim.** The impact-study structure is a contract only — no
+estimator, no experiment orchestration, nothing that runs an identification strategy. An
+individual job may carry a reference to such a study without that reference letting a cohort
+estimate stand in for an individually observed cause. No evaluator anywhere in this tree can
+produce either of the two impact-shaped evidence classes; this is enforced structurally, not by
+convention or reviewer discipline.
+
+**The relationship between a job assessment and an impact study result is not implemented.**
+This is stated as an absence, not a partial feature: an assessment carries a slot that could
+reference a study, and nothing in this tree fills that slot and nothing reads it.
+
+### Two requirements recorded as partial rather than closed
+
+**EGV-02 — a later implementation fits without masquerading.** True today: all six pluggable
+boundaries exist as registries, and each carries a non-LLM fixture that declares its own,
+honest evidence class rather than borrowing the naked-LLM path's `MODEL_ESTIMATED_DEMO`. Not
+true today: a configured boundary's own declared class does not reach the persisted record —
+resolution runs against the evaluators registry only, so an active valuation or evidence
+boundary's declared class is not what ends up on the sidecar. The recorded class therefore
+under-claims rather than over-claims, which is the safe direction — no record ever shows more
+certainty than it should. This was left open rather than patched because closing it needs a
+cross-boundary precedence rule that no decision covers — which class wins when the evaluator,
+the valuation boundary, and the evidence boundary each declare one — and because letting a
+boundary declaration raise a recorded class is the same mechanism as the promotion path this
+product structurally closed elsewhere; patching around that mechanism here would reopen it by
+a side door.
+
+**EGV-05 — six economic mechanisms are representable.** True today: all six mechanism values
+are representable on the wire and accepted by the reporter's allow-list. Not true today: three
+of the six — the operator-declared mechanisms — have no producer anywhere in this tree. No
+configuration key sets one, no CLI flag sets one, and the correction path does not set one
+either. They are representable and accepted; they are not reachable.
+
+Both gaps are recorded in full, including their re-deferral history, in
+`.planning/REQUIREMENTS.md`. That file is the authoritative record of both; this page states
+them here so a reader who never opens the gitignored planning tree still sees them.
