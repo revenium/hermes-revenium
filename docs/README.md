@@ -23,6 +23,12 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 - **[Upgrading](upgrading.md)** — four upgrade paths and what has to be re-run after each.
 - **[Operations](operations.md)** — manual commands, diagnostics, uninstall, and the tests.
 
+## Claim discipline
+
+- **[Claim distinctions and evidence boundaries](claim-distinctions-and-evidence-boundaries.md)**
+  — output vs. outcome vs. valuation vs. impact vs. ROI, the results chain, the product-truth
+  boundary, and what this milestone deliberately does not ship.
+
 ## Going deeper
 
 - **[Event metering](event-metering.md)** — the v1.5 event path: mechanism, the drain gate,
