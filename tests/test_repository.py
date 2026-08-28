@@ -253,9 +253,16 @@ class RepositoryTests(unittest.TestCase):
             # Milestone closeout records. Deliberately NOT under docs/internal/
             # — that tree is gitignored (see .gitignore), so a closeout placed
             # there dies with the working tree, which is what forced the
-            # 2026-06-06 roadmap reconstruction. Pinned here for the same
-            # reason docs/auxiliary-usage-sizing.md was: registering the file
-            # makes deleting it turn the suite red.
+            # 2026-06-06 roadmap reconstruction.
+            #
+            # There is no prior pinned closeout to cite as precedent, and that
+            # absence is the argument for this line. The 2026-08-15 decision
+            # was to commit sizing verdicts to docs/ AND register them here so
+            # deletion turns the suite red; the registration half never
+            # happened, auxiliary-usage-sizing.md was later swept into
+            # docs/internal/, and it is untracked today. Same for the v1.3 and
+            # v1.4 closeouts, which .planning/MILESTONES.md still describes as
+            # "git-tracked". Pinning is what makes the difference.
             ROOT / 'docs' / 'internal-milestones.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',

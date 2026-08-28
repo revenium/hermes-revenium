@@ -146,13 +146,6 @@ study reference (`studyId`/`studyVersion`).
 - **Whether real sessions cluster near the value bounds is still unmeasured**,
   carried forward from the previous milestone.
 
-- **One deferred test-design item.**
-  `GuardPermanenceTests.test_root_markers_dir_memoized_for_top_level_sessions`
-  counts the raw substring `resolve_markers_dir` and expects three; a comment in
-  `hermes-report.sh` contains the literal string, pushing the count to four. The
-  invariant itself is intact — three real call sites remain. The fix is to reword
-  the comment or to match call syntax rather than any substring.
-
 ### Decisions worth carrying forward
 
 1. **Open a milestone with reconciliation when the specification describes an
