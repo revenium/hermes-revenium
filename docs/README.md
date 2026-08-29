@@ -60,6 +60,9 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 - **[Evidence-class precedence and declaration authority](evidence-class-precedence.md)**
   — the Phase 48 reconciliation verdict and the cross-boundary `evidence_class`
   precedence rule that Phase 50 and Phase 51 both plan against.
+- **[Live envelope verification](live-envelope-verification.md)** — whether a real
+  Revenium API accepts the bounded `--metadata` envelope, measured against a live
+  tenant rather than fixtures, with the limits of that result stated.
 
 ## Inside the skill bundle
 

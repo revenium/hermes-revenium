@@ -283,6 +283,12 @@ class RepositoryTests(unittest.TestCase):
             # gitignored, so an unpinned copy can vanish exactly the way the
             # v1.3 and v1.4 closeouts did.
             ROOT / 'docs' / 'evidence-class-precedence.md',
+            # Phase 49 (LIVE-01) — the live-tenant record proving the bounded
+            # --metadata envelope is accepted by a real API. Phase 52 plans
+            # against it as a confirmed fact, and `.planning/` is gitignored,
+            # so an unpinned copy can vanish the way the v1.3 and v1.4
+            # closeouts did.
+            ROOT / 'docs' / 'live-envelope-verification.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
