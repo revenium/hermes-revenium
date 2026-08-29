@@ -326,6 +326,38 @@ class OperatorMechanismTests(unittest.TestCase):
                   '--attribution-basis', 'b')
         self.assertNotIn('CUSTOMER_CONFIGURED', p.read_text())
 
+    def test_chained_mechanism_only_corrections_preserve_the_valuation(self):
+        """Greptile (PR #110): a mechanism-only correction has no value
+        family, so the NEXT correction would snapshot its absent values and
+        write an empty prior_value_*. Two chained corrections then leave the
+        reporter nothing to promote and the standing valuation vanishes.
+
+        Fixed at the write side: prior_value_* records the true standing
+        value however many valueless corrections precede it."""
+        p = self._seed('job-chain')
+        for m in ('risk_avoidance', 'incremental_revenue', 'quality_decision_improvement'):
+            r = self._run('--job-id', 'job-chain', '--mechanism', m, '--reason', f'chain {m}')
+            self.assertEqual(r.returncode, 0, r.stderr)
+        corrections = self._corrections(p)
+        self.assertEqual(len(corrections), 3)
+        for i, c in enumerate(corrections):
+            with self.subTest(correction=i):
+                self.assertNotIn('value_base', c)
+                self.assertEqual(
+                    c['prior_value_base'], 20.0,
+                    'the standing value must survive every link in the chain',
+                )
+
+    def test_a_valued_correction_still_resets_the_standing_value(self):
+        """The carry-forward fills a gap; it must not pin the original value
+        forever once an operator supplies a new one."""
+        p = self._seed('job-reset')
+        self._run('--job-id', 'job-reset', '--mechanism', 'risk_avoidance', '--reason', 'a')
+        self._run('--job-id', 'job-reset', '--value', '99', '--currency', 'USD', '--reason', 'b')
+        self._run('--job-id', 'job-reset', '--mechanism', 'incremental_revenue', '--reason', 'c')
+        last = self._corrections(p)[-1]
+        self.assertEqual(last['prior_value_base'], 99.0)
+
 
 class ReporterAttributionAndValueTests(unittest.TestCase):
     """Greptile findings on PR #110, both against hermes-report.sh's reader

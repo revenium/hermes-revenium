@@ -374,6 +374,7 @@ def _clean(v):
 target_clean = _clean(raw_job_id)
 
 found = None
+valued = None
 line_count = 0
 correction_count = 0
 if os.path.exists(sidecar_path):
@@ -401,6 +402,35 @@ if os.path.exists(sidecar_path):
                 # reader in hermes-report.sh uses (41-CARRIER-DECISION.md
                 # Part 2's last-match-wins property).
                 found = rec
+                # Greptile (PR #110), Phase 51 D-08: track the last record
+                # that actually CARRIED a value, separately from the last
+                # record overall.
+                #
+                # A mechanism-only correction has no value family, so on a
+                # plain last-match-wins read the NEXT correction would
+                # snapshot its absent values and write an empty
+                # prior_value_*. Two chained mechanism-only corrections
+                # would then leave nothing for the reporter to promote, and
+                # the standing valuation would vanish from the wire --
+                # exactly the defect the one-level promotion was meant to
+                # close, one link further down the chain.
+                #
+                # Fixed at the WRITE side so prior_value_* always records
+                # the true standing value, however many valueless
+                # corrections precede it. That keeps every correction record
+                # self-describing rather than requiring a reader to walk
+                # backwards through history.
+                if rec.get('value_base') is not None:
+                    valued = rec
+                elif rec.get('kind') == 'correction' and rec.get('prior_value_base') is not None:
+                    # A valueless correction still carries the standing
+                    # value it inherited; carry it forward unchanged.
+                    valued = {
+                        'value_low': rec.get('prior_value_low'),
+                        'value_base': rec.get('prior_value_base'),
+                        'value_high': rec.get('prior_value_high'),
+                        'currency': rec.get('prior_currency'),
+                    }
     except OSError:
         pass
 
@@ -410,10 +440,13 @@ if found is None:
     print('FOUND=0')
 else:
     print('FOUND=1')
-    print(f"CURRENT_VALUE_LOW={found.get('value_low', '')}")
-    print(f"CURRENT_VALUE_BASE={found.get('value_base', '')}")
-    print(f"CURRENT_VALUE_HIGH={found.get('value_high', '')}")
-    print(f"CURRENT_CURRENCY={found.get('currency', '')}")
+    # Emitted from `valued`, not `found`: the standing value survives any
+    # number of valueless corrections in between.
+    _v = valued if valued is not None else {}
+    print(f"CURRENT_VALUE_LOW={_v.get('value_low') if _v.get('value_low') is not None else ''}")
+    print(f"CURRENT_VALUE_BASE={_v.get('value_base') if _v.get('value_base') is not None else ''}")
+    print(f"CURRENT_VALUE_HIGH={_v.get('value_high') if _v.get('value_high') is not None else ''}")
+    print(f"CURRENT_CURRENCY={_v.get('currency') if _v.get('currency') is not None else ''}")
 PY
 )
 
