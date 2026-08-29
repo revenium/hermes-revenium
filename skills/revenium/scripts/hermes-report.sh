@@ -3149,6 +3149,33 @@ try:
 except OSError:
     pass
 
+# Greptile (PR #110), Phase 51 D-08: a mechanism-only correction carries NO
+# value family -- absent by decision, so a correction never restates a
+# valuation the operator did not supply. But the reader above replaces the
+# effective record WHOLESALE (`found = rec`, last-match-wins, deliberate per
+# 41-CARRIER-DECISION.md), so such a correction would otherwise make every
+# downstream consumer see a record with no value at all: --outcome-value
+# would go empty, the bound forwarders would emit nothing, and a perfectly
+# good standing valuation would be silently dropped from the wire.
+#
+# Normalised HERE, once, rather than at each of the three consumer sites --
+# the value flag, the bound-triple validity check, and the --metadata bound
+# forwarder -- because patching consumers is how one of them gets missed.
+#
+# On a correction, `prior_value_*` IS the standing value; recording it is
+# that field's entire purpose. It is promoted only into a gap: a correction
+# that carries its own value keeps it untouched, and a job_assessment is
+# never touched at all.
+if isinstance(found, dict) and found.get('kind') == 'correction':
+    for _cur, _prior in (
+        ('value_low', 'prior_value_low'),
+        ('value_base', 'prior_value_base'),
+        ('value_high', 'prior_value_high'),
+        ('currency', 'prior_currency'),
+    ):
+        if found.get(_cur) is None and found.get(_prior) is not None:
+            found[_cur] = found[_prior]
+
 if found is None:
     # D-10 diagnostic reason word (Phase 42 Plan 04): tell "never
     # evaluated" apart from "evaluated by an older classifier, sidecar
@@ -3959,9 +3986,18 @@ if assessment_raw:
                 and _af not in (float('inf'), float('-inf'))
                 and 0.0 <= _af <= 1.0
             ):
-                meta['attribution_fraction'] = _af
+                # Greptile (PR #110): the PAIR is validated together, never
+                # the fraction alone. correct-assessment.sh refuses a
+                # fraction without a basis, but the reporter reads whatever
+                # is on disk -- a legacy, hand-edited, or partially-written
+                # sidecar can carry a valid fraction with no basis, and
+                # shipping it would put a naked number on the wire, defeating
+                # the one constraint the whole design rests on. A fraction
+                # whose basis is missing is not forwarded at all: an absent
+                # attribution is honest, a naked one is not.
                 attribution_basis = record.get('attribution_basis')
-                if isinstance(attribution_basis, str) and attribution_basis:
+                if isinstance(attribution_basis, str) and attribution_basis.strip():
+                    meta['attribution_fraction'] = _af
                     meta['attribution_basis'] = attribution_basis[:500]
 
 # Phase 46 (EGV-19, D-01/D-02/D-03): bounded emit -- the single place the

@@ -327,5 +327,50 @@ class OperatorMechanismTests(unittest.TestCase):
         self.assertNotIn('CUSTOMER_CONFIGURED', p.read_text())
 
 
+class ReporterAttributionAndValueTests(unittest.TestCase):
+    """Greptile findings on PR #110, both against hermes-report.sh's reader
+    rather than the operator CLI -- the reporter reads whatever is on disk,
+    so the CLI's own guarantees do not bind it."""
+
+    def _forwarder_src(self):
+        return (ROOT / 'skills' / 'revenium' / 'scripts' / 'hermes-report.sh').read_text()
+
+    def test_attribution_pair_is_gated_together_not_separately(self):
+        """A legacy or hand-edited sidecar can carry a valid fraction with no
+        basis. Shipping the fraction alone would put a naked number on the
+        wire, defeating the single constraint the design rests on."""
+        src = self._forwarder_src()
+        i = src.index("attribution_fraction = record.get('attribution_fraction')")
+        block = src[i:i + 1400]
+        frac_at = block.index("meta['attribution_fraction']")
+        basis_guard = block.index("attribution_basis.strip()")
+        self.assertLess(
+            basis_guard, frac_at,
+            'the basis must be validated BEFORE the fraction is inserted, '
+            'or a fraction can ship without one',
+        )
+
+    def test_correction_promotes_prior_values_into_a_gap(self):
+        """A mechanism-only correction carries no value family, and the
+        reader replaces the effective record wholesale -- so without
+        promotion the reporter drops a standing valuation."""
+        src = self._forwarder_src()
+        self.assertIn("found.get('kind') == 'correction'", src)
+        self.assertIn("('value_base', 'prior_value_base')", src)
+        self.assertIn("('currency', 'prior_currency')", src)
+
+    def test_promotion_only_fills_a_gap_never_overrides(self):
+        src = self._forwarder_src()
+        i = src.index("if found.get(_cur) is None and found.get(_prior) is not None:")
+        self.assertGreater(i, 0, 'promotion must be gated on the current value being absent')
+
+    def test_promotion_is_scoped_to_corrections(self):
+        """A job_assessment has no prior_value_* and must never be touched."""
+        src = self._forwarder_src()
+        block_at = src.index("if isinstance(found, dict) and found.get('kind') == 'correction':")
+        loop_at = src.index("for _cur, _prior in (", block_at)
+        self.assertLess(block_at, loop_at)
+
+
 if __name__ == '__main__':
     unittest.main()
