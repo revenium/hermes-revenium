@@ -308,3 +308,113 @@ is "stronger" than another. `classifier.py:1078-1097` states the nine labels are
 unordered by design and forbids sorting, ranking, or comparing them as an ordering key; this
 rule never compares two label strings against each other at all, so that constraint is never at
 stake.
+
+## Falsification conditions
+
+These conditions are written down before Phase 50 or Phase 51 evaluates them — that is
+RECON-04's own requirement (ROADMAP criterion 3), not a formality: a falsification condition
+recorded after the implementation it gates has already run is not a gate, it is a
+rationalisation. Each of the four conditions below states both the observation that would
+falsify the rule and what happens when it fires (D-11) — "the condition fired and we proceeded
+anyway" is precisely the failure a pre-committed gate exists to prevent. The four are D-12's
+locked set. No test can prove a falsifier set exhaustive; this section states the four that were
+named, not a claim that no fifth exists.
+
+### Falsifier 1 — an adversarial fixture obtains a boundary-declared class
+
+**The observation.** A hostile evaluator response, run through the real
+`_validate_assessment`/`_build_job_assessment` construction path under Phase 50's implementation
+of this rule, produces a persisted `evidence_class` equal to a value the response itself
+asserted — through any of the rule's new inputs, not only the fields already guarded today —
+rather than a value traced to a `register()`-time declaration.
+
+**What already covers it, and what does not.** Partially covered today. `PromotionTests`
+(`tests/test_phase43_evidence_grading.py:626`) runs `_hostile_evaluator_response()`'s eight
+attacks through the real construction path, and `test_a1_direct_label_promotion_is_ignored`
+(`:668`) asserts the direct label-promotion attack fails to obtain `EXPERIMENTAL_IMPACT`; the
+ast walk over `_PROMOTION_FORBIDDEN_KEYS` (`tests/test_phase43_evidence_grading.py:484-493`, walk
+at `:560-621`) proves no future edit can start reading the class off `raw` without turning the
+suite red. That covers the untrusted-model-output half. It does not cover the trusted-registrant
+half — a different threat model — which is what D-02 addresses and what falsifier 3 below is
+about.
+
+**Disposition:** Fatal, and it routes to the won't-fix trigger below, not to a narrowing. This
+document's D-01 premise is that a registration-time declaration by trusted code is structurally
+unable to read evaluator output — a different threat model from the one
+`_forced_evidence_class()` defends against, which is what makes EGV-02 closeable at all. If this
+falsifier fires despite that premise, the premise was wrong in practice: implementing the
+priority walk reopened, by some path this document did not anticipate, the promotion path Phase
+43 structurally closed. That is not a bug to patch inside Phase 50 — it is the ROADMAP's own
+anticipated Phase 50 outcome (see `## The won't-fix trigger` below), and EGV-02 closes as a
+recorded won't-fix rather than shipping a rule that reopens what Phase 43 shut.
+
+### Falsifier 2 — the rule cannot be sited once
+
+**The observation.** Building the priority walk forces the same resolve-and-compare logic to be
+written independently at more than one place — for example, inlined separately inside
+`_validate_assessment` and again inside `_build_job_assessment`, rather than both calling one
+shared function — so that a future change to the rule requires touching more than one call site
+to stay consistent.
+
+**What already covers it, and what does not.** No existing test, because no precedence rule
+exists yet. The concrete code-level reason this risk is real rather than hypothetical:
+`_validate_assessment` resolves the active valuation impl name locally at `classifier.py:1461`
+and never resolves the evidence-boundary impl name anywhere in its own body;
+`_resolve_reportability_status` — a different function — resolves the active evidence impl name
+at `classifier.py:2011`; `_build_job_assessment` resolves neither and receives `evaluator` as a
+parameter only. The natural first draft of "also check valuation and evidence" is tempted to
+inline a resolve-and-compare block separately at each record site, because each has different
+information already in local scope. `boundary_registry.py`'s own docstring records a fixed
+defect of exactly this shape: an earlier draft of `evaluators.py`'s `version` handling resolved
+metadata by comparing the registrant's name at the call site (`LLM_EVALUATOR_VERSION if name ==
+"llm" else ""`), which silently dropped the version of every registrant but one — the reason
+`boundary_registry.py` declares per-registrant metadata once, at registration, and never
+re-derives it at a call site.
+
+**Disposition:** Narrow, not fatal. If the rule cannot be sited once against
+`_validate_assessment` and `_build_job_assessment` as they are shaped today, the fix is
+architectural, not a reversal of D-01's chosen shape: extract the priority walk into one function
+inside `classifier.py` — mirroring `_declared_evidence_class`'s own existing shape — that both
+record sites call, supplying their locally-resolved valuation/evidence declarations as
+arguments, rather than re-deriving the walk at each site. Fixed boundary priority survives; only
+the plumbing narrows to enforce DECL-02 the way `boundary_registry.py` already enforces it for
+`version`.
+
+### Falsifier 3 — a causal label becomes reachable from config
+
+**The observation.** Any path — direct or indirect — by which a trusted registrant's declared
+class reaches a persisted `evidence_class` record carrying one of the three reserved
+causal-impact labels: `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`, or `EXPERIMENTAL_IMPACT`.
+
+**What already covers it, and what does not.** No existing coverage at all. `classifier.py:1218`
+passes the full nine-label `EVIDENCE_CLASSES` frozenset as `allowed`, so the membership test
+alone does not refuse the three labels D-02 reserves. Nothing reaches a record today only
+because `_declared_evidence_class` resolves the `output_assessment` registry alone. Closing this
+is Phase 50's narrowing of the `allowed` argument at that one site.
+
+**Disposition:** Revise before shipping — not fatal to the rule, and not a won't-fix trigger.
+This falsifier guards D-02 specifically, not D-01: if it fires, Phase 50's allow-list narrowing
+at `classifier.py:1218` was incomplete or wrong, and the fix is to correct that one narrowing
+(refuse exactly the three reserved labels, verified by test against every boundary this rule can
+reach) before the rule ships. D-02 is rated costly, not one-way, reversibility precisely because
+this kind of revision is expected to be possible without reopening D-01's own premise.
+
+### Falsifier 4 — feature-off behaviour shifts
+
+**The observation.** An install with no `boundaries` object in `config.json` records or meters
+anything differently than it does today — any change to what `hermes-report.sh` ships in
+`--metadata`, any new job-assessment sidecar file, any ledger-line shape change — once Phase 50's
+priority walk exists in the tree.
+
+**What already covers it, and what does not.** Dedicated driven coverage today.
+`tests/test_phase46_feature_off.py` (EGV-22, D-08) asserts byte-identity across two cron ticks
+with `llmOutcomeEvaluation.enabled=false`. It does not need to be built; it needs to be re-run
+once Phase 50 lands.
+
+**Disposition:** Revise before shipping — not fatal to the rule, and not a won't-fix trigger.
+EGV-22's feature-off contract is a hard constraint independent of whether the precedence rule is
+otherwise correct — the rule is unshippable regardless of correctness if this breaks (D-12). The
+fix is implementation, not design: gate the priority walk's evaluation behind the same
+`boundaries`-object presence check the rest of Phase 45's boundary machinery already uses, so a
+feature-off install never reaches the new code path at all, and re-run
+`tests/test_phase46_feature_off.py` to confirm.
