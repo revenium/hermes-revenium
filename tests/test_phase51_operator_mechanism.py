@@ -197,6 +197,135 @@ class OperatorMechanismTests(unittest.TestCase):
         self.assertEqual(p.read_bytes(), before)
         self.assertFalse(self.argv_log.exists() and self.argv_log.read_text().strip())
 
+    # ---- D-01/D-05: attribution ---------------------------------------
+
+    def test_attribution_pair_is_recorded_and_shipped(self):
+        p = self._seed('job-attr')
+        r = self._run('--job-id', 'job-attr', '--value', '102', '--currency', 'USD',
+                      '--mechanism', 'incremental_revenue',
+                      '--attribution-fraction', '0.15',
+                      '--attribution-basis', '15% per policy REV-2024-03',
+                      '--reason', 'confirmed booking')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        c = self._corrections(p)[-1]
+        self.assertEqual(c['attribution_fraction'], 0.15)
+        self.assertEqual(c['attribution_basis'], '15% per policy REV-2024-03')
+        self.assertEqual(c['value_base'], 102.0)
+        wire = self.argv_log.read_text()
+        self.assertIn('"attribution_fraction":0.15', wire)
+        self.assertIn('attribution_basis', wire)
+
+    def test_no_gross_figure_is_derived_or_stored(self):
+        """D-05: the operator supplies the already-attributed value. The
+        skill multiplies nothing, so 102 stays 102 -- it is never treated
+        as a gross to be reduced, and no gross ever enters the record."""
+        p = self._seed('job-gross')
+        self._run('--job-id', 'job-gross', '--value', '102', '--currency', 'USD',
+                  '--attribution-fraction', '0.15', '--attribution-basis', 'b',
+                  '--reason', 'x')
+        c = self._corrections(p)[-1]
+        self.assertEqual(c['value_base'], 102.0)
+        for v in c.values():
+            self.assertNotEqual(v, 680.0)
+            self.assertNotEqual(v, 15.3)
+
+    def test_fraction_requires_basis(self):
+        """The one constraint available: a fraction cannot be validated
+        against anything here, so it may never travel naked."""
+        self._seed('job-nb2')
+        for basis in (None, '', '   '):
+            with self.subTest(basis=repr(basis)):
+                args = ['--job-id', 'job-nb2', '--value', '5', '--currency', 'USD',
+                        '--reason', 'x', '--attribution-fraction', '0.5']
+                if basis is not None:
+                    args += ['--attribution-basis', basis]
+                r = self._run(*args)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn('requires --attribution-basis', r.stderr)
+
+    def test_basis_requires_fraction(self):
+        self._seed('job-bo')
+        r = self._run('--job-id', 'job-bo', '--value', '5', '--currency', 'USD',
+                      '--reason', 'x', '--attribution-basis', 'lonely')
+        self.assertNotEqual(r.returncode, 0)
+
+    def test_fraction_rejection_set(self):
+        for bad in ('1.5', '-0.1', 'abc', 'NaN', 'Infinity', '-Infinity', '9' * 400):
+            with self.subTest(value=bad):
+                self._seed('job-fr')
+                r = self._run('--job-id', 'job-fr', '--value', '5', '--currency', 'USD',
+                              '--reason', 'x', '--attribution-fraction', bad,
+                              '--attribution-basis', 'b')
+                self.assertNotEqual(r.returncode, 0, f'{bad!r} was accepted')
+
+    def test_zero_and_one_are_legal_fractions(self):
+        for f in ('0', '1', '0.0', '1.0'):
+            with self.subTest(fraction=f):
+                p = self._seed('job-edge')
+                r = self._run('--job-id', 'job-edge', '--value', '5', '--currency', 'USD',
+                              '--reason', 'x', '--attribution-fraction', f,
+                              '--attribution-basis', 'edge case')
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(self._corrections(p)[-1]['attribution_fraction'], float(f))
+
+    def test_basis_is_clamped_like_reason(self):
+        p = self._seed('job-clamp')
+        long_basis = 'A' * 900 + '|pipe\nnewline'
+        r = self._run('--job-id', 'job-clamp', '--value', '5', '--currency', 'USD',
+                      '--reason', 'x', '--attribution-fraction', '0.5',
+                      '--attribution-basis', long_basis)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        basis = self._corrections(p)[-1]['attribution_basis']
+        self.assertLessEqual(len(json.dumps(basis, ensure_ascii=True).encode()), 500)
+        for bad in ('|', '\n', '\r'):
+            self.assertNotIn(bad, basis)
+
+    # ---- MECH-03 / D-06: the label may not move -----------------------
+
+    def test_mechanism_never_moves_evidence_class(self):
+        """MECH-03: mechanism and evidence label are orthogonal (EGV-10)."""
+        for m in OPERATOR_ONLY + EVALUATOR_THREE:
+            with self.subTest(mechanism=m):
+                p = self._seed('job-ec', evidence_class='MODEL_ESTIMATED_DEMO')
+                self._run('--job-id', 'job-ec', '--mechanism', m, '--reason', 'x')
+                c = self._corrections(p)[-1]
+                self.assertNotIn('evidence_class', c)
+                first = json.loads(p.read_text().splitlines()[0])
+                self.assertEqual(first['evidence_class'], 'MODEL_ESTIMATED_DEMO')
+
+    def test_attribution_never_moves_evidence_class(self):
+        """D-06: a declared fraction is an operator assertion, not evidence.
+        Not even a fraction of 1 promotes the label."""
+        for f in ('0', '0.5', '1'):
+            with self.subTest(fraction=f):
+                p = self._seed('job-ec2', evidence_class='MODEL_ESTIMATED_DEMO')
+                self._run('--job-id', 'job-ec2', '--value', '5', '--currency', 'USD',
+                          '--reason', 'x', '--attribution-fraction', f,
+                          '--attribution-basis', 'b')
+                c = self._corrections(p)[-1]
+                self.assertNotIn('evidence_class', c)
+
+    def test_no_correction_reaches_a_reserved_causal_label(self):
+        """The three labels Phase 43 shut off and Phase 48's Falsifier 3
+        guards must be unreachable from any operator flag."""
+        reserved = ('ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT')
+        p = self._seed('job-res', evidence_class='MODEL_ESTIMATED_DEMO')
+        self._run('--job-id', 'job-res', '--value', '5', '--currency', 'USD',
+                  '--mechanism', 'incremental_revenue', '--reason', 'x',
+                  '--attribution-fraction', '1', '--attribution-basis', 'b')
+        blob = p.read_text() + self.argv_log.read_text()
+        for label in reserved:
+            self.assertNotIn(label, blob)
+
+    def test_attribution_does_not_set_customer_configured(self):
+        """Letting an operator flag move the label is the coupling Phases
+        43-48 exist to prevent -- including toward CUSTOMER_CONFIGURED."""
+        p = self._seed('job-cc', evidence_class='MODEL_ESTIMATED_DEMO')
+        self._run('--job-id', 'job-cc', '--value', '5', '--currency', 'USD',
+                  '--reason', 'x', '--attribution-fraction', '0.5',
+                  '--attribution-basis', 'b')
+        self.assertNotIn('CUSTOMER_CONFIGURED', p.read_text())
+
 
 if __name__ == '__main__':
     unittest.main()

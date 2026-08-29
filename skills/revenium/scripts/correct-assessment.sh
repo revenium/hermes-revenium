@@ -51,6 +51,9 @@ CURRENCY=""
 REASON=""
 MECHANISM=""
 MECHANISM_GIVEN=false
+ATTRIBUTION_FRACTION=""
+ATTRIBUTION_FRACTION_GIVEN=false
+ATTRIBUTION_BASIS=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -62,6 +65,8 @@ while [[ $# -gt 0 ]]; do
     --currency) CURRENCY="${2:-}"; shift 2 ;;
     --reason) REASON="${2:-}"; shift 2 ;;
     --mechanism) MECHANISM="${2:-}"; MECHANISM_GIVEN=true; shift 2 ;;
+    --attribution-fraction) ATTRIBUTION_FRACTION="${2:-}"; ATTRIBUTION_FRACTION_GIVEN=true; shift 2 ;;
+    --attribution-basis) ATTRIBUTION_BASIS="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
@@ -134,6 +139,60 @@ if [[ "${MECHANISM_GIVEN}" == true ]]; then
     echo "Matching is case-sensitive and exact -- an out-of-set value is refused, never coerced." >&2
     exit 2
   fi
+fi
+
+# D-01/D-05: the attribution pair. The operator supplies the ALREADY
+# ATTRIBUTED value; this script multiplies nothing and never sees a gross
+# figure. The fraction and basis document how the operator reached the
+# value they passed.
+#
+# The fraction cannot be validated against anything -- there is no gross
+# here to check it against, by design, because keeping a full business
+# figure out of an agent-metering record is the only structural defence
+# against cross-system double counting available at this layer. So the
+# fraction is an ASSERTION, and the one constraint worth having is that it
+# may never travel naked: --attribution-basis is REQUIRED whenever
+# --attribution-fraction is supplied. A bare number has the authority of a
+# measurement with none of the accountability; a cited one is auditable.
+if [[ "${ATTRIBUTION_FRACTION_GIVEN}" == true ]]; then
+  if [[ -z "${ATTRIBUTION_BASIS//[[:space:]]/}" ]]; then
+    echo "--attribution-fraction requires --attribution-basis." >&2
+    echo "A declared fraction is an operator assertion, not a measurement -- it must carry the stated basis it rests on." >&2
+    exit 2
+  fi
+  ATTRIBUTION_ERROR=$(ATTRIBUTION_FRACTION_PY="${ATTRIBUTION_FRACTION}" python3 - <<'ATTRPY'
+import math
+import os
+
+raw = os.environ.get('ATTRIBUTION_FRACTION_PY', '')
+# Mirrors _finite_number's rejection set (classifier.py), including the
+# OverflowError guard added under PR #109 -- float() raises on an
+# arbitrary-precision int, and this flag takes operator input.
+try:
+    f = float(raw)
+except OverflowError:
+    print('--attribution-fraction is too large to represent')
+    raise SystemExit(0)
+except (TypeError, ValueError):
+    print(f'--attribution-fraction {raw!r} is not a number')
+    raise SystemExit(0)
+if math.isnan(f) or math.isinf(f):
+    print('--attribution-fraction must be finite')
+    raise SystemExit(0)
+if not (0.0 <= f <= 1.0):
+    print(f'--attribution-fraction must be between 0 and 1 inclusive (got {f})')
+    raise SystemExit(0)
+ATTRPY
+)
+  if [[ -n "${ATTRIBUTION_ERROR}" ]]; then
+    echo "Invalid input: ${ATTRIBUTION_ERROR}" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "${ATTRIBUTION_BASIS//[[:space:]]/}" && "${ATTRIBUTION_FRACTION_GIVEN}" != true ]]; then
+  echo "--attribution-basis requires --attribution-fraction." >&2
+  exit 2
 fi
 
 # D-03: a bare --value with no range flags produces an equal-bounds record.
@@ -492,6 +551,8 @@ APPEND_OUTPUT=$(
   PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
   REASON_PY="${REASON}" \
   MECHANISM_PY="${MECHANISM}" \
+  ATTRIBUTION_FRACTION_PY="${ATTRIBUTION_FRACTION}" \
+  ATTRIBUTION_BASIS_PY="${ATTRIBUTION_BASIS}" \
   python3 - <<'PY'
 import json
 import os
@@ -603,6 +664,17 @@ with os.fdopen(fd, 'r+b', buffering=0) as f:
     _mechanism = os.environ.get('MECHANISM_PY', '')
     if _mechanism:
         record['economic_mechanism'] = _mechanism
+    # D-05: the attribution pair, recorded as documentation of how the
+    # operator reached the value above. Nothing is multiplied here, and no
+    # gross figure exists to multiply. The basis is clamped exactly as the
+    # reason is -- this metadata path has no ceiling of its own, so an
+    # unbounded operator string is the one way to blow the envelope from
+    # this direction.
+    _fraction = os.environ.get('ATTRIBUTION_FRACTION_PY', '')
+    if _fraction:
+        record['attribution_fraction'] = float(_fraction)
+        record['attribution_basis'] = _clamp_reason(
+            os.environ.get('ATTRIBUTION_BASIS_PY', ''))
     line_bytes = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
     f.write(line_bytes)
     # Greptile P1 (PR #94), CLOSED for good by the fd9 lock: this check used
@@ -713,6 +785,8 @@ OUTCOME_UPDATE_METADATA=$(
   PRIOR_VALUE_HIGH_PY="${CURRENT_VALUE_HIGH}" \
   PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
   MECHANISM_PY="${MECHANISM}" \
+  ATTRIBUTION_FRACTION_PY="${ATTRIBUTION_FRACTION}" \
+  ATTRIBUTION_BASIS_PY="${ATTRIBUTION_BASIS}" \
   python3 - <<'PY'
 import json
 import os
@@ -746,6 +820,19 @@ if prior_currency:
 mechanism = os.environ.get('MECHANISM_PY', '')
 if mechanism:
     meta['economic_mechanism'] = mechanism
+# D-07: the attribution assumption travels with the value it
+# documents. A value whose attribution is invisible downstream is
+# exactly the failure the claim-distinctions doc warns about --
+# the number travels and the caveat does not.
+fraction = os.environ.get('ATTRIBUTION_FRACTION_PY', '')
+if fraction:
+    meta['attribution_fraction'] = float(fraction)
+    basis = os.environ.get('ATTRIBUTION_BASIS_PY', '').strip()
+    for _bad in ('|', '\n', '\r'):
+        basis = basis.replace(_bad, ' ')
+    while len(json.dumps(basis, ensure_ascii=True).encode('utf-8')) > 500 and basis:
+        basis = basis[:-1]
+    meta['attribution_basis'] = basis
 print(json.dumps(meta, separators=(',', ':')))
 PY
 )

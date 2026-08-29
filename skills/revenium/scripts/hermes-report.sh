@@ -3624,6 +3624,14 @@ _METADATA_CEILING_BYTES = 4096
 _VALUE_FAMILY_META_KEYS = (
     'value_low', 'value_base', 'value_high', 'bounds_source',
     'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
+    # Phase 51 (D-07): the attribution pair joins the VALUE tier, not the
+    # provenance tier, and the tier ordering is the whole reason. Tier 1
+    # sheds value and tier 2 sheds provenance, so provenance OUTLIVES value.
+    # In provenance these would survive the value they document, leaving a
+    # fraction attributing nothing. In the value family they shed TOGETHER,
+    # which is what D-07 actually requires: the failure to prevent is a
+    # surviving value whose attribution has vanished.
+    'attribution_fraction', 'attribution_basis',
 )
 _PROVENANCE_FAMILY_META_KEYS = (
     'evaluator', 'evaluator_version', 'model', 'evidence_class',
@@ -3921,6 +3929,40 @@ if assessment_raw:
                     pass
         if assumptions:
             meta['assumptions'] = assumptions
+
+        # Phase 51 (D-05/D-07): the attribution pair, forwarded from a
+        # correction record. APPENDED last --
+        # meter-completion-assessment.golden.json's anchored pattern pins
+        # --metadata's key order, so a new key goes at the end or every
+        # existing golden shifts.
+        #
+        # Forwarded, never derived. The operator supplied an already
+        # attributed value; nothing here multiplies, and no gross figure
+        # exists in this record to multiply. The fraction is an operator
+        # ASSERTION validated only for shape -- a real, finite number in
+        # [0, 1] -- because there is nothing here to check it against.
+        # attribution_basis is what makes it auditable, which is why
+        # correct-assessment.sh refuses a fraction without one; the basis is
+        # therefore only forwarded alongside a valid fraction, never alone.
+        attribution_fraction = record.get('attribution_fraction')
+        if (
+            isinstance(attribution_fraction, (int, float))
+            and not isinstance(attribution_fraction, bool)
+        ):
+            try:
+                _af = float(attribution_fraction)
+            except OverflowError:
+                _af = None
+            if (
+                _af is not None
+                and _af == _af
+                and _af not in (float('inf'), float('-inf'))
+                and 0.0 <= _af <= 1.0
+            ):
+                meta['attribution_fraction'] = _af
+                attribution_basis = record.get('attribution_basis')
+                if isinstance(attribution_basis, str) and attribution_basis:
+                    meta['attribution_basis'] = attribution_basis[:500]
 
 # Phase 46 (EGV-19, D-01/D-02/D-03): bounded emit -- the single place the
 # actual wire bytes are measured before the payload leaves the machine.
