@@ -762,10 +762,10 @@ class NetValueTests(unittest.TestCase):
         self.assertEqual(rec['cost_coverage']['excluded'], ['metered_ai_cost'])
 
     def test_partial_costs_subtract_only_the_supplied_categories(self):
-        cfg = {'costs': {'bug_fix': {'human_review': 25, 'integration': 10}}}
+        cfg = {'costs': {'bug_fix': {'human_review': 25, 'handoff': 10}}}
         rec = self._record('nv44-job-002', cfg)
         self.assertEqual(
-            rec['supplied_costs'], {'human_review': 25.0, 'integration': 10.0})
+            rec['supplied_costs'], {'human_review': 25.0, 'handoff': 10.0})
         self.assertEqual(rec['net_value'], round(rec['estimated_value'] - 35.0, 2))
 
     def test_costs_configured_for_a_different_job_type_do_not_apply(self):
@@ -781,7 +781,7 @@ class NetValueTests(unittest.TestCase):
     def test_costs_exceeding_the_estimate_produce_a_negative_net_value_not_clamped(self):
         cfg = {'costs': {'bug_fix': {
             'human_review': 100000, 'rework_or_error': 100000,
-            'integration': 100000, 'training_or_change': 100000,
+            'handoff': 100000, 'training_or_change': 100000,
         }}}
         rec = self._record('nv44-job-004', cfg)
         self.assertLess(rec['net_value'], 0)
@@ -884,20 +884,20 @@ class CoverageOrderTests(unittest.TestCase):
         }}}
         supplied, coverage = mod._resolve_supplied_costs(cfg, 'bug_fix')
         self.assertEqual(coverage['included'], ['human_review', 'training_or_change'])
-        self.assertEqual(coverage['unknown'], ['rework_or_error', 'integration'])
+        self.assertEqual(coverage['unknown'], ['rework_or_error', 'handoff'])
         self.assertEqual(list(supplied.keys()), ['human_review', 'training_or_change'])
 
     def test_byte_identical_serialization_across_two_separate_module_loads(self):
         mod1 = _load_classifier({})
         mod2 = _load_classifier({})
-        cfg = {'costs': {'bug_fix': {'human_review': 0, 'integration': 15}}}
+        cfg = {'costs': {'bug_fix': {'human_review': 0, 'handoff': 15}}}
         s1, c1 = mod1._resolve_supplied_costs(cfg, 'bug_fix')
         s2, c2 = mod2._resolve_supplied_costs(cfg, 'bug_fix')
         self.assertEqual(json.dumps(s1), json.dumps(s2))
         self.assertEqual(json.dumps(c1), json.dumps(c2))
         # And the exact expected order/content, not merely self-consistency.
-        self.assertEqual(s1, {'human_review': 0.0, 'integration': 15.0})
-        self.assertEqual(c1['included'], ['human_review', 'integration'])
+        self.assertEqual(s1, {'human_review': 0.0, 'handoff': 15.0})
+        self.assertEqual(c1['included'], ['human_review', 'handoff'])
         self.assertEqual(c1['known_zero'], ['human_review'])
 
 
@@ -947,7 +947,7 @@ def _cost_sidecar_record(job_id, reportability_status='reportable',
         'cost_coverage': {
             'included': ['human_review'],
             'known_zero': [],
-            'unknown': ['rework_or_error', 'integration', 'training_or_change'],
+            'unknown': ['rework_or_error', 'handoff', 'training_or_change'],
             'excluded': ['metered_ai_cost'],
         },
     }
@@ -1597,7 +1597,7 @@ def _non_success_sidecar_record(job_id, execution_status='FAILED', **overrides):
         'cost_coverage': {
             'included': ['human_review'],
             'known_zero': [],
-            'unknown': ['rework_or_error', 'integration', 'training_or_change'],
+            'unknown': ['rework_or_error', 'handoff', 'training_or_change'],
             'excluded': ['metered_ai_cost'],
         },
         'double_counting_group': 'ns44-sid-group',

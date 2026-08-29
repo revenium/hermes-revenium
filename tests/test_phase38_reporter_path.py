@@ -150,7 +150,7 @@ def _sidecar_record(job_id, **overrides):
         "cost_coverage": {
             "included": ["human_review"],
             "known_zero": [],
-            "unknown": ["rework_or_error", "integration", "training_or_change"],
+            "unknown": ["rework_or_error", "handoff", "training_or_change"],
             "excluded": ["metered_ai_cost"],
         },
         # Phase 44 (EGV-16, plan 44-03): classifier.py's
@@ -2736,12 +2736,24 @@ class TestPhase38Canary(unittest.TestCase):
                 },
                 'economic_mechanism': 'augmentation_capacity_expansion',
                 'net_value': 15000.25,
+                # Extra significant digits are ballast, not precision.
+                # This fixture must clear _METADATA_CEILING_BYTES BEFORE the
+                # tier-1 drop or the truncation assertion below silently
+                # passes over an untruncated payload. Same lever, and same
+                # reason, as the CR-01 retune noted just below.
+                #
+                # Renaming a cost category shortens all four of its
+                # occurrences in this record and moves the pre-shed total:
+                # the `integration` -> `handoff` rename cost 16 bytes and
+                # dropped a sibling fixture to three bytes under the
+                # ceiling. supplied_costs is value-family, dropped at tier
+                # 1, so none of this reaches the asserted payload.
                 'supplied_costs': {
-                    'human_review': 125.75, 'rework_or_error': 45.55,
-                    'integration': 32.25, 'training_or_change': 18.75,
+                    'human_review': 125.7512345, 'rework_or_error': 45.5512345,
+                    'handoff': 32.2512345, 'training_or_change': 18.7512345,
                 },
                 'cost_coverage': {
-                    'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    'included': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
                     # CR-01 retune: known_zero AND unknown both non-empty
                     # (matching tests/test_compat_jobs_outcome.py's own
                     # retuned fixture) -- the forwarder omits an empty list
@@ -2750,8 +2762,8 @@ class TestPhase38Canary(unittest.TestCase):
                     # to clear the ceiling without resorting to an
                     # unreachable value like sys.float_info.max (see the
                     # class-level comment above).
-                    'known_zero': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
-                    'unknown': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                    'known_zero': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
+                    'unknown': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
                     'excluded': ['metered_ai_cost'],
                 },
                 'double_counting_group': emoji * self._P38_TRUNC_DOUBLE_COUNTING_GROUP_CHARS,

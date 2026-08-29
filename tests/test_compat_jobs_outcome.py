@@ -310,9 +310,27 @@ def _build_over_ceiling_sidecar_record(job_id):
         'assumptions': {'estimated_hours_saved': 39.75, 'assumed_loaded_rate': 499.75},
         'economic_mechanism': 'augmentation_capacity_expansion',
         'net_value': 15000.25,
+        # The cost floats carry extra significant digits purely as ballast.
+        # This record has to clear _METADATA_CEILING_BYTES *before* the
+        # tier-1 drop or the truncation path never runs and this test
+        # silently stops testing truncation. The emoji-padded fields above
+        # cannot supply that headroom -- each is already at its forwarder's
+        # own character slice -- and the cost_coverage lists are already
+        # fully populated with all four categories, so neither lever has
+        # any room left.
+        #
+        # These digits are load-bearing. Renaming a cost category shortens
+        # every one of its four occurrences here (one below, three in
+        # cost_coverage) and moves the pre-shed total; that is exactly how
+        # the `integration` -> `handoff` rename pushed this record to 4093
+        # bytes, three under the ceiling, and turned the truncation
+        # assertion into a no-op. `supplied_costs` is value-family, so it
+        # is dropped at tier 1 and none of this reaches the golden.
+        # test_untruncated_payload_for_same_record_would_have_exceeded_ceiling
+        # is the guard that fails if this headroom is ever lost again.
         'supplied_costs': {
-            'human_review': 125.75, 'rework_or_error': 45.55,
-            'integration': 32.25, 'training_or_change': 18.75,
+            'human_review': 125.7512345, 'rework_or_error': 45.5512345,
+            'handoff': 32.2512345, 'training_or_change': 18.7512345,
         },
         'cost_coverage': {
             # known_zero AND unknown both fully populated (not just
@@ -320,9 +338,9 @@ def _build_over_ceiling_sidecar_record(job_id):
             # lever that replaces the rejected float-max approach. The
             # forwarder does not enforce mutual exclusivity across the
             # three lists, so this is a legal (if unusual) shape.
-            'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
-            'known_zero': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
-            'unknown': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+            'included': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
+            'known_zero': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
+            'unknown': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
             'excluded': ['metered_ai_cost'],
         },
         'double_counting_group': _EMOJI * _DOUBLE_COUNTING_GROUP_CHARS,

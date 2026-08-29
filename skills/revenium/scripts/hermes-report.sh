@@ -3757,7 +3757,7 @@ if assessment_raw:
         # MechanismDriftTests' set comparison). This is the ONLY
         # declaration of _COST_CATEGORIES in hermes-report.sh.
         _COST_CATEGORIES = (
-            'human_review', 'rework_or_error', 'integration', 'training_or_change',
+            'human_review', 'rework_or_error', 'handoff', 'training_or_change',
         )
         economic_mechanism = record.get('economic_mechanism')
         if (

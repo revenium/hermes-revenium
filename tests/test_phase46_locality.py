@@ -448,11 +448,11 @@ class WireForwardingTests(unittest.TestCase):
             'assumptions': {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
             'supplied_costs': {
                 'human_review': 10.0, 'rework_or_error': 5.0,
-                'integration': 2.0, 'training_or_change': 1.0,
+                'handoff': 2.0, 'training_or_change': 1.0,
             },
             'cost_coverage': {
-                'included': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
-                'known_zero': ['human_review', 'rework_or_error', 'integration', 'training_or_change'],
+                'included': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
+                'known_zero': ['human_review', 'rework_or_error', 'handoff', 'training_or_change'],
                 'unknown': [],
                 'excluded': ['metered_ai_cost'],
             },
