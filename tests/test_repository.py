@@ -258,6 +258,11 @@ class RepositoryTests(unittest.TestCase):
             # and leaves the feature documented only in fragments — the state
             # this page was written to end.
             ROOT / 'docs' / 'value-and-roi.md',
+            # Its companion overview. Pinned for the same reason: README.md,
+            # docs/README.md, configuration.md and value-and-roi.md itself all
+            # link to it as the entry point a reader is sent to FIRST, so
+            # deleting it breaks the front door rather than a deep link.
+            ROOT / 'docs' / 'value-overview.md',
             # Milestone closeout records. Deliberately NOT under docs/internal/
             # — that tree is gitignored (see .gitignore), so a closeout placed
             # there dies with the working tree, which is what forced the

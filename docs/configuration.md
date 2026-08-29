@@ -64,6 +64,8 @@ The value this produces is an **unverified model estimate** — see
 means and how Revenium combines it with metered cost into a displayed ROI, and
 **[Job value and ROI](value-and-roi.md)** for the complete reference: the evaluator, the
 abstention vocabulary, the derivation, the records, the wire shape, and troubleshooting.
+[Job value: a practical overview](value-overview.md) is the short version, with an annotated
+worked configuration for a software engineering team.
 
 `net_value`, the cost coverage list, and the six `economic_mechanism` values
 (three the evaluator may select, three only an operator can declare) are all

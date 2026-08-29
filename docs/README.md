@@ -25,6 +25,9 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 
 ## Job value and ROI
 
+- **[Job value: a practical overview](value-overview.md)** — start here. How the mechanism
+  works, what the number means, and a fully annotated configuration for a software
+  engineering team, with the reasoning behind every figure. Short.
 - **[Job value and ROI](value-and-roi.md)** — the complete reference for the experimental
   value path: turning it on, the evaluator and its bounds, the abstention vocabulary, how a
   value is derived and bounded, costs and `net_value`, the six mechanisms, the nine evidence
@@ -54,6 +57,9 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 - **[Hermes plugin interface](plugin-interface.md)** — what the plugin surface
   actually does, measured against a live v0.20.1 install. Shipped code depends on
   it; [CONTRIBUTING.md](../CONTRIBUTING.md) has the rest of the workflow.
+- **[Evidence-class precedence and declaration authority](evidence-class-precedence.md)**
+  — the Phase 48 reconciliation verdict and the cross-boundary `evidence_class`
+  precedence rule that Phase 50 and Phase 51 both plan against.
 
 ## Inside the skill bundle
 
