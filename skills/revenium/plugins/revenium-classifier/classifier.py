@@ -1282,10 +1282,22 @@ def _finite_number(value) -> "float | None":
     NaN and infinity are rejected explicitly too: a bare `value > 0` comparison
     is FALSE for NaN, so NaN slips through any naive lower-bound guard and lands
     in a monetary field.
+
+    OverflowError is caught rather than allowed to propagate: json.load builds
+    an arbitrary-precision int for a long enough numeric literal, and float()
+    raises on one too large to represent. An operator typo in config.json's
+    `costs` is enough to reach it. Before this guard the raise escaped through
+    _resolve_supplied_costs -- whose contract says it never raises -- and this
+    function returned neither a float nor None, contradicting its own first
+    line. An unrepresentable number is not a real, finite number, so it
+    resolves to None like every other malformed value: unknown, never zero.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    f = float(value)
+    try:
+        f = float(value)
+    except OverflowError:
+        return None
     if math.isnan(f) or math.isinf(f):
         return None
     return f

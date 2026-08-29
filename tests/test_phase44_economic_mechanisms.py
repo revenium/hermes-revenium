@@ -805,7 +805,13 @@ class NetValueTests(unittest.TestCase):
         self.assertEqual(rec['supplied_costs'], {'human_review': 25.0})
 
     def test_malformed_cost_values_resolve_to_unknown_not_zero(self):
-        bad_values = [-5, float('nan'), float('inf'), True, None, '25', {'x': 1}]
+        # int('9' * 400) is an arbitrary-precision int json.load will happily
+        # build from a long enough numeric literal in config.json. float()
+        # raises OverflowError on it, which _finite_number used to let
+        # escape -- breaking _resolve_supplied_costs's "never raises"
+        # contract on nothing worse than an operator typo.
+        bad_values = [-5, float('nan'), float('inf'), True, None, '25', {'x': 1},
+                      int('9' * 400)]
         for bad in bad_values:
             with self.subTest(value=bad):
                 supplied, coverage = self.mod._resolve_supplied_costs(
@@ -814,6 +820,20 @@ class NetValueTests(unittest.TestCase):
                 self.assertIn('human_review', coverage['unknown'])
                 self.assertNotIn('human_review', coverage['included'])
                 self.assertNotIn('human_review', coverage['known_zero'])
+
+    def test_oversized_int_does_not_raise_and_leaves_siblings_intact(self):
+        """The contract is "never raises", and an unrepresentable number
+        must not take its well-formed siblings down with it."""
+        supplied, coverage = self.mod._resolve_supplied_costs(
+            {'costs': {'bug_fix': {
+                'human_review': int('9' * 400),
+                'handoff': 25,
+            }}},
+            'bug_fix',
+        )
+        self.assertIn('human_review', coverage['unknown'])
+        self.assertEqual(supplied.get('handoff'), 25.0)
+        self.assertIn('handoff', coverage['included'])
 
     def test_unrecognised_cost_key_is_ignored_entirely(self):
         supplied, coverage = self.mod._resolve_supplied_costs(

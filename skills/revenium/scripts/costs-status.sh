@@ -146,6 +146,14 @@ def priced(entry):
             continue
         if not isinstance(value, (int, float)):
             continue
+        # A JSON integer too large for a float raises OverflowError in
+        # float() -- and _finite_number calls float() unguarded, so the
+        # resolver raises on it too. Either way no value is produced, so
+        # it cannot count as priced here.
+        try:
+            value = float(value)
+        except OverflowError:
+            continue
         if value != value or value in (float('inf'), float('-inf')):
             continue
         if value >= 0:

@@ -176,6 +176,15 @@ class CostsStatusTests(unittest.TestCase):
         norm = lambda t: [x.strip().strip('\'"') for x in t.split(',') if x.strip()]
         self.assertEqual(norm(mine), norm(theirs))
 
+    def test_oversized_integer_is_not_a_price(self):
+        """A JSON int too large for float() cannot be converted, so the
+        resolver produces no value for it -- it must not read as priced."""
+        (self.state / 'job-taxonomy.json').write_text('{"labels":{"a":{}}}')
+        (self.state / 'config.json').write_text(
+            '{"llmOutcomeEvaluation":{"costs":{"a":{"human_review":%s}}}}' % ('9' * 400)
+        )
+        self.assertEqual(self._run().returncode, 10)
+
 
 if __name__ == '__main__':
     unittest.main()
