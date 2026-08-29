@@ -250,6 +250,14 @@ class RepositoryTests(unittest.TestCase):
             # enforcement. It was briefly untracked with the evidence tree.
             ROOT / 'docs' / 'plugin-interface.md',
             ROOT / 'docs' / 'upgrading.md',
+            # The dedicated value/ROI reference. Pinned for the same reason
+            # docs/internal-milestones.md below is: the operator-facing pages
+            # (README.md, how-it-works.md, configuration.md) and
+            # claim-distinctions-and-evidence-boundaries.md all link to it as
+            # THE deep-dive, so deleting it silently breaks four inbound links
+            # and leaves the feature documented only in fragments — the state
+            # this page was written to end.
+            ROOT / 'docs' / 'value-and-roi.md',
             # Milestone closeout records. Deliberately NOT under docs/internal/
             # — that tree is gitignored (see .gitignore), so a closeout placed
             # there dies with the working tree, which is what forced the

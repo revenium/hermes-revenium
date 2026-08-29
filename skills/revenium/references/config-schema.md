@@ -285,7 +285,15 @@ contracts, each backed by its own registry: `classification` (task_type labellin
 inference, one contract per D-13), `valuation`, and `evidence`. (The other three phase-45
 boundaries — cohort impact and Revenium reporting — ship with zero registrants or no live
 adapter and have no operator-selectable name today.) `boundaries` is how an operator selects a
-non-built-in implementation for one of these three, by the name it registered under:
+non-built-in implementation for one of these three, by the name it registered under.
+
+**It is read from the TOP LEVEL of `config.json`, as a sibling of `llmOutcomeEvaluation`**,
+not from inside that object — the resolver reads `config["boundaries"]` directly. The
+"Opt-in surfaces" table above groups it with `llmOutcomeEvaluation`'s other surfaces because
+it governs part of the same opt-in feature; that grouping is conceptual and says nothing
+about where the key lives. A nested `boundaries` object resolves to nothing, and because
+resolution fails open, every boundary silently keeps its built-in implementation with no
+log line to say so.
 
 ```json
 {

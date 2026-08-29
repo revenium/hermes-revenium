@@ -23,13 +23,22 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 - **[Upgrading](upgrading.md)** — four upgrade paths and what has to be re-run after each.
 - **[Operations](operations.md)** — manual commands, diagnostics, uninstall, and the tests.
 
+## Job value and ROI
+
+- **[Job value and ROI](value-and-roi.md)** — the complete reference for the experimental
+  value path: turning it on, the evaluator and its bounds, the abstention vocabulary, how a
+  value is derived and bounded, costs and `net_value`, the six mechanisms, the nine evidence
+  classes, reportability, the sidecar record, the exact wire shape and its byte ceiling,
+  corrections, operations, and troubleshooting. Read the claim-discipline page below first.
+
 ## Claim discipline
 
 - **[Claim distinctions and evidence boundaries](claim-distinctions-and-evidence-boundaries.md)**
   — output vs. outcome vs. valuation vs. impact vs. ROI, the results chain, the product-truth
   boundary, and what the experimental value path deliberately does not ship. Start here
-  before enabling it; [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)
-  has the label and mechanism reference it points to.
+  before enabling it, then read [Job value and ROI](value-and-roi.md) for the mechanism;
+  [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)
+  has the label and mechanism reference both point to.
 
 ## Going deeper
 

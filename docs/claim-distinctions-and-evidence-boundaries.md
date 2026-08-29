@@ -10,6 +10,9 @@ deliberately does not ship. Every contract term — the nine evidence labels, th
 the assessment schema — stays owned by the shipped references this page links to. This page
 never duplicates a contract; it only explains the frame the contracts sit inside.
 
+Once the frame is clear, [Job value and ROI](value-and-roi.md) is the mechanism: how the
+number is produced, bounded, recorded, and reported.
+
 ## Output, outcome, valuation, impact, ROI
 
 Five words get used loosely in this space. Here they are held apart.
