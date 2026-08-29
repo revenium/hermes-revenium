@@ -101,8 +101,11 @@ constant, and an unprobed bound recorded honestly is more useful than a guess.
    only. The operator workstation runs 1.4.0; read-verb availability has
    differed across CLI versions in this project before.
 3. **No server byte limit.** See above.
-4. **Acceptance is not persistence forever.** Each arm was read back once,
-   within roughly a minute of the write.
+4. **Acceptance is not persistence forever.** Each arm was read back once
+   within roughly a minute of the write, and re-read independently about
+   fourteen minutes later with identical byte counts, key counts, marker
+   states and sentinels. That is a second observation, not a durability
+   guarantee over days.
 
 ## Environment
 
