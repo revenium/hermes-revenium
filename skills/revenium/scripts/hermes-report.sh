@@ -3149,6 +3149,33 @@ try:
 except OSError:
     pass
 
+# Greptile (PR #110), Phase 51 D-08: a mechanism-only correction carries NO
+# value family -- absent by decision, so a correction never restates a
+# valuation the operator did not supply. But the reader above replaces the
+# effective record WHOLESALE (`found = rec`, last-match-wins, deliberate per
+# 41-CARRIER-DECISION.md), so such a correction would otherwise make every
+# downstream consumer see a record with no value at all: --outcome-value
+# would go empty, the bound forwarders would emit nothing, and a perfectly
+# good standing valuation would be silently dropped from the wire.
+#
+# Normalised HERE, once, rather than at each of the three consumer sites --
+# the value flag, the bound-triple validity check, and the --metadata bound
+# forwarder -- because patching consumers is how one of them gets missed.
+#
+# On a correction, `prior_value_*` IS the standing value; recording it is
+# that field's entire purpose. It is promoted only into a gap: a correction
+# that carries its own value keeps it untouched, and a job_assessment is
+# never touched at all.
+if isinstance(found, dict) and found.get('kind') == 'correction':
+    for _cur, _prior in (
+        ('value_low', 'prior_value_low'),
+        ('value_base', 'prior_value_base'),
+        ('value_high', 'prior_value_high'),
+        ('currency', 'prior_currency'),
+    ):
+        if found.get(_cur) is None and found.get(_prior) is not None:
+            found[_cur] = found[_prior]
+
 if found is None:
     # D-10 diagnostic reason word (Phase 42 Plan 04): tell "never
     # evaluated" apart from "evaluated by an older classifier, sidecar
@@ -3624,6 +3651,14 @@ _METADATA_CEILING_BYTES = 4096
 _VALUE_FAMILY_META_KEYS = (
     'value_low', 'value_base', 'value_high', 'bounds_source',
     'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
+    # Phase 51 (D-07): the attribution pair joins the VALUE tier, not the
+    # provenance tier, and the tier ordering is the whole reason. Tier 1
+    # sheds value and tier 2 sheds provenance, so provenance OUTLIVES value.
+    # In provenance these would survive the value they document, leaving a
+    # fraction attributing nothing. In the value family they shed TOGETHER,
+    # which is what D-07 actually requires: the failure to prevent is a
+    # surviving value whose attribution has vanished.
+    'attribution_fraction', 'attribution_basis',
 )
 _PROVENANCE_FAMILY_META_KEYS = (
     'evaluator', 'evaluator_version', 'model', 'evidence_class',
@@ -3921,6 +3956,49 @@ if assessment_raw:
                     pass
         if assumptions:
             meta['assumptions'] = assumptions
+
+        # Phase 51 (D-05/D-07): the attribution pair, forwarded from a
+        # correction record. APPENDED last --
+        # meter-completion-assessment.golden.json's anchored pattern pins
+        # --metadata's key order, so a new key goes at the end or every
+        # existing golden shifts.
+        #
+        # Forwarded, never derived. The operator supplied an already
+        # attributed value; nothing here multiplies, and no gross figure
+        # exists in this record to multiply. The fraction is an operator
+        # ASSERTION validated only for shape -- a real, finite number in
+        # [0, 1] -- because there is nothing here to check it against.
+        # attribution_basis is what makes it auditable, which is why
+        # correct-assessment.sh refuses a fraction without one; the basis is
+        # therefore only forwarded alongside a valid fraction, never alone.
+        attribution_fraction = record.get('attribution_fraction')
+        if (
+            isinstance(attribution_fraction, (int, float))
+            and not isinstance(attribution_fraction, bool)
+        ):
+            try:
+                _af = float(attribution_fraction)
+            except OverflowError:
+                _af = None
+            if (
+                _af is not None
+                and _af == _af
+                and _af not in (float('inf'), float('-inf'))
+                and 0.0 <= _af <= 1.0
+            ):
+                # Greptile (PR #110): the PAIR is validated together, never
+                # the fraction alone. correct-assessment.sh refuses a
+                # fraction without a basis, but the reporter reads whatever
+                # is on disk -- a legacy, hand-edited, or partially-written
+                # sidecar can carry a valid fraction with no basis, and
+                # shipping it would put a naked number on the wire, defeating
+                # the one constraint the whole design rests on. A fraction
+                # whose basis is missing is not forwarded at all: an absent
+                # attribution is honest, a naked one is not.
+                attribution_basis = record.get('attribution_basis')
+                if isinstance(attribution_basis, str) and attribution_basis.strip():
+                    meta['attribution_fraction'] = _af
+                    meta['attribution_basis'] = attribution_basis[:500]
 
 # Phase 46 (EGV-19, D-01/D-02/D-03): bounded emit -- the single place the
 # actual wire bytes are measured before the payload leaves the machine.

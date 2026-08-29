@@ -207,7 +207,30 @@ def _extract_forwarder_record_keys(script_text):
 # rule that an exemption set is never widened to make something pass,
 # applied in its stronger form: it is not populated at all when the data
 # does not require it).
-_UNREACHABLE_ON_THE_NAKED_LLM_VALUED_PATH = frozenset()
+# Phase 51: the set is no longer empty, and the justification is
+# structural rather than convenient. `attribution_fraction` and
+# `attribution_basis` are written ONLY by correct-assessment.sh, an operator
+# CLI; classifier.py's _build_job_assessment never produces them, so no
+# naked-LLM valued path can ever carry them. Verified rather than asserted:
+# neither string occurs anywhere in classifier.py.
+#
+# This test drives the real classifier and asserts on the artifact it
+# actually produced -- which is precisely why the exemption belongs here.
+# Requiring the produced sidecar to carry a key the producer cannot write
+# would be unsatisfiable, and satisfying it by teaching the classifier to
+# emit an empty attribution would put an operator-only assertion on every
+# ordinary record: this guard's own defect, inverted.
+#
+# Coverage is relocated, not dropped. tests/test_phase38_reporter_path.py's
+# SidecarFixtureFidelityTests carries the same two keys on
+# _correction_sidecar_record(), and its
+# test_correction_only_keys_are_present_in_the_correction_record asserts
+# every correction-only exemption actually appears there -- so neither key
+# escapes fidelity checking, it just happens on the record type that can
+# hold it.
+_UNREACHABLE_ON_THE_NAKED_LLM_VALUED_PATH = frozenset({
+    'attribution_fraction', 'attribution_basis',
+})
 
 
 # Plan 47-02 (Task 1): the two outcome-value-family CLI flags

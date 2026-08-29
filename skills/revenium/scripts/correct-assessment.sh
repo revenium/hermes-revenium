@@ -49,6 +49,11 @@ VALUE_LOW=""
 VALUE_HIGH=""
 CURRENCY=""
 REASON=""
+MECHANISM=""
+MECHANISM_GIVEN=false
+ATTRIBUTION_FRACTION=""
+ATTRIBUTION_FRACTION_GIVEN=false
+ATTRIBUTION_BASIS=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -59,21 +64,145 @@ while [[ $# -gt 0 ]]; do
     --value-high) VALUE_HIGH="${2:-}"; shift 2 ;;
     --currency) CURRENCY="${2:-}"; shift 2 ;;
     --reason) REASON="${2:-}"; shift 2 ;;
+    --mechanism) MECHANISM="${2:-}"; MECHANISM_GIVEN=true; shift 2 ;;
+    --attribution-fraction) ATTRIBUTION_FRACTION="${2:-}"; ATTRIBUTION_FRACTION_GIVEN=true; shift 2 ;;
+    --attribution-basis) ATTRIBUTION_BASIS="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ -z "${JOB_ID}" || -z "${VALUE}" || -z "${CURRENCY}" || -z "${REASON}" ]]; then
-  echo "Missing required flag(s) -- --job-id, --value, --currency, and --reason are all required." >&2
+# D-08: --value (and the --currency that denominates it) are required
+# UNLESS --mechanism is supplied. A mechanism-only correction is legal --
+# EGV-10 holds mechanism and value apart, and economic_mechanism already
+# travels without a value on the not-reportable path (it is absent from
+# hermes-report.sh's _VALUE_OMIT_FAMILY, whose docstring records that
+# withholding the VALUE does not withhold the fact that a record exists).
+# --job-id and --reason stay unconditionally required: this script's whole
+# purpose is an auditable trail, and neither is ever meaningless.
+if [[ -z "${JOB_ID}" || -z "${REASON}" ]]; then
+  echo "Missing required flag(s) -- --job-id and --reason are always required." >&2
   usage >&2
   exit 2
 fi
 
+if [[ "${MECHANISM_GIVEN}" != true && -z "${VALUE}" ]]; then
+  echo "Missing required flag(s) -- --value is required unless --mechanism is supplied." >&2
+  usage >&2
+  exit 2
+fi
+
+# A currency with no amount denominates nothing.
+if [[ -n "${VALUE}" && -z "${CURRENCY}" ]]; then
+  echo "Missing required flag(s) -- --currency is required whenever --value is supplied." >&2
+  usage >&2
+  exit 2
+fi
+
+# Range flags without a base value have nothing to bound.
+if [[ -z "${VALUE}" && ( -n "${VALUE_LOW}" || -n "${VALUE_HIGH}" ) ]]; then
+  echo "--value-low/--value-high require --value." >&2
+  exit 2
+fi
+
+# MECH-01: the six declared economic mechanisms, in classifier.py's
+# ECONOMIC_MECHANISMS order. This is a THIRD declaration of that vocabulary
+# (classifier.py and hermes-report.sh hold the other two), so a drift test
+# pins it -- the repo already treats the first two as a hazard worth testing.
+#
+# Discipline mirrored from _resolve_economic_mechanism, with one deliberate
+# divergence. Mirrored: `.strip()` is applied and `.lower()` is NOT, because
+# per D-03 an out-of-set value must not be coerced, and case-folding is
+# coercion. Diverged: that function ABSTAINS to unknown on a bad value
+# because it runs on the per-tick path; this is an interactive operator CLI
+# where D-04 already establishes the opposite posture -- fail loudly, since
+# "a silently-skipped correction is worse than a refused one". So an
+# unrecognised mechanism is a non-zero exit, never an abstention.
+_MECHANISMS="labor_substitution augmentation_capacity_expansion newly_enabled_work quality_decision_improvement risk_avoidance incremental_revenue"
+
+# Gate on whether the FLAG was supplied, not on whether its value is
+# non-empty: `--mechanism ""` is an explicit request carrying an
+# out-of-set value, and silently treating it as "no mechanism" would be
+# the coercion this allow-list exists to refuse.
+if [[ "${MECHANISM_GIVEN}" == true ]]; then
+  # shellcheck disable=SC2295
+  MECHANISM="${MECHANISM#"${MECHANISM%%[![:space:]]*}"}"
+  MECHANISM="${MECHANISM%"${MECHANISM##*[![:space:]]}"}"
+  _found=false
+  for _m in ${_MECHANISMS}; do
+    [[ "${MECHANISM}" == "${_m}" ]] && { _found=true; break; }
+  done
+  if [[ "${_found}" != true ]]; then
+    echo "Unsupported --mechanism '${MECHANISM}'." >&2
+    echo "Must be exactly one of: ${_MECHANISMS// /, }" >&2
+    echo "Matching is case-sensitive and exact -- an out-of-set value is refused, never coerced." >&2
+    exit 2
+  fi
+fi
+
+# D-01/D-05: the attribution pair. The operator supplies the ALREADY
+# ATTRIBUTED value; this script multiplies nothing and never sees a gross
+# figure. The fraction and basis document how the operator reached the
+# value they passed.
+#
+# The fraction cannot be validated against anything -- there is no gross
+# here to check it against, by design, because keeping a full business
+# figure out of an agent-metering record is the only structural defence
+# against cross-system double counting available at this layer. So the
+# fraction is an ASSERTION, and the one constraint worth having is that it
+# may never travel naked: --attribution-basis is REQUIRED whenever
+# --attribution-fraction is supplied. A bare number has the authority of a
+# measurement with none of the accountability; a cited one is auditable.
+if [[ "${ATTRIBUTION_FRACTION_GIVEN}" == true ]]; then
+  if [[ -z "${ATTRIBUTION_BASIS//[[:space:]]/}" ]]; then
+    echo "--attribution-fraction requires --attribution-basis." >&2
+    echo "A declared fraction is an operator assertion, not a measurement -- it must carry the stated basis it rests on." >&2
+    exit 2
+  fi
+  ATTRIBUTION_ERROR=$(ATTRIBUTION_FRACTION_PY="${ATTRIBUTION_FRACTION}" python3 - <<'ATTRPY'
+import math
+import os
+
+raw = os.environ.get('ATTRIBUTION_FRACTION_PY', '')
+# Mirrors _finite_number's rejection set (classifier.py), including the
+# OverflowError guard added under PR #109 -- float() raises on an
+# arbitrary-precision int, and this flag takes operator input.
+try:
+    f = float(raw)
+except OverflowError:
+    print('--attribution-fraction is too large to represent')
+    raise SystemExit(0)
+except (TypeError, ValueError):
+    print(f'--attribution-fraction {raw!r} is not a number')
+    raise SystemExit(0)
+if math.isnan(f) or math.isinf(f):
+    print('--attribution-fraction must be finite')
+    raise SystemExit(0)
+if not (0.0 <= f <= 1.0):
+    print(f'--attribution-fraction must be between 0 and 1 inclusive (got {f})')
+    raise SystemExit(0)
+ATTRPY
+)
+  if [[ -n "${ATTRIBUTION_ERROR}" ]]; then
+    echo "Invalid input: ${ATTRIBUTION_ERROR}" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "${ATTRIBUTION_BASIS//[[:space:]]/}" && "${ATTRIBUTION_FRACTION_GIVEN}" != true ]]; then
+  echo "--attribution-basis requires --attribution-fraction." >&2
+  exit 2
+fi
+
 # D-03: a bare --value with no range flags produces an equal-bounds record.
-[[ -z "${VALUE_LOW}" ]] && VALUE_LOW="${VALUE}"
-[[ -z "${VALUE_HIGH}" ]] && VALUE_HIGH="${VALUE}"
+# Guarded on VALUE (D-08): with no value there is nothing to equal, and
+# defaulting the bounds to "" would write three empty value keys rather than
+# omitting them.
+if [[ -n "${VALUE}" ]]; then
+  [[ -z "${VALUE_LOW}" ]] && VALUE_LOW="${VALUE}"
+  [[ -z "${VALUE_HIGH}" ]] && VALUE_HIGH="${VALUE}"
+fi
 
 # --------------------------------------------------------------------------
 # Step 1: resolve the sidecar path AND the ledger-line id -- a pure string
@@ -245,6 +374,7 @@ def _clean(v):
 target_clean = _clean(raw_job_id)
 
 found = None
+valued = None
 line_count = 0
 correction_count = 0
 if os.path.exists(sidecar_path):
@@ -272,6 +402,35 @@ if os.path.exists(sidecar_path):
                 # reader in hermes-report.sh uses (41-CARRIER-DECISION.md
                 # Part 2's last-match-wins property).
                 found = rec
+                # Greptile (PR #110), Phase 51 D-08: track the last record
+                # that actually CARRIED a value, separately from the last
+                # record overall.
+                #
+                # A mechanism-only correction has no value family, so on a
+                # plain last-match-wins read the NEXT correction would
+                # snapshot its absent values and write an empty
+                # prior_value_*. Two chained mechanism-only corrections
+                # would then leave nothing for the reporter to promote, and
+                # the standing valuation would vanish from the wire --
+                # exactly the defect the one-level promotion was meant to
+                # close, one link further down the chain.
+                #
+                # Fixed at the WRITE side so prior_value_* always records
+                # the true standing value, however many valueless
+                # corrections precede it. That keeps every correction record
+                # self-describing rather than requiring a reader to walk
+                # backwards through history.
+                if rec.get('value_base') is not None:
+                    valued = rec
+                elif rec.get('kind') == 'correction' and rec.get('prior_value_base') is not None:
+                    # A valueless correction still carries the standing
+                    # value it inherited; carry it forward unchanged.
+                    valued = {
+                        'value_low': rec.get('prior_value_low'),
+                        'value_base': rec.get('prior_value_base'),
+                        'value_high': rec.get('prior_value_high'),
+                        'currency': rec.get('prior_currency'),
+                    }
     except OSError:
         pass
 
@@ -281,10 +440,13 @@ if found is None:
     print('FOUND=0')
 else:
     print('FOUND=1')
-    print(f"CURRENT_VALUE_LOW={found.get('value_low', '')}")
-    print(f"CURRENT_VALUE_BASE={found.get('value_base', '')}")
-    print(f"CURRENT_VALUE_HIGH={found.get('value_high', '')}")
-    print(f"CURRENT_CURRENCY={found.get('currency', '')}")
+    # Emitted from `valued`, not `found`: the standing value survives any
+    # number of valueless corrections in between.
+    _v = valued if valued is not None else {}
+    print(f"CURRENT_VALUE_LOW={_v.get('value_low') if _v.get('value_low') is not None else ''}")
+    print(f"CURRENT_VALUE_BASE={_v.get('value_base') if _v.get('value_base') is not None else ''}")
+    print(f"CURRENT_VALUE_HIGH={_v.get('value_high') if _v.get('value_high') is not None else ''}")
+    print(f"CURRENT_CURRENCY={_v.get('currency') if _v.get('currency') is not None else ''}")
 PY
 )
 
@@ -313,6 +475,11 @@ echo "Current effective assessment for job '${JOB_ID}': value_low=${CURRENT_VALU
 # reaching a billing verb. Finite, non-negative, non-strictly-ordered
 # bounds and a supported currency, or refuse.
 # --------------------------------------------------------------------------
+# D-08: the value validators below have nothing to validate on a
+# mechanism-only correction. Skipped rather than made lenient -- when a
+# value IS supplied every original rule still applies unchanged.
+VALIDATION_ERROR=""
+if [[ -n "${VALUE}" ]]; then
 VALIDATION_ERROR=$(VALUE_PY="${VALUE}" VALUE_LOW_PY="${VALUE_LOW}" VALUE_HIGH_PY="${VALUE_HIGH}" CURRENCY_PY="${CURRENCY}" python3 - <<'PY'
 import math
 import os
@@ -350,6 +517,7 @@ if currency not in _SUPPORTED_CURRENCIES:
     raise SystemExit(0)
 PY
 )
+fi
 
 if [[ -n "${VALIDATION_ERROR}" ]]; then
   echo "Invalid input: ${VALIDATION_ERROR}" >&2
@@ -415,6 +583,9 @@ APPEND_OUTPUT=$(
   PRIOR_VALUE_HIGH_PY="${CURRENT_VALUE_HIGH}" \
   PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
   REASON_PY="${REASON}" \
+  MECHANISM_PY="${MECHANISM}" \
+  ATTRIBUTION_FRACTION_PY="${ATTRIBUTION_FRACTION}" \
+  ATTRIBUTION_BASIS_PY="${ATTRIBUTION_BASIS}" \
   python3 - <<'PY'
 import json
 import os
@@ -508,12 +679,35 @@ with os.fdopen(fd, 'r+b', buffering=0) as f:
         'prior_value_base': _num(os.environ.get('PRIOR_VALUE_BASE_PY', '')),
         'prior_value_high': _num(os.environ.get('PRIOR_VALUE_HIGH_PY', '')),
         'prior_currency': os.environ.get('PRIOR_CURRENCY_PY', ''),
-        'value_low': _num(os.environ.get('VALUE_LOW_PY', '')),
-        'value_base': _num(os.environ.get('VALUE_PY', '')),
-        'value_high': _num(os.environ.get('VALUE_HIGH_PY', '')),
-        'currency': os.environ.get('CURRENCY_PY', ''),
         'reason': reason,
     }
+    # D-08: on a mechanism-only correction the value family is ABSENT, not
+    # null and not zero -- the same distinction the value docs draw for an
+    # abstained record. `prior_value_*` above still records what stood
+    # before, so the history stays walkable; this line simply does not
+    # restate a valuation the operator never supplied.
+    _value_base = _num(os.environ.get('VALUE_PY', ''))
+    if _value_base is not None:
+        record['value_low'] = _num(os.environ.get('VALUE_LOW_PY', ''))
+        record['value_base'] = _value_base
+        record['value_high'] = _num(os.environ.get('VALUE_HIGH_PY', ''))
+        record['currency'] = os.environ.get('CURRENCY_PY', '')
+    # MECH-01/MECH-04: the operator-declared mechanism, already validated
+    # against the six-member allow-list in the shell above.
+    _mechanism = os.environ.get('MECHANISM_PY', '')
+    if _mechanism:
+        record['economic_mechanism'] = _mechanism
+    # D-05: the attribution pair, recorded as documentation of how the
+    # operator reached the value above. Nothing is multiplied here, and no
+    # gross figure exists to multiply. The basis is clamped exactly as the
+    # reason is -- this metadata path has no ceiling of its own, so an
+    # unbounded operator string is the one way to blow the envelope from
+    # this direction.
+    _fraction = os.environ.get('ATTRIBUTION_FRACTION_PY', '')
+    if _fraction:
+        record['attribution_fraction'] = float(_fraction)
+        record['attribution_basis'] = _clamp_reason(
+            os.environ.get('ATTRIBUTION_BASIS_PY', ''))
     line_bytes = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
     f.write(line_bytes)
     # Greptile P1 (PR #94), CLOSED for good by the fd9 lock: this check used
@@ -623,6 +817,9 @@ OUTCOME_UPDATE_METADATA=$(
   PRIOR_VALUE_BASE_PY="${CURRENT_VALUE_BASE}" \
   PRIOR_VALUE_HIGH_PY="${CURRENT_VALUE_HIGH}" \
   PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
+  MECHANISM_PY="${MECHANISM}" \
+  ATTRIBUTION_FRACTION_PY="${ATTRIBUTION_FRACTION}" \
+  ATTRIBUTION_BASIS_PY="${ATTRIBUTION_BASIS}" \
   python3 - <<'PY'
 import json
 import os
@@ -650,6 +847,25 @@ for key, env_key in (
 prior_currency = os.environ.get('PRIOR_CURRENCY_PY', '')
 if prior_currency:
     meta['prior_currency'] = prior_currency
+# MECH-04: the declared mechanism travels with the correction, so the
+# revision filed at Revenium says WHY the value changed, not only that
+# it did. Validated against the six-member allow-list in the shell.
+mechanism = os.environ.get('MECHANISM_PY', '')
+if mechanism:
+    meta['economic_mechanism'] = mechanism
+# D-07: the attribution assumption travels with the value it
+# documents. A value whose attribution is invisible downstream is
+# exactly the failure the claim-distinctions doc warns about --
+# the number travels and the caveat does not.
+fraction = os.environ.get('ATTRIBUTION_FRACTION_PY', '')
+if fraction:
+    meta['attribution_fraction'] = float(fraction)
+    basis = os.environ.get('ATTRIBUTION_BASIS_PY', '').strip()
+    for _bad in ('|', '\n', '\r'):
+        basis = basis.replace(_bad, ' ')
+    while len(json.dumps(basis, ensure_ascii=True).encode('utf-8')) > 500 and basis:
+        basis = basis[:-1]
+    meta['attribution_basis'] = basis
 print(json.dumps(meta, separators=(',', ':')))
 PY
 )
@@ -657,8 +873,14 @@ PY
 outcome_update_cmd=(
   revenium jobs outcome-update "${JOB_ID}"
   --reason "${REASON_SHIPPED}"
-  --outcome-value "${VALUE}"
-  --outcome-currency "${CURRENCY}"
+)
+# D-08: --outcome-value is a float64 flag; passing "" on a mechanism-only
+# correction would be a malformed invocation, not an omission. Appended
+# conditionally, the same way every other optional flag in this repo is.
+if [[ -n "${VALUE}" ]]; then
+  outcome_update_cmd+=(--outcome-value "${VALUE}" --outcome-currency "${CURRENCY}")
+fi
+outcome_update_cmd+=(
   --metadata "${OUTCOME_UPDATE_METADATA}"
   --quiet
 )

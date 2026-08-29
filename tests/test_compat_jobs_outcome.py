@@ -608,6 +608,41 @@ class TestCompatJobsOutcomeMetadataTruncated(unittest.TestCase):
             f'bytes, not over the {ceiling}-byte ceiling -- this record no '
             f'longer proves truncation; retune the field lengths above',
         )
+        # Phase 51 (D-09): a bare `> ceiling` is not enough. A record sitting
+        # one byte over passes here and is one key-rename away from silently
+        # ceasing to test truncation -- which is exactly what happened twice:
+        # Phase 49 found two fixtures within 3-16 bytes of the ceiling, and
+        # the `integration` -> `handoff` rename (4 chars x 4 occurrences)
+        # pushed one to three bytes UNDER it, turning the truncation
+        # assertions into a no-op that still reported green.
+        #
+        # Require real headroom so the next vocabulary change fails loudly
+        # here rather than quietly disabling the assertions above.
+        _MIN_CEILING_HEADROOM_BYTES = 128
+        self.assertGreater(
+            pre_drop_bytes - ceiling, _MIN_CEILING_HEADROOM_BYTES,
+            f'the untruncated payload clears the {ceiling}-byte ceiling by '
+            f'only {pre_drop_bytes - ceiling} bytes, under the '
+            f'{_MIN_CEILING_HEADROOM_BYTES}-byte headroom this fixture is '
+            f'required to keep. It still truncates TODAY, but the margin is '
+            f'thin enough that a key rename or a dropped field would silently '
+            f'stop it. Add ballast to the value-family fields above.',
+        )
+
+        # KNOWN LIMITATION, recorded rather than left implicit (Phase 51).
+        # This guard feeds OUTCOME_SOURCE the raw 61-emoji value, but the
+        # real driven tick clamps `source` well below that before setting
+        # the env var, so the payload measured here is several hundred bytes
+        # LARGER than the one that actually ships. That is why this guard
+        # passed during the `handoff` rename while the shipped payload had
+        # already fallen under the ceiling.
+        #
+        # The headroom assertion above therefore protects against a ceiling
+        # RAISE, but it does not by itself prove the shipped payload still
+        # truncates -- test_truncated_outcome_argv_matches_golden is what
+        # proves that, by asserting on the real argv. Closing the gap means
+        # mirroring the pipeline's source clamp here, which is a larger
+        # change than this phase took on.
 
 
 if __name__ == '__main__':

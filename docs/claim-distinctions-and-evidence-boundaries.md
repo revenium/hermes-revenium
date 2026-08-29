@@ -281,6 +281,34 @@ An abstained outcome, a withheld candidate, and a negative net value each descri
 job state. Collapsing them into a blank or zero would erase the distinction between "nothing
 to report" and "something to report, but not this way."
 
+## Operator-declared mechanism and attribution
+
+An operator may declare any of the six economic mechanisms, and may record an
+attribution fraction alongside a value. Both are **assertions by a person**,
+recorded as such, and neither is evidence.
+
+Placed against the five distinctions above: a declared mechanism says which
+*kind* of value is being claimed. An attribution fraction says what share of a
+larger figure the operator assigns to this job. Neither closes any link in the
+results chain — acceptance, adoption, operational outcome and business outcome
+remain unobserved by this skill whatever an operator declares, and an
+attributed figure is still a figure attached to an outcome nothing here saw.
+
+Two properties keep the boundary from eroding:
+
+- **Neither moves `evidence_class`.** The label reflects the evidence behind a
+  record; an operator flag is not evidence. In particular neither can promote a
+  record toward the three labels reserved for study-backed claims.
+- **The fraction is never applied to anything.** The operator supplies the
+  already-attributed figure; the skill is not given a larger number and holds
+  no rule for deriving one figure from another. A fraction is documentation of
+  the operator's own reasoning, which is why the stated basis is required
+  alongside it.
+
+Where a defensible figure is wanted rather than a plausible one, the route is
+a holdout comparison, which is a study — it needs the study contract this tree
+describes but does not run.
+
 ## What this milestone does not ship
 
 Every item below records what this tree does not contain today. None is a schedule or a
