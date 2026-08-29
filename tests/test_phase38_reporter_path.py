@@ -202,6 +202,16 @@ def _correction_sidecar_record(job_id, sequence=1, **overrides):
         "value_high": 120.0,
         "currency": "USD",
         "reason": "operator correction",
+        # Phase 51 (D-05): the attribution pair is written ONLY by
+        # correct-assessment.sh, never by classifier.py's
+        # _build_job_assessment -- so it belongs on this fixture and not on
+        # _sidecar_record(), exactly as `sequence` does. Verified: the
+        # string "attribution_fraction" does not appear in classifier.py at
+        # all. Putting it on the job_assessment fixture instead would pin a
+        # wire shape production never sends, which is this guard's own
+        # defect inverted.
+        "attribution_fraction": 0.15,
+        "attribution_basis": "15% per policy REV-2024-03",
     }
     record.update(overrides)
     return record
@@ -1000,12 +1010,47 @@ class SidecarFixtureFidelityTests(unittest.TestCase):
     like the bound family already in this file, would not be caught here).
     """
 
-    # Only a kind:"correction" record carries `sequence` --
-    # _correction_sidecar_record() supplies it, not _sidecar_record(). Every
-    # future addition to this exemption set needs the same kind of written
-    # justification: a growing exemption set is how this guard would rot
-    # back into the defect it exists to catch.
-    _SEQUENCE_ONLY_ON_CORRECTIONS = frozenset({'sequence'})
+    # Keys only a kind:"correction" record carries --
+    # _correction_sidecar_record() supplies them, not _sidecar_record().
+    # Every addition needs written justification: a growing exemption set is
+    # how this guard would rot back into the defect it exists to catch.
+    #
+    # `sequence` (Phase 42): only a correction has one.
+    #
+    # `attribution_fraction` / `attribution_basis` (Phase 51): written ONLY
+    # by correct-assessment.sh. classifier.py's _build_job_assessment never
+    # produces them -- verified, the strings do not occur in that file at
+    # all. Adding them to _sidecar_record() instead would make the golden
+    # pin an ordinary job_assessment carrying attribution, a shape
+    # production never sends: this guard's own defect, inverted.
+    #
+    # The exemption RELOCATES coverage rather than removing it --
+    # test_correction_only_keys_are_present_in_the_correction_record below
+    # asserts every exempted key appears on the correction fixture, so a key
+    # cannot be exempted into having no fidelity coverage at all. That guard
+    # did not exist when the set held only `sequence`; it was added in Phase
+    # 51 precisely because widening an unguarded exemption set is the rot the
+    # comment above warns about.
+    _CORRECTION_ONLY_KEYS = frozenset({
+        'sequence', 'attribution_fraction', 'attribution_basis',
+    })
+
+    def test_correction_only_keys_are_present_in_the_correction_record(self):
+        """Phase 51: an exemption must RELOCATE fidelity coverage, never
+        remove it. Every key excused from _sidecar_record() on the grounds
+        that only a correction carries it has to actually appear on
+        _correction_sidecar_record() -- otherwise exempting a key silently
+        buys it a pass from this guard entirely, which is exactly how the
+        set would rot."""
+        correction = _correction_sidecar_record('fidelity-probe-correction')
+        missing = self._CORRECTION_ONLY_KEYS - set(correction.keys())
+        self.assertEqual(
+            missing, set(),
+            f'_correction_sidecar_record() is missing correction-only keys: '
+            f'{sorted(missing)} -- these were excused from _sidecar_record() '
+            f'because only a correction carries them, so the correction '
+            f'fixture is where their fidelity coverage lives',
+        )
 
     def test_every_forwardable_key_is_present_in_sidecar_record(self):
         script_text = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
@@ -1022,7 +1067,7 @@ class SidecarFixtureFidelityTests(unittest.TestCase):
             'the extractor is broken',
         )
         record = _sidecar_record('fidelity-probe-job')
-        missing = (set(keys) - self._SEQUENCE_ONLY_ON_CORRECTIONS) - set(record.keys())
+        missing = (set(keys) - self._CORRECTION_ONLY_KEYS) - set(record.keys())
         self.assertEqual(
             missing, set(),
             f'_sidecar_record() is missing forwardable keys: {missing} -- '
