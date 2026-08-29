@@ -146,8 +146,16 @@ Four categories exist, and the keys are fixed:
 |---|---|
 | `human_review` | Someone reads the diff before it lands. Almost always non-zero. |
 | `rework_or_error` | What it costs when the agent gets it wrong and a person fixes it. |
-| `integration` | Landing the change — migrations, coordination, staged rollout. |
+| `integration` | Work required after accepting the output to put it into the operating workflow or system of record. |
 | `training_or_change` | Bringing the team up to speed on a new pattern or tool. |
+
+`integration` does **not** mean the cost of integrating Revenium, building an API, or setting
+up the agent. It is a per-job operational cost. It starts after someone accepts the agent's
+output and ends when that output is usable in the real process. Copying an approved narrative
+into a case-management system, attaching evidence, updating disposition fields, and routing
+the case to the next queue are integration work. Deciding whether the narrative is correct is
+`human_review`; correcting it is `rework_or_error`; teaching people a new procedure is
+`training_or_change`.
 
 Three rules decide what actually happens:
 
@@ -201,9 +209,13 @@ an analyst loaded rate of `$120` per hour and the job type `aml_alert_investigat
 ```
 
 `human_review: 60` allocates 30 minutes for the analyst's review and disposition.
-`integration: 24` allocates 12 minutes for recording the decision and supporting evidence in
-the case-management system. `rework_or_error: 18` is an expected correction cost across
-comparable investigations, not an assertion that every case requires rework.
+`integration: 24` allocates 12 minutes for the operational steps after approval: updating the
+case record, attaching supporting evidence, and routing the case. It is not the cost of
+building or maintaining a case-management connector. If the agent writes the accepted result
+to the case system and routes it without additional work, configure `integration: 0`. If the
+institution has not measured or estimated that work, omit the key so the cost remains unknown.
+`rework_or_error: 18` is an expected correction cost across comparable investigations, not
+an assertion that every case requires rework.
 `training_or_change: 6` amortizes periodic procedure and model-use training across cases.
 
 The costs apply only when the classifier records the exact job type

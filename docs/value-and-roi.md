@@ -465,8 +465,15 @@ a model cannot supply a cost figure.
 |---|---|
 | `human_review` | Review of the agent's output by a person |
 | `rework_or_error` | Cost of fixing what the agent got wrong |
-| `integration` | Cost of landing the output in the real system |
+| `integration` | Cost incurred after acceptance to put the output into the operating workflow or system of record |
 | `training_or_change` | Change-management and enablement cost |
+
+`integration` is a per-job operationalization cost. It does not mean the cost of integrating
+Revenium, building an API, or setting up the agent. Count the work that begins after the output
+is accepted and is required to make it usable in the real process: entering it into a system
+of record, attaching evidence, updating required fields, routing it to another queue, or
+performing a controlled handoff. Keep the acceptance decision under `human_review`, corrections
+under `rework_or_error`, and training under `training_or_change`.
 
 They are keyed by **job type**, and there is **no fleet-wide default bucket**. An absent
 job-type key means every category is unknown for that job type, exactly as if `costs` were
