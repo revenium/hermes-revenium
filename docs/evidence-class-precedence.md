@@ -466,3 +466,28 @@ records had drifted apart, each stating one side of the same question in a diffe
 deferral note. A rule derived once and cited twice cannot drift; a rule derived twice will. That
 is why this trigger lives here, in the one document both Phase 50 and Phase 51 read, rather than
 being restated separately inside each phase's own plan.
+
+## Appendix: restatement-site sweep
+
+D-10's rule, in this document's own voice: every place in the tree that echoes one side of the
+RECON-03 tension is enumerated here, and only the sites the decision renders false are edited.
+The audit is visible even where no edit follows, so a later reader knows a site was considered
+rather than missed.
+
+| Site | file:line | What it asserts | Verdict | Edited? |
+|---|---|---|---|---|
+| A | `docs/claim-distinctions-and-evidence-boundaries.md:319-331` | "Not true today: a configured boundary's own declared class does not reach the persisted record ... This was left open rather than patched because closing it needs a cross-boundary precedence rule that no decision covers ... and because letting a boundary declaration raise a recorded class is the same mechanism as the promotion path this product structurally closed elsewhere; patching around that mechanism here would reopen it by a side door." | Splits in two. The factual clause (lines 319-326, "Not true today ... under-claims rather than over-claims") stays literally true after this phase — Phase 48 changes no runtime behaviour, so the fact that a configured boundary's declared class does not yet reach the record is unaffected. The reasoning clause (lines 328-331, "the same mechanism as the promotion path ... reopen it by a side door") is exactly the EGV-02 deferral's reasoning D-01 corrects: a registration-time declaration by trusted code is a different threat model, not the same mechanism reached from a different source. | Yes — reasoning clause only. Performed by plan 48-03, not this plan (this plan touches only `docs/evidence-class-precedence.md`). |
+| B | `boundary_registry.py:25-32` (module docstring, the `register()` contract paragraph) | "This is a DIFFERENT threat model from the one classifier._forced_evidence_class() defends ... A registration-time declaration never touches evaluator output either ... Neither pattern subsumes the other." | Confirmed — this already states D-01's upheld position accurately. | No. |
+| C | `cohort_impact.py:46-60` (module docstring paragraph) | "A registered estimator's result can never be represented as individually-observed causality. The mechanism is STRUCTURAL, not a check: this registry is a separate BoundaryRegistry instance that classifier._declared_evidence_class NEVER consults ..." | Confirmed — factual, still true. `_declared_evidence_class` resolves the `output_assessment` registry alone, exactly as this paragraph describes. | No. |
+| D | `evaluators.py:38-50` (module docstring paragraph) | "The validator derives evidence_class from the resolved evaluator's OWN registration-time declaration (Phase 45, D-06 AMENDED ...)" | Confirmed — accurate description of the mechanism, unaffected by which record RECON-03 corrects. | No. |
+| E | `evidence.py:50-66` (module docstring paragraph) | "...this module does NOT decide an implementation's evidence class. The class is DECLARED at register() time by trusted code (D-06 AMENDED, the same mechanism every other boundary in this phase uses) ..." | Considered and distinguished, not false. This "same mechanism" has a different referent from site A's: here it names the shared registration mechanism every boundary in Phase 45 uses (`register()`/`resolve()`), not the EGV-02 deferral's claim that a boundary declaration is the same mechanism as the promotion path. Different referent, not an instance of the reasoning D-01 corrects. | No — recorded here as considered, which is what D-10's "visible even where no edit follows" exists for. |
+| F | `docs/internal-milestones.md:161-165` (numbered list, "Six lessons" closing section) | "5. Record the direction of an error. EGV-02 was deferrable precisely because it under-claims; that fact turned a would-be blocker into a documented gap." | Confirmed — a generic engineering lesson illustrated by EGV-02's history. Its truth does not depend on RECON-03's outcome; the correction lives in the dated superseding block D-08 adds at line 110, not in this lesson. | No. |
+
+Two of these six sites — E and F — were found beyond the four `48-CONTEXT.md` named (A, B, C,
+D). Sites B, C, and D are unaffected because they already state, or accurately describe, the
+position D-01 upholds; Phase 48 changes no code these sites describe. The sweep itself is
+grep-based and best-effort: it searched `docs/` and the plugin tree for the tension's
+characteristic language — "same mechanism", "different threat model", "structurally", "promotion
+path", "reopen". A restatement phrased in wording this pattern set did not search would not have
+surfaced; a later reader broadening the search should start with the next-closest vocabulary this
+document itself uses — "masquerad", "trusted registrant", "cross-boundary precedence".
