@@ -78,8 +78,10 @@ estimate because the product does not provide it.
 
 ## The configuration
 
-One block in `~/.hermes/state/revenium/config.json`. This example is tuned for a software
-engineering team; the reasoning behind each number follows.
+One block in `~/.hermes/state/revenium/config.json`. The amounts below are illustrative
+operator assumptions for a software engineering team. They are not product defaults,
+measurements, or values produced by the evaluator. Each amount is a flat cost in the
+configured currency, applied once to a completed job arc of that type.
 
 ```json
 {
@@ -132,8 +134,11 @@ the transcript says or the model returns.
 
 ### The costs
 
-`costs` is where you subtract what the agent's output actually costs *you* to accept.
-`estimated_value` stays the gross figure; `net_value` is the figure after this subtraction.
+`costs` holds the organization's own cost assumptions for accepting an agent's output.
+The skill defines the category names; the operator supplies the amounts. The classifier
+does not derive them from the transcript, evaluator response, metered AI usage, or a
+Revenium API. `estimated_value` stays the gross figure; `net_value` is the figure after
+the configured costs for that job type are subtracted.
 
 Four categories exist, and the keys are fixed:
 
@@ -171,6 +176,47 @@ Reasoning behind the figures above, at a $220 loaded hour:
 | `documentation` | review 25 | Cheap to review, cheap to correct. |
 | `research` | review 15 | You are reading the output anyway; that reading *is* the review. |
 | `planning` | review 40 | A plan gets discussed before it is acted on. |
+
+These amounts are static allocations, not observed expenses. Every successful evaluated
+arc of a configured job type receives the same costs. If actual review or integration work
+varies materially, use a defensible average and revisit it periodically. For occasional
+rework, use an expected cost across comparable jobs rather than the worst possible failure.
+
+#### Financial-services example
+
+A regulated financial-services engineering team may incur more review and release cost than
+the general example. Assume a loaded rate of `$240` per hour and a delivery process that
+requires peer review, a control review, change evidence, and a staged production rollout:
+
+```json
+"costs": {
+  "bug_fix": {
+    "human_review": 120,
+    "integration": 240
+  },
+  "feature_development": {
+    "human_review": 240,
+    "integration": 480,
+    "training_or_change": 120
+  },
+  "devops": {
+    "human_review": 240,
+    "rework_or_error": 360,
+    "integration": 480
+  },
+  "documentation": {
+    "human_review": 120,
+    "integration": 0
+  }
+}
+```
+
+Here, `human_review: 120` represents 30 minutes at the loaded rate. For a `bug_fix`,
+`integration: 240` reserves one hour for the change ticket, control evidence, release
+coordination, and rollout. The `documentation` entry uses `integration: 0` to state that
+approved documentation has no separate deployment cost. Omitting that key would mean the
+integration cost is unknown, not zero. These figures are examples; a financial institution
+should derive its own amounts from its review and change-management process.
 
 `interrupted` is absent because it is the terminal type for an arc cut short by a budget
 halt or a pivot. It is never `SUCCESS` and therefore never valued, so a `costs` entry would
