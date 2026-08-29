@@ -1172,6 +1172,12 @@ def _declared_evidence_class(evaluator: str) -> str:
     threat model from the untrusted model output _forced_evidence_class()
     defends against (Phase 45, D-06 AMENDED).
 
+    Phase 48: the cross-boundary precedence rule for when the evaluator,
+    the valuation boundary, and the evidence boundary each declare a
+    class lives in docs/evidence-class-precedence.md, not here -- Phase
+    50 is the phase that would implement it, and until it does this
+    function still resolves the evaluators registry alone.
+
     The membership test against EVIDENCE_CLASSES is what keeps a registrant
     from declaring a label outside the nine, mirroring
     _resolve_economic_mechanism's allow-list discipline above -- while
