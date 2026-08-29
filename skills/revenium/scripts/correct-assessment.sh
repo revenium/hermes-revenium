@@ -49,6 +49,8 @@ VALUE_LOW=""
 VALUE_HIGH=""
 CURRENCY=""
 REASON=""
+MECHANISM=""
+MECHANISM_GIVEN=false
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -59,21 +61,89 @@ while [[ $# -gt 0 ]]; do
     --value-high) VALUE_HIGH="${2:-}"; shift 2 ;;
     --currency) CURRENCY="${2:-}"; shift 2 ;;
     --reason) REASON="${2:-}"; shift 2 ;;
+    --mechanism) MECHANISM="${2:-}"; MECHANISM_GIVEN=true; shift 2 ;;
     --dry-run) DRY_RUN=true; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown flag: $1" >&2; exit 2 ;;
   esac
 done
 
-if [[ -z "${JOB_ID}" || -z "${VALUE}" || -z "${CURRENCY}" || -z "${REASON}" ]]; then
-  echo "Missing required flag(s) -- --job-id, --value, --currency, and --reason are all required." >&2
+# D-08: --value (and the --currency that denominates it) are required
+# UNLESS --mechanism is supplied. A mechanism-only correction is legal --
+# EGV-10 holds mechanism and value apart, and economic_mechanism already
+# travels without a value on the not-reportable path (it is absent from
+# hermes-report.sh's _VALUE_OMIT_FAMILY, whose docstring records that
+# withholding the VALUE does not withhold the fact that a record exists).
+# --job-id and --reason stay unconditionally required: this script's whole
+# purpose is an auditable trail, and neither is ever meaningless.
+if [[ -z "${JOB_ID}" || -z "${REASON}" ]]; then
+  echo "Missing required flag(s) -- --job-id and --reason are always required." >&2
   usage >&2
   exit 2
 fi
 
+if [[ "${MECHANISM_GIVEN}" != true && -z "${VALUE}" ]]; then
+  echo "Missing required flag(s) -- --value is required unless --mechanism is supplied." >&2
+  usage >&2
+  exit 2
+fi
+
+# A currency with no amount denominates nothing.
+if [[ -n "${VALUE}" && -z "${CURRENCY}" ]]; then
+  echo "Missing required flag(s) -- --currency is required whenever --value is supplied." >&2
+  usage >&2
+  exit 2
+fi
+
+# Range flags without a base value have nothing to bound.
+if [[ -z "${VALUE}" && ( -n "${VALUE_LOW}" || -n "${VALUE_HIGH}" ) ]]; then
+  echo "--value-low/--value-high require --value." >&2
+  exit 2
+fi
+
+# MECH-01: the six declared economic mechanisms, in classifier.py's
+# ECONOMIC_MECHANISMS order. This is a THIRD declaration of that vocabulary
+# (classifier.py and hermes-report.sh hold the other two), so a drift test
+# pins it -- the repo already treats the first two as a hazard worth testing.
+#
+# Discipline mirrored from _resolve_economic_mechanism, with one deliberate
+# divergence. Mirrored: `.strip()` is applied and `.lower()` is NOT, because
+# per D-03 an out-of-set value must not be coerced, and case-folding is
+# coercion. Diverged: that function ABSTAINS to unknown on a bad value
+# because it runs on the per-tick path; this is an interactive operator CLI
+# where D-04 already establishes the opposite posture -- fail loudly, since
+# "a silently-skipped correction is worse than a refused one". So an
+# unrecognised mechanism is a non-zero exit, never an abstention.
+_MECHANISMS="labor_substitution augmentation_capacity_expansion newly_enabled_work quality_decision_improvement risk_avoidance incremental_revenue"
+
+# Gate on whether the FLAG was supplied, not on whether its value is
+# non-empty: `--mechanism ""` is an explicit request carrying an
+# out-of-set value, and silently treating it as "no mechanism" would be
+# the coercion this allow-list exists to refuse.
+if [[ "${MECHANISM_GIVEN}" == true ]]; then
+  # shellcheck disable=SC2295
+  MECHANISM="${MECHANISM#"${MECHANISM%%[![:space:]]*}"}"
+  MECHANISM="${MECHANISM%"${MECHANISM##*[![:space:]]}"}"
+  _found=false
+  for _m in ${_MECHANISMS}; do
+    [[ "${MECHANISM}" == "${_m}" ]] && { _found=true; break; }
+  done
+  if [[ "${_found}" != true ]]; then
+    echo "Unsupported --mechanism '${MECHANISM}'." >&2
+    echo "Must be exactly one of: ${_MECHANISMS// /, }" >&2
+    echo "Matching is case-sensitive and exact -- an out-of-set value is refused, never coerced." >&2
+    exit 2
+  fi
+fi
+
 # D-03: a bare --value with no range flags produces an equal-bounds record.
-[[ -z "${VALUE_LOW}" ]] && VALUE_LOW="${VALUE}"
-[[ -z "${VALUE_HIGH}" ]] && VALUE_HIGH="${VALUE}"
+# Guarded on VALUE (D-08): with no value there is nothing to equal, and
+# defaulting the bounds to "" would write three empty value keys rather than
+# omitting them.
+if [[ -n "${VALUE}" ]]; then
+  [[ -z "${VALUE_LOW}" ]] && VALUE_LOW="${VALUE}"
+  [[ -z "${VALUE_HIGH}" ]] && VALUE_HIGH="${VALUE}"
+fi
 
 # --------------------------------------------------------------------------
 # Step 1: resolve the sidecar path AND the ledger-line id -- a pure string
@@ -313,6 +383,11 @@ echo "Current effective assessment for job '${JOB_ID}': value_low=${CURRENT_VALU
 # reaching a billing verb. Finite, non-negative, non-strictly-ordered
 # bounds and a supported currency, or refuse.
 # --------------------------------------------------------------------------
+# D-08: the value validators below have nothing to validate on a
+# mechanism-only correction. Skipped rather than made lenient -- when a
+# value IS supplied every original rule still applies unchanged.
+VALIDATION_ERROR=""
+if [[ -n "${VALUE}" ]]; then
 VALIDATION_ERROR=$(VALUE_PY="${VALUE}" VALUE_LOW_PY="${VALUE_LOW}" VALUE_HIGH_PY="${VALUE_HIGH}" CURRENCY_PY="${CURRENCY}" python3 - <<'PY'
 import math
 import os
@@ -350,6 +425,7 @@ if currency not in _SUPPORTED_CURRENCIES:
     raise SystemExit(0)
 PY
 )
+fi
 
 if [[ -n "${VALIDATION_ERROR}" ]]; then
   echo "Invalid input: ${VALIDATION_ERROR}" >&2
@@ -415,6 +491,7 @@ APPEND_OUTPUT=$(
   PRIOR_VALUE_HIGH_PY="${CURRENT_VALUE_HIGH}" \
   PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
   REASON_PY="${REASON}" \
+  MECHANISM_PY="${MECHANISM}" \
   python3 - <<'PY'
 import json
 import os
@@ -508,12 +585,24 @@ with os.fdopen(fd, 'r+b', buffering=0) as f:
         'prior_value_base': _num(os.environ.get('PRIOR_VALUE_BASE_PY', '')),
         'prior_value_high': _num(os.environ.get('PRIOR_VALUE_HIGH_PY', '')),
         'prior_currency': os.environ.get('PRIOR_CURRENCY_PY', ''),
-        'value_low': _num(os.environ.get('VALUE_LOW_PY', '')),
-        'value_base': _num(os.environ.get('VALUE_PY', '')),
-        'value_high': _num(os.environ.get('VALUE_HIGH_PY', '')),
-        'currency': os.environ.get('CURRENCY_PY', ''),
         'reason': reason,
     }
+    # D-08: on a mechanism-only correction the value family is ABSENT, not
+    # null and not zero -- the same distinction the value docs draw for an
+    # abstained record. `prior_value_*` above still records what stood
+    # before, so the history stays walkable; this line simply does not
+    # restate a valuation the operator never supplied.
+    _value_base = _num(os.environ.get('VALUE_PY', ''))
+    if _value_base is not None:
+        record['value_low'] = _num(os.environ.get('VALUE_LOW_PY', ''))
+        record['value_base'] = _value_base
+        record['value_high'] = _num(os.environ.get('VALUE_HIGH_PY', ''))
+        record['currency'] = os.environ.get('CURRENCY_PY', '')
+    # MECH-01/MECH-04: the operator-declared mechanism, already validated
+    # against the six-member allow-list in the shell above.
+    _mechanism = os.environ.get('MECHANISM_PY', '')
+    if _mechanism:
+        record['economic_mechanism'] = _mechanism
     line_bytes = (json.dumps(record, separators=(',', ':'), ensure_ascii=True) + '\n').encode('utf-8')
     f.write(line_bytes)
     # Greptile P1 (PR #94), CLOSED for good by the fd9 lock: this check used
@@ -623,6 +712,7 @@ OUTCOME_UPDATE_METADATA=$(
   PRIOR_VALUE_BASE_PY="${CURRENT_VALUE_BASE}" \
   PRIOR_VALUE_HIGH_PY="${CURRENT_VALUE_HIGH}" \
   PRIOR_CURRENCY_PY="${CURRENT_CURRENCY}" \
+  MECHANISM_PY="${MECHANISM}" \
   python3 - <<'PY'
 import json
 import os
@@ -650,6 +740,12 @@ for key, env_key in (
 prior_currency = os.environ.get('PRIOR_CURRENCY_PY', '')
 if prior_currency:
     meta['prior_currency'] = prior_currency
+# MECH-04: the declared mechanism travels with the correction, so the
+# revision filed at Revenium says WHY the value changed, not only that
+# it did. Validated against the six-member allow-list in the shell.
+mechanism = os.environ.get('MECHANISM_PY', '')
+if mechanism:
+    meta['economic_mechanism'] = mechanism
 print(json.dumps(meta, separators=(',', ':')))
 PY
 )
@@ -657,8 +753,14 @@ PY
 outcome_update_cmd=(
   revenium jobs outcome-update "${JOB_ID}"
   --reason "${REASON_SHIPPED}"
-  --outcome-value "${VALUE}"
-  --outcome-currency "${CURRENCY}"
+)
+# D-08: --outcome-value is a float64 flag; passing "" on a mechanism-only
+# correction would be a malformed invocation, not an omission. Appended
+# conditionally, the same way every other optional flag in this repo is.
+if [[ -n "${VALUE}" ]]; then
+  outcome_update_cmd+=(--outcome-value "${VALUE}" --outcome-currency "${CURRENCY}")
+fi
+outcome_update_cmd+=(
   --metadata "${OUTCOME_UPDATE_METADATA}"
   --quiet
 )
