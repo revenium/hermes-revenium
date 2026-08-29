@@ -262,17 +262,36 @@ to a caller-supplied name or to a registration-time declaration, never to model 
 its priority walk at all, under any of the additional parameters this rule adds. No parameter
 in the widened signature can be traced back to `raw` through the call chain: `_boundary_impl_name`
 reads `config.json`, not `raw`; `resolve_evidence_class` reads an import-time registry entry, not
-`raw`. If a future edit tried to derive one of the new parameters from `raw` instead, it would
-have to do so inside `_validate_assessment` or `_build_job_assessment` — the two functions
-`tests/test_phase43_evidence_grading.py`'s ast guard already statically scopes — and would be
-caught the same way A1-A8 are caught today, because `evidence_class` is already a member of
-`_PROMOTION_FORBIDDEN_KEYS` (`tests/test_phase43_evidence_grading.py:484-493`).
+`raw`. A future edit that derived one of the new parameters from `raw` *in the obvious place* —
+directly inside one of the three functions `tests/test_phase43_evidence_grading.py`'s ast guard
+statically scopes — would be caught the same way A1-A8 are caught today, because `evidence_class`
+is already a member of `_PROMOTION_FORBIDDEN_KEYS`
+(`tests/test_phase43_evidence_grading.py:484-493`).
+
+**What that guard does not cover.** The guard is not a general promotion detector, and Phase 50
+must not treat it as one. Its own docstring
+(`tests/test_phase43_evidence_grading.py:550-575`) records the scoping as deliberate:
+"Deliberately scoped to the `raw` NAME within these three functions, and to a NAMED forbidden-key
+set." Three edits would therefore pass it:
+
+1. **A new helper.** `_find_forbidden_raw_reads` walks only the bodies returned by
+   `_scoped_function_defs`. A read of `raw['evidence_class']` inside a helper *called from* one of
+   those functions is never visited.
+2. **A different key.** The match is against `_PROMOTION_FORBIDDEN_KEYS` by name. A precedence
+   input derived from some other response field, and only then mapped to a class, is not a
+   forbidden-key read.
+3. **A different name.** The match is against the literal identifier `raw`
+   (`_UNTRUSTED_PARAM_NAME`). Any rebinding before the read is out of scope.
 
 **Which existing test would catch a regression.** `tests/test_phase43_evidence_grading.py`'s
 `PromotionTests` (`:626`) running `_hostile_evaluator_response()` through the real construction
-path, plus the ast guard over `_PROMOTION_FORBIDDEN_KEYS`. Neither test needs to change for this
-rule to exist; both continue to prove the untrusted-input half of the threat model regardless of
-how many boundaries the trusted-declaration half consults.
+path, plus the ast guard over `_PROMOTION_FORBIDDEN_KEYS`. Both remain **necessary and continue
+to hold** — they prove the untrusted-input half of the threat model regardless of how many
+boundaries the trusted-declaration half consults. They are **not sufficient**: if Phase 50's
+priority walk lands in a new helper rather than inline in the three scoped functions, extending
+`_scoped_function_defs` to cover that helper is part of Phase 50's work, not an optional extra.
+Structural safety here rests on the widened signature carrying no `raw`-derived parameter — the
+argument above — with the ast guard as a regression net over the inline case only.
 
 ### Boundary cases
 
