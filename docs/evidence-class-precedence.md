@@ -418,3 +418,51 @@ fix is implementation, not design: gate the priority walk's evaluation behind th
 `boundaries`-object presence check the rest of Phase 45's boundary machinery already uses, so a
 feature-off install never reaches the new code path at all, and re-run
 `tests/test_phase46_feature_off.py` to confirm.
+
+## The won't-fix trigger
+
+**The trigger, named exactly.** `### Falsifier 1 — an adversarial fixture obtains a
+boundary-declared class` is the falsifier that routes Phase 50 to a recorded won't-fix rather
+than an implementation. If a hostile evaluator response reaches a boundary-declared class
+through the real construction path once this rule exists, D-01's premise — that a
+registration-time declaration by trusted code is a different threat model from untrusted model
+output, not the same mechanism reached from a different source — was wrong in practice, and
+EGV-02 cannot close without reopening the promotion path Phase 43 structurally shut. That is the
+exact scenario Phase 50's own ROADMAP goal text anticipates: "or, if Phase 48 concluded EGV-02
+cannot close without reopening a path Phase 43 shut, the phase's honest output is a documented
+won't-fix with reasoning recorded, matching how Phase 31 closed unbuilt on its own pre-committed
+gate." Falsifier 2 (the rule cannot be sited once) narrows the implementation's plumbing rather
+than closing the feature — see its disposition above. Falsifier 3 (a causal label becomes
+reachable from config) and Falsifier 4 (feature-off behaviour shifts) are revise-before-ship
+items, each fixable inside Phase 50 without touching D-01's premise — neither is a trigger.
+Falsifier 1 alone is the trigger.
+
+**What a recorded won't-fix looks like here.** Matching how Phase 31 closed unbuilt on its own
+pre-committed gate: its durable artifact, `docs/auxiliary-usage-sizing.md`, recorded the gate
+verdict with reasoning in a tracked file, with an explicit "Withdrawn (date) — reason. Not
+failed." disposition per affected requirement, rather than a silent drop. A Phase 50 won't-fix
+follows the same shape: the closure and its reasoning are written down in a tracked file,
+DECL-01 and DECL-04 are dispositioned individually as withdrawn rather than silently dropped,
+and — by explicit dependency — LIVE-03 (ROADMAP Phase 52 criterion 2, which REQUIREMENTS.md
+already marks "Conditional on DECL-01 building — if EGV-02 closes as a recorded won't-fix, this
+requirement closes with it, explicitly, not silently") is dispositioned alongside them. Phase
+50's own ROADMAP charter already names this outcome, so the successor phase does not silently
+re-inherit a refuted assumption.
+
+**Binding Phase 51 to the same rule.** Phase 51's `--mechanism` work consumes this document's
+precedence rule rather than deriving a second one. MECH-03's orthogonality constraint holds
+against it: an operator-declared mechanism never moves the recorded `evidence_class`, which
+follows the precedence rule stated above and never the mechanism. MECH-05's guard test (a study
+reference must not set a mechanism) leans on the same allow-list split D-02 establishes — which
+is why D-02 is rated costly rather than reversible above. One rule, two consumers, no second
+derivation. Even if Falsifier 1 fires and Phase 50 closes DECL-01/DECL-04 as a won't-fix, the
+rule itself — and MECH-03's constraint against it — is unaffected: what would be withdrawn is
+the multi-registry resolution Phase 50 builds, not the precedence statement Phase 51 binds
+against.
+
+**The drift this prevents.** This milestone opened with a reconciliation phase because two
+records had drifted apart, each stating one side of the same question in a different place —
+`classifier.py:1160`'s threat-model argument and `docs/internal-milestones.md:110`'s EGV-02
+deferral note. A rule derived once and cited twice cannot drift; a rule derived twice will. That
+is why this trigger lives here, in the one document both Phase 50 and Phase 51 read, rather than
+being restated separately inside each phase's own plan.
