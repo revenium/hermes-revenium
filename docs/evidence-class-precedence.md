@@ -50,7 +50,7 @@ resolution path a caller reaches today. It is a four-step chain, one citation pe
    when it is a non-empty string present in `allowed`, else `default`.
 
 **No step in this chain can raise.** `evidence.resolve_declared_class`'s entire body runs
-inside its own `try/except Exception: return default` (`evidence.py:212-226`).
+inside its own `try/except Exception: return default` (`evidence.py:250-263`).
 `BoundaryRegistry.resolve_evidence_class` has no code path that raises at all — a non-string
 `name` short-circuits to `""`, a missing entry falls through a dict `.get()` to `""`. And the
 whole body of `_declared_evidence_class` itself — both nested import attempts, the call into
@@ -79,7 +79,7 @@ rule site inherits it verbatim.
 
 Trust attaches to the registrant's own in-repo top-level `register(...)` call, made at import
 time by code the operator installed — **not** to `config.json`'s `boundaries` object.
-`_boundary_impl_name(key, default)` (`classifier.py:2854`) reads `config.json` to select
+`_boundary_impl_name(key, default)` (`classifier.py:2860`) reads `config.json` to select
 **which** already-registered implementation is active for a boundary; it never supplies a
 class itself, and it cannot author one that was not already declared by a `register()` call in
 the tree. An operator editing `config.json` can choose **among** declarations already written
@@ -230,7 +230,7 @@ evidence impl name itself. So under this rule, `_declared_evidence_class`'s sign
 beyond its current single `evaluator: str` parameter to also receive the active valuation and
 evidence boundaries' declared classes as caller-supplied string arguments. Those values come
 from the same two primitives already in the tree — `_boundary_impl_name(key, default)`
-(`classifier.py:2854`) to find the active implementation name, then that boundary's own
+(`classifier.py:2860`) to find the active implementation name, then that boundary's own
 `resolve_evidence_class(name)` (the `BoundaryRegistry` method at `boundary_registry.py:169-176`)
 to read its declared class — without prescribing here what Phase 50's exact parameter list
 looks like.

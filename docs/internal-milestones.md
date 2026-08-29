@@ -135,7 +135,7 @@ mechanism." That final clause is what the corrected understanding disagrees
 with. Trust attaches to the registrant's own in-repo top-level
 `register(...)` call, written by the same code that defines `fn`, at import
 time — not to `config.json`'s `boundaries` object, which selects *which*
-registrant is active (`_boundary_impl_name`, `classifier.py:2854`) and never
+registrant is active (`_boundary_impl_name`, `classifier.py:2860`) and never
 authors a class. `classifier.py:1160`'s threat-model argument is the record
 that stands. Phase 48 changes no runtime behaviour: a configured boundary's
 declared class still does not reach the persisted record, and
