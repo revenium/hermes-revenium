@@ -125,6 +125,28 @@ the promotion path this milestone closed — sourced from trusted configuration
 rather than model output, but the same mechanism. That belongs in a design
 discussion, not a patch.
 
+**Superseded 2026-08-29 (Phase 48) —** a registration-time declaration by
+trusted code and untrusted model output are two different threat models, not
+the same mechanism reached from a different source. The paragraph above
+concludes that any rule letting a boundary declaration raise the recorded
+class is structurally the promotion path this milestone closed — "sourced
+from trusted configuration rather than model output, but the same
+mechanism." That final clause is what the corrected understanding disagrees
+with. Trust attaches to the registrant's own in-repo top-level
+`register(...)` call, written by the same code that defines `fn`, at import
+time — not to `config.json`'s `boundaries` object, which selects *which*
+registrant is active (`_boundary_impl_name`, `classifier.py:2854`) and never
+authors a class. `classifier.py:1160`'s threat-model argument is the record
+that stands. Phase 48 changes no runtime behaviour: a configured boundary's
+declared class still does not reach the persisted record, and
+`_declared_evidence_class` still resolves the evaluators registry alone —
+the correction is to the *reasoning* that made EGV-02 look unclosable, not
+to the *facts* of the gap. See `docs/evidence-class-precedence.md`,
+particularly `## The reconciliation verdict` and `## The precedence rule`,
+which together make EGV-02 closeable in Phase 50 rather than a permanent
+won't-fix; see `## The won't-fix trigger` for the conditions under which it
+would still close unbuilt.
+
 **EGV-05 — three economic mechanisms have no producer.**
 `quality_decision_improvement`, `risk_avoidance` and `incremental_revenue` are
 declared, accepted by the reporter's allow-list, and would forward on the wire,
