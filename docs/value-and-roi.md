@@ -1,6 +1,6 @@
 # Job value and ROI
 
-[← Documentation index](README.md)
+[← Documentation index](README.md) · [Short version →](value-overview.md)
 
 > **Experimental, opt-in, and off by default.** Nothing on this page runs until an
 > operator writes a literal `"enabled": true` into `config.json`. An install that leaves
@@ -10,7 +10,11 @@ This page is the complete reference for the one part of this skill that produces
 *monetary* figure: the estimated economic value of a completed agentic job, the operands
 that value is built from, and how Revenium turns those operands into a displayed ROI.
 
-It is the deep-dive. The pages that mention this feature in passing —
+It is the deep-dive. For the short version — how it works, what the number means, and an
+annotated configuration you can copy — read
+[Job value: a practical overview](value-overview.md) first.
+
+The pages that mention this feature in passing —
 [README](../README.md), [How it works](how-it-works.md),
 [Configuration](configuration.md),
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md),
