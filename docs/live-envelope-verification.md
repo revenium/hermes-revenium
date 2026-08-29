@@ -36,7 +36,7 @@ that ships.
 |-----|---:|---:|---|---:|---:|---------|
 | A   | 337 | 337 | absent | 337 | 12 | accepted |
 | B   | 4484 | 220 | `true` | 220 | 7 | accepted |
-| C1  | 6157 | 3149 | `true` | 3199 | 7 | accepted; arm invalid, see below |
+| C1  | 6207 | 3199 | `true` | 3199 | 7 | accepted; arm invalid, see below |
 | C1b | 8210 | 91 | `true` | 91 | 3 | accepted |
 | C2  | 4350 | 4350 | absent | 4350 | 2 | accepted |
 
@@ -64,7 +64,7 @@ live server.
 ## An arm that did not test what it was designed to test
 
 Arm C1 was intended to exercise both shed tiers. It did not. `assumptions` at
-3000 bytes was on its own enough to bring the payload from 6157 to 3149 bytes,
+3000 bytes was on its own enough to bring the payload from 6207 to 3199 bytes,
 under the ceiling, so tier 2 never ran and `study_id` survived. C1 is a valid
 tier-1 observation and a duplicate of arm B; it is not the two-tier case.
 
