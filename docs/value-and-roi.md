@@ -120,17 +120,41 @@ is stated at more length in
 
 ### The five opt-in surfaces
 
-Everything lives under `llmOutcomeEvaluation` in
-`~/.hermes/state/revenium/config.json`. Five surfaces compose deliberately; there is **no
-master flag**, and none of them will be renamed.
+Five surfaces compose deliberately; there is **no master flag**, and none of them will be
+renamed. Four live inside `llmOutcomeEvaluation` in
+`~/.hermes/state/revenium/config.json`; the fifth does not.
 
-| Surface | Governs | Default |
-|---|---|---|
-| `enabled` | Whether evaluation happens at all | `false` |
-| `experimentalReportEstimates` | Whether a computed value may leave the machine | `false` |
-| `boundaries` | Which registered implementation serves each pluggable contract | built-ins |
-| `costs` | Operator-supplied non-AI costs that net against the estimate | `{}` |
-| `studyId` / `studyVersion` | A reference to an impact study; never changes an assessment's own evidence class | absent |
+| Surface | Where it goes | Governs | Default |
+|---|---|---|---|
+| `enabled` | inside `llmOutcomeEvaluation` | Whether evaluation happens at all | `false` |
+| `experimentalReportEstimates` | inside `llmOutcomeEvaluation` | Whether a computed value may leave the machine | `false` |
+| `costs` | inside `llmOutcomeEvaluation` | Operator-supplied non-AI costs that net against the estimate | `{}` |
+| `studyId` / `studyVersion` | inside `llmOutcomeEvaluation` | A reference to an impact study; never changes an assessment's own evidence class | absent |
+| `boundaries` | **top level**, a sibling of `llmOutcomeEvaluation` | Which registered implementation serves each pluggable contract | built-ins |
+
+> **`boundaries` is read from the top level of `config.json`, not from inside
+> `llmOutcomeEvaluation`.** The resolver reads `config["boundaries"]` directly. Nesting it
+> under `llmOutcomeEvaluation` is the expensive mistake here, because the resolution fails
+> **open**: a `boundaries` object the resolver cannot find is indistinguishable from one that
+> was never configured, so every boundary silently keeps its built-in implementation and
+> nothing is logged. Prose elsewhere describes `boundaries` as part of the
+> `llmOutcomeEvaluation` opt-in *surface*, which it is conceptually — but not structurally.
+> Place it at the top level:
+>
+> ```json
+> {
+>   "llmOutcomeEvaluation": { "enabled": true },
+>   "boundaries": {
+>     "classification": "llm",
+>     "valuation": "hours_times_rate",
+>     "evidence": "config_opt_in"
+>   }
+> }
+> ```
+>
+> Verify a selection took effect by its behaviour, not by the config file — a name that does
+> not resolve to a registered implementation falls back to the built-in just as quietly as a
+> misplaced object does.
 
 No master flag exists on purpose: a sixth gate over the billing path would become a second
 way to disable metering, and would conflate fail-open enrichment with deterministic budget
@@ -169,7 +193,9 @@ enforcement.
 | `studyId` | absent | Non-empty string. All-or-none with `studyVersion` in both directions. |
 | `studyVersion` | absent | Integer ≥ 1. |
 | `costs` | `{}` | Keyed by job type. See [§8](#8-costs-and-net-value). |
-| `boundaries` | built-ins | `classification` / `valuation` / `evidence`. Fail-open by name. |
+
+`boundaries` is **not** in this table because it is not a member of this object — see the
+callout above.
 
 **The read fails closed.** A missing, unreadable, or malformed `config.json` resolves to
 disabled. This is the deliberate inverse of `guardrail-status.json`, which fails *open* so
@@ -853,9 +879,25 @@ silently-skipped correction is worse than a refused one. So:
 | Situation | Result |
 |---|---|
 | CLI lacks `jobs outcome-update` | Local correction **saved**, ledger line written, then exit **1** with an upgrade message |
-| `revenium config show` fails while resolving the team id | Local correction saved, exit 1, re-runnable |
-| `jobs outcome-update` returns non-zero | Local record intact, exit 1, re-runnable — no automatic retry |
+| `revenium config show` fails while resolving the team id | Local correction saved, ledger line written, exit 1 |
+| `jobs outcome-update` returns non-zero | Local record and ledger line intact, exit 1 — no automatic retry |
 | Sidecar unlinked mid-write by a concurrent prune | Refused before anything is written or shipped |
+
+> **Re-running after a failed ship is not idempotent locally.** The three failure rows above
+> all fail *after* the local append. The script writes the correction line and the ledger
+> line first, on purpose — a durable local record is the thing worth keeping when the network
+> leg fails — and `sequence` is recomputed from the file's current line count on every run. So
+> a second attempt appends a **second** correction line at the next sequence number and a
+> second `JOB:<id>:correction:` ledger line before it ships again.
+>
+> The effective value does not change: the reader scans to the end and the last matching line
+> wins, so two identical corrections resolve to the same figure. What changes is the audit
+> trail, which will show two revisions where an operator intended one. On the CLI-capability
+> row this compounds — every re-run against an unsupported CLI adds another pair.
+>
+> Before re-running, read the tail of the job's sidecar file and decide whether you want a
+> second revision recorded. `--dry-run` will not tell you this: it reports the sequence the
+> *next* write would take, which is exactly the number a re-run would consume.
 
 ## 15. Inference locality provenance
 
@@ -900,8 +942,9 @@ either a stated or a negated form.
 
 ### The six-word log taxonomy spans two destinations
 
-Six words describe every outcome an evaluation attempt can reach, and **no single file or
-command shows all six**.
+Six words are the *named* taxonomy — the vocabulary `diagnose.sh` reports against — and
+**no single file or command shows all six**. They are not, however, every line an
+evaluation attempt can emit; three more are listed below the table.
 
 | Word | Written by | Lands in | Exact line |
 |---|---|---|---|
@@ -914,6 +957,22 @@ command shows all six**.
 
 The first four are on the Python logger `revenium_classifier`, inside the Hermes process.
 They do **not** appear in `revenium-metering.log`.
+
+**Three further in-process lines exist and are outside the named six.** They are reachable,
+they carry their own `abstention_reason` on the record, and a reader troubleshooting "why is
+there no value" will meet them:
+
+| Line | Matching `abstention_reason` |
+|---|---|
+| `revenium-classifier: outcome evaluation skipped, unknown evaluator: %r` | `unknown_evaluator` |
+| `revenium-classifier: outcome evaluation rejected for job=%s` | `rejected` |
+| `revenium-classifier: outcome evaluation failed for job=%s: %r` | `failed` |
+
+Eight in-process lines, six named taxonomy words, eight record-level abstention reasons
+([§6](#6-validation-and-abstention)) — the three sets are related but none is a superset of
+the others. `not_evaluated_non_success` is the one abstention reason with no log line at all,
+because no evaluation was ever attempted. When a value is missing, **the record's
+`abstention_reason` is the authoritative answer**; the log is the convenience.
 
 ### diagnose.sh
 

@@ -111,6 +111,13 @@ promises unchanged behaviour to.
 }
 ```
 
+`boundaries` is a **top-level key of `config.json`, a sibling of `llmOutcomeEvaluation`** —
+the JSON above is the whole file's shape, not a fragment to paste inside the
+`llmOutcomeEvaluation` object. It is one of that feature's five opt-in *surfaces*
+conceptually, but it is not one of its members structurally. Nesting it is silent: the
+resolver reads the top level, and a `boundaries` object it does not find is
+indistinguishable from one that was never configured.
+
 Phase 45 (EGV-01) turned six seams inside the classifier plugin into named, pluggable
 contracts, each backed by its own registry. `boundaries` selects a non-built-in
 implementation for one of them, by the name it registered under — `classification` covers
