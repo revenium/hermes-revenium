@@ -184,39 +184,32 @@ rework, use an expected cost across comparable jobs rather than the worst possib
 
 #### Financial-services example
 
-A regulated financial-services engineering team may incur more review and release cost than
-the general example. Assume a loaded rate of `$240` per hour and a delivery process that
-requires peer review, a control review, change evidence, and a staged production rollout:
+Consider an AI-assisted anti-money-laundering alert investigation. The agent gathers relevant
+account and transaction history, summarizes the activity, and drafts a case narrative. A human
+analyst still reviews the evidence and decides whether to close or escalate the alert. Assume
+an analyst loaded rate of `$120` per hour and the job type `aml_alert_investigation`:
 
 ```json
 "costs": {
-  "bug_fix": {
-    "human_review": 120,
-    "integration": 240
-  },
-  "feature_development": {
-    "human_review": 240,
-    "integration": 480,
-    "training_or_change": 120
-  },
-  "devops": {
-    "human_review": 240,
-    "rework_or_error": 360,
-    "integration": 480
-  },
-  "documentation": {
-    "human_review": 120,
-    "integration": 0
+  "aml_alert_investigation": {
+    "human_review": 60,
+    "rework_or_error": 18,
+    "integration": 24,
+    "training_or_change": 6
   }
 }
 ```
 
-Here, `human_review: 120` represents 30 minutes at the loaded rate. For a `bug_fix`,
-`integration: 240` reserves one hour for the change ticket, control evidence, release
-coordination, and rollout. The `documentation` entry uses `integration: 0` to state that
-approved documentation has no separate deployment cost. Omitting that key would mean the
-integration cost is unknown, not zero. These figures are examples; a financial institution
-should derive its own amounts from its review and change-management process.
+`human_review: 60` allocates 30 minutes for the analyst's review and disposition.
+`integration: 24` allocates 12 minutes for recording the decision and supporting evidence in
+the case-management system. `rework_or_error: 18` is an expected correction cost across
+comparable investigations, not an assertion that every case requires rework.
+`training_or_change: 6` amortizes periodic procedure and model-use training across cases.
+
+The costs apply only when the classifier records the exact job type
+`aml_alert_investigation`. The figures are examples rather than financial-services defaults;
+a financial institution should derive its own amounts from observed review time, correction
+rates, case-management work, and training expense.
 
 `interrupted` is absent because it is the terminal type for an arc cut short by a budget
 halt or a pivot. It is never `SUCCESS` and therefore never valued, so a `costs` entry would
