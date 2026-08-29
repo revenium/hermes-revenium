@@ -350,3 +350,30 @@ is skipped by the reader (never crashes it) and refused outright by the writer.
 Both variables are declared only in `common.sh`, between the existing declarations and
 the eager `mkdir -p` line, following the single-source-of-truth rule every other state
 path in this document follows.
+
+## `correct-assessment.sh` operator flags
+
+Corrections are filed by a human at a terminal; this script is never reachable
+from cron. Every flag below is refused loudly on a bad value rather than
+degraded to a default — an operator running one command can act on an error,
+and a silently-skipped correction is worse than a refused one.
+
+| Flag | Required | Notes |
+|------|----------|-------|
+| `--job-id` | always | |
+| `--reason` | always | Audit-trail text, clamped to 500 serialized bytes. |
+| `--value` | unless `--mechanism` is given | The point/base estimate. |
+| `--currency` | whenever `--value` is given | One of USD, EUR, GBP, CAD, AUD, JPY, CHF. |
+| `--value-low` / `--value-high` | no | Default to `--value` (equal bounds). Refused without `--value`. |
+| `--mechanism` | no | One of the six declared economic mechanisms, matched exactly. Case-sensitive; surrounding whitespace is trimmed, nothing else is coerced. `--mechanism ""` is refused rather than treated as absent. |
+| `--attribution-fraction` | no | A finite number from 0 through 1, both endpoints legal. Refused if not accompanied by `--attribution-basis`. |
+| `--attribution-basis` | whenever `--attribution-fraction` is given | Free text, clamped like `--reason`. Refused on its own. |
+| `--dry-run` | no | Performs no writes, local or remote, on any path. |
+
+A mechanism-only correction omits the value family entirely rather than
+writing zeros or nulls; `prior_value_*` still records what stood before.
+
+The attribution pair is recorded, never computed. What it does and does not
+establish is set out in the project's `docs/value-and-roi.md` — referenced by
+name rather than linked, because this file ships into the skill bundle where a
+repo-relative path would not resolve.

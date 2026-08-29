@@ -114,8 +114,10 @@ capability is invented here.
 - **Base keys** — `source` (the deployment source) and `failure_reason` (a `FAILED` arc's
   short cause). These are base metering and are never dropped.
 - **The value family** — `value_low`, `value_base`, `value_high`, `bounds_source`,
-  `net_value`, `assumptions`, `supplied_costs`, `cost_coverage`. The economic estimate and
-  its inputs.
+  `net_value`, `assumptions`, `supplied_costs`, `cost_coverage`, `attribution_fraction`,
+  `attribution_basis`. The economic estimate and its inputs. The attribution pair is in
+  this family rather than the provenance one on purpose: the value family sheds first, so
+  an attribution recorded here can never outlive the value it documents.
 - **The provenance family** — `evaluator`, `evaluator_version`, `model`, `evidence_class`,
   `reportability_status`, `study_id`, `study_version`, `confidence`, `economic_mechanism`,
   `double_counting_group`, `correction_sequence`, `inference_provider`, and

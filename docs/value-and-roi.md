@@ -534,6 +534,74 @@ value, not just how much. Six flat, unordered values exist. None ranks above ano
 | `risk_avoidance` | operator only |
 | `incremental_revenue` | operator only |
 
+### How an operator declares one
+
+The three operator-only mechanisms are declared through `correct-assessment.sh`,
+which appends a `kind:"correction"` line and never rewrites the original record:
+
+```
+correct-assessment.sh --job-id <id> --mechanism incremental_revenue \
+  --reason "confirmed booking, folio 12345"
+```
+
+`--value` is required only when `--mechanism` is absent. A mechanism-only
+correction is legal: mechanism and value are separate claims, and "this job
+avoided a risk" is meaningful before anyone prices it. On that path the value
+family is **absent** from the correction — not null and not zero — while
+`prior_value_*` still records what stood before.
+
+A declared mechanism does not move `evidence_class`. Mechanism and evidence
+label are orthogonal: the mechanism says what kind of value is claimed, the
+label says what sort of evidence stands behind it, and neither implies the
+other.
+
+### Attribution
+
+When an operator supplies a value that represents only part of a larger
+figure, two optional flags record how they got there:
+
+```
+correct-assessment.sh --job-id <id> --value 102 --currency USD \
+  --mechanism incremental_revenue \
+  --attribution-fraction 0.15 \
+  --attribution-basis "15% per policy REV-2024-03; agent-initiated chat, no prior web session" \
+  --reason "confirmed booking, folio 12345"
+```
+
+**The operator supplies the already-attributed figure.** `102` is what gets
+recorded. This skill multiplies nothing, is never given the larger number, and
+holds no rule for deriving one from the other. Keeping a full business figure
+out of an agent record is deliberate: that same figure is typically claimed by
+several other systems at once — a sales channel, a loyalty programme, a
+pricing engine, a marketing attribution model — and a copy of it sitting here
+would be summed alongside theirs.
+
+**The fraction is a declared assumption, not a measurement.** Nothing
+validates it, because there is nothing here to validate it against. It is
+checked only for shape: a finite number from 0 through 1, with both endpoints
+legal. That is why `--attribution-basis` is required whenever
+`--attribution-fraction` is given — a bare number carries the appearance of
+precision without anything to answer for it, and a stated basis is what makes
+it auditable.
+
+For the same reason, an attribution fraction is not meaningful to average or
+aggregate across jobs. Each one is a separate operator assertion resting on
+its own stated basis, not a sample from a common measurement.
+
+**It does not change the evidence label.** A declared fraction cannot promote
+a record toward any of the three labels reserved for study-backed claims, and
+does not set `CUSTOMER_CONFIGURED` either. Whatever the fraction says, the
+label continues to reflect the evidence that actually exists.
+
+**What it does not establish.** An attributed figure is still a figure
+attached to an outcome this skill did not observe. The chain from the agent's
+output to a business result — acceptance, adoption, operational change,
+business change — is unobserved here regardless of what fraction is declared;
+see [claim distinctions](claim-distinctions-and-evidence-boundaries.md). Where
+a defensible number is wanted rather than a plausible one, the route is a
+holdout comparison — route some work through the agent and some not — which is
+a study, needs the study contract, and is not what this flag provides.
+
 The split is an authority split, enforced in code rather than described in prose. A
 mechanism is a claim about the work, which the transcript evidences — so the evaluator may
 choose among the three it can actually evidence from what it observed. Revenue, risk
