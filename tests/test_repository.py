@@ -277,6 +277,12 @@ class RepositoryTests(unittest.TestCase):
             # v1.4 closeouts, which .planning/MILESTONES.md still describes as
             # "git-tracked". Pinning is what makes the difference.
             ROOT / 'docs' / 'internal-milestones.md',
+            # Phase 48 (RECON-03/RECON-04) — the tracked reconciliation verdict
+            # and cross-boundary evidence_class precedence rule. Phase 50 and
+            # Phase 51 both plan against this document, and `.planning/` is
+            # gitignored, so an unpinned copy can vanish exactly the way the
+            # v1.3 and v1.4 closeouts did.
+            ROOT / 'docs' / 'evidence-class-precedence.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
