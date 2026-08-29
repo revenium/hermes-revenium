@@ -2,8 +2,8 @@
 
 [← Back to the project README](../README.md)
 
-Packaged as a Hermes skill bundle, but the working parts are a plugin, three shell hooks,
-and a cron; `SKILL.md` is only a halt-check backstop. The README's
+The package is a Hermes skill bundle, but a plugin, three shell hooks, and a cron perform
+the runtime work. `SKILL.md` is only a halt-check backstop. The README's
 [What's actually installed](../README.md#whats-actually-installed) has the breakdown, and
 [How it works](how-it-works.md) has the mechanism.
 
@@ -25,13 +25,13 @@ and a cron; `SKILL.md` is only a halt-check backstop. The README's
 
 ## Job value and ROI
 
-- **[Job value: a practical overview](value-overview.md)** — start here. How the mechanism
+- **[Job value: a practical overview](value-overview.md)** — how the mechanism
   works, what the number means, and a fully annotated configuration for a software
   engineering team, with the reasoning behind every figure. Short.
 - **[Job value and ROI](value-and-roi.md)** — the complete reference for the experimental
   value path: turning it on, the evaluator and its bounds, the abstention vocabulary, how a
   value is derived and bounded, costs and `net_value`, the six mechanisms, the nine evidence
-  classes, reportability, the sidecar record, the exact wire shape and its byte ceiling,
+  classes, reportability, the sidecar record, the wire shape and its byte ceiling,
   corrections, operations, and troubleshooting. Read the claim-discipline page below first.
 
 ## Claim discipline

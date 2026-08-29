@@ -8,7 +8,7 @@ default home. See [the fleet guide](fleet.md).
 
 ## Start here
 
-`diagnose.sh` is the read-only triage report — credentials, cron, ledgers, the settle gate,
+`diagnose.sh` is the read-only triage report for credentials, cron, ledgers, the settle gate,
 plugin and hook state, and a per-profile summary in one pass. Run it before reading
 anything else:
 
@@ -58,7 +58,7 @@ cat    ~/.hermes/state/revenium/guardrail-status.json       # live guardrail sna
 crontab -l | grep hermes-revenium-metering                  # is the cron installed
 ```
 
-Three append-only ledgers hold the idempotency record. A record present in one has already
+Three append-only ledgers hold the idempotency record. Records in these ledgers have already
 shipped:
 
 ```bash

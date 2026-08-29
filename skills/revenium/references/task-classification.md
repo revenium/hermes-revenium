@@ -1,6 +1,6 @@
 # Task Classification — Operational Detail
 
-This file holds the full operational detail for the `## FINAL ACTION — TASK CLASSIFICATION` step in `SKILL.md`. Refer here for trigger rules, the `write_marker` snippet, the blocklist, and worked examples.
+This file defines the trigger rules, `write_marker` snippet, blocklist, and examples for the `## FINAL ACTION — TASK CLASSIFICATION` step in `SKILL.md`.
 
 ## Trigger (binary — no judgment calls)
 
@@ -13,13 +13,13 @@ You **MUST** skip the marker write ONLY when ALL of these are true:
 - Your entire response is ≤ 2 sentences.
 - You called zero tools.
 
-There is no "borderline / when in doubt skip" path. If you can argue either side, you have already triggered rule (a), (b), or (c) — classify.
+There is no "borderline / when in doubt skip" path. If either side is arguable, rule (a), (b), or (c) has already triggered; classify.
 
 ## Required action sequence
 
 Before your final response yields back to the user, you **MUST** call `execute_code` with the snippet below. **DO NOT skip it. DO NOT defer it to "next turn". DO NOT respond to the user without performing it.** The success print line (`markers written: <path>`) is your confirmation that the action completed.
 
-**Step 1 — pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent harm; minting a slightly-too-broad label is recoverable.
+**Step 1 — pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent; a slightly broad label can be corrected.
 
 The cron REJECTS markers carrying any of these `task_type` values — using them is a protocol violation:
 
@@ -32,7 +32,7 @@ The cron REJECTS markers carrying any of these `task_type` values — using them
 
 For the full schema, normalization rules, and the atomic mint pattern, see `references/task-taxonomy.md`. The seed file ships at `skills/revenium/task-taxonomy.json`; the live mutable copy is at `~/.hermes/state/revenium/task-taxonomy.json`.
 
-**Step 2 — call `execute_code` with this snippet.** Replace `"code_review"` with the label you picked in Step 1. Both calls happen in the same `execute_code` invocation — one with `operation_type="GUARDRAIL"` (the classification span), one with `operation_type="CHAT"` (the work span). Two records per substantive turn is the load-bearing invariant — exactly one is a protocol violation, zero on a substantive turn is a protocol violation.
+**Step 2 — call `execute_code` with this snippet.** Replace `"code_review"` with the label you picked in Step 1. Make both calls in the same `execute_code` invocation: one with `operation_type="GUARDRAIL"` (the classification span) and one with `operation_type="CHAT"` (the work span). Every substantive turn requires two records. One record or zero records violates the protocol.
 
 ```python
 import fcntl, json, os, secrets, time
@@ -85,7 +85,7 @@ print(f"markers written: {marker_path}")
 
 ## Self-check before yielding
 
-Immediately before yielding your final response, answer these three questions to yourself. If markers were required and you have not written them, fix it NOW — call `execute_code` with the snippet above before sending your response. Do not promise to do it next turn. There is no next turn for this protocol.
+Immediately before yielding your final response, answer these three questions. If markers were required and you have not written them, call `execute_code` with the snippet above before sending your response. Do not defer the markers to a later turn.
 
 1. Did I call any tool other than `read_file` in this turn? → if yes, markers REQUIRED.
 2. Did I produce > 200 words of new content? → if yes, markers REQUIRED.
@@ -109,8 +109,8 @@ User asked you to explain POSIX O_APPEND atomicity. You wrote a five-paragraph r
 - Required action: `write_marker("posix_append_atomicity_explainer", "GUARDRAIL")` then `write_marker("posix_append_atomicity_explainer", "CHAT")`.
 
 **Example 4 — Borderline skip (SKIP):**
-User said "good morning, can you confirm you're ready?" You replied "Good morning — ready when you are." over two short lines. No tools called.
+User said "good morning, can you confirm you're ready?" You replied "Good morning, ready when you are." over two short lines. No tools called.
 - All skip conditions met: ≤ 2 sentences AND zero tools.
 - Required action: NONE.
 
-Writing a marker on a clear-skip turn pollutes the taxonomy. Skipping a marker on a clear-classify turn breaks attribution. The rule is binary by design — there is no middle ground.
+Writing a marker on a clear-skip turn pollutes the taxonomy. Skipping a marker on a clear-classify turn breaks attribution. The rule is binary.

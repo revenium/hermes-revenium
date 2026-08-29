@@ -6,8 +6,8 @@ Installing has two halves: get the files onto the host, then wire them into Herm
 Option 1 does both. The other three do only the first, and you finish with
 [Set up guardrails, cron, and hooks](#set-up-guardrails-cron-and-hooks).
 
-The second half is not optional bookkeeping. `hermes skills install` delivers the *skill* —
-`SKILL.md` and the support files it names — and nothing else. The classifier **plugin**,
+The second half installs the runtime components. `hermes skills install` delivers only the
+*skill*: `SKILL.md` and the support files it names. The classifier **plugin**,
 the **shell hooks**, and the **cron** are what actually classify, enforce, and meter, and
 each is installed separately. See
 [What's actually installed](../README.md#whats-actually-installed).
@@ -26,7 +26,7 @@ support files `SKILL.md` names as bundle-relative paths. `references/bootstrap.s
 of them. `plugins/` is not, and cannot be: Hermes disallows a `plugins/` directory in a
 skill bundle outright, so the classifier can never arrive this way.
 
-That is what the second command is for. It fetches the missing `scripts/` and `plugins/`
+The second command fetches the missing `scripts/` and `plugins/`
 into `~/.hermes/skills/revenium/`, then completes setup — credentials, plugin, hooks,
 guardrail rule, cron, gateway restart. Flags pass straight through to `install.sh`; see
 [Set up guardrails, cron, and hooks](#set-up-guardrails-cron-and-hooks) for the list.
@@ -44,7 +44,7 @@ whatever it downloaded the first time. See [Upgrading](upgrading.md).
 
 #### What the security scanner reports
 
-The skill scans **`SAFE`** and installs without `--force`. Hermes still shows its standard
+The skill receives a **`SAFE`** scan result and installs without `--force`. Hermes still shows its standard
 third-party disclaimer and asks you to confirm; that prompt applies to every external
 skill, not to this one.
 
@@ -52,8 +52,7 @@ The scan does report two `MEDIUM` findings. Both describe behaviour the skill ge
 has:
 
 - **`persistence`** — the `crontab` calls in the cron scripts and setup docs. This is the
-  per-minute metering loop. It is intentional, fully disclosed, and removing it would
-  break the skill's core function.
+  per-minute metering loop. Removing it would stop per-minute metering.
 - **`supply_chain`** — the `git clone` line in the documented install path above.
 
 An earlier `HIGH exfiltration` finding was cleared in v1.1 and no longer appears. The
@@ -113,8 +112,8 @@ single step.
 bash ~/.hermes/skills/revenium/scripts/install.sh
 ```
 
-That one command runs every step in this section in order: credentials, plugin, hooks,
-guardrail rule, cron, gateway restart. It is idempotent — already-configured steps are
+This command runs every step in this section in order: credentials, plugin, hooks,
+guardrail rule, cron, gateway restart. It is idempotent: already-configured steps are
 skipped, so re-running it is how you upgrade.
 
 | Flag | Effect |
@@ -174,7 +173,7 @@ itself, so this step stays manual. Skip it and the agent reports "Guardrail stat
 available" before every operation, which is the halt-check backstop correctly detecting
 that the cron never ran.
 
-Where 60 seconds is too slow — a demo, a live dashboard — install a sub-minute interval.
+For a demo or live dashboard that needs updates faster than 60 seconds, install a sub-minute interval.
 The cron still fires once a minute; the pipeline loops inside each tick.
 
 ```bash

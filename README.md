@@ -38,12 +38,11 @@ done by a plugin, three shell hooks, and a cron.**
 >
 > → **[What is Revenium Labs?](https://github.com/revenium/.github/blob/main/LABS.md)**
 
-Hermes reports token totals per session. That tells you what you spent and nothing about
-what you bought. This closes that gap: every metered completion is labelled with what the
-agent was actually doing, each task arc is tracked as a billable job, every tool call is
-metered, and the agent is halted structurally when a budget rule blocks. A successful job
-can also carry an estimated economic value, which Revenium combines with metered cost into
-a displayed ROI.
+Hermes reports token totals per session. That tells you what you spent, but not what
+you bought. Revenium adds that context: each metered completion is labelled with the
+agent's task, each task arc is tracked as a billable job, every tool call is metered, and
+a blocking budget rule halts the agent structurally. A successful job can also include an
+estimated economic value, which Revenium combines with metered cost to display ROI.
 
 ## What you get
 
@@ -75,11 +74,11 @@ the host, and only one of them is the skill:
 | `SKILL.md` | **skill** — markdown loaded into the agent's context | `~/.hermes/skills/revenium/` | A halt-check backstop, by its own description defense-in-depth only |
 | `job-assessments/` | **state** — one append-only JSONL file per job | `~/.hermes/state/revenium/` | The record of record for a job's assessment and its correction history. Kept 90 days (`REVENIUM_ASSESSMENT_RETENTION_DAYS`), against 30 for markers |
 
-This matters operationally. Hermes loads plugins from `~/.hermes/plugins/` and skills from
-`~/.hermes/skills/` — different roots, different loaders — and `hermes skills install`
-carries only the second. That is why installing the skill is not enough on its own, and why
-the bootstrap exists. It is also why a stale plugin copy is the most common silent failure
-on a multi-profile host: the skill tree is shared, the plugin is not.
+Hermes loads plugins from `~/.hermes/plugins/` and skills from
+`~/.hermes/skills/`. They use different roots and loaders, and `hermes skills install`
+carries only the skill. The bootstrap installs the other pieces. On a multi-profile host,
+a stale plugin copy is the most common silent failure because the skill tree is shared but
+the plugin is not.
 
 An assessment is never rewritten. If a value turns out to be wrong,
 `scripts/correct-assessment.sh` appends a correction — locally as a new line in the job's

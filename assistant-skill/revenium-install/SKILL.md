@@ -14,22 +14,22 @@ license: MIT
 
 # revenium-install
 
-A thin, portable runbook for installing and operating the **hermes-revenium**
-metering skill. It is **tool-agnostic**: every action is a POSIX shell command
-that runs the skill's own scripts under `~/.hermes/skills/revenium/scripts/`.
-There are no assistant-specific tool calls here — any coding assistant that can
-read markdown and run `bash` can follow it.
+This portable runbook installs and operates the **hermes-revenium** metering
+skill. Every action is a POSIX shell command that runs the skill's own scripts
+under `~/.hermes/skills/revenium/scripts/`, so the runbook is **tool-agnostic**.
+Any coding assistant that can read markdown and run `bash` can follow it; the
+runbook contains no assistant-specific tool calls.
 
-**This skill does not reimplement anything.** It decides *which* existing script
-to run and *how to verify* the result. All mutation lives in the shell scripts.
+This skill selects the existing script to run and explains how to verify the
+result. The shell scripts perform every mutation.
 
 ## When to use
 
 - Installing Revenium metering on a host (single profile) or a fleet
   (`~/.hermes/profiles/*`).
-- Verifying an install actually meters (completions, agentic jobs, tool-events,
-  budget guardrails).
-- Diagnosing a broken or partial install — route symptoms through
+- Verifying that an install meters completions, agentic jobs, tool-events, and
+  budget guardrails.
+- Diagnosing a broken or partial install. Route symptoms through
   [`references/decision-tree.md`](references/decision-tree.md).
 
 ## Prerequisites (check first, don't assume)
@@ -67,8 +67,8 @@ git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-
 
 ### 2. Run the installer
 
-`install.sh` is idempotent and orchestrates everything (credentials → classifier
-plugin → shell hooks → guardrail rule → per-minute cron → gateway restart).
+`install.sh` is idempotent. It configures credentials, the classifier plugin,
+shell hooks, a guardrail rule, the per-minute cron, and the gateway restart.
 
 ```sh
 # Single host, interactive budget prompt:
@@ -99,7 +99,7 @@ Key flags (full list: `install.sh --help`):
 
 ### 3. Deployment-mode note (fleets)
 
-Both modes are supported and need no extra flags — the install is the same:
+The same install supports both modes without extra flags:
 
 - **One process per profile** (default): each gateway runs with its own
   `HERMES_HOME`.

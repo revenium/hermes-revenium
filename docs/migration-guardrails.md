@@ -1,11 +1,10 @@
 # Migrating to Guardrails-Native Budget Enforcement
 
 This guide documents the v1.3 upgrade from polling-style `revenium alerts budget`
-enforcement to first-class `revenium guardrails` budget rules. It covers the
-`config.json` schema change, the auto-migration path that runs invisibly on the
-next cron tick after upgrade, what gets preserved and what gets orphaned, and the
-manual-recovery paths for edge cases. For the majority of operators the only
-required action is upgrading the skill — everything else happens automatically.
+enforcement to `revenium guardrails` budget rules. It covers the `config.json`
+schema change, the automatic migration on the next cron tick, preserved and
+orphaned state, and manual recovery. Most operators only need to upgrade the
+skill; the cron performs the migration.
 
 ## What changed
 
@@ -51,7 +50,7 @@ migration script does the following:
    ```
 
 **No operator action is required for the common case.** The script is idempotent:
-every cron tick after the first successful migration is a fast no-op — the
+every cron tick after the first successful migration is a fast no-op. The
 `ruleIds`-presence check in `config.json` exits early before any API call is made.
 
 The legacy `alertId` is left in `config.json` as an orphan. The corresponding
@@ -61,11 +60,10 @@ budget data independently. If you want to remove the orphan `alertId` key from
 
 ## We preserve your enforcement posture
 
-Migrated rules enforce **immediately by default** — they are NOT created in shadow
+Migrated rules enforce **immediately by default**. They are NOT created in shadow
 mode. If the legacy alert was halting your agent under autonomous mode in v1.2, the
-same hard-limit number will halt the agent under v1.3. Auto-shadowing on migration
-would silently lift enforcement without your awareness — that is an unacceptable
-surprise when a real budget breach is active.
+same hard-limit number will halt the agent under v1.3. Auto-shadowing on migration would silently lift enforcement during an active budget
+breach.
 
 In practice: if your agent was being halted Monday under v1.2, it will continue to
 be halted Tuesday after the v1.3 upgrade.
@@ -102,10 +100,10 @@ created by `setup-guardrails.sh` is automatically scoped with
 `--group-by AGENT --filter AGENT:IS:Hermes`. This makes the rule evaluate
 against the meter completions this skill ships (every
 `revenium meter completion` call carries `--agent "Hermes"`), with all
-matching spend rolled into a single self-contained bucket — no dependency on
+matching spend rolled into a single self-contained bucket with no dependency on
 org/subscription resolution.
 
-**Why this matters:** the original v1.3 default was `--group-by ORGANIZATION`
+The original v1.3 default was `--group-by ORGANIZATION`
 with no filter, which made the Revenium engine group spend by organization but
 see nothing in the team's child-org buckets because metered events fall
 through to the auto-discovery `UNCLASSIFIED` subscription. With
@@ -158,7 +156,7 @@ See `references/troubleshooting.md` for the recipe.
 
 ## Orphan Cleanup (Optional)
 
-After migration completes, the legacy `alertId` line remains in `config.json` — it is inert (no code path reads it) but cosmetically orphaned. To clean up:
+After migration completes, the legacy `alertId` line remains in `config.json`. It is inert because no code path reads it. To clean up:
 
 1. **Verify the new ruleId is enforcing.** Tail the log and inspect the status file:
    ```bash
@@ -226,7 +224,7 @@ The text after the `|` separator is the most recent `revenium guardrails enforce
 
 ## Loud-on-failure behavior
 
-Migration failures are loud, not silent. The cron pipeline continues metering
+Migration failures are logged and notified. The cron pipeline continues metering
 and checking budgets regardless of migration outcome — a migration failure does
 not block the other pipeline stages.
 

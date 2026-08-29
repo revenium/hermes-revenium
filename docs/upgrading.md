@@ -5,8 +5,8 @@
 Re-running `install.sh` *is* the upgrade. It is idempotent: configured steps are skipped,
 and it creates no duplicate rules or cron lines.
 
-Two things have to happen every time. The new bytes must reach the host, and the plugin
-must be re-synced — refreshing `~/.hermes/skills/` alone leaves the active copy at
+Every upgrade must copy the new files to the host and re-sync the plugin. Refreshing
+`~/.hermes/skills/` alone leaves the active copy at
 `~/.hermes/plugins/` stale. `install.sh` handles the second for you.
 
 > **On a multi-profile host, repeat `--profile` / `--all-profiles` on every upgrade.**
@@ -14,7 +14,7 @@ must be re-synced — refreshing `~/.hermes/skills/` alone leaves the active cop
 > *scripts* for every profile at once. The classifier is not shared: it is copied into
 > each profile's own `plugins/` directory, and nothing copies over it unless you name that
 > profile again. An upgrade that omits the flag leaves every profile running the old
-> classifier while the shared scripts move on — no error, no warning. Restart the gateway
+> classifier while the shared scripts are updated without an error or warning. Restart the gateway
 > afterwards, or the refreshed plugin still will not load.
 
 Pick the path that matches what the host can reach.
@@ -76,8 +76,8 @@ bash ~/.hermes/skills/revenium/references/bootstrap.sh --update --all-profiles  
 ```
 
 The bootstrap consumes `--update` and passes every other flag through to `install.sh`.
-This refresh overlays rather than replaces, so host-only scripts survive — which makes it
-safer than `git clone && bash install.sh`, whose root installer removes the skill
+This refresh overlays rather than replaces, so host-only scripts survive. Unlike this
+path, `git clone && bash install.sh` removes the skill
 directory first.
 
 A `bootstrap.sh` predating `--update` rejects the flag. Refresh that one file first:

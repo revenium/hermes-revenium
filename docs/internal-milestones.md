@@ -1,10 +1,9 @@
 # Internal milestone closeouts
 
-Engineering-evidence records for shipped planning milestones. Tracked
-deliberately: the planning tree (`.planning/`) and the evidence tree
-(`docs/internal/`) are both gitignored, so a closeout recorded only there dies
-with the working tree — the exposure that forced the 2026-06-06 roadmap
-reconstruction.
+Engineering evidence for shipped planning milestones is tracked here because the
+planning tree (`.planning/`) and evidence tree (`docs/internal/`) are both
+gitignored. A closeout recorded only there disappears with the working tree, as
+the 2026-06-06 roadmap reconstruction showed.
 
 Planning milestones and product git tags share numbers but are separate
 namespaces. Milestones from "LLM-Estimated Agentic Job Outcomes and ROI" onward
@@ -26,8 +25,8 @@ return figure and was not one. Prediction, valuation and return were collapsed
 together, derived from a single economic mechanism, and carried a single forced
 evidence label.
 
-The work was mostly *separation of claims*. Each now has its own representation,
-its own evidence label, and its own gate:
+The work separated the claims. Each now has its own representation, evidence
+label, and gate:
 
 | Claim | Question it answers |
 |---|---|
@@ -47,7 +46,7 @@ disappears the moment there are nine.
 
 ### What shipped
 
-- **Nine evidence labels, deliberately not a confidence ladder.** Customer
+- **Nine evidence labels that do not form a confidence ladder.** Customer
   confirmation may be commercially authoritative yet causally weak; observation
   proves occurrence, not cause; configuration establishes an approved rate, not
   hours actually spent. The naked-LLM path emits `MODEL_ESTIMATED_DEMO` and is
@@ -59,11 +58,10 @@ disappears the moment there are nine.
   zero and unknown denominators, double-counting controls, and zero and negative
   work staying visible rather than disappearing.
 
-- **A versioned sidecar carrier.** The assessment moved off the 1024-byte marker
-  line — already 70% consumed by six fields — onto a job-id-keyed JSONL under
-  `${STATE_DIR}/job-assessments/`, chosen on arithmetic that was shown rather
-  than asserted, with the carrier's falsification conditions stated before the
-  measurement was run. None fired.
+- **A versioned sidecar carrier.** The assessment moved from the 1024-byte marker
+  line, already 70% consumed by six fields, to a job-id-keyed JSONL under
+  `${STATE_DIR}/job-assessments/`. The choice used measured sizes, and none of
+  the stated falsification conditions occurred.
 
 - **Provenance that survives.** Model, prompt, taxonomy, policy and schema
   versions persist through deferred job creation and retry, proven by two real
@@ -98,14 +96,12 @@ disappears the moment there are nine.
   valuation, reportability resolution, and safe job outcome metadata.
 
 Test code outweighs shipped code roughly 2.6:1 (+17,423 test lines against
-+6,662 plugin and shell lines). That ratio reflects the central requirement,
-which was that the safety property be demonstrated adversarially rather than
-claimed.
++6,662 plugin and shell lines). The tests demonstrate the safety property with
+adversarial cases.
 
 ### Known gaps
 
-Both were surfaced explicitly in the successor phase's context document and
-re-deferred there. Neither was silently absorbed.
+The successor phase's context document records and re-defers both gaps.
 
 **EGV-02 — cross-boundary evidence-class precedence is undecided.** A configured
 boundary's declared `evidence_class` does not reach the persisted record;
@@ -115,7 +111,7 @@ boundary's declared `evidence_class` does not reach the persisted record;
 evaluator's class. Found by external review on PR #100 and confirmed against
 source.
 
-The error is in the **safe** direction — `MODEL_ESTIMATED_DEMO` is the weakest
+The error is in the **safe** direction. `MODEL_ESTIMATED_DEMO` is the weakest
 label, so the record under-claims rather than over-claims, and the
 promotion-blocking architecture is not breached. It was deferred rather than
 patched because closing it requires a genuinely new precedence rule (which class

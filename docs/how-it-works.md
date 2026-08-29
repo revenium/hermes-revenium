@@ -2,8 +2,8 @@
 
 [← Documentation index](README.md)
 
-This ships as a Hermes skill bundle, but the skill itself — `SKILL.md` — only carries a
-halt-check backstop. The work is done by a plugin, three shell hooks, and a cron. See
+This ships as a Hermes skill bundle, but `SKILL.md` only carries a halt-check backstop. A
+plugin, three shell hooks, and a cron perform the runtime work. See
 [What's actually installed](../README.md#whats-actually-installed) for the split.
 
 Those pieces fall into three parts, and they never call each other. The only coupling is
@@ -18,8 +18,8 @@ files under `~/.hermes/state/revenium/`.
 3. **The cron pipeline.** Once a minute, out of process, under one lock. This is the only
    part that talks to Revenium.
 
-That separation is deliberate. A broken install degrades to "no enforcement, no
-classification" — never to "agent blocked".
+This separation makes a broken install fail open with no enforcement or classification
+instead of blocking the agent.
 
 ## Token metering with task-type classification
 
@@ -55,8 +55,8 @@ hold no matter which hook fires first.
 ## Event-driven metering (the v1.5 path)
 
 A second path meters each API call individually. `post_api_request` fires once per call and
-appends a compact record to a per-session spool — no network call, no LLM, no database read
-on that path — and the cron's `api-event-report.sh` stage ships each record as its own row,
+appends a compact record to a per-session spool without a network call, LLM call, or database
+read. The cron's `api-event-report.sh` stage ships each record as its own row,
 keyed on the provider's `api_request_id`.
 
 The difference from the reporter above is what gets attributed. `hermes-report.sh` takes a
@@ -132,12 +132,12 @@ The figure is a **defensive** choice, not a measured server bound: there is no o
 Revenium server-side `--metadata` limit to derive a ceiling from. What DOES stand behind it
 is a measurement of this skill's own output — the ASCII baseline for the whole Phase 42-45
 field set (every provenance, value, and cost key this envelope can emit) measures under
-1,000 bytes, comfortably below the 4096-byte ceiling. So the number is bounded by measurement
+1,000 bytes, below the 4096-byte ceiling. The number is bounded by measurement
 of what this skill actually sends, even though it is not bounded by any documented Revenium
 contract.
 
 The source constant remains the authoritative place the value lives; the number here is a
-convenience for the reader, kept honest by the guard, not a second source of truth.
+convenience for the reader, with the guard preventing drift. It is not a second source of truth.
 
 **When a payload exceeds the ceiling**, the value family is dropped first, the provenance
 family second, and base metering is never dropped — metering never breaks, only the
@@ -146,8 +146,8 @@ consumer can tell "this job had no value" (both value keys and the marker absent
 value did not fit" (`metadata_truncated` present). An unmarked partial record would be the
 silent substitution this milestone exists to prevent.
 
-**Transport, not policy.** The ceiling decides only what physically fits on the wire — it
-makes no judgment about what is worth reporting. The reportability decision (EGV-18) is made
+**Transport, not policy.** The ceiling decides only what physically fits on the wire. It
+does not decide what is worth reporting. The reportability decision (EGV-18) is made
 upstream, by the resolver; the reporter only reads that decision and never computes it.
 
 ## LLM outcome-value evaluation (experimental)
@@ -222,7 +222,7 @@ the rows to stay.
 The reported outcome carried `evidence_class: MODEL_ESTIMATED_DEMO` in its metadata,
 alongside `evaluator`, `evaluator_version`, `confidence`, and both numeric assumptions the
 estimate is built from. A reader inspecting the outcome's own metadata can tell this number
-apart from a measured one — but `revenium jobs roi <id>` itself, in both its JSON and table
+apart from a measured one, but `revenium jobs roi <id>` itself, in both its JSON and table
 output, surfaced none of that: no `evidence_class`, no `evaluator`, no `confidence`, nothing
 distinguishing an estimate from a measurement. The estimated value is shown with the exact
 same visual weight a measured value would get. Only the separate `jobs outcome-history`

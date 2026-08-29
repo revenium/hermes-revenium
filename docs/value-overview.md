@@ -5,13 +5,12 @@
 > **Experimental, opt-in, off by default.** An install that leaves it off meters exactly as
 > it does today.
 
-This is the short version, for someone deciding whether to turn the feature on. It covers
-how the mechanism works, what the number does and does not mean, and a complete, annotated
-configuration for a software engineering team.
+This short version helps an operator decide whether to turn the feature on. It explains
+the mechanism, defines the number's limits, and provides an annotated configuration for a
+software engineering team.
 
-[Job value and ROI](value-and-roi.md) is the full reference — every field, every failure
-mode, the wire format, troubleshooting. Come here first; go there when something surprises
-you.
+[Job value and ROI](value-and-roi.md) is the full reference for every field, failure mode,
+the wire format, and troubleshooting. Start here and use the full reference when needed.
 
 ---
 
@@ -20,14 +19,12 @@ you.
 Your agent spend shows up as tokens and dollars. That tells you what you spent. It says
 nothing about what you got.
 
-This feature attaches an estimate of what each completed task arc was *worth* to the same
-record that already carries what it cost — so a Revenium dashboard can put the two side by
-side instead of showing cost alone.
+This feature adds an estimate of what each completed task arc was *worth* to the record that
+already carries its cost. A Revenium dashboard can then show value and cost side by side.
 
 ## How it works
 
-Five steps. Nothing here is a background service; it is a plugin and a cron that already
-exist.
+The existing plugin and cron perform five steps. The feature adds no background service.
 
 ```mermaid
 flowchart LR
@@ -53,8 +50,7 @@ flowchart LR
 5. **Your own costs are subtracted, and the result ships** with the job's outcome on the next
    cron tick.
 
-Two design choices are worth knowing up front, because they explain most of the behaviour
-you will see:
+Two design choices explain most of the observed behaviour:
 
 **The model can decline.** Abstaining is an expected answer, not a failure. When the work is
 trivial or unclear, the evaluator returns nothing and the job reports its outcome with no
@@ -67,7 +63,7 @@ job and computes the ratio on its side.
 
 ## What the number means
 
-Be precise about this with anyone who sees the dashboard.
+Explain this distinction to anyone who sees the dashboard.
 
 | | |
 |---|---|
@@ -76,9 +72,9 @@ Be precise about this with anyone who sees the dashboard.
 | **On the wire** | The **low** end of the estimated range, not the midpoint. It understates by design. |
 | **Labelled** | Every record carries `evidence_class: MODEL_ESTIMATED_DEMO`, so an estimate stays distinguishable from a measurement after the fact. |
 
-One caveat that matters operationally: `revenium jobs roi` does **not** display the evidence
-label. An estimate appears there with the same weight a measured figure would. If people are
-going to read these numbers, tell them what they are — the product will not.
+`revenium jobs roi` does **not** display the evidence label. An estimate appears there with
+the same weight as a measured figure. Readers need separate notice that the number is an
+estimate because the product does not provide it.
 
 ## The configuration
 
@@ -110,7 +106,7 @@ engineering team; the reasoning behind each number follows.
 }
 ```
 
-JSON carries no comments, so the annotation lives here.
+JSON does not support comments, so the annotations follow the example.
 
 ### The switches
 
@@ -124,8 +120,7 @@ JSON carries no comments, so the annotation lives here.
 ### The two ceilings
 
 These bound the model's **inputs**, not the product. An assumption outside the range makes
-the evaluator abstain — which shows up in the record as a reason — rather than being quietly
-clamped to the limit.
+the evaluator abstain and record the reason instead of quietly clamping the value.
 
 | Key | Value | Why this number |
 |---|---|---|
@@ -168,7 +163,7 @@ Reasoning behind the figures above, at a $220 loaded hour:
 |---|---|---|
 | `bug_fix` | review 45, integration **0** | ~12 min of review. A one-line fix ships on the existing pipeline, so integration is a true zero, not an unknown. |
 | `code_review` | review 20 | The agent's review is a first pass; a person still skims it. Nothing to integrate. |
-| `feature_development` | review 90, integration 120 | The expensive one — ~25 min of review, plus real coordination to land. |
+| `feature_development` | review 90, integration 120 | ~25 min of review, plus coordination to land the change. |
 | `refactoring` | review 60, rework 40 | Behaviour-preserving changes need careful review, and this is where "looks right, subtly isn't" lives. |
 | `debugging` | review 45 | Priced like `bug_fix` review; the diagnosis still needs confirming. |
 | `testing` | review 30, integration **0** | New tests join the existing suite for free. |
@@ -177,13 +172,13 @@ Reasoning behind the figures above, at a $220 loaded hour:
 | `research` | review 15 | You are reading the output anyway; that reading *is* the review. |
 | `planning` | review 40 | A plan gets discussed before it is acted on. |
 
-`interrupted` is deliberately absent. It is the terminal type for an arc cut short by a budget
-halt or a pivot — never `SUCCESS`, therefore never valued, so a `costs` entry for it would be
-dead configuration.
+`interrupted` is absent because it is the terminal type for an arc cut short by a budget
+halt or a pivot. It is never `SUCCESS` and therefore never valued, so a `costs` entry would
+be dead configuration.
 
-**Get these roughly right rather than precisely wrong.** They are your numbers, not the
-model's — the skill invents no cost of its own — and a defensible estimate of review time
-beats an unconfigured job type that silently nets nothing.
+**Use defensible estimates.** These are operator-supplied numbers; the skill invents no cost
+of its own. An approximate review-time estimate is better than an unconfigured job type that
+silently nets nothing.
 
 ## What it looks like end to end
 
@@ -230,10 +225,9 @@ Both assumptions are inside the ceilings, so the assessment is accepted.
  "assumptions":{"estimated_hours_saved":1.5,"assumed_loaded_rate":220.0}}
 ```
 
-Read that `cost_coverage` block for a moment, because it is the honest part. It says: two
-categories were counted, one of those was a real zero, two were never configured, and metered
-AI cost was left out on purpose because Revenium already has it. A partial subtraction is fine
-as long as its partiality is legible.
+The `cost_coverage` block says that two categories were counted, one was a real zero, two were
+never configured, and metered AI cost was omitted because Revenium already has it. The block
+makes the partial subtraction explicit.
 
 **On the Revenium side,** that `$280.50` meets the job's metered AI cost — cents, for an arc
 like this — and the displayed ratio follows. It is an estimated ROI under stated assumptions,
@@ -241,7 +235,7 @@ and the assumptions rode along in the same payload.
 
 ## Rolling it out
 
-Three stages. Do not skip to the third.
+Use all three stages in order.
 
 **1 — Local only.** Set `enabled: true` and leave `experimentalReportEstimates` off. Estimates
 are computed and written to disk; no figure reaches Revenium. Let it run for a week, then read
@@ -257,11 +251,11 @@ for f in ~/.hermes/state/revenium/job-assessments/*.jsonl; do
 done
 ```
 
-One file at a time is not fussiness: `tail -1` over a glob interleaves `==>` filename
-headers and hands several documents to a parser that reads one.
+Process one file at a time because `tail -1` over a glob interleaves `==>` filename headers
+and passes several documents to a parser that reads one.
 
-You are looking for two things: are the values plausible, and is the evaluator declining on
-trivial work? An evaluator that prices *everything* is the warning sign.
+Check whether the values are plausible and whether the evaluator declines trivial work. An
+evaluator that prices *everything* is misconfigured or overestimating.
 
 **2 — Tune.** Adjust `maxLoadedRate` to your real loaded cost, tighten `maxHoursSaved` if
 estimates run long, and fill in `costs` for the job types you actually see. Check which

@@ -21,7 +21,7 @@ this skill has ever written an `agent` field into a marker record — not
 therefore falls back to `REVENIUM_AGENT_NAME` exactly as before, for every
 session, on every install, today.
 
-Concretely, this means:
+The current behavior has these consequences:
 
 - **Saved Revenium views keyed on AGENT need no change.**
 - **`AGENT:IS:` guardrail filters** (see `scripts/common.sh:26`) keep matching
@@ -62,10 +62,10 @@ fallback this table originally described. See
 `skills/revenium/references/setup.md` → **Squad grouping across the fleet**
 for the fleet recipe.
 
-**This vocabulary is topology, not function.** `--squad-role` describes where a
+**This vocabulary describes topology, not function.** `--squad-role` describes where a
 session sits in the dispatch tree, not what it did (`planner`, `executor`,
 `reviewer`, etc.). Function-derived roles were deliberately deferred rather
-than shipped now and migrated later — topology is derivable from the existing
+rather than shipped now and migrated later. Topology is derivable from the existing
 root-walk with no marker dependency, so it is available on every session,
 whereas a functional label would degrade to a fallback exactly when markers
 are missing.
@@ -107,7 +107,7 @@ source set widened.
 per session, not once per turn. `_session_already_classified`
 (`classifier.py:648-677`) is a permanent latch consulted at a single call site
 inside `run_classification_async` (`classifier.py:1063`) that every trigger
-flows through, in every firing order — so adding two more triggers did not
+flows through, in every firing order. Adding two more triggers did not
 add inferences. A session of N turns costs one classification inference, not
 N.
 

@@ -27,9 +27,9 @@ Fresh-install and reconfigure flows are driven by `setup-guardrails.sh --interac
 
 ## Default rule filter scope
 
-Rules created by `setup-guardrails.sh` are automatically scoped with `--group-by AGENT --filter AGENT:IS:Hermes` so they evaluate against the meter completions this skill ships (every call carries `--agent "Hermes"`). Grouping by AGENT puts all matching spend in one self-contained bucket keyed on the agent name — no dependency on org/subscription resolution. Without this default, an `ORGANIZATION`-grouped rule on a team whose orgs have no subscriptions would see `currentValue: 0` forever (events fall through to Revenium's auto-discovery `UNCLASSIFIED` subscription). The agent name is centralized in `scripts/common.sh::REVENIUM_AGENT_NAME` (default `Hermes`, env-overridable) so the rule filter and the per-call `--agent` argv stay in sync.
+Rules created by `setup-guardrails.sh` use `--group-by AGENT --filter AGENT:IS:Hermes` so they evaluate the meter completions this skill ships; every call carries `--agent "Hermes"`. Grouping by AGENT puts matching spend in one bucket keyed on the agent name without depending on org/subscription resolution. Without this default, an `ORGANIZATION`-grouped rule on a team whose orgs have no subscriptions would always see `currentValue: 0` because events fall through to Revenium's auto-discovery `UNCLASSIFIED` subscription. `scripts/common.sh::REVENIUM_AGENT_NAME` centralizes the agent name (default `Hermes`, env-overridable) so the rule filter and each call's `--agent` argument stay in sync.
 
-To override the default filter — for example, scoping a rule to a specific model or provider — pass `--filter dim:op:val` (repeatable) or `--filters-json '<json>'` (single expression, mutually exclusive with `--filter`):
+To scope a rule to a specific model or provider, override the default filter with `--filter dim:op:val` (repeatable) or `--filters-json '<json>'` (single expression, mutually exclusive with `--filter`):
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh \
@@ -45,11 +45,11 @@ Re-run `setup-guardrails.sh --interactive`. The script detects existing `ruleIds
 
 ## Auto-migration (legacy alertId installs)
 
-Hosts upgrading from a v1.2 install that has only `alertId` in `config.json` and no `ruleIds` are auto-migrated on the next cron tick — no operator action required for the common case. Full contract in `docs/migration-guardrails.md` (what changes, what happens automatically, enforcement-posture preservation, loud-on-failure behavior, manual recovery, contributor appendix).
+The next cron tick auto-migrates hosts upgrading from a v1.2 install that has only `alertId` in `config.json` and no `ruleIds`. The common case requires no operator action. `docs/migration-guardrails.md` defines the full contract: changes, automatic actions, enforcement-posture preservation, failure behavior, manual recovery, and contributor notes.
 
 ## Multi-profile / fleet installs
 
-A Hermes **profile** is a separate Hermes home directory — its own `config.yaml`,
+A Hermes **profile** is a separate Hermes home directory with its own `config.yaml`,
 `.env`, `SOUL.md`, sessions, skills, cron jobs, and `state.db` under
 `~/.hermes/profiles/<name>/`. The default profile uses `~/.hermes/` directly
 (see the Hermes user guide `user-guide/profiles.md`; enumerate with
@@ -84,7 +84,7 @@ into that profile's crontab env or the per-state `env` file.
 
 This is the **AGENT** dimension (`--agent` argv). It is **not** the same as the
 **ORGANIZATION** dimension. `organizationName` in `config.json` is the
-ORGANIZATION — a company/product like `tableforone` — and it is threaded through
+ORGANIZATION (a company/product like `tableforone`) and is threaded through
 completions, tool-events, **and** `revenium jobs create` so a job and its
 transactions never land in different orgs. **Do not** set `organizationName` to
 an agent or profile name; that pollutes the ORGANIZATION dimension. The cron logs
@@ -106,7 +106,7 @@ the per-profile distinction is the AGENT, not the org.
 ### Squad grouping across the fleet (`REVENIUM_SQUAD_NAME`)
 
 The **SQUAD** dimension is a different grouping than AGENT, and it is meant to
-**span** agents rather than mirror them. `--squad-id` is the root session id —
+**span** agents rather than mirror them. `--squad-id` is the root session id;
 it groups one root session with every subagent it dispatches into a single
 *execution*. The squad *name* is what the Revenium platform groups those
 executions into: a fleet or team identity, not a single agent's identity.
@@ -116,18 +116,18 @@ executions into: a fleet or team identity, not a single agent's identity.
 back through the root session's marker-derived agent name to
 `REVENIUM_AGENT_NAME`). A fleet install gives each profile a distinct
 `Hermes-<profile>` agent name (see Per-agent attribution above), so every
-profile becomes its own single-agent squad — the SQUAD dimension ends up
+profile becomes its own single-agent squad, so the SQUAD dimension ends up
 duplicating the AGENT dimension instead of adding a fleet-level view on top
 of it.
 
 **Resolution order:** the operator override (`REVENIUM_SQUAD_NAME`) first,
 then the root session's marker-derived agent name, then
-`REVENIUM_AGENT_NAME`. Leaving it unset reproduces today's behavior exactly —
+`REVENIUM_AGENT_NAME`. Leaving it unset reproduces today's behavior exactly;
 no wire change.
 
 **Setting it for one install:** append it to that install's `env` file at
 `~/.hermes/state/revenium/env`, which `cron.sh` sources with `allexport` on
-every tick — the same channel `docs/migration-guardrails.md` documents for
+every tick through the same channel `docs/migration-guardrails.md` documents for
 `REVENIUM_AGENT_NAME`:
 
 ```bash
@@ -136,7 +136,7 @@ echo 'REVENIUM_SQUAD_NAME=gtm-fleet' >> ~/.hermes/state/revenium/env
 
 **The fleet recipe.** Export ONE shared squad name above the per-profile
 loop, while each profile keeps its OWN agent name and its own `HERMES_HOME` /
-`REVENIUM_STATE_DIR` — the illustration below is the pattern to follow, not a
+`REVENIUM_STATE_DIR`. The illustration below is the pattern to follow, not a
 script this repo ships:
 
 ```bash
@@ -160,9 +160,9 @@ Resulting shape: three agents (`Hermes-gtm-alice`, `Hermes-gtm-bob`,
 **Two caveats:**
 
 - `install-cron.sh` does **not** bake `REVENIUM_SQUAD_NAME` into the crontab
-  line — the `env` file (or a wrapper's exported environment, as above) is
+  line. The `env` file (or a wrapper's exported environment, as above) is
   the channel.
-- Running `hermes-report.sh` by hand does **not** source the `env` file —
+- Running `hermes-report.sh` by hand does **not** source the `env` file;
   only `cron.sh` does. A manual run needs the variable exported in the
   calling shell.
 
@@ -183,29 +183,29 @@ a `~/.hermes` reset) are reconciled automatically on the next `install-cron.sh`.
 ### `REVENIUM_CRON_SETTLE_SECONDS` sizing vs job-inference latency
 
 The reporter defers a session's completions until the classifier plugin's
-`.ready` sentinel lands (the **authoritative** gate — the plugin writes it only
+`.ready` sentinel lands (the **authoritative** gate, which the plugin writes only
 *after* it has written the `kind:"job"` marker), or until the session ages past
 `REVENIUM_CRON_SETTLE_SECONDS`. This age-fallback exists only for installs with
 **no** classifier plugin (no sentinel ever arrives).
 
 The default is **600 seconds**. It **must exceed worst-case job-inference
-latency** — the classifier's job-inference LLM call can take ~200s under
+latency**. The classifier's job-inference LLM call can take ~200s under
 concurrent multi-profile load. If the window is shorter than that latency, the
 age-fallback meters and ledgers a session's completions *before* the job marker
 exists, and per-muid dedup then permanently **orphans** them from the job created
 a tick later (`revenium jobs transactions <id>` shows "No transactions found").
 Metering-only installs (no classifier plugin, no job markers) can safely lower it
-— there is nothing to wait for.
+because there is nothing to wait for.
 
 ### Headless gateways: `hooks_auto_accept`
 
 Profile gateways are **headless** and never show Hermes' interactive hook-approval
-prompt, so registered hooks stay **inert** — tool-event capture silently never
+prompt, so registered hooks stay **inert** and tool-event capture never
 happens. For gateway-served profiles you MUST set `hooks_auto_accept: true` in
 that profile's `config.yaml`. `install-hooks.sh --auto-accept` does this;
 `install.sh --all-profiles` passes `--auto-accept` for every fleet child
 automatically. In shadow/metering-only mode the two `pre_*` enforcement hooks are
-inert overhead that still fire on every LLM/tool call — use
+inert overhead that still fires on every LLM/tool call. Use
 `install-hooks.sh --metering-only` to register only `post_tool_call`
 (tool-event capture).
 
@@ -222,7 +222,7 @@ Both deployment modes from `user-guide/multi-profile-gateways.md` are supported:
   **owning profile's** home/state.db/markers/`config.json` **per session** from
   the `agent:<profile>:…` namespace, so a namespaced session's markers and
   `.ready` sentinel land under that profile's `state/revenium/` where its
-  per-profile cron picks them up — not in the default home. Non-namespaced
+  per-profile cron picks them up, not in the default home. Non-namespaced
   sessions and the default profile resolve to the process home unchanged.
 
 ## How attribution works
@@ -234,9 +234,9 @@ The cron emits two S2 telemetry log lines per session per tick to make this visi
 - `INFO: S2: window=<n>, mean_per_marker=<delta_total // n>` — every tick a session has at least one marker. Reports how many markers shared the session-delta this minute and the floor-divided per-marker share of the total token delta.
 - `WARN: S2: classification-dominated window, attribution may be lossy` — fires when `n == 2` AND at least one marker has `operation_type == GUARDRAIL`. This is the canonical mixed-window signature where the equal-split overstates GUARDRAIL share the most.
 
-Attribution is driven entirely by the `task_type` and `operation_type` fields the agent writes into each marker line (per the Phase 2 marker schema; see `references/task-taxonomy.md`). The cron does not infer task types from prompts or model output — every marker the agent emits maps to exactly one `revenium meter completion` call with those fields passed through verbatim. When a session window has zero markers (legacy install, missing marker file, all lines unparseable), the cron falls through to a single call with `--task-type unclassified` and `--operation-type CHAT` (Phase 4 / WIRE-01 — Revenium server-side default for absent `operationType` is `CHAT`, verified by the D-22 research gate, so emitting it explicitly is idempotent for existing dashboards and budgets).
+Attribution is driven entirely by the `task_type` and `operation_type` fields the agent writes into each marker line (per the Phase 2 marker schema; see `references/task-taxonomy.md`). The cron does not infer task types from prompts or model output. Every marker the agent emits maps to exactly one `revenium meter completion` call with those fields passed through verbatim. When a session window has zero markers (legacy install, missing marker file, all lines unparseable), the cron falls through to a single call with `--task-type unclassified` and `--operation-type CHAT` (Phase 4 / WIRE-01 — Revenium server-side default for absent `operationType` is `CHAT`, verified by the D-22 research gate, so emitting it explicitly is idempotent for existing dashboards and budgets).
 
-This framing supersedes any earlier "self-cancels over many windows" mention in older planning notes — the bias is one-directional (GUARDRAIL is overstated, never understated) and does NOT average out across ticks.
+This description supersedes any earlier "self-cancels over many windows" mention in older planning notes. The bias is one-directional (GUARDRAIL is overstated, never understated) and does NOT average out across ticks.
 
 When markers carry different `agent` or `trace_id` values across a session, each Revenium meter call records the per-turn attribution; per-session aggregation happens dashboard-side.
 

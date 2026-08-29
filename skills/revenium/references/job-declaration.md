@@ -1,16 +1,16 @@
 # Job Declaration — Inference Criteria
 
-As of Phase 13, job markers (`kind:"job"`) are written automatically by the
-`revenium-classifier` plugin at session end — it infers the job arc(s) from
-session data without agent involvement. This document describes the criteria
+As of Phase 13, the `revenium-classifier` plugin writes job markers (`kind:"job"`)
+automatically at session end. It infers the job arc(s) from session data without
+agent involvement. This document describes the criteria
 the plugin's inference uses. Refer here only in the rare backstop case where
 the SKILL.md `## FINAL ACTION — JOB DECLARATION` section applies.
 
 ## Arc definition (goal-continuity rule)
 
-**Same arc:** the same goal, including follow-up fixes, refinements, and corrections of that goal. Example: "the tests fail" sent after "implement X" is still arc X — X is not done until it works. Do NOT declare the job at "implement X" if you know verification is still needed.
+**Same arc:** the same goal, including follow-up fixes, refinements, and corrections. Example: "the tests fail" sent after "implement X" is still arc X. X is not done until it works. Do NOT declare the job at "implement X" if you know verification is still needed.
 
-**New arc:** a goal that is NOT a continuation of the current one — a genuine topic pivot, a new unrelated request.
+**New arc:** a goal that is NOT a continuation of the current one, such as a topic pivot or unrelated request.
 
 **On a genuine pivot before the current arc was declared:** first write a `CANCELLED` job marker for the abandoned arc (prevents attribution leakage into the next job), then treat the new request as a fresh arc.
 
@@ -21,7 +21,7 @@ the SKILL.md `## FINAL ACTION — JOB DECLARATION` section applies.
 Declare a job marker if ANY of these are true:
 - You have just completed the goal the arc was working toward and you have self-verified the result (see SUCCESS bar below).
 - The arc has definitively failed (the fix didn't fix, the build cannot pass, the goal is unachievable).
-- The user has pivoted to a new goal before this arc was declared — write `CANCELLED` for the abandoned arc first.
+- The user has pivoted to a new goal before this arc was declared. Write `CANCELLED` for the abandoned arc first.
 
 **Skip the job marker ONLY when ALL of these are true:**
 - Your entire turn was a trivial response (≤ 2 sentences, zero tools called).
@@ -31,8 +31,8 @@ Declare a job marker if ANY of these are true:
 
 Exactly one of: `SUCCESS`, `FAILED`, `CANCELLED` (uppercase).
 
-- `SUCCESS` requires positive, checkable evidence established in the session: tests run and passed, build green, diff demonstrably correct, question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. No user sign-off required — self-verification is the bar.
-- `FAILED` is narrow: a definitive negative terminal state — the fix didn't fix, the build cannot pass, the goal is objectively unachievable. For a `FAILED` arc, also set `failure_reason` to a brief plain-text cause (e.g. "tests failed: 3 assertion errors in auth module"). The cron forwards it to Revenium as `--metadata` on the job outcome. Omit `failure_reason` for `SUCCESS` and `CANCELLED`.
+- `SUCCESS` requires positive, checkable evidence established in the session: tests run and passed, build green, diff demonstrably correct, or question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. Self-verification is sufficient; user sign-off is not required.
+- `FAILED` is narrow: the fix did not work, the build cannot pass, or the goal is objectively unachievable. For a `FAILED` arc, also set `failure_reason` to a brief plain-text cause (e.g. "tests failed: 3 assertion errors in auth module"). The cron forwards it to Revenium as `--metadata` on the job outcome. Omit `failure_reason` for `SUCCESS` and `CANCELLED`.
 - `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded, or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
 
 ## Examples
@@ -42,21 +42,21 @@ User asked you to add a pagination endpoint. You wrote the code, ran the test su
 - `agentic_job_id`: `add-pagination-endpoint-3b1e`
 - `job_name`: "Add pagination to /api/users endpoint"
 - `job_type`: `feature_development` (or mint `api_endpoint_development` if more specific)
-- `status`: `SUCCESS` (tests ran and passed — self-verified)
+- `status`: `SUCCESS` (tests ran and passed; self-verified)
 
 **Example 2 — Arc complete but NOT verified (CANCELLED, not SUCCESS):**
 User asked you to fix a bug. You wrote the fix but did not run the tests (no terminal access, or deferred to user).
-- `status`: `CANCELLED` — you made the change but could not verify it. Do NOT set `SUCCESS` here. The user will verify; if they confirm it works, that is a separate arc.
+- `status`: `CANCELLED` because you made the change but could not verify it. Do NOT set `SUCCESS` here. If the user later confirms it works, that confirmation is a separate arc.
 
 **Example 3 — Arc definitively failed (FAILED):**
 User asked you to make the CI pipeline green. After 3 attempts the underlying library has a known unresolved upstream bug that makes the goal objectively unachievable today.
 - `agentic_job_id`: `fix-ci-upstream-blocker-9f2a`
 - `job_type`: `debugging`
-- `status`: `FAILED` (definitive negative terminal state — goal is unachievable)
+- `status`: `FAILED` (the goal is unachievable)
 - `failure_reason`: "upstream library bug blocks CI; no workaround after 3 attempts"
 
 **Example 4 — User pivot before arc declared (CANCELLED for abandoned arc):**
-User asked you to refactor the auth module (arc in progress, not yet declared). Mid-arc, user says "actually forget that — help me write a release announcement."
+User asked you to refactor the auth module (arc in progress, not yet declared). Mid-arc, the user says, "actually forget that; help me write a release announcement."
 - First: write a `CANCELLED` job marker for the abandoned refactor arc (`job_type`: `refactoring`, `status`: `CANCELLED`).
 - Then: begin the new arc (release announcement writing).
 - Reason: prevents the refactor's task markers from leaking attribution into the announcement arc.
@@ -69,7 +69,7 @@ When LLM outcome evaluation is enabled and an evaluator returns an accepted
 assessment, a `SUCCESS` job marker carries one extra key: `assessment`.
 
 **This is a frozen contract.** Marker readers written before v1.5 must keep
-parsing, so every reader uses `.get("assessment", {})` and the key is simply
+parsing, so every reader uses `.get("assessment", {})`; the key is
 **absent** whenever evaluation is off, the arc is not `SUCCESS`, or the evaluator
 abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 
@@ -118,7 +118,7 @@ model's, and the feature is labelled experimental for that reason.
 **A future non-LLM evaluator must report a different evidence class.** ONNX
 classifiers, deterministic customer policies, vertical models, and
 system-of-record adapters each carry their own. Do not widen this one to cover
-measured value — the whole point of the field is that the two are
+measured value. The field exists to keep the two
 distinguishable after the fact.
 
 ### The nine evidence-class labels (EGV-10)
@@ -139,7 +139,7 @@ merely sounds productive.
 
 See "Abstention and the non-SUCCESS record" below: this statement is about
 the marker's `assessment` key, which stays absent exactly as described here.
-A separate sidecar record is now written for these arcs too — its shape is
+A separate sidecar record is now written for these arcs too. Its shape is
 covered there, not here.
 
 ---
@@ -159,8 +159,8 @@ live on the sidecar record `hermes-report.sh` reads to build `--metadata`.
 
 ### The six economic mechanisms (EGV-05)
 
-Every sidecar record names an `economic_mechanism` — a claim about *how* the
-work produced its value, not just how much. Six flat, unordered values exist,
+Every sidecar record names an `economic_mechanism`, which states how the work
+produced value. Six flat, unordered values exist,
 mirroring the shape of the nine evidence-class labels above: `labor_substitution`,
 `augmentation_capacity_expansion`, `newly_enabled_work`,
 `quality_decision_improvement`, `risk_avoidance`, `incremental_revenue`.
@@ -183,7 +183,7 @@ producer is a study reference, which is Phase 45 work.
 
 An unrecognised value, or one of the three operator-only mechanisms,
 appearing in an evaluator response resolves to the `unknown` sentinel and
-abstains — the field is absent from the record's asserted mechanism claim
+abstains. The field is absent from the record's asserted mechanism claim
 rather than clamped to a working default.
 
 ### Net value and the coverage list (EGV-14, EGV-15)

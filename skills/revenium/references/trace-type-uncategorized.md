@@ -1,23 +1,23 @@
 # Trace type shows `uncategorized`
 
-**Symptom.** Metered completions in Revenium carry `traceType: uncategorized` instead of the
-classified job type (e.g. `code_review`, `refactor`, `planning`) — for one session or across an
+Metered completions in Revenium carry `traceType: uncategorized` instead of the
+classified job type (e.g. `code_review`, `refactor`, `planning`) for one session or across an
 entire fleet. The cron log is otherwise healthy: `revenium-metering.log` is full of successful
 `Reported: session=...` lines and the ledger (`revenium-hermes.ledger`) keeps growing. Metering
 itself is working; the job label just never made it onto the wire.
 
-**The one-line narrowing.** `--trace-type` is only ever sent when the installed `revenium` CLI
-advertises the flag — a CLI that lacks it gets no `--trace-type` argument at all, not a literal
+`--trace-type` is sent only when the installed `revenium` CLI advertises the flag. A CLI that
+lacks it gets no `--trace-type` argument at all, not a literal
 `uncategorized` one. So if you are actually seeing the string `uncategorized` in Revenium (not
 just a missing field), that already proves the CLI is capable and the reporter got as far as
 looking up a job classification for the session and found nothing usable. Don't spend time
-checking `revenium --version` or CLI flags for this symptom — start at the marker lookup instead.
+checking `revenium --version` or CLI flags for this symptom. Start at the marker lookup instead.
 
-**The resolution chain.** Two independent processes have to agree on one thing. The
+Two independent processes must agree on the marker location. The
 `revenium-classifier` Hermes plugin writes a `kind:"job"` record into the session's marker file,
 under the profile that owns the session. The cron reporter (run every minute) reads that record
 back from the markers directory its own environment resolves to, for the *root* session of the
-trace — a subagent's completions inherit the root session's job type, so every completion sharing
+trace. A subagent's completions inherit the root session's job type, so every completion sharing
 a trace ships the identical `traceType`; a wrong or missing value at the root propagates to
 everything under it.
 
@@ -30,12 +30,12 @@ cat ~/.hermes/state/revenium/markers/<root-session-id>.jsonl 2>/dev/null | pytho
 ```
 
 If that marker file does not exist, or exists with no `kind:"job"` line inside it, the reporter
-falls back to `uncategorized` for every completion in that trace. The sections below walk the
-on-disk signatures for why.
+falls back to `uncategorized` for every completion in that trace. The sections below describe
+each on-disk signature.
 
 ## No marker file for the root session
 
-**Symptom.** No file exists at all under the resolved markers directory for the trace's root
+No file exists under the resolved markers directory for the trace's root
 session id.
 
 ```bash
@@ -43,12 +43,12 @@ ls -la ~/.hermes/state/revenium/markers/<root-session-id>.jsonl
 # ls: cannot access '...': No such file or directory
 ```
 
-**Root cause.** The classifier's `on_session_end` hook either never ran for this session, or ran
-and failed before reaching the marker write. A registration outage — the plugin never loaded by
-Hermes at all — is the specific failure that produced a live nine-day fleet-wide incident, and it
+The classifier's `on_session_end` hook either never ran for this session or failed before
+writing the marker. A registration outage, where Hermes never loaded the plugin,
+produced a live nine-day fleet-wide incident and
 is the one the check below is built to catch.
 
-**Fix.** First confirm which process actually serves this profile — the plugin is loaded once
+First confirm which process serves this profile. The plugin is loaded once
 at process start, and on a desktop-app host the gateway is usually not the owner:
 
 ```bash
@@ -58,7 +58,7 @@ ps -axo pid,lstart,command | grep -E 'hermes.*(serve|gateway run)' | grep -v gre
 A `--profile <name> serve` process is spawned by the Hermes desktop app: quit and reopen the
 app to reload it. `hermes gateway restart` will not affect it, and a gateway whose
 `HERMES_HOME` is the default home never touches a profile at all. Compare each process's start
-time against the plugin's mtime — a server older than the plugin cannot have loaded it.
+time against the plugin's mtime. A server older than the plugin cannot have loaded it.
 
 Then run the registration-level health check this skill ships, from the installed scripts
 directory:
@@ -69,7 +69,7 @@ bash ~/.hermes/skills/revenium/scripts/plugin-status.sh
 
 This replaces an older instruction that listed the skill bundle's own plugin source directory.
 That directory is not one of Hermes' plugin-discovery roots, so a listing of it succeeds whether
-or not the plugin is actually loaded — it reported "present" throughout the entire nine-day
+or not the plugin is loaded. It reported "present" throughout the nine-day
 outage. `plugin-status.sh` checks registration and runtime liveness instead, and its exit code
 tells you what to do next:
 
@@ -80,34 +80,34 @@ tells you what to do next:
 | `0` | Healthy — the registration path is fine | The cause is elsewhere in this document; continue to the sections below |
 
 If `plugin-status.sh` reports exit `0` and the marker file is still never written after a fresh
-session completes, this is not something an operator can resolve by re-running the cron — it
+session completes, an operator cannot resolve it by re-running the cron. It
 needs the classifier plugin itself investigated. Re-running
 `bash ~/.hermes/skills/revenium/scripts/cron.sh` will not create the marker; the marker is written
 by the classifier, not the reporter.
 
 ## Marker file present, no job record
 
-**Symptom.** The marker file exists but contains no line with `"kind": "job"`.
+The marker file exists but contains no line with `"kind": "job"`.
 
 ```bash
 cat ~/.hermes/state/revenium/markers/<root-session-id>.jsonl | grep '"kind":"job"'
 # (no output)
 ```
 
-**Root cause.** The classifier attempted classification but produced nothing usable: the LLM
+The classifier attempted classification but produced nothing usable: the LLM
 call returned zero jobs (a valid, non-error outcome), the LLM call itself failed, or every
 candidate job it proposed failed label validation. These three cases currently leave an
-identical on-disk footprint — see the note at the end of this file for what that means for
+identical on-disk footprint. See the note at the end of this file for what that means for
 diagnosing this specific mode today.
 
-**Fix.** There is nothing to clear or reset here — a marker file with task records but no job
+There is nothing to clear or reset here. A marker file with task records but no job
 record reflects the classifier's own judgment about that session's transcript. If this happens
 for every session on a profile, treat it the same as the no-marker-file case above and escalate
 to the classifier plugin itself.
 
 ## Markers directory mismatch (multi-profile / multiplexed installs)
 
-**Symptom.** The classifier writes the marker to one directory; the reporter reads from a
+The classifier writes the marker to one directory; the reporter reads from a
 different one. The marker file exists on disk, but not where the reporter is looking.
 
 ```bash
@@ -122,30 +122,30 @@ ls -la ~/.hermes/profiles/<profile>/state/revenium/markers/
 echo "${REVENIUM_MARKERS_DIR:-${REVENIUM_STATE_DIR:-${HOME}/.hermes/state/revenium}/markers}"
 ```
 
-**Root cause.** In a multi-profile fleet, each profile has its own `~/.hermes/profiles/<name>/`
+In a multi-profile fleet, each profile has its own `~/.hermes/profiles/<name>/`
 home. If the cron wrapper that invokes `cron.sh` sets a different `HERMES_HOME` /
 `REVENIUM_STATE_DIR` per profile than the one the classifier's own Hermes process resolves for
 that profile, the two sides read and write different `markers/` directories for the same
 session, and the reporter never sees a marker that genuinely exists.
 
-**Fix.** Confirm both sides resolve to the identical directory for the profile in question — the
+Confirm both sides resolve to the identical directory for the profile in question. The
 cron wrapper's `HERMES_HOME`/`REVENIUM_STATE_DIR` assignment for that profile must match what the
 classifier plugin sees inside that profile's own gateway process. If your install runs Hermes'
 `gateway.multiplex_profiles` mode (a single gateway process serving multiple profiles via
-namespaced session ids), also confirm that setting is consistent across the fleet — this mode
+namespaced session ids), also confirm that setting is consistent across the fleet. This mode
 changes which resolution mechanism is live and is the one this failure mode is most likely to
 affect.
 
 ### A recorded deployment assumption, not a supported configuration
 
-Some fleets are driven by a wrapper script that is not part of this repository — for example, a
-`cron-fleet.sh` that this skill does not ship and cannot read. This is a recorded assumption about
-one such deployment, nothing more: no code in this repository accommodates a file it cannot read,
+Some fleets use a wrapper script that is not part of this repository, for example, a
+`cron-fleet.sh` that this skill does not ship and cannot read. This documents an assumption about
+one such deployment. No code in this repository accommodates a file it cannot read,
 and there is no detection step or compatibility shim for it here.
 
 Such a wrapper typically repoints `HERMES_HOME` to give each profile its own Hermes home, rather
 than relying on the classifier's namespaced-session multiplex mechanism described above. In that
-layout the cron side and the classifier side agree on the markers directory by construction —
+layout the cron side and the classifier side agree on the markers directory by construction:
 both run against the exact same per-profile `HERMES_HOME`, so there is no separate namespace for
 the two to disagree about.
 
@@ -157,7 +157,7 @@ calls for the same usage. Pick exactly one fleet-scheduling mode per profile and
 
 ## Reporter runs before the classifier writes the marker
 
-**Symptom.** The marker eventually appears, but the completion had already been reported as
+The marker eventually appears, but the completion had already been reported as
 `uncategorized` on an earlier cron tick.
 
 ```bash
@@ -168,18 +168,18 @@ grep "^HERMES:<root-session-id>:" ~/.hermes/state/revenium/revenium-hermes.ledge
 
 The ledger line is **5 colon-delimited fields**, not 4: `HERMES:<session_id>:<total_tokens>:
 <timestamp>:<muid>`. The timestamp is **field 4** (a millisecond-precision float, e.g.
-`1785250329.656`), not the last field — the 5th field is a per-completion marker id (or, on the
+`1785250329.656`), not the last field. The 5th field is a per-completion marker id (or, on the
 zero-marker fallback path, a synthetic `unclassified-<timestamp>` value with no dots). If you are
 comparing this timestamp against something else to check a timing race, use field 4.
 
-**Root cause.** The reporter defers a session until either the classifier's `.ready` sentinel
+The reporter defers a session until either the classifier's `.ready` sentinel
 lands under the markers directory's `.ready/` subdirectory, or the session ages past a settle
-window — whichever comes first. If job inference is slow enough (heavy concurrent load, a slow
+window, whichever comes first. If job inference is slow enough (heavy concurrent load, a slow
 LLM call) that neither the sentinel nor the marker lands before the settle window elapses, the
 reporter reports the session as `uncategorized` and never revisits it, even after the marker
 eventually shows up.
 
-**Fix.** Check the settle window actually in force on your host — do not assume the default:
+Check the settle window in force on your host; do not assume the default:
 
 ```bash
 crontab -l | grep -o 'REVENIUM_CRON_SETTLE_SECONDS=[0-9]*'
@@ -187,7 +187,7 @@ crontab -l | grep -o 'REVENIUM_CRON_SETTLE_SECONDS=[0-9]*'
 ```
 
 If job-inference latency on your fleet regularly exceeds the settle window, that is a capacity /
-timing tuning problem (raise `REVENIUM_CRON_SETTLE_SECONDS`), not a code bug — but confirm via
+timing tuning problem (raise `REVENIUM_CRON_SETTLE_SECONDS`), not a code bug. Confirm via
 the timestamp comparison above that this is actually what happened before changing the setting,
 since it produces the same end symptom as the other three failure modes.
 
@@ -207,18 +207,16 @@ grep 'reason=' ~/.hermes/state/revenium/revenium-metering.log | tail -20
 | `reason=no_job_classified` | The plugin is registered and healthy, but the marker lookup found nothing usable — either no marker file yet, or a marker file with no `kind:"job"` line | See "Marker file present, no job record" and "Reporter runs before the classifier writes the marker" above |
 | `reason=marker_lookup_failed` | The plugin is registered and healthy, but reading the marker file itself raised an error (for example, something other than a plain file occupying that path, or a permissions problem) | Inspect the marker path directly with `ls -la` and check ownership/permissions; this is not the same symptom as an absent file |
 
-`reason=plugin_unregistered` is the one literal no in-plugin diagnostic could ever have reported —
-the failure mode it names is the plugin never loading in the first place, so nothing running
-inside the plugin ever gets a chance to log anything. That is exactly why this check runs on the
-cron side instead.
+No in-plugin diagnostic could report `reason=plugin_unregistered` because the failure mode
+means the plugin never loaded. The cron therefore performs this check.
 
 ---
 
-**A note on telling these apart.** As of this version of the skill, the metering log's `reason=`
+As of this version of the skill, the metering log's `reason=`
 line separates a registration outage (`plugin_unregistered`) from every other cause of
 `uncategorized`, and separates a genuine marker-read error (`marker_lookup_failed`) from an
 absent-or-jobless marker (`no_job_classified`). What it does not separate is the finer split
 inside "marker present, no job record": whether the LLM call returned zero jobs, the LLM call
 itself failed, or every candidate job failed label validation. Those three causes still share the
-same `no_job_classified` reason code and the same on-disk marker shape — telling them apart still
+same `no_job_classified` reason code and the same on-disk marker shape. Telling them apart still
 means inspecting the classifier plugin's own logs, not this document.

@@ -77,10 +77,9 @@ The full schema is in
 
 ### Opt-in surfaces and how they compose (D-09, EGV-23)
 
-Everything under `llmOutcomeEvaluation` — including the `boundaries` object
-below, which selects an implementation for one of its assessment steps — is
-**experimental**. Five surfaces make up the whole opt-in feature, each
-governing a genuinely different thing:
+Everything under `llmOutcomeEvaluation` is **experimental**, including the
+`boundaries` object below, which selects an implementation for one assessment
+step. Five settings control separate parts of the opt-in feature:
 
 | Surface | Governs |
 |---|---|
@@ -90,13 +89,12 @@ governing a genuinely different thing:
 | `costs` | Operator-supplied inputs that net against a computed estimate. |
 | `studyId` / `studyVersion` | Reference an impact study; referencing one never changes an assessment's own evidence class. |
 
-These five are **independent and compose deliberately — there is no master
-flag, and none of them will be renamed.**
+These five are **independent. There is no master flag, and none of them will be
+renamed.**
 
-No master flag exists because adding a new gate to the billing path risks
-becoming a second way to disable metering, and would conflate fail-open
-enrichment with deterministic budget enforcement — the exact conflation
-EGV-22's own clause forbids. No surface will be renamed because `enabled` and
+Adding a master flag to the billing path would create a second way to disable
+metering and mix fail-open enrichment with deterministic budget enforcement,
+which EGV-22 forbids. No setting will be renamed because `enabled` and
 `experimentalReportEstimates` are already set in live installs; renaming
 either is a breaking config change for exactly the installs this milestone
 promises unchanged behaviour to.
@@ -120,13 +118,13 @@ conceptually, but it is not one of its members structurally. Nesting it is silen
 resolver reads the top level, and a `boundaries` object it does not find is
 indistinguishable from one that was never configured.
 
-Phase 45 (EGV-01) turned six seams inside the classifier plugin into named, pluggable
+Phase 45 (EGV-01) turned six points inside the classifier plugin into named, pluggable
 contracts, each backed by its own registry. `boundaries` selects a non-built-in
 implementation for one of them, by the name it registered under — `classification` covers
 both turn-level task-type labelling and job/arc inference as one contract; `valuation` and
 `evidence` are separate boundaries. The object, any one of its members, an empty value, or a
 name that resolves to nothing all fall back to the built-in implementation and change
-nothing else — a typo here degrades to today's behaviour, it never stops classification.
+nothing else. A typo here falls back to current behaviour and never stops classification.
 
 `llmOutcomeEvaluation.evaluator` above stays the selector for the output/outcome-assessment
 boundary and is deliberately not part of this object, because moving it would be a breaking
@@ -146,7 +144,7 @@ a reason to. The cron reads them from an optional env file at
 | Variable | Default | Purpose |
 |---|---|---|
 | `REVENIUM_AGENT_NAME` | `Hermes` | The AGENT dimension. Fleet installs set `Hermes-<profile>` per profile. |
-| `REVENIUM_SQUAD_NAME` | *(empty)* | The SQUAD dimension, meant to span agents. The empty default is load-bearing for backward compatibility. |
+| `REVENIUM_SQUAD_NAME` | *(empty)* | The SQUAD dimension, meant to span agents. The empty default preserves backward compatibility. |
 
 `organizationName` is neither of these. It names a company or product, and conflating it
 with an agent name is a common enough mistake that the installer warns about it.

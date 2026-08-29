@@ -1,11 +1,12 @@
 # revenium-install — troubleshooting decision tree
 
-Symptom → most likely cause → exact remediation. All commands are POSIX shell
-against the skill's own scripts. Paths assume the default install at
-`~/.hermes/skills/revenium/`; for a fleet profile, prefix commands with that
-profile's `HERMES_HOME` / `REVENIUM_STATE_DIR`.
+This decision tree routes each symptom to its most likely cause and exact
+remediation. All commands are POSIX shell commands that invoke the skill's own
+scripts. Paths assume the default install at `~/.hermes/skills/revenium/`; for a
+fleet profile, prefix commands with that profile's `HERMES_HOME` /
+`REVENIUM_STATE_DIR`.
 
-Work top to bottom — earlier entries are more common and cheaper to check.
+Work from top to bottom. Earlier entries are more common and cheaper to check.
 
 ---
 
@@ -29,25 +30,24 @@ git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-
 
 ## `hermes skills install` refuses with a `CAUTION` / scanner verdict
 
-**This is not the expected path.** As of 2026-08-21 the skill scans `SAFE` and
-installs with no flags — see "What the security scanner reports" in the README.
-The scan does surface `MEDIUM` findings (cron `persistence`, a documented
-`git clone` under `supply_chain`); those are expected and do not block an install
-on their own.
+As of 2026-08-21, the skill scans `SAFE` and installs with no flags; see "What
+the security scanner reports" in the README. A refusal is not expected. The scan
+reports `MEDIUM` findings for cron `persistence` and a documented `git clone`
+under `supply_chain`; those findings do not block an install on their own.
 
-**Cause, if you do hit a refusal:** the scanner's verdict is produced by Hermes,
-not by this repo, so it can change on their side. A `CAUTION` verdict here means
-the scan graded findings more severely than the version observed above did.
+**Cause:** Hermes produces the scanner verdict, not this repository, so the
+verdict can change independently. A `CAUTION` verdict means the scan graded
+findings more severely than the version observed above.
 
-**Fix:** confirm the findings are the expected ones before bypassing anything —
-`--force` should be a considered decision, not a reflex:
+**Fix:** confirm that the findings are the expected ones before bypassing the
+scanner. Treat `--force` as a considered decision, not a reflex:
 
 ```sh
 hermes skills install revenium/hermes-revenium/skills/revenium --force
 ```
 
-Please also [open an issue](https://github.com/revenium/hermes-revenium/issues)
-with the verdict and findings — a change from `SAFE` is worth knowing about.
+Also [open an issue](https://github.com/revenium/hermes-revenium/issues) with the
+verdict and findings. A change from `SAFE` is worth knowing about.
 
 ---
 
@@ -98,9 +98,9 @@ job inference to wait for.
 
 ## Hooks are registered but nothing gets captured (tool-events stay empty)
 
-**Cause:** hooks are **inert until consented**. A headless/gateway-served profile
-never shows the interactive approval prompt, so `hooks_auto_accept` must be set —
-otherwise `pre_llm_call` / `pre_tool_call` / `post_tool_call` never fire.
+**Cause:** hooks are **inert until consented**. A headless or gateway-served
+profile never shows the interactive approval prompt. Set `hooks_auto_accept` or
+`pre_llm_call`, `pre_tool_call`, and `post_tool_call` will never fire.
 
 **Diagnose:**
 

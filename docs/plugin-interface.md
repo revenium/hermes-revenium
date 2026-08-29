@@ -2,11 +2,11 @@
 
 [← Documentation index](README.md)
 
-What the Hermes plugin surface actually does, measured against a **v0.20.1
+This reference records measured Hermes plugin behavior from a **v0.20.1
 (2026.8.13)** install rather than inferred from its documentation. Dated
 2026-08-13, with one correction applied 2026-08-15.
 
-This is contributor reference, not operator documentation — nothing here is
+This is contributor reference, not operator documentation. Nothing here is
 needed to run the skill. It is in the repository because shipped code depends on
 it. `api_event_spool.py` parses the E2 payload below, and E1 is a negative result
 that forbids a change which looks like a simplification and would silently break
@@ -47,17 +47,16 @@ forcing a second main-loop LLM call within the same session.
 | Main-loop call 1 system prompt | `halted=False` |
 | Main-loop call 2 system prompt (same session) | `halted=False` ← **stale** |
 
-**The section is frozen at session start. A halt arriving mid-session never
+**The section is frozen at session start, so a halt arriving mid-session never
 reaches it.**
 
-**Why this matters.** It is tempting to "simplify" the `SKILL.md` halt-check
-backstop — and its manual context-dilution runbook in
-`skills/revenium/references/halt-survivability.md` — into a registered prompt
+Moving the `SKILL.md` halt-check backstop and its manual context-dilution runbook in
+`skills/revenium/references/halt-survivability.md` into a registered prompt
 section, because sections survive compression rebuilds and fresh-process resume
 byte-identically. Doing so would silently break enforcement for the exact case
 that matters: a halt firing during a long autonomous run.
 
-**Correct division of labor:**
+**Required division of labor:**
 
 - **Prompt section** → the *standing* instruction. Durable and compression-proof;
   legitimately retires the dilution-survivability concern for the instruction half.
@@ -77,8 +76,7 @@ sections. Only the main loop does.
 | Gateway | not driven live *by this probe* — no messaging credentials on the probe machine. Answered separately since; see the caveat below. |
 
 `pre`/`post_llm_call` fire **once per turn**; `pre`/`post_api_request` fire **once
-per API call** (2 calls in the tool-call session). **That distinction is the
-metering seam.**
+per API call** (2 calls in the tool-call session). **Metering depends on that distinction.**
 
 **Captured `post_api_request` payload** (real, from the probe; identifiers
 replaced with their shapes):
@@ -104,7 +102,7 @@ This supplies, per API call and in real time, everything `hermes-report.sh`
 currently reconstructs by polling `state.db` and computing scaled deltas:
 
 - **`api_request_id` is a natural idempotency key** (`<session>:<task>:<turn>:api:<n>`).
-  Each event is already a delta — no ledger delta-scaling math, and no
+  Each event is already a delta, so it needs no ledger delta-scaling math or
   `HERMES:<sid>:<total_tokens>` key.
 - **`provider` + `base_url` arrive as data**, so the provider-inference Python
   heredocs in `hermes-report.sh` become unnecessary.
@@ -126,7 +124,7 @@ on_session_end     → SAME handler          # both events, one handler
 subagent_start / subagent_stop
 ```
 
-Two things follow:
+This produces two requirements:
 
 1. **Registering both `on_session_end` and `on_session_finalize` against one
    handler is exactly what first-party does.** That is this skill's Phase 29
@@ -173,7 +171,7 @@ So a two-halves architecture is viable on `ctx.state`, provided the cron half
 (a) derives the namespace, (b) takes the `fcntl` lock on `.state.json.lock`, and
 (c) writes atomically.
 
-**Risk to weigh before depending on this.** `_portable_skill_namespace` is a
+`_portable_skill_namespace` is a
 private, underscore-prefixed function. Depending on its exact digest scheme couples
 the out-of-process half to a Hermes internal with no stability contract, and the
 upstream compat suite covers *plugin APIs*, not this. Either pin and test it, or
@@ -195,7 +193,7 @@ Two consequences for `pre_tool_call.sh`:
   less code, same wire shape. **But the halt response string is contractual**
   (see the "Modifying the halt response string" anti-pattern in `CLAUDE.md`), so
   verify the stderr path reproduces it byte-for-byte before adopting.
-- **`fail_closed: true` is a policy decision, not a free win.** It contradicts the
+- **`fail_closed: true` changes the availability policy.** It contradicts the
   deliberate current posture: the skill fails open when `guardrail-status.json` is
   missing, so a never-installed cron does not block all work. Fail-closed trades
   availability for enforcement integrity. For a *budget* tool that argues one way;
@@ -228,8 +226,7 @@ configuration actually sets that policy to a mode of `both`. The *observation*
 addressed by registering `on_session_finalize` alongside a guarded `post_llm_call`,
 shipped and live-proven on 2026-07-29. Only the stated cause was incorrect.
 
-Recorded here because the wrong cause is more dangerous than no cause: it would
-send a future reader to change a config knob that is not the problem — and
+The incorrect cause could lead a reader to change a config knob that is not the problem, and
 changing that particular knob has a real cost, since forcing a reset policy makes
 conversations lose context. Rejecting that change is a standing decision in this
 repository, pinned by a repository-scoped test
@@ -257,8 +254,7 @@ worth a conversation.
 directly observed serving two chat-completions calls — one main-loop, one title
 generation — and emitting only **one** `post_api_request` event.
 
-This refutes the obvious assumption that event-driven metering picks up auxiliary
-usage for free. It does not. `session_model_usage` remains the only source for
+Event-driven metering does not capture auxiliary usage. `session_model_usage` remains the only source for
 auxiliary spend, and nothing in this skill reads it, so auxiliary usage is
 currently unmetered by both paths.
 

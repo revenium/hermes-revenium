@@ -6,11 +6,11 @@ reads [`CLAUDE.md`](CLAUDE.md), which is the fuller reference.
 
 ## What this repo is
 
-A distribution package for a single **Hermes Agent** skill (`revenium`) that adds
-Revenium budget guardrails and usage metering to Hermes. There is no build step
-and no application runtime — the product is `skills/revenium/` (a Hermes skill:
-`SKILL.md`, `scripts/*.sh`, `plugins/`, `references/`). Everything else is
-packaging, docs, and tests.
+This repository distributes one **Hermes Agent** skill (`revenium`) that adds
+Revenium budget guardrails and usage metering to Hermes. It has no build step or
+application runtime. The deliverable is `skills/revenium/`, a Hermes skill containing
+`SKILL.md`, `scripts/*.sh`, `plugins/`, and `references/`. Everything else is packaging,
+documentation, or tests.
 
 ## Build / test
 

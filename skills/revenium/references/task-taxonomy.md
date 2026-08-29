@@ -3,8 +3,8 @@
 ## What this is
 
 The task taxonomy is an agent-owned controlled vocabulary stored at `${TAXONOMY_FILE}` (declared
-in `common.sh`; defaults to `~/.hermes/state/revenium/task-taxonomy.json`). The seed file at
-`skills/revenium/task-taxonomy.json` is copied into `${TAXONOMY_FILE}` on fresh installs — by the
+in `common.sh`; defaults to `~/.hermes/state/revenium/task-taxonomy.json`). Fresh installs copy
+the seed file at `skills/revenium/task-taxonomy.json` into `${TAXONOMY_FILE}` through the
 root `install.sh` on the repo-clone path, and by `scripts/install.sh` on the tap path
 (`hermes skills install` → `references/bootstrap.sh`). Both are guarded on file existence: an
 existing taxonomy is a vocabulary the host has grown, and is never overwritten. Until
@@ -80,8 +80,8 @@ The classifier reads `${TAXONOMY_FILE}` before every substantive turn and mints 
 DESCRIPTIVE label that captures what the agent actually did (2-4 words joined by underscores).
 The prompt deliberately carries no concrete example labels: they were copied verbatim onto
 unrelated work in 20% of classifications, and removing them also improved granularity
-(quick task 260815-r39). Existing labels are reused
-only when they describe the SAME specific work — "close enough" reuse caused taxonomy
+(quick task 260815-r39). Existing labels are reused only when they describe the SAME
+specific work. "Close enough" reuse caused taxonomy
 fragmentation in practice (quick task 260514-nfb).
 
 When uncertain whether to mint or reuse, mint a new specific label rather than collapsing to
@@ -101,7 +101,7 @@ before the marker is written.
 ## Atomic write pattern
 
 Taxonomy mutations use the write-to-tmp + `os.rename` + `fcntl.flock` pattern. This prevents
-partial reads: `os.rename` on a POSIX filesystem is atomic — the file visible to readers is
+partial reads because `os.rename` on a POSIX filesystem is atomic. The file visible to readers is
 always either the pre-mutation state or the post-mutation state, never a partially written
 intermediate.
 
@@ -140,7 +140,7 @@ def mint_label(taxonomy_path, name, description, examples):
 The `fcntl.flock(LOCK_EX)` call is advisory. It prevents two concurrent agent processes from
 both attempting to mint the same label at the same moment. A non-cooperating reader (such as
 the cron pipeline) is not blocked by this lock; the reader sees a consistent file state
-regardless because `os.rename` is the actual atomicity mechanism.
+because `os.rename` provides the atomicity.
 
 ## Label catalog
 
@@ -158,14 +158,14 @@ profiling system behavior, mint a specific label for that diagnosis (e.g.
 
 ### code_review
 
-Use `code_review` when the turn evaluates code — a function, a diff, a module, or an
-architectural decision — for correctness, style, or architectural fit.
+Use `code_review` when the turn evaluates a function, diff, module, or architectural
+decision for correctness, style, or architectural fit.
 
 Examples: "review this function", "check this diff for bugs"
 
 Disambiguation: when the subject of review is a design document, runbook, or prose rather than
 code, mint a specific label naming the artifact (e.g. `runbook_review`, `adr_review`).
-`code_review` is for code specifically — a function, a diff, a module, an architectural decision.
+`code_review` applies specifically to a function, diff, module, or architectural decision.
 
 ### refactor
 

@@ -1,8 +1,8 @@
 # Contributing
 
-Thanks for taking the time. This is a [Revenium Labs](https://github.com/revenium/.github/blob/main/LABS.md)
-project — field-developed and best-effort — so issues and PRs are genuinely welcome, and
-we're happy to work with you to make it fit your environment.
+This is a [Revenium Labs](https://github.com/revenium/.github/blob/main/LABS.md)
+project: field-developed, best-effort software. Issues and PRs are welcome, and we will
+work with you to adapt it to your environment.
 [Come talk to us on Discord](https://discord.gg/J2DbmjZ2nA).
 
 ## What this repo is
@@ -12,8 +12,7 @@ application runtime. The product is `skills/revenium/`; everything else is packa
 docs, and tests.
 
 Read [`CLAUDE.md`](CLAUDE.md) before changing anything under `skills/`. It documents the
-architecture, the conventions, and — most importantly — the invariants the test suite
-enforces and why each one exists.
+architecture, conventions, test-suite invariants, and why each invariant exists.
 
 ## Getting set up
 
@@ -43,8 +42,7 @@ bash install.sh
 
 ## The invariants
 
-These are the ones that bite. All are enforced by tests, but knowing them up front saves a
-round trip.
+The tests enforce these invariants:
 
 **State paths live in `scripts/common.sh` and nowhere else.** Adding a state file means
 adding its variable there, above the `mkdir -p`. Never hardcode `~/.hermes/...` in a

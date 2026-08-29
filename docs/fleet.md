@@ -3,10 +3,10 @@
 [← Documentation index](README.md)
 
 A Hermes profile is a separate Hermes home under `~/.hermes/profiles/<name>/`; the default
-profile uses `~/.hermes/` directly. Every command in these docs is scoped to one home, and
-the default home is not a superset of the others. A profile you never name gets no plugin,
-no hooks, and no cron, and meters nothing — while the default profile keeps working, so
-the host looks healthy.
+profile uses `~/.hermes/` directly. Every command in these docs applies to one home, and
+the default home is not a superset of the others. An unnamed profile gets no plugin,
+hooks, or cron and meters nothing. The default profile can keep working, making the host
+appear healthy.
 
 To wire a fleet, name the profiles:
 
@@ -44,7 +44,7 @@ the fleet* for the resolution order and the recipe.
 
 ## Per-profile facts that bite
 
-Each of these caused a real outage where the symptom pointed nowhere near the cause.
+Each of these caused an outage whose symptom did not identify the cause.
 
 ### The process serving the profile must restart before its plugin loads — and it is often not the gateway
 
@@ -68,8 +68,8 @@ ps -axo pid,lstart,command | grep -E 'hermes.*(serve|gateway run)' | grep -v gre
   still answering requests while a freshly restarted gateway sat beside it classifying
   nothing.
 
-`install.sh` restarts the gateway for you, which covers the gateway case and only that
-case.
+`install.sh` restarts the gateway, but it does not restart desktop-managed serve
+processes.
 
 ### "Registered" is not "loaded"
 
@@ -100,10 +100,9 @@ Ledgers, markers, `config.json`, and `guardrail-status.json` all live under
 bash ~/.hermes/skills/revenium/scripts/diagnose.sh --profile ent
 ```
 
-With no flag, `diagnose.sh` reads the default profile. Reading the wrong home is the
-easiest way to conclude that nothing is being metered. Its last section lists every
-profile's ledger size and last cron run, which is the fastest way to spot one profile that
-has gone quiet.
+With no flag, `diagnose.sh` reads the default profile. Reading the wrong home can make an
+active metering setup appear inactive. Its last section lists every profile's ledger size
+and last cron run, which identifies profiles that have stopped reporting.
 
 ## Deployment modes
 

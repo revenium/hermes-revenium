@@ -1,11 +1,9 @@
 # Event-Driven Completion Metering
 
-This is the document to have open while running the shadow, canary, and
-fleet stages of the Phase 32 rollout — and the one a future reader finds
-when the planning tree that designed it is gone. It covers what changed,
-how to tell the two metering paths apart on a Revenium row, the switches
-that control the rollout, the drain gate that protects it, the known
-differences between the two paths, and what rollback can and cannot undo.
+Use this document during the shadow, canary, and fleet stages of the Phase
+32 rollout. It covers the changes, how to identify the metering path for a
+Revenium row, the rollout switches, the drain gate, differences between the
+two paths, and the limits of rollback.
 
 ## What changed
 
@@ -16,7 +14,7 @@ counters. A new `revenium-classifier` plugin hook spools one record per
 call to disk; a new cron stage (`api-event-report.sh`) enriches and ships
 those records via `revenium meter completion`.
 
-**Only completion metering moved.** Everything else about the cron
+**Only completion metering moved.** The rest of the cron
 pipeline is unchanged:
 
 - **Agentic jobs stay marker-driven, on the cron.** `post_api_request`
@@ -28,24 +26,21 @@ pipeline is unchanged:
 - **Guardrail polling keeps its job.** `guardrail-check.sh` was not
   modified by any plan in this phase.
 
-**This is not "delete the cron."** `cron.sh` grew a fifth metering stage
+**The cron remains required.** `cron.sh` grew a fifth metering stage
 and a sixth gate stage; the four stages that existed before this phase all
 still run, every tick, unchanged.
 
 ## The two paths, and how to tell them apart on a Revenium row
 
-The fastest way to tell which path produced a given metered row is its
-`--transaction-id`, which becomes the row's transaction identifier in
-Revenium:
+The `--transaction-id` identifies which path produced a metered row and becomes
+the row's transaction identifier in Revenium:
 
 | Path | Transaction identifier shape | Granularity |
 |------|------------------------------|-------------|
 | Legacy (cron-reconstructed) | `<session_id>-<cumulative_total_tokens>-<muid>` (or `<session_id>-<cumulative_total_tokens>` for a markerless session) | One row per session-delta split, computed from `state.db` counters roughly a cron tick after the call |
 | Event-driven (this phase) | `event:<api_request_id>` | One row per API call, computed from the call that incurred it |
 
-If you are debugging a row and want to know which path shipped it, look at
-the transaction identifier first — that is the question every operator
-asks before anything else.
+When debugging a row, check the transaction identifier first.
 
 ## The switches
 
@@ -58,8 +53,8 @@ resolution table — neither ledger has rows yet → the claiming stage wins;
 legacy-only rows → legacy (backfill); event-only rows → event (backfill);
 both → legacy, with a warn — and once either stage writes that record for a
 sid, the other is locked out of it permanently, independent of stage order.
-**This means the outcome for a brand-new session depends on a race, and the
-race's winner is not fixed by stage order alone.** `cron.sh` does run the
+**A race determines the path for a brand-new session, and stage order alone
+does not determine the winner.** `cron.sh` does run the
 legacy stage strictly before the event stage inside one invocation (see
 "A residual straddle exposure" under Rollback below) — but the legacy
 stage's own per-session work list is fixed once, at that stage's own start,
@@ -90,13 +85,10 @@ the *only* one. Inducing a session on a profile with an 886-session legacy
 backlog, also at `mode=live, legacy=enabled`, sent it entirely to the event
 path instead (0 legacy rows) — the backlog size, not anything about the
 switches themselves, is what differs between the two runs.
-**`REVENIUM_LEGACY_COMPLETIONS=disabled` is still required** for the event
-path to bill reliably — not because leaving legacy enabled always fails (it
-frequently does not), but because leaving it enabled makes the outcome for
+**`REVENIUM_LEGACY_COMPLETIONS=disabled` is still required** for reliable event
+path billing. Leaving legacy enabled does not always fail, but it makes the outcome for
 any given session depend on a race this operator does not control and
-cannot predict from the switches alone. A billing decision that depends on
-which of two background loops happens to finish first is not a state to
-cut over from.
+cannot predict from the switches alone. Do not cut over while billing depends on which background loop finishes first.
 
 Two independent, reversible settings control the rollout. Both are
 readable from the environment (highest precedence) or from
@@ -104,8 +96,8 @@ readable from the environment (highest precedence) or from
 unrecognised value falling back to the safe default and warning exactly
 once per run — a typo must never silently change what gets billed.
 
-**Independence is what makes one sequence unsupported (quick-260818-jbl,
-AX-Q16).** Do not set `REVENIUM_LEGACY_COMPLETIONS=disabled` while
+**One sequence is unsupported (quick-260818-jbl, AX-Q16).** Do not set
+`REVENIUM_LEGACY_COMPLETIONS=disabled` while
 `REVENIUM_EVENT_METERING_MODE` is `shadow` (the default). With legacy
 suppressed and the event path not shipping, every brand-new session created
 while that combination holds is billed by **neither** path for as long as
@@ -125,12 +117,12 @@ to `live`. A reader who lands on either paragraph should find both.
 | Event metering mode | `REVENIUM_EVENT_METERING_MODE` | `eventMeteringMode` | `shadow` | `shadow` (ships nothing, writes no ledger line, produces a comparison readout) / `live` (ships for real) |
 | Legacy completions | `REVENIUM_LEGACY_COMPLETIONS` | `legacyCompletions` | `enabled` | `enabled` (the old path keeps billing) / `disabled` (request to stop — see the drain gate below) |
 
-A fresh install of this phase's code observes **zero change**: shadow mode
+A fresh install of this phase's code has **zero behavior change**: shadow mode
 ships nothing and the legacy path keeps billing exactly as it always did.
 Flipping either switch is a deliberate, later operator action, not a side
 effect of updating the skill.
 
-**Shadow mode's readout.** While `REVENIUM_EVENT_METERING_MODE=shadow`
+**Shadow mode readout.** While `REVENIUM_EVENT_METERING_MODE=shadow`
 (the default), `api-event-report.sh` fully constructs every event's
 `revenium meter completion` argv and then discards it — no CLI call, no
 ledger line — and instead appends one JSON row per session to
@@ -143,9 +135,9 @@ all) gets answered on real traffic, before any billing changes.
 
 ## The drain gate
 
-`drain-status.sh` answers one question: **has the legacy completions path
-finished with every session it owns?** It reads exactly two local sources
-— the frozen legacy ledger and `state.db` — and makes zero HTTP requests.
+`drain-status.sh` determines whether the legacy completions path has
+finished with every session it owns. It reads the frozen legacy ledger and
+`state.db` and makes zero HTTP requests.
 A session is **drained** only when both hold:
 
 - **Terminal** — the session has ended and aged past the settle window, it
@@ -218,7 +210,7 @@ staleness route. Phase 33 observed this directly: `lorekeeper` converged
 "right on the Round-3-computed earliest bound," roughly 24h after its slowest
 pending session went quiet.
 
-**The self-healing chain.** A stale-drained session's verdict is
+**Reevaluation after activity.** A stale-drained session's verdict is
 re-derived from live inputs on every tick, not decided once: if the
 session resumes, its ledger timestamp or `last_activity_at` moves,
 `last_seen` moves with it, staleness withdraws, `terminal` goes back to
@@ -247,15 +239,15 @@ suppress(sid) = REVENIUM_LEGACY_COMPLETIONS=disabled
                 AND sid NOT IN legacyRetainedSids
 ```
 
-**Polarity is the whole design: the default is suppress, retention is the
-carve-out.** A brand-new session that has never appeared in the legacy
+**Suppression is the default; retention is the carve-out.** A brand-new
+session that has never appeared in the legacy
 ledger is not tracked, so it is not retained, so it **is** suppressed —
 which is what lets the event path own it. A status document with no
 `legacyRetainedSids` key at all (an older `drain-status.sh`, or an
 early fail-closed run) suppresses every session exactly as it did before
 this change.
 
-**Retaining a session costs (close to) nothing.** The growth guard and
+**Retaining a session adds no network request.** The growth guard and
 zero-delta guard in `hermes-report.sh` both `continue` before any
 `revenium` invocation is built, so "legacy keeps metering a retained,
 quiet session" is a ledger comparison and a `continue` — zero HTTP
@@ -401,9 +393,8 @@ tick's legacy run:
   `REVENIUM_LEGACY_COMPLETIONS=enabled`. Do not wait on this warn — act on
   one of the two remedies.
 
-**The recovery bound — both routes, both bounds (AX-Q16).** An earlier
-draft of this fix described abstention as "fully recoverable." That
-overstated it. There are two independent recovery routes, with two
+**The recovery bound (AX-Q16).** An earlier draft described abstention as
+"fully recoverable," which overstated it. There are two independent recovery routes with two
 different bounds, and permanent loss requires BOTH closed:
 
 - **Route A — flip the event path to `live`.** Recovers from the session's
@@ -449,7 +440,7 @@ that spools its input), either revert `REVENIUM_EVENT_METERING_MODE` to
 session over normally — or clear the affected sessions' `owners/<sid>`
 records directly so the legacy path backfills them fresh.
 
-**A residual straddle exposure, and how to avoid it entirely.** The two
+**Residual straddle exposure.** The two
 scripts resolve the mode INDEPENDENTLY, at their own process startup — two
 sequential reads by two processes, never a shared read. Under cron this can
 never bite: `cron.sh` always runs the legacy stage before the event stage,

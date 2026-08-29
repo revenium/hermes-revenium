@@ -32,7 +32,7 @@ to outcome — self-verification is not downstream adoption.
 It requires an outcome (or an assumed one) plus a rate or price to convert it to money. This
 skill's `llmOutcomeEvaluation` feature produces a valuation — an hours-saved figure times a
 loaded rate — but the outcome the valuation is attached to is itself assumed, not observed.
-That is the load-bearing gap the rest of this page returns to.
+The rest of this page describes that evidence gap.
 
 **Impact** is the causal contribution of the intervention, relative to a comparator — what
 would have happened without the agent's work. Establishing impact requires an identification
@@ -75,10 +75,9 @@ whether this skill actually observes that evidence.
    directly, skipping links 3–6 entirely — an assumed hours-saved figure standing in for
    the whole unobserved middle of the chain.
 
-Read this way, `llmOutcomeEvaluation`'s valuation is not a measurement of link 7 — it is a
-model's guess at what link 7 might be, made without evidence for links 3 through 6 ever
-existing. That gap between "the number this skill emits" and "the chain that number claims to
-summarize" is the single fact the rest of this page exists to keep visible.
+`llmOutcomeEvaluation`'s valuation is not a measurement of link 7. It is a model estimate of
+link 7 made without evidence that links 3 through 6 occurred. This page distinguishes the
+number the skill emits from the chain that number claims to summarize.
 
 ## Evidence labels and the product-truth boundary
 
@@ -102,8 +101,7 @@ way, which is why the labels sit side by side rather than in a rank order.
 
 ### The product-truth boundary
 
-This is the boundary that matters most for anyone reading a number this skill reports, so it
-gets stated plainly rather than left as a passing remark.
+This boundary applies to every number the skill reports.
 
 A live verification against a real Revenium tenant found that `revenium jobs roi <id>`
 surfaces no `evidence_class`, no `evaluator`, and no `confidence` in either its JSON or its
@@ -111,9 +109,9 @@ table output. A model-estimated value is displayed with the exact same visual we
 measured value would get on that read-back surface. Only the separate `jobs outcome-history`
 command echoes the metadata blob at all.
 
-**The honesty burden for stating that a value is an unverified model estimate rests entirely
-on this skill's own `--metadata` payload and on documentation like this page — not on
-anything Revenium's primary read-back surfaces.** Revenium's product does not draw the
+**The skill's `--metadata` payload and this documentation are the only places that state a
+value is an unverified model estimate; Revenium's primary read-back surfaces do not.**
+Revenium's product does not draw the
 distinction this page draws; nothing downstream of the wire enforces it. If this skill's
 `--metadata` payload ever stopped carrying `evidence_class`, or if a reader never opened this
 page, an estimate and a measurement would be visually indistinguishable to anyone looking at
@@ -170,11 +168,10 @@ For the exact literal strings, read
 — the disallowed strings live in that test's own pattern list, exactly as `CLAUDE.md`'s
 "Legacy naming guards" section already instructs for this repository's legacy-branding list.
 
-The allowed vocabulary above is guidance only — no test asserts that any of the five allowed
-phrases appears anywhere in shipped text, and that is deliberate. A presence assertion would
-either pass vacuously (nothing requires prose to use these exact words to be honest) or force
-stilted, repetitive writing every time a number is mentioned. The prohibited list is a floor;
-the allowed list is a suggestion for clearing it comfortably.
+The allowed vocabulary above is guidance only. No test requires any of the five phrases in
+shipped text. Such a test would either pass vacuously or force repetitive wording whenever a
+number is mentioned. The prohibited list sets the minimum requirement; the allowed list gives
+acceptable terms.
 
 ## Configuration and privacy modes
 
@@ -229,8 +226,8 @@ evidence-class labels and the resolution rule that assigns one to an assessment 
 
 ## Correction and audit
 
-This section is written from what a real, currently-passing test observes, not from prose —
-per D-18, so the worked example cannot drift from what the code actually does. The source is
+This section follows a currently passing test so the worked example cannot drift from the
+code, as required by D-18. The source is
 [`tests/test_phase47_end_to_end.py::test_operator_correction_appends_a_revision_and_ships_its_marker`](../tests/test_phase47_end_to_end.py).
 A future reader can check the description below against that test directly; if the two ever
 disagree, the test is the one to trust.
@@ -279,15 +276,15 @@ test in `tests/test_phase47_end_to_end.py`.
   the sidecar and the wire, rather than being clamped to zero, suppressed, or dropped. Observed
   by `test_negative_net_value_stays_visible_with_the_value_family_intact`.
 
-Why this matters: work that produced no value and work that was never valued must not look the
-same in the data. An abstained outcome, a withheld candidate, and a negative net value are each
-a different, honest fact about a job — collapsing any of them into a blank or a zero would
-erase the distinction between "nothing to report" and "something to report, but not this way."
+Work that produced no value and work that was never valued must remain distinct in the data.
+An abstained outcome, a withheld candidate, and a negative net value each describe a different
+job state. Collapsing them into a blank or zero would erase the distinction between "nothing
+to report" and "something to report, but not this way."
 
 ## What this milestone does not ship
 
-Every item below is stated as an absence, not as something scheduled. Nothing here is a
-commitment about what happens next; it is a record of what this tree does not contain today.
+Every item below records what this tree does not contain today. None is a schedule or a
+commitment.
 
 **No local classifier model ships here.** Classification and outcome evaluation both run
 through an LLM call on the operator's own configured provider. Nothing in this tree runs an

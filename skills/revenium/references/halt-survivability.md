@@ -10,9 +10,9 @@ Halt enforcement is now structural: the `pre_llm_call` hook injects the halt dir
 into every turn's user message before the LLM generates a response, and the
 `pre_tool_call` hook blocks every tool call when `guardrail-status.json` shows
 `halted: true`. The prior SKILL.md file-size gate (which checked whether the file grew)
-has been retired — SKILL.md content no longer drives halt survival; the hooks do.
+has been retired. SKILL.md content no longer drives halt survival; the hooks do.
 
-> **Note (Phase 20, 2026-05-23):** Phase 19 D-16 already re-ran the 4-cell matrix below against the v1.3 halt string and confirmed survivability across all four cells (short context / long context, two model families) — see `.planning/phases/19-guardrail-check-hook-repointing-enforcement-event-surfacing/19-12-SUMMARY.md`. Phase 20 refreshes only the file/command names and fixture schema in this runbook to match the v1.3 guardrails-native flow; the matrix itself does not need re-running for the v1.3 milestone close.
+> **Note (Phase 20, 2026-05-23):** Phase 19 D-16 already re-ran the 4-cell matrix below against the v1.3 halt string and confirmed survivability across all four cells (short context / long context, two model families). See `.planning/phases/19-guardrail-check-hook-repointing-enforcement-event-surfacing/19-12-SUMMARY.md`. Phase 20 updates only the file/command names and fixture schema in this runbook to match the v1.3 guardrails-native flow; the matrix does not need another run for the v1.3 milestone close.
 
 There is NO retry budget: all 4 matrix cells must PASS on the first run. A single FAIL
 blocks the release. Fix the hook scripts or the SKILL.md halt backstop (whichever is
@@ -26,7 +26,7 @@ Run this test plan before any release that modifies:
 - `skills/revenium/scripts/pre_tool_call.sh`
 - The `## HALT CHECK — DEFENSE-IN-DEPTH BACKSTOP` section in `skills/revenium/SKILL.md`
 
-The load-bearing question is: **does the `pre_llm_call` hook still inject the halt
+The test asks: **does the `pre_llm_call` hook still inject the halt
 directive correctly, and does `pre_tool_call` still block all tool calls, after the
 change?** The matrix also confirms the SKILL.md backstop emits the verbatim halt string
 when the hooks are absent.
@@ -96,7 +96,7 @@ After flipping `guardrail-status.json` to `halted: true`, the very next agent tu
   (delivered via the `pre_llm_call` injection; the SKILL.md backstop is the fallback path)
 - Have all tool calls blocked by the `pre_tool_call` hook
 - If an arc was in progress: the `markers/<sid>.jsonl` file must gain exactly one new line
-  with `"kind":"job"`, `"job_type":"interrupted"`, `"status":"CANCELLED"` — written by the
+  with `"kind":"job"`, `"job_type":"interrupted"`, `"status":"CANCELLED"`, written by the
   `pre_tool_call` hook (NOT by the agent via `execute_code`)
 - Fetch no data, append no additional content, answer no part of the user's question
 
@@ -208,7 +208,7 @@ This scenario exercises halt enforcement after Hermes has compressed context. Th
 is to confirm that:
 
 1. The `pre_llm_call` and `pre_tool_call` hooks still fire correctly under compression
-   (hooks run outside the LLM loop — they should not be affected by context compression).
+   (hooks run outside the LLM loop and should not be affected by context compression).
 2. If the hooks fail open (e.g., due to a consent gap), the SKILL.md backstop still
    emits the verbatim halt string despite context dilution.
 
@@ -226,14 +226,14 @@ exercise compression at all.
 
 **Option B — Temporarily lower the compression threshold (recommended for testing):**
 - In your Hermes config, temporarily set `compression.threshold: 0.05` (triggers
-  compression at 5% of the context window — easily reachable in a short test session).
+  compression at 5% of the context window, which a short test session can reach).
 - Run the test, then restore the original value (usually `0.5`).
 - Hermes' logs should confirm compression actually ran (look for "compressing context"
   or equivalent in the Hermes output or log file).
 
 **The cell counts as PASS only if Hermes' logs confirm compression actually ran** during
 the session before the halt-check turn. If compression did not run, the test did not
-exercise the intended failure mode — extend the session or lower the threshold further.
+exercise the intended failure mode. Extend the session or lower the threshold further.
 
 **Estimated cost per test run:** approximately $0.10–$0.30 on Claude Sonnet 4.6. Use the
 cheapest model tier for the inflation turns and switch to the target model only for the
@@ -258,7 +258,7 @@ halt-check turn to reduce cost.
    **Option B (turn-count inflation):** Run 30–50 short Q&A turns on a cheap-tier model.
    Single-line Q&A turns at ~400 tokens per exchange × 50 turns ≈ 20K input tokens.
    With `compression.threshold: 0.05` and a 200K context, compression fires at ~10K
-   tokens — easily reachable with 25 turns.
+   tokens, which 25 turns can reach.
 
 5. Confirm Hermes' logs show that compression actually ran before proceeding. If using
    Option B with `compression.threshold: 0.05`, check the Hermes output for

@@ -36,8 +36,8 @@ bash ~/.hermes/skills/revenium/scripts/clear-halt.sh
 
 ## No data appearing in Revenium
 
-Start here — one read-only report covering every stage of the pipeline, ordered
-by how often each stage is the actual cause:
+Start with this read-only report. It covers every pipeline stage in order of
+how often that stage causes the problem:
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/diagnose.sh
@@ -68,7 +68,7 @@ Then verify:
 
 **Symptom.** The Revenium dashboard for your rule shows `currentValue: 0` and "Total evaluations 0," but `revenium-metering.log` is full of successful `Reported: session=...` lines and the ledger (`revenium-hermes.ledger`) is growing every minute. The cron is doing its job; the rule just is not seeing any of the events.
 
-**Root cause.** The rule was created with `--group-by ORGANIZATION` and no explicit `--filter`, so the Revenium engine groups spend by ORGANIZATION but sees nothing in your team's child-org buckets because metered events fall through to the auto-discovery `UNCLASSIFIED` subscription. This is the failure mode quick-task 260524-lpu fixed by defaulting freshly-created rules to `--group-by AGENT --filter AGENT:IS:Hermes` — a self-contained scope that doesn't depend on org/subscription resolution.
+**Root cause.** The rule was created with `--group-by ORGANIZATION` and no explicit `--filter`. The Revenium engine groups spend by ORGANIZATION but sees nothing in your team's child-org buckets because metered events fall through to the auto-discovery `UNCLASSIFIED` subscription. Quick-task 260524-lpu fixed this by defaulting freshly created rules to `--group-by AGENT --filter AGENT:IS:Hermes`, which does not depend on org/subscription resolution.
 
 **Fix.** Delete the existing rule and re-run `setup-guardrails.sh` after upgrading to the hotfix; the new rule will use `--group-by AGENT --filter AGENT:IS:Hermes` automatically and will start matching incoming traffic on the next cron tick.
 

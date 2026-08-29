@@ -6,13 +6,12 @@
 > operator writes a literal `"enabled": true` into `config.json`. An install that leaves
 > it off meters byte-identically to an install that never heard of it.
 
-This page is the complete reference for the one part of this skill that produces a
-*monetary* figure: the estimated economic value of a completed agentic job, the operands
-that value is built from, and how Revenium turns those operands into a displayed ROI.
+This page documents the part of the skill that produces a *monetary* figure: the estimated
+economic value of a completed agentic job, the operands used to calculate that value, and
+how Revenium turns those operands into a displayed ROI.
 
-It is the deep-dive. For the short version — how it works, what the number means, and an
-annotated configuration you can copy — read
-[Job value: a practical overview](value-overview.md) first.
+For a short explanation of how it works, what the number means, and an annotated
+configuration, read [Job value: a practical overview](value-overview.md) first.
 
 The pages that mention this feature in passing —
 [README](../README.md), [How it works](how-it-works.md),
@@ -55,8 +54,8 @@ first. This page assumes it.
 
 ## 1. What the feature does
 
-The rest of this skill answers *what did the agent do, and what did it cost*. This feature
-attempts the other half: *what was the work worth*.
+The rest of this skill records *what the agent did and what it cost*. This feature estimates
+*what the work was worth*.
 
 When a session's classifier infers a task arc that finished `SUCCESS`, and the feature is
 switched on, the classifier makes **one** additional bounded LLM call — on the operator's
@@ -64,9 +63,9 @@ own configured provider, the same one Hermes already uses — asking not for a d
 but for two assumptions: how many hours of human work the arc avoided, and what a loaded
 hour of that role costs. The skill multiplies them itself.
 
-That derived figure, the assumptions behind it, the operator's own supplied costs, and a
-block of provenance are written to a per-job sidecar record on disk, and then ride out on
-the job's `revenium jobs outcome` call as `--outcome-value` plus a `--metadata` payload.
+The classifier writes the derived figure, its assumptions, operator-supplied costs, and
+provenance to a per-job sidecar record. The job's `revenium jobs outcome` call then sends
+them as `--outcome-value` and a `--metadata` payload.
 
 **The skill never emits a ratio.** It ships operands — a value, the costs it was netted
 against, and a coverage list naming which costs were and were not included. Revenium
@@ -87,7 +86,7 @@ The naked-LLM path always produces an **unverified model estimate**, labelled
 | One input to the ROI Revenium displays | The ROI itself; the metered cost is the other half |
 | Reasoned from the session transcript | Confirmation that the claimed outcome occurred — nothing downstream is observed |
 
-Four structural properties keep it honest rather than merely labelled honest:
+Four structural properties bound the claim:
 
 1. **The figure is derived, not asserted.** `estimated_value` is `hours × rate`. An
    evaluator that returns a total has that total thrown away, because bound checks on an
@@ -124,8 +123,8 @@ is stated at more length in
 
 ### The five opt-in surfaces
 
-Five surfaces compose deliberately; there is **no master flag**, and none of them will be
-renamed. Four live inside `llmOutcomeEvaluation` in
+Five surfaces control the feature. There is **no master flag**, and none will be renamed.
+Four live inside `llmOutcomeEvaluation` in
 `~/.hermes/state/revenium/config.json`; the fifth does not.
 
 | Surface | Where it goes | Governs | Default |
@@ -160,8 +159,8 @@ renamed. Four live inside `llmOutcomeEvaluation` in
 > not resolve to a registered implementation falls back to the built-in just as quietly as a
 > misplaced object does.
 
-No master flag exists on purpose: a sixth gate over the billing path would become a second
-way to disable metering, and would conflate fail-open enrichment with deterministic budget
+No master flag exists because a sixth gate over the billing path would provide a second way
+to disable metering and would conflate fail-open enrichment with deterministic budget
 enforcement.
 
 ### A worked configuration
@@ -264,7 +263,7 @@ flowchart TB
     end
 ```
 
-Two ordering facts are load-bearing:
+Two ordering rules preserve the record:
 
 - **Sidecar first, marker second.** A crash between the two writes leaves a harmless orphan
   sidecar record rather than losing the assessment.
@@ -277,8 +276,8 @@ Two ordering facts are load-bearing:
 
 ### The gate
 
-Three conditions, checked in this order, and the order is deliberate — a `FAILED` arc must
-never reach code that could make a network call:
+The gate checks three conditions in this order so a `FAILED` arc never reaches code that
+could make a network call:
 
 1. `valid["status"] == "SUCCESS"`.
 2. `llmOutcomeEvaluation.enabled` is literally `true`.
@@ -318,9 +317,9 @@ the same with money. It:
   exactly: null. Abstaining is a correct and expected answer."*
 - Frames the transcript as **data, not instructions**, and says so to the model.
 
-That last line is the cheap layer of the injection defence. The real control is structural:
-the value is derived from two independently capped inputs, so no single field can inflate
-the result past `maxHoursSaved × maxLoadedRate` however cooperative the model is.
+That last line is the first layer of the injection defence. The structural control derives
+the value from two independently capped inputs, so no single field can inflate the result
+past `maxHoursSaved × maxLoadedRate`.
 
 ### The per-mechanism response shape
 
@@ -373,8 +372,8 @@ fails two gates abstains for the **first** reason, so the recorded cause is the 
 | 6 | Currency | not in the supported set, or not equal to the configured currency |
 | 7 | Valuation re-check | the resolved valuation implementation returned a non-numeric amount, a mismatched currency, a negative amount, or one above `maxHoursSaved × maxLoadedRate` |
 
-Gate 7 is worth a note: the built-in `hours_times_rate` derivation is itself a registrant,
-so the default path passes through this re-check too. A **third-party** implementation
+The built-in `hours_times_rate` derivation is itself a registrant, so the default path passes
+through gate 7. A **third-party valuation plugin**
 returning exactly `0.0` abstains — an implementation asserting work was worth precisely
 nothing is more likely broken than truthful. The **built-in** may return `0.0`, because a
 valid input pair can legitimately round to zero and refusing it would both break the
@@ -583,7 +582,7 @@ holds no reportability policy of its own and only reads and obeys the field.
 | `reportable` | `experimentalReportEstimates` is literally `true`, and the assessment did not abstain | yes | yes | yes | yes |
 | `candidate` | anything else, including every abstained assessment | no | **stripped** | yes | yes |
 
-Two properties are load-bearing:
+Two properties enforce this separation:
 
 - **An abstained assessment is never `reportable`**, whatever the config says. The
   abstention check runs unconditionally, *before* any registered evidence implementation is
@@ -688,8 +687,8 @@ fails.
 Several jobs inferred from **one** session's transcript carry the same
 `double_counting_group` id, so a consumer can see they must not be summed naively.
 
-**Known gap, stated in the same breath as the capability:** it groups same-session,
-multi-job records only. It does **not** resolve cross-session or root-plus-subagent
+**Known gap:** it groups same-session, multi-job records only. It does **not** resolve
+cross-session or root-plus-subagent
 attribution — job inference runs only when the session is its own root, so a subagent
 session never independently produces a second record to relate to its root's.
 
@@ -735,8 +734,8 @@ value or an unsupported currency drops both, never one alone.
 
 ### The `--metadata` envelope
 
-One flat JSON object. Not a new transport — the existing `jobs outcome --metadata` flag.
-Three key groups:
+The existing `jobs outcome --metadata` flag carries one flat JSON object with three key
+groups:
 
 | Group | Keys | Dropped under pressure? |
 |---|---|---|
@@ -773,10 +772,9 @@ A ceiling is enforced **once**, in the reporter, at emit — the one place the a
 bytes exist before the payload leaves the machine. It is **4096 bytes**, and a guard test
 pins that number to the source constant so the two cannot drift.
 
-The figure is a **defensive** choice, not a measured server bound: there is no observed
-Revenium `--metadata` limit to derive one from. What stands behind it is a measurement of
-this skill's own output — the ASCII baseline for the whole field set measures under 1000
-bytes, comfortably below the ceiling.
+The figure is a **defensive** choice, not a measured server bound. No observed Revenium
+`--metadata` limit exists from which to derive one. The skill's own ASCII baseline for the
+whole field set measures under 1000 bytes, below the ceiling.
 
 When a payload exceeds it:
 
@@ -935,12 +933,10 @@ be the unverified claim this field exists to avoid.
 the moment it was read, not a verified connection. A mid-flight provider failover is not
 observed by this field, exactly as it is not observed by `evaluator`/`evaluator_version`.
 
-**What these two facts are not.** They are inputs to an operator's own judgment about their
-own deployment, not a conclusion about it. The skill can observe only where inference was
-configured to go; it cannot observe the preprocessing, logging, or retention halves of the
-path, so it records the part it can see and draws no conclusion from it. Nothing here should
-be read as a statement about where data went, was kept, was logged, or was retained — in
-either a stated or a negated form.
+These two facts are inputs to an operator's judgment about the deployment, not a conclusion
+about it. The skill observes only where inference was configured to go. It cannot observe
+preprocessing, logging, or retention, so it records only the configured endpoint class. The
+facts do not establish where data went, was kept, was logged, or was retained.
 
 ## 16. Operating it
 
@@ -1061,7 +1057,7 @@ reporter re-reads the sidecar at outcome time and reports status-only when it fi
 
 ## 18. Limits
 
-Stated as absences, not as roadmap.
+These limits describe the current implementation, not a roadmap.
 
 - **No local classifier model ships here.** Classification and outcome evaluation both run
   through an LLM call on the operator's own configured provider.
@@ -1092,8 +1088,8 @@ Stated as absences, not as roadmap.
 
 ## 19. Where each contract lives
 
-This page explains and connects. It never owns a contract term — each of those is owned by
-one file, and that file is the one to trust if they ever disagree.
+This page does not own contract terms. Each contract has one owner file, which controls if
+the documents disagree.
 
 | Contract | Owner |
 |---|---|
