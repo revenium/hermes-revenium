@@ -341,6 +341,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'api-event-report.sh',
             # Phase 32 Plan 03 — drain-completion gate (C-11/D-13, EVT-12)
             SKILL / 'scripts' / 'drain-status.sh',
+            SKILL / 'scripts' / 'costs-status.sh',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
             SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
             SKILL / 'plugins' / 'revenium-classifier' / '__init__.py',
