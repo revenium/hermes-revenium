@@ -43,7 +43,7 @@ and an install that leaves it off meters byte-identically to before.
   revenue. The evaluator may select three of them; the other three are operator-declared
   (see Known limitations).
 - **Net value across supplied costs** (`net_value`). A new `costs` config block, keyed by
-  job type, subtracts `human_review`, `rework_or_error`, `integration`, and
+  job type, subtracts `human_review`, `rework_or_error`, `handoff`, and
   `training_or_change` from the estimated value. A supplied `0` and an absent category are
   different things and both are explicit in the record. There is no fleet-wide default —
   an unconfigured job type nets nothing.

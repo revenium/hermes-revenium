@@ -93,12 +93,12 @@ configured currency, applied once to a completed job arc of that type.
     "maxHoursSaved": 16,
     "maxLoadedRate": 220,
     "costs": {
-      "bug_fix":             { "human_review": 45, "integration": 0 },
+      "bug_fix":             { "human_review": 45, "handoff": 0 },
       "code_review":         { "human_review": 20 },
-      "feature_development": { "human_review": 90, "integration": 120 },
+      "feature_development": { "human_review": 90, "handoff": 120 },
       "refactoring":         { "human_review": 60, "rework_or_error": 40 },
       "debugging":           { "human_review": 45 },
-      "testing":             { "human_review": 30, "integration": 0 },
+      "testing":             { "human_review": 30, "handoff": 0 },
       "devops":              { "human_review": 75, "rework_or_error": 60 },
       "documentation":       { "human_review": 25 },
       "research":            { "human_review": 15 },
@@ -146,16 +146,17 @@ Four categories exist, and the keys are fixed:
 |---|---|
 | `human_review` | Someone reads the diff before it lands. Almost always non-zero. |
 | `rework_or_error` | What it costs when the agent gets it wrong and a person fixes it. |
-| `integration` | Work required after accepting the output to put it into the operating workflow or system of record. |
+| `handoff` | Work required after accepting the output to put it into the operating workflow or system of record. |
 | `training_or_change` | Bringing the team up to speed on a new pattern or tool. |
 
-`integration` does **not** mean the cost of integrating Revenium, building an API, or setting
-up the agent. It is a per-job operational cost. It starts after someone accepts the agent's
-output and ends when that output is usable in the real process. Copying an approved narrative
-into a case-management system, attaching evidence, updating disposition fields, and routing
-the case to the next queue are integration work. Deciding whether the narrative is correct is
+`handoff` is a per-job operational cost. It starts after someone accepts the agent's output
+and ends when that output is usable in the real process. Copying an approved narrative into a
+case-management system, attaching evidence, updating disposition fields, and routing the case
+to the next queue are handoff work. Deciding whether the narrative is correct is
 `human_review`; correcting it is `rework_or_error`; teaching people a new procedure is
-`training_or_change`.
+`training_or_change`. It is not the cost of connecting Revenium, building an API, or setting
+up the agent — those are one-time build costs, not per-job costs, and this model does not
+carry them.
 
 Three rules decide what actually happens:
 
@@ -165,8 +166,8 @@ Three rules decide what actually happens:
 - **A supplied `0` and an omitted key are different, and both are deliberate.** `0` means
   "we checked, this costs nothing" and participates in the arithmetic as a known zero. An
   omitted key means "we do not know", is recorded as unknown, and stays out of the
-  subtraction. `bug_fix` above says integration is genuinely free; `code_review` says nothing
-  about integration at all.
+  subtraction. `bug_fix` above says handoff is genuinely free; `code_review` says nothing
+  about handoff at all.
 - **Malformed values fail to unknown, never to zero.** A typo will not quietly corrupt the
   subtraction.
 
@@ -174,19 +175,19 @@ Reasoning behind the figures above, at a $220 loaded hour:
 
 | Job type | Cost | Reasoning |
 |---|---|---|
-| `bug_fix` | review 45, integration **0** | ~12 min of review. A one-line fix ships on the existing pipeline, so integration is a true zero, not an unknown. |
+| `bug_fix` | review 45, handoff **0** | ~12 min of review. A one-line fix ships on the existing pipeline, so handoff is a true zero, not an unknown. |
 | `code_review` | review 20 | The agent's review is a first pass; a person still skims it. Nothing to integrate. |
-| `feature_development` | review 90, integration 120 | ~25 min of review, plus coordination to land the change. |
+| `feature_development` | review 90, handoff 120 | ~25 min of review, plus coordination to land the change. |
 | `refactoring` | review 60, rework 40 | Behaviour-preserving changes need careful review, and this is where "looks right, subtly isn't" lives. |
 | `debugging` | review 45 | Priced like `bug_fix` review; the diagnosis still needs confirming. |
-| `testing` | review 30, integration **0** | New tests join the existing suite for free. |
+| `testing` | review 30, handoff **0** | New tests join the existing suite for free. |
 | `devops` | review 75, rework 60 | Highest rework figure on the list. Infrastructure mistakes are expensive to discover late. |
 | `documentation` | review 25 | Cheap to review, cheap to correct. |
 | `research` | review 15 | You are reading the output anyway; that reading *is* the review. |
 | `planning` | review 40 | A plan gets discussed before it is acted on. |
 
 These amounts are static allocations, not observed expenses. Every successful evaluated
-arc of a configured job type receives the same costs. If actual review or integration work
+arc of a configured job type receives the same costs. If actual review or handoff work
 varies materially, use a defensible average and revisit it periodically. For occasional
 rework, use an expected cost across comparable jobs rather than the worst possible failure.
 
@@ -202,17 +203,17 @@ an analyst loaded rate of `$120` per hour and the job type `aml_alert_investigat
   "aml_alert_investigation": {
     "human_review": 60,
     "rework_or_error": 18,
-    "integration": 24,
+    "handoff": 24,
     "training_or_change": 6
   }
 }
 ```
 
 `human_review: 60` allocates 30 minutes for the analyst's review and disposition.
-`integration: 24` allocates 12 minutes for the operational steps after approval: updating the
+`handoff: 24` allocates 12 minutes for the operational steps after approval: updating the
 case record, attaching supporting evidence, and routing the case. It is not the cost of
 building or maintaining a case-management connector. If the agent writes the accepted result
-to the case system and routes it without additional work, configure `integration: 0`. If the
+to the case system and routes it without additional work, configure `handoff: 0`. If the
 institution has not measured or estimated that work, omit the key so the cost remains unknown.
 `rework_or_error: 18` is an expected correction cost across comparable investigations, not
 an assertion that every case requires rework.
@@ -268,8 +269,8 @@ Both assumptions are inside the ceilings, so the assessment is accepted.
 {"value_low":280.5,"value_base":330.0,"value_high":379.5,"bounds_source":"derived",
  "evidence_class":"MODEL_ESTIMATED_DEMO","reportability_status":"reportable",
  "economic_mechanism":"labor_substitution","net_value":285.0,
- "supplied_costs":{"human_review":45.0,"integration":0.0},
- "cost_coverage":{"included":["human_review","integration"],"known_zero":["integration"],
+ "supplied_costs":{"human_review":45.0,"handoff":0.0},
+ "cost_coverage":{"included":["human_review","handoff"],"known_zero":["handoff"],
                   "unknown":["rework_or_error","training_or_change"],
                   "excluded":["metered_ai_cost"]},
  "evaluator":"llm","confidence":0.7,

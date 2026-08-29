@@ -1838,7 +1838,7 @@ assert EVALUATOR_MECHANISMS.isdisjoint(OPERATOR_ONLY_MECHANISMS), (
 )
 
 # Phase 44 (EGV-14, D-05/D-06): the four cost categories EGV-14 requires
-# net_value to account for -- human review, rework or error, integration,
+# net_value to account for -- human review, rework or error, handoff,
 # and training or change. A TUPLE, not a frozenset: EGV-14's ordering probe
 # edge requires cost_coverage's lists to emit in a FIXED, stable order so
 # two records built from the same config are byte-identical across
@@ -1852,7 +1852,7 @@ assert EVALUATOR_MECHANISMS.isdisjoint(OPERATOR_ONLY_MECHANISMS), (
 COST_CATEGORIES = (
     "human_review",
     "rework_or_error",
-    "integration",
+    "handoff",
     "training_or_change",
 )
 

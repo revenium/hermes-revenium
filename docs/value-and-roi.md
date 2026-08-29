@@ -178,7 +178,7 @@ enforcement.
     "costs": {
       "bug_fix": {
         "human_review": 25,
-        "integration": 0
+        "handoff": 0
       }
     }
   }
@@ -465,10 +465,10 @@ a model cannot supply a cost figure.
 |---|---|
 | `human_review` | Review of the agent's output by a person |
 | `rework_or_error` | Cost of fixing what the agent got wrong |
-| `integration` | Cost incurred after acceptance to put the output into the operating workflow or system of record |
+| `handoff` | Cost incurred after acceptance to put the output into the operating workflow or system of record |
 | `training_or_change` | Change-management and enablement cost |
 
-`integration` is a per-job operationalization cost. It does not mean the cost of integrating
+`handoff` is a per-job operational cost. It does not mean the cost of connecting
 Revenium, building an API, or setting up the agent. Count the work that begins after the output
 is accepted and is required to make it usable in the real process: entering it into a system
 of record, attaching evidence, updating required fields, routing it to another queue, or
@@ -501,7 +501,7 @@ An unrecognised key inside a job type's cost object is ignored entirely: absent 
 ```json
 "cost_coverage": {
   "included": ["human_review"],
-  "unknown": ["rework_or_error", "integration", "training_or_change"],
+  "unknown": ["rework_or_error", "handoff", "training_or_change"],
   "excluded": ["metered_ai_cost"]
 }
 ```
@@ -766,7 +766,7 @@ included):
  "reportability_status":"reportable","economic_mechanism":"labor_substitution",
  "net_value":500.0,"supplied_costs":{"human_review":25.0},
  "cost_coverage":{"included":["human_review"],
-                  "unknown":["rework_or_error","integration","training_or_change"],
+                  "unknown":["rework_or_error","handoff","training_or_change"],
                   "excluded":["metered_ai_cost"]},
  "double_counting_group":"g38-sid-002","evaluator":"llm","evaluator_version":"v1",
  "model":"unknown","inference_provider":"openrouter","inference_address_class":"public",

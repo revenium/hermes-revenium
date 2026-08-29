@@ -137,7 +137,7 @@ Absent from `config.json` is the same as disabled.
     "costs": {
       "bug_fix": {
         "human_review": 25,
-        "integration": 0
+        "handoff": 0
       }
     }
   }
@@ -154,7 +154,7 @@ Absent from `config.json` is the same as disabled.
 | `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. |
 | `studyId` | `""` | A non-empty string naming an `ImpactStudyResult` this install's job assessments reference. Recorded on every assessment this install produces; never changes an assessment's own `evidence_class` (EGV-13, D-08). |
 | `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. The pair is **all-or-none in both directions**: if either field is missing or malformed (a blank `studyId`, a non-integer or `< 1` `studyVersion`), both resolve to their absent defaults. A half-reference could never name a real `ImpactStudyResult`, so none is recorded. |
-| `costs` | `{}` | An object keyed by job type (EGV-14). Each job type's value is an object whose keys are drawn from the four `COST_CATEGORIES` names — `human_review`, `rework_or_error`, `integration`, `training_or_change`. There is **no fleet-wide default bucket**: an absent job-type key means every category is unknown for that job type, exactly as if `costs` were absent entirely. A supplied `0` is knowledge and participates in the subtraction as a known zero; an absent category is unknown and does not participate (D-10) — these are different and both explicit. A malformed, non-numeric, boolean, or negative value resolves that category to unknown, never to zero. |
+| `costs` | `{}` | An object keyed by job type (EGV-14). Each job type's value is an object whose keys are drawn from the four `COST_CATEGORIES` names — `human_review`, `rework_or_error`, `handoff`, `training_or_change`. There is **no fleet-wide default bucket**: an absent job-type key means every category is unknown for that job type, exactly as if `costs` were absent entirely. A supplied `0` is knowledge and participates in the subtraction as a known zero; an absent category is unknown and does not participate (D-10) — these are different and both explicit. A malformed, non-numeric, boolean, or negative value resolves that category to unknown, never to zero. |
 
 ### Economic mechanisms (EGV-05)
 
