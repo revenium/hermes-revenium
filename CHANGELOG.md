@@ -14,6 +14,18 @@ evaluation; the second replaced most of its internals so a model estimate can no
 read as an observed result. The feature stays **opt-in and off by default** throughout,
 and an install that leaves it off meters byte-identically to before.
 
+### Documentation
+
+- **[Job value and ROI](docs/value-and-roi.md)** — a dedicated reference for the whole
+  experimental value path, replacing the fragments previously spread across the README,
+  `docs/how-it-works.md`, `docs/configuration.md`, `references/config-schema.md`, and
+  `references/job-declaration.md`. It documents, in one place, what was previously in no
+  document at all: the evaluator call's own bounds, the eight-word abstention vocabulary,
+  the full sidecar field inventory, the exact `--metadata` key order on the wire, the two
+  truncation tiers, the correction record shape, the ledger lines, retention and pruning,
+  and a symptom-to-cause troubleshooting table. The pages it was extracted from keep their
+  summaries and link to it.
+
 ### Added — evidence grading and economic mechanisms
 
 - **Nine evidence labels** (`evidence_class`), replacing the single forced constant.

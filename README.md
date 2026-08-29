@@ -53,13 +53,14 @@ a displayed ROI.
 | **Agentic job tracking** | Discrete task arcs become Revenium jobs with immutable, once-only outcomes, and their transactions are linked back via `--agentic-job-id`. |
 | **Tool-event metering** | Every Hermes tool call is metered — name, duration, success, error — through `revenium meter tool-event`. |
 | **Structural budget guardrails** | Hermes shell hooks read a local guardrail snapshot before every LLM call and every tool call, so enforcement does not depend on the agent choosing to comply. |
-| **Job value estimation** *(experimental, opt-in, off by default)* | On a `SUCCESS` arc only, one bounded LLM call on your own provider estimates the job's economic value from two independently capped inputs. It is an **unverified model estimate**, not an observed outcome. Absent or malformed config fails closed, so an existing install meters byte-identically to before. |
+| **Job value estimation** *(experimental, opt-in, off by default)* | On a `SUCCESS` arc only, one bounded LLM call on your own provider estimates the job's economic value from two independently capped inputs. It is an **unverified model estimate**, not an observed outcome. Absent or malformed config fails closed, so an existing install meters byte-identically to before. Full reference: **[Job value and ROI](docs/value-and-roi.md)**. |
 
 > **Which number crosses the wire.** When value estimation is enabled, `--outcome-value`
 > ships the **low** bound of the low/base/high band — the conservative figure, not the base.
 > All three bounds and their provenance ride in `--metadata`, so the full range stays
 > recoverable. The estimate understates by design rather than overstating, which means the
 > value on a Revenium dashboard is deliberately the floor of the range.
+> [Job value and ROI](docs/value-and-roi.md) documents the whole path.
 
 ## What's actually installed
 

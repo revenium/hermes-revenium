@@ -152,6 +152,11 @@ upstream, by the resolver; the reporter only reads that decision and never compu
 
 ## LLM outcome-value evaluation (experimental)
 
+> This section is the summary. **[Job value and ROI](value-and-roi.md)** is the complete
+> reference — configuration, the evaluator's own bounds, the abstention vocabulary, the
+> value derivation, costs and `net_value`, reportability, the sidecar record, the full wire
+> shape, corrections, operations, and troubleshooting.
+
 Opt-in, off by default. When enabled and a job's arc completes `SUCCESS`, the classifier
 makes one separate, bounded LLM call on the user's own configured provider to estimate that
 job's economic value. `FAILED` and `CANCELLED` arcs are never evaluated — there is no
