@@ -125,6 +125,57 @@ class CostsStatusTests(unittest.TestCase):
         self.assertNotIn('0', line)
         self.assertNotIn(':', line)
 
+    def test_unrecognised_category_is_not_a_price(self):
+        """_resolve_supplied_costs ignores a key outside COST_CATEGORIES
+        "entirely -- absent from supplied_costs, from every coverage list,
+        and from the subtraction", so it cannot make a job type priced."""
+        self._write({'labels': {'a': {}}}, self._costs({'a': {'bogus_category': 50}}))
+        self.assertEqual(self._run().returncode, 10)
+
+    def test_non_finite_values_are_not_prices(self):
+        """A non-finite value fails closed to unknown in the resolver."""
+        for literal in ('Infinity', '-Infinity', 'NaN'):
+            with self.subTest(literal=literal):
+                (self.state / 'job-taxonomy.json').write_text('{"labels":{"a":{}}}')
+                (self.state / 'config.json').write_text(
+                    '{"llmOutcomeEvaluation":{"costs":{"a":{"human_review":%s}}}}' % literal
+                )
+                self.assertEqual(self._run().returncode, 10)
+
+    def test_unreadable_config_is_could_not_determine_not_unpriced(self):
+        """A config that EXISTS but cannot be parsed may contain prices this
+        script cannot see. Reporting those job types as unpriced would be a
+        false claim -- that is exit 1, not exit 10."""
+        (self.state / 'job-taxonomy.json').write_text('{"labels":{"a":{}}}')
+        (self.state / 'config.json').write_text('{not valid json')
+        r = self._run()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('could not be read', r.stderr)
+
+    def test_non_object_config_is_could_not_determine(self):
+        (self.state / 'job-taxonomy.json').write_text('{"labels":{"a":{}}}')
+        (self.state / 'config.json').write_text('[]')
+        self.assertEqual(self._run().returncode, 1)
+
+    def test_absent_config_is_unpriced_not_an_error(self):
+        """Absent is different from unreadable: nothing is priced, and that
+        is a legitimate reportable state."""
+        self._write({'labels': {'a': {}}})
+        self.assertEqual(self._run().returncode, 10)
+
+    def test_cost_categories_match_the_classifier(self):
+        """Third declaration of the four names; drift makes the report
+        disagree with the resolver about what counts as priced."""
+        import re
+        script = (ROOT / 'skills' / 'revenium' / 'scripts' / 'costs-status.sh').read_text()
+        classifier = (
+            ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier' / 'classifier.py'
+        ).read_text()
+        mine = re.search(r"^COST_CATEGORIES = \(([^)]*)\)", script, re.M).group(1)
+        theirs = re.search(r"^COST_CATEGORIES = \(([^)]*)\)", classifier, re.M).group(1)
+        norm = lambda t: [x.strip().strip('\'"') for x in t.split(',') if x.strip()]
+        self.assertEqual(norm(mine), norm(theirs))
+
 
 if __name__ == '__main__':
     unittest.main()

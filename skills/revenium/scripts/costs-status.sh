@@ -93,32 +93,62 @@ if not isinstance(labels, dict):
     sys.exit(0)
 job_types = sorted(labels)
 
-# A missing or unreadable config is not an error here: it means nothing is
-# priced, which is a legitimate (and very common) state worth reporting
-# rather than failing on.
+# An ABSENT config means nothing is priced -- a legitimate, common state
+# worth reporting. A config that EXISTS but cannot be parsed is a different
+# thing entirely: it may well contain prices this script cannot see, so
+# reporting those job types as unpriced would be a false claim. That case
+# is "could not determine" (exit 1), not "unpriced" (exit 10).
+#
+# Collapsing the two would repeat, one level up, the exact error this
+# script exists to warn against: treating unknown as if it were zero.
 costs = {}
-try:
-    with open(cfg_path, encoding='utf-8') as fh:
-        cfg = json.load(fh)
+if os.path.exists(cfg_path):
+    try:
+        with open(cfg_path, encoding='utf-8') as fh:
+            cfg = json.load(fh)
+    except Exception as exc:
+        print(f'ERR|config exists but could not be read: {exc}')
+        sys.exit(0)
+    if not isinstance(cfg, dict):
+        print('ERR|config exists but is not a JSON object')
+        sys.exit(0)
     evaluation = cfg.get('llmOutcomeEvaluation')
     if isinstance(evaluation, dict):
         candidate = evaluation.get('costs')
         if isinstance(candidate, dict):
             costs = candidate
-except Exception:
-    costs = {}
 
-# "Priced" means the job type has at least one category carrying a usable
-# figure. An empty object, or one holding only unusable values, is
-# behaviourally identical to being absent -- every category resolves to
-# unknown -- so it is reported as unpriced rather than treated as done.
+# The four names must stay identical to classifier.py's COST_CATEGORIES
+# and hermes-report.sh's _COST_CATEGORIES. tests/test_costs_status.py's
+# drift test fails if they diverge -- this is the third declaration, and
+# the repo already treats the first two as a drift hazard worth a test.
+COST_CATEGORIES = ('human_review', 'rework_or_error', 'handoff', 'training_or_change')
+
+
+# "Priced" means at least one category carries a figure the RESOLVER would
+# actually use. This predicate has to match _resolve_supplied_costs exactly,
+# or the report claims pricing is complete while net_value stays empty:
+#
+#   - only the four COST_CATEGORIES count. An unrecognised key "is ignored
+#     entirely -- absent from supplied_costs, from every coverage list, and
+#     from the subtraction", so {"bogus": 50} is unpriced.
+#   - a malformed value ("non-finite, boolean, negative, wrong type") fails
+#     closed to unknown, so Infinity, NaN, True and -5 are all unpriced.
+#   - a supplied 0 IS a price: measured knowledge that participates.
+#
+# An empty object is therefore unpriced, exactly as absence is.
 def priced(entry):
     if not isinstance(entry, dict):
         return False
-    for value in entry.values():
+    for category in COST_CATEGORIES:
+        value = entry.get(category)
         if isinstance(value, bool):
             continue
-        if isinstance(value, (int, float)) and value >= 0:
+        if not isinstance(value, (int, float)):
+            continue
+        if value != value or value in (float('inf'), float('-inf')):
+            continue
+        if value >= 0:
             return True
     return False
 
