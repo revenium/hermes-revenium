@@ -420,23 +420,39 @@ this kind of revision is expected to be possible without reopening D-01's own pr
 
 ### Falsifier 4 — feature-off behaviour shifts
 
-**The observation.** An install with no `boundaries` object in `config.json` records or meters
-anything differently than it does today — any change to what `hermes-report.sh` ships in
-`--metadata`, any new job-assessment sidecar file, any ledger-line shape change — once Phase 50's
-priority walk exists in the tree.
+**The observation.** A feature-off install records or meters anything differently than it does
+today — any change to what `hermes-report.sh` ships in `--metadata`, any new job-assessment
+sidecar file, any ledger-line shape change — once Phase 50's priority walk exists in the tree.
 
-**What already covers it, and what does not.** Dedicated driven coverage today.
+**Two independent configuration surfaces, not one.** Getting this falsifier right requires not
+conflating them:
+
+- **`llmOutcomeEvaluation.enabled`** is the feature gate. `_llm_evaluation_enabled` reads it, and
+  it is what EGV-22's feature-off contract is written against.
+- **`boundaries`** is a *selection* surface only, and it has **no presence gate**.
+  `_boundary_impl_name(key, default, …)` (`classifier.py:2860`) fails open by construction: its
+  docstring states that "a missing `boundaries` object" — like a typo or a non-string value —
+  "returns `default`", and `default` is always the built-in implementation's registered name. An
+  install with no `boundaries` object still resolves to a live registrant. The same docstring
+  calls `llmOutcomeEvaluation` "the (unrelated) llmOutcomeEvaluation object".
+
+**What already covers it, and what does not.** Partial coverage.
 `tests/test_phase46_feature_off.py` (EGV-22, D-08) asserts byte-identity across two cron ticks
-with `llmOutcomeEvaluation.enabled=false`. It does not need to be built; it needs to be re-run
-once Phase 50 lands.
+with `llmOutcomeEvaluation.enabled=false` (`:219`). It does not need to be built; it needs to be
+re-run once Phase 50 lands. What it does **not** cover is a config that leaves outcome evaluation
+enabled and carries boundary selections — there is no "no `boundaries` object" arm, and because
+that object's absence is indistinguishable from the registered defaults, such an arm would not
+establish feature-off behaviour anyway.
 
 **Disposition:** Revise before shipping — not fatal to the rule, and not a won't-fix trigger.
 EGV-22's feature-off contract is a hard constraint independent of whether the precedence rule is
 otherwise correct — the rule is unshippable regardless of correctness if this breaks (D-12). The
-fix is implementation, not design: gate the priority walk's evaluation behind the same
-`boundaries`-object presence check the rest of Phase 45's boundary machinery already uses, so a
-feature-off install never reaches the new code path at all, and re-run
-`tests/test_phase46_feature_off.py` to confirm.
+fix is implementation, not design: gate the priority walk's evaluation behind
+`_llm_evaluation_enabled` — the gate that actually exists and that EGV-22 is written against — so
+a feature-off install never reaches the new code path at all, and re-run
+`tests/test_phase46_feature_off.py` to confirm. Do **not** gate on the presence of the
+`boundaries` object; no such check exists in the tree, and adding one would change the fail-open
+behaviour `_boundary_impl_name` deliberately guarantees.
 
 ## The won't-fix trigger
 
