@@ -114,8 +114,8 @@ constant, and an unprobed bound recorded honestly is more useful than a guess.
   over the live diagnosis host, which serves real traffic.
 - CLI: `revenium` 1.5.0, installed from `revenium/tap/revenium` via linuxbrew
   to `/home/linuxbrew/.linuxbrew/bin/revenium`.
-- Tenant: the pre-prod API, team `XPoqxyw`. No credential value appears in this
-  document.
+- Tenant: the pre-prod API. Neither a credential value nor a tenant identifier
+  appears in this document.
 
 **The instrument was verified before it was trusted.** The host was carrying a
 test double at `~/.local/bin/revenium` — a script that exits 0 for the calls
