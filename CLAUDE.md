@@ -32,6 +32,7 @@ bash ~/.hermes/skills/revenium/scripts/guardrail-check.sh   # guardrail evaluati
 bash ~/.hermes/skills/revenium/scripts/tool-event-report.sh # tool-event metering only
 bash ~/.hermes/skills/revenium/scripts/api-event-report.sh  # api-event metering only
 bash ~/.hermes/skills/revenium/scripts/drain-status.sh      # spool drain health (alert-only)
+bash ~/.hermes/skills/revenium/scripts/costs-status.sh      # which classified job types have no configured costs (read-only)
 bash ~/.hermes/skills/revenium/scripts/clear-halt.sh        # clear all halts (--rule-id <id> for one)
 bash ~/.hermes/skills/revenium/scripts/prune-markers.sh --dry-run   # marker + assessment GC (manual, never in cron)
 bash ~/.hermes/skills/revenium/scripts/correct-assessment.sh --job-id <id> --value <n> \
