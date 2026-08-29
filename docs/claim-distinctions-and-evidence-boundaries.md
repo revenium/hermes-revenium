@@ -318,17 +318,19 @@ reference a study, and nothing in this tree fills that slot and nothing reads it
 
 **EGV-02 — a later implementation fits without masquerading.** True today: all six pluggable
 boundaries exist as registries, and each carries a non-LLM fixture that declares its own,
-honest evidence class rather than borrowing the naked-LLM path's `MODEL_ESTIMATED_DEMO`. Not
-true today: a configured boundary's own declared class does not reach the persisted record —
+honest evidence class rather than borrowing the naked-LLM path's `MODEL_ESTIMATED_DEMO`.
+Not true today: a configured boundary's own declared class does not reach the persisted record —
 resolution runs against the evaluators registry only, so an active valuation or evidence
 boundary's declared class is not what ends up on the sidecar. The recorded class therefore
 under-claims rather than over-claims, which is the safe direction — no record ever shows more
 certainty than it should. This was left open rather than patched because closing it needs a
 cross-boundary precedence rule that no decision covers — which class wins when the evaluator,
-the valuation boundary, and the evidence boundary each declare one — and because letting a
-boundary declaration raise a recorded class is the same mechanism as the promotion path this
-product structurally closed elsewhere; patching around that mechanism here would reopen it by
-a side door.
+the valuation boundary, and the evidence boundary each declare one. A registration-time
+declaration by trusted in-repo code and an untrusted model output are two different threat
+models, covering two different moments — import time versus call time — not, as this page once
+reasoned, the same mechanism reached from a different source; `boundary_registry.py`'s own
+`register()` docstring and `classifier.py:1160`'s docstring both argue this directly. The
+precedence rule itself now lives in `docs/evidence-class-precedence.md` (Phase 48, 2026-08-29).
 
 **EGV-05 — six economic mechanisms are representable.** True today: all six mechanism values
 are representable on the wire and accepted by the reporter's allow-list. Not true today: three
