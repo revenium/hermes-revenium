@@ -153,3 +153,158 @@ guarantee does not need to close. **Not true today:** a configured boundary's ow
 class does not yet reach the persisted record — `_declared_evidence_class` resolves the
 evaluators registry only — so this correction changes no observable behaviour by itself
 (Phase 45, D-06 AMENDED; Phase 43, EGV-13).
+
+## The precedence rule
+
+**Chosen shape: fixed boundary priority, `evidence` > `valuation` > `evaluator`.** When more
+than one of the three boundaries has an active, non-empty declared `evidence_class` for a given
+assessment, the rule walks the boundaries in that fixed order and returns the first non-empty
+declaration it finds. If none of the three has a non-empty declaration, the rule returns
+`_forced_evidence_class()`, unchanged from today. A Phase 50 implementer can build directly from
+this paragraph without re-deriving anything.
+
+### Why the other two candidates were rejected
+
+**Weakest-declared floor** (`MODEL_ESTIMATED_DEMO` as an absolute floor, with a separate
+selection rule above it) is not a complete rule on its own. It answers "is the declaration the
+forced constant or not," but says nothing about which of two *different*, non-forced
+declarations wins — the shape RESEARCH.md §4 shows the registrant set already produces today
+(e.g. `valuation.py:315-319` declares `CUSTOMER_CONFIGURED`, `evidence.py:320-324` declares
+`CUSTOMER_CONFIRMED`; both are non-forced and different). Answering that case requires pairing
+the floor with a secondary tiebreak, which collapses the candidate into fixed boundary priority
+anyway — so it is not a separate shape, it is this shape with an extra step.
+
+**Per-aspect authority** (each field family owned by its own boundary, no cross-boundary
+override) most closely matches the code's *existing* shape — `evidence_class` is already
+effectively owned by whichever single registry `_declared_evidence_class` resolves (today, only
+`evaluators`), the same way `estimated_value` is independently owned by the valuation boundary
+(`classifier.py:1461`) and `reportability_status` by the evidence boundary
+(`classifier.py:2011`). But taken literally for `evidence_class` specifically, it does not
+answer RECON-04's stated question at all: if `evidence_class` stays singularly owned by one
+registry, there is no genuine three-way conflict for it to resolve, and D-03's "conflicting
+declarations in the same assessment" scenario has nothing to apply to. Per-aspect authority
+sidesteps RECON-04 rather than answering it.
+
+### One rule site, not one record site
+
+**DECL-02's "exactly one call site" means one *rule* site, not one *record* site.** There are
+two places a record is written — `_validate_assessment`'s return dict at `classifier.py:1553`
+and `_build_job_assessment`'s record literal at `classifier.py:2389` — and both already call
+`_declared_evidence_class(evaluator)` today. This is existing, favorable structure that Phase 50
+must not throw away: siting the priority-walk logic inside that one function reaches both
+records without duplicating the walk. Whichever shape were chosen, this structural fact would
+hold; it happens to make fixed boundary priority easy to implement without violating DECL-02.
+
+### The causal-label refusal (D-02), carried into this rule
+
+The three causal-impact labels — `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`, and
+`EXPERIMENTAL_IMPACT` — are refused at the allow-list even when a trusted registrant declares
+one, while `ACTIVITY_MEASURED`, `OUTCOME_OBSERVED`, `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`,
+`OUTPUT_OBSERVED`, and `MODEL_ESTIMATED_DEMO` stay declarable. The exact insertion point for
+this refusal is the `allowed` argument at `classifier.py:1218`, narrowed from the full
+`EVIDENCE_CLASSES` frozenset, inside the existing `evidence.resolve_declared_class(declared,
+allowed, default)` call (`evidence.py:226`) — not a new gate, a narrower argument to the one
+that exists. The rationale: a config-installed boundary must not be able to mark an individual
+record with a causal-impact label when no experiment backs it — the boundary between a cohort
+estimate and an individually-observed one (EGV-13).
+
+### Conflicting declarations, recorded (D-03)
+
+When two active boundaries declare **different**, non-empty classes for the same assessment,
+the rule picks one by the fixed order above, and the persisted record notes both that a
+conflict occurred and which authority (boundary) won. This costs one additional field in the
+record. A silent pick was rejected: without it, an auditor could not distinguish "exactly one
+boundary declared a class" from "two boundaries disagreed and one was chosen over the other."
+Recording both facts satisfies DECL-04 (determinism, provable by test) and DECL-05 (an auditor
+can tell which authority applied) with one mechanism rather than two.
+
+### The plumbing consequence
+
+Neither existing record-site function currently has all three boundaries' declared classes in
+local scope. `_validate_assessment` (containing record site 1) resolves the active **valuation**
+impl name locally at `classifier.py:1461` and never resolves the evidence-boundary impl name
+anywhere in its own body. `_resolve_reportability_status` — a **different function** — resolves
+the active **evidence** impl name at `classifier.py:2011`. `_build_job_assessment` (containing
+record site 2) receives `evaluator` as a parameter but resolves neither the valuation nor the
+evidence impl name itself. So under this rule, `_declared_evidence_class`'s signature must grow
+beyond its current single `evaluator: str` parameter to also receive the active valuation and
+evidence boundaries' declared classes as caller-supplied string arguments. Those values come
+from the same two primitives already in the tree — `_boundary_impl_name(key, default)`
+(`classifier.py:2854`) to find the active implementation name, then that boundary's own
+`resolve_evidence_class(name)` (the `BoundaryRegistry` method at `boundary_registry.py:169-176`)
+to read its declared class — without prescribing here what Phase 50's exact parameter list
+looks like.
+
+### Fail-open, preserved
+
+Every resolution path in the existing chain — an unregistered name, an empty declaration, a
+non-string declaration, an import failure, or any raised exception — falls back to
+`_forced_evidence_class()` and never raises. The rule inherits this without change: a priority
+walk over three fail-open lookups is itself fail-open, and its own worst-case outcome is the
+same forced constant the chain already returns today.
+
+### Promotion safety
+
+This subsection states explicitly why the chosen rule opens no promotion path — the binding
+constraint an untrusted model output stays structurally unable to raise its own claim
+(DECL-03).
+
+**The signature-shaped guarantee, after this rule exists.** `_declared_evidence_class` grows to
+accept two additional string arguments — the active valuation-boundary and evidence-boundary
+declared classes — but neither may be, nor be derived from, `raw`. Each additional parameter is
+itself the *result* of a registry lookup the caller performs via `_boundary_impl_name` (reading
+`config.json`) and `BoundaryRegistry.resolve_evidence_class` (reading a registry entry set at
+`register()` time) — never a value read out of an evaluator's response. The function's
+guarantee class is preserved, not weakened: every parameter it takes still traces back either
+to a caller-supplied name or to a registration-time declaration, never to model output.
+
+**What a model output still cannot do.** `raw` never crosses into `_declared_evidence_class` or
+its priority walk at all, under any of the additional parameters this rule adds. No parameter
+in the widened signature can be traced back to `raw` through the call chain: `_boundary_impl_name`
+reads `config.json`, not `raw`; `resolve_evidence_class` reads an import-time registry entry, not
+`raw`. If a future edit tried to derive one of the new parameters from `raw` instead, it would
+have to do so inside `_validate_assessment` or `_build_job_assessment` — the two functions
+`tests/test_phase43_evidence_grading.py`'s ast guard already statically scopes — and would be
+caught the same way A1-A8 are caught today, because `evidence_class` is already a member of
+`_PROMOTION_FORBIDDEN_KEYS` (`tests/test_phase43_evidence_grading.py:484-493`).
+
+**Which existing test would catch a regression.** `tests/test_phase43_evidence_grading.py`'s
+`PromotionTests` (`:626`) running `_hostile_evaluator_response()` through the real construction
+path, plus the ast guard over `_PROMOTION_FORBIDDEN_KEYS`. Neither test needs to change for this
+rule to exist; both continue to prove the untrusted-input half of the threat model regardless of
+how many boundaries the trusted-declaration half consults.
+
+### Boundary cases
+
+**Identical declarations.** Two active boundaries declare the *same* `evidence_class`. This is
+not a conflict: the priority walk stops at the first non-empty declaration it encounters in
+fixed order, and that value happens to equal what a lower-priority boundary would also have
+said. No conflict is recorded, because none occurred — the record only needs a conflict field
+when two boundaries would have produced *different* answers (see Conflicting declarations
+above).
+
+**Absent declarations.** Two distinct shapes exist, and they must not be conflated. Shape (a):
+a boundary's *configured* implementation name is **unregistered** —
+`BoundaryRegistry.resolve_evidence_class` misses on `self._entries.get(name)` and returns `""`
+(`boundary_registry.py:169-176`). Shape (b): a boundary is registered but its entry declares a
+literal `""`. Today, `reporting.py:78-81` and `cohort_impact.py:104-106` ship with zero
+registrants — but neither is one of the three boundaries this rule consults (`evaluator`,
+`valuation`, `evidence`), so shape (a) is theoretical for this rule's inputs unless an operator
+configures an unregistered impl name for one of those three. No fixture in this tree registers
+anything with a literal `""` declaration, so shape (b) has no fixture at all. Both shapes
+resolve to the same string, `""`, and the priority walk treats `""` as "this boundary cast no
+vote" and moves to the next boundary in order. **All-absent case:** if all three boundaries
+resolve to `""`, the rule returns `_forced_evidence_class()`, unchanged from today's behaviour.
+**Exactly-one-declares case:** that boundary's declaration wins outright, with no conflict
+recorded, because only one boundary cast a vote.
+
+**Tied declarations.** No tie is structurally possible under this shape. `evidence` >
+`valuation` > `evaluator` is a strict total order over exactly three named boundaries, so no two
+boundaries ever share a priority rank — the walk always has exactly one first non-empty match
+among any nonempty subset. What might look like a tie at first glance — two boundaries declaring
+the *same* class — is the Identical declarations case above, not a priority conflict: the
+tiebreak in this rule is over which **boundary** is consulted first, never over which **label**
+is "stronger" than another. `classifier.py:1078-1097` states the nine labels are flat and
+unordered by design and forbids sorting, ranking, or comparing them as an ordering key; this
+rule never compares two label strings against each other at all, so that constraint is never at
+stake.
