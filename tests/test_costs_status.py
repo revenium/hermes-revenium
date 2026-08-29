@@ -185,6 +185,33 @@ class CostsStatusTests(unittest.TestCase):
         )
         self.assertEqual(self._run().returncode, 10)
 
+    def test_exit_code_matrix_across_quiet_and_plain(self):
+        """The gap that let the quiet-success bug ship: --quiet was only
+        ever tested with something unpriced, and all-priced was only ever
+        tested without --quiet. Neither dimension was wrong; the untested
+        COMBINATION was -- and it is the state automation settles into once
+        everything is configured."""
+        priced_all = self._costs({'a': {'human_review': 25}, 'b': {'handoff': 0}})
+        priced_some = self._costs({'a': {'human_review': 25}})
+        cases = [
+            (priced_all, (), 0),
+            (priced_all, ('--quiet',), 0),
+            (priced_some, (), 10),
+            (priced_some, ('--quiet',), 10),
+        ]
+        for config, args, expected in cases:
+            with self.subTest(args=args, expected=expected):
+                self._write({'labels': {'a': {}, 'b': {}}}, config)
+                self.assertEqual(self._run(*args).returncode, expected)
+
+    def test_quiet_all_priced_prints_nothing_and_no_error(self):
+        """Empty output is quiet mode's success signal, not a failure."""
+        self._write({'labels': {'a': {}}}, self._costs({'a': {'human_review': 25}}))
+        r = self._run('--quiet')
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.stdout.strip(), '')
+        self.assertNotIn('produced no output', r.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

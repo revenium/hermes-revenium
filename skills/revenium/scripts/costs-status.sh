@@ -181,20 +181,27 @@ for j in orphans:
 PY
 )
 
-if [[ -z "${REPORT}" ]]; then
-  echo "costs-status: the report produced no output" >&2
-  exit 1
-fi
-
 if [[ "${REPORT}" == ERR\|* ]]; then
   echo "costs-status: ${REPORT#ERR|}" >&2
   exit 1
 fi
 
+# Quiet mode is checked BEFORE the empty-output guard below, because empty
+# is quiet mode's success signal: it prints one line per unpriced job type,
+# so nothing to print means nothing is unpriced. Treating that as "the
+# report produced no output" turned the clean, fully-configured state --
+# the one automation settles into -- into exit 1.
 if [[ "${QUIET}" == true ]]; then
   echo "${REPORT}" | sed -n 's/^NAME|//p'
   if echo "${REPORT}" | grep -q '^NAME|'; then exit 10; fi
   exit 0
+fi
+
+# Non-quiet output always carries a COUNT| line, so emptiness here really
+# does mean the report failed to produce anything.
+if [[ -z "${REPORT}" ]]; then
+  echo "costs-status: the report produced no output" >&2
+  exit 1
 fi
 
 total=$(echo "${REPORT}" | sed -n 's/^COUNT|\([0-9]*\)|.*/\1/p')
