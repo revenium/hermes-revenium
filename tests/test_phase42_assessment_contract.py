@@ -1248,6 +1248,14 @@ class RecordShapeTests(unittest.TestCase):
         # this set).
         'inference_provider', 'inference_address_class',
         'confidence', 'abstention_reason', 'reportability_status',
+        # Phase 50 (DECL-05, D-04): which of the four precedence-walk
+        # boundaries decided evidence_class above -- present on every path
+        # including abstention, on the same footing as evaluator/
+        # reportability_status. Added deliberately here, not discovered by
+        # a failing test, per D-02's own "not a test bent to fit code"
+        # instruction (mirroring double_counting_group's and study_id's
+        # comments above).
+        'evidence_class_authority',
     }
 
     def tearDown(self):

@@ -3672,6 +3672,11 @@ _PROVENANCE_FAMILY_META_KEYS = (
     # configured to go for as long as any provenance survives, and only
     # yields alongside the rest of provenance at tier 2.
     'inference_provider', 'inference_address_class',
+    # Phase 50 (DECL-05, D-04): names WHICH boundary's declaration decided
+    # evidence_class above -- provenance tier, not the value tier, per D-04:
+    # it describes WHO decided, the same footing as evaluator/model, not a
+    # monetary value.
+    'evidence_class_authority',
 )
 
 meta = {}
@@ -3737,6 +3742,38 @@ if assessment_raw:
         evidence_class = record.get('evidence_class')
         if isinstance(evidence_class, str) and evidence_class:
             meta['evidence_class'] = evidence_class[:32]
+        # Phase 50 (DECL-05, D-04): forwards WHICH boundary's declaration
+        # decided evidence_class immediately above -- an auditor otherwise
+        # cannot tell "a declaration won" from "which one." Unlike
+        # evidence_class's own forwarder (whose single allow-list check
+        # already ran upstream in classifier.py's precedence walk, so this
+        # forwarder simply trusts the already-sanitized record), an
+        # out-of-set evidence_class_authority here would be a CORRECTNESS
+        # bug, not a cosmetic one -- it would misname the authority that
+        # decided a billing-adjacent record -- so this allow-list check
+        # lives AT THE FORWARDER, mirroring economic_mechanism's own
+        # allow-list-then-drop shape below rather than evidence_class's
+        # trust-the-record shape. Hand-synced against classifier.py's
+        # _EVIDENCE_CLASS_AUTHORITIES; this heredoc is its own independent
+        # python3 process (a separate subshell, never a shared Python
+        # namespace), so the vocabulary is declared fresh here, the same
+        # reasoning _ECONOMIC_MECHANISMS below already documents for
+        # itself. FOUR words, not three: the Task 1 checkpoint decision
+        # (50-01-SUMMARY.md, "option-b") widened the classifier's walk to
+        # include the classification boundary, and this set must name every
+        # authority the walk can return. Clamped to 16 bytes -- the longest
+        # member, 'classification', is 14 bytes, comfortably under the
+        # clamp but close enough that a fifth authority word must re-check
+        # it, not assume headroom.
+        _EVIDENCE_CLASS_AUTHORITIES = frozenset({
+            'evidence', 'valuation', 'classification', 'evaluator',
+        })
+        evidence_class_authority = record.get('evidence_class_authority')
+        if (
+            isinstance(evidence_class_authority, str)
+            and evidence_class_authority in _EVIDENCE_CLASS_AUTHORITIES
+        ):
+            meta['evidence_class_authority'] = evidence_class_authority[:16]
         # Phase 43 (EGV-18, T-43-04): forwards the reportability decision
         # itself, not just its effect -- without this, a row withheld by
         # the gate above is indistinguishable on the tenant from a row

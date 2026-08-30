@@ -119,10 +119,13 @@ capability is invented here.
   this family rather than the provenance one on purpose: the value family sheds first, so
   an attribution recorded here can never outlive the value it documents.
 - **The provenance family** — `evaluator`, `evaluator_version`, `model`, `evidence_class`,
-  `reportability_status`, `study_id`, `study_version`, `confidence`, `economic_mechanism`,
-  `double_counting_group`, `correction_sequence`, `inference_provider`, and
-  `inference_address_class`. Who or what produced the estimate, and where it was configured
-  to run.
+  `evidence_class_authority`, `reportability_status`, `study_id`, `study_version`,
+  `confidence`, `economic_mechanism`, `double_counting_group`, `correction_sequence`,
+  `inference_provider`, and `inference_address_class`. Who or what produced the estimate,
+  and where it was configured to run. `evidence_class_authority` names which of the four
+  boundaries in the cross-boundary precedence walk (evidence, valuation, classification, or
+  evaluator) decided `evidence_class` — see
+  [Evidence-class precedence and declaration authority](evidence-class-precedence.md).
 
 **A byte ceiling is enforced once, in the reporter, at emit** — the one place the actual
 wire bytes exist before the payload leaves the machine. The ceiling is **4096 bytes**. This
