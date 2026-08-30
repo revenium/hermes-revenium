@@ -1727,6 +1727,36 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
             return None
         estimated_value = amount
 
+    # Phase 50 (DECL-01/DECL-02, record site 1): resolve the remaining two
+    # boundaries' declarations, then call the ONE rule site once. The
+    # valuation declaration reuses `impl_name`/`valuation_mod` ALREADY
+    # resolved above at this function's own valuation-derivation step --
+    # resolving it a second time here would itself violate DECL-02's
+    # single-resolution intent for this function. The evidence and
+    # classification declarations are NEW: this function performs zero
+    # `_boundary_impl_name` calls for either today, so both are added here
+    # following `_resolve_reportability_status`'s exact
+    # `_boundary_impl_name(key, default)` -> module load ->
+    # `resolve_evidence_class(name)` idiom, verbatim.
+    valuation_declared = (
+        valuation_mod.resolve_evidence_class(impl_name) if valuation_mod is not None else ""
+    )
+    _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in")
+    _evidence_mod = _load_evidence_module()
+    evidence_declared = (
+        _evidence_mod.resolve_evidence_class(_evidence_impl_name)
+        if _evidence_mod is not None else ""
+    )
+    _classification_impl_name = _boundary_impl_name("classification", "llm")
+    _classification_mod = _load_classification_module()
+    classification_declared = (
+        _classification_mod.resolve_evidence_class(_classification_impl_name)
+        if _classification_mod is not None else ""
+    )
+    _evidence_class, _evidence_class_authority = _evidence_class_precedence(
+        evaluator, valuation_declared, evidence_declared, classification_declared,
+    )
+
     return {
         "estimated_value": estimated_value,
         "currency": currency,
@@ -1739,10 +1769,16 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "confidence": confidence,
         "evaluator": _clamp_assessment_text(evaluator, 32),
         "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-        # Phase 45 (D-06 AMENDED): the evidence class the RESOLVED evaluator
-        # declared at registration, falling back to the forced constant --
-        # still never read from evaluator output (ROI-04, D-03).
-        "evidence_class": _declared_evidence_class(evaluator),
+        # Phase 45 (D-06 AMENDED)/Phase 50 (DECL-01/DECL-02): the evidence
+        # class the cross-boundary precedence walk resolved, falling back
+        # to the forced constant -- still never read from evaluator output
+        # (ROI-04, D-03).
+        "evidence_class": _evidence_class,
+        # Phase 50 (DECL-05, D-04): which boundary's declaration decided
+        # the class above -- present on the same footing as evaluator, not
+        # part of any value-omit family (it describes WHO decided, not a
+        # monetary value).
+        "evidence_class_authority": _evidence_class_authority,
     }
 
 

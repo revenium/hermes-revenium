@@ -1853,8 +1853,14 @@ class PhaseFieldInventoryTests(unittest.TestCase):
     # pushed "FAILED (failures=1)" out of the `tail -3` window that
     # acceptance criterion checks -- discovered instead during plan 46-02
     # Task 4's own full-discover verification.
+    # Phase 50 (DECL-05, D-04) added evidence_class_authority to
+    # DECLARED_KEYS -- same reasoning as the Phase 46 entry immediately
+    # above: this gate is scoped to Phase 44's own four fields, so a later
+    # phase's addition is excluded here rather than left to fail this
+    # Phase-44-scoped assertion.
     _KNOWN_LATER_PHASE_FIELDS = frozenset({
         'inference_provider', 'inference_address_class',
+        'evidence_class_authority',
     })
 
     def test_declared_keys_gained_exactly_the_four_phase_44_fields(self):

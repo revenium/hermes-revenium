@@ -255,6 +255,115 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         self.assertEqual(forced, mod._declared_evidence_class(42))
 
 
+class PrecedenceWalkTests(_DeclarationAuthorityTestCase):
+    """DECL-01/DECL-02, Task 3 <behavior> -- the walk's behavior at record
+    site 1 (`_validate_assessment`), the N=2 successive-config case, and
+    the single-resolution / single-rule-site backstops."""
+
+    def test_evidence_boundary_wins_outright(self):
+        mod = self._load(boundaries={'evidence': 'confirmation_workflow_evidence_fixture'})
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIRMED', got['evidence_class'])
+        self.assertEqual('evidence', got['evidence_class_authority'])
+
+    def test_valuation_boundary_wins_when_evidence_is_at_its_default(self):
+        """Fact 1's masking is actually gone: the evidence boundary's
+        built-in default declares the forced constant (no vote), so the
+        walk falls through to valuation, which is not forced."""
+        mod = self._load(
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            rate_card={'senior_engineer': 480.0},
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+        self.assertEqual('valuation', got['evidence_class_authority'])
+
+    def test_no_boundaries_object_is_byte_identical_to_pre_phase_50(self):
+        mod = self._load(boundaries=None)
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+
+    def test_validate_assessment_resolves_valuation_impl_name_exactly_once(self):
+        """Task 3 Test 4: the existing resolution at _validate_assessment's
+        own valuation-derivation step is REUSED for the precedence walk,
+        never re-resolved -- DECL-02's single-resolution intent for this
+        function. AST-counted, not grepped, so a comment mentioning the
+        boundary key cannot produce a false pass or fail."""
+        tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        func = _find_function_def(tree, '_validate_assessment')
+        self.assertIsNotNone(func, '_validate_assessment not found in classifier.py')
+        count = _count_boundary_impl_name_calls(func, 'valuation')
+        self.assertEqual(
+            1, count,
+            f'_validate_assessment calls _boundary_impl_name("valuation", ...) '
+            f'{count} times; expected exactly 1 -- the resolution must be reused, '
+            'not duplicated',
+        )
+
+    def test_two_successive_calls_with_different_boundaries_configs_n2_no_cross_call_state(self):
+        """N=2, state-carrying case (CONTEXT.md's own constraint): two
+        successive _validate_assessment calls in the SAME process, the
+        second with a DIFFERENT boundaries config, each return the class
+        matching their OWN config -- no value is cached across calls."""
+        mod_a = self._load(boundaries={'evidence': 'confirmation_workflow_evidence_fixture'})
+        cfg_a = mod_a._llm_evaluation_config()
+        got_a = mod_a._validate_assessment(self._raw(), cfg_a, 'stub', 'v1')
+        self.assertIsNotNone(got_a)
+        self.assertEqual('CUSTOMER_CONFIRMED', got_a['evidence_class'])
+
+        # A second, freshly-loaded module (a distinct config.json, a
+        # distinct boundaries object) -- proves no module-level or
+        # process-level cache carries the first call's winner forward.
+        second_config = Path(self.tmp) / 'config2.json'
+        _write_config(second_config, boundaries=None)
+        mod_b = _load_classifier({'REVENIUM_CONFIG_FILE': str(second_config)})
+        cfg_b = mod_b._llm_evaluation_config()
+        got_b = mod_b._validate_assessment(self._raw(), cfg_b, 'stub', 'v1')
+        self.assertIsNotNone(got_b)
+        self.assertEqual('MODEL_ESTIMATED_DEMO', got_b['evidence_class'])
+        self.assertNotEqual(got_a['evidence_class'], got_b['evidence_class'])
+
+        # And the FIRST module, called again with the SAME config, still
+        # returns its own answer unchanged -- the walk is a pure function
+        # of its inputs, not of call order.
+        got_a_again = mod_a._validate_assessment(self._raw(), cfg_a, 'stub', 'v1')
+        self.assertIsNotNone(got_a_again)
+        self.assertEqual(got_a['evidence_class'], got_a_again['evidence_class'])
+        self.assertEqual(
+            got_a['evidence_class_authority'], got_a_again['evidence_class_authority'])
+
+    def test_evidence_class_precedence_call_site_count_is_stable(self):
+        """DECL-02 backstop (must_haves precision item): the single-rule-
+        site property survives a future edit -- exactly ONE FunctionDef
+        named _evidence_class_precedence, and exactly THREE call sites
+        (the delegation inside _declared_evidence_class, plus one call at
+        EACH of the two record sites). A third record site calling this
+        function, or a second inline walk, would change this count and
+        fail this test loudly rather than silently drift."""
+        tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        defs = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == '_evidence_class_precedence'
+        ]
+        self.assertEqual(1, len(defs), 'expected exactly one _evidence_class_precedence def')
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == '_evidence_class_precedence'
+        ]
+        self.assertEqual(
+            3, len(calls),
+            f'expected 3 call sites (the _declared_evidence_class delegation '
+            f'plus one at each of the two record sites), found {len(calls)}',
+        )
+
+
 class AuthorityWordClampTests(unittest.TestCase):
     """DECL-05 precision backstop (must_haves): the 16-byte clamp on
     evidence_class_authority (hermes-report.sh's forwarder) cannot truncate
