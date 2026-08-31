@@ -1259,5 +1259,165 @@ class BoundaryCaseTests(_DeclarationAuthorityTestCase):
         self.assertNotIn('evidence_class_conflict', got)
 
 
+class ProfileScopedBoundaryProvenanceTests(_DeclarationAuthorityTestCase):
+    """PR #111 review P1 #1 ("Profile boundary provenance is global"):
+    `_boundary_impl_name`'s `paths` parameter must actually be threaded
+    through both record sites (`_validate_assessment`,
+    `_build_job_assessment`) and `_resolve_reportability_status`, or a
+    multiplexed profile's persisted `evidence_class`/
+    `evidence_class_authority` names a boundary that did not decide that
+    profile's job -- exactly the phase's own blocking prohibition
+    ("The record must not name an authority that did not determine the
+    class.").
+
+    Builds TWO profile state dirs with DIFFERENT `boundaries` objects:
+    profile A declares via `valuation` (CUSTOMER_CONFIGURED), profile B
+    declares via `evidence` (CUSTOMER_CONFIRMED) -- evidence outranks
+    valuation in the four-leg precedence order, so the two profiles are
+    not just differently-configured, they resolve to DIFFERENT winning
+    classes AND different authorities. The module is loaded with its
+    PROCESS-level config pointed at profile A (mirroring a multiplexed
+    gateway's module-level snapshot); the calls under test pass
+    `paths=` pointed at profile B. A correct implementation must reflect
+    profile B, not the process-level profile A.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.profile_a_dir = Path(self.tmp) / 'profile-a'
+        self.profile_b_dir = Path(self.tmp) / 'profile-b'
+        self.profile_a_dir.mkdir()
+        self.profile_b_dir.mkdir()
+        self.profile_a_config = self.profile_a_dir / 'config.json'
+        self.profile_b_config = self.profile_b_dir / 'config.json'
+        _write_config(
+            self.profile_a_config,
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        _write_config(
+            self.profile_b_config,
+            boundaries={'evidence': 'confirmation_workflow_evidence_fixture'},
+        )
+
+    def _paths_for_profile_b(self, mod):
+        """A `_Paths` namedtuple pointed at profile B's config.json. Every
+        other field is unused by the call paths under test (they only ever
+        read `.config_file` off the tuple they are handed), so they are
+        filled with harmless placeholders under the same tmp dir rather
+        than left to collide with profile A's real module-level paths."""
+        return mod._Paths(
+            hermes_home=self.profile_b_dir,
+            state_dir=self.profile_b_dir,
+            markers_dir=self.profile_b_dir / 'markers',
+            markers_ready_dir=self.profile_b_dir / 'markers' / '.ready',
+            taxonomy_file=self.profile_b_dir / 'task-taxonomy.json',
+            job_taxonomy_file=self.profile_b_dir / 'job-taxonomy.json',
+            guardrail_status_file=self.profile_b_dir / 'guardrail-status.json',
+            config_file=self.profile_b_config,
+            state_db=self.profile_b_dir / 'state.db',
+            job_assessments_dir=self.profile_b_dir / 'job-assessments',
+        )
+
+    def _load_with_process_level_profile_a(self):
+        return _load_classifier({'REVENIUM_CONFIG_FILE': str(self.profile_a_config)})
+
+    def test_validate_assessment_uses_the_passed_profile_not_the_process_one(self):
+        mod = self._load_with_process_level_profile_a()
+        paths_b = self._paths_for_profile_b(mod)
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1', paths=paths_b)
+        self.assertIsNotNone(got)
+        # Profile B's declaration (evidence -> CUSTOMER_CONFIRMED) must win,
+        # NOT profile A's (valuation -> CUSTOMER_CONFIGURED), which is what
+        # the process-level / module-level config would resolve to if
+        # `paths` were silently ignored.
+        self.assertEqual('CUSTOMER_CONFIRMED', got['evidence_class'])
+        self.assertEqual('evidence', got['evidence_class_authority'])
+        self.assertNotEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+        self.assertNotEqual('valuation', got['evidence_class_authority'])
+
+    def test_build_job_assessment_uses_the_passed_profile_not_the_process_one(self):
+        mod = self._load_with_process_level_profile_a()
+        paths_b = self._paths_for_profile_b(mod)
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1', paths=paths_b)
+        self.assertIsNotNone(validated)
+        record = mod._build_job_assessment(
+            self._valid_job('p50-review-profile-b'), validated, raw, cfg, 'stub', 'v1',
+            paths=paths_b,
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual('CUSTOMER_CONFIRMED', record['evidence_class'])
+        self.assertEqual('evidence', record['evidence_class_authority'])
+        self.assertNotEqual('CUSTOMER_CONFIGURED', record['evidence_class'])
+        self.assertNotEqual('valuation', record['evidence_class_authority'])
+
+    def test_reportability_status_resolution_uses_the_passed_profile(self):
+        """`_resolve_reportability_status` is the pre-existing sister
+        defect (Task Step 3's second bullet): it must also honor `paths`,
+        not just accept it. Proven with an OUTCOME difference, not merely
+        an impl-name lookup: profile A has no `evidence` boundary
+        configured (falls back to the unregistered `config_opt_in` name,
+        which resolves to the inline `experimentalReportEstimates` rule),
+        while profile B configures `confirmation_workflow_evidence_fixture`,
+        a REGISTERED evidence-boundary implementation that reports
+        REPORTABLE for a job id present in `cfg['confirmations']` and
+        CANDIDATE otherwise -- given the identical `cfg` and `job` on both
+        calls, only the `paths` argument can explain a different verdict."""
+        mod = self._load_with_process_level_profile_a()
+        paths_b = self._paths_for_profile_b(mod)
+        job = {'agentic_job_id': 'rs-confirmed-job', 'job_type': 'bug_fix'}
+        cfg_with_confirmation = {'confirmations': ['rs-confirmed-job']}
+
+        status_via_profile_a = mod._resolve_reportability_status(
+            cfg_with_confirmation, False, job=job, paths=None)
+        status_via_profile_b = mod._resolve_reportability_status(
+            cfg_with_confirmation, False, job=job, paths=paths_b)
+
+        self.assertEqual(mod.REPORTABILITY_CANDIDATE, status_via_profile_a)
+        self.assertEqual(mod.REPORTABILITY_REPORTABLE, status_via_profile_b)
+        self.assertNotEqual(status_via_profile_a, status_via_profile_b)
+
+    def test_fail_open_paths_none_matches_todays_process_level_behavior(self):
+        """The non-negotiable fail-open contract: `paths=None` (or omitting
+        the argument entirely) must resolve exactly as it did before this
+        fix, i.e. identically to the process-level / module-level config --
+        profile A in this fixture."""
+        mod = self._load_with_process_level_profile_a()
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+
+        without_kwarg = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        with_explicit_none = mod._validate_assessment(raw, cfg, 'stub', 'v1', paths=None)
+        self.assertIsNotNone(without_kwarg)
+        self.assertIsNotNone(with_explicit_none)
+        self.assertEqual('CUSTOMER_CONFIGURED', without_kwarg['evidence_class'])
+        self.assertEqual('valuation', without_kwarg['evidence_class_authority'])
+        self.assertEqual(without_kwarg['evidence_class'], with_explicit_none['evidence_class'])
+        self.assertEqual(
+            without_kwarg['evidence_class_authority'],
+            with_explicit_none['evidence_class_authority'],
+        )
+
+        record_without_kwarg = mod._build_job_assessment(
+            self._valid_job('p50-review-fail-open'), without_kwarg, raw, cfg, 'stub', 'v1')
+        record_with_none = mod._build_job_assessment(
+            self._valid_job('p50-review-fail-open-2'), with_explicit_none, raw, cfg, 'stub', 'v1',
+            paths=None,
+        )
+        self.assertIsNotNone(record_without_kwarg)
+        self.assertIsNotNone(record_with_none)
+        self.assertEqual('CUSTOMER_CONFIGURED', record_without_kwarg['evidence_class'])
+        self.assertEqual('valuation', record_without_kwarg['evidence_class_authority'])
+        self.assertEqual(
+            record_without_kwarg['evidence_class'], record_with_none['evidence_class'])
+        self.assertEqual(
+            record_without_kwarg['evidence_class_authority'],
+            record_with_none['evidence_class_authority'],
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

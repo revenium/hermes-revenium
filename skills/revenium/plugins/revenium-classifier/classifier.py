@@ -1546,7 +1546,8 @@ def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float,
 
 
 def _validate_assessment(raw: dict, config: "dict | None" = None,
-                         evaluator: str = "", evaluator_version: str = "") -> "dict | None":
+                         evaluator: str = "", evaluator_version: str = "",
+                         paths: "_Paths | None" = None) -> "dict | None":
     """Validate a raw evaluator assessment and derive its monetary value.
 
     Mirror of _validate_job: reject by returning None, never raise, and log the
@@ -1650,7 +1651,7 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "inferred_role": inferred_role,
     }
 
-    impl_name = _boundary_impl_name("valuation", "hours_times_rate")
+    impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
     valuation_mod = _load_valuation_module()
     impl = valuation_mod.resolve(impl_name) if valuation_mod is not None else None
     fall_back_to_builtin = impl is None
@@ -1741,13 +1742,13 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     valuation_declared = (
         valuation_mod.resolve_evidence_class(impl_name) if valuation_mod is not None else ""
     )
-    _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in")
+    _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
     _evidence_mod = _load_evidence_module()
     evidence_declared = (
         _evidence_mod.resolve_evidence_class(_evidence_impl_name)
         if _evidence_mod is not None else ""
     )
-    _classification_impl_name = _boundary_impl_name("classification", "llm")
+    _classification_impl_name = _boundary_impl_name("classification", "llm", paths=paths)
     _classification_mod = _load_classification_module()
     classification_declared = (
         _classification_mod.resolve_evidence_class(_classification_impl_name)
@@ -2175,7 +2176,8 @@ def _resolve_served_model(response) -> str:
 
 
 def _resolve_reportability_status(
-    cfg: "dict | None", abstained: bool, job: "dict | None" = None
+    cfg: "dict | None", abstained: bool, job: "dict | None" = None,
+    paths: "_Paths | None" = None,
 ) -> str:
     """Resolve EGV-18's reportability_status for one JobAssessment record.
 
@@ -2236,7 +2238,7 @@ def _resolve_reportability_status(
     impl_name = "config_opt_in"
     resolved_status = None
     try:
-        impl_name = _boundary_impl_name("evidence", "config_opt_in")
+        impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
         evidence_mod = _load_evidence_module()
         impl = evidence_mod.resolve(impl_name) if evidence_mod is not None else None
         if impl is not None:
@@ -2440,6 +2442,7 @@ def _build_job_assessment(
     model: str = PROVENANCE_MODEL_UNKNOWN,
     inference_provider: str = "",
     inference_address_class: str = ADDRESS_CLASS_UNSET,
+    paths: "_Paths | None" = None,
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -2552,19 +2555,19 @@ def _build_job_assessment(
         # `resolve_evidence_class(name)` idiom, verbatim. Computed once,
         # shared by the abstention early-return and the success-path
         # continuation below, exactly like study_id/supplied_costs above.
-        _valuation_impl_name = _boundary_impl_name("valuation", "hours_times_rate")
+        _valuation_impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
         _valuation_mod = _load_valuation_module()
         valuation_declared = (
             _valuation_mod.resolve_evidence_class(_valuation_impl_name)
             if _valuation_mod is not None else ""
         )
-        _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in")
+        _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
         _evidence_mod = _load_evidence_module()
         evidence_declared = (
             _evidence_mod.resolve_evidence_class(_evidence_impl_name)
             if _evidence_mod is not None else ""
         )
-        _classification_impl_name = _boundary_impl_name("classification", "llm")
+        _classification_impl_name = _boundary_impl_name("classification", "llm", paths=paths)
         _classification_mod = _load_classification_module()
         classification_declared = (
             _classification_mod.resolve_evidence_class(_classification_impl_name)
@@ -2721,6 +2724,7 @@ def _build_job_assessment(
             # get it, because both read from this same dict literal.
             "reportability_status": _resolve_reportability_status(
                 cfg, bool(abstention_reason), job={"agentic_job_id": job_id, "job_type": job_type},
+                paths=paths,
             ),
         }
 
@@ -3624,6 +3628,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         raw = fn(valid, transcript, cfg)
@@ -3672,6 +3677,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         if raw is _EVAL_TIMED_OUT:
@@ -3685,6 +3691,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         if raw is None:
@@ -3698,6 +3705,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         # The version comes from the REGISTRY, not from a name comparison here.
@@ -3724,9 +3732,10 @@ async def _attach_assessment(
                 model=served_model,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
-        assessment = _validate_assessment(raw, cfg, name, evaluator_version)
+        assessment = _validate_assessment(raw, cfg, name, evaluator_version, paths=paths)
         if assessment:
             valid["assessment"] = assessment
             # Phase 42 (C-01/C-04/D-12): the sidecar record of record, built
@@ -3741,6 +3750,7 @@ async def _attach_assessment(
                 model=served_model,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -3764,6 +3774,7 @@ async def _attach_assessment(
                 model=served_model,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -3794,6 +3805,7 @@ async def _attach_assessment(
             double_counting_group=double_counting_group,
             inference_provider=inference_provider,
             inference_address_class=inference_address_class,
+            paths=paths,
         )
     except Exception as exc:
         logger.warning(
@@ -3805,6 +3817,7 @@ async def _attach_assessment(
             double_counting_group=double_counting_group,
             inference_provider=inference_provider,
             inference_address_class=inference_address_class,
+            paths=paths,
         )
 
 
@@ -4093,6 +4106,7 @@ async def run_classification_async(
                                         double_counting_group=session_id,
                                         inference_provider=_non_success_provider,
                                         inference_address_class=_non_success_class,
+                                        paths=p,
                                     )
                                 # Phase 42 (D-12): sidecar FIRST, then the job
                                 # marker. A crash between the two appends
