@@ -100,6 +100,48 @@ and an install that leaves it off meters byte-identically to before.
   `--metadata` field, proven by a dynamically enumerated canary sweep whose
   vacuous-pass guard is itself proven binding by a negative control.
 
+### Added — declaration authority and the evidence-class precedence rule
+
+- **One cross-boundary precedence rule for `evidence_class`.** A configured boundary's
+  registration-time declaration now reaches the persisted record, resolved by a single
+  function (`_evidence_class_precedence`) that both record sites call — one *rule* site,
+  not one per boundary. It walks four boundaries in fixed priority order: evidence,
+  valuation, classification, evaluator.
+- **A declaration must be non-forced to count as a vote, not merely non-empty.** The
+  built-in default registrant on every boundary declares the same constant the naked-LLM
+  path already forces (`MODEL_ESTIMATED_DEMO`), so a literal first-non-empty walk would
+  have stopped at the highest-priority boundary on 100% of installs and masked every
+  lower one. A declaration equal to that constant is therefore indistinguishable from
+  silence and casts no vote. All four fixture-declared classes are reachable as a result:
+  `CUSTOMER_CONFIRMED`, `CUSTOMER_CONFIGURED`, `ACTIVITY_MEASURED`, `OUTCOME_OBSERVED`.
+- **`evidence_class_authority`**, a new provenance-family `--metadata` key naming *which*
+  boundary determined the class — `evidence`, `valuation`, `classification`, or
+  `evaluator`. With three-plus boundaries in the walk, "a declaration won" is not the
+  question an auditor asks; "which one" is. Conditional-emit as usual: absent from the
+  record means absent from the envelope, and a value outside the four-word enum is not
+  forwarded. A `kind:"correction"` record carries neither this key nor `evidence_class`,
+  because an operator override does not re-run the walk and so has no authority to name.
+- **The causal-impact labels stay unobtainable from configuration.**
+  `_DECLARABLE_EVIDENCE_CLASSES` narrows what a registrant may declare to six labels,
+  excluding `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT` and `EXPERIMENTAL_IMPACT` — a
+  config-installed boundary cannot mark a record with a causal-impact label that no
+  experiment backs, even from trusted code.
+- **Boundary lookups are scoped to the profile that owns the session.** In multiplexed
+  mode each profile has its own `config.json` and therefore its own `boundaries` object;
+  the record-site lookups now thread per-session paths, so a persisted `evidence_class`
+  and its authority name the boundary that actually applied to *that* profile's job. This
+  also closes the same latent defect on the pre-existing valuation and reportability
+  lookups.
+- **The rule's replacement guarantee is checkable, not asserted.** The old DECL-03
+  guarantee held structurally because the function took one parameter; the widened
+  signature takes four, so an ast-walk guard now proves no parameter carries evaluator
+  output and that no call-site argument derives from raw model output. Adversarial fixtures
+  drive a hostile evaluator response through the real construction path — including one
+  that names the walk's own parameters as attack keys — and the record is unchanged.
+- **[Evidence-class precedence and declaration authority](docs/evidence-class-precedence.md)**
+  records the implemented rule, the reachability amendment, and a written verdict for each
+  of the four pre-committed falsifiers.
+
 ### Added — documentation and guards
 
 - **[Claim distinctions and evidence boundaries](docs/claim-distinctions-and-evidence-boundaries.md)** —
