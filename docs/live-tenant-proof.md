@@ -425,10 +425,14 @@ observation was of session *keys*, and that the regex was written against keys
 and applied to ids from the start — is a hypothesis about a host not re-examined
 here, not a measurement.
 
-The consequence for `b4c3b63` is unchanged and now better grounded: the
-`paths`-threading fix is correct but **inert**, and per-profile marker routing
-and per-profile boundary provenance are both silently disabled on every
-multiplexed install. Recorded in full in the todo
+The consequence for `b4c3b63`, stated at the scope actually measured: on this
+v0.20.1 host the `paths`-threading fix is correct but **inert**, and per-profile
+marker routing and per-profile boundary provenance are both silently disabled
+*there*. Whether that extends to any other multiplexed install depends on
+whether its Hermes mints ids from the same namespace — which is the open
+question above, not a result. An operator seeing profile-routing failures on a
+different version or host should not assume this is the cause without checking
+their own `sessions.id` shapes first. Recorded in full in the todo
 `paths-for-session-regex-may-never-match`, which this amendment supersedes as
 the durable copy.
 
