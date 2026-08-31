@@ -120,6 +120,18 @@ def _sidecar_record(job_id, **overrides):
         "evaluator_version": "v1",
         "confidence": 0.8,
         "evidence_class": "MODEL_ESTIMATED_DEMO",
+        # Phase 50 (DECL-05, D-04): classifier.py's _build_job_assessment
+        # (and _validate_assessment) populate this key UNCONDITIONALLY on
+        # every record they build, and this plan makes hermes-report.sh
+        # forward it -- another WR-04/PA-12 fixture-fidelity site, closed
+        # the same way every prior recurrence was: SidecarFixtureFidelityTests'
+        # _sidecar_record() gains the fixture key, never a widened exemption
+        # set. "evaluator" is the honest value for this fixture's own
+        # "MODEL_ESTIMATED_DEMO" evidence_class immediately above: no
+        # boundary votes on the default/unconfigured arm, so the
+        # cross-boundary precedence walk falls through to
+        # _forced_evidence_class() with authority "evaluator".
+        "evidence_class_authority": "evaluator",
         "assumptions": {
             "estimated_hours_saved": 3.5,
             "assumed_loaded_rate": 150.0,

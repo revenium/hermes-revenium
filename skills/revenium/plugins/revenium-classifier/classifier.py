@@ -1157,73 +1157,247 @@ def _forced_evidence_class() -> str:
     return EVIDENCE_CLASS_MODEL_ESTIMATED
 
 
-def _declared_evidence_class(evaluator: str) -> str:
-    """Return the evidence_class the named `evaluator` DECLARED at
-    registration, falling back to _forced_evidence_class() for every other
-    outcome.
+# Phase 50 (DECL-02/DECL-05, D-04, Task 1 decision "option-b"): the
+# authority words the precedence walk below may attribute a returned
+# evidence_class to. FOUR members, not three -- the checkpoint decision
+# recorded in 50-01-SUMMARY.md widened the walk from `evidence > valuation >
+# evaluator` to `evidence > valuation > classification > evaluator` because
+# ACTIVITY_MEASURED (classification.py:367-371) is declared on NO boundary
+# the three-boundary rule ever consults, so it was structurally unreachable
+# under the locked rule as first written. This tuple is NOT an ordering of
+# the nine evidence-class labels -- classifier.py:1076-1099 forbids that --
+# it only names WHICH boundary decided, never how "strong" its label is.
+# Longest member is 'classification' at 14 bytes, under
+# hermes-report.sh's 16-byte clamp for evidence_class_authority but close
+# enough to it that a future fifth authority word must re-check the clamp,
+# not assume headroom.
+_EVIDENCE_CLASS_AUTHORITIES = ("evidence", "valuation", "classification", "evaluator")
 
-    Guarantee class: this function takes exactly ONE parameter, the
-    caller-supplied evaluator NAME, and no parameter carrying evaluator
-    OUTPUT -- so it structurally cannot read evaluator output, the same
-    class of guarantee _forced_evidence_class() provides above, preserved
-    rather than weakened. The value it resolves comes from a
-    REGISTRATION-TIME declaration made by TRUSTED CODE at import time (a
-    boundary module's own top-level `register(...)` call) -- a different
-    threat model from the untrusted model output _forced_evidence_class()
-    defends against (Phase 45, D-06 AMENDED).
+# Phase 50 (DECL-04, Falsifier 3 in docs/evidence-class-precedence.md,
+# closed pre-emptively): the three causal-impact labels are refused as a
+# DECLARATION even from a trusted registrant -- a config-installed boundary
+# must not be able to mark an individual record with a causal-impact label
+# when no experiment backs it. A strict subset of EVIDENCE_CLASSES, built
+# by subtraction rather than independently listed, so the two sets cannot
+# drift apart silently; the asserts below are the import-time drift guard,
+# mirroring EVIDENCE_CLASS_MODEL_ESTIMATED's own assert above.
+_DECLARABLE_EVIDENCE_CLASSES = EVIDENCE_CLASSES - {
+    "ASSOCIATIONAL", "QUASI_EXPERIMENTAL_IMPACT", "EXPERIMENTAL_IMPACT",
+}
+assert (
+    # .issubset() + != rather than the `<` strict-subset operator --
+    # tests/test_phase43_evidence_grading.py's LabelTests static guard flags
+    # any ORDERING comparison operator (<, <=, >, >=) applied to a label
+    # constant's name, even a set-containment one like this. .issubset() is
+    # a method call, not an ast.Compare ordering operator, and != is
+    # equality-family (deliberately exempted by that guard's own docstring)
+    # -- both are semantically identical to `<` here, just spelled to stay
+    # outside that guard's (necessarily syntactic) scope.
+    _DECLARABLE_EVIDENCE_CLASSES.issubset(EVIDENCE_CLASSES)
+    and _DECLARABLE_EVIDENCE_CLASSES != EVIDENCE_CLASSES
+), (
+    "_DECLARABLE_EVIDENCE_CLASSES must be a STRICT subset of EVIDENCE_CLASSES "
+    "-- refusing the three reserved causal-impact labels is the whole point "
+    "of this constant existing separately from EVIDENCE_CLASSES"
+)
+assert len(_DECLARABLE_EVIDENCE_CLASSES) == 6, (
+    f"_DECLARABLE_EVIDENCE_CLASSES has {len(_DECLARABLE_EVIDENCE_CLASSES)} "
+    "members, not the expected 6 -- EVIDENCE_CLASSES or the three refused "
+    "causal-impact labels have drifted out of sync with each other"
+)
 
-    Phase 48: the cross-boundary precedence rule for when the evaluator,
-    the valuation boundary, and the evidence boundary each declare a
-    class lives in docs/evidence-class-precedence.md, not here -- Phase
-    50 is the phase that would implement it, and until it does this
-    function still resolves the evaluators registry alone.
 
-    The membership test against EVIDENCE_CLASSES is what keeps a registrant
-    from declaring a label outside the nine, mirroring
-    _resolve_economic_mechanism's allow-list discipline above -- while
-    being a THIRD, distinct pattern, not a repeat of that one:
-    _resolve_economic_mechanism resolves an untrusted VALUE off `raw`
-    against an allow-list; this function resolves a TRUSTED DECLARATION off
-    a registry against an allow-list, and only ever sees the caller-supplied
-    evaluator name, never `raw`.
+def _declared_evidence_class(
+    evaluator: str, valuation_declared: str = "", evidence_declared: str = "",
+    classification_declared: str = "",
+) -> str:
+    """Return the evidence_class the cross-boundary precedence walk
+    resolves for this assessment, falling back to _forced_evidence_class()
+    for every other outcome.
 
-    Phase 45 (D-06 AMENDED, plan 06, PA-19): the membership test itself now
-    lives in evidence.py as evidence.resolve_declared_class -- the rule
-    that decides which evidence labels an implementation may claim belongs
-    with the boundary that owns evidence, not scattered across the host
-    module that carves the other five boundaries out. The guarantee this
-    function provides is UNCHANGED by that move: it still takes only the
-    caller-supplied evaluator NAME, still reads the declaration from the
-    evaluators registry (never from evidence.py, which owns the allow-list
-    rule but not the declaration itself), and still never raises.
+    Phase 50 (DECL-01/DECL-02/DECL-03, D-02/D-03): this function is now a
+    ONE-LINE DELEGATOR to _evidence_class_precedence (immediately below),
+    the actual rule site, returning element 0 of its 2-tuple. It is kept as
+    a thin wrapper -- rather than removed and every caller pointed at
+    _evidence_class_precedence directly -- because
+    tests/test_phase45_boundary_registry.py (which may not be edited, per
+    that plan's own reversibility warning) calls it with exactly one
+    positional argument and asserts a plain string back; the three new
+    parameters default to "" so every such call is unchanged.
 
-    Every outcome other than "a str member of EVIDENCE_CLASSES" -- an
-    unregistered name, an empty declaration, a non-string declaration, a
-    label outside the nine, a non-string `evaluator` argument, or any
-    exception raised while importing evaluators.py/evidence.py or looking
-    the name up -- falls back to _forced_evidence_class(). Never raises.
+    Guarantee class, restated for the widened signature (D-02): no
+    parameter carries evaluator OUTPUT. `evaluator` is still the
+    caller-supplied evaluator NAME, exactly as before. Each of
+    `valuation_declared`, `evidence_declared`, and `classification_declared`
+    is a caller-RESOLVED string, produced by the caller via
+    `_boundary_impl_name(key, default)` (reading config.json for a
+    registrant NAME) followed by that boundary's own
+    `resolve_evidence_class(name)` (reading a REGISTRATION-TIME entry) --
+    never a value read out of an evaluator's response. Two named strings
+    per new argument (not a context object) is deliberate: DECL-03 requires
+    that no parameter carry evaluator output, and a plain string argument
+    makes that inspectable at every call site, where an object is a
+    container a later change could quietly put `raw`-derived data into.
+
+    Phase 48/50: the cross-boundary precedence rule this function now
+    implements -- `evidence > valuation > classification > evaluator`
+    (Task 1 decision "option-b") -- is documented in
+    docs/evidence-class-precedence.md, including the D-02 causal-label
+    refusal and the "non-forced, not merely non-empty" refinement the
+    Task 1 checkpoint recorded (a declaration equal to
+    EVIDENCE_CLASS_MODEL_ESTIMATED carries no information distinguishing it
+    from "this boundary cast no vote," so it does not count as a vote).
+
+    D-03: the walk lives in _evidence_class_precedence, a SEPARATE function
+    from this one, rather than inline in this function's own body as D-03
+    initially preferred -- D-03 itself authorises this departure ("if
+    planning finds the walk cannot live there, extending the guard is part
+    of the work"): the authority half of the return value must come out
+    alongside the class, and a second walk computing only the class would
+    be a second rule site, which is exactly DECL-02's own violation.
+    _evidence_class_precedence is deliberately NOT added to
+    tests/test_phase43_evidence_grading.py's `_SCOPED_FUNCTIONS` -- that
+    guard's `_assert_functions_declare_untrusted_param` requires every
+    scoped function to declare a parameter literally named `raw`, and
+    `_evidence_class_precedence` must never have `raw` in scope at all.
+    The replacement guarantee (no parameter traces back to `raw`) is proven
+    instead by plan 50-02's own signature guard.
+
+    Never raises: the whole body of _evidence_class_precedence, which this
+    function delegates to unconditionally, is wrapped in one outer
+    try/except returning `(_forced_evidence_class(), "evaluator")`.
+    """
+    return _evidence_class_precedence(
+        evaluator, valuation_declared, evidence_declared, classification_declared,
+    )[0]
+
+
+def _evidence_class_precedence(
+    evaluator: str, valuation_declared: str = "", evidence_declared: str = "",
+    classification_declared: str = "",
+) -> "tuple[str, str]":
+    """THE ONE RULE SITE (DECL-02) for Phase 50's cross-boundary
+    evidence_class precedence walk. Returns a 2-tuple
+    `(evidence_class, authority)` where `authority` is a member of
+    _EVIDENCE_CLASS_AUTHORITIES naming WHICH boundary's declaration
+    produced `evidence_class` -- DECL-05: an auditor must be able to tell
+    which authority applied, not just that a declaration won.
+
+    THE RULE, exactly as docs/evidence-class-precedence.md states it and
+    the Task 1 checkpoint refined it (option-b): walk the four boundaries
+    in the FIXED order evidence, valuation, classification, evaluator.
+    A declaration "counts as a vote" only when it is a non-empty string
+    that is NOT EQUAL to EVIDENCE_CLASS_MODEL_ESTIMATED -- the Task 1
+    refinement from "non-empty" to "non-forced": a declaration equal to the
+    forced constant carries no information distinguishing it from "this
+    boundary cast no vote," so treating it as a vote would make the
+    evidence boundary's built-in default registrant (which always declares
+    the forced constant, classifier.py:943-944) mask every lower-priority
+    boundary on 100% of installs -- exactly Falsifier 1's Fact 1 in the
+    Task 1 checkpoint. The FIRST boundary in that fixed order whose
+    declaration counts as a vote wins outright; no later boundary is
+    consulted once one has won. When no boundary votes, the rule returns
+    `(_forced_evidence_class(), "evaluator")` -- unchanged from today's
+    behaviour, with "evaluator" the fixed authority for the default arm
+    (the Task 2 <behavior> pin: the all-forced fallback authority is
+    "evaluator", asserted explicitly rather than left incidental).
+
+    PRECISION (DECL-01 probe): this function performs no arithmetic and no
+    ORDERING comparison between two label strings. Every comparison is
+    either identity against the empty string, identity against the forced
+    constant EVIDENCE_CLASS_MODEL_ESTIMATED, or `in` membership against
+    _DECLARABLE_EVIDENCE_CLASSES -- never label-to-label. This is the same
+    "flat and unordered, never sorted or ranked" contract EVIDENCE_CLASSES'
+    own declaration states above and evidence.resolve_declared_class's own
+    docstring restates; this function inherits it rather than re-deriving
+    it, and never widens it.
+
+    `evaluator`'s OWN declaration is resolved HERE, inside this function,
+    exactly as `_declared_evidence_class` resolved it before this phase --
+    `evaluator` is a NAME, not a pre-resolved declaration like the other
+    three arguments, so its resolution (the `evaluators` registry lookup)
+    stays where it always lived. `valuation_declared`, `evidence_declared`,
+    and `classification_declared` arrive ALREADY RESOLVED: each caller
+    produces them via `_boundary_impl_name(key, default)` (config.json ->
+    a registrant NAME) then that boundary's own `resolve_evidence_class`
+    (a REGISTRATION-TIME entry, never the registrant's own output) --
+    mirroring `_resolve_reportability_status`'s exact idiom. No parameter
+    here is, or is derived from, `raw` -- an evaluator's untrusted response
+    never reaches this function under any of its four arguments, preserving
+    the same class of guarantee `_forced_evidence_class()` provides (DECL-03).
+
+    THE WINNING VALUE STILL PASSES THE ALLOW-LIST. Whichever boundary wins
+    the walk, its declared value is passed through
+    `evidence.resolve_declared_class(declared, _DECLARABLE_EVIDENCE_CLASSES,
+    _forced_evidence_class())` -- the SAME allow-list membership test this
+    function's single-boundary predecessor always applied, narrowed from
+    the full nine-label EVIDENCE_CLASSES to the six declarable labels
+    (Falsifier 3, closed pre-emptively). A winning declaration that fails
+    this membership test (for example, one of the three reserved
+    causal-impact labels, which cannot be a vote-then-reject retry through
+    a lower-priority boundary -- that would let a refused label smuggle
+    itself in by a side door) is treated exactly like "no boundary voted":
+    `(_forced_evidence_class(), "evaluator")`.
+
+    Never raises: the whole body runs inside one outer try/except returning
+    `(_forced_evidence_class(), "evaluator")`, the same fail-open contract
+    `_declared_evidence_class` always provided, inherited without change
+    (Phase 48: "a priority walk over three fail-open lookups is itself
+    fail-open").
     """
     try:
         if not isinstance(evaluator, str):
-            return _forced_evidence_class()
+            return (_forced_evidence_class(), "evaluator")
         try:
             from . import evaluators as _ev
         except Exception:  # pragma: no cover - relative import outside a package
             try:
                 import evaluators as _ev  # type: ignore
             except Exception:
-                return _forced_evidence_class()
-        declared = _ev.resolve_evidence_class(evaluator)
+                return (_forced_evidence_class(), "evaluator")
+        evaluator_declared = _ev.resolve_evidence_class(evaluator)
+
         try:
             from . import evidence as _evd
         except Exception:  # pragma: no cover - relative import outside a package
             try:
                 import evidence as _evd  # type: ignore
             except Exception:
-                return _forced_evidence_class()
-        return _evd.resolve_declared_class(declared, EVIDENCE_CLASSES, _forced_evidence_class())
+                return (_forced_evidence_class(), "evaluator")
+
+        forced = EVIDENCE_CLASS_MODEL_ESTIMATED
+        # Fixed order, per the rule: evidence > valuation > classification >
+        # evaluator. A tuple of (authority, declared) pairs, walked once,
+        # never re-ordered and never compared to each other.
+        legs = (
+            ("evidence", evidence_declared),
+            ("valuation", valuation_declared),
+            ("classification", classification_declared),
+            ("evaluator", evaluator_declared),
+        )
+        winner = None
+        winning_authority = "evaluator"
+        for authority, declared in legs:
+            if isinstance(declared, str) and declared and declared != forced:
+                winner = declared
+                winning_authority = authority
+                break
+
+        if winner is None:
+            return (_forced_evidence_class(), "evaluator")
+
+        resolved = _evd.resolve_declared_class(
+            winner, _DECLARABLE_EVIDENCE_CLASSES, _forced_evidence_class(),
+        )
+        if resolved == _forced_evidence_class():
+            # The winning boundary voted, but its declaration failed the
+            # allow-list (e.g. a reserved causal-impact label) -- treated
+            # the same as "no boundary voted," never promoted through a
+            # lower-priority boundary's declaration instead.
+            return (_forced_evidence_class(), "evaluator")
+        return (resolved, winning_authority)
     except Exception:
-        return _forced_evidence_class()
+        return (_forced_evidence_class(), "evaluator")
 
 
 def _resolve_economic_mechanism(raw) -> str:
@@ -1372,7 +1546,8 @@ def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float,
 
 
 def _validate_assessment(raw: dict, config: "dict | None" = None,
-                         evaluator: str = "", evaluator_version: str = "") -> "dict | None":
+                         evaluator: str = "", evaluator_version: str = "",
+                         paths: "_Paths | None" = None) -> "dict | None":
     """Validate a raw evaluator assessment and derive its monetary value.
 
     Mirror of _validate_job: reject by returning None, never raise, and log the
@@ -1476,7 +1651,7 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "inferred_role": inferred_role,
     }
 
-    impl_name = _boundary_impl_name("valuation", "hours_times_rate")
+    impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
     valuation_mod = _load_valuation_module()
     impl = valuation_mod.resolve(impl_name) if valuation_mod is not None else None
     fall_back_to_builtin = impl is None
@@ -1553,6 +1728,36 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
             return None
         estimated_value = amount
 
+    # Phase 50 (DECL-01/DECL-02, record site 1): resolve the remaining two
+    # boundaries' declarations, then call the ONE rule site once. The
+    # valuation declaration reuses `impl_name`/`valuation_mod` ALREADY
+    # resolved above at this function's own valuation-derivation step --
+    # resolving it a second time here would itself violate DECL-02's
+    # single-resolution intent for this function. The evidence and
+    # classification declarations are NEW: this function performs zero
+    # `_boundary_impl_name` calls for either today, so both are added here
+    # following `_resolve_reportability_status`'s exact
+    # `_boundary_impl_name(key, default)` -> module load ->
+    # `resolve_evidence_class(name)` idiom, verbatim.
+    valuation_declared = (
+        valuation_mod.resolve_evidence_class(impl_name) if valuation_mod is not None else ""
+    )
+    _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
+    _evidence_mod = _load_evidence_module()
+    evidence_declared = (
+        _evidence_mod.resolve_evidence_class(_evidence_impl_name)
+        if _evidence_mod is not None else ""
+    )
+    _classification_impl_name = _boundary_impl_name("classification", "llm", paths=paths)
+    _classification_mod = _load_classification_module()
+    classification_declared = (
+        _classification_mod.resolve_evidence_class(_classification_impl_name)
+        if _classification_mod is not None else ""
+    )
+    _evidence_class, _evidence_class_authority = _evidence_class_precedence(
+        evaluator, valuation_declared, evidence_declared, classification_declared,
+    )
+
     return {
         "estimated_value": estimated_value,
         "currency": currency,
@@ -1565,10 +1770,16 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "confidence": confidence,
         "evaluator": _clamp_assessment_text(evaluator, 32),
         "evaluator_version": _clamp_assessment_text(evaluator_version, 16),
-        # Phase 45 (D-06 AMENDED): the evidence class the RESOLVED evaluator
-        # declared at registration, falling back to the forced constant --
-        # still never read from evaluator output (ROI-04, D-03).
-        "evidence_class": _declared_evidence_class(evaluator),
+        # Phase 45 (D-06 AMENDED)/Phase 50 (DECL-01/DECL-02): the evidence
+        # class the cross-boundary precedence walk resolved, falling back
+        # to the forced constant -- still never read from evaluator output
+        # (ROI-04, D-03).
+        "evidence_class": _evidence_class,
+        # Phase 50 (DECL-05, D-04): which boundary's declaration decided
+        # the class above -- present on the same footing as evaluator, not
+        # part of any value-omit family (it describes WHO decided, not a
+        # monetary value).
+        "evidence_class_authority": _evidence_class_authority,
     }
 
 
@@ -1965,7 +2176,8 @@ def _resolve_served_model(response) -> str:
 
 
 def _resolve_reportability_status(
-    cfg: "dict | None", abstained: bool, job: "dict | None" = None
+    cfg: "dict | None", abstained: bool, job: "dict | None" = None,
+    paths: "_Paths | None" = None,
 ) -> str:
     """Resolve EGV-18's reportability_status for one JobAssessment record.
 
@@ -2026,7 +2238,7 @@ def _resolve_reportability_status(
     impl_name = "config_opt_in"
     resolved_status = None
     try:
-        impl_name = _boundary_impl_name("evidence", "config_opt_in")
+        impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
         evidence_mod = _load_evidence_module()
         impl = evidence_mod.resolve(impl_name) if evidence_mod is not None else None
         if impl is not None:
@@ -2110,7 +2322,9 @@ def _resolve_study_reference(cfg: "dict | None") -> "tuple[str, int]":
     anything else about the study -- classifier.py does not even import the
     module that would let it (see impact_study.py's own module docstring
     and tests/test_phase43_evidence_grading.py's NonInheritanceTests). The
-    job's own evidence_class is always set by _forced_evidence_class(),
+    job's own evidence_class is resolved entirely independently, by
+    _evidence_class_precedence's cross-boundary walk (Phase 50,
+    DECL-01/DECL-02) or _forced_evidence_class() when no boundary votes --
     completely independent of whatever study_id/study_version this function
     returns; referencing a study can never change it.
     """
@@ -2228,6 +2442,7 @@ def _build_job_assessment(
     model: str = PROVENANCE_MODEL_UNKNOWN,
     inference_provider: str = "",
     inference_address_class: str = ADDRESS_CLASS_UNSET,
+    paths: "_Paths | None" = None,
 ) -> "dict | None":
     """Construct the full EGV-04 JobAssessment sidecar record.
 
@@ -2331,6 +2546,39 @@ def _build_job_assessment(
         # abstained record still retains its costs and its coverage list.
         supplied_costs, cost_coverage = _resolve_supplied_costs(cfg, job_type)
 
+        # Phase 50 (DECL-01/DECL-02, record site 2): this function performs
+        # ZERO `_boundary_impl_name` calls anywhere else in its own body
+        # (Research Q1's larger of the two plumbing tasks), so all THREE
+        # non-evaluator declarations are resolved fresh here, each
+        # following `_resolve_reportability_status`'s exact
+        # `_boundary_impl_name(key, default)` -> module load ->
+        # `resolve_evidence_class(name)` idiom, verbatim. Computed once,
+        # shared by the abstention early-return and the success-path
+        # continuation below, exactly like study_id/supplied_costs above.
+        _valuation_impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
+        _valuation_mod = _load_valuation_module()
+        valuation_declared = (
+            _valuation_mod.resolve_evidence_class(_valuation_impl_name)
+            if _valuation_mod is not None else ""
+        )
+        _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
+        _evidence_mod = _load_evidence_module()
+        evidence_declared = (
+            _evidence_mod.resolve_evidence_class(_evidence_impl_name)
+            if _evidence_mod is not None else ""
+        )
+        _classification_impl_name = _boundary_impl_name("classification", "llm", paths=paths)
+        _classification_mod = _load_classification_module()
+        classification_declared = (
+            _classification_mod.resolve_evidence_class(_classification_impl_name)
+            if _classification_mod is not None else ""
+        )
+        # THE ONE RULE SITE (DECL-02), called ONCE, both tuple elements used
+        # below -- never re-derived, never compared a second time.
+        _evidence_class, _evidence_class_authority = _evidence_class_precedence(
+            evaluator, valuation_declared, evidence_declared, classification_declared,
+        )
+
         record: dict = {
             "kind": "job_assessment",
             "ts": now,
@@ -2399,12 +2647,20 @@ def _build_job_assessment(
             # belongs to evidence_class below; see EVIDENCE_CLASSES'
             # declaration above for where it lives and D-01's rationale.
             "evidence_references": [],
-            # Phase 45 (D-06 AMENDED): declared by the REGISTERED
-            # implementation at registration time, defaulted to the forced
-            # constant when unregistered/undeclared/non-string/out-of-set --
-            # still never read from evaluator output (ROI-04, D-03):
-            # provenance a model can assert is not provenance.
-            "evidence_class": _declared_evidence_class(evaluator),
+            # Phase 45 (D-06 AMENDED)/Phase 50 (DECL-01/DECL-02): the
+            # cross-boundary precedence walk's resolved class -- declared by
+            # WHICHEVER boundary won (evidence, valuation, classification,
+            # or evaluator), defaulted to the forced constant when none
+            # voted or the winner failed the allow-list -- still never read
+            # from evaluator output (ROI-04, D-03): provenance a model can
+            # assert is not provenance.
+            "evidence_class": _evidence_class,
+            # Phase 50 (DECL-05, D-04): which boundary's declaration decided
+            # the class immediately above -- present on every path
+            # including abstention, on the same footing as evaluator, never
+            # part of D-11's value-omit family (it describes WHO decided,
+            # not a monetary value).
+            "evidence_class_authority": _evidence_class_authority,
             # Phase 43 (EGV-13, D-08): the study reference, and NOTHING else
             # about the study -- resolved above via _resolve_study_reference
             # from cfg only. Referencing a study never changes evidence_class
@@ -2468,6 +2724,7 @@ def _build_job_assessment(
             # get it, because both read from this same dict literal.
             "reportability_status": _resolve_reportability_status(
                 cfg, bool(abstention_reason), job={"agentic_job_id": job_id, "job_type": job_type},
+                paths=paths,
             ),
         }
 
@@ -3371,6 +3628,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         raw = fn(valid, transcript, cfg)
@@ -3419,6 +3677,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         if raw is _EVAL_TIMED_OUT:
@@ -3432,6 +3691,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         if raw is None:
@@ -3445,6 +3705,7 @@ async def _attach_assessment(
                 double_counting_group=double_counting_group,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
         # The version comes from the REGISTRY, not from a name comparison here.
@@ -3471,9 +3732,10 @@ async def _attach_assessment(
                 model=served_model,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             return
-        assessment = _validate_assessment(raw, cfg, name, evaluator_version)
+        assessment = _validate_assessment(raw, cfg, name, evaluator_version, paths=paths)
         if assessment:
             valid["assessment"] = assessment
             # Phase 42 (C-01/C-04/D-12): the sidecar record of record, built
@@ -3488,6 +3750,7 @@ async def _attach_assessment(
                 model=served_model,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
             logger.info(
                 "revenium-classifier: outcome evaluated job=%s value=%s %s",
@@ -3511,6 +3774,7 @@ async def _attach_assessment(
                 model=served_model,
                 inference_provider=inference_provider,
                 inference_address_class=inference_address_class,
+                paths=paths,
             )
     except (asyncio.TimeoutError, TimeoutError):
         # Phase 39 (ROI-14): the SECOND timeout site. A registered evaluator
@@ -3541,6 +3805,7 @@ async def _attach_assessment(
             double_counting_group=double_counting_group,
             inference_provider=inference_provider,
             inference_address_class=inference_address_class,
+            paths=paths,
         )
     except Exception as exc:
         logger.warning(
@@ -3552,6 +3817,7 @@ async def _attach_assessment(
             double_counting_group=double_counting_group,
             inference_provider=inference_provider,
             inference_address_class=inference_address_class,
+            paths=paths,
         )
 
 
@@ -3840,6 +4106,7 @@ async def run_classification_async(
                                         double_counting_group=session_id,
                                         inference_provider=_non_success_provider,
                                         inference_address_class=_non_success_class,
+                                        paths=p,
                                     )
                                 # Phase 42 (D-12): sidecar FIRST, then the job
                                 # marker. A crash between the two appends

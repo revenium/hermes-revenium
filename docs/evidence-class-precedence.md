@@ -163,6 +163,52 @@ declaration it finds. If none of the three has a non-empty declaration, the rule
 `_forced_evidence_class()`, unchanged from today. A Phase 50 implementer can build directly from
 this paragraph without re-deriving anything.
 
+### Amendment (2026-08-30, Phase 50 Task 1 checkpoint "option-b"): the walk widens to four legs, and a vote must be non-forced, not merely non-empty
+
+**This paragraph amends, and does not replace, the rule stated immediately above.** The original
+text is Phase 48's own record and is left in place; this dated block is the correction Phase 50's
+Task 1 checkpoint produced against it, per the same append-only discipline this document already
+uses elsewhere (see `## Appendix: restatement-site sweep`, D-10). Phase 48 itself said its four
+named falsifiers "are not a claim that no fifth exists" (`:339-340` above) — the two facts below
+are that fifth consideration, discovered while building, not while falsifying.
+
+**Fact 1 — the built-in default registrant would win on every install under a literal
+"first-non-empty" reading.** `classifier.py:943-944` registers the evidence boundary's fail-open
+default registrant, `config_opt_in`, with `evidence_class=_LLM_EVIDENCE_CLASS_LITERAL`
+(`MODEL_ESTIMATED_DEMO`) — a non-empty string. A walk that stops at the first *non-empty*
+declaration, exactly as originally written above, would therefore stop at the `evidence` boundary
+on 100% of installs, because its built-in default always has something non-empty to say. Neither
+`CUSTOMER_CONFIGURED` (declared on `valuation`) nor `OUTCOME_OBSERVED` (declared on the evaluator)
+could ever reach a record, regardless of configuration — the walk's own default arm would mask
+every lower-priority boundary unconditionally.
+
+**Fact 2 — `ACTIVITY_MEASURED` is declared on a boundary the three-boundary rule never
+consults.** `ACTIVITY_MEASURED` is declared in exactly one place in the tree,
+`classification.py:367-371`'s `keyword_classification_fixture`, on the **`classification`**
+boundary. The rule as originally written above walks only `evidence`, `valuation`, and
+`evaluator` — `classification` is not one of the three named boundaries, so this class was
+structurally unreachable no matter how `classification` was configured. DECL-04 requires all four
+fixture-declared classes to reach the record; under the original three-boundary text, one of the
+four could not.
+
+**The refined rule, stated as one paragraph an implementer can build from.** Walk four boundaries
+in the fixed order `evidence > valuation > classification > evaluator`. A boundary's declaration
+"counts as a vote" only when it is a non-empty string **and** is not equal to
+`EVIDENCE_CLASS_MODEL_ESTIMATED` — the forced constant carries no information distinguishing "this
+boundary deliberately declared the demo class" from "this boundary cast no vote at all," so
+treating it as a vote is indistinguishable from Fact 1's masking failure. The first boundary in
+that order whose declaration counts as a vote wins outright; no later boundary is consulted once
+one has won. When no boundary casts a vote, the rule returns `_forced_evidence_class()` with
+authority `evaluator`, unchanged from today's behaviour. The winning declaration still passes
+through the existing allow-list membership test (see "The causal-label refusal" below) before it
+is accepted.
+
+**Consequence for DECL-04 and ROADMAP criterion 1.** All four fixture-declared classes
+(`CUSTOMER_CONFIRMED`, `CUSTOMER_CONFIGURED`, `ACTIVITY_MEASURED`, `OUTCOME_OBSERVED`) are reachable
+under the refined rule — proven by `tests/test_phase45_boundary_fixtures.py::FixtureMatrixTests`'
+reachability matrix (plan 50-03). DECL-04 closes in **full**. ROADMAP Phase 50 success criterion 1
+is **met**, not superseded or narrowed — there is no supersession line to write for it.
+
 ### Why the other two candidates were rejected
 
 **Weakest-declared floor** (`MODEL_ESTIMATED_DEMO` as an absolute floor, with a separate
@@ -218,6 +264,27 @@ boundary declared a class" from "two boundaries disagreed and one was chosen ove
 Recording both facts satisfies DECL-04 (determinism, provable by test) and DECL-05 (an auditor
 can tell which authority applied) with one mechanism rather than two.
 
+**Amendment (2026-08-30) — the mechanism is one key naming the winner, not a separate conflict
+flag.** What shipped is `evidence_class_authority`, a string field carrying which boundary's
+declaration produced the recorded `evidence_class` on **every** record, including the all-absent
+fallback arm — not only on records where a conflict occurred. This still satisfies DECL-05 (which
+authority applied is always legible) without a second boolean field: "was there a conflict" is
+answerable by an auditor as "did a higher-priority boundary in the fixed order also have a
+non-empty, non-forced declaration" — information the four-leg walk itself makes reconstructable,
+because a lower-priority boundary only ever wins when every higher-priority leg cast no vote.
+
+**The enum, corrected from this section's earlier three-value framing.** `evidence_class_authority`
+is one of `_EVIDENCE_CLASS_AUTHORITIES = ("evidence", "valuation", "classification", "evaluator")`
+(`classifier.py:1174`) — **four** words, not the three this document's pre-implementation text
+assumed, because the walk itself widened to four legs (see the amendment above). The value is
+validated against this exact set at the forwarder in `hermes-report.sh` before being placed on the
+`--metadata` envelope, and clamped to 16 bytes — `classification` is the longest member at 14
+bytes, leaving 2 bytes of headroom that a future fifth authority word must re-check rather than
+assume. The forwarder's allow-list check runs **before** truncation, so a legal value is never
+silently cut, and an out-of-set value is dropped rather than forwarded — a correctness discipline,
+not a cosmetic one, because misnaming who set an evidence label on a billing-adjacent record would
+itself be a false audit trail.
+
 ### The plumbing consequence
 
 Neither existing record-site function currently has all three boundaries' declared classes in
@@ -234,6 +301,20 @@ from the same two primitives already in the tree — `_boundary_impl_name(key, d
 `resolve_evidence_class(name)` (the `BoundaryRegistry` method at `boundary_registry.py:169-176`)
 to read its declared class — without prescribing here what Phase 50's exact parameter list
 looks like.
+
+**Amendment (2026-08-30) — what actually shipped.** The rule site is `_evidence_class_precedence(
+evaluator, valuation_declared, evidence_declared, classification_declared) -> tuple[str, str]`
+(`classifier.py:1275`), one parameter longer than this paragraph anticipated because the walk grew
+a fourth leg (see the amendment under "The precedence rule" above). `_declared_evidence_class`
+(`classifier.py:1210`) survives unchanged in name and in its existing single-argument call
+contract — its three new parameters default to `""` — but its body is now a one-line delegator
+returning element 0 of `_evidence_class_precedence`'s 2-tuple, so DECL-02's "exactly one rule
+site" holds structurally: there is one function that walks, and one function every existing
+caller already called. Both record sites (`_validate_assessment`, `classifier.py:1548`, calling
+`_evidence_class_precedence` at `:1756`; and `_build_job_assessment`, `classifier.py:2431`,
+calling it at `:2575`) call `_evidence_class_precedence` directly and unpack both elements of its
+return tuple, rather than calling the delegator and losing the second element. This is exactly Falsifier 2's own prescribed
+narrowing — see `## Phase 50 outcome` below.
 
 ### Fail-open, preserved
 
@@ -501,6 +582,105 @@ records had drifted apart, each stating one side of the same question in a diffe
 deferral note. A rule derived once and cited twice cannot drift; a rule derived twice will. That
 is why this trigger lives here, in the one document both Phase 50 and Phase 51 read, rather than
 being restated separately inside each phase's own plan.
+
+## Phase 50 outcome (2026-08-30)
+
+**Verdict: SHIP.** Falsifier 1 did not fire. Phase 50 built the precedence rule described above
+rather than converting to the won't-fix trigger. This section is the closing record the
+falsification-conditions discipline (`## Falsification conditions` above) requires: a written
+verdict for each of the four named conditions, fired or not fired, with the evidence that
+produced it — none left silently unevaluated.
+
+### Falsifier 1 — an adversarial fixture obtains a boundary-declared class
+
+**Did not fire. Verdict: `ship`** (plan 50-02, Task 3). Ten checks — six behavioral
+(`PromotionUnderPrecedenceTests`) plus four static (`SignatureGuardTests`) — all `PASS` against
+the real, built implementation, not a paper prediction. The load-bearing case is Test 2: a hostile
+response naming five keys after the walk's own new inputs (`valuation_declared`,
+`evidence_declared`, `evidence_class_authority`, `boundaries`, `boundary_impl`) produced a record
+identical to the unmodified attack, because those keys are never read off `raw` at either call
+site — both callers resolve their non-evaluator arguments independently, from config-driven
+module lookups. Static property 3 proves this structurally: every call-site argument traces to a
+name or a boundary lookup, never to `raw` (ast-verified). Full detail and the ten-check table:
+`.planning/phases/50-declaration-authority/50-02-SUMMARY.md`.
+
+### Falsifier 2 — the rule cannot be sited once
+
+**Did not fire.** The shape built is exactly this falsifier's own prescribed narrowing: one
+function, `_evidence_class_precedence` (`classifier.py:1275`), inside `classifier.py`, mirroring
+`_declared_evidence_class`'s own pre-existing shape, that both record sites call — supplying their
+locally-resolved valuation/evidence/classification declarations as arguments rather than
+re-deriving the walk at each site. No resolve-and-compare logic was written independently at more
+than one place; `_validate_assessment` (`classifier.py:1548`) and `_build_job_assessment`
+(`classifier.py:2431`) both call `_evidence_class_precedence` directly (`:1756`, `:2575`) and
+unpack its 2-tuple. DECL-02's "exactly one call site" — one rule site, not one record site, per
+this document's own earlier framing — holds as built.
+
+### Falsifier 3 — a causal label becomes reachable from config
+
+**Did not fire, closed pre-emptively.** `_DECLARABLE_EVIDENCE_CLASSES` (`classifier.py:1184-1207`)
+narrows the `allowed` argument at the walk's allow-list check from the full nine-label
+`EVIDENCE_CLASSES` to a strict six-member subset, refusing `ASSOCIATIONAL`,
+`QUASI_EXPERIMENTAL_IMPACT`, and `EXPERIMENTAL_IMPACT` even from a trusted registrant, built by
+subtraction (never independently listed) with an import-time assert guarding against drift.
+Proven adversarially, not just by construction: 50-02 Task 1 Test 3 registers a fixture declaring
+`EXPERIMENTAL_IMPACT` via `boundaries.valuation` and confirms it is refused, falling back to the
+forced constant with authority `evaluator` — never `valuation`. 50-03's conflict-pairing tests
+re-exercise the same gate across the other three legs (evidence, classification, evaluator).
+
+### Falsifier 4 — feature-off behaviour shifts
+
+**Did not fire.** Structural reason: both record-site callers of `_evidence_class_precedence` are
+gated behind `_llm_evaluation_enabled` (`classifier.py:3753` and `:3772`), so a feature-off
+install never reaches the priority walk at all — the gate that actually exists and that EGV-22 is
+written against, not a check on the presence of the `boundaries` object (no such check exists in
+the tree, per this document's own Falsifier 4 disposition above). Re-confirmed by a fresh run of
+`tests/test_phase46_feature_off.py` in this plan (Task 1), asserting byte-identity across two cron
+ticks with `llmOutcomeEvaluation.enabled=false`:
+
+```
+$ python3 -m unittest tests.test_phase46_feature_off -v
+Ran 11 tests in 71.103s
+OK
+```
+
+### Reachability and conflict determinism (DECL-04)
+
+All four fixture-declared classes reach the persisted record from their own boundary's
+configuration, proven against the real `_validate_assessment` → `_build_job_assessment`
+construction path (plan 50-03, `FixtureMatrixTests`' reachability matrix):
+
+| Class | Boundary | Reachable? |
+|---|---|---|
+| `CUSTOMER_CONFIRMED` | `evidence` | YES |
+| `CUSTOMER_CONFIGURED` | `valuation` | YES |
+| `ACTIVITY_MEASURED` | `classification` | YES (option-b's newly-inserted fourth leg) |
+| `OUTCOME_OBSERVED` | evaluator name | YES |
+
+Conflict resolution is deterministic at N=2 (all six pairings across the four-leg walk), N=3 (two
+variants), and N=4 (all four boundaries conflicting) — `ConflictDeterminismTests` (plan 50-03),
+re-run three times plus once with `config.json`'s `boundaries` dict keys reversed, with an ast
+guard confirming the walk never sorts, maxes, mins, or ordinally compares two label strings.
+
+**Consequence:** DECL-04 closes in **full**. ROADMAP Phase 50 success criterion 1 is **met**; its
+"or superseded" branch does not apply, and no supersession line was written for it.
+
+### The full-suite verification this outcome rests on
+
+```
+$ python3 -m unittest discover -s tests -p 'test_*.py' -v
+Ran 1248 tests in 1108.332s
+OK (expected failures=1)
+```
+
+Zero `FAIL:`/`ERROR:` lines. `expected failures=1` is the module's own documented
+`expectedFailure`, not the `test_a27` floor-regression flake (which presents as
+`FAILED (failures=1, expected failures=1)` with a `FAIL:` line present — absent here). Neither
+known flake (`test_a27`, the `supports_flag` squad capability probe) fired on this run.
+
+Before/after test counts: **1203** (pre-Phase-50, `origin/main`) → **1248** (this HEAD), an
+increase of 45 tests across the four plans (14 in 50-01, 10 in 50-02, 21 in 50-03), with zero
+tests removed or weakened. Full detail: `.planning/phases/50-declaration-authority/50-VERIFICATION.md`.
 
 ## Appendix: restatement-site sweep
 

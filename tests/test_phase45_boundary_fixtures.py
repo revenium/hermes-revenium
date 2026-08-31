@@ -13,6 +13,16 @@ tests/test_phase45_valuation_boundary.py covers valuation.py.
 PhaseGateTests records the phase gate procedure and re-verifies the
 immutable goldens this plan must not have touched.
 
+Phase 50 Plan 03 (DECL-04) extends FixtureMatrixTests from "the fixtures
+declare distinct classes" to "those declarations reach the persisted
+record": four new test methods, one per class in FOUR_DECLARED_CLASSES,
+each driving the REAL `_build_job_assessment` construction path (via
+tests.test_phase50_declaration_authority's `_load_classifier`/
+`_write_config` harness, reused rather than reimplemented) rather than
+calling `_evidence_class_precedence` directly. Under the 50-01 Task 1
+"option-b" decision, `ACTIVITY_MEASURED` IS reachable, via
+`boundaries.classification = keyword_classification_fixture`.
+
 Every test here runs OFFLINE, matching tests/test_phase36_evaluator_seam.py's
 own module docstring: no provider, no network, no subprocess.
 """
@@ -20,6 +30,7 @@ own module docstring: no provider, no network, no subprocess.
 import ast
 import hashlib
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -28,6 +39,7 @@ from tests.test_phase43_evidence_grading import (
     _UNTRUSTED_PARAM_NAME,
 )
 from tests.test_phase45_contract_only_boundaries import GoldenImmutabilityTests
+from tests.test_phase50_declaration_authority import _load_classifier, _write_config
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
@@ -362,6 +374,59 @@ class FixtureMatrixTests(unittest.TestCase):
         'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
     })
 
+    # Phase 50 Plan 03 (DECL-04): a companion mapping, built from
+    # FOUR_DECLARED_CLASSES above, from each declared class to the
+    # `boundaries` configuration and (for the 'evaluator' authority) the
+    # evaluator NAME that makes it the walk's winner -- so the four
+    # reachability tests below are driven from one table rather than four
+    # hand-written configs, the same "derived from a concrete reviewed
+    # shape, not guessed at" discipline
+    # tests/test_phase43_evidence_grading.py:480-484 records for its own
+    # forbidden-key set. `rate_card` matches `_reachability_raw()`'s own
+    # `inferred_role` value ('senior_engineer') so `rate_card_valuation_fixture`
+    # does not abstain.
+    CLASS_REACHABILITY = {
+        'CUSTOMER_CONFIRMED': {
+            'boundaries': {'evidence': 'confirmation_workflow_evidence_fixture'},
+            'evaluator': 'stub',
+            'authority': 'evidence',
+        },
+        'CUSTOMER_CONFIGURED': {
+            'boundaries': {'valuation': 'rate_card_valuation_fixture'},
+            'evaluator': 'stub',
+            'authority': 'valuation',
+            'rate_card': {'senior_engineer': 480.0},
+        },
+        'ACTIVITY_MEASURED': {
+            'boundaries': {'classification': 'keyword_classification_fixture'},
+            'evaluator': 'stub',
+            'authority': 'classification',
+        },
+        'OUTCOME_OBSERVED': {
+            'boundaries': None,
+            'evaluator': 'system_of_record_assessment_fixture',
+            'authority': 'evaluator',
+        },
+    }
+
+    @classmethod
+    def setUpClass(cls):
+        # Phase 50 Plan 03: classifier.py's bare `import valuation`/
+        # `import evidence`/`import classification`/`import evaluators`
+        # fallback (exercised by the reachability tests below, via
+        # `_load_classifier`) needs PLUGIN on sys.path -- mirrors
+        # tests/test_phase50_declaration_authority.py's own
+        # `_DeclarationAuthorityTestCase.setUpClass` exactly. Additive to
+        # this class; the existing per-test `setUp` below is unchanged.
+        cls._path_added = str(PLUGIN) not in sys.path
+        if cls._path_added:
+            sys.path.insert(0, str(PLUGIN))
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls._path_added and str(PLUGIN) in sys.path:
+            sys.path.remove(str(PLUGIN))
+
     def setUp(self):
         self.br = _load_boundary_registry()
         self.classification = _load_classification()
@@ -439,6 +504,77 @@ class FixtureMatrixTests(unittest.TestCase):
         for name, (expected, mod) in expectations.items():
             with self.subTest(name=name):
                 self.assertEqual(expected, mod.resolve_evidence_class(name))
+
+    # -- Phase 50 Plan 03 (DECL-04): record-reachability -------------------
+
+    def _reachability_raw(self):
+        """Mirrors tests/test_phase50_declaration_authority.py's own
+        `_DeclarationAuthorityTestCase._raw()` input shape exactly -- not
+        imported, because it is plain construction-input data, not a wire
+        fixture the fixture-fidelity guard cares about; duplicating a small
+        input dict here carries none of that guard's risk."""
+        return {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'senior_engineer',
+            'estimated_hours_saved': 2.5,
+            'assumed_loaded_rate': 150.0,
+            'currency': 'USD',
+            'basis': 'time avoided',
+            'confidence': 0.5,
+        }
+
+    def _reachability_job(self, job_id):
+        return {
+            'agentic_job_id': job_id, 'job_name': 'n', 'job_type': 'bug_fix',
+            'status': 'SUCCESS',
+        }
+
+    def _reachability_module(self, boundaries=None, rate_card=None):
+        import shutil
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix='gsd-p50-03-reachability-')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        config_path = Path(tmp) / 'config.json'
+        _write_config(config_path, boundaries=boundaries, rate_card=rate_card)
+        return _load_classifier({'REVENIUM_CONFIG_FILE': str(config_path)})
+
+    def _assert_class_reaches_the_record(self, evidence_class):
+        """Drives the ONE table (CLASS_REACHABILITY) through the REAL
+        `_validate_assessment` -> `_build_job_assessment` construction path
+        -- reaching the record is what DECL-04 requires; a unit test of the
+        walk (`_evidence_class_precedence` called directly) proves the walk,
+        not the reach."""
+        spec = self.CLASS_REACHABILITY[evidence_class]
+        mod = self._reachability_module(
+            boundaries=spec['boundaries'], rate_card=spec.get('rate_card'))
+        cfg = mod._llm_evaluation_config()
+        raw = self._reachability_raw()
+        evaluator = spec['evaluator']
+        validated = mod._validate_assessment(raw, cfg, evaluator, 'v1')
+        self.assertIsNotNone(
+            validated, f'{evidence_class}: assessment abstained, expected acceptance')
+        record = mod._build_job_assessment(
+            self._reachability_job(f'p50-03-reach-{evidence_class.lower()}'),
+            validated, raw, cfg, evaluator, 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(evidence_class, record['evidence_class'])
+        self.assertEqual(spec['authority'], record['evidence_class_authority'])
+
+    def test_customer_confirmed_reaches_the_record_via_evidence_boundary(self):
+        self._assert_class_reaches_the_record('CUSTOMER_CONFIRMED')
+
+    def test_customer_configured_reaches_the_record_via_valuation_boundary(self):
+        self._assert_class_reaches_the_record('CUSTOMER_CONFIGURED')
+
+    def test_activity_measured_reaches_the_record_via_classification_boundary(self):
+        """Option-b (50-01 Task 1): ACTIVITY_MEASURED IS reachable, via
+        `boundaries.classification = keyword_classification_fixture` -- NOT
+        recorded as unreachable. Do not regress this to option-C's
+        unreachability shape."""
+        self._assert_class_reaches_the_record('ACTIVITY_MEASURED')
+
+    def test_outcome_observed_reaches_the_record_via_evaluator_name(self):
+        self._assert_class_reaches_the_record('OUTCOME_OBSERVED')
 
     def test_cohort_fixture_declares_impact_label_reporting_fixture_declares_nothing(self):
         """D-07: the two boundaries with no evidence_class of their own get
