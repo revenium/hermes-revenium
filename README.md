@@ -136,6 +136,7 @@ python3 --version
 | [Operations](docs/operations.md) | Manual commands, diagnostics, uninstall, and the test suite |
 | [Event metering](docs/event-metering.md) | The v1.5 event path in depth: mechanism, cutover, and rollback |
 | [Plugin interface](docs/plugin-interface.md) | The Hermes plugin surfaces the classifier registers against, and what each one can and cannot see |
+| [Evidence classes](docs/evidence-class-precedence.md) | Which boundary decides a record's `evidence_class`, the fixed precedence order, and what a declaration may and may not claim · [Claim distinctions](docs/claim-distinctions-and-evidence-boundaries.md) |
 | [Migrations](docs/migration-guardrails.md) | [Guardrails](docs/migration-guardrails.md) · [AGENT dimension](docs/migration-agent-dimension.md) |
 
 Reference material that ships inside the skill bundle lives at
