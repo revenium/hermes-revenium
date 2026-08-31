@@ -593,6 +593,26 @@ a record toward any of the three labels reserved for study-backed claims, and
 does not set `CUSTOMER_CONFIGURED` either. Whatever the fraction says, the
 label continues to reflect the evidence that actually exists.
 
+**A fraction requires a value to attribute.** `--attribution-fraction` is
+refused without `--value`, the same way `--attribution-basis` is refused
+without a fraction: the attribution flags travel as a set.
+
+This was left open when the flags shipped. A mechanism may be declared on a job
+carrying no value — "this job avoided a risk" is meaningful before anyone
+prices it — and once that made `--value` optional, a fraction attributing
+nothing became reachable. It is refused now, on the same reasoning that decided
+where the pair sheds under a truncated envelope: `attribution_fraction` and
+`attribution_basis` sit in the *value* family precisely so they shed together
+with the figure they describe, because a surviving value whose attribution has
+vanished is the failure worth preventing. A fraction that never had a value is
+that same failure reached from the other side, and shedding cannot catch it
+because there is nothing to shed alongside. A fraction is a modifier on a
+value's meaning; a modifier with nothing to modify is a claim about nothing.
+
+A mechanism-only correction is unaffected and stays legal — drop the
+attribution pair and file the mechanism on its own, then attribute later when
+a figure exists.
+
 **What it does not establish.** An attributed figure is still a figure
 attached to an outcome this skill did not observe. The chain from the agent's
 output to a business result — acceptance, adoption, operational change,

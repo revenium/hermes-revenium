@@ -22,7 +22,7 @@ OPERATOR_ONLY = ('quality_decision_improvement', 'risk_avoidance', 'incremental_
 EVALUATOR_THREE = ('labor_substitution', 'augmentation_capacity_expansion', 'newly_enabled_work')
 
 _STUB = """#!/usr/bin/env bash
-if [[ "$*" == *"--help"* ]]; then echo "--reason string"; exit 0; fi
+if [[ "$*" == *"--help"* ]]; then echo "--reason string"; echo "--metadata string"; exit 0; fi
 if [[ "$1" == "config" ]]; then echo "Team ID:    TEAMX"; exit 0; fi
 printf '%s\\n' "$*" >> "${REVENIUM_ARGV_LOG}"
 exit 0
@@ -242,6 +242,77 @@ class OperatorMechanismTests(unittest.TestCase):
                 r = self._run(*args)
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn('requires --attribution-basis', r.stderr)
+
+    def test_metadata_flag_is_probed_not_assumed_from_reason(self):
+        """A CLI advertising --reason but NOT --metadata must be reported as
+        incapable, naming the missing flag.
+
+        correct-assessment.sh appends --metadata unconditionally at Step 8
+        (pinned by jobs-outcome-update.golden.json's pattern_fields), so
+        probing --reason alone let such a CLI pass the probe and fail at the
+        wire -- with the Step 7 guidance never printing, because that branch is
+        only reached when --reason itself is missing. The local correction is
+        still saved either way; what this guards is the diagnostic.
+        """
+        stub = self.bin / 'revenium'
+        stub.write_text(
+            '#!/usr/bin/env bash\n'
+            'if [[ "$*" == *"--help"* ]]; then echo "--reason string"; exit 0; fi\n'
+            'if [[ "$1" == "config" ]]; then echo "Team ID:    TEAMX"; exit 0; fi\n'
+            'printf \'%s\\n\' "$*" >> "${REVENIUM_ARGV_LOG}"\n'
+            'exit 0\n'
+        )
+        stub.chmod(0o755)
+        p = self._seed('job-probe')
+        r = self._run('--job-id', 'job-probe', '--value', '5', '--currency', 'USD',
+                      '--reason', 'x')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('--metadata', r.stderr)
+        # D-04: the local correction is saved even when the ship is refused.
+        self.assertTrue(self._corrections(p), 'local correction was not saved')
+
+    def test_fraction_requires_value(self):
+        """51-CONTEXT.md research question 4, resolved as REFUSE.
+
+        D-08 made --value optional when --mechanism is supplied, which left a
+        fraction attributing nothing reachable. Refused on the same reasoning
+        that placed the attribution pair in hermes-report.sh's
+        _VALUE_FAMILY_META_KEYS -- so a fraction can never outlive the value it
+        documents. A fraction that never HAD a value is that same failure by
+        another route, and shed ordering cannot catch it.
+        """
+        self._seed('job-fnv')
+        r = self._run('--job-id', 'job-fnv', '--mechanism', 'incremental_revenue',
+                      '--reason', 'x', '--attribution-fraction', '0.15',
+                      '--attribution-basis', 'stated basis')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('--attribution-fraction requires --value', r.stderr)
+
+    def test_fraction_requires_value_does_not_narrow_mechanism_only(self):
+        """The refusal above must not re-break D-03/D-08: a mechanism-only
+        correction carrying NO attribution pair stays legal."""
+        p = self._seed('job-mono')
+        r = self._run('--job-id', 'job-mono', '--mechanism', 'incremental_revenue',
+                      '--reason', 'still legal')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self._corrections(p)[-1]['economic_mechanism'],
+                         'incremental_revenue')
+
+    def test_fraction_with_value_and_mechanism_together_is_legal(self):
+        """The revenue-attribution workflow documented in
+        docs/value-overview.md passes --mechanism AND --value AND the
+        attribution pair in one invocation. None of the guards may refuse it.
+        """
+        p = self._seed('job-rev')
+        r = self._run('--job-id', 'job-rev', '--mechanism', 'incremental_revenue',
+                      '--value', '102', '--currency', 'USD',
+                      '--attribution-fraction', '0.15',
+                      '--attribution-basis', 'stated basis',
+                      '--reason', 'booking attributed')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rec = self._corrections(p)[-1]
+        self.assertEqual(rec['economic_mechanism'], 'incremental_revenue')
+        self.assertEqual(rec['attribution_fraction'], 0.15)
 
     def test_basis_requires_fraction(self):
         self._seed('job-bo')

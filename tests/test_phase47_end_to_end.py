@@ -938,6 +938,9 @@ class TestPhase47EndToEnd(unittest.TestCase):
                 '  jobs)\n'
                 '    if [[ "$2" == "outcome-update" && "$3" == "--help" ]]; then\n'
                 '      echo "--reason string   Reason for the correction"\n'
+                # --metadata too: correct-assessment.sh appends it
+                # unconditionally, so a --reason-only CLI cannot serve it.
+                '      echo "--metadata string   Metadata JSON object"\n'
                 '      exit 0\n'
                 '    fi\n'
                 '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'

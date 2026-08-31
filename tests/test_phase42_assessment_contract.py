@@ -1936,8 +1936,15 @@ def _build_correction_shim(shim_path, outcome_update_capable=True,
     strictly AFTER the local correction and ledger line are already saved.
     """
     if outcome_update_capable:
+        # BOTH flags correct-assessment.sh passes, not just --reason.
+        # `--metadata` is appended UNCONDITIONALLY at its Step 8 (and pinned by
+        # tests/fixtures/compat/jobs-outcome-update.golden.json's
+        # pattern_fields), so a CLI advertising only --reason could not serve
+        # this script at all. Advertising one flag modelled a capability that
+        # does not exist in any CLI this script can talk to.
         outcome_update_help_lines = (
             '      echo "--reason string    Reason for the update"\n'
+            '      echo "--metadata string   Metadata JSON object"\n'
         )
     else:
         outcome_update_help_lines = ''
@@ -2102,16 +2109,25 @@ def _jobs_log_invocations(jobs_log):
 def _build_toctou_race_shim(shim_path, entered_file, release_file):
     """WR-02 (42-REVIEW.md) race-reproduction shim.
 
-    correct-assessment.sh's Step 4 (`supports_flag "jobs outcome-update"
-    "--reason"`) calls `revenium jobs outcome-update --help` -- the LAST
-    thing the script does before Step 5 opens the sidecar file. Blocking
-    right there gives the test a deterministic hook between Step 1+2's
-    unlocked D-14 existence check (far above) and Step 5's append: touch
-    `entered_file` so the test knows the script is paused at that exact
-    point, then poll for `release_file` before answering the probe. The
-    test deletes the sidecar in between -- a real interleaving, not a
+    correct-assessment.sh's Step 4 probes `jobs outcome-update --help` --
+    the LAST thing the script does before Step 5 opens the sidecar file.
+    Blocking right there gives the test a deterministic hook between Step
+    1+2's unlocked D-14 existence check (far above) and Step 5's append:
+    touch `entered_file` so the test knows the script is paused at that
+    exact point, then poll for `release_file` before answering the probe.
+    The test deletes the sidecar in between -- a real interleaving, not a
     pre-script deletion (which would only exercise the ALREADY-WORKING
     D-14 refusal for a record that was never found in the first place).
+
+    Step 4 makes TWO probes now (`--reason`, then `--metadata`), and this
+    branch answers both. The race hook is unaffected: the block fires on
+    the FIRST call, and by the second `release_file` already exists so the
+    poll returns immediately. The help output advertises both flags --
+    `--metadata` is appended unconditionally at Step 8 and pinned by
+    jobs-outcome-update.golden.json's pattern_fields, so a shim offering
+    only `--reason` would model a CLI incapable of serving this script at
+    all, and the correction would refuse to ship for reasons that have
+    nothing to do with the race under test.
 
     The wait is bounded (10s) so a broken test fails fast instead of
     hanging the suite if the release signal never arrives.
@@ -2129,6 +2145,7 @@ def _build_toctou_race_shim(shim_path, entered_file, release_file):
         '        sleep 0.05\n'
         '      done\n'
         '      echo "--reason string    Reason for the update"\n'
+        '      echo "--metadata string   Metadata JSON object"\n'
         '      exit 0\n'
         '    fi\n'
         '    printf "%q " "$@" >> "${JOBS_LOG:-/dev/null}"\n'

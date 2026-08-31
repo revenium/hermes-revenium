@@ -366,7 +366,7 @@ and a silently-skipped correction is worse than a refused one.
 | `--currency` | whenever `--value` is given | One of USD, EUR, GBP, CAD, AUD, JPY, CHF. |
 | `--value-low` / `--value-high` | no | Default to `--value` (equal bounds). Refused without `--value`. |
 | `--mechanism` | no | One of the six declared economic mechanisms, matched exactly. Case-sensitive; surrounding whitespace is trimmed, nothing else is coerced. `--mechanism ""` is refused rather than treated as absent. |
-| `--attribution-fraction` | no | A finite number from 0 through 1, both endpoints legal. Refused if not accompanied by `--attribution-basis`. |
+| `--attribution-fraction` | no | A finite number from 0 through 1, both endpoints legal. Refused if not accompanied by `--attribution-basis`, and refused without `--value` — a fraction with nothing to attribute is not recorded. |
 | `--attribution-basis` | whenever `--attribution-fraction` is given | Free text, clamped like `--reason`. Refused on its own. |
 | `--dry-run` | no | Performs no writes, local or remote, on any path. |
 
