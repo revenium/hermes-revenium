@@ -23,10 +23,13 @@ source "${SCRIPT_DIR}/common.sh"
 usage() {
   cat <<'USAGE'
 Usage: correct-assessment.sh --job-id <id> --reason <text>
-                              (--value <n> --currency <CUR> | --mechanism <name>)
+                              [--value <n> --currency <CUR>] [--mechanism <name>]
                               [--value-low <n>] [--value-high <n>]
                               [--attribution-fraction <0..1> --attribution-basis <text>]
                               [--dry-run]
+
+At least one of --value or --mechanism is required; supplying both is legal
+and is what the revenue-attribution workflow does.
 
 Files a correction against a job's JobAssessment sidecar record (EGV-09).
 The original record and every earlier correction are preserved -- this
