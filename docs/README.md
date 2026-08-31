@@ -63,6 +63,11 @@ the runtime work. `SKILL.md` is only a halt-check backstop. The README's
 - **[Live envelope verification](live-envelope-verification.md)** — whether a real
   Revenium API accepts the bounded `--metadata` envelope, measured against a live
   tenant rather than fixtures, with the limits of that result stated.
+- **[Live-tenant proof](live-tenant-proof.md)** — the declaration-authority and
+  operator-mechanism work, and the sidecar carrier under both, measured against
+  a live tenant: LIVE-02 through LIVE-06 plus two arms added in the open, with
+  one criterion recorded NOT CONFIRMED live and its finding stated with its
+  limit.
 
 ## Inside the skill bundle
 

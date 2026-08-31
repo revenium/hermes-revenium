@@ -289,6 +289,12 @@ class RepositoryTests(unittest.TestCase):
             # so an unpinned copy can vanish the way the v1.3 and v1.4
             # closeouts did.
             ROOT / 'docs' / 'live-envelope-verification.md',
+            # Phase 52 (LIVE-05) — the tracked live-tenant proof for LIVE-02
+            # through LIVE-06 plus D-02/D-03, with the criterion 6 miss and
+            # its limits recorded plainly. Later phases plan against this
+            # record, and `.planning/` is gitignored, so an unpinned copy
+            # can vanish the way the v1.3 and v1.4 closeouts did.
+            ROOT / 'docs' / 'live-tenant-proof.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
