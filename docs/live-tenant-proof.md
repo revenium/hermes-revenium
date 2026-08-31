@@ -330,11 +330,24 @@ reasons:
    install's `api_server` platform mints ids shaped `api-<hex>` instead.
    Neither profile's session id matched, so both sessions' markers landed
    in the same default, process-level directory — **identically for both
-   profiles.** That symmetry is what rules out a provenance leak: a
-   misattribution defect would show one profile's record landing under the
-   *other* profile's directory, with a direction. What was observed instead
-   is both falling to the same neutral default, with no direction at all —
-   a detection miss, not a misdirection.
+   profiles.**
+
+   **This symmetry does not rule out a provenance leak, and an earlier
+   draft of this document wrongly said it did.** Because both sessions fell
+   back to process-level paths, *neither profile's own boundary
+   configuration was ever consulted*. The code path capable of
+   misattributing a record across profiles did not execute. Nothing was
+   therefore established about whether profile isolation holds: this is
+   absence of evidence, not evidence of absence.
+
+   What the symmetry does establish is narrower, and worth stating only as
+   that: the observed behaviour is not *itself* an instance of the defect —
+   no record named a boundary belonging to a different profile, because no
+   record named a profile-specific boundary at all. A misattribution
+   defect would have a direction, one profile's record landing under the
+   *other's*. What was observed has no direction because the resolver never
+   engaged. That is a detection miss, and it leaves criterion 6's actual
+   question untouched.
 2. `api_server` completions are stateless and never populate `ended_at` on
    the session row, so the outcome-evaluation logic criterion 6 targets
    never runs at all on this route. No sidecar was produced for either
