@@ -823,5 +823,275 @@ class AuthorityWordClampTests(unittest.TestCase):
         self.assertEqual(6, len(mod._DECLARABLE_EVIDENCE_CLASSES))
 
 
+# -- Plan 50-03, Task 2: conflict determinism at N=2/N=3, and every ---------
+# -- Phase 48 boundary case --------------------------------------------------
+#
+# `_RATE_CARD_FOR_RAW` matches `_DeclarationAuthorityTestCase._raw()`'s own
+# `inferred_role` value ('senior_engineer') exactly, so
+# `rate_card_valuation_fixture` never abstains in any test below that
+# configures it. `_causal_label_valuation_fixture` (defined above, for
+# 50-02's Falsifier 3 fixture) is REUSED here rather than re-defined -- an
+# unconditional hours*rate valuation fixture with no evidence_class opinion
+# of its own, so it can be registered under whatever declared class a given
+# boundary-case test needs, per this plan's own instruction not to retype a
+# fixture that already exists in this file.
+
+_RATE_CARD_FOR_RAW = {'senior_engineer': 480.0}
+
+_THROWAWAY_REGISTRANT_SEQ = [0]
+
+
+def _next_throwaway_name(prefix):
+    _THROWAWAY_REGISTRANT_SEQ[0] += 1
+    return f'{prefix}_{_THROWAWAY_REGISTRANT_SEQ[0]}'
+
+
+class ConflictDeterminismTests(_DeclarationAuthorityTestCase):
+    """ROADMAP criterion 4 / DECL-04 (adjacency, ordering): the conflict
+    rule is deterministic at N=2 (all three pairings) and N=3, output does
+    not depend on dict iteration order or call sequence, and the walk never
+    sorts, ranks, or order-compares two label strings. Registers a
+    throwaway valuation fixture declaring CUSTOMER_CONFIRMED for the
+    identical-declarations style checks this class also needs, mirroring
+    `PromotionUnderPrecedenceTests._register_causal_label_valuation`'s own
+    register/addCleanup shape.
+    """
+
+    def _register_valuation_declaring(self, evidence_class):
+        name = _next_throwaway_name('p50_03_conflict_valuation')
+        import valuation as val  # type: ignore  # PLUGIN is on sys.path (setUpClass)
+        val.register(name, _causal_label_valuation_fixture, '1', evidence_class=evidence_class)
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        return name
+
+    # -- N=2, all three pairings (CONTEXT.md: write every pairing, not one) -
+
+    def test_n2_case_a_evidence_beats_valuation(self):
+        valuation_name = self._register_valuation_declaring('CUSTOMER_CONFIGURED')
+        mod = self._load(
+            boundaries={
+                'evidence': 'confirmation_workflow_evidence_fixture',
+                'valuation': valuation_name,
+            },
+        )
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIRMED', got['evidence_class'])
+        self.assertEqual('evidence', got['evidence_class_authority'])
+
+    def test_n2_case_b_valuation_beats_evaluator(self):
+        mod = self._load(
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        got = mod._validate_assessment(
+            self._raw(), mod._llm_evaluation_config(),
+            'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+        self.assertEqual('valuation', got['evidence_class_authority'])
+
+    def test_n2_case_c_evidence_beats_evaluator(self):
+        mod = self._load(boundaries={'evidence': 'confirmation_workflow_evidence_fixture'})
+        got = mod._validate_assessment(
+            self._raw(), mod._llm_evaluation_config(),
+            'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIRMED', got['evidence_class'])
+        self.assertEqual('evidence', got['evidence_class_authority'])
+
+    # -- N=3: all three declare different non-forced classes ----------------
+
+    def test_n3_all_three_declare_different_classes_evidence_wins(self):
+        mod = self._load(
+            boundaries={
+                'evidence': 'confirmation_workflow_evidence_fixture',
+                'valuation': 'rate_card_valuation_fixture',
+            },
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        validated = mod._validate_assessment(
+            self._raw(), mod._llm_evaluation_config(),
+            'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(validated)
+        record = mod._build_job_assessment(
+            self._valid_job('p50-03-n3-job'), validated, self._raw(),
+            mod._llm_evaluation_config(), 'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual('CUSTOMER_CONFIRMED', record['evidence_class'])
+        self.assertEqual('evidence', record['evidence_class_authority'])
+        # The two losing declarations appear NOWHERE in the record -- not
+        # merely "did not win the evidence_class field."
+        self.assertNotIn('CUSTOMER_CONFIGURED', record.values())
+        self.assertNotIn('OUTCOME_OBSERVED', record.values())
+
+    # -- Determinism: repeated runs and reversed config key order -----------
+
+    def test_determinism_across_repeated_runs_and_reversed_config_key_order(self):
+        boundaries = {
+            'evidence': 'confirmation_workflow_evidence_fixture',
+            'valuation': 'rate_card_valuation_fixture',
+        }
+        results = []
+        for _ in range(3):
+            mod = self._load(boundaries=boundaries, rate_card=_RATE_CARD_FOR_RAW)
+            got = mod._validate_assessment(
+                self._raw(), mod._llm_evaluation_config(),
+                'system_of_record_assessment_fixture', 'v1',
+            )
+            self.assertIsNotNone(got)
+            results.append((got['evidence_class'], got['evidence_class_authority']))
+        self.assertEqual(1, len(set(results)), f'non-deterministic across repeated runs: {results}')
+
+        reversed_boundaries = {
+            'valuation': 'rate_card_valuation_fixture',
+            'evidence': 'confirmation_workflow_evidence_fixture',
+        }
+        mod_rev = self._load(boundaries=reversed_boundaries, rate_card=_RATE_CARD_FOR_RAW)
+        got_rev = mod_rev._validate_assessment(
+            self._raw(), mod_rev._llm_evaluation_config(),
+            'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(got_rev)
+        self.assertEqual(
+            results[0], (got_rev['evidence_class'], got_rev['evidence_class_authority']),
+            'result depends on the boundaries dict key order in config.json',
+        )
+
+    # -- No ordering: the walk never sorts, ranks, or order-compares labels -
+
+    def test_no_ordering_or_ranking_of_label_strings_in_the_walk(self):
+        tree = ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+        func = _find_function_def(tree, '_evidence_class_precedence')
+        self.assertIsNotNone(func, '_evidence_class_precedence not found in classifier.py')
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in ('sorted', 'max', 'min')
+            ):
+                self.fail(
+                    f'_evidence_class_precedence calls {node.func.id}(...) -- '
+                    'labels must never be sorted or ranked (classifier.py:1076-1099)'
+                )
+            if isinstance(node, ast.Compare):
+                for op in node.ops:
+                    if isinstance(op, (ast.Lt, ast.Gt, ast.LtE, ast.GtE)):
+                        self.fail(
+                            '_evidence_class_precedence contains an order comparison '
+                            '(<, >, <=, >=) -- labels must never be order-compared '
+                            '(classifier.py:1076-1099)'
+                        )
+
+
+class BoundaryCaseTests(_DeclarationAuthorityTestCase):
+    """One test per Phase 48 'Boundary cases' named case
+    (docs/evidence-class-precedence.md:296-320): identical declarations,
+    the two absent-declaration shapes, all-absent, and exactly-one-
+    declares. A failure here names the case, not a row number.
+    """
+
+    def _register_valuation_declaring(self, evidence_class):
+        name = _next_throwaway_name('p50_03_boundarycase_valuation')
+        import valuation as val  # type: ignore  # PLUGIN is on sys.path (setUpClass)
+        val.register(name, _causal_label_valuation_fixture, '1', evidence_class=evidence_class)
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        return name
+
+    def _register_evidence_declaring_empty(self):
+        """Absent shape (b): a registrant declaring a literal '' -- Phase 48
+        explicitly records no fixture in this tree has ever done this, so
+        this test CREATES the case rather than finding it. The registered
+        fn (the real confirmation-workflow fixture) is never called by
+        `_validate_assessment`/`_build_job_assessment` for this boundary --
+        only its registration-time declared class is resolved -- so reusing
+        it here changes nothing observable but the declared label."""
+        name = _next_throwaway_name('p50_03_boundarycase_evidence_empty')
+        import evidence as evd  # type: ignore  # PLUGIN is on sys.path (setUpClass)
+        evd.register(
+            name, evd._confirmation_workflow_evidence_fixture, '1', evidence_class='',
+        )
+        self.addCleanup(evd._REGISTRY._entries.pop, name, None)
+        return name
+
+    # -- Identical declarations: not a conflict ------------------------------
+
+    def test_identical_declarations_same_class_two_boundaries_not_a_conflict(self):
+        """Two active boundaries (evidence, valuation) declare the SAME
+        non-forced class (CUSTOMER_CONFIRMED) -- the walk stops at the
+        higher-priority one (evidence), the recorded class is that shared
+        value, and the recorded authority NAMES evidence, not valuation --
+        asserted, not inferred."""
+        valuation_name = self._register_valuation_declaring('CUSTOMER_CONFIRMED')
+        mod = self._load(
+            boundaries={
+                'evidence': 'confirmation_workflow_evidence_fixture',
+                'valuation': valuation_name,
+            },
+        )
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIRMED', got['evidence_class'])
+        self.assertEqual('evidence', got['evidence_class_authority'])
+
+    # -- Absent shape (a): an unregistered configured impl name --------------
+
+    def test_absent_shape_a_unregistered_impl_name_casts_no_vote(self):
+        mod = self._load(
+            boundaries={
+                'evidence': 'no_such_registrant_at_all_p50_03',
+                'valuation': 'rate_card_valuation_fixture',
+            },
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+        self.assertEqual('valuation', got['evidence_class_authority'])
+
+    # -- Absent shape (b): a registrant declaring a literal '' ---------------
+
+    def test_absent_shape_b_registrant_declares_literal_empty_string_casts_no_vote(self):
+        evidence_name = self._register_evidence_declaring_empty()
+        mod = self._load(
+            boundaries={
+                'evidence': evidence_name,
+                'valuation': 'rate_card_valuation_fixture',
+            },
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+        self.assertEqual('valuation', got['evidence_class_authority'])
+
+    # -- All-absent: forced fallback, authority 'evaluator' -------------------
+
+    def test_all_absent_no_boundary_votes_yields_forced_fallback(self):
+        mod = self._load(boundaries=None)
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+        self.assertEqual('evaluator', got['evidence_class_authority'])
+
+    # -- Exactly-one-declares: that class, that authority, no conflict shape -
+
+    def test_exactly_one_declares_wins_outright_with_no_conflict_recorded(self):
+        mod = self._load(boundaries={'evidence': 'confirmation_workflow_evidence_fixture'})
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIRMED', got['evidence_class'])
+        self.assertEqual('evidence', got['evidence_class_authority'])
+        # No conflict-shaped key exists on the record at all -- a single
+        # declaration winning is not distinguished from a conflict by any
+        # extra field, per D-03's shape (naming the authority IS the
+        # legibility mechanism; there is no separate boolean).
+        self.assertNotIn('conflict', got)
+        self.assertNotIn('evidence_class_conflict', got)
+
+
 if __name__ == '__main__':
     unittest.main()
