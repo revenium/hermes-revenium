@@ -846,11 +846,48 @@ def _next_throwaway_name(prefix):
     return f'{prefix}_{_THROWAWAY_REGISTRANT_SEQ[0]}'
 
 
+def _poison_module_import(test_case, module_name):
+    """Force `import <module_name>` to raise ImportError for the rest of
+    `test_case`, using CPython's own documented poison idiom -- a `None`
+    entry in `sys.modules` (see the `importlib` docs: "If the module name
+    is missing, ... if sys.modules[name] is None, ImportError is raised").
+    This exercises the REAL `_load_classification_module`/
+    `_load_valuation_module`/`_load_evidence_module` try/except paths in
+    classifier.py -- not a stand-in for them -- because those functions'
+    own `import <name>` statement is what raises.
+
+    Restored via `addCleanup`, in every case: if `module_name` was not
+    present in `sys.modules` before poisoning, the poison entry is popped
+    (allowing a later real import to re-execute the module normally); if it
+    was present (classifier.py's own top-level import already cached the
+    real module, which is the common case here since `_load_classifier`
+    always runs first), the original module object is restored exactly --
+    so a later test in the SAME process is never left with a poisoned
+    global entry for a boundary module every other test in this file also
+    relies on.
+    """
+    import sys
+    had_key = module_name in sys.modules
+    saved = sys.modules.get(module_name)
+    sys.modules[module_name] = None
+
+    def _restore():
+        if had_key:
+            sys.modules[module_name] = saved
+        else:
+            sys.modules.pop(module_name, None)
+
+    test_case.addCleanup(_restore)
+
+
 class ConflictDeterminismTests(_DeclarationAuthorityTestCase):
     """ROADMAP criterion 4 / DECL-04 (adjacency, ordering): the conflict
-    rule is deterministic at N=2 (all three pairings) and N=3, output does
-    not depend on dict iteration order or call sequence, and the walk never
-    sorts, ranks, or order-compares two label strings. Registers a
+    rule is deterministic at N=2 (all SIX pairings over the four-leg walk,
+    per the coordinator's Gap 1 finding -- the original three covered only
+    evidence/valuation/evaluator and left `classification`, option-b's
+    newly-inserted leg, with zero conflict coverage), N=3, and N=4, output
+    does not depend on dict iteration order or call sequence, and the walk
+    never sorts, ranks, or order-compares two label strings. Registers a
     throwaway valuation fixture declaring CUSTOMER_CONFIRMED for the
     identical-declarations style checks this class also needs, mirroring
     `PromotionUnderPrecedenceTests._register_causal_label_valuation`'s own
@@ -929,6 +966,105 @@ class ConflictDeterminismTests(_DeclarationAuthorityTestCase):
         self.assertNotIn('CUSTOMER_CONFIGURED', record.values())
         self.assertNotIn('OUTCOME_OBSERVED', record.values())
 
+    # -- N=2, the three pairings involving `classification` (Gap 1) ---------
+    # option-b's newly-inserted leg. Its priority POSITION -- not merely its
+    # own reachability (already proven in
+    # tests/test_phase45_boundary_fixtures.py) -- must be proven against
+    # each of its two neighbours in the fixed order
+    # evidence > valuation > classification > evaluator.
+
+    def test_n2_case_d_valuation_beats_classification(self):
+        mod = self._load(
+            boundaries={
+                'valuation': 'rate_card_valuation_fixture',
+                'classification': 'keyword_classification_fixture',
+            },
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+        self.assertEqual('valuation', got['evidence_class_authority'])
+
+    def test_n2_case_e_classification_beats_evaluator(self):
+        mod = self._load(boundaries={'classification': 'keyword_classification_fixture'})
+        got = mod._validate_assessment(
+            self._raw(), mod._llm_evaluation_config(),
+            'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(got)
+        self.assertEqual('ACTIVITY_MEASURED', got['evidence_class'])
+        self.assertEqual('classification', got['evidence_class_authority'])
+
+    def test_n2_case_f_evidence_beats_classification(self):
+        mod = self._load(
+            boundaries={
+                'evidence': 'confirmation_workflow_evidence_fixture',
+                'classification': 'keyword_classification_fixture',
+            },
+        )
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIRMED', got['evidence_class'])
+        self.assertEqual('evidence', got['evidence_class_authority'])
+
+    # -- N=3 variant that includes `classification` (Gap 1) -----------------
+    # The pre-existing N=3 test above covers evidence/valuation/evaluator
+    # and skips classification entirely. This one drops evidence instead,
+    # so classification's position relative to BOTH its neighbours
+    # (valuation above it, evaluator below it) is proven simultaneously.
+
+    def test_n3_valuation_classification_evaluator_valuation_wins(self):
+        mod = self._load(
+            boundaries={
+                'valuation': 'rate_card_valuation_fixture',
+                'classification': 'keyword_classification_fixture',
+            },
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        validated = mod._validate_assessment(
+            self._raw(), mod._llm_evaluation_config(),
+            'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(validated)
+        record = mod._build_job_assessment(
+            self._valid_job('p50-03-n3-classification-job'), validated, self._raw(),
+            mod._llm_evaluation_config(), 'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual('CUSTOMER_CONFIGURED', record['evidence_class'])
+        self.assertEqual('valuation', record['evidence_class_authority'])
+        self.assertNotIn('ACTIVITY_MEASURED', record.values())
+        self.assertNotIn('OUTCOME_OBSERVED', record.values())
+
+    # -- N=4: all four boundaries declare different non-forced classes ------
+
+    def test_n4_all_four_declare_different_classes_evidence_wins(self):
+        mod = self._load(
+            boundaries={
+                'evidence': 'confirmation_workflow_evidence_fixture',
+                'valuation': 'rate_card_valuation_fixture',
+                'classification': 'keyword_classification_fixture',
+            },
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        validated = mod._validate_assessment(
+            self._raw(), mod._llm_evaluation_config(),
+            'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(validated)
+        record = mod._build_job_assessment(
+            self._valid_job('p50-03-n4-job'), validated, self._raw(),
+            mod._llm_evaluation_config(), 'system_of_record_assessment_fixture', 'v1',
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual('CUSTOMER_CONFIRMED', record['evidence_class'])
+        self.assertEqual('evidence', record['evidence_class_authority'])
+        # All THREE losing declarations appear nowhere in the record.
+        self.assertNotIn('CUSTOMER_CONFIGURED', record.values())
+        self.assertNotIn('ACTIVITY_MEASURED', record.values())
+        self.assertNotIn('OUTCOME_OBSERVED', record.values())
+
     # -- Determinism: repeated runs and reversed config key order -----------
 
     def test_determinism_across_repeated_runs_and_reversed_config_key_order(self):
@@ -990,8 +1126,12 @@ class ConflictDeterminismTests(_DeclarationAuthorityTestCase):
 class BoundaryCaseTests(_DeclarationAuthorityTestCase):
     """One test per Phase 48 'Boundary cases' named case
     (docs/evidence-class-precedence.md:296-320): identical declarations,
-    the two absent-declaration shapes, all-absent, and exactly-one-
-    declares. A failure here names the case, not a row number.
+    the THREE absent-declaration shapes (per this plan's own must_have --
+    unregistered impl name, a literal empty-string declaration, and a
+    boundary module that fails to import; the third was a Gap 2 finding in
+    orchestrator review, not caught by this executor's own first pass),
+    all-absent, and exactly-one-declares. A failure here names the case,
+    not a row number.
     """
 
     def _register_valuation_declaring(self, evidence_class):
@@ -1065,6 +1205,32 @@ class BoundaryCaseTests(_DeclarationAuthorityTestCase):
         )
         got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
         self.assertIsNotNone(got)
+        self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+        self.assertEqual('valuation', got['evidence_class_authority'])
+
+    # -- Absent shape (c): a boundary module that fails to import -----------
+
+    def test_absent_shape_c_boundary_module_fails_to_import_casts_no_vote_and_does_not_crash(self):
+        """The fail-open path (Gap 2): a boundary whose module raises on
+        import casts no vote and does NOT propagate the exception -- the
+        walk falls through to the next boundary in fixed order, exactly
+        like shapes (a)/(b) above, and `_validate_assessment` returns a
+        real record rather than raising or returning None. `classification`
+        is poisoned AFTER `self._load(...)` so classifier.py's OWN
+        successful top-level import (which registers the built-in `llm`
+        classification registrant) is unaffected -- only the LATER
+        `_load_classification_module()` call inside `_validate_assessment`
+        hits the poisoned entry."""
+        mod = self._load(
+            boundaries={
+                'classification': 'keyword_classification_fixture',
+                'valuation': 'rate_card_valuation_fixture',
+            },
+            rate_card=_RATE_CARD_FOR_RAW,
+        )
+        _poison_module_import(self, 'classification')
+        got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
+        self.assertIsNotNone(got, 'a boundary module import failure must not crash construction')
         self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
         self.assertEqual('valuation', got['evidence_class_authority'])
 
