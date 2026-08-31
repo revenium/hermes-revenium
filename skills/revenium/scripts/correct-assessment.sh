@@ -55,8 +55,9 @@ correction but exits non-zero (D-04 -- fail loudly, never silently skip).
                 Optional. A finite number in [0, 1] recording what share of the
                 outcome you attribute to the agent. It DOCUMENTS the figure you
                 supplied in --value; it never derives it -- pass the already-
-                attributed amount, never the gross one. Requires
-                --attribution-basis.
+                attributed amount, never the gross one. Requires BOTH
+                --attribution-basis and --value: a fraction with nothing to
+                attribute is refused.
   --attribution-basis
                 Required with --attribution-fraction. The stated basis the
                 fraction rests on. A fraction is an operator assertion, not a
@@ -219,6 +220,32 @@ fi
 
 if [[ -n "${ATTRIBUTION_BASIS//[[:space:]]/}" && "${ATTRIBUTION_FRACTION_GIVEN}" != true ]]; then
   echo "--attribution-basis requires --attribution-fraction." >&2
+  exit 2
+fi
+
+# An attribution fraction requires a value to attribute. 51-CONTEXT.md's
+# fourth research question ("does --attribution-fraction require --value?")
+# was never answered -- D-08 resolved the adjacent --value/--mechanism
+# question and did not return to it -- leaving a fraction that attributes
+# nothing legal once --mechanism relaxed the --value requirement.
+#
+# Resolved as REFUSE, on the same reasoning that settled where the pair sheds:
+# attribution_fraction/attribution_basis were placed in
+# _VALUE_FAMILY_META_KEYS (hermes-report.sh) specifically so a fraction can
+# never OUTLIVE the value it documents -- "in the value family they shed
+# TOGETHER ... the failure to prevent is a surviving value whose attribution
+# has vanished". A fraction that never had a value is that same failure
+# reached by another route, and shed ordering cannot catch it because there
+# is nothing to shed alongside. D-05 calls attribution "a modifier on the
+# value's meaning"; a modifier with nothing to modify is a claim about
+# nothing.
+#
+# This does NOT narrow D-03/D-08: a mechanism-only correction stays legal.
+# Only the fraction is coupled, mirroring the fraction<->basis mutual
+# requirement immediately above -- the attribution flags travel as a set.
+if [[ "${ATTRIBUTION_FRACTION_GIVEN}" == true && -z "${VALUE}" ]]; then
+  echo "--attribution-fraction requires --value." >&2
+  echo "A fraction documents how a supplied value was arrived at; with no value there is nothing to attribute. Supply the already-attributed --value (never the gross figure), or drop the attribution pair and file a mechanism-only correction." >&2
   exit 2
 fi
 
@@ -559,8 +586,21 @@ CURRENCY="$(printf '%s' "${CURRENCY}" | tr '[:lower:]' '[:upper:]')"
 # variable -- never `VAR=$(supports_flag ...)`, which discards the exit
 # status supports_flag's three-way outcome depends on (D-04).
 # --------------------------------------------------------------------------
+# BOTH flags this script actually passes are probed, not just --reason.
+# Step 8 appends --metadata unconditionally, so probing --reason alone left a
+# CLI that supports --reason but not --metadata passing the probe and failing
+# at the wire -- with Step 7's guidance ("upgrade to a release that supports
+# 'jobs outcome-update'") never printing, because that branch is only reached
+# when --reason itself is missing. The operator then saw a raw CLI error
+# pointing at a subcommand that does exist. Conjunction form mirrors
+# hermes-report.sh's own two-flag probe of `jobs outcome` (:125-126).
 OUTCOME_UPDATE_CLI_CAPABLE=false
-if supports_flag "jobs outcome-update" "--reason"; then
+OUTCOME_UPDATE_MISSING_FLAG=""
+if ! supports_flag "jobs outcome-update" "--reason"; then
+  OUTCOME_UPDATE_MISSING_FLAG="--reason"
+elif ! supports_flag "jobs outcome-update" "--metadata"; then
+  OUTCOME_UPDATE_MISSING_FLAG="--metadata"
+else
   OUTCOME_UPDATE_CLI_CAPABLE=true
 fi
 
@@ -572,7 +612,7 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   if [[ "${OUTCOME_UPDATE_CLI_CAPABLE}" == "true" ]]; then
     echo "[dry-run] revenium CLI supports 'jobs outcome-update' -- would ship this correction to Revenium."
   else
-    echo "[dry-run] revenium CLI does NOT support 'jobs outcome-update' -- would save the local correction only and exit non-zero (D-04)."
+    echo "[dry-run] revenium CLI does NOT support 'jobs outcome-update ${OUTCOME_UPDATE_MISSING_FLAG}' -- would save the local correction only and exit non-zero (D-04)."
   fi
   echo "[dry-run] No file, ledger, or CLI call was made -- --dry-run performs no writes, local or remote."
   exit 0
@@ -824,8 +864,8 @@ echo "JOB:${LEDGER_ID}:correction:${SEQUENCE}:${CORRECTION_TS}" >> "${JOBS_LEDGE
 # one. The local record and the ledger line above are already saved.
 # --------------------------------------------------------------------------
 if [[ "${OUTCOME_UPDATE_CLI_CAPABLE}" != "true" ]]; then
-  echo "revenium CLI does not support 'jobs outcome-update --reason' -- the local correction was saved, but NOT shipped to Revenium." >&2
-  echo "Upgrade to a revenium CLI release that supports 'jobs outcome-update' (run 'revenium jobs outcome-update --help' to check) and re-run this exact command." >&2
+  echo "revenium CLI does not support 'jobs outcome-update ${OUTCOME_UPDATE_MISSING_FLAG}' -- the local correction was saved, but NOT shipped to Revenium." >&2
+  echo "Upgrade to a revenium CLI release whose 'jobs outcome-update' accepts ${OUTCOME_UPDATE_MISSING_FLAG} (run 'revenium jobs outcome-update --help' to check) and re-run this exact command." >&2
   exit 1
 fi
 
