@@ -494,6 +494,29 @@ _PROMOTION_FORBIDDEN_KEYS = frozenset({
     'double_counting_group',
 })
 
+# Phase 50 (DECL-03, D-03): `_evidence_class_precedence` -- the cross-
+# boundary precedence-walk rule site classifier.py:1275 adds -- is
+# DELIBERATELY ABSENT from `_SCOPED_FUNCTIONS` below, and this is not an
+# oversight. `_assert_functions_declare_untrusted_param` (below) requires
+# every scoped function to declare a parameter literally named
+# `_UNTRUSTED_PARAM_NAME` ("raw"); adding a function to that tuple that
+# does NOT declare `raw` would make the discovery step itself fail loudly,
+# which is correct, because `_evidence_class_precedence` must never have
+# `raw` in scope at all -- its whole four-parameter signature is built from
+# a caller-supplied evaluator NAME plus three caller-RESOLVED declaration
+# strings (`classifier.py:1210-1272`'s own docstring), never from the
+# untrusted evaluator response this file's guard exists to keep out of the
+# three functions above. The REPLACEMENT guarantee for this new function --
+# "no parameter carries evaluator output," DECL-03 restated for the widened
+# signature -- is proven instead by `SignatureGuardTests` in
+# tests/test_phase50_declaration_authority.py: its four static properties
+# assert the exact parameter list, the absence of any `raw` reference
+# anywhere in the function's body, that every call-site argument traces to
+# either the `evaluator` name or a `resolve_evidence_class(...)` chain, and
+# that exactly one rule site exists. Extending `_SCOPED_FUNCTIONS` here
+# would not add coverage; it would just break this guard's own discovery
+# step against a function that structurally cannot satisfy it.
+
 # The three functions that legitimately hold the untrusted evaluator
 # response in scope, all under the SAME parameter name -- which is what
 # lets one guard cover all three (confirmed against classifier.py at plan

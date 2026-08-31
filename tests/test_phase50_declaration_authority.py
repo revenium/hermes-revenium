@@ -571,6 +571,224 @@ class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
         self.assertNotEqual(record_1['evidence_class'], record_3['evidence_class'])
 
 
+# -- Plan 50-02, Task 2: the replacement structural guarantee, made checkable --
+
+class SignatureGuardTests(unittest.TestCase):
+    """Task 2 -- the replacement structural guarantee (DECL-03 restated for
+    the widened, four-parameter signature), made checkable by four
+    independent static properties. Each has its own test method so a
+    failure names the property, not a line number.
+
+    Written against the LIVE tree, per this plan's own instruction to
+    follow the tree rather than stale prose: 50-02-PLAN.md's Task 2 text
+    describes `_evidence_class_precedence` as declaring its three new
+    parameters "without defaults." The built function defaults all three
+    to `""`, identically to `_declared_evidence_class`
+    (classifier.py:1210-1278) -- its own docstring (D-03) explains this
+    keeps `_declared_evidence_class` a call-compatible one-line delegator.
+    Property 1 below asserts the parameter NAME list and ORDER exactly (an
+    add, a rename, or a re-order turns it red); it does not assert the
+    plan's now-superseded "no defaults" claim about
+    `_evidence_class_precedence`, because that claim is false against the
+    tree this task must guard.
+    """
+
+    EXPECTED_PARAM_ORDER = (
+        'evaluator', 'valuation_declared', 'evidence_declared', 'classification_declared',
+    )
+    _RULE_FUNCTIONS = ('_declared_evidence_class', '_evidence_class_precedence')
+
+    @staticmethod
+    def _tree():
+        return ast.parse(CLASSIFIER_SOURCE_PATH.read_text())
+
+    @staticmethod
+    def _func(tree, name):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+        return None
+
+    @staticmethod
+    def _ends_in_resolve_evidence_class_call(node):
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'resolve_evidence_class'
+        )
+
+    @classmethod
+    def _is_boundary_declaration_expr(cls, value):
+        """True when `value` is a Call ending in `.resolve_evidence_class(...)`,
+        or the `X if Y is not None else ""` ternary idiom every call site in
+        classifier.py uses to guard a possibly-None boundary module --
+        `body` must be such a call and `orelse` must be the empty-string
+        fallback, never anything else."""
+        if cls._ends_in_resolve_evidence_class_call(value):
+            return True
+        if isinstance(value, ast.IfExp):
+            return (
+                cls._ends_in_resolve_evidence_class_call(value.body)
+                and isinstance(value.orelse, ast.Constant)
+                and value.orelse.value == ''
+            )
+        return False
+
+    # -- Property 1: the parameter list is exactly what D-02 specified. -----
+
+    def test_property_1_parameter_list_matches_d02_exactly_for_both_functions(self):
+        tree = self._tree()
+        for name in self._RULE_FUNCTIONS:
+            func = self._func(tree, name)
+            self.assertIsNotNone(func, f'{name} not found in classifier.py')
+            arg_names = tuple(a.arg for a in func.args.args)
+            self.assertEqual(
+                self.EXPECTED_PARAM_ORDER, arg_names,
+                f'{name} parameter list drifted from D-02\'s widened '
+                f'signature: {arg_names!r}',
+            )
+            self.assertEqual(
+                3, len(func.args.defaults),
+                f'{name} must default its three new parameters to ""',
+            )
+            for default in func.args.defaults:
+                self.assertIsInstance(default, ast.Constant)
+                self.assertEqual('', default.value)
+
+    # -- Property 2: neither function can see evaluator output. -------------
+
+    def test_property_2_neither_function_declares_or_references_raw(self):
+        tree = self._tree()
+        for name in self._RULE_FUNCTIONS:
+            func = self._func(tree, name)
+            self.assertIsNotNone(func, f'{name} not found in classifier.py')
+            arg_names = {a.arg for a in func.args.args}
+            self.assertNotIn(
+                'raw', arg_names,
+                f'{name} must never declare a parameter named "raw"',
+            )
+            raw_name_refs = [
+                node for node in ast.walk(func)
+                if isinstance(node, ast.Name) and node.id == 'raw'
+            ]
+            self.assertEqual(
+                [], raw_name_refs,
+                f'{name} body contains a reference to a name literally called '
+                '"raw" -- the untrusted evaluator response must never be in '
+                'scope here',
+            )
+
+    # -- Property 3: every call-site argument traces to a name lookup or a --
+    # -- registry lookup. -----------------------------------------------------
+
+    def test_property_3_call_site_arguments_trace_to_a_name_or_a_boundary_lookup(self):
+        tree = self._tree()
+        for site_name in ('_validate_assessment', '_build_job_assessment'):
+            func = self._func(tree, site_name)
+            self.assertIsNotNone(func, f'{site_name} not found in classifier.py')
+            enclosing_params = {a.arg for a in func.args.args}
+            calls = [
+                node for node in ast.walk(func)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == '_evidence_class_precedence'
+            ]
+            self.assertEqual(
+                1, len(calls),
+                f'{site_name} must call _evidence_class_precedence exactly '
+                f'once, found {len(calls)}',
+            )
+            for arg in calls[0].args:
+                self._assert_argument_traces_to_a_boundary_lookup(
+                    arg, func, enclosing_params, site_name)
+
+    def _assert_argument_traces_to_a_boundary_lookup(self, arg, func, enclosing_params, site_name):
+        # Reject outright, anywhere inside the argument expression: a
+        # subscript of `raw` or a `.get(...)` call on `raw` -- defense in
+        # depth on top of the Name-only shape check below, matching the
+        # plan's own explicit call-out of these two idioms.
+        for node in ast.walk(arg):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == 'raw'
+            ):
+                self.fail(
+                    f'{site_name}: an _evidence_class_precedence argument '
+                    f'subscripts raw directly -- {ast.dump(arg)}')
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'get'
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == 'raw'
+            ):
+                self.fail(
+                    f'{site_name}: an _evidence_class_precedence argument '
+                    f'calls raw.get(...) directly -- {ast.dump(arg)}')
+
+        if isinstance(arg, ast.Name) and arg.id == 'evaluator':
+            self.assertIn(
+                'evaluator', enclosing_params,
+                f'{site_name} passes a Name "evaluator" that is not its own '
+                'parameter',
+            )
+            return
+
+        self.assertIsInstance(
+            arg, ast.Name,
+            f'{site_name}: _evidence_class_precedence argument is not a '
+            f'plain name -- {ast.dump(arg)}',
+        )
+        assigns = [
+            node for node in ast.walk(func)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == arg.id for t in node.targets)
+        ]
+        self.assertTrue(
+            assigns,
+            f'{site_name}: no assignment found for local {arg.id!r} passed '
+            'to _evidence_class_precedence',
+        )
+        for assign in assigns:
+            self.assertTrue(
+                self._is_boundary_declaration_expr(assign.value),
+                f'{site_name}: {arg.id!r} is assigned from an expression '
+                f'that is not a resolve_evidence_class(...) chain -- '
+                f'{ast.dump(assign.value)}',
+            )
+
+    # -- Property 4: there is exactly one rule site. -------------------------
+
+    def test_property_4_exactly_one_rule_site_and_no_shadow_walk_elsewhere(self):
+        tree = self._tree()
+        defs = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == '_evidence_class_precedence'
+        ]
+        self.assertEqual(1, len(defs), 'expected exactly one _evidence_class_precedence def')
+        rule_site = defs[0]
+
+        watch_names = {'evidence_declared', 'valuation_declared', 'evaluator'}
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node is rule_site:
+                continue
+            referenced = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Compare):
+                    for operand in [sub.left] + list(sub.comparators):
+                        for name_node in ast.walk(operand):
+                            if isinstance(name_node, ast.Name):
+                                referenced.add(name_node.id)
+            if watch_names.issubset(referenced):
+                offenders.append(node.name)
+        self.assertEqual(
+            [], offenders,
+            f'function(s) {offenders!r} contain a comparison chain over all '
+            f'three of {sorted(watch_names)} -- a second inlined precedence walk?',
+        )
+
+
 class AuthorityWordClampTests(unittest.TestCase):
     """DECL-05 precision backstop (must_haves): the 16-byte clamp on
     evidence_class_authority (hermes-report.sh's forwarder) cannot truncate
