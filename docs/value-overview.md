@@ -76,6 +76,75 @@ Explain this distinction to anyone who sees the dashboard.
 the same weight as a measured figure. Readers need separate notice that the number is an
 estimate because the product does not provide it.
 
+## When the estimate does not fit: a revenue-generating agent
+
+Everything above describes **one** of the six economic mechanisms this product
+recognises: `labor_substitution`, the value of human work avoided. `hours × rate` is a
+model of that mechanism and of no other.
+
+Some agents do not substitute for labour. Consider a hospitality agent that takes a guest
+enquiry and completes a room booking. Asking how many hours of staff time it saved is close
+to meaningless — the agent produced a **revenue event**, not saved clerk time. Run the
+automated estimator against it and you get a number that answers a question nobody asked.
+
+`incremental_revenue` exists in the mechanism vocabulary for exactly this case. Two things
+about it are deliberate and worth understanding before you reach for it.
+
+**The agent can never claim it.** `incremental_revenue`, `quality_decision_improvement` and
+`risk_avoidance` are operator-only, and not by convention — the evaluator's mechanism
+resolver tests against a narrower set that does not contain them, so there is no code path
+by which a model response can select one, whatever it claims. An agent asserting it earned
+revenue is precisely the self-attribution this product is built to refuse.
+
+**You declare the value; the skill computes nothing.** A revenue outcome is recorded after
+the fact, by an operator, one job at a time:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/correct-assessment.sh \
+  --job-id <agentic_job_id> \
+  --mechanism incremental_revenue \
+  --value 102 --currency USD \
+  --attribution-fraction 0.15 \
+  --attribution-basis "<how you arrived at 15%>" \
+  --reason "<audit-trail text>"
+```
+
+`--dry-run` previews it without writing anything, locally or remotely.
+
+### Supply the attributed figure, never the gross one
+
+In the example above the stay is worth `$680` and the operator has decided 15% of it is
+attributable to the agent. **`--value` takes 102, not 680.**
+
+This is the single most important rule in this section. Putting full business revenue into
+an agent-metering record guarantees it will be summed by some downstream consumer — and it
+is the same margin the channel, the loyalty programme, the pricing engine and marketing
+attribution each already claim against the same stay. Keeping gross out of the record is the
+one structural defence against cross-system double counting available at this layer. It also
+keeps this skill from becoming the place where a business-gross figure meets an attribution
+policy, which is not a decision a metering tool should own.
+
+`--attribution-fraction` and `--attribution-basis` **document** how you reached the figure;
+they never derive it. The fraction is validated for shape only — a finite number in `[0, 1]`
+— because there is nothing here to check it against. The basis is mandatory: a fraction
+without a stated basis is refused, and the reporter forwards the two together or not at all.
+An absent attribution is honest; a naked number is not.
+
+A declared fraction is an operator assertion, not evidence. It never moves `evidence_class`
+toward a causal label, and declaring one does not make a record `CUSTOMER_CONFIRMED`.
+
+### What this does not give you
+
+| | |
+|---|---|
+| **Volume** | One job per invocation, human-invoked, deliberately unreachable from cron. There is no bulk or booking-system ingestion path. At real hospitality volume you would need one, and it is not built. |
+| **A defensible share** | The stay's margin is knowable. The agent's *share* of it is not. Any fraction assumes "no agent, no booking" — a causal claim this product places outside its own boundary. The honest version is a holdout study: route some enquiries through the agent and some not. That is a different evidence class and needs a study contract this tree only stubs. |
+| **Realized value** | Credit at booking time is a forecast. A cancelled stay does not retract it. |
+
+Declaring a fraction is a way to state your assumption **separably and visibly**, so the
+caveat travels with the number instead of being lost the moment it reaches a dashboard. It is
+not a way to make the assumption true.
+
 ## The configuration
 
 One block in `~/.hermes/state/revenium/config.json`. The amounts below are illustrative
@@ -346,5 +415,6 @@ does not imply "current". Run `plugin-status.sh` after any upgrade.
 |---|---|
 | Every field, failure mode, and the wire format | [Job value and ROI](value-and-roi.md) |
 | Why an estimate is a hypothesis, and the vocabulary to use | [Claim distinctions and evidence boundaries](claim-distinctions-and-evidence-boundaries.md) |
+| Which boundary decided a record's evidence label | [Evidence-class precedence and declaration authority](evidence-class-precedence.md) |
 | The complete `config.json` schema | [`references/config-schema.md`](../skills/revenium/references/config-schema.md) |
 | What counts as one task arc | [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md) |

@@ -22,8 +22,14 @@ source "${SCRIPT_DIR}/common.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: correct-assessment.sh --job-id <id> --value <n> --currency <CUR> --reason <text>
-                              [--value-low <n>] [--value-high <n>] [--dry-run]
+Usage: correct-assessment.sh --job-id <id> --reason <text>
+                              [--value <n> --currency <CUR>] [--mechanism <name>]
+                              [--value-low <n>] [--value-high <n>]
+                              [--attribution-fraction <0..1> --attribution-basis <text>]
+                              [--dry-run]
+
+At least one of --value or --mechanism is required; supplying both is legal
+and is what the revenue-attribution workflow does.
 
 Files a correction against a job's JobAssessment sidecar record (EGV-09).
 The original record and every earlier correction are preserved -- this
@@ -33,13 +39,34 @@ correction is also shipped to Revenium; an older CLI still saves the local
 correction but exits non-zero (D-04 -- fail loudly, never silently skip).
 
   --job-id      Required. The agentic_job_id whose assessment is being corrected.
-  --value       Required. The corrected value (the point/base estimate).
+  --reason      Required. Audit-trail text explaining the correction.
+  --value       Required UNLESS --mechanism is supplied (D-08). The corrected
+                value (the point/base estimate).
+  --currency    Required whenever --value is given. One of:
+                USD, EUR, GBP, CAD, AUD, JPY, CHF.
   --value-low   Optional. Corrected low bound. Defaults to --value (equal bounds).
   --value-high  Optional. Corrected high bound. Defaults to --value (equal bounds).
-  --currency    Required. One of: USD, EUR, GBP, CAD, AUD, JPY, CHF.
-  --reason      Required. Audit-trail text explaining the correction.
+  --mechanism   Optional. One of the six economic mechanisms. The three
+                operator-only ones -- quality_decision_improvement,
+                risk_avoidance, incremental_revenue -- can ONLY be set here; an
+                evaluator can never select them. Supplying this makes --value
+                optional: a mechanism is meaningful before anyone prices it.
+  --attribution-fraction
+                Optional. A finite number in [0, 1] recording what share of the
+                outcome you attribute to the agent. It DOCUMENTS the figure you
+                supplied in --value; it never derives it -- pass the already-
+                attributed amount, never the gross one. Requires
+                --attribution-basis.
+  --attribution-basis
+                Required with --attribution-fraction. The stated basis the
+                fraction rests on. A fraction is an operator assertion, not a
+                measurement, and is not forwarded without its basis.
   --dry-run     Preview the correction; writes nothing, locally or remotely.
   --help, -h    Show this message.
+
+A declared mechanism or attribution fraction never moves evidence_class.
+See docs/value-overview.md, "When the estimate does not fit", for the
+revenue-attribution workflow and why gross must stay out of the record.
 USAGE
 }
 
