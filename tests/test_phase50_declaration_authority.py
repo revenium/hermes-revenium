@@ -55,6 +55,7 @@ from tests.test_phase46_metadata_envelope import (  # noqa: E402
     _extract_outcome_metadata_heredoc,
     _run_forwarder,
 )
+from tests.test_phase43_evidence_grading import _hostile_evaluator_response  # noqa: E402
 
 
 def _load_classifier(env: "dict | None" = None):
@@ -362,6 +363,212 @@ class PrecedenceWalkTests(_DeclarationAuthorityTestCase):
             f'expected 3 call sites (the _declared_evidence_class delegation '
             f'plus one at each of the two record sites), found {len(calls)}',
         )
+
+
+# -- Plan 50-02, Task 1: Falsifier 1's adversarial fixture -----------------
+#
+# The volatile keys _build_job_assessment stamps from the clock at
+# construction time -- excluded before comparing two records for equality,
+# because two REAL calls a few microseconds apart will never agree on
+# these even when every declaration-bearing field is identical. None of
+# these keys is what DECL-03 is about; `job_started_at`/`job_ended_at` fall
+# back to `time.time()` per _build_job_assessment's own docstring (and are
+# copied verbatim into `observation_window_start`/`observation_window_end`
+# in the record literal), and `ts` is stamped fresh on every call.
+_VOLATILE_RECORD_KEYS = (
+    'ts', 'job_started_at', 'job_ended_at',
+    'observation_window_start', 'observation_window_end',
+)
+
+
+def _stable_record_view(record):
+    return {k: v for k, v in record.items() if k not in _VOLATILE_RECORD_KEYS}
+
+
+def _hostile_boundary_response():
+    """`_hostile_evaluator_response()`'s eight attacks (imported, not
+    copied -- a copied attack fixture is the fixture-fidelity defect this
+    repo has hit four times in three phases) plus FIVE more attack keys
+    named after the four-leg walk's own new inputs and its provenance
+    output: `valuation_declared`, `evidence_declared`,
+    `evidence_class_authority`, `boundaries`, `boundary_impl`. An attacker
+    naming a key after a resolved-declaration parameter, or after the
+    config surface that selects a boundary implementation, is exactly the
+    "smuggle a declaration through raw" attack DECL-03 exists to refuse --
+    none of these five keys is ever read off `raw` by the real
+    implementation; they are attack surface, not configuration.
+    """
+    hostile = dict(_hostile_evaluator_response())
+    hostile.update({
+        'valuation_declared': 'EXPERIMENTAL_IMPACT',
+        'evidence_declared': 'CUSTOMER_CONFIRMED',
+        'evidence_class_authority': 'evidence',
+        'boundaries': {'evidence': 'confirmation_workflow_evidence_fixture'},
+        'boundary_impl': 'confirmation_workflow_evidence_fixture',
+    })
+    return hostile
+
+
+# A throwaway valuation registrant declaring one of the three reserved
+# causal-impact labels (Test 3 / A10) -- mirrors
+# tests/test_phase45_valuation_boundary.py's own
+# `_rate_card_valuation_fixture` shape exactly (same assumptions keys, same
+# None-on-abstain contract) so the hostile fixture's hours/rate/currency
+# price cleanly through it.
+_CAUSAL_LABEL_THROWAWAY_SEQ = [0]
+
+
+def _causal_label_valuation_fixture(assumptions: dict, config: dict):
+    try:
+        a = assumptions if isinstance(assumptions, dict) else {}
+        hours = a.get('estimated_hours_saved')
+        rate = a.get('assumed_loaded_rate')
+        if not isinstance(hours, (int, float)) or not isinstance(rate, (int, float)):
+            return None
+        if isinstance(hours, bool) or isinstance(rate, bool) or hours <= 0 or rate <= 0:
+            return None
+        return {'estimated_value': round(hours * rate, 2), 'currency': a.get('currency')}
+    except Exception:
+        return None
+
+
+class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
+    """Falsifier 1's adversarial fixture (docs/evidence-class-precedence.md
+    :342-368), proven against the REAL `_validate_assessment` ->
+    `_build_job_assessment` construction path under the four-leg
+    precedence walk built in 50-01. Six cases: the base eight-attack
+    fixture under the new rule (Test 1, A1), the same fixture additionally
+    naming the walk's own new inputs as attack keys (Test 2, A9), a
+    trusted registrant declaring a causal-impact label selected via
+    `boundaries.valuation` (Test 3, A10), the authority field itself as an
+    attack surface (Test 4), and the N=2 / N=3 state-carrying cases
+    CONTEXT.md requires be written explicitly.
+
+    This class COLLECTS EVIDENCE for the Task 3 checkpoint. It does not
+    decide anything. If a test fails, the failure is Falsifier 1 firing --
+    it is recorded verbatim in the SUMMARY and named in the checkpoint;
+    no implementation file is edited in response to a failure here.
+    """
+
+    def _run_hostile(self, mod, raw, job_id='p50-hostile-001',
+                      evaluator='stub-evaluator', version='v1'):
+        """Mirrors PromotionTests.setUp's own shape
+        (tests/test_phase43_evidence_grading.py:646-663): assert ACCEPTED
+        before asserting anything about the record -- an attack that lands
+        on the abstention path proves only that abstention works, not that
+        acceptance resists promotion."""
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(raw, cfg, evaluator, version)
+        self.assertIsNotNone(
+            validated,
+            'the hostile fixture must be ACCEPTED for this test to be '
+            'meaningful -- an attack that lands on the abstention path '
+            'proves only that abstention works, not that acceptance '
+            'resists promotion',
+        )
+        record = mod._build_job_assessment(
+            self._valid_job(job_id), validated, raw, cfg, evaluator, version)
+        self.assertIsNotNone(record)
+        return record
+
+    def _register_causal_label_valuation(self):
+        _CAUSAL_LABEL_THROWAWAY_SEQ[0] += 1
+        name = f'p50_causal_ceiling_{_CAUSAL_LABEL_THROWAWAY_SEQ[0]}'
+        import valuation as val  # type: ignore  # PLUGIN is on sys.path (setUpClass)
+        val.register(name, _causal_label_valuation_fixture, '1',
+                      evidence_class='EXPERIMENTAL_IMPACT')
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        return name
+
+    # -- Test 1 (A1 under the new rule) -------------------------------------
+
+    def test_1_eight_attack_fixture_under_default_boundaries_is_forced(self):
+        mod = self._load(boundaries=None)
+        record = self._run_hostile(mod, _hostile_evaluator_response())
+        self.assertEqual(record['evidence_class'], mod.EVIDENCE_CLASS_MODEL_ESTIMATED)
+
+    # -- Test 2 (A9, new -- the walk's own new inputs as an attack surface) -
+
+    def test_2_hostile_response_naming_the_walks_own_inputs_is_unchanged(self):
+        mod = self._load(boundaries=None)
+        baseline = self._run_hostile(
+            mod, _hostile_evaluator_response(), job_id='p50-a9-shared-job-id')
+        attacked = self._run_hostile(
+            mod, _hostile_boundary_response(), job_id='p50-a9-shared-job-id')
+        self.assertEqual(_stable_record_view(baseline), _stable_record_view(attacked))
+
+    # -- Test 3 (A10, new -- the causal ceiling) -----------------------------
+
+    def test_3_causal_impact_declaration_via_valuation_boundary_is_refused(self):
+        name = self._register_causal_label_valuation()
+        mod = self._load(boundaries={'valuation': name})
+        record = self._run_hostile(mod, _hostile_evaluator_response())
+        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        # The all-forced fallback authority is 'evaluator' -- never
+        # 'valuation' with a causal label smuggled through.
+        self.assertEqual('evaluator', record['evidence_class_authority'])
+        self.assertNotEqual('EXPERIMENTAL_IMPACT', record['evidence_class'])
+
+    # -- Test 4 (the authority field is not an attack surface) --------------
+
+    def test_4_authority_field_spoof_is_ignored_absent_a_real_declaration(self):
+        mod = self._load(boundaries=None)
+        record = self._run_hostile(mod, _hostile_boundary_response())
+        self.assertEqual('evaluator', record['evidence_class_authority'])
+        self.assertNotEqual('evidence', record['evidence_class_authority'])
+
+    # -- Test 5 (N=2) ---------------------------------------------------------
+
+    def test_5_two_hostile_responses_back_to_back_n2_no_cross_call_leak(self):
+        mod_a = self._load(boundaries={'evidence': 'confirmation_workflow_evidence_fixture'})
+        record_a = self._run_hostile(mod_a, _hostile_evaluator_response(), job_id='p50-n2-a')
+        self.assertEqual('CUSTOMER_CONFIRMED', record_a['evidence_class'])
+        self.assertEqual('evidence', record_a['evidence_class_authority'])
+
+        second_config = Path(self.tmp) / 'config-n2-b.json'
+        _write_config(second_config, boundaries=None)
+        mod_b = _load_classifier({'REVENIUM_CONFIG_FILE': str(second_config)})
+        record_b = self._run_hostile(mod_b, _hostile_evaluator_response(), job_id='p50-n2-b')
+        self.assertEqual('MODEL_ESTIMATED_DEMO', record_b['evidence_class'])
+        self.assertEqual('evaluator', record_b['evidence_class_authority'])
+        self.assertNotEqual(record_a['evidence_class'], record_b['evidence_class'])
+
+    # -- Test 6 (N=3) ---------------------------------------------------------
+
+    def test_6_three_successive_hostile_responses_n3_each_gets_its_own_config(self):
+        mod_evidence = self._load(
+            boundaries={'evidence': 'confirmation_workflow_evidence_fixture'})
+        record_1 = self._run_hostile(
+            mod_evidence, _hostile_evaluator_response(), job_id='p50-n3-evidence')
+        self.assertEqual('CUSTOMER_CONFIRMED', record_1['evidence_class'])
+        self.assertEqual('evidence', record_1['evidence_class_authority'])
+
+        valuation_config = Path(self.tmp) / 'config-n3-valuation.json'
+        _write_config(
+            valuation_config,
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            # 'senior engineer' matches _hostile_evaluator_response()'s own
+            # inferred_role value exactly.
+            rate_card={'senior engineer': 480.0},
+        )
+        mod_valuation = _load_classifier({'REVENIUM_CONFIG_FILE': str(valuation_config)})
+        record_2 = self._run_hostile(
+            mod_valuation, _hostile_evaluator_response(), job_id='p50-n3-valuation')
+        self.assertEqual('CUSTOMER_CONFIGURED', record_2['evidence_class'])
+        self.assertEqual('valuation', record_2['evidence_class_authority'])
+
+        evaluator_config = Path(self.tmp) / 'config-n3-evaluator.json'
+        _write_config(evaluator_config, boundaries=None)
+        mod_evaluator = _load_classifier({'REVENIUM_CONFIG_FILE': str(evaluator_config)})
+        record_3 = self._run_hostile(
+            mod_evaluator, _hostile_evaluator_response(), job_id='p50-n3-evaluator')
+        self.assertEqual('MODEL_ESTIMATED_DEMO', record_3['evidence_class'])
+        self.assertEqual('evaluator', record_3['evidence_class_authority'])
+
+        # None of the three leaks into either of the others.
+        self.assertNotEqual(record_1['evidence_class'], record_2['evidence_class'])
+        self.assertNotEqual(record_2['evidence_class'], record_3['evidence_class'])
+        self.assertNotEqual(record_1['evidence_class'], record_3['evidence_class'])
 
 
 class AuthorityWordClampTests(unittest.TestCase):
