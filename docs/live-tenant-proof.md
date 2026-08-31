@@ -373,6 +373,65 @@ multiplex route, no real session id matched, and the correction branch
 `paths-for-session-regex-may-never-match`, severity high — not folded
 silently into "could not reach multiplex."
 
+### Amendment 2026-08-31 — the root cause, found after the phase closed
+
+Everything above stands as the record of what the arm established while it ran.
+This block records what was learned afterwards, during the post-phase cleanup of
+the same host, and it changes the *diagnosis* — not the verdict.
+
+The blocker is not a drifted id shape. It is a **namespace mismatch**:
+`agent:<ns>:` is the session-**key** namespace, it is alive and well in this
+Hermes version, and it has never been the session **id**. `_paths_for_session`
+matches a key-shaped regex against an id, so it cannot match — anywhere, on any
+platform, on this version.
+
+From the deployed Hermes' own source (`gateway/session.py:1070-1087`, its
+docstring verbatim):
+
+> The historical key format is `agent:main:<platform>:<chat_type>:...` where
+> `main` is a static namespace literal (**NOT** a branch name — branching keys
+> off `session_id`, not this slot).
+
+with the default profile mapping to `agent:main` and a named profile `coder` to
+`agent:coder`; `gateway/run.py:19947` assembles the rest. What the classifier is
+handed is the other identifier — `gateway/run.py:12753` calls
+`finalize_session(session_id=entry.session_id, …)`, i.e. `sessions.id`.
+
+A live capture of every session on the host, taken before the profiles were torn
+down, widens the original one-platform observation to four sources:
+
+| database | rows | `sessions.id` shape | source |
+|---|---|---|---|
+| `state.db` | 32 | `20260831_162501_ccfdf5` | cli(26), subagent(4), cron(2) |
+| `profiles/p52alpha/state.db` | 1 | `api-1b852ab4523500e5` | api_server |
+| `profiles/p52beta/state.db` | 1 | `api-ca0b6a3eee148a5e` | api_server |
+
+None is `agent:`-prefixed — including the `cli` and `subagent` sources the
+ordinary metering path runs on daily, not just the `api_server` route the arm
+exercised.
+
+**The fix is not "teach the regex the new shape."** There is no id shape to
+learn; the profile is not in the id. It is in the row: `sessions.profile_name`,
+populated correctly on exactly the sessions where resolution failed —
+`p52alpha` and `p52beta` on the two profile databases, `NULL` on the
+process-level one, which is the right answer for a non-multiplexed home. A
+`session_key` column exists too, but 0 of 34 rows carry a non-null value on this
+version, so the key is not persisted here and cannot be the fix's source.
+
+**What this amendment still does not claim.** That the same holds on other
+Hermes versions or on the phases 28–30 fleet host. One host, v0.20.1
+(2026.8.13), four session sources. The strong hypothesis — that the fleet
+observation was of session *keys*, and that the regex was written against keys
+and applied to ids from the start — is a hypothesis about a host not re-examined
+here, not a measurement.
+
+The consequence for `b4c3b63` is unchanged and now better grounded: the
+`paths`-threading fix is correct but **inert**, and per-profile marker routing
+and per-profile boundary provenance are both silently disabled on every
+multiplexed install. Recorded in full in the todo
+`paths-for-session-regex-may-never-match`, which this amendment supersedes as
+the durable copy.
+
 **Criterion 6 verdict: NOT CONFIRMED LIVE.** Accepted as the honest close.
 
 ## What this does not establish
@@ -410,7 +469,11 @@ silently into "could not reach multiplex."
    establish that the classifier's per-session path regex is dead code
    everywhere. One platform (`api_server`) was exercised, on one host, at
    one deployed commit. The fleet ran matching-shaped session ids on a
-   different host in an earlier phase of this project.
+   different host in an earlier phase of this project. **See the
+   2026-08-31 amendment in the criterion 6 section**: the root cause is now
+   known to be a session-key-versus-session-id namespace mismatch, and the
+   observation is widened to four session sources — but it is still one
+   host at one Hermes version, and this limit stands as written.
 6. **LIVE-06's feature-off state was a deliberate toggle, found `true`
    first.** There is no untouched, as-found feature-off baseline on this
    host, and there never was one for this phase to capture. The
