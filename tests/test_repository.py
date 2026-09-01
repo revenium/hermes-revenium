@@ -465,6 +465,7 @@ class RepositoryTests(unittest.TestCase):
             # _EVAL_MAX_TOKENS regression guard and the finish_reason
             # truncation-diagnostic's never-raises contract.
             ROOT / 'tests' / 'test_phase53_evaluator_token_budget.py',
+            ROOT / 'tests' / 'test_phase53_reportable_class_gate.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

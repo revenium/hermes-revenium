@@ -3399,9 +3399,15 @@ _EVIDENCE_CLASSES = frozenset({
 # refuses to WRITE reportable for these classes, and this refuses to SHIP a
 # value for them regardless of what the record claims.
 #
-# ONE RULE, TWO ENFORCEMENT POINTS -- not two rules. The membership is
-# derived the same way classifier.py derives _REPORTABLE_EVIDENCE_CLASSES
-# (the declarable six minus the forced constant); the divergence guard in
+# ONE RULE, TWO ENFORCEMENT POINTS -- not two rules. Read that precisely:
+# this set is a hand-written LITERAL, not a mechanical derivation. It cannot
+# import classifier.py's _REPORTABLE_EVIDENCE_CLASSES -- that lives in the
+# in-process plugin, on the far side of a language and process boundary this
+# file can never cross. What makes the pair one rule is that both are written
+# to the same definition (the declarable six minus the forced constant) and
+# that a test fails the moment they disagree -- NOT that either is computed
+# from the other. The guard is therefore STATIC-class: it catches drift that
+# exists, it does not prevent drift by construction. The divergence guard in
 # tests/test_phase53_reportable_class_gate.py fails if the two ever disagree,
 # because a hand-synced pair that can drift silently is exactly the failure
 # this file's own C-02 comment accepts a duplication in order to catch.

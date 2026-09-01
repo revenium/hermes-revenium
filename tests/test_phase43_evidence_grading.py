@@ -992,15 +992,6 @@ def _extract_frozenset_assignment_fragment(text, target_name):
     once, or if the isolated fragment does not parse as a single
     `NAME = frozenset({...})` assignment of string constants.
     """
-    # Phase 53 (ROI-01): anchored at LINE START. The bare substring anchor
-    # also matched any assignment whose name merely ENDS with target_name --
-    # `_REPORTABLE_EVIDENCE_CLASSES = frozenset({` contains
-    # `_EVIDENCE_CLASSES = frozenset({` -- so adding that sibling constant to
-    # hermes-report.sh made the anchor match twice and this extractor return
-    # None, failing the drift guard for a reason unrelated to drift. Requiring
-    # the name to begin a line makes the match mean "this top-level
-    # assignment", which is what it always intended. This TIGHTENS the guard;
-    # it does not loosen it.
     anchor = f'{target_name} = frozenset({{'
     occurrences = [
         i for i in range(len(text))
