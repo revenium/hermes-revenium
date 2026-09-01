@@ -137,9 +137,20 @@ class ResolverTests(unittest.TestCase):
 
     def test_literal_true_config_and_not_abstained_is_reportable(self):
         """Behavior 1: cfg {"experimentalReportEstimates": True}, abstained
-        False -> "reportable"."""
+        False -> "reportable".
+
+        Phase 53 (ROI-01) added a second, independent precondition: the
+        record's evidence_class must be one the class gate permits. This test
+        still proves exactly what it always proved -- that a literal-True
+        config on a non-abstained record yields reportable -- so the
+        assertion is unchanged. The evidence_class argument is added to the
+        SETUP only, supplying what the sole production call site has always
+        supplied, so the config rule this test is about is still the thing
+        being exercised rather than being masked by the new gate.
+        """
         status = self.mod._resolve_reportability_status(
-            {'experimentalReportEstimates': True}, False)
+            {'experimentalReportEstimates': True}, False,
+            evidence_class='CUSTOMER_CONFIGURED')
         self.assertEqual(status, self.mod.REPORTABILITY_REPORTABLE)
 
     def test_empty_config_is_candidate(self):

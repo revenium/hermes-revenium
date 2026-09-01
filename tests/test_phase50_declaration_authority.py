@@ -1371,10 +1371,18 @@ class ProfileScopedBoundaryProvenanceTests(_DeclarationAuthorityTestCase):
         job = {'agentic_job_id': 'rs-confirmed-job', 'job_type': 'bug_fix'}
         cfg_with_confirmation = {'confirmations': ['rs-confirmed-job']}
 
+        # Phase 53 (ROI-01): evidence_class is supplied to BOTH calls,
+        # identically, and is a permitted class. It is setup, not the thing
+        # under test -- holding it constant across the two calls preserves
+        # this test's own argument that "only the `paths` argument can explain
+        # a different verdict". CUSTOMER_CONFIRMED is the apt class for a
+        # confirmation-workflow scenario.
         status_via_profile_a = mod._resolve_reportability_status(
-            cfg_with_confirmation, False, job=job, paths=None)
+            cfg_with_confirmation, False, job=job, paths=None,
+            evidence_class='CUSTOMER_CONFIRMED')
         status_via_profile_b = mod._resolve_reportability_status(
-            cfg_with_confirmation, False, job=job, paths=paths_b)
+            cfg_with_confirmation, False, job=job, paths=paths_b,
+            evidence_class='CUSTOMER_CONFIRMED')
 
         self.assertEqual(mod.REPORTABILITY_CANDIDATE, status_via_profile_a)
         self.assertEqual(mod.REPORTABILITY_REPORTABLE, status_via_profile_b)

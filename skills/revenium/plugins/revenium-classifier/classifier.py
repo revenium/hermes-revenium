@@ -1207,6 +1207,56 @@ assert len(_DECLARABLE_EVIDENCE_CLASSES) == 6, (
 )
 
 
+# Phase 53 (ROI-01, D-02/D-04): which evidence classes may carry a VALUE onto
+# the wire. DERIVED from the declarable set minus the one forced constant --
+# never hand-listed -- so it cannot drift from the vocabulary the way a third
+# hand-synced list would.
+#
+# WHY MODEL_ESTIMATED_DEMO IS REFUSED, and why that is not a ranking:
+# `revenium jobs roi <id>` surfaces no evidence_class, no evaluator and no
+# confidence, in either its JSON or its table output -- established by live
+# verification and recorded in docs/claim-distinctions-and-evidence-boundaries.md.
+# An estimate displayed there is visually indistinguishable from a measurement.
+# So a value may reach that surface only when something other than a model
+# constituted it.
+#
+# This is a PARTITION, not a confidence ladder. EGV-10 (D-01) forbids ranking
+# these labels and nothing here does: the five permitted members are not claimed
+# to be stronger than each other or than the refused one. The single property
+# that separates them is whether a model, and only a model, is the basis. That
+# is a membership question, not an ordering one -- no sort, no comparison, no
+# index.
+#
+# NOT operator-widenable, on purpose (D-02). There is deliberately no config key
+# that admits MODEL_ESTIMATED_DEMO here: a value-reporting gate an operator can
+# configure away is not a gate. Widening this requires a code change and review,
+# the same discipline Phase 43 and Phase 50 chose over policy wherever both were
+# available.
+_REPORTABLE_EVIDENCE_CLASSES = _DECLARABLE_EVIDENCE_CLASSES - {
+    EVIDENCE_CLASS_MODEL_ESTIMATED,
+}
+assert (
+    # .issubset()/!= rather than `<`, for the same reason the declarable-set
+    # assert above spells it that way: LabelTests' static guard flags ordering
+    # operators applied to label constants.
+    _REPORTABLE_EVIDENCE_CLASSES.issubset(_DECLARABLE_EVIDENCE_CLASSES)
+    and _REPORTABLE_EVIDENCE_CLASSES != _DECLARABLE_EVIDENCE_CLASSES
+), (
+    "_REPORTABLE_EVIDENCE_CLASSES must be a STRICT subset of "
+    "_DECLARABLE_EVIDENCE_CLASSES -- refusing the forced model-estimate "
+    "constant is the whole point of this constant existing separately"
+)
+assert EVIDENCE_CLASS_MODEL_ESTIMATED not in _REPORTABLE_EVIDENCE_CLASSES, (
+    "MODEL_ESTIMATED_DEMO is a member of _REPORTABLE_EVIDENCE_CLASSES -- the "
+    "one label this gate exists to refuse has drifted back into it"
+)
+assert len(_REPORTABLE_EVIDENCE_CLASSES) == 5, (
+    f"_REPORTABLE_EVIDENCE_CLASSES has {len(_REPORTABLE_EVIDENCE_CLASSES)} "
+    "members, not the expected 5 -- the declarable set or the forced constant "
+    "have drifted out of sync with each other"
+)
+
+
 def _declared_evidence_class(
     evaluator: str, valuation_declared: str = "", evidence_declared: str = "",
     classification_declared: str = "",
@@ -2177,7 +2227,7 @@ def _resolve_served_model(response) -> str:
 
 def _resolve_reportability_status(
     cfg: "dict | None", abstained: bool, job: "dict | None" = None,
-    paths: "_Paths | None" = None,
+    paths: "_Paths | None" = None, evidence_class: "str | None" = None,
 ) -> str:
     """Resolve EGV-18's reportability_status for one JobAssessment record.
 
@@ -2233,6 +2283,28 @@ def _resolve_reportability_status(
     # Load-bearing position (PA-18, D-05): unconditional, before the
     # resolution step below runs at all. Do not move this check.
     if abstained:
+        return REPORTABILITY_CANDIDATE
+
+    # Phase 53 (ROI-01, D-01/D-04): the evidence-class gate. SAME LOAD-BEARING
+    # POSITION as the abstention check above and for the same reason -- it runs
+    # unconditionally, before any registered implementation is consulted, so a
+    # registrant cannot return its way past it. A confirmation workflow may
+    # decide that a REAL estimate is reportable; it may not decide that a
+    # MODEL-ESTIMATED one is. Do not move this below the resolution step.
+    #
+    # Fail-CLOSED on an unknown class, deliberately, and note this is the
+    # opposite of this module's usual fail-open posture: everywhere else a
+    # missing input degrades to "no enforcement", but here degrading means
+    # shipping a value onto a surface that cannot say where it came from. The
+    # safe direction is to withhold. `candidate` still ships full provenance --
+    # nothing is lost but the value itself.
+    #
+    # evidence_class=None means a caller did not supply one. That is also
+    # refused rather than waved through: the sole production call site threads
+    # it, so None reaching here means either a test or a future caller that has
+    # not been taught the gate, and neither should obtain `reportable` by
+    # omission.
+    if evidence_class not in _REPORTABLE_EVIDENCE_CLASSES:
         return REPORTABILITY_CANDIDATE
 
     impl_name = "config_opt_in"
@@ -2725,6 +2797,11 @@ def _build_job_assessment(
             "reportability_status": _resolve_reportability_status(
                 cfg, bool(abstention_reason), job={"agentic_job_id": job_id, "job_type": job_type},
                 paths=paths,
+                # Phase 53 (ROI-01): the class the precedence walk actually
+                # resolved above (:2628), the same value persisted as this
+                # record's evidence_class -- never re-derived, so the gate and
+                # the record can never disagree about what class this is.
+                evidence_class=_evidence_class,
             ),
         }
 

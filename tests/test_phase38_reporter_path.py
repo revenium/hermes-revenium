@@ -177,11 +177,23 @@ def _sidecar_record(job_id, **overrides):
         "double_counting_group": "g38-sid-002",
         # Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
         # populates this UNCONDITIONALLY on every record it builds (Phase 42
-        # onward). Default here is the reportable literal so every existing
-        # test in this file -- written before hermes-report.sh read this
-        # field at all -- keeps describing a record that ships its value,
-        # unless a test explicitly overrides it to exercise the gate.
-        "reportability_status": "reportable",
+        # onward).
+        #
+        # Phase 53 (ROI-01) CHANGED THIS DEFAULT from "reportable" to
+        # "candidate", and the reason matters more than the value. This
+        # fixture's evidence_class is MODEL_ESTIMATED_DEMO (above), and after
+        # Phase 53's class gate a MODEL_ESTIMATED_DEMO record can NEVER be
+        # reportable -- production resolves it to candidate. The old pairing
+        # described a record production cannot emit, which is precisely what
+        # FixtureFidelityTests exists to catch; it caught this one.
+        #
+        # A test that needs a value-shipping record must now override BOTH
+        # keys to a COHERENT pair, e.g.
+        #   _sidecar_record(jid, reportability_status="reportable",
+        #                   evidence_class="CUSTOMER_CONFIGURED")
+        # Overriding reportability_status alone re-creates the impossible
+        # record this change removed.
+        "reportability_status": "candidate",
     }
     record.update(overrides)
     return record
@@ -422,7 +434,12 @@ class TestPhase38ReporterPath(unittest.TestCase):
         provenance fields."""
         argv = self._run_one_outcome(
             'o38-sid-001', 'o38-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
-            sidecar=_sidecar_record('o38-job-001'),
+            sidecar=_sidecar_record(
+                'o38-job-001',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
         )
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
@@ -430,7 +447,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
 
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta.get('source'), 'test')
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
         self.assertEqual(meta.get('evaluator'), 'llm')
         self.assertEqual(meta.get('evaluator_version'), 'v1')
         self.assertEqual(meta.get('confidence'), 0.8)
@@ -497,7 +514,12 @@ class TestPhase38ReporterPath(unittest.TestCase):
         itself (Task 2, Test 1)."""
         argv = self._run_one_outcome(
             'r43-sid-001', 'r43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
-            sidecar=_sidecar_record('r43-job-001'),
+            sidecar=_sidecar_record(
+                'r43-job-001',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
         )
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
@@ -510,7 +532,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             meta.get('assumptions'),
             {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
         )
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
         self.assertEqual(meta.get('reportability_status'), 'reportable')
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
@@ -713,12 +735,17 @@ class TestPhase38ReporterPath(unittest.TestCase):
         and the nominal case."""
         argv = self._run_one_outcome(
             'ec43-sid-004', 'ec43-job-004', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
-            sidecar=_sidecar_record('ec43-job-004'),
+            sidecar=_sidecar_record(
+                'ec43-job-004',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
         )
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
 
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
@@ -737,7 +764,12 @@ class TestPhase38ReporterPath(unittest.TestCase):
         shape, not the marker's frozen 9 keys)."""
         argv = self._run_one_outcome(
             'g38-sid-002', 'assessment-golden-job', 'SUCCESS',
-            sidecar=_sidecar_record('assessment-golden-job'),
+            sidecar=_sidecar_record(
+                'assessment-golden-job',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
         )
         # CF-1: the genuine call site (kept on one line so it is grep-able
         # as a pair with the golden's own filename, closing the gap plan

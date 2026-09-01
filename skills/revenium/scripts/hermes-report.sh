@@ -3391,6 +3391,30 @@ _EVIDENCE_CLASSES = frozenset({
     'MODEL_ESTIMATED_DEMO', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
     'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
 })
+
+# Phase 53 (ROI-01, D-01): the reporter's own copy of the class gate --
+# the SECOND enforcement point, deliberately independent of the classifier's.
+# This is the gate a sidecar written by a pre-Phase-53 classifier, or a
+# hand-edited one, would otherwise reach the wire through: the classifier
+# refuses to WRITE reportable for these classes, and this refuses to SHIP a
+# value for them regardless of what the record claims.
+#
+# ONE RULE, TWO ENFORCEMENT POINTS -- not two rules. The membership is
+# derived the same way classifier.py derives _REPORTABLE_EVIDENCE_CLASSES
+# (the declarable six minus the forced constant); the divergence guard in
+# tests/test_phase53_reportable_class_gate.py fails if the two ever disagree,
+# because a hand-synced pair that can drift silently is exactly the failure
+# this file's own C-02 comment accepts a duplication in order to catch.
+#
+# The three causal-impact labels are absent here as well as from the
+# classifier's set: they are already undeclarable
+# (classifier._DECLARABLE_EVIDENCE_CLASSES refuses them even from a trusted
+# registrant), so a record carrying one is malformed, and a malformed record
+# must not ship a value either.
+_REPORTABLE_EVIDENCE_CLASSES = frozenset({
+    'ACTIVITY_MEASURED', 'OUTPUT_OBSERVED', 'OUTCOME_OBSERVED',
+    'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
+})
 # WR-02 (43-REVIEW.md): scope the absent-is-permissible exception to the
 # record kind that actually earns it. Only a kind:"correction" record
 # legitimately carries no evidence_class -- correct-assessment.sh has never
@@ -3431,6 +3455,36 @@ if _reject_evidence_class:
     _strip_value_family(found)
     if not _not_reportable_reason:
         _not_reportable_reason = 'evidence_class_unrecognized'
+elif not _evidence_class_missing and (
+        _raw_evidence_class not in _REPORTABLE_EVIDENCE_CLASSES):
+    # Phase 53 (ROI-01, D-01): a RECOGNIZED class that may not carry a value
+    # onto the wire -- MODEL_ESTIMATED_DEMO in practice. Distinct from the
+    # rejection branch above in one load-bearing way: `evidence_class` is
+    # KEPT on the record, not popped.
+    #
+    # `not _evidence_class_missing` is LOAD-BEARING and was missing from this
+    # branch's first draft, which broke corrections. A kind:"correction"
+    # record legitimately carries NO evidence_class -- correct-assessment.sh
+    # has never written one -- and is reportable BY CONSTRUCTION under D-06.
+    # Without this guard, `None not in _REPORTABLE_EVIDENCE_CLASSES` is True,
+    # so every correction had its value stripped. Caught by
+    # test_correction_ships_even_when_the_reportability_gate_is_closed and
+    # test_absent_evidence_class_is_not_a_rejection, which exist for exactly
+    # this trap. Absence is handled by the WR-02 branch above, not here.
+    #
+    # That asymmetry is Phase 43's rule, not an inconsistency. An
+    # unrecognized class is evidence of a malformed or tampered record, so
+    # the claim itself is removed. A model-estimated class is a perfectly
+    # honest claim that simply may not carry a value to a read surface that
+    # cannot display its provenance -- and withholding the VALUE must not
+    # withhold the FACT that an estimate happened. The record still ships
+    # evidence_class, evaluator, confidence and the whole provenance family;
+    # only the value is withheld.
+    value_out = ''
+    currency_out = ''
+    _strip_value_family(found)
+    if not _not_reportable_reason:
+        _not_reportable_reason = 'evidence_class_not_reportable'
 
 # Phase 42 (C-04): the whole resolved sidecar record rides as ONE JSON
 # blob -- replacing the eight separate KEY=value prints the marker reader
