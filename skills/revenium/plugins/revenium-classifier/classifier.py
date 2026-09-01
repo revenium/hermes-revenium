@@ -341,12 +341,59 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
 
 
 # Phase 37: the evaluator call's own budgets. NOT inherited from the job path.
-# Sized from 37-RESEARCH.md, which measured a worst-case single-job assessment at
-# ~149 tokens under the phase-36 clamps (basis 200, inferred_role 60). 256 gives
-# ~1.7x margin. The timeout sits under _infer_jobs_via_llm's 20.0s because this
-# call runs AFTER job inference has already spent its budget, and the turn should
+# Originally sized from 37-RESEARCH.md at ~149 tokens worst-case (basis 200,
+# inferred_role 60) under the phase-36 clamps, with 256 as ~1.7x margin. That
+# basis predates Phase 44 (EGV-05), which replaced the flat field list with
+# three labelled mechanism branches (_mechanism_instruction_block) -- the
+# PROMPT grew, and 53-03 (2026-09-01) circumstantially suspected the
+# COMPLETION cap was now too tight, from an 88% live rejection rate on
+# `confidence outside [0,1]: None`.
+#
+# Phase 53-04 (2026-09-01) MEASURED this directly rather than resizing from
+# that suspicion: 8 real evaluator calls (5 replayed against actual 53-03
+# session transcripts pulled from state.db, 3 against fresh synthetic
+# transcripts shaped to probe each of the three EVALUATOR_MECHANISMS
+# branches), each run BOTH at the shipped cap (256) and at a generous one
+# (800). Result: finish_reason was "stop" in all 8 at BOTH caps, and
+# completion_tokens was IDENTICAL between the capped and uncapped run for
+# every case that matched (69-86 tokens observed; the single case that
+# differed did so by wording, not length, at 69 vs 70 tokens). The model
+# never once hit the 256-token ceiling. Confidence was still missing in 7 of
+# the 8 responses anyway -- at 86 tokens against a 256-token budget, nowhere
+# near the cap. **The 53-03 truncation theory does not hold under direct
+# measurement**: this is the model omitting a trailer field it was never
+# short on room to write, not a token-budget defect. See 53-04-SUMMARY.md
+# for the full transcript-level evidence; this comment carries the number,
+# not the argument.
+#
+# The cap is still re-sized here, per 53-04's own instruction to act on the
+# measurement rather than leave a stale, disproven basis in place -- but as
+# a margin correction, not a promised fix for the confidence-omission rate.
+# Measured worst COMPLETE response: 86 tokens (labor_substitution, the
+# shared shape with augmentation_capacity_expansion -- the two branches ask
+# for the identical field set, so the worst case is either of them, never
+# the shorter newly_enabled_work branch, which omits the role/hours/rate/
+# currency fields entirely). augmentation_capacity_expansion's mechanism
+# name is 13 characters longer than labor_substitution's ("augmentation_
+# capacity_expansion" vs "labor_substitution"), worth roughly 4 more tokens
+# echoed back. The wild sidecar record with the single longest observed
+# `basis` text (147 chars vs this measurement's ~110-char median) adds
+# roughly another 10-15 tokens of headroom nobody has yet produced a
+# complete response for. 512 -- not a fresh guess, but the SAME budget
+# already shipped and proven for _infer_jobs_via_llm's structurally similar
+# one-shot JSON-generation call (a strictly larger array-of-jobs output) --
+# gives ~5x margin over the measured worst case, more than the original
+# ~1.7x, without inventing a new number for this codebase to carry.
+#
+# The timeout is NOT moved. Latency is bound by tokens actually generated,
+# not by the ceiling: the capped and uncapped runs above produced
+# statistically the same completion_tokens and, observed informally during
+# the same measurement pass, the same response latency -- raising the cap
+# does not make the model write more, so 15.0s still holds. It stays under
+# _infer_jobs_via_llm's 20.0s for the original reason too: this call runs
+# AFTER job inference has already spent its own budget, and the turn should
 # not pay both in full.
-_EVAL_MAX_TOKENS = 256
+_EVAL_MAX_TOKENS = 512
 _EVAL_TIMEOUT_SECONDS = 15.0
 # Same 6000-char cap as _build_job_inference_prompt's transcript_preview. One
 # number, not two, so they cannot drift apart.
@@ -599,8 +646,10 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
 
     Mirror of _infer_jobs_via_llm with these deviations:
     - Returns None (abstain) rather than [] when call_llm is None.
-    - max_tokens=256, timeout=15.0 -- this call's OWN budgets, sized in
-      37-RESEARCH.md, not inherited from the job path.
+    - max_tokens=_EVAL_MAX_TOKENS (512), timeout=_EVAL_TIMEOUT_SECONDS (15.0)
+      -- this call's OWN budgets, not inherited from the job path. See the
+      constants' own comment (Phase 37, re-measured Phase 53-04) for the
+      sizing evidence.
     - Accepts a bare `null` response as a deliberate abstention, not an error.
     - CRITICALLY, and for the same reason as _infer_jobs_via_llm: NO `task=`
       kwarg. That is what keeps the call on the user's configured provider and
