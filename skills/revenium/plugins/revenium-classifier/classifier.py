@@ -685,6 +685,23 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
             raw = response.choices[0].message.content
         except AttributeError:
             raw = response["choices"][0]["message"]["content"]
+        # Phase 53-04 (Task 3, gap closure on 53-03's finding): diagnostic
+        # ONLY -- see _resolve_finish_reason's own docstring. 53-03 spent 85
+        # live sessions unable to tell a truncated response apart from a
+        # genuinely malformed one, because nothing at this call site ever
+        # looked at finish_reason; both collapsed into the same
+        # _EVAL_INVALID / rejected signature downstream. This branch changes
+        # NEITHER `raw` nor this function's return value -- a response
+        # object with no finish_reason at all falls through
+        # _resolve_finish_reason's own sentinel and this `if` is simply
+        # False, identical to before this change existed.
+        if _resolve_finish_reason(response) == _FINISH_REASON_LENGTH:
+            logger.warning(
+                "revenium-classifier: outcome evaluation response truncated "
+                "(finish_reason=length) for job=%s -- distinct from a "
+                "malformed response, see _EVAL_MAX_TOKENS",
+                (job or {}).get("agentic_job_id", ""),
+            )
         parsed = _parse_assessment_object(raw or "")
         if isinstance(parsed, dict):
             # Phase 45 (EGV-08, D-10/PA-07): unconditional -- overwrites
@@ -2272,6 +2289,57 @@ def _resolve_served_model(response) -> str:
         return PROVENANCE_MODEL_UNKNOWN
     except Exception:
         return PROVENANCE_MODEL_UNKNOWN
+
+
+# Phase 53-04 (Task 3, gap closure on 53-03's finding): the sentinel
+# _resolve_finish_reason falls back to when finish_reason is genuinely
+# absent, malformed, or the access itself raises. NOT one of the API's own
+# literal values ("stop", "length", "tool_calls", "content_filter",
+# "function_call"), so it can never collide with a real provider value.
+_FINISH_REASON_UNKNOWN = "unknown"
+# The one value this module's diagnostic actually branches on -- the
+# OpenAI-shaped literal a provider returns when generation was cut off by
+# max_tokens rather than stopping on its own.
+_FINISH_REASON_LENGTH = "length"
+
+
+def _resolve_finish_reason(response) -> str:
+    """Return response.choices[0].finish_reason, or the unknown sentinel.
+
+    DIAGNOSTIC ONLY (D-04/ROI-08 fail-open, same footing as
+    _resolve_served_model immediately above): this function's return value
+    is never fed into a control-flow decision anywhere outside a single
+    logging branch at its one call site (_evaluate_outcome_via_llm). It
+    does not change what that function returns, does not touch `raw`, and
+    is never attached to a persisted record.
+
+    Mirrors _resolve_served_model's exact shape -- dual object/dict access
+    (response.choices[0].finish_reason first, then
+    response["choices"][0]["finish_reason"] for a dict-shaped response),
+    the whole body inside one try/except returning the sentinel, so a
+    response object missing this attribute, or one where access itself
+    raises, falls straight through to the sentinel and changes nothing
+    about today's behavior. A response object that lacks finish_reason
+    entirely (a third-party evaluator, a stub, a future SDK shape) is
+    exactly the case this must survive without raising.
+    """
+    try:
+        reason = None
+        try:
+            reason = response.choices[0].finish_reason
+        except (AttributeError, IndexError, TypeError, KeyError):
+            if isinstance(response, dict):
+                try:
+                    reason = response["choices"][0]["finish_reason"]
+                except (KeyError, IndexError, TypeError):
+                    reason = None
+        if isinstance(reason, str):
+            reason = reason.strip()
+            if reason:
+                return reason
+        return _FINISH_REASON_UNKNOWN
+    except Exception:
+        return _FINISH_REASON_UNKNOWN
 
 
 def _resolve_reportability_status(
