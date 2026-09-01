@@ -151,7 +151,7 @@ Absent from `config.json` is the same as disabled.
 | `currency` | `"USD"` | ISO 4217. An assessment naming a different currency is rejected. |
 | `maxHoursSaved` | `40` | Upper bound on the estimated hours saved. |
 | `maxLoadedRate` | `500` | Upper bound on the assumed loaded hourly rate. |
-| `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. |
+| `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. **As of Phase 53 this flag alone is necessary but no longer sufficient** — see "Reporting the estimate's value" below for the record's evidence-class gate this flag now composes with. |
 | `studyId` | `""` | A non-empty string naming an `ImpactStudyResult` this install's job assessments reference. Recorded on every assessment this install produces; never changes an assessment's own `evidence_class` (EGV-13, D-08). |
 | `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. The pair is **all-or-none in both directions**: if either field is missing or malformed (a blank `studyId`, a non-integer or `< 1` `studyVersion`), both resolve to their absent defaults. A half-reference could never name a real `ImpactStudyResult`, so none is recorded. |
 | `costs` | `{}` | An object keyed by job type (EGV-14). Each job type's value is an object whose keys are drawn from the four `COST_CATEGORIES` names — `human_review`, `rework_or_error`, `handoff`, `training_or_change`. There is **no fleet-wide default bucket**: an absent job-type key means every category is unknown for that job type, exactly as if `costs` were absent entirely. A supplied `0` is knowledge and participates in the subtraction as a known zero; an absent category is unknown and does not participate (D-10) — these are different and both explicit. A malformed, non-numeric, boolean, or negative value resolves that category to unknown, never to zero. |
@@ -230,11 +230,44 @@ job-assessments sidecar, but its `reportability_status` resolves to `candidate`:
 arc still reports to Revenium, and provenance (`evidence_class`, `evaluator`,
 `evaluator_version`, `model`, and the version family) still ships in `--metadata`, but no
 bound, no `bounds_source`, and no `assumptions` cross the wire. The number stays on this
-machine. Set it to a literal JSON `true` and `reportability_status` resolves to `reportable`,
+machine. Set it to a literal JSON `true` and `reportability_status` resolves to `reportable`
+**only if the record's evidence class also clears the gate described below** —
 shipping the estimate exactly as the value flags and `--metadata` describe above. An
 abstained assessment is never `reportable`, whatever this key says. An operator-filed
 correction (`correct-assessment.sh`) always ships its value, regardless of this key,
 because a human explicitly authorizes it.
+
+#### The evidence-class gate on top of this flag (Phase 53, ROI-01)
+
+Turning `experimentalReportEstimates` on is **necessary but no longer
+sufficient** for a value to reach the wire. As of Phase 53, a record must
+also carry one of five permitted evidence classes: `ACTIVITY_MEASURED`,
+`OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`, `CUSTOMER_CONFIGURED`,
+`CUSTOMER_CONFIRMED`. A record whose evidence class is `MODEL_ESTIMATED_DEMO`
+— the class every naked-LLM evaluation produces — is refused, whatever this
+flag says.
+
+**Why:** `revenium jobs roi <id>`, the surface an operator actually reads a
+value on, carries no `evidence_class`, `evaluator`, or `confidence` — a
+model-estimated figure would render there with a measurement's visual weight.
+See [`docs/claim-distinctions-and-evidence-boundaries.md`](../../../docs/claim-distinctions-and-evidence-boundaries.md#the-product-truth-boundary)
+for the live finding, and [`docs/roi-read-surface-ask.md`](../../../docs/roi-read-surface-ask.md)
+for the standing ask this gate is a self-imposed substitute for.
+
+**The permitted set is a code constant, not a config key (D-02).** There is
+deliberately no field anywhere in `config.json` that widens it — an operator
+cannot turn `MODEL_ESTIMATED_DEMO` reportable by any combination of settings
+in this file. Widening the set requires a code change and review, not a
+configuration edit. This is intentional: a value-reporting gate an operator
+can configure away is not a gate.
+
+**If you turn `experimentalReportEstimates` on and see nothing reported,**
+this is why. The naked-LLM evaluator (`"evaluator": "llm"`, the default)
+always produces `MODEL_ESTIMATED_DEMO`, which this gate always refuses — no
+config change in this file makes that evaluator's output reportable. A value
+becomes reportable only when it is constituted by something other than a
+model — for example a `CUSTOMER_CONFIGURED` boundary — never by turning this
+flag on alone.
 
 ### Operator visibility (Phase 39, ROI-14)
 
