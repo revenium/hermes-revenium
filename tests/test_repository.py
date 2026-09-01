@@ -461,6 +461,10 @@ class RepositoryTests(unittest.TestCase):
             # The README's hero banner; pinned so deleting it fails the suite instead
             # of silently rendering a broken image on GitHub.
             ROOT / 'assets' / 'hermes-revenium.png',
+            # Phase 53-04 (gap closure on 53-03's finding) — the re-sized
+            # _EVAL_MAX_TOKENS regression guard and the finish_reason
+            # truncation-diagnostic's never-raises contract.
+            ROOT / 'tests' / 'test_phase53_evaluator_token_budget.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
