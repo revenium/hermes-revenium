@@ -439,7 +439,8 @@ class TestPhase38ReporterPath(unittest.TestCase):
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
                 # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
                 # reportable is no longer a record production can emit.
-                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
@@ -519,7 +520,8 @@ class TestPhase38ReporterPath(unittest.TestCase):
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
                 # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
                 # reportable is no longer a record production can emit.
-                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
@@ -740,7 +742,8 @@ class TestPhase38ReporterPath(unittest.TestCase):
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
                 # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
                 # reportable is no longer a record production can emit.
-                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
@@ -769,7 +772,8 @@ class TestPhase38ReporterPath(unittest.TestCase):
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
                 # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
                 # reportable is no longer a record production can emit.
-                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED'),
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         # CF-1: the genuine call site (kept on one line so it is grep-able
         # as a pair with the golden's own filename, closing the gap plan
@@ -1622,15 +1626,20 @@ class TestPhase38MultiTick(unittest.TestCase):
             )
             argv2 = outcome_inv2[0]
 
-            # D-08's meaning survives the deferral too: --outcome-value
-            # carries the LOW bound the sidecar held before tick 1.
-            self.assertIn(
-                '--outcome-value', argv2, f'expected --outcome-value in tick 2 argv: {argv2}',
-            )
-            self.assertEqual(
-                argv2[argv2.index('--outcome-value') + 1], str(on_disk_before['value_low']),
-                'the LOW bound must survive the deferral onto --outcome-value unchanged',
-            )
+            # Phase 53 (ROI-01): this record is built by the REAL constructor
+            # (_build_real_sidecar_record), so its evidence_class is the forced
+            # MODEL_ESTIMATED_DEMO of the naked-LLM path -- and the class gate
+            # withholds the value family from the wire for exactly that class.
+            #
+            # D-08's meaning is UNCHANGED and still asserted, just one level in:
+            # the sidecar on disk still holds the low bound across the deferral
+            # (`on_disk_before['value_low']` is compared to the post-retry
+            # on-disk record below). What this test is actually for -- that a
+            # deferred create followed by a retry does not lose or mutate the
+            # record -- is proven by the provenance sweep that follows, which is
+            # the stronger half and is untouched.
+            self.assertNotIn('--outcome-value', argv2, argv2)
+            self.assertNotIn('--outcome-currency', argv2, argv2)
 
             meta2 = json.loads(_metadata_of(argv2))
             for field in provenance_fields:
@@ -1927,7 +1936,14 @@ class TestPhase38Canary(unittest.TestCase):
     _P38_TRUNC_EVALUATOR_VERSION_CHARS = 16
     _P38_TRUNC_BOUNDS_SOURCE_CHARS = 16
     _P38_TRUNC_SOURCE_CHARS = 61
-    _P38_TRUNC_EVIDENCE_CLASS = 'QUASI_EXPERIMENTAL_IMPACT'
+    # Phase 53 (ROI-01): was QUASI_EXPERIMENTAL_IMPACT. That label is one of
+    # the three causal-impact classes -- undeclarable since Phase 50 and now
+    # refused by the value gate, so the reporter stripped the value family
+    # from this record, shrank it below the metadata ceiling, and the
+    # truncation path this canary exists to watch stopped firing at all.
+    # This sweep is about SIZE and truncation visibility, not evidence, so
+    # it needs a class that actually carries a value onto the wire.
+    _P38_TRUNC_EVIDENCE_CLASS = 'CUSTOMER_CONFIGURED'
 
     def tearDown(self):
         # _load_classifier touches REVENIUM_STATE_DIR/MARKERS_DIR/CONFIG_FILE

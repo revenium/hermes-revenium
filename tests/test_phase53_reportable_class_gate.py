@@ -289,9 +289,12 @@ class ReporterGateTests(unittest.TestCase):
         stripped. A branch that popped it would destroy provenance the
         milestone depends on.
         """
-        branch = self.source[self.source.index(
-            "elif _raw_evidence_class not in _REPORTABLE_EVIDENCE_CLASSES:"):]
-        branch = branch[:branch.index('# Phase 42 (C-04)')]
+        # Slice from the gate branch to the next top-level marker. Anchored on
+        # the `elif not _evidence_class_missing` spelling the branch actually
+        # uses -- an earlier draft anchored on a shorter form that stopped
+        # existing when the correction-path guard was added to it.
+        start = self.source.index('elif not _evidence_class_missing and (')
+        branch = self.source[start:start + 2000]
         self.assertIn('_strip_value_family(found)', branch)
         self.assertIn("_not_reportable_reason = 'evidence_class_not_reportable'",
                       branch)

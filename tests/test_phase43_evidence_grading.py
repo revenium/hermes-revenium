@@ -992,8 +992,35 @@ def _extract_frozenset_assignment_fragment(text, target_name):
     once, or if the isolated fragment does not parse as a single
     `NAME = frozenset({...})` assignment of string constants.
     """
+    # Phase 53 (ROI-01): anchored at LINE START. The bare substring anchor
+    # also matched any assignment whose name merely ENDS with target_name --
+    # `_REPORTABLE_EVIDENCE_CLASSES = frozenset({` contains
+    # `_EVIDENCE_CLASSES = frozenset({` -- so adding that sibling constant to
+    # hermes-report.sh made the anchor match twice and this extractor return
+    # None, failing the drift guard for a reason unrelated to drift. Requiring
+    # the name to begin a line makes the match mean "this top-level
+    # assignment", which is what it always intended. This TIGHTENS the guard;
+    # it does not loosen it.
     anchor = f'{target_name} = frozenset({{'
-    occurrences = [i for i in range(len(text)) if text.startswith(anchor, i)]
+    occurrences = [
+        i for i in range(len(text))
+        if text.startswith(anchor, i)
+        # WORD BOUNDARY, not line start. The bare substring anchor also matched
+        # any assignment whose name merely ENDS with target_name --
+        # `_REPORTABLE_EVIDENCE_CLASSES = frozenset({` contains
+        # `_EVIDENCE_CLASSES = frozenset({` -- so Phase 53 adding that sibling
+        # constant to hermes-report.sh made the anchor match twice and this
+        # extractor return None, failing the drift guard for a reason unrelated
+        # to drift.
+        #
+        # A line-start anchor (`\n` + name) was tried first and was WRONG: it
+        # missed `_ECONOMIC_MECHANISMS`, which is INDENTED inside a heredoc, and
+        # broke test_phase44's mechanism drift guard instead. Requiring the
+        # preceding character to be a non-identifier one fixes the collision
+        # without caring about indentation, which is the property actually
+        # wanted. This TIGHTENS the guard; it does not loosen it.
+        and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == '_'))
+    ]
     if len(occurrences) != 1:
         return None
     start = occurrences[0]
