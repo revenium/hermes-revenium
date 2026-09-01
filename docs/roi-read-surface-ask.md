@@ -26,6 +26,30 @@ are rendered with the exact same visual weight on that surface. A reader
 looking at `jobs roi` has no way to tell, from that screen alone, which kind
 of number they are looking at.
 
+## A second, distinct gap: a withheld value renders identically to a measured zero
+
+A second finding, independent of the missing-provenance gap above, surfaced
+2026-09-01 during Phase 53's live-tenant arm
+(`.planning/phases/53-value-on-the-wire/53-03-SUMMARY.md`, gitignored — this
+page is the durable record) and is repeated here so it does not depend on a
+planning artifact that can vanish.
+
+`revenium jobs roi <id>`'s **table** output renders a withheld/`null`
+`outcomeValue` as `"$0.00"`, and the derived `roi` field as `"0.00%"` —
+visually indistinguishable from a job that was genuinely measured and found
+to be worth exactly nothing. The **JSON** output does not have this problem:
+it correctly returns `"outcomeValue": null` and `"roi": null` for the same
+withheld record. This was observed against
+`implement_p53_ctrl_gcd_function_8404`, a real tenant row whose value the
+Phase 53 evidence-class gate correctly withheld (its `evidence_class` is
+the forced `MODEL_ESTIMATED_DEMO` constant — see "What this skill did about
+it" below).
+
+This compounds the first gap rather than duplicating it: even a reader who
+already knows to distrust a `jobs roi` figure with no `evidence_class` has
+no way, from the table alone, to tell "withheld by policy" apart from "priced
+at zero." Only the JSON form preserves that distinction today.
+
 ## What this skill did about it, instead of waiting
 
 Rather than hold value reporting off until a server-side change lands, Phase
@@ -69,6 +93,13 @@ And to match what `jobs outcome-history` already returns for the same job:
 Both outputs `jobs roi` currently produces — **JSON and table** — would need
 to carry these fields. A fix that lands only in JSON leaves the table view,
 which is what most people actually look at, exactly as opaque as it is today.
+
+Separately from the provenance fields above: the **table** renderer should
+distinguish a withheld/`null` `outcomeValue` (and the `roi` derived from it)
+from a genuinely measured zero, the way the JSON renderer already does. This
+does not require a new field — the JSON output already carries the correct
+`null` — only that the table formatter stop coercing `null` to `"$0.00"` /
+`"0.00%"` before display.
 
 ## What it would unlock
 
