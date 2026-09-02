@@ -700,7 +700,21 @@ def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | 
     rule `correct-assessment.sh`'s own `--attribution-fraction`/
     `--attribution-basis` flag pair enforces -- and a present fraction
     must be finite, non-boolean, and within `[0.0, 1.0]` inclusive at
-    both endpoints, or the entry abstains. When both validate, the
+    both endpoints, or the entry abstains.
+
+    A caveat on that inclusive `0.0`, so a reader does not mistake this
+    registrant's validation rule for the end-to-end outcome (IN-02, phase-54
+    code review): a fraction of exactly `0.0` is legal HERE and returns
+    `estimated_value == 0.0`, but the caller's lower-bound re-check applies
+    the strict third-party bound (`amount > 0`) to this registrant, so the
+    whole assessment then abstains. The `0.0` endpoint is therefore
+    validation-legal but not reachable as a persisted record through this
+    path. Left as-is deliberately: the strict bound for third-party
+    registrants is its own documented choice (see the CR-01 comment in
+    classifier.py), and a priced booking worth nothing is not a record
+    worth relaxing that bound to obtain.
+
+    When both validate, the
     returned `estimated_value` is `round(gross * fraction, 2)` -- the
     PRODUCT, computed in one expression at the point of return, never
     the gross under any key or in any diagnostic -- and the return dict

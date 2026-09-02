@@ -143,12 +143,17 @@ which together make EGV-02 closeable in Phase 50 rather than a permanent
 won't-fix; see `## The won't-fix trigger` for the conditions under which it
 would still close unbuilt.
 
-**EGV-05 — three economic mechanisms have no producer.**
-`quality_decision_improvement`, `risk_avoidance` and `incremental_revenue` are
-declared, accepted by the reporter's allow-list, and would forward on the wire,
-but nothing can set them: no configuration key, no CLI flag, and
-`correct-assessment.sh` does not assign a mechanism. The intended producer is a
-study reference (`studyId`/`studyVersion`).
+**EGV-05 — the operator-declared mechanisms had no producer.** As recorded at
+the close of phases 41-47 this was true of all three:
+`quality_decision_improvement`, `risk_avoidance` and `incremental_revenue` were
+declared and would forward on the wire, but nothing could set them. Two
+producers have since landed — `correct-assessment.sh --mechanism` (Phase 51)
+and a valuation registrant declaring one at registration (Phase 54, where the
+shipped `revenueCard` fixture declares `incremental_revenue`) — so the
+statement above stands only for `quality_decision_improvement` and
+`risk_avoidance`, whose intended producer remains a study reference
+(`studyId`/`studyVersion`). The evaluator still cannot select any of the three,
+which is deliberate rather than outstanding.
 
 ### Limits of what was demonstrated
 

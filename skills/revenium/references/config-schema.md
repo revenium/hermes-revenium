@@ -207,7 +207,7 @@ via `boundaries.valuation = "revenue_card_valuation_fixture"` together with
 | entry field | required | notes |
 |---|---|---|
 | `grossPerJob` | yes | A finite number greater than zero — the approved value per completed booking. |
-| `attributionFraction` | no | A finite number from 0 through 1, both endpoints legal. |
+| `attributionFraction` | no | A finite number from 0 through 1, both endpoints legal — but see the note on `0.0` below. |
 | `attributionBasis` | required whenever `attributionFraction` is present | The stated basis the fraction rests on, clamped to 500 serialized bytes. |
 
 `attributionFraction` and `attributionBasis` **travel as a set in both
@@ -221,6 +221,13 @@ gross figure itself reaches no persisted record, no `meter` argv, no
 `--metadata` envelope, and no log line. See `docs/value-and-roi.md`'s
 Attribution section for the full reasoning behind this narrow reversal of a
 prior decision (D-09).
+
+**A fraction of exactly `0.0` validates but produces no record.** It is legal
+input and the multiplication yields `0.00`, but a configured valuation is held
+to a strictly-positive lower bound, so the assessment then abstains. Nothing is
+misreported and no error is raised — the job simply reports its outcome with no
+value. If you mean "this work is attributed nothing", omitting the entry says
+so more clearly than a zero fraction does.
 
 Its honest limit, in the rate card's own sentence shape: **configuration
 establishes an approved value per completed booking, an operator policy, not
