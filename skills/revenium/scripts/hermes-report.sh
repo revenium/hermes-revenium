@@ -19,6 +19,12 @@ _LEGACY_COMPLETIONS_ENV_RAW="${REVENIUM_LEGACY_COMPLETIONS:-}"
 # diverge on the DATA each process's own startup sees (env/config.json at
 # two different instants), never on the CODE that resolves it.
 _EVENT_METERING_MODE_ENV_RAW="${REVENIUM_EVENT_METERING_MODE:-}"
+# Phase 55 (D-01): captured BEFORE `source common.sh` for the identical
+# reason as _EVENT_METERING_MODE_ENV_RAW above — common.sh's own
+# "${REVENIUM_AUX_METERING:-enabled}" declaration would destroy the
+# unset-versus-explicit distinction resolve_switch_setting needs to reach
+# config.json's "auxMetering" key.
+_AUX_METERING_ENV_RAW="${REVENIUM_AUX_METERING:-}"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/common.sh"
 
@@ -269,6 +275,22 @@ REVENIUM_LEGACY_COMPLETIONS_RESOLVED=$(printf '%s' "${_legacy_completions_resolu
 _legacy_completions_invalid=$(printf '%s' "${_legacy_completions_resolution}" | sed -n '2p')
 if [[ "${_legacy_completions_invalid}" == "true" ]]; then
   warn "REVENIUM_LEGACY_COMPLETIONS/legacyCompletions had an unrecognised value — falling back to 'enabled' (completions keep metering)."
+fi
+
+# Phase 55 (D-01): resolve the auxiliary-metering activation tunable, same
+# env > config.json ("auxMetering") > "enabled" default precedence as every
+# other closed-two-literal switch in this file. A typo must never silently
+# change billing behaviour, so an unrecognised value warns and falls back to
+# the default rather than failing closed or open silently.
+_aux_metering_resolution=$(resolve_switch_setting "${_AUX_METERING_ENV_RAW}" "auxMetering" "enabled" "enabled" "disabled")
+REVENIUM_AUX_METERING_RESOLVED=$(printf '%s' "${_aux_metering_resolution}" | sed -n '1p')
+_aux_metering_invalid=$(printf '%s' "${_aux_metering_resolution}" | sed -n '2p')
+if [[ "${_aux_metering_invalid}" == "true" ]]; then
+  warn "REVENIUM_AUX_METERING/auxMetering had an unrecognised value — falling back to 'enabled' (auxiliary usage keeps metering)."
+fi
+AUX_METERING_ENABLED="false"
+if [[ "${REVENIUM_AUX_METERING_RESOLVED}" == "enabled" ]]; then
+  AUX_METERING_ENABLED="true"
 fi
 
 DRAIN_GATE_DRAINED="false"
@@ -739,6 +761,488 @@ print(f"BASELINE={new_baseline}")
 PY
 }
 
+# Phase 55 (T-55-02/D-10): shared model-name cleaner. Extracted from the main
+# loop's own inline `python3 -c` call so the auxiliary pass (report_auxiliary_usage,
+# below) calls the EXACT same logic rather than duplicating it — D-10 (a later
+# plan) edits this function once, not two call sites. Converted from an
+# interpolated `python3 -c` string into a quoted `<<'PY'` heredoc receiving
+# MODEL through the environment, per CLAUDE.md's own heredoc rule: the prior
+# form interpolated a DB-sourced model string into a double-quoted `python3 -c`
+# argument, so a model name containing a single quote could escape into the
+# interpreter (T-55-02). Same prefix-strip tuple as before this extraction;
+# same fallback — on any failure, print the raw model unchanged.
+_clean_model_name() {
+  local model="$1"
+  MODEL="${model}" python3 - <<'PY' 2>/dev/null || printf '%s\n' "${model}"
+import os
+model = os.environ.get('MODEL', '')
+if '/' in model:
+    model = model.split('/', 1)[1]
+for prefix in ('global.', 'anthropic.', 'openai.', 'google.', 'x-ai.'):
+    if model.startswith(prefix):
+        model = model[len(prefix):]
+print(model)
+PY
+}
+
+# Phase 55 (T-55-02/D-10): shared provider inferrer, extracted from the main
+# loop's own inline `python3 -c` call for the same reason and via the same
+# environment-passing conversion as _clean_model_name above. Same
+# openrouter/litellm/bedrock branches, same fallback chain, same 'unknown'
+# default. Plan 02 (D-10) widened the short-circuit exclusion tuple with
+# 'auto': a billing_provider of literal "auto" (common on auxiliary rows
+# paired with a real base URL, per docs/internal/auxiliary-usage-sizing.md)
+# now falls through to model-name inference exactly as an empty/'none'/
+# 'unknown' value already did. Because this function is the ONE inference
+# path both the main loop (:2429) and the auxiliary pass (:1100) call, the
+# fix applies to both emit paths from this single edit -- there is no second
+# copy to keep in step. --model-source is UNCHANGED by this: it ships the
+# raw billing_provider column verbatim on both paths, so an `auto` row now
+# carries `--provider anthropic` and `--model-source auto` simultaneously
+# (deliberate asymmetry: --provider is the resolved analytics/guardrail
+# dimension, --model-source is the record of what Hermes actually declared).
+_infer_provider() {
+  local model="$1" billing="$2"
+  MODEL="${model}" BILLING="${billing}" python3 - <<'PY' 2>/dev/null || printf 'unknown\n'
+import os
+model = os.environ.get('MODEL', '').lower()
+billing = os.environ.get('BILLING', '').lower()
+if billing and billing not in ('', 'none', 'unknown', 'auto'):
+    if billing == 'openrouter' or 'litellm' in billing:
+        if 'claude' in model or 'anthropic' in model:
+            print('anthropic')
+        elif 'gpt' in model or 'o1' in model or 'o3' in model:
+            print('openai')
+        elif 'gemini' in model:
+            print('google')
+        elif 'grok' in model or 'x-ai' in model:
+            print('xai')
+        elif 'deepseek' in model:
+            print('deepseek')
+        else:
+            print(billing)
+    elif billing == 'bedrock':
+        if 'claude' in model:
+            print('anthropic')
+        else:
+            print('aws')
+    else:
+        print(billing)
+else:
+    if 'claude' in model or 'anthropic' in model:
+        print('anthropic')
+    elif 'gpt' in model or 'o1-' in model or 'o3-' in model:
+        print('openai')
+    elif 'gemini' in model:
+        print('google')
+    elif 'grok' in model or 'x-ai' in model:
+        print('xai')
+    elif 'deepseek' in model:
+        print('deepseek')
+    elif 'llama' in model or 'mistral' in model:
+        print('meta')
+    else:
+        print('unknown')
+PY
+}
+
+# Phase 55 Plan 02 (D-04/D-08/T-55-07/T-55-08): shared once-per-install gate
+# for AUX_WARN_FLAGS_DIR (common.sh), reused by BOTH the once-per-distinct-
+# unrecognised-task-value warn (report_auxiliary_usage below) and the
+# once-per-install permanent step-up notice -- one gating helper, not two,
+# matching the plan's own instruction to reuse rather than duplicate.
+#
+# The sanitised key is computed ONCE into a single local that BOTH the
+# existence check and the touch read (T-55-08's own rule: two copies of a
+# sanitizing expression drift, and when they do the gate silently never
+# matches one path while creating another). Every character outside
+# A-Za-z0-9_- is replaced with '_' and the result is clamped to 80 bytes
+# (T-55-07): a DB-sourced value reaching a filename must never be able to
+# smuggle a path separator or a traversal sequence out of AUX_WARN_FLAGS_DIR.
+#
+# raw_key must contain NOTHING that varies per tick -- a constant literal
+# ("notice-step-up") or a value stable across ticks (the unrecognised task
+# value itself). A key that changes every tick reproduces the
+# unknown-<epoch> defeat pre_llm_call.sh:73-115 already paid for once, where
+# the sentinel never matches and the line fires every call.
+#
+# Never returns non-zero: a failed mkdir/touch (e.g. a read-only state dir)
+# degrades to an un-gated warn on this call only, rather than aborting the
+# reporter -- matching OUTCOME_WARN_FLAGS_DIR's own tolerance.
+_aux_warn_once() {
+  local raw_key="$1" message="$2"
+  local sanitized_key="${raw_key//[^A-Za-z0-9_-]/_}"
+  sanitized_key="${sanitized_key:0:80}"
+  local flag_path="${AUX_WARN_FLAGS_DIR}/${sanitized_key}.flag"
+  if [[ ! -e "${flag_path}" ]]; then
+    mkdir -p "${AUX_WARN_FLAGS_DIR}" 2>/dev/null && touch "${flag_path}" 2>/dev/null
+    warn "${message}"
+  fi
+}
+
+# Phase 55 (D-06/D-07/D-13): the post-loop auxiliary-usage pass. Runs ONE
+# Python heredoc that reads session_model_usage (a table this file otherwise
+# never references), diffs it against AUX_LEDGER_FILE (common.sh), and prints one
+# pipe-delimited row per emittable auxiliary usage row. Bash then loops those
+# rows, ships each as its own `revenium meter completion --operation-type
+# AUX`, and appends a ledger line ONLY on a zero exit — matching this file's
+# never-batch, ledger-after-success discipline everywhere else.
+#
+# Called from main() AFTER the post-loop outcome stage and BEFORE the
+# cost-reconciliation block (Phase 31 D-06): an aux query or emit failure
+# here structurally cannot reach main-loop rows, because every main-loop row
+# has already been reported by the time this function runs.
+#
+# Argument: the accumulated aux_session_ctx string from the session loop
+# (one "sid|root_sid|root_agent_name|root_trace_type|aux_job_id|source" line
+# per session, see the aux_session_ctx append site near the root_aid resolution).
+# session_model_usage is the ONLY source for auxiliary rows, and this cache
+# is the ONLY way this post-loop pass can recover per-session attribution
+# without re-deriving it (duplicating the get-root-session-id.py sidecar
+# call and ~150 lines of root/trace/job resolution the session loop already
+# performed once per session).
+report_auxiliary_usage() {
+  local session_ctx="$1"
+
+  if [[ "${AUX_METERING_ENABLED}" != "true" ]]; then
+    return 0
+  fi
+
+  local aux_query_output
+  aux_query_output=$(
+    STATE_DB="${STATE_DB}" \
+    AUX_LEDGER_FILE="${AUX_LEDGER_FILE}" \
+    AUX_TAXONOMY_FILE="${AUX_TAXONOMY_FILE}" \
+    AUX_SESSION_CTX="${session_ctx}" \
+    python3 - <<'PY' 2>/dev/null
+import hashlib
+import json
+import os
+import sqlite3
+import time
+from datetime import datetime, timezone
+
+state_db = os.environ.get('STATE_DB', '')
+ledger_file = os.environ.get('AUX_LEDGER_FILE', '')
+taxonomy_file = os.environ.get('AUX_TAXONOMY_FILE', '')
+session_ctx_raw = os.environ.get('AUX_SESSION_CTX', '')
+
+
+def _sanitize(value):
+    value = value if isinstance(value, str) else str(value)
+    for bad in ('|', '\n', '\r'):
+        value = value.replace(bad, '_')
+    return value
+
+
+def _ts_or_now(value):
+    if value is None:
+        return time.time()
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return time.time()
+
+
+# Phase 55 (discretionary decision item 1): the session loop's own cache,
+# one line per session: sid|root_sid|root_agent_name|root_trace_type|
+# aux_job_id|source. Only sids present here are eligible for an aux row —
+# this is what confines a multiplexed host's aux pass to sessions its OWN
+# process's G-03-filtered loop iterated (T-55-06 mitigation).
+ctx = {}
+for _line in session_ctx_raw.split('\n'):
+    if not _line:
+        continue
+    _parts = _line.split('|')
+    if len(_parts) != 6:
+        continue
+    _sid, _root_sid, _root_agent, _root_trace, _aux_job, _source = _parts
+    ctx[_sid] = (_root_sid, _root_agent, _root_trace, _aux_job, _source)
+
+conn = None
+rows = []
+try:
+    conn = sqlite3.connect(state_db)
+    cur = conn.cursor()
+    # D-07: probe presence before querying. An install whose Hermes predates
+    # this table must meter byte-identically to today — the caller logs one
+    # info line naming this exact reason so "not supported here" is never
+    # indistinguishable from "nothing to report" (the trace-type
+    # uncategorized outage this repeats the mistake of, if silent).
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='session_model_usage'"
+    )
+    if cur.fetchone() is None:
+        print('AUX_TABLE_ABSENT')
+        raise SystemExit(0)
+
+    # D-14: session_model_usage counters are CUMULATIVE per six-column
+    # identity (confirmed UPSERT: ON CONFLICT ... DO UPDATE SET x = x +
+    # excluded.x), not append-only per-call rows — so this ledger subtracts
+    # the last-shipped counter rather than keying on per-row identity.
+    # COALESCE(task, '') != '' excludes the empty-task mirror bucket, whose
+    # summed tokens/cost equal the sessions table's totals to the cent on
+    # every profile (Phase 31 closure note) — an unfiltered read here would
+    # double-meter every already-reported main-loop token.
+    cur.execute(
+        "SELECT session_id, model, billing_provider, billing_base_url, "
+        "billing_mode, task, api_call_count, input_tokens, output_tokens, "
+        "cache_read_tokens, cache_write_tokens, estimated_cost_usd, "
+        "first_seen, last_seen "
+        "FROM session_model_usage "
+        "WHERE COALESCE(task, '') != '' "
+        "ORDER BY session_id, model, billing_provider, billing_base_url, "
+        "billing_mode, task"
+    )
+    rows = cur.fetchall()
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit(0)
+finally:
+    if conn is not None:
+        conn.close()
+
+try:
+    labels = json.load(open(taxonomy_file)).get('labels', {})
+except Exception:
+    labels = {}
+
+ledger_lines = []
+if ledger_file and os.path.exists(ledger_file):
+    try:
+        with open(ledger_file, 'r', encoding='utf-8') as fh:
+            ledger_lines = fh.readlines()
+    except OSError:
+        ledger_lines = []
+
+for row in rows:
+    try:
+        (sid, model, billing, base_url, mode, task, api_calls, in_tok,
+         out_tok, cr_tok, cw_tok, cost, first_seen, last_seen) = row
+
+        if sid not in ctx:
+            continue
+        c_root_sid, c_root_agent, c_root_trace, c_aux_job, c_source = ctx[sid]
+
+        # T-55-01: ONE sanitizer used for both the ledger-key construction
+        # AND the write below, so a smuggled pipe/newline/CR cannot forge or
+        # shadow another identity's line.
+        s_sid = _sanitize(sid)
+        s_model = _sanitize(model or '')
+        s_billing = _sanitize(billing or '')
+        s_base_url = _sanitize(base_url or '')
+        s_mode = _sanitize(mode or '')
+        s_task = _sanitize(task or '')
+
+        # Fixed-string, line-anchored, pipe-bounded match — never a
+        # colon-position parse (sid/model/base_url can each contain colons).
+        prefix = f"AUX:{s_sid}|{s_model}|{s_billing}|{s_base_url}|{s_mode}|{s_task}|"
+        prev_apic = prev_in = prev_out = prev_cr = prev_cw = 0
+        prev_cost = 0.0
+        for _existing in reversed(ledger_lines):
+            _existing = _existing.rstrip('\n')
+            if _existing.startswith(prefix):
+                _remainder = _existing[len(prefix):]
+                _rparts = _remainder.rsplit('|', 1)
+                if len(_rparts) == 2:
+                    _cparts = _rparts[0].split(',')
+                    if len(_cparts) == 6:
+                        try:
+                            prev_apic = int(_cparts[0])
+                            prev_in = int(_cparts[1])
+                            prev_out = int(_cparts[2])
+                            prev_cr = int(_cparts[3])
+                            prev_cw = int(_cparts[4])
+                            prev_cost = float(_cparts[5])
+                        except (TypeError, ValueError):
+                            pass
+                break
+
+        cur_apic = int(api_calls or 0)
+        cur_in = int(in_tok or 0)
+        cur_out = int(out_tok or 0)
+        cur_cr = int(cr_tok or 0)
+        cur_cw = int(cw_tok or 0)
+        try:
+            cur_cost = float(cost or 0)
+        except (TypeError, ValueError):
+            cur_cost = 0.0
+
+        delta_apic = max(0, cur_apic - prev_apic)
+        delta_in = max(0, cur_in - prev_in)
+        delta_out = max(0, cur_out - prev_out)
+        delta_cr = max(0, cur_cr - prev_cr)
+        delta_cw = max(0, cur_cw - prev_cw)
+        delta_cost = max(0.0, cur_cost - prev_cost)
+
+        if (delta_in + delta_out) <= 0:
+            continue
+
+        # D-08: a taxonomy miss NEVER drops the row -- only the label. The
+        # spend is real and must ship regardless of whether the DB's `task`
+        # value has a matching entry in aux-taxonomy.json (an upstream
+        # rename, or a genuinely new auxiliary call shape, must never
+        # silently under-report). The LABEL SHIPPED ON THE WIRE for a HIT is
+        # the taxonomy KEY itself ("aux_approval"), matching
+        # task-taxonomy.json's own shape where the classifier's task_type is
+        # the dict key, not a field inside its value. A MISS ships the fixed
+        # literal "aux_unclassified" instead -- deliberately NOT a member of
+        # aux-taxonomy.json itself (adding it there would make the miss
+        # unobservable), and deliberately NOT the raw DB value passed
+        # through unlabelled (an upstream rename would then silently turn
+        # one thing into two different wire labels instead of surfacing as
+        # one actionable warn -- see is_unclassified below, consumed by
+        # bash's once-per-distinct-value _aux_warn_once gate).
+        candidate_label = f"aux_{task}"
+        is_unclassified = candidate_label not in labels
+        label = candidate_label if not is_unclassified else 'aux_unclassified'
+
+        req_ts = _ts_or_now(first_seen)
+        resp_ts = _ts_or_now(last_seen)
+        request_time = datetime.fromtimestamp(req_ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        response_time = datetime.fromtimestamp(resp_ts, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        duration_ms = max(0, int((resp_ts - req_ts) * 1000))
+
+        # D-13: no hash enters the ledger KEY (a hash change would unmatch
+        # every existing line and re-ship everything). A digest DOES enter
+        # --transaction-id — a server-side dedup token with no such trap.
+        digest_src = '|'.join([s_sid, s_model, s_billing, s_base_url, s_mode, s_task])
+        digest = hashlib.sha256(digest_src.encode('utf-8')).hexdigest()[:12]
+
+        cum_group = f"{cur_apic},{cur_in},{cur_out},{cur_cr},{cur_cw},{cur_cost:.6f}"
+        cum_total = cur_in + cur_out
+
+        print('|'.join([
+            s_sid, s_model, s_billing, s_base_url, s_mode, s_task,
+            label, str(int(is_unclassified)),
+            str(delta_apic), str(delta_in), str(delta_out), str(delta_cr), str(delta_cw),
+            f"{delta_cost:.6f}",
+            cum_group, str(cum_total),
+            request_time, response_time, str(duration_ms),
+            sid, digest,
+            c_root_sid, c_root_agent, c_root_trace, c_aux_job, c_source,
+        ]))
+    except Exception:
+        continue
+PY
+  ) || aux_query_output=""
+
+  if [[ -z "${aux_query_output}" ]]; then
+    return 0
+  fi
+
+  if [[ "${aux_query_output}" == "AUX_TABLE_ABSENT" ]]; then
+    info "auxiliary usage metering skipped this tick: session_model_usage table not present on this Hermes install (predates auxiliary usage tracking) — main-loop metering is unaffected"
+    return 0
+  fi
+
+  local s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified
+  local d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total
+  local req_time resp_time dur_ms orig_sid digest
+  local ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source
+  while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified \
+    d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total \
+    req_time resp_time dur_ms orig_sid digest \
+    ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source; do
+    [[ -z "${s_sid}" ]] && continue
+
+    # D-08: gate to once per distinct unrecognised task value per install
+    # (_aux_warn_once, above). Fires independent of whether the emit below
+    # succeeds -- the label miss is a fact about the taxonomy vs. the DB
+    # value, not about the CLI call's outcome, so it is not gated on
+    # cmd_exit the way Task 3's step-up notice is.
+    if [[ "${is_unclassified}" == "1" ]]; then
+      _aux_warn_once "unknown-${s_task}" \
+        "auxiliary task value unrecognised: '${s_task}' (session=${orig_sid}) — add it to skills/revenium/aux-taxonomy.json; spend was still reported as aux_unclassified, only the label was dropped"
+    fi
+
+    local cmd=(
+      revenium meter completion
+      --model "$(_clean_model_name "${s_model}")"
+      --provider "$(_infer_provider "${s_model}" "${s_billing}")"
+      --input-tokens "${d_in}"
+      --output-tokens "${d_out}"
+      --cache-read-tokens "${d_cr}"
+      --cache-creation-tokens "${d_cw}"
+      --total-tokens "$((d_in + d_out))"
+      --stop-reason "END"
+      --request-time "${req_time}"
+      --completion-start-time "${req_time}"
+      --response-time "${resp_time}"
+      --request-duration "${dur_ms}"
+      --agent "${ctx_root_agent:-${REVENIUM_AGENT_NAME}}"
+      --transaction-id "aux-${orig_sid}-${cum_total}-${digest}"
+      --trace-id "${ctx_root_sid}"
+      --is-streamed
+      --quiet
+      --task-type "${label}"
+      --operation-type "AUX"
+    )
+
+    # Main path's own flag order: --model-source ships the row's RAW
+    # billing_provider — only --provider goes through inference.
+    if [[ -n "${s_billing}" ]]; then
+      cmd+=(--model-source "${s_billing}")
+    fi
+    if [[ "${d_cost}" != "0" && "${d_cost}" != "0.000000" && "${d_cost}" != "0.0" ]]; then
+      cmd+=(--total-cost "${d_cost}")
+    fi
+    if [[ -n "${ORG_NAME}" ]]; then
+      cmd+=(--organization-name "${ORG_NAME}")
+    fi
+    if [[ -n "${ctx_source}" ]]; then
+      cmd+=(--environment "${ctx_source}")
+    fi
+    if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
+      cmd+=(--trace-type "${ctx_root_trace:-uncategorized}")
+    fi
+    if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${ctx_aux_job}" ]]; then
+      cmd+=(--agentic-job-id "${ctx_aux_job}")
+    fi
+    if [[ "${SQUAD_CLI_CAPABLE}" == "true" ]]; then
+      cmd+=(--squad-id "${ctx_root_sid}")
+      cmd+=(--squad-name "${REVENIUM_SQUAD_NAME:-${ctx_root_agent:-${REVENIUM_AGENT_NAME}}}")
+      if [[ "${ctx_root_sid}" == "${orig_sid}" ]]; then
+        cmd+=(--squad-role "root")
+      else
+        cmd+=(--squad-role "subagent")
+      fi
+    fi
+
+    local cmd_output cmd_exit
+    cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
+
+    if [[ "${cmd_exit}" -eq 0 ]]; then
+      local aux_now_ts
+      aux_now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
+      echo "AUX:${s_sid}|${s_model}|${s_billing}|${s_base_url}|${s_mode}|${s_task}|${cum_group}|${aux_now_ts}" >> "${AUX_LEDGER_FILE}"
+      info "Aux reported: session=${orig_sid} label=${label} model=$(_clean_model_name "${s_model}") in=${d_in} out=${d_out}"
+
+      # D-04: the once-per-install permanent step-up notice, gated through
+      # the SAME _aux_warn_once helper Task 2's unrecognised-value warn uses
+      # (constant key "notice-step-up" — never a per-tick value). Placed
+      # HERE, inside the zero-exit branch, so it can only fire after a real
+      # successful emit: a notice about spend that was never reported would
+      # be a lie, and it shares this precondition with the ledger line
+      # directly above it rather than a second, looser one.
+      #
+      # This uses `warn`, not `info` (a deliberate deviation from
+      # CLAUDE.md's usual info/warn split, recorded in 55-02-PLAN.md's
+      # discretionary_decision): this is the one line telling an operator
+      # their effective budget just tightened permanently and that this
+      # tick's figure includes a one-time historical catch-up. In an info
+      # stream it would be lost among ordinary lifecycle lines; the whole
+      # point of D-04 is that it is not.
+      _aux_warn_once "notice-step-up" \
+        "auxiliary LLM usage (compression, title generation, vision, and similar background calls) is now metered, which permanently raises reported spend against unchanged traffic -- a guardrail threshold tuned before this upgrade may now trip earlier. This first tick also reports auxiliary usage accumulated before the upgrade, since the aux ledger started empty while the underlying counters are cumulative -- treat this tick's figure as a one-time historical catch-up, not a new baseline. To turn this off, set REVENIUM_AUX_METERING=disabled -- see docs/migration-auxiliary-usage.md for details."
+    else
+      # Never append a ledger line — the next tick retries.
+      warn "Aux failed: session=${orig_sid} label=${label} exit=${cmd_exit} output=${cmd_output}"
+    fi
+  done <<< "${aux_query_output}"
+}
+
 main() {
   info "=== Hermes Metering Reporter starting ==="
 
@@ -921,6 +1425,14 @@ PY
   # nothing in the metering decision path reads this variable -- it feeds
   # exactly one `info` reconciliation line in the end-of-run summary below.
   local attribution_rows=""
+  # Phase 55 (discretionary decision item 1): per-session attribution cache
+  # for the post-loop auxiliary pass (report_auxiliary_usage, called after
+  # this loop closes). One pipe-joined record per session:
+  # "sid|root_sid|root_agent_name|root_trace_type|aux_job_id|source",
+  # appended inside the session loop (see the aux_session_ctx append site near the
+  # root_aid resolution). Same fed-by-herestring, survives-in-this-shell
+  # discipline as attribution_rows immediately above.
+  local aux_session_ctx=""
   # quick-260813-wnz (LOG-01/D-02): fed by a herestring (`done <<< "${sessions}"`
   # at the loop's close below), NOT a pipe -- the loop body therefore runs in
   # THIS shell, so a counter incremented inside it survives to the aggregate
@@ -1326,16 +1838,34 @@ PY
     # subagent's own (orphan) m_owning_job_id. The next cron tick retries
     # idempotently once the root's job marker exists.
     local root_aid=""
+    # Phase 55 (D-13, discretionary decision item 3): resolved unconditionally
+    # (guard is now presence-only — see below) so the auxiliary pass can reach
+    # the session's own latest agentic_job_id without a second primitive.
+    # `aux_job_id` is set unconditionally from this resolution; `root_aid`
+    # keeps its EXACT pre-existing v1.3/Phase 22 value by re-gating the
+    # assignment on `root_sid != sid` immediately below, so every existing
+    # --agentic-job-id decision on the per-marker and markerless paths is
+    # byte-identical to before this change.
+    local aux_job_id=""
     # quick-260814-e7c (PERF-01, H4): bash mirror of the heredoc's own
     # `if marker_path.exists():` guard. The heredoc prints only inside
     # `if marker_path.exists():` -> `try:` -> `if latest_aid:`; with no file
-    # it prints nothing, root_aid stays "" (already its `local` default),
+    # it prints nothing, resolved_aid stays "" (already its `local` default),
     # and the trailing strip of "" is "". Uses `-e` for predicate fidelity
     # with `exists()`, though here the directory case converges either way —
     # `open()` on a directory raises `OSError`, caught, nothing printed — so
     # `-e` is chosen for consistency with H2, not necessity.
-    if [[ "${root_sid}" != "${sid}" && -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then
-      root_aid=$(
+    #
+    # Phase 55 (D-13): the guard's original `root_sid != sid` clause is
+    # DROPPED — presence-only now — so a top-level session (root_sid == sid)
+    # also resolves resolved_aid from its own marker file (the same file
+    # session_markers_dir/root_markers_dir already point at when they are
+    # equal). This gives the aux row the session's own latest kind:"job"
+    # agentic_job_id for a root session, and the root's for a subagent — the
+    # Phase 22/29 rule honoured, not re-invented.
+    local resolved_aid=""
+    if [[ -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then
+      resolved_aid=$(
         ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null || true
 import json, os
 from pathlib import Path
@@ -1373,7 +1903,57 @@ else:
 PY
       )
       # Strip any trailing newline/whitespace the heredoc emitted.
-      root_aid="${root_aid%%$'\n'*}"
+      resolved_aid="${resolved_aid%%$'\n'*}"
+    fi
+    if [[ "${root_sid}" != "${sid}" ]]; then
+      root_aid="${resolved_aid}"
+    fi
+    aux_job_id="${resolved_aid}"
+
+    # Phase 55 (discretionary decision item 1): cache this session's
+    # per-session attribution context for the auxiliary pass, which runs
+    # AFTER this whole session loop closes and therefore cannot re-derive
+    # these values without duplicating the get-root-session-id.py sidecar
+    # call and ~150 lines of root/trace/job resolution this loop already
+    # performs once per session. Newline-accumulated-string idiom (the same
+    # one attribution_rows/LEGACY_RETAINED_SIDS/outcome_deferred_seen already
+    # use in this file) rather than a bash-4 associative array — this repo is
+    # bash-3.2-constrained (setup-guardrails.sh states it explicitly) and
+    # contains no bash-4-only associative arrays anywhere.
+    #
+    # Placement is load-bearing: this append sits ABOVE both the zero-delta
+    # `continue` and the legacy/ownership emit guard further down this same
+    # loop iteration, so a session that would be skipped or suppressed by
+    # either of those STILL gets cached here — session_model_usage is the
+    # ONLY source for its auxiliary rows, so skipping the cache would lose
+    # that spend permanently, not just defer it. `source` is populated
+    # earlier in this same iteration (the sessions query column), consumed
+    # here as ctx_source by report_auxiliary_usage as the --environment value.
+    #
+    # Phase 55 Plan 03 (T-55-06): gated on session_markers_dir (already
+    # resolved above, no re-derivation) matching THIS process's own
+    # MARKERS_DIR. A multiplexed host can run one cron tick per profile, each
+    # with its own REVENIUM_STATE_DIR, against sessions/session_model_usage
+    # tables that carry namespaced `agent:<profile>:...` ids with no
+    # profile-scoping WHERE clause -- every tick sees every profile's rows.
+    # resolve_markers_dir routes a namespaced sid to the markers directory
+    # its OWN profile owns, independent of which process is asking; when that
+    # owning directory is NOT this process's own MARKERS_DIR, the session
+    # belongs to (and will be correctly reported by) a DIFFERENT profile's own
+    # tick, so this process must not cache it for its auxiliary pass --
+    # AUX_LEDGER_FILE has no cross-profile coordination of its own (each
+    # profile keeps its own ledger), so caching here would double-ship. A
+    # session with no `agent:<profile>:` prefix (every existing install
+    # today) always resolves session_markers_dir to MARKERS_DIR, so this
+    # guard is a no-op everywhere except a genuinely namespaced multiplex
+    # deployment.
+    if [[ "${session_markers_dir}" == "${MARKERS_DIR}" ]]; then
+      local _aux_ctx_sid="${sid//[|$'\n'$'\r']/_}"
+      local _aux_ctx_root_sid="${root_sid//[|$'\n'$'\r']/_}"
+      local _aux_ctx_root_agent_name="${root_agent_name//[|$'\n'$'\r']/_}"
+      local _aux_ctx_aux_job_id="${aux_job_id//[|$'\n'$'\r']/_}"
+      local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
+      aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}"$'\n'
     fi
 
     # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.
@@ -1946,56 +2526,8 @@ else:
     fi
 
     local clean_model provider
-    clean_model=$(python3 -c "
-model = '${model}'
-if '/' in model:
-    model = model.split('/', 1)[1]
-for prefix in ('global.', 'anthropic.', 'openai.', 'google.', 'x-ai.'):
-    if model.startswith(prefix):
-        model = model[len(prefix):]
-print(model)
-" 2>/dev/null || echo "${model}")
-
-    provider=$(python3 -c "
-model = '${model}'.lower()
-billing = '${billing_provider}'.lower()
-if billing and billing not in ('', 'none', 'unknown'):
-    if billing == 'openrouter' or 'litellm' in billing:
-        if 'claude' in model or 'anthropic' in model:
-            print('anthropic')
-        elif 'gpt' in model or 'o1' in model or 'o3' in model:
-            print('openai')
-        elif 'gemini' in model:
-            print('google')
-        elif 'grok' in model or 'x-ai' in model:
-            print('xai')
-        elif 'deepseek' in model:
-            print('deepseek')
-        else:
-            print(billing)
-    elif billing == 'bedrock':
-        if 'claude' in model:
-            print('anthropic')
-        else:
-            print('aws')
-    else:
-        print(billing)
-else:
-    if 'claude' in model or 'anthropic' in model:
-        print('anthropic')
-    elif 'gpt' in model or 'o1-' in model or 'o3-' in model:
-        print('openai')
-    elif 'gemini' in model:
-        print('google')
-    elif 'grok' in model or 'x-ai' in model:
-        print('xai')
-    elif 'deepseek' in model:
-        print('deepseek')
-    elif 'llama' in model or 'mistral' in model:
-        print('meta')
-    else:
-        print('unknown')
-" 2>/dev/null || echo "unknown")
+    clean_model="$(_clean_model_name "${model}")"
+    provider="$(_infer_provider "${model}" "${billing_provider}")"
 
     local request_time response_time duration_ms
     local last_report_ts=""
@@ -4256,6 +4788,13 @@ PY
       warn "legacy declined to claim ${claim_abstained_count} session(s) this tick — emission is suppressed for them and neither ledger holds rows, and the event path is NOT live, so nobody will claim or bill them this tick. Recovery is bounded, not permanent: flip REVENIUM_EVENT_METERING_MODE=live (recovers from the event spool, bounded by REVENIUM_MARKER_RETENTION_DAYS from each session's last event, only when the manual pruner has been run) or set REVENIUM_LEGACY_COMPLETIONS=enabled (recovers from state.db, which this skill never prunes). Do not wait on this — act on one of the two remedies."
     fi
   fi
+
+  # Phase 55 (D-06): the post-loop auxiliary-usage pass. Placement is
+  # load-bearing: after the outcome stage (every JOB:<id>:created: line this
+  # tick could write already exists, so aux rows can reach --agentic-job-id)
+  # and before the cost-reconciliation block below, so an aux query or emit
+  # failure structurally cannot reach main-loop rows.
+  report_auxiliary_usage "${aux_session_ctx}"
 
   # Phase 44 Plan 04 (EGV-17/D-15): one per-tick reconciliation line naming
   # the classified/unclassified/unallocated cost totals, built by

@@ -1,0 +1,46 @@
+{
+  "labels": {
+    "aux_approval": {
+      "description": "Auxiliary LLM calls that decide whether a proposed tool use is approved — measured fleet-wide as the dominant auxiliary cost contributor (95.83% of auxiliary cost on the sizing sample), not an afterthought to the other five labels",
+      "examples": [
+        "should this tool call be allowed to run",
+        "evaluate this pending action against policy"
+      ]
+    },
+    "aux_title_generation": {
+      "description": "Auxiliary LLM calls that generate a short session or conversation title",
+      "examples": [
+        "generate a title for this session",
+        "summarize this conversation in a few words"
+      ]
+    },
+    "aux_compression": {
+      "description": "Auxiliary LLM calls that compress or summarize prior context to free up window space",
+      "examples": [
+        "compress this transcript",
+        "summarize the earlier turns to save context"
+      ]
+    },
+    "aux_vision": {
+      "description": "Auxiliary LLM calls that process image or visual input",
+      "examples": [
+        "describe what is in this screenshot",
+        "extract text from this image"
+      ]
+    },
+    "aux_web_extract": {
+      "description": "Auxiliary LLM calls that extract structured content from fetched web pages",
+      "examples": [
+        "pull the relevant section out of this page",
+        "extract the article body from this HTML"
+      ]
+    },
+    "aux_session_search": {
+      "description": "Auxiliary LLM calls that search across prior sessions or history",
+      "examples": [
+        "find the earlier session where this was discussed",
+        "search past conversations for this topic"
+      ]
+    }
+  }
+}

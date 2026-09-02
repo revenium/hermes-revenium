@@ -473,6 +473,41 @@ class RepositoryTests(unittest.TestCase):
             # selector key that refuses to guess from model output or
             # dict order.
             ROOT / 'tests' / 'test_phase54_revenue_valuation_boundary.py',
+            # Phase 55 Plan 01 (ROI-09/ROI-11) — the fixed six-label
+            # auxiliary-usage vocabulary. Read from the skill directory and
+            # NEVER copied into STATE_DIR (D-07) -- deleting it silently
+            # degrades every auxiliary row's --task-type to a taxonomy miss
+            # (skipped with no emit, in this plan; the aux_unclassified
+            # fallback lands in Plan 02).
+            SKILL / 'aux-taxonomy.json',
+            # Phase 55 Plan 01 — the auxiliary-usage metering tracer: one
+            # session_model_usage row end to end to a metered
+            # --operation-type AUX row and an AUX: ledger line.
+            ROOT / 'tests' / 'test_phase55_auxiliary_metering.py',
+            # Phase 55 Plan 02 (ROI-09/ROI-10) — the three edges the tracer
+            # deliberately left open: the `auto` provider resolution
+            # (globally, via the one shared _infer_provider function), the
+            # aux_unclassified fallback + its once-per-distinct-value warn,
+            # and the once-per-install permanent step-up notice.
+            ROOT / 'tests' / 'test_phase55_aux_edges.py',
+            # Phase 55 Plan 03 (ROI-09/ROI-10/ROI-11) — the D-15 adversarial
+            # mirror-bucket proof with positive control, the cross-profile
+            # arm (T-55-06), the multi-tick idempotency arm, the seven edge
+            # predicates, and the ROI-10 scope-parity assertion.
+            ROOT / 'tests' / 'test_phase55_aux_proofs.py',
+            # Phase 55 Plan 03 (D-02) — the auxiliary path's own argv-shape
+            # golden, additive to (not part of) the v1.x immutability
+            # contract, and its runner.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-aux.golden.json',
+            ROOT / 'tests' / 'test_compat_meter_completion_aux.py',
+            # Phase 55 Plan 04 (D-03) — the tracked operator record for the
+            # auxiliary-usage step-up. docs/internal/ is gitignored, and an
+            # unpinned copy of this document can vanish exactly the way the
+            # sizing measurement and the v1.3/v1.4 closeouts did -- deleting
+            # this file must turn the suite red, not silently repeat that
+            # loss.
+            ROOT / 'docs' / 'migration-auxiliary-usage.md',
+            ROOT / 'tests' / 'test_phase55_aux_docs.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -962,7 +997,11 @@ exit 0
                           'the report must reach its own end marker')
 
             # Read-only without --tick: no ledger, no log, no shipped data.
-            for artifact in ('revenium-hermes.ledger', 'revenium-metering.log'):
+            # revenium-aux.ledger added (Phase 55 Plan 04, T-55-15): a future
+            # edit that makes the auxiliary section touch its own ledger
+            # must fail here, not in production.
+            for artifact in ('revenium-hermes.ledger', 'revenium-metering.log',
+                              'revenium-aux.ledger'):
                 self.assertFalse(
                     os.path.exists(os.path.join(state, artifact)),
                     f'diagnose.sh created {artifact} — a diagnostic must not mutate '
@@ -2382,6 +2421,63 @@ exit 0
             'JOB_ASSESSMENTS_DIR must be in the eager mkdir -p — it is a '
             'first-class spool like EVENT_SPOOL_DIR, always present',
         )
+        # Phase 55 (D-13): the auxiliary-usage ledger gets its own key
+        # domain, in the shape of the EVENT_LEDGER_FILE block above.
+        self.assertIn('AUX_LEDGER_FILE=', text)
+        self.assertIn('revenium-aux.ledger', text)
+        self.assertRegex(
+            text,
+            r'AUX_LEDGER_FILE="\$\{REVENIUM_AUX_LEDGER_FILE:-\$\{STATE_DIR\}/revenium-aux\.ledger\}"',
+        )
+        # Phase 55 (D-05/D-07): the fixed six-label auxiliary vocabulary
+        # resolves under SKILL_DIR, NEVER STATE_DIR -- unlike
+        # TAXONOMY_FILE/JOB_TAXONOMY_FILE, this is a fixed vocabulary the
+        # reporter only reads, not one the classifier grows, and a
+        # skill-dir read cannot inherit the tap-install seeding gap that
+        # leaves TAXONOMY_FILE empty on bootstrap hosts. This is the
+        # assertion that makes a later "fix" into the seeded-taxonomy shape
+        # fail loudly.
+        self.assertIn('AUX_TAXONOMY_FILE=', text)
+        self.assertIn('aux-taxonomy.json', text)
+        self.assertRegex(
+            text,
+            r'AUX_TAXONOMY_FILE="\$\{REVENIUM_AUX_TAXONOMY_FILE:-\$\{SKILL_DIR\}/aux-taxonomy\.json\}"',
+        )
+        self.assertNotIn('STATE_DIR}/aux-taxonomy.json', text)
+        # Phase 55 (D-01): the activation tunable defaults ON. A silent
+        # flip of the default to "disabled" -- the exact failure this
+        # milestone opened by naming -- must turn this suite red.
+        self.assertIn('REVENIUM_AUX_METERING=', text)
+        self.assertRegex(
+            text,
+            r'REVENIUM_AUX_METERING="\$\{REVENIUM_AUX_METERING:-enabled\}"',
+        )
+        # None of the three new AUX_ declarations belong in the eager
+        # mkdir -p -- AUX_LEDGER_FILE is append-only (created by its first
+        # writer, like the other ledgers) and AUX_TAXONOMY_FILE/
+        # REVENIUM_AUX_METERING are not directories at all.
+        for ln in mkdir_lines:
+            self.assertNotIn('AUX_', ln,
+                             'no AUX_ variable belongs in the eager mkdir -p line')
+        # Phase 55 Plan 02 (D-04/D-08): AUX_WARN_FLAGS_DIR, the fifth
+        # sentinel directory in the WARN_FLAGS_DIR family. Created lazily by
+        # its writer (_aux_warn_once) -- deliberately absent from the eager
+        # mkdir -p, reusing the SAME mkdir_lines list computed above rather
+        # than recomputing it, matching every other lazily-created sentinel
+        # directory's own assertion shape in this method.
+        self.assertIn('AUX_WARN_FLAGS_DIR=', text)
+        self.assertIn('markers/.aux-warn', text)
+        self.assertRegex(
+            text,
+            r'AUX_WARN_FLAGS_DIR="\$\{REVENIUM_AUX_WARN_FLAGS_DIR:-\$\{MARKERS_DIR\}/\.aux-warn\}"',
+        )
+        for ln in mkdir_lines:
+            self.assertNotIn(
+                'AUX_WARN_FLAGS_DIR', ln,
+                'AUX_WARN_FLAGS_DIR must NOT be in the eager mkdir -p -- an '
+                'install that never meters an auxiliary row must create no '
+                'auxiliary warn state at all',
+            )
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
@@ -15939,15 +16035,17 @@ exit 0
     def test_trace_type_wired_in_both_emit_paths_behind_capability_gate(self):
         # quick-260625-mlc (TRACE-TYPE-01): --trace-type must be probed once,
         # resolved once-per-session to the root job type (fallback "uncategorized"),
-        # and appended in BOTH emit paths behind the capability gate — without ever
+        # and appended in every emit path behind the capability gate — without ever
         # leaking into --transaction-id (idempotency invariant).
         text = (SKILL / 'scripts' / 'hermes-report.sh').read_text()
         # Capability probe exists and greps the CLI help for the flag.
         self.assertIn('TRACE_TYPE_CLI_CAPABLE', text)
         self.assertIn('meter completion --help', text)
         self.assertIn('--trace-type', text)
-        # Appended in exactly two cmd+= sites (per-marker + zero-marker).
-        self.assertEqual(text.count('cmd+=(--trace-type'), 2)
+        # Appended in exactly three cmd+= sites: per-marker, zero-marker
+        # (markerless), and (Phase 55) the post-loop auxiliary pass —
+        # reusing the SAME cached capability boolean, never re-probed.
+        self.assertEqual(text.count('cmd+=(--trace-type'), 3)
         # Resolved once-per-session with the literal hard fallback.
         self.assertIn('root_trace_type', text)
         self.assertIn('uncategorized', text)

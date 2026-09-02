@@ -156,6 +156,33 @@ is populated from the spooled event's `response_model` field rather than its
 `model` field — the source of the multi-model attribution the legacy path's
 session-level `model` column could not resolve.
 
+## meter-completion-aux.golden.json — the auxiliary-usage path's own contract (Phase 55)
+
+- **meter-completion-aux.golden.json** — an eighth fixture, added in Phase 55
+  Plan 03 (D-02), pinning the `revenium meter completion --operation-type AUX`
+  argv shape shipped by `report_auxiliary_usage`, the post-loop auxiliary-usage
+  pass in `skills/revenium/scripts/hermes-report.sh` (Phase 55 Plan 01,
+  D-06/D-07/D-13). Loaded by `tests/test_compat_meter_completion_aux.py`.
+
+This fixture is **additive** to the v1.x contract above, not a replacement for
+it, and is **NOT** part of the immutability contract or the v1.4 umbrella
+meta suite (`tests/test_compat_v1_4_meta.py`) — that suite's identifier is the
+milestone-level acceptance gate for the *legacy* (cron-reconstructed) wire
+shape specifically. The auxiliary path is a second, additive argv shape that
+ships alongside the main-loop completion for the same session, on its own
+`--operation-type` and its own ledger (`revenium-aux.ledger`). The four v1.x
+fixtures above remain immutable and untouched by this fixture's existence.
+
+It pins the auxiliary path's own deliberate differences from the legacy
+main-loop shape as required *presences*/*patterns* in `exact_match_fields` /
+`pattern_fields`: `--operation-type AUX` (never `CHAT`), an `aux_`-prefixed
+`--task-type` (e.g. `aux_approval`), and a `--transaction-id` carrying the
+`aux-` prefix (pinned by regex, since it also embeds the session id and a
+cumulative-counter-derived digest that vary per row). It also asserts a
+required *absence* in `forbidden_fields`: `--reasoning-tokens`, which neither
+the main-loop nor the auxiliary emit path ships — its appearance on either
+would be a silent parity break.
+
 ## v1.4 subagent inheritance — orthogonal to top-level compat
 
 v1.4 (Phases 21-23) adds subagent `--trace-id` + `--agentic-job-id`

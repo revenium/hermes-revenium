@@ -113,6 +113,14 @@ PRE_MARKERS="$(count "${_probe_state}/markers")"
 PRE_READY="$(count "${_probe_state}/markers/.ready")"
 PRE_TOOL_EVENTS="$(count "${_probe_state}/tool-events")"
 
+# Captured BEFORE common.sh's own "${REVENIUM_AUX_METERING:-enabled}"
+# declaration overwrites the variable — same reason hermes-report.sh captures
+# _AUX_METERING_ENV_RAW ahead of its own `source common.sh` (Phase 55 D-01):
+# the unset-versus-explicit distinction is what tells section 10 below
+# whether the tunable's resolved value came from the environment or fell
+# through to config.json / the default.
+_AUX_METERING_ENV_RAW="${REVENIUM_AUX_METERING:-}"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 source "${SCRIPT_DIR}/common.sh"
@@ -163,6 +171,9 @@ hr "3. LEDGERS (what has already shipped)"
 printf '%-30s %s lines\n' "revenium-hermes.ledger"      "$(lines "${LEDGER_FILE}")"
 printf '%-30s %s lines\n' "revenium-jobs.ledger"        "$(lines "${JOBS_LEDGER_FILE}")"
 printf '%-30s %s lines\n' "revenium-tool-events.ledger" "$(lines "${TOOL_EVENTS_LEDGER_FILE}")"
+# basename derived at runtime rather than a hardcoded literal — the path
+# string itself lives only in common.sh's AUX_LEDGER_FILE declaration.
+printf '%-30s %s lines\n' "$(basename "${AUX_LEDGER_FILE}")" "$(lines "${AUX_LEDGER_FILE}")"
 echo "--- last 3 completion ledger lines ---"
 tail -3 "${LEDGER_FILE}" 2>/dev/null || echo "(none)"
 
@@ -339,8 +350,108 @@ echo "      they land wherever Hermes' own logging is configured. This report"
 echo "      cannot show them; it can only tell you where to look."
 
 # ---------------------------------------------------------------------------
+hr "10. AUXILIARY USAGE PASS"
+# Read-only, matching the file's whole posture: every sqlite3 call below is a
+# SELECT, config.json is only read, and AUX_WARN_FLAGS_DIR is tested for, not
+# created — the diagnostic must never write the auxiliary state it reports on
+# (Phase 55 T-55-15).
+
+# --- tunable state and its source (Phase 55 D-01) ---
+# Mirrors hermes-report.sh's own env > config.json ("auxMetering") > default
+# precedence via the SAME resolve_switch_setting helper common.sh defines,
+# rather than a second, possibly-diverging copy of that precedence logic.
+_aux_cfg_raw=""
+if [[ -z "${_AUX_METERING_ENV_RAW}" && -f "${CONFIG_FILE}" ]]; then
+  _aux_cfg_raw=$(CONFIG_FILE="${CONFIG_FILE}" python3 - <<'PY' 2>/dev/null
+import json, os
+try:
+    v = json.load(open(os.environ["CONFIG_FILE"])).get("auxMetering", "")
+    print(v if isinstance(v, str) else "")
+except Exception:
+    print("")
+PY
+)
+fi
+if [[ -n "${_AUX_METERING_ENV_RAW}" ]]; then
+  _aux_source="environment REVENIUM_AUX_METERING=${_AUX_METERING_ENV_RAW}"
+elif [[ -n "${_aux_cfg_raw}" ]]; then
+  _aux_source="config.json auxMetering=${_aux_cfg_raw}"
+else
+  _aux_source="default (neither set)"
+fi
+_aux_resolution="$(resolve_switch_setting "${_AUX_METERING_ENV_RAW}" "auxMetering" "enabled" "enabled" "disabled")"
+_aux_resolved="$(printf '%s' "${_aux_resolution}" | sed -n '1p')"
+_aux_invalid="$(printf '%s' "${_aux_resolution}" | sed -n '2p')"
+echo "tunable:             ${_aux_resolved}  (source: ${_aux_source})"
+if [[ "${_aux_invalid}" == "true" ]]; then
+  echo "                     !! unrecognised raw value — falls back to 'enabled'"
+fi
+
+# --- table presence and, when present, the aux/mirror row split ---
+if [[ -f "${STATE_DB}" ]]; then
+  _aux_table_exists="$(sqlite3 "${STATE_DB}" \
+    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='session_model_usage';" 2>&1)"
+  if [[ "${_aux_table_exists}" == "1" ]]; then
+    echo "session_model_usage: present"
+    echo "--- row counts: auxiliary (task != '') vs. main-loop mirror (task = '') ---"
+    sqlite3 -header -column "${STATE_DB}" \
+      "SELECT
+         (SELECT COUNT(*) FROM session_model_usage WHERE task != '') AS aux_rows,
+         (SELECT COALESCE(SUM(estimated_cost_usd),0) FROM session_model_usage WHERE task != '') AS aux_cost,
+         (SELECT COUNT(*) FROM session_model_usage WHERE task = '') AS mirror_rows,
+         (SELECT COALESCE(SUM(estimated_cost_usd),0) FROM session_model_usage WHERE task = '') AS mirror_cost;" 2>&1
+    echo "NOTE: mirror_rows/mirror_cost duplicate the sessions table's own totals --"
+    echo "      a near-100% aux share here means a query omitted the task != '' filter."
+    echo "--- top task values by row count ---"
+    sqlite3 -header -column "${STATE_DB}" \
+      "SELECT task, COUNT(*) AS rows, COALESCE(SUM(estimated_cost_usd),0) AS cost
+       FROM session_model_usage WHERE task != '' GROUP BY task ORDER BY rows DESC LIMIT 6;" 2>&1
+  else
+    echo "session_model_usage: table absent — this Hermes build predates auxiliary accounting"
+  fi
+else
+  echo "!! no state.db at ${STATE_DB} — Hermes has not run here."
+fi
+
+# --- taxonomy vocabulary ---
+if [[ -f "${AUX_TAXONOMY_FILE}" ]]; then
+  _aux_tax_count="$(AUX_TAXONOMY_FILE="${AUX_TAXONOMY_FILE}" python3 - <<'PY' 2>/dev/null
+import json, os
+try:
+    with open(os.environ["AUX_TAXONOMY_FILE"]) as fh:
+        d = json.load(fh)
+    # Count the LABELS, not the root keys. aux-taxonomy.json is
+    # {"labels": {...}} — a single root key — so len(d) reports 1 for every
+    # healthy install, which is exactly backwards for a diagnostic an
+    # operator reads to confirm the full vocabulary is present.
+    print(len(d.get("labels", {})) if isinstance(d, dict) else 0)
+except Exception:
+    print("(unreadable)")
+PY
+)"
+  echo "aux-taxonomy.json:   ${AUX_TAXONOMY_FILE} (${_aux_tax_count:-(unreadable)} labels)"
+else
+  echo "aux-taxonomy.json:   (absent) at ${AUX_TAXONOMY_FILE}"
+fi
+
+# --- sentinel flags: which unrecognised values / notices have already fired ---
+# Tested for, never created — creating it here would be this diagnostic
+# mutating the exact state it exists to report on.
+echo "--- sentinel flags (markers/.aux-warn) ---"
+if [[ -d "${AUX_WARN_FLAGS_DIR}" ]]; then
+  _aux_warn_list="$(ls -1 "${AUX_WARN_FLAGS_DIR}" 2>/dev/null)"
+  if [[ -n "${_aux_warn_list}" ]]; then
+    echo "${_aux_warn_list}"
+  else
+    echo "(none)"
+  fi
+else
+  echo "(absent)"
+fi
+
+# ---------------------------------------------------------------------------
 if [[ "${TICK}" == "true" ]]; then
-  hr "10. ONE REAL CRON TICK — THIS SHIPS DATA"
+  hr "11. ONE REAL CRON TICK — THIS SHIPS DATA"
   bash "${SKILL_DIR}/scripts/cron.sh" 2>&1 | tail -40
   echo "--- log after the tick ---"
   tail -25 "${LOG_FILE}" 2>/dev/null || echo "(no log)"

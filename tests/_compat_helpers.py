@@ -277,6 +277,70 @@ def build_state_db(path, sessions):
     conn.close()
 
 
+def build_session_model_usage(path, rows):
+    """Create the `session_model_usage` table at an existing state.db and seed rows.
+
+    Sibling to build_state_db, deliberately NOT folded into it: an existing
+    caller of build_state_db that never calls this function is the
+    absent-table arm Phase 55 Task 3 needs (D-07 — an install whose Hermes
+    predates this table must meter byte-identically to today).
+
+    Schema copied verbatim from the verified production `CREATE TABLE
+    session_model_usage` statement (55-RESEARCH.md), primary-keyed on the
+    six-column cumulative identity: session_id, model, billing_provider,
+    billing_base_url, billing_mode, task.
+
+    Each row dict provides: session_id, model, billing_provider,
+    billing_base_url, billing_mode, task, api_call_count, input_tokens,
+    output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens
+    (optional, defaults to 0), estimated_cost_usd, actual_cost_usd (optional,
+    defaults to 0), cost_status (optional), cost_source (optional),
+    first_seen, last_seen.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        'CREATE TABLE session_model_usage ('
+        'session_id TEXT NOT NULL, '
+        'model TEXT NOT NULL, '
+        "billing_provider TEXT NOT NULL DEFAULT '', "
+        "billing_base_url TEXT NOT NULL DEFAULT '', "
+        "billing_mode TEXT NOT NULL DEFAULT '', "
+        "task TEXT NOT NULL DEFAULT '', "
+        'api_call_count INTEGER NOT NULL DEFAULT 0, '
+        'input_tokens INTEGER NOT NULL DEFAULT 0, '
+        'output_tokens INTEGER NOT NULL DEFAULT 0, '
+        'cache_read_tokens INTEGER NOT NULL DEFAULT 0, '
+        'cache_write_tokens INTEGER NOT NULL DEFAULT 0, '
+        'reasoning_tokens INTEGER NOT NULL DEFAULT 0, '
+        'estimated_cost_usd REAL NOT NULL DEFAULT 0, '
+        'actual_cost_usd REAL NOT NULL DEFAULT 0, '
+        'cost_status TEXT, '
+        'cost_source TEXT, '
+        'first_seen REAL, '
+        'last_seen REAL, '
+        'PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)'
+        ')'
+    )
+    for r in rows:
+        conn.execute(
+            'INSERT INTO session_model_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (
+                r['session_id'], r['model'],
+                r.get('billing_provider', ''), r.get('billing_base_url', ''),
+                r.get('billing_mode', ''), r.get('task', ''),
+                r.get('api_call_count', 0),
+                r['input_tokens'], r['output_tokens'],
+                r.get('cache_read_tokens', 0), r.get('cache_write_tokens', 0),
+                r.get('reasoning_tokens', 0),
+                r.get('estimated_cost_usd', 0), r.get('actual_cost_usd', 0),
+                r.get('cost_status'), r.get('cost_source'),
+                r.get('first_seen'), r.get('last_seen'),
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+
 def run_script(script_path, env, invocations_log):
     """Run a bash script and parse the captured invocations log.
 

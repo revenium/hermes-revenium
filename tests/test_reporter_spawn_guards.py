@@ -86,7 +86,29 @@ REAL_PYTHON3 = sys.executable
 # marker" fixture) still populates attribution_rows (unclassified +
 # possibly unallocated rows), so the extra spawn lands on BOTH sides of the
 # relational comparison below and the strictly-fewer property still holds.
-NO_MARKER_SPAWN_CEILING = 14
+#
+# Phase 55 (ROI-09) raises it to 16. The auxiliary-usage pass adds exactly
+# TWO python3 spawns to this fixture, both measured and both once per tick:
+#   1. `read_config_field` for the `auxMetering` key. This one is an artifact
+#      of how the switch is resolved, not of the aux pass itself: it fires
+#      only when REVENIUM_AUX_METERING is UNSET, so resolve_switch_setting
+#      falls through to config.json. Export the env var and it disappears.
+#   2. report_auxiliary_usage's own `session_model_usage` query heredoc.
+# Neither scales with session count or row count, so the per-session hot-path
+# cost quick-260814-e7c cut is untouched — verified by measurement, not
+# assertion: with REVENIUM_AUX_METERING=disabled this same fixture spawns
+# exactly 14, the pre-Phase-55 ceiling, so the phase added nothing to the
+# pre-existing path.
+#
+# This fixture's state.db has no `session_model_usage` table, so the pass
+# takes its D-07 table-absent early exit and emits zero rows. The spawn that
+# WOULD scale is `aux_now_ts` (the `python3 -c` timestamp inside the per-row
+# `while IFS='|' read` loop in report_auxiliary_usage) — one per EMITTED aux
+# row. It is invisible here. If a future fixture seeds that table, this
+# ceiling must be expressed as `16 + rows_emitted` rather than raised
+# blindly; a bare bump would silently license per-row spawn growth, which is
+# the exact regression this constant exists to catch.
+NO_MARKER_SPAWN_CEILING = 16
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):
@@ -421,8 +443,17 @@ class GuardPermanenceTests(unittest.TestCase):
             1000,
         ),
         (
+            # Phase 55 (D-13) dropped this guard's original
+            # `root_sid != sid &&` clause, making it presence-only so a
+            # top-level session also resolves resolved_aid from its own
+            # marker file. The `root_sid != sid` test did not disappear — it
+            # moved down to gate the `root_aid=` ASSIGNMENT, which is what
+            # keeps every pre-existing --agentic-job-id decision
+            # byte-identical. Consequence for this test: H4's guard literal
+            # is now byte-identical to H2's, so the lookup below must take
+            # the LAST occurrence before the anchor, not the first.
             'H4',
-            'root_sid}" != "${sid}" && -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then',
+            'if [[ -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then',
             "ROOT_SID=\"${root_sid}\" MARKERS_DIR=\"${root_markers_dir}\" python3 - <<'PY' 2>/dev/null || true\nimport json, os\nfrom pathlib import Path\nroot_sid = os.environ.get('ROOT_SID', '')\nmarkers_dir = os.environ.get('MARKERS_DIR', '')\nif not root_sid or not markers_dir:",
             1500,
         ),
@@ -431,8 +462,17 @@ class GuardPermanenceTests(unittest.TestCase):
     def test_each_guard_precedes_and_is_near_its_heredoc_anchor(self):
         src = HERMES_REPORT.read_text(encoding='utf-8')
         for name, guard_literal, heredoc_anchor, max_window in self.GUARD_PAIRS:
-            guard_idx = src.index(guard_literal)
             anchor_idx = src.index(heredoc_anchor)
+            # Take the NEAREST guard occurrence preceding this anchor, not the
+            # first in the file. Since Phase 55 (D-13) H2 and H4 share a
+            # byte-identical guard literal, and a plain `index()` would match
+            # H2's occurrence while measuring the window to H4's anchor —
+            # passing or failing for reasons unrelated to H4. `rindex` bounded
+            # by the anchor is also the STRICTER assertion: `index()` could be
+            # satisfied by a far-away earlier guard whenever the window
+            # happened to be wide enough, whereas this requires a guard
+            # actually adjacent to the heredoc it claims to protect.
+            guard_idx = src.rindex(guard_literal, 0, anchor_idx)
             self.assertLess(
                 guard_idx, anchor_idx,
                 f'{name}: guard literal must precede its heredoc anchor',
