@@ -15,6 +15,7 @@ Two classes:
   `HERMES_HOME`, in the absent-table and present-table arms, and asserts the
   auxiliary section runs and creates nothing.
 """
+import json
 import os
 import re
 import shutil
@@ -302,6 +303,54 @@ class AuxDiagnoseSectionTests(unittest.TestCase):
             self.assertIn('aux_rows', r.stdout)
             self.assertIn('mirror_rows', r.stdout)
             self.assertIn('approval', r.stdout)
+            self._assert_no_aux_state_created(state)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_taxonomy_line_counts_labels_not_root_keys(self):
+        """Greptile P2 on PR #119: the taxonomy line evaluated `len(d)`.
+
+        `aux-taxonomy.json` is `{"labels": {...}}` -- ONE root key -- so a
+        healthy install reported `1 labels`, which is precisely backwards
+        for a diagnostic an operator reads to confirm the whole vocabulary
+        landed: the failure it exists to catch (a truncated taxonomy) and a
+        correct install both printed the same number.
+
+        Pinned against the SHIPPED taxonomy rather than a fixture literal,
+        so adding a label to `aux-taxonomy.json` cannot silently drift this
+        assertion -- the count is read from the same file the script reads.
+        """
+        expected = len(
+            json.loads((SKILL / 'aux-taxonomy.json').read_text())['labels']
+        )
+        self.assertGreater(
+            expected, 1,
+            'guard is vacuous if the shipped taxonomy has <=1 label -- with '
+            'one label the buggy len(d) and the correct len(d["labels"]) '
+            'agree, so this test could not tell them apart',
+        )
+        tmp = tempfile.mkdtemp(prefix='gsd-aux-diag-tax-')
+        try:
+            _hermes_home, scripts, state, env = self._make_home(tmp)
+            # _make_home copies only scripts/, but AUX_TAXONOMY_FILE resolves
+            # to SKILL_DIR/aux-taxonomy.json -- place the REAL shipped file so
+            # the assertion above stays pinned to production, not a literal.
+            shutil.copy(
+                SKILL / 'aux-taxonomy.json',
+                os.path.join(os.path.dirname(scripts), 'aux-taxonomy.json'),
+            )
+            r = self._run(scripts, env)
+            self.assertEqual(r.returncode, 0, f'stderr={r.stderr}')
+            self.assertIn(
+                f'({expected} labels)', r.stdout,
+                f'taxonomy line must report {expected} labels (the count '
+                f'INSIDE the "labels" object), not the number of root keys',
+            )
+            self.assertNotIn(
+                '(1 labels)', r.stdout,
+                'taxonomy line reported "1 labels" -- the root-key count, '
+                'the exact regression this pins',
+            )
             self._assert_no_aux_state_created(state)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

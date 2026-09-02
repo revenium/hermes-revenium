@@ -420,7 +420,11 @@ import json, os
 try:
     with open(os.environ["AUX_TAXONOMY_FILE"]) as fh:
         d = json.load(fh)
-    print(len(d) if isinstance(d, dict) else 0)
+    # Count the LABELS, not the root keys. aux-taxonomy.json is
+    # {"labels": {...}} — a single root key — so len(d) reports 1 for every
+    # healthy install, which is exactly backwards for a diagnostic an
+    # operator reads to confirm the full vocabulary is present.
+    print(len(d.get("labels", {})) if isinstance(d, dict) else 0)
 except Exception:
     print("(unreadable)")
 PY
