@@ -1058,45 +1058,64 @@ class SidecarFixtureFidelityTests(unittest.TestCase):
     like the bound family already in this file, would not be caught here).
     """
 
-    # Keys only a kind:"correction" record carries --
-    # _correction_sidecar_record() supplies them, not _sidecar_record().
-    # Every addition needs written justification: a growing exemption set is
-    # how this guard would rot back into the defect it exists to catch.
+    # Keys a DEFAULT job_assessment arm never carries -- _sidecar_record()
+    # and meter-completion-assessment.golden.json both describe that
+    # default arm, so a key exempted here is a key that arm still never
+    # sends. Every addition needs written justification: a growing
+    # exemption set is how this guard would rot back into the defect it
+    # exists to catch. Membership is UNCHANGED from this guard's prior
+    # name (_CORRECTION_ONLY_KEYS) -- this is a rename plus a corrected
+    # justification, not a widened set.
     #
-    # `sequence` (Phase 42): only a correction has one.
+    # `sequence` (Phase 42): only a kind:"correction" record has one.
+    # _correction_sidecar_record() supplies it.
     #
-    # `attribution_fraction` / `attribution_basis` (Phase 51): written ONLY
-    # by correct-assessment.sh. classifier.py's _build_job_assessment never
-    # produces them -- verified, the strings do not occur in that file at
-    # all. Adding them to _sidecar_record() instead would make the golden
-    # pin an ordinary job_assessment carrying attribution, a shape
-    # production never sends: this guard's own defect, inverted.
+    # `attribution_fraction` / `attribution_basis` (Phase 51, Phase 54):
+    # TWO producers now, not one, and that is exactly why this frozenset
+    # was renamed. correct-assessment.sh's CLI path was always the first;
+    # as of Phase 54 Task 1, classifier.py's _build_job_assessment is a
+    # second, on its CONFIGURED-REVENUE arm only (_validate_assessment's
+    # own re-check of a revenue registrant's returned attribution pair,
+    # gated on a declared operator-only mechanism having been accepted).
+    # Every prior recurrence this guard caught (economic_mechanism, the
+    # cost family, the locality pair, evidence_class_authority) involved a
+    # key _build_job_assessment populates UNCONDITIONALLY -- these two are
+    # the first keys it populates CONDITIONALLY, on that one configured
+    # arm alone. _sidecar_record() and the golden fixture describe the
+    # DEFAULT arm, which still never carries either key; adding them there
+    # would pin a shape that arm never sends -- this guard's own defect,
+    # inverted, from the other side. The second producer's fidelity
+    # coverage lives in
+    # tests/test_phase54_revenue_valuation_boundary.py::RevenuePathFidelityTests,
+    # which drives the REAL _build_job_assessment on a configured revenue
+    # arm and asserts both keys are produced there.
     #
     # The exemption RELOCATES coverage rather than removing it --
-    # test_correction_only_keys_are_present_in_the_correction_record below
+    # test_non_default_arm_keys_keep_relocated_fidelity_coverage below
     # asserts every exempted key appears on the correction fixture, so a key
     # cannot be exempted into having no fidelity coverage at all. That guard
     # did not exist when the set held only `sequence`; it was added in Phase
     # 51 precisely because widening an unguarded exemption set is the rot the
-    # comment above warns about.
-    _CORRECTION_ONLY_KEYS = frozenset({
+    # comment above warns about. This edit does not grow the set -- it still
+    # has exactly the same three members it did before this task.
+    _NON_DEFAULT_ARM_KEYS = frozenset({
         'sequence', 'attribution_fraction', 'attribution_basis',
     })
 
-    def test_correction_only_keys_are_present_in_the_correction_record(self):
+    def test_non_default_arm_keys_keep_relocated_fidelity_coverage(self):
         """Phase 51: an exemption must RELOCATE fidelity coverage, never
         remove it. Every key excused from _sidecar_record() on the grounds
-        that only a correction carries it has to actually appear on
+        that only a non-default arm carries it has to actually appear on
         _correction_sidecar_record() -- otherwise exempting a key silently
         buys it a pass from this guard entirely, which is exactly how the
         set would rot."""
         correction = _correction_sidecar_record('fidelity-probe-correction')
-        missing = self._CORRECTION_ONLY_KEYS - set(correction.keys())
+        missing = self._NON_DEFAULT_ARM_KEYS - set(correction.keys())
         self.assertEqual(
             missing, set(),
-            f'_correction_sidecar_record() is missing correction-only keys: '
+            f'_correction_sidecar_record() is missing non-default-arm keys: '
             f'{sorted(missing)} -- these were excused from _sidecar_record() '
-            f'because only a correction carries them, so the correction '
+            f'because only a non-default arm carries them, so the correction '
             f'fixture is where their fidelity coverage lives',
         )
 
@@ -1115,7 +1134,7 @@ class SidecarFixtureFidelityTests(unittest.TestCase):
             'the extractor is broken',
         )
         record = _sidecar_record('fidelity-probe-job')
-        missing = (set(keys) - self._CORRECTION_ONLY_KEYS) - set(record.keys())
+        missing = (set(keys) - self._NON_DEFAULT_ARM_KEYS) - set(record.keys())
         self.assertEqual(
             missing, set(),
             f'_sidecar_record() is missing forwardable keys: {missing} -- '
