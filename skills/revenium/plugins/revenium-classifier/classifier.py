@@ -1593,29 +1593,106 @@ def _finite_number(value) -> "float | None":
     return f
 
 
-def _is_valuation_delegated_builtin_result(valuation_mod, derived: dict) -> bool:
-    """WR-01 fix (phase-54 code review): fail-safe wrapper around
+def _resolve_delegation_identity_check(valuation_mod, derived: dict) -> "bool | None":
+    """WR-01 fix (phase-54 code review), extended for the sibling
+    evidence_class defect (also phase-54 code review, same root cause,
+    different field): the ONE call site that ever invokes
     `valuation.is_delegated_builtin_result`.
 
-    Fails to False -- never True -- on any error. This is the fail-CLOSED
-    direction for this particular check: the worst outcome of a failure
-    here is the PRE-EXISTING WR-01 behaviour (a delegated builtin result
-    held to the stricter third-party lower bound, so an occasional
-    legitimate zero-value assessment abstains), never a wrongly WIDENED
-    bound produced by a check that raised partway through and was
-    swallowed as a false True. `run_classification_async` must never
-    raise (see this module's own top-level contract), so this wrapper —
-    not a bare `valuation_mod.is_delegated_builtin_result(derived)` call —
-    is what the re-check block in `_validate_assessment` calls.
+    That function is READ-AND-CLEAR (see valuation.py's own module
+    comment above `_delegated_builtin_result`): it consumes the marker it
+    reads, so a second call within the same turn can never re-observe the
+    first call's answer. `_validate_assessment` needs this identity
+    check's verdict for TWO purposes that want OPPOSITE fail-closed
+    defaults on doubt -- the amount lower-bound re-check (below) and the
+    evidence_class resolution (also below, at this function's own
+    "record site 1") -- so this function calls the underlying check
+    EXACTLY ONCE and returns its raw TRI-STATE outcome, leaving each
+    caller to apply its own default for the uncertain case:
+
+      True   the identity check ran and confirmed `derived` IS (by
+             object identity) the exact dict
+             `_delegate_to_builtin_hours_times_rate` produced.
+      False  the identity check ran and found no match -- a genuine
+             third-party result.
+      None   the identity check itself raised (e.g. an older valuation.py
+             predating this marker). Neither True nor False: an honest
+             "cannot tell," never coerced to a default here.
+
+    `run_classification_async` must never raise (see this module's own
+    top-level contract), so this wrapper -- not a bare
+    `valuation_mod.is_delegated_builtin_result(derived)` call -- is what
+    every caller in this module uses.
     """
     try:
         return bool(valuation_mod.is_delegated_builtin_result(derived))
     except Exception:
         logger.warning(
             "revenium-classifier: delegated-builtin identity check raised; "
-            "treating this result as third-party",
+            "each caller applies its own fail-closed default",
         )
-        return False
+        return None
+
+
+def _valuation_evidence_impl_name(
+    impl_name: str, fall_back_to_builtin: bool, delegation_check: "bool | None",
+) -> str:
+    """Sibling fix to WR-01 (phase-54 code review), same root cause,
+    different field: resolve the registrant NAME whose declared
+    evidence_class should describe THIS call's valuation result, rather
+    than reflexively resolving `impl_name` -- the CONFIGURED boundary
+    name -- as WR-01's own comment above the lower-bound re-check already
+    explains `impl_name` alone cannot be trusted to mean.
+
+    D-04's `revenue_card_valuation_fixture` delegates to the real
+    `hours_times_rate` registrant whenever it has nothing revenue-shaped
+    to price and returns that registrant's OWN dict VERBATIM. Before this
+    fix, `boundaries.valuation="revenue_card_valuation_fixture"` on a host
+    with no matching card made `valuation_mod.resolve_evidence_class(
+    impl_name)` resolve the FIXTURE's own registered class
+    (CUSTOMER_CONFIGURED) for a value the fixture never actually
+    produced -- the builtin did. Under phase 53's
+    `_REPORTABLE_EVIDENCE_CLASSES` gate that flips an ordinary,
+    non-revenue, model-estimated session from "withheld from the wire" to
+    "shipped via --outcome-value, labelled customer-configured," which is
+    exactly the provenance lie that gate exists to prevent.
+
+    Returns "hours_times_rate" -- the builtin's own registered name,
+    whose registration (classifier.py's `_register_valuation_impl`) fixes
+    its declared class at MODEL_ESTIMATED_DEMO -- whenever this call's
+    value came from the builtin:
+      * `fall_back_to_builtin`: the configured implementation could not
+        be resolved, or raised, so `_validate_assessment` computed
+        `round(hours * rate, 2)` directly with no registrant call at all.
+      * `impl_name == "hours_times_rate"`: the configured boundary NAME
+        literally is the builtin already (no delegation needed to reach
+        this conclusion).
+      * `delegation_check is not False`: the identity check
+        (`_resolve_delegation_identity_check`, called ONCE per call --
+        see that function's own docstring for why) confirmed this exact
+        result IS the builtin's own dict (`True`), OR the check itself
+        could not run (`None`).
+
+    Returns `impl_name` unchanged (the CONFIGURED boundary name) only
+    when `delegation_check` is the definite `False` a completed identity
+    check returns for a genuine third-party result -- e.g. a real
+    revenue-card match, which must keep its CUSTOMER_CONFIGURED
+    provenance untouched.
+
+    FAILS CLOSED in the OPPOSITE direction from the amount lower-bound
+    re-check that shares this same `delegation_check` tri-state value:
+    that check treats `None` (identity check raised) as "assume
+    third-party," because the safe direction there is the STRICTER
+    bound. Evidence_class resolution treats `None` as "assume builtin"
+    instead, because the risk here runs the other way: shipping a model
+    estimate as CUSTOMER_CONFIGURED (reportable) is the defect this fixes;
+    treating a genuinely customer-configured value as MODEL_ESTIMATED_DEMO
+    (non-reportable) on mere doubt about an identity check is a lost row,
+    never a provenance lie.
+    """
+    if fall_back_to_builtin or impl_name == "hours_times_rate" or delegation_check is not False:
+        return "hours_times_rate"
+    return impl_name
 
 
 # Phase 42 (EGV-06/D-09 site one): the fractional half-width used to DERIVE a
@@ -1797,6 +1874,17 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     impl = valuation_mod.resolve(impl_name) if valuation_mod is not None else None
     fall_back_to_builtin = impl is None
     derived = None
+    # Tri-state verdict from the ONE call this function ever makes to
+    # `_resolve_delegation_identity_check` (see that function's own
+    # docstring for why it can only be called once per assessment).
+    # Defaults to False here -- "no delegation" -- for every path that
+    # never reaches the registrant-invocation branch below at all
+    # (`fall_back_to_builtin`); that branch's own evidence_class handling
+    # (below, at this function's "record site 1") short-circuits on
+    # `fall_back_to_builtin` itself before ever consulting this variable,
+    # so its value in that case is never actually read for a builtin
+    # decision -- it stays False only so the name is never undefined.
+    _delegation_check: "bool | None" = False
     if impl is None:
         logger.warning(
             "revenium-classifier: valuation implementation %r unresolved, "
@@ -1983,10 +2071,23 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # than "what name is `boundaries.valuation` configured to" -- see
         # valuation.py's module comment above `_delegated_builtin_result`
         # for why that check cannot be spoofed by a third-party dict.
-        _is_builtin = impl_name == "hours_times_rate" or (
-            isinstance(derived, dict)
-            and _is_valuation_delegated_builtin_result(valuation_mod, derived)
+        #
+        # `_delegation_check` is resolved here -- the ONE call this
+        # function makes to `_resolve_delegation_identity_check` -- and
+        # reused below at "record site 1" for evidence_class, because the
+        # underlying check is read-and-clear and cannot be called twice
+        # (see that function's own docstring). This bound check fails
+        # CLOSED to False on doubt (`_delegation_check is True`, never
+        # `is not False`): the worst outcome of a raised identity check
+        # here is the PRE-EXISTING WR-01 behaviour (a delegated builtin
+        # result held to the stricter third-party lower bound, so an
+        # occasional legitimate zero-value assessment abstains), never a
+        # wrongly WIDENED bound.
+        _delegation_check = (
+            _resolve_delegation_identity_check(valuation_mod, derived)
+            if isinstance(derived, dict) else False
         )
+        _is_builtin = impl_name == "hours_times_rate" or _delegation_check is True
         _lower_ok = (amount is not None) and (
             amount >= 0 if _is_builtin else amount > 0
         )
@@ -2012,8 +2113,17 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     # following `_resolve_reportability_status`'s exact
     # `_boundary_impl_name(key, default)` -> module load ->
     # `resolve_evidence_class(name)` idiom, verbatim.
+    #
+    # Sibling fix to WR-01 (phase-54 code review): resolve evidence_class
+    # from `_valuation_evidence_impl_name(...)`, NOT bare `impl_name` --
+    # see that function's own docstring for why a delegated builtin
+    # result must declare the BUILTIN's class, never the configured
+    # boundary name's.
     valuation_declared = (
-        valuation_mod.resolve_evidence_class(impl_name) if valuation_mod is not None else ""
+        valuation_mod.resolve_evidence_class(
+            _valuation_evidence_impl_name(impl_name, fall_back_to_builtin, _delegation_check)
+        )
+        if valuation_mod is not None else ""
     )
     _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
     _evidence_mod = _load_evidence_module()
@@ -2995,29 +3105,58 @@ def _build_job_assessment(
         # `resolve_evidence_class(name)` idiom, verbatim. Computed once,
         # shared by the abstention early-return and the success-path
         # continuation below, exactly like study_id/supplied_costs above.
-        _valuation_impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
-        _valuation_mod = _load_valuation_module()
-        valuation_declared = (
-            _valuation_mod.resolve_evidence_class(_valuation_impl_name)
-            if _valuation_mod is not None else ""
-        )
-        _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
-        _evidence_mod = _load_evidence_module()
-        evidence_declared = (
-            _evidence_mod.resolve_evidence_class(_evidence_impl_name)
-            if _evidence_mod is not None else ""
-        )
-        _classification_impl_name = _boundary_impl_name("classification", "llm", paths=paths)
-        _classification_mod = _load_classification_module()
-        classification_declared = (
-            _classification_mod.resolve_evidence_class(_classification_impl_name)
-            if _classification_mod is not None else ""
-        )
-        # THE ONE RULE SITE (DECL-02), called ONCE, both tuple elements used
-        # below -- never re-derived, never compared a second time.
-        _evidence_class, _evidence_class_authority = _evidence_class_precedence(
-            evaluator, valuation_declared, evidence_declared, classification_declared,
-        )
+        #
+        # Sibling fix to WR-01 (phase-54 code review), same root cause as
+        # `_valuation_evidence_impl_name` above (classifier.py's own
+        # "record site 1", inside `_validate_assessment`), different call
+        # site. On the SUCCESS path, `assessment` IS `_validate_assessment`'s
+        # own returned dict, which already carries the evidence_class /
+        # evidence_class_authority pair THAT function's record site 1
+        # resolved -- correctly, because that call site still has
+        # `derived` / `fall_back_to_builtin` / the delegation identity
+        # check's verdict in scope. This function does not: the identity
+        # check (`valuation.is_delegated_builtin_result`) is READ-AND-CLEAR
+        # (see `_resolve_delegation_identity_check`'s own docstring), so by
+        # the time this function runs -- always AFTER `_validate_assessment`
+        # has already returned -- the marker it consulted has already been
+        # consumed. A fresh, independent `_boundary_impl_name`-only
+        # resolution here can never tell a delegated builtin result from a
+        # genuine third-party one; it can only ever repeat record site 1's
+        # PRE-fix mistake. So: REUSE `assessment`'s own already-resolved
+        # pair on the success path; fall back to the independent
+        # per-boundary walk only on abstention (`assessment` is None here
+        # -- no valuation call ever happened for this record, so there is
+        # no delegation outcome to consult, and today's config-name-only
+        # resolution is unchanged).
+        if isinstance(assessment, dict) and "evidence_class" in assessment:
+            _evidence_class = assessment.get("evidence_class") or _forced_evidence_class()
+            _evidence_class_authority = assessment.get("evidence_class_authority") or "evaluator"
+        else:
+            _valuation_impl_name = _boundary_impl_name(
+                "valuation", "hours_times_rate", paths=paths)
+            _valuation_mod = _load_valuation_module()
+            valuation_declared = (
+                _valuation_mod.resolve_evidence_class(_valuation_impl_name)
+                if _valuation_mod is not None else ""
+            )
+            _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
+            _evidence_mod = _load_evidence_module()
+            evidence_declared = (
+                _evidence_mod.resolve_evidence_class(_evidence_impl_name)
+                if _evidence_mod is not None else ""
+            )
+            _classification_impl_name = _boundary_impl_name(
+                "classification", "llm", paths=paths)
+            _classification_mod = _load_classification_module()
+            classification_declared = (
+                _classification_mod.resolve_evidence_class(_classification_impl_name)
+                if _classification_mod is not None else ""
+            )
+            # THE ONE RULE SITE (DECL-02), called ONCE, both tuple elements
+            # used below -- never re-derived, never compared a second time.
+            _evidence_class, _evidence_class_authority = _evidence_class_precedence(
+                evaluator, valuation_declared, evidence_declared, classification_declared,
+            )
 
         record: dict = {
             "kind": "job_assessment",

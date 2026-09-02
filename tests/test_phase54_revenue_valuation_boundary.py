@@ -778,23 +778,61 @@ class DelegationTests(_ValuationBoundaryTestCase):
     # -- 5. Whole-dict equality against the default install --------------
 
     def test_whole_dict_equality_against_default_install(self):
+        """Phase-54 code-review fix (the sibling evidence_class defect's
+        `also_fix_the_vacuous_test` note): this test's PRIOR shape called
+        `self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})`
+        for `mod_revenue`, then IMMEDIATELY called
+        `self._load(boundaries=None)` for `mod_default` -- BEFORE ever
+        calling `mod_revenue._validate_assessment`. `self._load()` writes
+        to `self.config_path`, ONE path fixed for the whole test method by
+        setUp(), and `_boundary_impl_name`/`_llm_evaluation_config` read
+        that file's CONTENTS fresh on every call rather than snapshotting
+        at module-load time (see the ORDERING NOTE above case 6 below,
+        which documents the identical trap). The second `self._load()`
+        call therefore overwrote the file the FIRST module still reads
+        live, so `mod_revenue._validate_assessment` actually ran against
+        the DEFAULT config the whole time -- this test was comparing
+        default against default, never a delegated revenue-configured
+        result against a default one, and so could never have caught the
+        evidence_class defect it exists to guard.
+
+        Fixed by fully consuming `mod_revenue` (both
+        `_validate_assessment` and `_build_job_assessment`, reading
+        `cfg_revenue` while it still reflects the revenue-configured
+        file) before calling `self._load()` a second time for
+        `mod_default` -- the same sequencing every DelegationTests case-6
+        method below already uses, plus the same `_boundary_impl_name`
+        sanity assertion they use as a guard against silently regressing
+        back into this exact trap.
+        """
         mod_revenue = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
-        mod_default = self._load(boundaries=None)
         raw = self._raw(economic_mechanism='labor_substitution')
         cfg_revenue = mod_revenue._llm_evaluation_config()
-        cfg_default = mod_default._llm_evaluation_config()
+        self.assertEqual(
+            'revenue_card_valuation_fixture',
+            mod_revenue._boundary_impl_name('valuation', 'hours_times_rate'),
+            'sanity: this test must actually exercise delegation through '
+            'the fixture, not silently resolve straight to the builtin',
+        )
         valid_revenue = mod_revenue._validate_assessment(raw, cfg_revenue, 'stub', 'v1')
-        valid_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
         self.assertIsNotNone(valid_revenue)
-        self.assertIsNotNone(valid_default)
         job = {'agentic_job_id': 'delegation-identity-001', 'job_type': 'code_review',
                'status': 'SUCCESS'}
         record_revenue = mod_revenue._build_job_assessment(
             job, valid_revenue, raw, cfg_revenue, 'stub', 'v1')
+        self.assertIsNotNone(record_revenue)
+
+        # ONLY NOW -- after mod_revenue has been fully consumed through
+        # both calls above -- overwrite self.config_path for the
+        # default-install comparison (the ordering this trap requires).
+        mod_default = self._load(boundaries=None)
+        cfg_default = mod_default._llm_evaluation_config()
+        valid_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
+        self.assertIsNotNone(valid_default)
         record_default = mod_default._build_job_assessment(
             job, valid_default, raw, cfg_default, 'stub', 'v1')
-        self.assertIsNotNone(record_revenue)
         self.assertIsNotNone(record_default)
+
         for key in (
             'ts', 'job_started_at', 'job_ended_at',
             'observation_window_start', 'observation_window_end',
@@ -2936,3 +2974,134 @@ class RevenueArmEnvelopeBudgetTests(_ValuationBoundaryTestCase):
         )
         print(f'[54-06 RevenueArmEnvelopeBudgetTests] largest worst-case '
               f'revenue-arm envelope: {largest} bytes, margin {self.ceiling - largest}')
+
+
+class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
+    """Phase-54 code-review fix (the sibling to WR-01): `impl_name` alone
+    -- the CONFIGURED `boundaries.valuation` name -- must never decide
+    evidence_class when the value it labels actually came from a
+    DELEGATED builtin result. Before this fix,
+    `boundaries.valuation='revenue_card_valuation_fixture'` with no
+    matching card made every ordinary, non-revenue session on that host
+    declare CUSTOMER_CONFIGURED for a value the builtin produced, which
+    phase 53's `_REPORTABLE_EVIDENCE_CLASSES` gate would then ship onto
+    the wire as though it were a measured, non-model figure.
+
+    One method per constraint the fix binds itself to: the delegated case
+    is corrected, a genuine revenue-card match is untouched, and the
+    end-to-end reportability consequence (the actual defect's blast
+    radius) is closed at both classifier enforcement sites
+    (`_validate_assessment` and `_build_job_assessment`)."""
+
+    def test_delegated_result_carries_model_estimated_demo_not_customer_configured(self):
+        """The exact reproduction from the phase-54 code review: identical
+        raw input and identical delegated computation, only
+        `boundaries.valuation` differs between a default install and a
+        revenue-configured host with nothing revenue-shaped to price."""
+        raw = {
+            'economic_mechanism': 'labor_substitution', 'inferred_role': 'engineer',
+            'estimated_hours_saved': 2.0, 'assumed_loaded_rate': 100.0,
+            'currency': 'USD', 'basis': 'ordinary non-revenue session',
+            'confidence': 0.8,
+        }
+        mod_default = self._load(boundaries=None)
+        cfg_default = mod_default._llm_evaluation_config()
+        got_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
+        self.assertIsNotNone(got_default)
+        self.assertEqual(200.0, got_default['estimated_value'])
+        self.assertEqual('MODEL_ESTIMATED_DEMO', got_default['evidence_class'])
+
+        mod_revenue = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        cfg_revenue = mod_revenue._llm_evaluation_config()
+        self.assertEqual(
+            'revenue_card_valuation_fixture',
+            mod_revenue._boundary_impl_name('valuation', 'hours_times_rate'),
+            'sanity: this test must actually exercise delegation through '
+            'the fixture, not silently resolve straight to the builtin',
+        )
+        got_revenue = mod_revenue._validate_assessment(raw, cfg_revenue, 'stub', 'v1')
+        self.assertIsNotNone(got_revenue)
+        self.assertEqual(
+            200.0, got_revenue['estimated_value'],
+            'sanity: this must actually be the delegated builtin product',
+        )
+        self.assertEqual(
+            'MODEL_ESTIMATED_DEMO', got_revenue['evidence_class'],
+            'a delegated builtin result must carry the BUILTIN\'s declared '
+            'evidence_class, not the configured boundary name\'s -- '
+            'labelling it CUSTOMER_CONFIGURED is the defect this test guards',
+        )
+
+        # The same defect existed independently at record site 2
+        # (_build_job_assessment) -- assert it there too, not merely at
+        # _validate_assessment's own record site 1.
+        job = {'agentic_job_id': 'evidence-sibling-001', 'job_type': 'code_review',
+               'status': 'SUCCESS'}
+        record_revenue = mod_revenue._build_job_assessment(
+            job, got_revenue, raw, cfg_revenue, 'stub', 'v1')
+        self.assertIsNotNone(record_revenue)
+        self.assertEqual('MODEL_ESTIMATED_DEMO', record_revenue['evidence_class'])
+
+    def test_genuine_revenue_card_match_still_carries_customer_configured(self):
+        """The fix must not over-correct: a REAL revenue valuation (not a
+        delegation) keeps its CUSTOMER_CONFIGURED provenance, at both
+        record sites."""
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        got = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(250.0, got['estimated_value'])
+        self.assertEqual('incremental_revenue', got['economic_mechanism'])
+        self.assertEqual('CUSTOMER_CONFIGURED', got['evidence_class'])
+
+        job = {'agentic_job_id': 'evidence-sibling-002', 'job_type': 'booking_completion',
+               'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, got, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual('CUSTOMER_CONFIGURED', record['evidence_class'])
+
+    def test_delegated_result_is_not_in_the_reportable_set_and_ships_no_value(self):
+        """End-to-end consequence (ROI-01/phase 53): a delegated result's
+        evidence_class must not be a member of
+        `_REPORTABLE_EVIDENCE_CLASSES`, and `_build_job_assessment`'s own
+        `reportability_status` field -- resolved from that same class --
+        must land on the non-shipping candidate status even when the host
+        has opted into `experimentalReportEstimates`. This is phase 53's
+        gate actually closing for the exact record this defect used to
+        slip past it."""
+        mod = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        raw = {
+            'economic_mechanism': 'labor_substitution', 'inferred_role': 'engineer',
+            'estimated_hours_saved': 2.0, 'assumed_loaded_rate': 100.0,
+            'currency': 'USD', 'basis': 'ordinary non-revenue session',
+            'confidence': 0.8,
+        }
+        cfg = dict(mod._llm_evaluation_config())
+        cfg['experimentalReportEstimates'] = True
+        got = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertNotIn(
+            got['evidence_class'], mod._REPORTABLE_EVIDENCE_CLASSES,
+            'a delegated builtin result must never land in the reportable '
+            'set -- that is exactly what would let its value cross the wire',
+        )
+
+        job = {'agentic_job_id': 'evidence-sibling-003', 'job_type': 'code_review',
+               'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, got, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual(
+            mod.REPORTABILITY_CANDIDATE, record['reportability_status'],
+            'a delegated builtin result reached REPORTABILITY_REPORTABLE -- '
+            'its value would ship onto the wire labelled CUSTOMER_CONFIGURED',
+        )
+        # Provenance is kept even though the value is withheld -- the same
+        # D-11 shape phase 53's own end-to-end test asserts.
+        self.assertIn('evidence_class', record)
+        self.assertEqual('stub', record['evaluator'])
