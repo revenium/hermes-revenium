@@ -783,3 +783,251 @@ class DelegationTests(_ValuationBoundaryTestCase):
             record_revenue.pop(key, None)
             record_default.pop(key, None)
         self.assertEqual(record_revenue, record_default)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 -- AttributionCouplingTests
+# ---------------------------------------------------------------------------
+#
+# D-09/D-10/D-08, ROI-07. The registrant's OWN return dict is what these
+# tests inspect for attribution_fraction/attribution_basis -- the caller
+# (classifier.py's _validate_assessment) does not yet copy that pair onto
+# its own frozen return dict or re-check it; that threading and the
+# hostile-registrant re-check both land in 54-04 (see 54-03-PLAN.md Task 3's
+# own instruction and the "for the caller to re-check in 54-04" key_link).
+# `estimated_value` and `basis`, by contrast, DO already thread all the way
+# through _validate_assessment and _build_job_assessment -- see D-08's own
+# threading, added by this same task, in classifier.py.
+
+def _serialized_len(s: str) -> int:
+    """Same SERIALIZED-BYTES measurement _clamp_text/_clamp_assessment_text
+    use internally (json.dumps(..., ensure_ascii=True), minus the two
+    surrounding quote bytes) -- duplicated here rather than imported, per
+    this module's own no-shared-code-with-the-producer convention."""
+    return len(json.dumps(s, ensure_ascii=True).encode('utf-8')) - 2
+
+
+class AttributionCouplingTests(_ValuationBoundaryTestCase):
+    """D-09/D-10 (ROI-07): the card may carry a gross AND a fraction; the
+    skill multiplies; only the product ever leaves. D-08: the producing
+    boundary authors the `basis` that explains the number it derived."""
+
+    _DISTINCTIVE_GROSS = 4321.0
+
+    def _entry(self, gross=None, fraction=None, basis=None):
+        entry = {'grossPerJob': self._DISTINCTIVE_GROSS if gross is None else gross}
+        if fraction is not None:
+            entry['attributionFraction'] = fraction
+        if basis is not None:
+            entry['attributionBasis'] = basis
+        return entry
+
+    # -- 1. The product, not the gross ---------------------------------------
+
+    def test_product_not_gross_reaches_the_record(self):
+        val = _load_valuation()
+        derived = val._revenue_card_valuation_fixture(
+            {'currency': 'USD'},
+            {'revenueCard': {'k': self._entry(
+                fraction=0.15, basis='loyalty capture rate, Q3 pricing review')},
+             'revenueCardKey': 'k'},
+        )
+        self.assertIsNotNone(derived)
+        self.assertEqual(648.15, derived['estimated_value'])
+        self.assertEqual(0.15, derived['attribution_fraction'])
+        serialized = json.dumps(derived)
+        self.assertNotIn('4321', serialized, 'the gross literal must never appear')
+
+        # estimated_value threads all the way through the real caller --
+        # this half does NOT require the registrant's return dict directly.
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': self._entry(
+                fraction=0.15, basis='loyalty capture rate, Q3 pricing review')},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(648.15, validated['estimated_value'])
+        self.assertNotIn('4321', json.dumps(validated))
+
+        valid_job = {'agentic_job_id': 'attribution-proof-001',
+                     'job_type': 'booking_completion', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(valid_job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(648.15, record['estimated_value'])
+        self.assertNotIn('4321', json.dumps(record))
+
+    # -- 2. Endpoints ---------------------------------------------------------
+
+    def test_endpoints_zero_and_one_both_legal(self):
+        val = _load_valuation()
+        zero = val._revenue_card_valuation_fixture(
+            {'currency': 'USD'},
+            {'revenueCard': {'k': self._entry(fraction=0.0, basis='floor case')},
+             'revenueCardKey': 'k'},
+        )
+        self.assertIsNotNone(zero)
+        self.assertEqual(0.0, zero['estimated_value'])
+        self.assertEqual(0.0, zero['attribution_fraction'])
+
+        one = val._revenue_card_valuation_fixture(
+            {'currency': 'USD'},
+            {'revenueCard': {'k': self._entry(fraction=1.0, basis='ceiling case')},
+             'revenueCardKey': 'k'},
+        )
+        self.assertIsNotNone(one)
+        self.assertEqual(self._DISTINCTIVE_GROSS, one['estimated_value'])
+        self.assertEqual(1.0, one['attribution_fraction'])
+
+    # -- 3. The rejection table for the fraction -------------------------------
+
+    def _fraction_rejection_table(self):
+        return [
+            ('negative', -0.01),
+            ('above_one', 1.01),
+            ('nan', float('nan')),
+            ('inf', float('inf')),
+            ('neg_inf', float('-inf')),
+            ('boolean_true', True),
+            ('boolean_false', False),
+            ('non_numeric_string', '0.5'),
+            ('none_explicit', None),
+        ]
+
+    def test_fraction_rejection_table(self):
+        rows = self._fraction_rejection_table()
+        self.assertGreaterEqual(len(rows), 8)
+        val = _load_valuation()
+        for label, fraction in rows:
+            with self.subTest(label):
+                config = {'revenueCard': {'k': self._entry(
+                    fraction=fraction, basis='some basis')},
+                    'revenueCardKey': 'k'}
+                got = val._revenue_card_valuation_fixture({'currency': 'USD'}, config)
+                self.assertIsNone(got, f'{label} must abstain')
+
+    # -- 4. Travel-as-a-set, both directions -----------------------------------
+
+    def test_fraction_with_no_basis_abstains(self):
+        val = _load_valuation()
+        for bad_basis in (None, '', '   ', 42, ['not', 'a', 'string']):
+            with self.subTest(bad_basis=bad_basis):
+                entry = {'grossPerJob': self._DISTINCTIVE_GROSS,
+                         'attributionFraction': 0.5}
+                if bad_basis is not None:
+                    entry['attributionBasis'] = bad_basis
+                got = val._revenue_card_valuation_fixture(
+                    {'currency': 'USD'},
+                    {'revenueCard': {'k': entry}, 'revenueCardKey': 'k'},
+                )
+                self.assertIsNone(got)
+
+    def test_basis_with_no_fraction_abstains(self):
+        val = _load_valuation()
+        entry = {'grossPerJob': self._DISTINCTIVE_GROSS,
+                 'attributionBasis': 'a basis with nothing to attribute'}
+        got = val._revenue_card_valuation_fixture(
+            {'currency': 'USD'},
+            {'revenueCard': {'k': entry}, 'revenueCardKey': 'k'},
+        )
+        self.assertIsNone(got)
+
+    def test_neither_key_prices_plain_gross_with_no_attribution_keys(self):
+        val = _load_valuation()
+        got = val._revenue_card_valuation_fixture(
+            {'currency': 'USD'},
+            {'revenueCard': {'k': {'grossPerJob': self._DISTINCTIVE_GROSS}},
+             'revenueCardKey': 'k'},
+        )
+        self.assertIsNotNone(got)
+        self.assertEqual(self._DISTINCTIVE_GROSS, got['estimated_value'])
+        self.assertNotIn('attribution_fraction', got)
+        self.assertNotIn('attribution_basis', got)
+
+    # -- 5. Coupling: the fraction and the amount cannot disagree -------------
+
+    def test_coupling_across_three_pairs(self):
+        val = _load_valuation()
+        for gross, fraction in ((1000.0, 0.25), (77.77, 0.6), (999999.99, 0.01)):
+            with self.subTest(gross=gross, fraction=fraction):
+                got = val._revenue_card_valuation_fixture(
+                    {'currency': 'USD'},
+                    {'revenueCard': {'k': {
+                        'grossPerJob': gross,
+                        'attributionFraction': fraction,
+                        'attributionBasis': 'coupling proof',
+                    }}, 'revenueCardKey': 'k'},
+                )
+                self.assertIsNotNone(got)
+                self.assertEqual(round(gross * fraction, 2), got['estimated_value'])
+                self.assertEqual(fraction, got['attribution_fraction'])
+
+    # -- 6. The authored basis --------------------------------------------------
+
+    def test_authored_basis_reaches_validate_assessment_and_the_record(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': self._entry(
+                fraction=0.15, basis='loyalty capture rate, Q3 pricing review')},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(basis='the evaluator said something else entirely')
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertIn('attribution', validated['basis'])
+        self.assertIn('0.15', validated['basis'])
+        self.assertNotIn('evaluator said something else', validated['basis'])
+        self.assertLessEqual(_serialized_len(validated['basis']), 200)
+        self.assertNotIn('4321', validated['basis'])
+
+        job = {'agentic_job_id': 'basis-proof-001', 'job_type': 'booking_completion',
+               'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(validated['basis'], record['basis'])
+        self.assertLessEqual(_serialized_len(record['basis']), 200)
+
+    def test_authored_basis_bound_across_a_wide_fraction_sample(self):
+        val = _load_valuation()
+        for fraction in (0.0, 1.0, 0.123456789012345, 1e-10, 0.999999999999999):
+            with self.subTest(fraction=fraction):
+                got = val._revenue_card_valuation_fixture(
+                    {'currency': 'USD'},
+                    {'revenueCard': {'k': {
+                        'grossPerJob': self._DISTINCTIVE_GROSS,
+                        'attributionFraction': fraction,
+                        'attributionBasis': 'bound proof',
+                    }}, 'revenueCardKey': 'k'},
+                )
+                self.assertIsNotNone(got)
+                self.assertLessEqual(_serialized_len(got['basis']), 200)
+                self.assertNotIn('4321', got['basis'])
+
+    def test_delegated_call_and_default_install_both_keep_evaluators_basis(self):
+        raw = self._raw(basis='the evaluator wrote this basis')
+
+        # Delegated: revenue registrant configured but nothing revenue-
+        # shaped to price -- falls through to hours_times_rate, which
+        # never returns a basis of its own.
+        mod_delegated = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        cfg_delegated = mod_delegated._llm_evaluation_config()
+        validated_delegated = mod_delegated._validate_assessment(
+            raw, cfg_delegated, 'stub', 'v1')
+        self.assertIsNotNone(validated_delegated)
+        self.assertEqual(
+            mod_delegated._clamp_assessment_text(raw.get('basis'), 200),
+            validated_delegated['basis'],
+        )
+
+        # Default install: no boundaries object at all.
+        mod_default = self._load(boundaries=None)
+        cfg_default = mod_default._llm_evaluation_config()
+        validated_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
+        self.assertIsNotNone(validated_default)
+        self.assertEqual(validated_delegated['basis'], validated_default['basis'])
+        self.assertEqual(raw['basis'], validated_default['basis'])

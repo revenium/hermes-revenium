@@ -1906,10 +1906,28 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         evaluator, valuation_declared, evidence_declared, classification_declared,
     )
 
+    # Phase 54 (D-08): the boundary that DERIVED the value authors the
+    # `basis` that explains it -- the same producer-names-it rule D-02
+    # already applies to `economic_mechanism`, applied here to the field
+    # that explains the number. `derived` is whichever registrant's
+    # return dict actually priced THIS call (the built-in or a
+    # third-party registrant; still None on the fall-back-to-builtin
+    # path above), read here and NEVER from `raw`, so a registrant's
+    # caveat cannot be overwritten by the model's own text. A registrant
+    # that returns no basis -- the built-in hours_times_rate, and the
+    # revenue fixture's own delegation branches -- leaves this exactly as
+    # it was before this phase: the evaluator's own raw-authored text,
+    # clamped identically (D-14 byte-identity preserved).
+    _registrant_basis = derived.get("basis") if isinstance(derived, dict) else None
+    if isinstance(_registrant_basis, str) and _registrant_basis.strip():
+        _basis_value = _clamp_assessment_text(_registrant_basis, 200)
+    else:
+        _basis_value = _clamp_assessment_text(raw.get("basis"), 200)
+
     _result: dict = {
         "estimated_value": estimated_value,
         "currency": currency,
-        "basis": _clamp_assessment_text(raw.get("basis"), 200),
+        "basis": _basis_value,
         "assumptions": {
             "inferred_role": inferred_role,
             "estimated_hours_saved": hours,

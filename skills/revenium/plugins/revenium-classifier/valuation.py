@@ -451,6 +451,17 @@ register(
 #      "incremental_revenue"` -- the producing boundary names the
 #      mechanism it priced, re-checked by the caller against this
 #      registrant's own registration-time declaration below.
+#   4. (D-09/D-10, ROI-07) The entry may ALSO carry `attributionFraction`
+#      and `attributionBasis`. When both are present and valid, the
+#      returned `estimated_value` is `round(gross * fraction, 2)` -- the
+#      product, never the gross -- and the return dict carries the
+#      validated `attribution_fraction`/`attribution_basis` pair under
+#      the SAME snake_case wire names `correct-assessment.sh`'s
+#      `--attribution-fraction`/`--attribution-basis` flags already
+#      persist, so the configured and CLI paths produce one
+#      representation rather than two that can diverge (D-10). See the
+#      multiplication itself, below, for why this is a narrow, deliberate
+#      reversal of `51-CONTEXT.md` D-05 rather than an oversight.
 #
 # Its honest limit, stated the way the rate-card fixture's own comment
 # states its (valuation.py, above): configuration establishes an approved
@@ -509,6 +520,17 @@ register(
 
 REVENUE_CARD_FIXTURE_VERSION = "1"
 
+# Phase 54 (D-08, D-09): the fixed prefix every producer-authored `basis`
+# starts from -- states the provenance and the honest limit the SAME way
+# the sibling rate-card fixture's own module comment states its: an
+# APPROVED VALUE PER COMPLETED BOOKING, not this booking's actual
+# revenue. The fraction is safe to name after this prefix (see below);
+# the gross never is, on any branch, under any name.
+_REVENUE_CARD_BASIS_PREFIX = (
+    "revenue card: an approved value per completed booking, not this "
+    "booking's actual revenue"
+)
+
 
 def _delegate_to_builtin_hours_times_rate(assumptions: dict, config: dict) -> "dict | None":
     """D-04: delegate to the `hours_times_rate` registrant when this
@@ -548,6 +570,7 @@ _REVENUE_ABSTAIN_REASONS = frozenset({
     "unmatched_key",
     "malformed_entry",
     "malformed_gross",
+    "malformed_attribution",
     "internal_error",
 })
 
@@ -585,9 +608,35 @@ def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | 
     (also None) -- see `_delegate_to_builtin_hours_times_rate` for the
     delegation itself and its own self-delegation guard.
 
+    Phase 54 (D-09/D-10, ROI-07): the selected entry may ALSO carry
+    `attributionFraction` and `attributionBasis`. The two travel as a
+    SET -- one present without the other abstains outright, the same
+    rule `correct-assessment.sh`'s own `--attribution-fraction`/
+    `--attribution-basis` flag pair enforces -- and a present fraction
+    must be finite, non-boolean, and within `[0.0, 1.0]` inclusive at
+    both endpoints, or the entry abstains. When both validate, the
+    returned `estimated_value` is `round(gross * fraction, 2)` -- the
+    PRODUCT, computed in one expression at the point of return, never
+    the gross under any key or in any diagnostic -- and the return dict
+    additionally carries the validated `attribution_fraction` (float)
+    and `attribution_basis` (clamped to `NARRATIVE_CLAMP_BYTES`
+    serialized bytes, the same limit `correct-assessment.sh`'s own
+    `_clamp_reason` uses). With neither key configured, the entry prices
+    at `round(gross, 2)` exactly as before this phase, and the return
+    dict carries neither attribution key.
+
     Its honest limit, stated the way the rate-card fixture states its own:
     configuration establishes an approved value PER COMPLETED BOOKING --
     an operator policy, not this booking's actual revenue.
+
+    Phase 54 (D-08): on every branch where THIS fixture actually derives
+    a value (never on a delegation branch, never on an abstain), the
+    return dict also carries a `basis` string it authored itself --
+    `_REVENUE_CARD_BASIS_PREFIX`, plus the applied fraction when one was
+    applied. The fraction is safe to name in that string; the gross is
+    not, and never appears in it. The caller's own 200-byte clamp on
+    `basis` cannot truncate this string mid-sentence -- it is built to
+    stay well under that bound by construction, not merely by care.
 
     `estimated_hours_saved` and `assumed_loaded_rate` on `assumptions` are
     deliberately never read (D-12): revenue is not derived from effort,
@@ -660,11 +709,99 @@ def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | 
             )
             return None
 
-        return {
-            "estimated_value": round(gross, 2),
+        # Phase 54 (D-09/D-10, ROI-07): the attribution pair, read and
+        # validated ONLY here, after gross itself already validated.
+        # `51-CONTEXT.md` D-05 chose "recorded, never computed" for two
+        # reasons: (a) keeping gross out of a metering RECORD is the only
+        # structural defence against cross-system double counting
+        # available at this layer -- the channel, the loyalty programme,
+        # the pricing engine and marketing attribution each already claim
+        # the same stay -- and (b) it kept this skill from becoming the
+        # site where a business-gross figure meets an attribution policy.
+        # D-09 narrowly reverses (b), in the open: this skill now IS that
+        # site, for the configured path only. (a) survives completely --
+        # `gross` above is read, multiplied below, and discarded; it is
+        # bound to no other name, returned under no key, and named in no
+        # diagnostic. The rejected alternative was letting the operator
+        # pre-multiply off-system, which lets a later fraction edit
+        # silently desynchronise from an amount nobody recomputed --
+        # exactly the drift phase success criterion 5 forbids. Doing the
+        # multiplication here, in one expression, makes that criterion
+        # true by construction.
+        raw_fraction = entry.get("attributionFraction")
+        raw_basis = entry.get("attributionBasis")
+        has_fraction = raw_fraction is not None
+        has_basis_text = isinstance(raw_basis, str) and raw_basis.strip() != ""
+
+        attribution_fraction = None
+        attribution_basis_text = None
+
+        if has_fraction and not has_basis_text:
+            # Travel-as-a-set, direction 1: a bare fraction carries the
+            # appearance of precision with nothing to answer for it --
+            # same rule, same reasoning as correct-assessment.sh's own
+            # --attribution-fraction/--attribution-basis flag pair.
+            logger.warning(
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "malformed_attribution", card_key,
+            )
+            return None
+        if not has_fraction and raw_basis is not None:
+            # Travel-as-a-set, direction 2: a basis with nothing to
+            # attribute.
+            logger.warning(
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "malformed_attribution", card_key,
+            )
+            return None
+        if has_fraction:
+            fraction = _finite_number(raw_fraction)
+            if fraction is None or not (0.0 <= fraction <= 1.0):
+                # Rejects non-finite, boolean, non-numeric, and anything
+                # outside [0.0, 1.0] -- both endpoints are legal, matching
+                # the CLI flag's own inclusive bound.
+                logger.warning(
+                    "valuation: revenue card fixture abstained (%s) for "
+                    "key %r", "malformed_attribution", card_key,
+                )
+                return None
+            attribution_fraction = fraction
+            attribution_basis_text = _clamp_text(raw_basis, NARRATIVE_CLAMP_BYTES)
+
+        # The multiplication: ONE expression, at this ONE site, bound
+        # directly to the value this function returns. `gross` is never
+        # rebound to a longer-lived name for this purpose.
+        estimated_value = round(
+            gross * attribution_fraction if attribution_fraction is not None
+            else gross,
+            2,
+        )
+
+        # Phase 54 (D-08): the producer-authored basis -- present only on
+        # this, the branch where this fixture actually derived a value.
+        # The fraction is safe to name here; the gross is not, and is
+        # never referenced.
+        basis_text = _REVENUE_CARD_BASIS_PREFIX
+        if attribution_fraction is not None:
+            basis_text = (
+                f"{_REVENUE_CARD_BASIS_PREFIX} (attribution "
+                f"{attribution_fraction} applied; see attribution_basis)"
+            )
+        basis_text = _clamp_text(basis_text, 200)
+
+        result = {
+            "estimated_value": estimated_value,
             "currency": a.get("currency"),
             "economic_mechanism": "incremental_revenue",
+            "basis": basis_text,
         }
+        if attribution_fraction is not None:
+            # Same snake_case wire names Phase 51 shipped for the CLI
+            # path (D-10) -- emitted ONLY when both validated, so an
+            # unconfigured entry's return dict carries neither key.
+            result["attribution_fraction"] = attribution_fraction
+            result["attribution_basis"] = attribution_basis_text
+        return result
     except Exception:
         logger.warning(
             "valuation: revenue card fixture abstained (%s) for key %r",
