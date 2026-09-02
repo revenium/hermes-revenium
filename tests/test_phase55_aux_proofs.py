@@ -33,6 +33,7 @@ SUMMARY.md, not a pre-planned artifact.
 """
 import os
 import shutil
+import sqlite3
 import tempfile
 import unittest
 
@@ -44,7 +45,29 @@ from tests._compat_helpers import (
     run_script,
     SCRIPTS_DIR,
 )
+from tests.test_phase55_aux_edges import _bump_aux_row
 from tests.test_phase55_auxiliary_metering import _AuxMeteringTestCase
+
+
+def _bump_aux_row_with_cost(state_db, session_id, model, billing_provider='', billing_base_url='',
+                             billing_mode='', task='', delta_input=0, delta_output=0,
+                             delta_calls=0, delta_cost=0.0):
+    """Sibling to tests/test_phase55_aux_edges.py::_bump_aux_row, extended
+    with a cost delta -- that helper only advances token/call counters, and
+    the cross-tick idempotency proof below needs the `--total-cost` flag's
+    own increment-not-cumulative behaviour asserted too (plan Task 2)."""
+    conn = sqlite3.connect(state_db)
+    conn.execute(
+        'UPDATE session_model_usage SET '
+        'input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, '
+        'api_call_count = api_call_count + ?, estimated_cost_usd = estimated_cost_usd + ? '
+        'WHERE session_id=? AND model=? AND billing_provider=? AND billing_base_url=? '
+        'AND billing_mode=? AND task=?',
+        (delta_input, delta_output, delta_calls, delta_cost,
+         session_id, model, billing_provider, billing_base_url, billing_mode, task),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +306,225 @@ class AuxMirrorLeakFixtureTests(_AuxMeteringTestCase):
             len(union), 1,
             'the union of captured auxiliary invocations across both profile ticks '
             'must contain exactly one row for this identity, not two',
+        )
+
+
+# ---------------------------------------------------------------------------
+# Task 2 -- cross-tick idempotency plus the six local edge predicates.
+# ---------------------------------------------------------------------------
+class AuxIdempotencyTests(_AuxMeteringTestCase):
+    """ROI-11's idempotency proof, in the shape of the ledger idempotency
+    tests already in this repo (tests/test_phase32_event_ledger_idempotency.py),
+    plus the six edge predicates the plan's probe surfaced. Every arm drives
+    the real script; none asserts on script text."""
+
+    def test_cross_tick_idempotency_ships_increment_not_cumulative_total(self):
+        aux_row = self._one_aux_row()  # api_call_count=3, input=40, output=10, cost=0.002
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[aux_row])
+        result_1 = self._tick(fixture, 0)
+        self.assertEqual(len(self._find_aux_invocation(result_1['meter_invocations'])), 1)
+
+        ledger_path = self._aux_ledger_path(fixture)
+        with open(ledger_path, 'rb') as f:
+            ledger_after_tick_1 = f.read()
+
+        result_2 = self._tick(fixture, 1)
+        self.assertEqual(
+            len(self._find_aux_invocation(result_2['meter_invocations'])), 0,
+            'a second tick over unchanged counters must ship zero auxiliary invocations',
+        )
+        with open(ledger_path, 'rb') as f:
+            ledger_after_tick_2 = f.read()
+        self.assertEqual(
+            ledger_after_tick_1, ledger_after_tick_2,
+            'revenium-aux.ledger must be byte-identical across the no-op tick',
+        )
+
+        # Grow the row's cumulative counters -- what the confirmed UPSERT does.
+        _bump_aux_row_with_cost(
+            fixture['state_db'], session_id=aux_row['session_id'], model=aux_row['model'],
+            billing_provider=aux_row['billing_provider'],
+            billing_base_url=aux_row['billing_base_url'], billing_mode=aux_row['billing_mode'],
+            task=aux_row['task'], delta_input=30, delta_output=8, delta_calls=2,
+            delta_cost=0.0015,
+        )
+        result_3 = self._tick(fixture, 2)
+        aux_flags_list = self._find_aux_invocation(result_3['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 1, result_3['meter_invocations'])
+        aux_flags = aux_flags_list[0]
+        self.assertEqual(
+            aux_flags.get('--input-tokens'), '30',
+            'must ship the INCREMENT (30), never the cumulative total (70) again',
+        )
+        self.assertEqual(aux_flags.get('--output-tokens'), '8')
+        self.assertEqual(
+            aux_flags.get('--total-cost'), '0.001500',
+            'the cost flag must carry the cost INCREMENT, not the cumulative total',
+        )
+
+        with open(ledger_path) as f:
+            lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+        self.assertEqual(
+            len(lines), 2,
+            f'the ledger must now hold two lines for this identity (two cumulative '
+            f'snapshots, in order), got {lines!r}',
+        )
+
+    def test_edge_roi11_adjacency_a_tied_counter_ships_nothing_a_grown_sibling_still_ships(self):
+        row_tied = self._one_aux_row(task='approval')
+        row_grows = self._one_aux_row(task='title_generation', model='claude-3-5-haiku')
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[row_tied, row_grows])
+        result_1 = self._tick(fixture, 0)
+        self.assertEqual(len(self._find_aux_invocation(result_1['meter_invocations'])), 2)
+
+        # Only row_grows advances; row_tied's counters stay exactly equal.
+        _bump_aux_row(
+            fixture['state_db'], session_id=row_grows['session_id'], model=row_grows['model'],
+            billing_provider=row_grows['billing_provider'],
+            billing_base_url=row_grows['billing_base_url'], billing_mode=row_grows['billing_mode'],
+            task=row_grows['task'],
+        )
+        result_2 = self._tick(fixture, 1)
+        aux_flags_list = self._find_aux_invocation(result_2['meter_invocations'])
+        self.assertEqual(
+            len(aux_flags_list), 1,
+            'exactly one identity (the grown sibling) must ship this tick',
+        )
+        self.assertEqual(
+            aux_flags_list[0].get('--task-type'), 'aux_title_generation',
+            'the SHIPPED identity must be the grown sibling, not the tied one -- '
+            'proving the tied identity\'s absence is a real skip, not "nothing ran"',
+        )
+
+    def test_edge_roi11_empty_absent_and_zero_byte_ledger_both_ship_full_cumulative_once(self):
+        aux_row = self._one_aux_row()
+
+        # Pass 1: ledger genuinely absent (the ordinary first-ever-tick case).
+        fixture_a = self._setup_fixture([self._one_session()], aux_rows=[aux_row])
+        result_a = self._tick(fixture_a, 0)
+        aux_a = self._find_aux_invocation(result_a['meter_invocations'])
+        self.assertEqual(len(aux_a), 1)
+        self.assertEqual(aux_a[0].get('--input-tokens'), str(aux_row['input_tokens']))
+        with open(self._aux_ledger_path(fixture_a)) as f:
+            lines_a = [ln for ln in f if ln.strip()]
+        self.assertEqual(len(lines_a), 1)
+
+        # Pass 2: ledger present but zero bytes -- same outcome.
+        fixture_b = self._setup_fixture([self._one_session()], aux_rows=[aux_row])
+        ledger_b = self._aux_ledger_path(fixture_b)
+        open(ledger_b, 'w').close()
+        result_b = self._tick(fixture_b, 0)
+        aux_b = self._find_aux_invocation(result_b['meter_invocations'])
+        self.assertEqual(len(aux_b), 1)
+        self.assertEqual(aux_b[0].get('--input-tokens'), str(aux_row['input_tokens']))
+        with open(ledger_b) as f:
+            lines_b = [ln for ln in f if ln.strip()]
+        self.assertEqual(len(lines_b), 1)
+
+    def test_edge_roi11_ordering_a_counter_tie_between_distinct_identities_never_merges(self):
+        row_a = self._one_aux_row(task='approval')
+        row_b = self._one_aux_row(task='title_generation', model='claude-3-5-haiku')
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[row_a, row_b])
+        result = self._tick(fixture, 0)
+        aux_flags_list = self._find_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 2)
+        task_types = sorted(f.get('--task-type') for f in aux_flags_list)
+        self.assertEqual(task_types, ['aux_approval', 'aux_title_generation'])
+
+        ledger_path = self._aux_ledger_path(fixture)
+        with open(ledger_path) as f:
+            lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+        self.assertEqual(len(lines), 2)
+        tasks_in_ledger = set()
+        for line in lines:
+            parts = line.split('|')
+            self.assertEqual(len(parts), 8, f'malformed ledger line: {line!r}')
+            tasks_in_ledger.add(parts[5])
+        self.assertEqual(
+            tasks_in_ledger, {'approval', 'title_generation'},
+            'a tie on the counter value must not merge, mask, or reorder the two '
+            'distinct identities\' ledger lines',
+        )
+
+        # Re-run: both are now no-ops -- the tie did not leave one unrecorded.
+        result_2 = self._tick(fixture, 1)
+        self.assertEqual(len(self._find_aux_invocation(result_2['meter_invocations'])), 0)
+
+    def test_edge_roi09_adjacency_the_two_ledgers_never_cross_contaminate(self):
+        # Deliberately NOT the harness default 'aux-sid-001' -- that session
+        # id itself begins with "aux-", which would make the transaction-id
+        # prefix assertion below vacuously true regardless of which emit
+        # path produced it.
+        sid = 'roi09-adjacency-sid-001'
+        fixture = self._setup_fixture(
+            [self._one_session(id=sid)], aux_rows=[self._one_aux_row(session_id=sid)],
+        )
+        result = self._tick(fixture, 0)
+        aux_flags = self._find_aux_invocation(result['meter_invocations'])[0]
+        main_flags = self._find_non_aux_invocation(result['meter_invocations'])[0]
+
+        self.assertNotEqual(aux_flags.get('--transaction-id'), main_flags.get('--transaction-id'))
+        self.assertTrue(str(aux_flags.get('--transaction-id', '')).startswith('aux-'))
+        self.assertFalse(str(main_flags.get('--transaction-id', '')).startswith('aux-'))
+        self.assertNotEqual(aux_flags.get('--operation-type'), main_flags.get('--operation-type'))
+
+        main_ledger_path = os.path.join(fixture['state_dir'], 'revenium-hermes.ledger')
+        aux_ledger_path = self._aux_ledger_path(fixture)
+        with open(main_ledger_path) as f:
+            main_lines = [ln for ln in f if ln.strip()]
+        with open(aux_ledger_path) as f:
+            aux_lines = [ln for ln in f if ln.strip()]
+        self.assertTrue(
+            all(not ln.startswith('AUX:') for ln in main_lines),
+            f'revenium-hermes.ledger must contain no AUX: line: {main_lines!r}',
+        )
+        self.assertTrue(
+            all(not ln.startswith('HERMES:') for ln in aux_lines),
+            f'revenium-aux.ledger must contain no HERMES: line: {aux_lines!r}',
+        )
+
+    def test_edge_roi09_empty_zero_one_and_empty_task_row_counts(self):
+        # Zero session_model_usage rows (table present, no rows).
+        fixture_1 = self._setup_fixture([self._one_session()], aux_rows=[])
+        result_1 = self._tick(fixture_1, 0)
+        self.assertEqual(len(self._find_aux_invocation(result_1['meter_invocations'])), 0)
+
+        # Exactly one row.
+        fixture_2 = self._setup_fixture([self._one_session()], aux_rows=[self._one_aux_row()])
+        result_2 = self._tick(fixture_2, 0)
+        self.assertEqual(len(self._find_aux_invocation(result_2['meter_invocations'])), 1)
+
+        # One row, empty task.
+        fixture_3 = self._setup_fixture(
+            [self._one_session()], aux_rows=[self._one_aux_row(task='')],
+        )
+        result_3 = self._tick(fixture_3, 0)
+        self.assertEqual(len(self._find_aux_invocation(result_3['meter_invocations'])), 0)
+
+    def test_edge_roi09_ordering_stable_across_independent_runs_and_matches_sort_order(self):
+        session = self._one_session()
+        insertion_order = ['web_extract', 'approval', 'compression', 'title_generation']
+        rows = [self._one_aux_row(task=t) for t in insertion_order]
+        expected_order = ['aux_approval', 'aux_compression', 'aux_title_generation', 'aux_web_extract']
+
+        fixture_1 = self._setup_fixture([session], aux_rows=rows)
+        result_1 = self._tick(fixture_1, 0)
+        seq_1 = [
+            f.get('--task-type') for f in self._find_aux_invocation(result_1['meter_invocations'])
+        ]
+
+        fixture_2 = self._setup_fixture([session], aux_rows=rows)
+        result_2 = self._tick(fixture_2, 0)
+        seq_2 = [
+            f.get('--task-type') for f in self._find_aux_invocation(result_2['meter_invocations'])
+        ]
+
+        self.assertEqual(seq_1, expected_order, seq_1)
+        self.assertEqual(seq_2, expected_order, seq_2)
+        self.assertEqual(
+            seq_1, seq_2,
+            'emission order must be identical across two independent runs of the '
+            'same insertion-scrambled input -- total and stable, not insertion-dependent',
         )
 
 
