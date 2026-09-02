@@ -246,6 +246,33 @@ REVENIUM_DRAIN_QUIET_TICKS="${REVENIUM_DRAIN_QUIET_TICKS:-15}"
 # drain-status.sh.
 REVENIUM_DRAIN_STALE_SECONDS="${REVENIUM_DRAIN_STALE_SECONDS:-604800}"
 
+# Phase 55 (D-13): the auxiliary-usage ledger gets its OWN key domain, in the
+# same shape as EVENT_LEDGER_FILE above — a six-column cumulative identity
+# (session_id, model, billing_provider, billing_base_url, billing_mode,
+# task), not the per-session-total key LEDGER_FILE indexes on. Colliding the
+# two domains would make an aux row's idempotency check race the main-loop
+# HERMES: check, so this is a fully separate file rather than a shared
+# prefix inside an existing ledger.
+AUX_LEDGER_FILE="${REVENIUM_AUX_LEDGER_FILE:-${STATE_DIR}/revenium-aux.ledger}"
+# Phase 55 (D-05/D-07): the fixed six-label auxiliary vocabulary. Resolves
+# under SKILL_DIR, NEVER STATE_DIR — unlike TAXONOMY_FILE/JOB_TAXONOMY_FILE
+# above, this is a fixed vocabulary the reporter only READS, not one the
+# classifier grows over time, and a skill-dir read cannot inherit the known
+# tap-install seeding gap that leaves TAXONOMY_FILE empty on bootstrap hosts
+# (see project_tap_install_taxonomy_seed_gap). Do NOT "fix" this into the
+# seeded-taxonomy shape — that reintroduces the exact gap D-07 exists to
+# avoid.
+AUX_TAXONOMY_FILE="${REVENIUM_AUX_TAXONOMY_FILE:-${SKILL_DIR}/aux-taxonomy.json}"
+# Phase 55 (D-01): activation tunable for the auxiliary-usage metering pass.
+# Defaults ON — auxiliary spend has always been real spend, and the
+# alternative (defaulting off) would mean shipping a phase that measures the
+# understated cost side without fixing it. "disabled" is the explicit,
+# documented off switch (docs/migration-auxiliary-usage.md, Plan 04);
+# resolved the same env > config.json ("auxMetering") > default precedence
+# every other closed-two-literal switch in this file uses, via
+# resolve_switch_setting.
+REVENIUM_AUX_METERING="${REVENIUM_AUX_METERING:-enabled}"
+
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}" "${JOB_ASSESSMENTS_DIR}"
 
 ensure_path() {
