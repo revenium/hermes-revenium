@@ -177,8 +177,8 @@ in reported spend against unchanged traffic, documented in
 - Whether a Revenium-side guardrail counter actually increases for an ingested auxiliary
   row inside a rule's scope is **not demonstrated by this release** — the proof shipped
   here establishes that an auxiliary row is emitted carrying the same session-resolved
-  dimensions as its session's main-loop completion, and the server-side counting half is
-  confirmed separately against a live tenant.
+  dimensions as its session's main-loop completion; the server-side counting half remains
+  to be confirmed separately against a live tenant.
 
 ### Added — auxiliary usage metering
 
