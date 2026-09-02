@@ -299,11 +299,19 @@ Two properties keep the boundary from eroding:
 - **Neither moves `evidence_class`.** The label reflects the evidence behind a
   record; an operator flag is not evidence. In particular neither can promote a
   record toward the three labels reserved for study-backed claims.
-- **The fraction is never applied to anything.** The operator supplies the
-  already-attributed figure; the skill is not given a larger number and holds
-  no rule for deriving one figure from another. A fraction is documentation of
-  the operator's own reasoning, which is why the stated basis is required
-  alongside it.
+- **The fraction is applied only on the configured path, and only ever
+  produces what it persists.** Two paths can attach a fraction to a value, and
+  they behave differently:
+  - On the CLI path (`correct-assessment.sh --attribution-fraction`), the
+    operator supplies the already-attributed figure; the skill is not given a
+    larger number and holds no rule for deriving one figure from another.
+  - On the configured path (a `revenueCard` entry, Phase 54, D-09), the skill
+    multiplies a configured `grossPerJob` by the configured
+    `attributionFraction` and records only the product. The gross still never
+    appears in anything the skill persists or transmits — no record, no
+    `meter` argv, no `--metadata` envelope, and no log line.
+  On both paths a fraction is documentation of the operator's own reasoning,
+  which is why the stated basis is required alongside it.
 
 Where a defensible figure is wanted rather than a plausible one, the route is
 a holdout comparison, which is a study — it needs the study contract this tree
@@ -317,11 +325,6 @@ commitment.
 **No local classifier model ships here.** Classification and outcome evaluation both run
 through an LLM call on the operator's own configured provider. Nothing in this tree runs an
 on-device or locally-hosted model of any kind.
-
-**No customer-configured value policy produces a recorded value here.** The pluggable
-boundaries exist as contracts and carry non-LLM fixtures proving they fit, but nothing in this
-tree turns an operator's own rate card, pricing table, or business rule into the class
-actually written to a persisted record.
 
 **No system-of-record outcome adapter ships here.** Nothing in this tree observes a downstream
 system — a ticketing tool, an incident tracker, a revenue system — to confirm that a claimed
@@ -358,10 +361,13 @@ reasoned, the same mechanism reached from a different source; `boundary_registry
 precedence rule itself now lives in `docs/evidence-class-precedence.md` (Phase 48, 2026-08-29).
 
 **EGV-05 — six economic mechanisms are representable.** True today: all six mechanism values
-are representable on the wire and accepted by the reporter's allow-list. Not true today: three
-of the six — the operator-declared mechanisms — have no producer anywhere in this tree. No
-configuration key sets one, no CLI flag sets one, and the correction path does not set one
-either. They are representable and accepted; they are not reachable.
+are representable on the wire and accepted by the reporter's allow-list, and two producers now
+exist for the operator-declared three — `correct-assessment.sh --mechanism` (Phase 51), and, as
+of Phase 54, a valuation registrant declaring one at registration (the shipped `revenueCard`
+fixture declares `incremental_revenue`). Not true today, and structurally so: the evaluator
+still cannot select any of the three — `_resolve_economic_mechanism`'s membership test runs
+only against `EVALUATOR_MECHANISMS`, never `ECONOMIC_MECHANISMS` — so a transcript alone can
+never assert `quality_decision_improvement`, `risk_avoidance`, or `incremental_revenue`.
 
 Both gaps are recorded in full, including their re-deferral history, in
 `.planning/REQUIREMENTS.md`. That file is the authoritative record of both; this page states
