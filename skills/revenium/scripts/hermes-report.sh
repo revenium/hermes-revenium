@@ -787,17 +787,27 @@ PY
 
 # Phase 55 (T-55-02/D-10): shared provider inferrer, extracted from the main
 # loop's own inline `python3 -c` call for the same reason and via the same
-# environment-passing conversion as _clean_model_name above. Logic is
-# UNCHANGED in this task — same openrouter/litellm/bedrock branches, same
-# fallback chain, same 'unknown' default; D-10's 'auto' addition to the
-# short-circuit tuple lands in a later plan and now only needs editing here.
+# environment-passing conversion as _clean_model_name above. Same
+# openrouter/litellm/bedrock branches, same fallback chain, same 'unknown'
+# default. Plan 02 (D-10) widened the short-circuit exclusion tuple with
+# 'auto': a billing_provider of literal "auto" (common on auxiliary rows
+# paired with a real base URL, per docs/internal/auxiliary-usage-sizing.md)
+# now falls through to model-name inference exactly as an empty/'none'/
+# 'unknown' value already did. Because this function is the ONE inference
+# path both the main loop (:2429) and the auxiliary pass (:1100) call, the
+# fix applies to both emit paths from this single edit -- there is no second
+# copy to keep in step. --model-source is UNCHANGED by this: it ships the
+# raw billing_provider column verbatim on both paths, so an `auto` row now
+# carries `--provider anthropic` and `--model-source auto` simultaneously
+# (deliberate asymmetry: --provider is the resolved analytics/guardrail
+# dimension, --model-source is the record of what Hermes actually declared).
 _infer_provider() {
   local model="$1" billing="$2"
   MODEL="${model}" BILLING="${billing}" python3 - <<'PY' 2>/dev/null || printf 'unknown\n'
 import os
 model = os.environ.get('MODEL', '').lower()
 billing = os.environ.get('BILLING', '').lower()
-if billing and billing not in ('', 'none', 'unknown'):
+if billing and billing not in ('', 'none', 'unknown', 'auto'):
     if billing == 'openrouter' or 'litellm' in billing:
         if 'claude' in model or 'anthropic' in model:
             print('anthropic')
