@@ -272,6 +272,27 @@ AUX_TAXONOMY_FILE="${REVENIUM_AUX_TAXONOMY_FILE:-${SKILL_DIR}/aux-taxonomy.json}
 # every other closed-two-literal switch in this file uses, via
 # resolve_switch_setting.
 REVENIUM_AUX_METERING="${REVENIUM_AUX_METERING:-enabled}"
+# Phase 55 Plan 02 (D-04/D-08): fifth sentinel directory in the same family
+# as WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR, PROBE_WARN_FLAGS_DIR, and
+# OUTCOME_WARN_FLAGS_DIR above -- one zero-byte flag file per gated key,
+# never a per-tick value (matches every neighbour's own rule: the
+# unknown-<epoch> defeat in pre_llm_call.sh:73-115 is what a per-tick key
+# reproduces). Two non-overlapping key namespaces share this ONE directory
+# rather than getting a sixth/seventh sentinel directory each, because both
+# reasons share a lifetime (once per install, forever) and a shape
+# (zero-byte flag file) -- the same (scope, reason)-inside-one-directory
+# idiom WARN_FLAGS_DIR already uses:
+#   - "notice-step-up" (constant key): the once-per-install permanent
+#     step-up notice, gated so an operator is told the aux metering upgrade
+#     permanently raised reported spend exactly once, never per tick.
+#   - "unknown-<sanitised task value>": once per distinct unrecognised
+#     session_model_usage.task value per install, so an upstream label
+#     rename surfaces as one actionable warn rather than silent spend with
+#     no label, or worse, an unbounded per-tick warn stream.
+# Created lazily by its writer, deliberately absent from the eager
+# mkdir -p below -- an install that never meters an auxiliary row creates
+# no auxiliary warn state at all.
+AUX_WARN_FLAGS_DIR="${REVENIUM_AUX_WARN_FLAGS_DIR:-${MARKERS_DIR}/.aux-warn}"
 
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}" "${JOB_ASSESSMENTS_DIR}"
 

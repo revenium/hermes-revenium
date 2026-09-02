@@ -846,6 +846,40 @@ else:
 PY
 }
 
+# Phase 55 Plan 02 (D-04/D-08/T-55-07/T-55-08): shared once-per-install gate
+# for AUX_WARN_FLAGS_DIR (common.sh), reused by BOTH the once-per-distinct-
+# unrecognised-task-value warn (report_auxiliary_usage below) and the
+# once-per-install permanent step-up notice -- one gating helper, not two,
+# matching the plan's own instruction to reuse rather than duplicate.
+#
+# The sanitised key is computed ONCE into a single local that BOTH the
+# existence check and the touch read (T-55-08's own rule: two copies of a
+# sanitizing expression drift, and when they do the gate silently never
+# matches one path while creating another). Every character outside
+# A-Za-z0-9_- is replaced with '_' and the result is clamped to 80 bytes
+# (T-55-07): a DB-sourced value reaching a filename must never be able to
+# smuggle a path separator or a traversal sequence out of AUX_WARN_FLAGS_DIR.
+#
+# raw_key must contain NOTHING that varies per tick -- a constant literal
+# ("notice-step-up") or a value stable across ticks (the unrecognised task
+# value itself). A key that changes every tick reproduces the
+# unknown-<epoch> defeat pre_llm_call.sh:73-115 already paid for once, where
+# the sentinel never matches and the line fires every call.
+#
+# Never returns non-zero: a failed mkdir/touch (e.g. a read-only state dir)
+# degrades to an un-gated warn on this call only, rather than aborting the
+# reporter -- matching OUTCOME_WARN_FLAGS_DIR's own tolerance.
+_aux_warn_once() {
+  local raw_key="$1" message="$2"
+  local sanitized_key="${raw_key//[^A-Za-z0-9_-]/_}"
+  sanitized_key="${sanitized_key:0:80}"
+  local flag_path="${AUX_WARN_FLAGS_DIR}/${sanitized_key}.flag"
+  if [[ ! -e "${flag_path}" ]]; then
+    mkdir -p "${AUX_WARN_FLAGS_DIR}" 2>/dev/null && touch "${flag_path}" 2>/dev/null
+    warn "${message}"
+  fi
+}
+
 # Phase 55 (D-06/D-07/D-13): the post-loop auxiliary-usage pass. Runs ONE
 # Python heredoc that reads session_model_usage (a table this file otherwise
 # never references), diffs it against AUX_LEDGER_FILE (common.sh), and prints one
@@ -1045,15 +1079,24 @@ for row in rows:
         if (delta_in + delta_out) <= 0:
             continue
 
-        # In THIS task, a taxonomy miss is skipped with no emit — plan 02
-        # adds the aux_unclassified fallback and its gated warn (D-08). The
-        # LABEL SHIPPED ON THE WIRE is the taxonomy KEY itself ("aux_approval"),
-        # matching task-taxonomy.json's own shape where the classifier's
-        # task_type is the dict key, not a field inside its value.
+        # D-08: a taxonomy miss NEVER drops the row -- only the label. The
+        # spend is real and must ship regardless of whether the DB's `task`
+        # value has a matching entry in aux-taxonomy.json (an upstream
+        # rename, or a genuinely new auxiliary call shape, must never
+        # silently under-report). The LABEL SHIPPED ON THE WIRE for a HIT is
+        # the taxonomy KEY itself ("aux_approval"), matching
+        # task-taxonomy.json's own shape where the classifier's task_type is
+        # the dict key, not a field inside its value. A MISS ships the fixed
+        # literal "aux_unclassified" instead -- deliberately NOT a member of
+        # aux-taxonomy.json itself (adding it there would make the miss
+        # unobservable), and deliberately NOT the raw DB value passed
+        # through unlabelled (an upstream rename would then silently turn
+        # one thing into two different wire labels instead of surfacing as
+        # one actionable warn -- see is_unclassified below, consumed by
+        # bash's once-per-distinct-value _aux_warn_once gate).
         candidate_label = f"aux_{task}"
-        if candidate_label not in labels:
-            continue
-        label = candidate_label
+        is_unclassified = candidate_label not in labels
+        label = candidate_label if not is_unclassified else 'aux_unclassified'
 
         req_ts = _ts_or_now(first_seen)
         resp_ts = _ts_or_now(last_seen)
@@ -1072,7 +1115,7 @@ for row in rows:
 
         print('|'.join([
             s_sid, s_model, s_billing, s_base_url, s_mode, s_task,
-            label,
+            label, str(int(is_unclassified)),
             str(delta_apic), str(delta_in), str(delta_out), str(delta_cr), str(delta_cw),
             f"{delta_cost:.6f}",
             cum_group, str(cum_total),
@@ -1094,15 +1137,25 @@ PY
     return 0
   fi
 
-  local s_sid s_model s_billing s_base_url s_mode s_task label
+  local s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified
   local d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total
   local req_time resp_time dur_ms orig_sid digest
   local ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source
-  while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label \
+  while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified \
     d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total \
     req_time resp_time dur_ms orig_sid digest \
     ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source; do
     [[ -z "${s_sid}" ]] && continue
+
+    # D-08: gate to once per distinct unrecognised task value per install
+    # (_aux_warn_once, above). Fires independent of whether the emit below
+    # succeeds -- the label miss is a fact about the taxonomy vs. the DB
+    # value, not about the CLI call's outcome, so it is not gated on
+    # cmd_exit the way Task 3's step-up notice is.
+    if [[ "${is_unclassified}" == "1" ]]; then
+      _aux_warn_once "unknown-${s_task}" \
+        "auxiliary task value unrecognised: '${s_task}' (session=${orig_sid}) — add it to skills/revenium/aux-taxonomy.json; spend was still reported as aux_unclassified, only the label was dropped"
+    fi
 
     local cmd=(
       revenium meter completion

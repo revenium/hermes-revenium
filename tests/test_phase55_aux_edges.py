@@ -270,5 +270,168 @@ class NoGoldenDriftGuardTests(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Task 2 -- an unrecognised task value ships as aux_unclassified with a
+# once-per-distinct-value warn (D-08).
+# ---------------------------------------------------------------------------
+def _bump_aux_row(state_db, session_id, model, billing_provider='', billing_base_url='',
+                   billing_mode='', task='', delta_input=20, delta_output=10, delta_calls=1):
+    """Advance a session_model_usage row's CUMULATIVE counters between ticks
+    (the schema is UPSERT/cumulative per six-column identity, per Plan 01's
+    own D-14 note) so a second tick ships a real new delta rather than the
+    no-op every existing test in test_phase55_auxiliary_metering.py drives."""
+    conn = sqlite3.connect(state_db)
+    conn.execute(
+        'UPDATE session_model_usage SET '
+        'input_tokens = input_tokens + ?, output_tokens = output_tokens + ?, '
+        'api_call_count = api_call_count + ? '
+        'WHERE session_id=? AND model=? AND billing_provider=? AND billing_base_url=? '
+        'AND billing_mode=? AND task=?',
+        (delta_input, delta_output, delta_calls,
+         session_id, model, billing_provider, billing_base_url, billing_mode, task),
+    )
+    conn.commit()
+    conn.close()
+
+
+class _AuxWarnGateTestCase(_AuxMeteringTestCase):
+    @staticmethod
+    def _log_text(fixture):
+        log_path = os.path.join(fixture['state_dir'], 'revenium-metering.log')
+        if not os.path.exists(log_path):
+            return ''
+        with open(log_path) as f:
+            return f.read()
+
+    @staticmethod
+    def _aux_warn_dir(fixture):
+        return os.path.join(fixture['state_dir'], 'markers', '.aux-warn')
+
+    @classmethod
+    def _sentinel_names(cls, fixture):
+        warn_dir = cls._aux_warn_dir(fixture)
+        if not os.path.isdir(warn_dir):
+            return []
+        return os.listdir(warn_dir)
+
+
+class UnrecognisedTaskValueTests(_AuxWarnGateTestCase):
+    """Task 2 -- an unrecognised `task` value never drops the row's spend,
+    only its label, and costs the operator exactly one actionable warn per
+    distinct value per install."""
+
+    def test_unrecognised_value_ships_aux_unclassified_with_spend_intact_and_one_warn(self):
+        aux_row = self._one_aux_row(task='title_gen_v2', input_tokens=40, output_tokens=10)
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[aux_row])
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+
+        aux_flags_list = self._find_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 1, result['meter_invocations'])
+        aux_flags = aux_flags_list[0]
+
+        self.assertEqual(aux_flags.get('--task-type'), 'aux_unclassified')
+        self.assertEqual(
+            aux_flags.get('--input-tokens'), '40',
+            'the spend must ship intact even though the label was dropped',
+        )
+        self.assertEqual(aux_flags.get('--output-tokens'), '10')
+        self.assertEqual(aux_flags.get('--total-tokens'), '50')
+
+        log_text = self._log_text(fixture)
+        self.assertEqual(
+            log_text.count('title_gen_v2'), 1,
+            f'expected exactly one warn line naming the unrecognised value, log:\n{log_text}',
+        )
+        self.assertIn('aux-taxonomy.json', log_text)
+        self.assertIn('aux_unclassified', log_text)
+
+        sentinels = self._sentinel_names(fixture)
+        self.assertTrue(
+            any('title_gen_v2' in name for name in sentinels),
+            f'expected a sentinel file naming the unrecognised value, got {sentinels!r}',
+        )
+
+    def test_second_tick_over_a_grown_delta_does_not_repeat_the_warn(self):
+        aux_row = self._one_aux_row(task='title_gen_v2')
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[aux_row])
+        self._tick(fixture, 0)
+
+        log_after_tick_1 = self._log_text(fixture)
+        self.assertEqual(log_after_tick_1.count('title_gen_v2'), 1)
+
+        _bump_aux_row(
+            fixture['state_db'], session_id=aux_row['session_id'], model=aux_row['model'],
+            billing_provider=aux_row['billing_provider'],
+            billing_base_url=aux_row['billing_base_url'], billing_mode=aux_row['billing_mode'],
+            task=aux_row['task'],
+        )
+        result_2 = self._tick(fixture, 1)
+        aux_flags_list = self._find_aux_invocation(result_2['meter_invocations'])
+        self.assertEqual(
+            len(aux_flags_list), 1,
+            'a real new delta must still ship a second aux invocation -- the '
+            '"no repeat warn" result below must not be explainable by '
+            'nothing having run',
+        )
+
+        log_after_tick_2 = self._log_text(fixture)
+        self.assertEqual(
+            log_after_tick_2.count('title_gen_v2'), 1,
+            f'the warn must never repeat for an already-seen value, log:\n{log_after_tick_2}',
+        )
+
+    def test_two_distinct_unrecognised_values_each_get_their_own_warn_and_sentinel(self):
+        row_a = self._one_aux_row(task='title_gen_v2', model='claude-3-5-haiku')
+        row_b = self._one_aux_row(task='weird_upstream_rename', model='claude-3-5-haiku',
+                                   billing_base_url='https://distinct-b.example')
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[row_a, row_b])
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+
+        aux_flags_list = self._find_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 2, result['meter_invocations'])
+        for flags in aux_flags_list:
+            self.assertEqual(flags.get('--task-type'), 'aux_unclassified')
+
+        log_text = self._log_text(fixture)
+        self.assertEqual(log_text.count('title_gen_v2'), 1)
+        self.assertEqual(log_text.count('weird_upstream_rename'), 1)
+
+        sentinels = self._sentinel_names(fixture)
+        self.assertTrue(any('title_gen_v2' in name for name in sentinels), sentinels)
+        self.assertTrue(any('weird_upstream_rename' in name for name in sentinels), sentinels)
+
+    def test_hostile_task_value_sentinel_filename_is_fully_sanitized(self):
+        hostile_task = 'weird|task\ncolon:val'
+        aux_row = self._one_aux_row(task=hostile_task)
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[aux_row])
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+
+        aux_flags_list = self._find_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 1, result['meter_invocations'])
+        self.assertEqual(aux_flags_list[0].get('--task-type'), 'aux_unclassified')
+
+        sentinels = self._sentinel_names(fixture)
+        self.assertEqual(len(sentinels), 1, sentinels)
+        sentinel_name = sentinels[0]
+        for forbidden in ('|', '\n', ':'):
+            self.assertNotIn(
+                forbidden, sentinel_name,
+                f'sentinel filename {sentinel_name!r} must not carry a raw {forbidden!r}',
+            )
+
+        ledger_path = self._aux_ledger_path(fixture)
+        with open(ledger_path) as f:
+            lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+        self.assertEqual(len(lines), 1, lines)
+        parts = lines[0].split('|')
+        self.assertEqual(
+            len(parts), 8,
+            f'ledger line must still split into 8 pipe-delimited parts, got {len(parts)}: {parts!r}',
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
