@@ -803,6 +803,163 @@ class DelegationTests(_ValuationBoundaryTestCase):
             record_default.pop(key, None)
         self.assertEqual(record_revenue, record_default)
 
+    # -- 6. WR-01 (phase-54 code review): the delegated lower bound must
+    #    match the BUILTIN's, not the CONFIGURED boundary name's ----------
+    #
+    # `test_whole_dict_equality_against_default_install` above uses
+    # estimated_hours_saved=2.5, assumed_loaded_rate=150.0 -- a product
+    # that never approaches the $0.00 boundary, so it cannot catch a
+    # regression in the lower-bound re-check. These tests close that gap.
+    #
+    # ORDERING NOTE (load-bearing for every test below that needs BOTH a
+    # revenue-configured and a default classifier module): self._load()
+    # writes to `self.config_path`, ONE path fixed for the whole test
+    # method by setUp(). `_boundary_impl_name`/`_llm_evaluation_config`
+    # read that file's CONTENTS fresh on every call -- they are not
+    # snapshotted at module-load time -- so a SECOND self._load() call
+    # within the same test overwrites the file the FIRST module still
+    # reads live. Every test below therefore fully consumes the
+    # revenue-configured module (through _validate_assessment, and through
+    # _build_job_assessment where used) BEFORE calling self._load() again
+    # for the default-install comparison, and asserts impl_name actually
+    # resolved to the fixture as a guard against silently regressing into
+    # that same trap.
+
+    def test_delegated_zero_value_result_is_accepted_not_abstained(self):
+        """WR-01: a delegated hours*rate product that rounds to $0.00 must
+        still produce a record on a revenue-configured host, exactly as it
+        does on a default install. `impl_name` alone
+        ("revenue_card_valuation_fixture") is not "the builtin" -- but the
+        DELEGATED RESULT is, because `_delegate_to_builtin_hours_times_rate`
+        returns the real `hours_times_rate` registrant's own dict, verbatim.
+        The caller's re-check must recognise that by what actually produced
+        the value, not by the configured boundary name."""
+        mod_revenue = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        raw = self._raw(
+            economic_mechanism='labor_substitution',
+            estimated_hours_saved=0.001, assumed_loaded_rate=1.0,
+        )
+        cfg_revenue = mod_revenue._llm_evaluation_config()
+        self.assertEqual(
+            'revenue_card_valuation_fixture',
+            mod_revenue._boundary_impl_name('valuation', 'hours_times_rate'),
+            'sanity: this test must actually exercise delegation through '
+            'the fixture, not silently resolve straight to the builtin',
+        )
+        got_revenue = mod_revenue._validate_assessment(raw, cfg_revenue, 'stub', 'v1')
+        self.assertIsNotNone(
+            got_revenue,
+            'a session that DELEGATES to the real hours_times_rate '
+            'registrant must be held to the BUILTIN inclusive lower bound '
+            '(amount >= 0), not the third-party exclusive one -- '
+            'abstaining here silently drops an assessment D-04 guarantees '
+            'stays recorded',
+        )
+        self.assertEqual(0.0, got_revenue['estimated_value'])
+        self.assertNotIn('economic_mechanism', got_revenue)
+
+        # Compare against a genuinely fresh default-install classifier for
+        # the SAME hours/rate pair, loaded only AFTER mod_revenue's own
+        # call above has already run to completion (see the ordering note
+        # above this test group).
+        mod_default = self._load(boundaries=None)
+        cfg_default = mod_default._llm_evaluation_config()
+        got_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
+        self.assertIsNotNone(got_default, 'sanity: phase-45 CR-01 back-compat')
+        self.assertEqual(got_default['estimated_value'], got_revenue['estimated_value'])
+
+    def test_delegated_zero_value_matches_default_across_several_boundary_pairs(self):
+        """WR-01: several hours/rate pairs at or near the $0.00 rounding
+        boundary (the same style of matrix phase-45's own
+        ZeroRoundingBackCompatTests.test_matches_mains_unconditional_rounding_across_several_pairs
+        uses), each proven individually to still delegate and still be
+        accepted with the exact value round(hours * rate, 2) produces."""
+        for hours, rate in ((0.001, 1.0), (0.0001, 10.0), (0.004, 1.0), (0.01, 0.4)):
+            with self.subTest(hours=hours, rate=rate):
+                mod_revenue = self._load(
+                    boundaries={'valuation': 'revenue_card_valuation_fixture'})
+                raw = self._raw(
+                    economic_mechanism='labor_substitution',
+                    estimated_hours_saved=hours, assumed_loaded_rate=rate,
+                )
+                cfg_revenue = mod_revenue._llm_evaluation_config()
+                self.assertEqual(
+                    'revenue_card_valuation_fixture',
+                    mod_revenue._boundary_impl_name('valuation', 'hours_times_rate'),
+                )
+                got = mod_revenue._validate_assessment(raw, cfg_revenue, 'stub', 'v1')
+                self.assertIsNotNone(got, f'delegated ({hours}, {rate}) must not abstain')
+                self.assertEqual(round(hours * rate, 2), got['estimated_value'])
+
+    def test_genuine_third_party_zero_value_still_abstains(self):
+        """WR-01's fix must not relax the bound for an ACTUAL third-party
+        registrant: `amount > 0` (strict) stays their rule. A registrant
+        that computes its OWN dict (never delegates to the real builtin)
+        and returns exactly 0.0 must still abstain, exactly as it did
+        before this fix -- only a genuinely DELEGATED result gets the
+        inclusive bound."""
+        import valuation as val  # type: ignore
+        name = _throwaway_registrant_name()
+
+        def _fn(a, c):
+            # A real third party, computing its own answer -- NOT calling
+            # _delegate_to_builtin_hours_times_rate, so the identity
+            # marker this fix relies on is never set for this call.
+            return {'estimated_value': 0.0, 'currency': a.get('currency')}
+
+        val.register(name, _fn, '1', evidence_class='CUSTOMER_CONFIGURED')
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        self.addCleanup(val._MECHANISM_DECLARATIONS.pop, name, None)
+
+        mod = self._load(boundaries={'valuation': name})
+        raw = self._raw(economic_mechanism='labor_substitution')
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNone(
+            got,
+            'a genuine third-party registrant returning exactly 0.0 '
+            '(never delegating) must still abstain -- WR-01 must not '
+            'widen the bound for real third parties',
+        )
+
+    def test_hostile_registrant_cannot_spoof_delegation_marker_via_dict_key(self):
+        """Non-forgeability: the REJECTED naive fix would have recognised
+        "the builtin" by a key on the returned dict (e.g.
+        `"_delegated_to_builtin": True`), which any registrant -- honest or
+        hostile -- fully controls. The actual fix is IDENTITY-based
+        (valuation.is_delegated_builtin_result), so a registrant that
+        merely mimics that shape without ever calling
+        `_delegate_to_builtin_hours_times_rate` must still be held to the
+        third-party bound and abstain on exactly 0.0."""
+        import valuation as val  # type: ignore
+        name = _throwaway_registrant_name()
+
+        def _fn(a, c):
+            # Mimics the shape of the REJECTED dict-key marker design from
+            # the review's own naive fix suggestion. If the fix read this
+            # key from the dict, this call would forge builtin treatment.
+            return {
+                'estimated_value': 0.0,
+                'currency': a.get('currency'),
+                '_delegated_to_builtin': True,
+            }
+
+        val.register(name, _fn, '1', evidence_class='CUSTOMER_CONFIGURED')
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        self.addCleanup(val._MECHANISM_DECLARATIONS.pop, name, None)
+
+        mod = self._load(boundaries={'valuation': name})
+        raw = self._raw(economic_mechanism='labor_substitution')
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNone(
+            got,
+            'a hostile registrant returning the naive marker key verbatim '
+            'must NOT receive the builtin inclusive lower bound -- the '
+            'fix is identity-based (an object this module produced), '
+            'never content-based (a key any dict can carry)',
+        )
+
 
 # ---------------------------------------------------------------------------
 # Task 2 -- AttributionCouplingTests

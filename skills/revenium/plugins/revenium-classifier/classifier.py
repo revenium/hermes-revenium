@@ -1593,6 +1593,31 @@ def _finite_number(value) -> "float | None":
     return f
 
 
+def _is_valuation_delegated_builtin_result(valuation_mod, derived: dict) -> bool:
+    """WR-01 fix (phase-54 code review): fail-safe wrapper around
+    `valuation.is_delegated_builtin_result`.
+
+    Fails to False -- never True -- on any error. This is the fail-CLOSED
+    direction for this particular check: the worst outcome of a failure
+    here is the PRE-EXISTING WR-01 behaviour (a delegated builtin result
+    held to the stricter third-party lower bound, so an occasional
+    legitimate zero-value assessment abstains), never a wrongly WIDENED
+    bound produced by a check that raised partway through and was
+    swallowed as a false True. `run_classification_async` must never
+    raise (see this module's own top-level contract), so this wrapper —
+    not a bare `valuation_mod.is_delegated_builtin_result(derived)` call —
+    is what the re-check block in `_validate_assessment` calls.
+    """
+    try:
+        return bool(valuation_mod.is_delegated_builtin_result(derived))
+    except Exception:
+        logger.warning(
+            "revenium-classifier: delegated-builtin identity check raised; "
+            "treating this result as third-party",
+        )
+        return False
+
+
 # Phase 42 (EGV-06/D-09 site one): the fractional half-width used to DERIVE a
 # low/base/high band when the evaluator supplies no bounds of its own -- the
 # only path today's naked-LLM evaluator can take. This is a declared
@@ -1778,6 +1803,25 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
             "falling back to the built-in derivation", impl_name,
         )
     else:
+        # Phase 54 (WR-01 fix): reset the cross-module delegation marker
+        # BEFORE invoking the registrant, so a marker left behind by an
+        # earlier, unrelated assessment can never be mistaken for this
+        # call's own delegation. Guarded independently of the impl() call
+        # below -- a failure here must never block the derivation itself,
+        # only cost this call the (already rare) delegated-builtin lower
+        # bound, which is the fail-closed/fail-strict direction: worst
+        # case is the pre-existing WR-01 behaviour, never a wrongly
+        # WIDENED bound. See valuation.reset_delegation_marker()'s own
+        # docstring and the module comment above
+        # valuation._delegated_builtin_result for the full mechanism.
+        try:
+            valuation_mod.reset_delegation_marker()
+        except Exception:
+            logger.warning(
+                "revenium-classifier: failed to reset the valuation "
+                "delegation marker; delegated-builtin lower bound will "
+                "not apply for this call",
+            )
         try:
             derived = impl(assumptions, cfg)
         except Exception:
@@ -1917,7 +1961,32 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # trust the built-in has by being the same code main ran. It still
         # abstains. Negative amounts are refused from everyone -- the skill
         # must never assert a negative value it never measured (phase 44 D-14).
-        _is_builtin = impl_name == "hours_times_rate"
+        #
+        # WR-01 (phase-54 code review): `impl_name == "hours_times_rate"`
+        # alone is not enough to recognise "the builtin", because D-04's
+        # `revenue_card_valuation_fixture` DELEGATES to the real
+        # `hours_times_rate` registrant internally and returns its result
+        # VERBATIM (valuation.py's own module comment above
+        # `_delegate_to_builtin_hours_times_rate`) precisely so an
+        # ordinary, non-revenue session on a revenue-configured host is
+        # priced exactly as it would be on a default install. On such a
+        # host `impl_name` is `"revenue_card_valuation_fixture"` -- the
+        # CONFIGURED boundary name, not the name of whatever actually
+        # produced `derived` -- so a name-only check applied the
+        # THIRD-PARTY exclusive bound to a session whose hours*rate
+        # legitimately rounds to 0.00, silently dropping the whole
+        # assessment (`_validate_assessment` returning None) instead of
+        # keeping it visible the way this comment's own preceding
+        # paragraph requires. `is_delegated_builtin_result(derived)` closes
+        # that gap by asking "did this call's registrant actually delegate
+        # to the real builtin and hand back ITS unmodified dict" rather
+        # than "what name is `boundaries.valuation` configured to" -- see
+        # valuation.py's module comment above `_delegated_builtin_result`
+        # for why that check cannot be spoofed by a third-party dict.
+        _is_builtin = impl_name == "hours_times_rate" or (
+            isinstance(derived, dict)
+            and _is_valuation_delegated_builtin_result(valuation_mod, derived)
+        )
         _lower_ok = (amount is not None) and (
             amount >= 0 if _is_builtin else amount > 0
         )

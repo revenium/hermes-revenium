@@ -79,6 +79,7 @@ dependency rule, not an oversight.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import math
 
@@ -532,6 +533,76 @@ _REVENUE_CARD_BASIS_PREFIX = (
 )
 
 
+# Phase 54 (WR-01 fix, phase-54 code review): an IDENTITY-based delegation
+# marker -- deliberately NOT a key written into the returned dict.
+#
+# The rejected alternative (the naive form of this fix) was to have
+# `_delegate_to_builtin_hours_times_rate` stamp a key like
+# `"_delegated_to_builtin": True` onto its return dict and have the caller
+# check for that key. That is forgeable by construction: the returned
+# dict is the one piece of this contract a registrant -- honest or
+# hostile -- fully controls. A third-party registrant that wanted the
+# BUILT-IN's laxer inclusive lower bound (`amount >= 0`) instead of its
+# own exclusive one (`amount > 0`) could simply copy that key into its own
+# return dict; nothing about dict content distinguishes a genuine
+# delegation from a look-alike.
+#
+# What a registrant does NOT control is OBJECT IDENTITY. This module's own
+# `_delegate_to_builtin_hours_times_rate`, and only that function, records
+# the exact dict object it got back from calling the real
+# `hours_times_rate` registrant, into a ContextVar private to this module.
+# The caller then asks "is the dict I received LITERALLY that same object"
+# with Python's `is`, never by re-parsing keys/values. Constructing a new
+# dict with identical keys and values -- which is all a hostile registrant
+# can do -- produces a distinct object, so `is` is False regardless of
+# content. Forging a match would require reaching into this module's
+# private ContextVar directly and calling `.set()` on it with a dict the
+# registrant itself never legitimately produced -- a materially different
+# and far more deliberate act than "return a dict with an extra key",
+# and not a channel the documented `value(assumptions, config) -> dict |
+# None` contract exposes to a registrant at all.
+#
+# A ContextVar, not a plain module-level global, because classification
+# runs concurrently across asyncio tasks/threads for a multiplexed host's
+# several profiles at once (see classifier.py's own per-session
+# path-resolution comments) -- a bare global would let two concurrent
+# calls stomp each other's marker. A ContextVar isolates each task's/
+# thread's own value.
+#
+# The marker is reset before every call to a registrant (so a call that
+# never delegates can never observe a PRIOR, unrelated call's leftover
+# marker) and consumed -- read, then immediately cleared -- the one time
+# the caller checks it, so a second read within the same turn cannot
+# re-match a different `derived` object.
+_delegated_builtin_result: "contextvars.ContextVar[object]" = contextvars.ContextVar(
+    "revenium_valuation_delegated_builtin_result", default=None
+)
+
+
+def reset_delegation_marker() -> None:
+    """Clear this call's delegation marker.
+
+    The caller (`classifier._validate_assessment`) calls this once,
+    immediately before invoking a resolved registrant, so a marker left
+    behind by an earlier, unrelated call can never leak forward and be
+    mistaken for this call's own delegation.
+    """
+    _delegated_builtin_result.set(None)
+
+
+def is_delegated_builtin_result(candidate) -> bool:
+    """Read-and-clear: True only when `candidate` IS (by identity, never
+    by content) the exact dict object `_delegate_to_builtin_hours_times_rate`
+    most recently produced by calling the real `hours_times_rate`
+    registrant. Always clears the marker before returning -- see the
+    module comment above `_delegated_builtin_result` for why identity,
+    not a dict key, is what makes this unforgeable.
+    """
+    marker = _delegated_builtin_result.get()
+    _delegated_builtin_result.set(None)
+    return candidate is not None and candidate is marker
+
+
 def _delegate_to_builtin_hours_times_rate(assumptions: dict, config: dict) -> "dict | None":
     """D-04: delegate to the `hours_times_rate` registrant when this
     fixture has nothing revenue-shaped to price.
@@ -550,11 +621,26 @@ def _delegate_to_builtin_hours_times_rate(assumptions: dict, config: dict) -> "d
     to never raise. The identity check refuses that call and returns None
     instead -- a self-referential configuration is itself a reason to
     abstain, not a delegation.
+
+    Phase 54 (WR-01 fix): when the delegation actually reaches the real
+    builtin and gets a dict back, that exact object is ALSO recorded via
+    `_delegated_builtin_result.set(...)` -- an identity marker
+    `classifier._validate_assessment` reads through
+    `is_delegated_builtin_result()` to apply the BUILT-IN's inclusive
+    lower bound to a delegated result, rather than the third-party
+    exclusive bound `impl_name` alone would suggest once
+    `boundaries.valuation` points at THIS fixture rather than directly at
+    `hours_times_rate`. The dict itself is untouched here -- no key added,
+    no copy made -- so "returns the built-in's result VERBATIM" stays
+    exactly as true as it was before this marker existed.
     """
     builtin = resolve("hours_times_rate")
     if builtin is None or builtin is _revenue_card_valuation_fixture:
         return None
-    return builtin(assumptions, config)
+    result = builtin(assumptions, config)
+    if isinstance(result, dict):
+        _delegated_builtin_result.set(result)
+    return result
 
 # Phase 54 (D-11, ROI-08, T-54-02): the closed set of reason words this
 # fixture's diagnostics may ever emit. A branch names exactly one of these
