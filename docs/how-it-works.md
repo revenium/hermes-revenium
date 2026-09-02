@@ -91,6 +91,45 @@ than the default.
 Rollback is the reverse: set `REVENIUM_LEGACY_COMPLETIONS=enabled` again, then
 `REVENIUM_EVENT_METERING_MODE=shadow`.
 
+## Auxiliary usage metering
+
+This pass meters the auxiliary LLM calls Hermes makes around its own main loop —
+compression, title generation, approval, vision, web extraction, and session search.
+None of it was reported before this feature shipped.
+
+It runs as `report_auxiliary_usage`, a post-loop pass inside `hermes-report.sh`, after the
+agentic-jobs outcome stage. **This is not a seventh cron stage** — the cron still runs
+six.
+
+It reads `session_model_usage` in `state.db`, read-only, and considers only rows whose
+`task` column is non-empty. An empty-`task` row mirrors the `sessions` row's own totals
+and is excluded — shipping it would double-count the main loop.
+
+Each qualifying row ships as its own `revenium meter completion`, with
+`--operation-type AUX` and `--task-type` drawn from a fixed six-label `aux_*` vocabulary.
+An unrecognised value ships as `aux_unclassified` so spend is never dropped, only its
+label.
+
+Idempotency is `revenium-aux.ledger`, its own key domain, using per-column cumulative
+subtraction — re-running the cron never double-reports.
+
+The switch is `REVENIUM_AUX_METERING` (env) or `auxMetering` (`config.json`), env wins.
+`disabled` — or a Hermes build with no `session_model_usage` table — meters
+byte-identically to before.
+
+**Guardrail scope.** A rule left at the default `AGENT:IS:` scope has the same scope on
+an auxiliary row as on that session's main-loop row, because the auxiliary row carries
+the same `--agent` value. A `MODEL`- or `PROVIDER`-scoped rule is different: those are the
+auxiliary row's OWN facts, and an auxiliary call frequently runs on a smaller model than
+the session's main-loop model, so a `MODEL`-scoped rule built around your primary model
+will not see it. A `TASK_TYPE`-scoped rule is opt-in by construction and the `aux_*`
+labels must be enumerated. **Whether the Revenium-side guardrail counter actually moves
+for an ingested auxiliary row is not demonstrated by this work** — that confirmation is a
+separate, later effort against a live tenant.
+
+See [Auxiliary usage migration](migration-auxiliary-usage.md) for the measured step-up,
+the re-runnable sizing SQL, and the off switch.
+
 ## Agentic job tracking
 
 Discrete task arcs become Revenium agentic jobs through `revenium jobs create` and

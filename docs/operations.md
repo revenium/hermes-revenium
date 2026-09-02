@@ -9,13 +9,16 @@ default home. See [the fleet guide](fleet.md).
 ## Start here
 
 `diagnose.sh` is the read-only triage report for credentials, cron, ledgers, the settle gate,
-plugin and hook state, and a per-profile summary in one pass. Run it before reading
-anything else:
+plugin and hook state, the auxiliary usage pass (section 10), and a per-profile summary in
+one pass. Run it before reading anything else:
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/diagnose.sh
 bash ~/.hermes/skills/revenium/scripts/diagnose.sh --profile ent
 ```
+
+`--tick` (which actually ships data) is now section 11, bumped down from 10 to make room
+for the read-only auxiliary usage pass section.
 
 ## Running a stage by hand
 
@@ -41,7 +44,7 @@ registered, `2` registered but inert.
 | Command | What it does |
 |---|---|
 | `clear-halt.sh` | Clear an active halt. `--rule-id <id>` clears one rule. This is the only thing that clears a halt — nothing auto-clears. |
-| `prune-markers.sh` | Remove marker files older than 30 days — and job-assessment sidecars on their own, longer clock (`REVENIUM_ASSESSMENT_RETENTION_DAYS`, 90 days by default), skipping any sidecar a correction currently holds locked — plus the warn-flag sentinel directories (`.warn`, `.fallback-warn`, `.outcome-warn`, `.probe-warn`) — these accumulate one zero-byte file per suppressed condition and are never pruned automatically. `--dry-run` previews. Deliberately not wired into cron; run it periodically by hand. |
+| `prune-markers.sh` | Remove marker files older than 30 days — and job-assessment sidecars on their own, longer clock (`REVENIUM_ASSESSMENT_RETENTION_DAYS`, 90 days by default), skipping any sidecar a correction currently holds locked — plus the warn-flag sentinel directories (`.warn`, `.fallback-warn`, `.outcome-warn`, `.probe-warn`, `.aux-warn`) — these accumulate one zero-byte file per suppressed condition and are never pruned automatically. `--dry-run` previews. Deliberately not wired into cron; run it periodically by hand. |
 | `install-cron.sh` / `uninstall-cron.sh` | Manage the per-minute crontab entry |
 | `install-hooks.sh` / `uninstall-hooks.sh` | Manage the three shell hooks in `config.yaml` |
 | `install-plugin.sh` | Copy the classifier into `~/.hermes/plugins/` and restart the gateway |
@@ -58,13 +61,14 @@ cat    ~/.hermes/state/revenium/guardrail-status.json       # live guardrail sna
 crontab -l | grep hermes-revenium-metering                  # is the cron installed
 ```
 
-Three append-only ledgers hold the idempotency record. Records in these ledgers have already
+Four append-only ledgers hold the idempotency record. Records in these ledgers have already
 shipped:
 
 ```bash
 tail -n 20 ~/.hermes/state/revenium/revenium-hermes.ledger       # completions
 tail -n 20 ~/.hermes/state/revenium/revenium-jobs.ledger         # agentic jobs
 tail -n 20 ~/.hermes/state/revenium/revenium-tool-events.ledger  # tool events
+tail -n 20 ~/.hermes/state/revenium/revenium-aux.ledger          # auxiliary usage
 cat        ~/.hermes/state/revenium/tool-events/<sid>.jsonl      # captured tool calls
 ```
 
