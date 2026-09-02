@@ -1218,6 +1218,24 @@ PY
       aux_now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
       echo "AUX:${s_sid}|${s_model}|${s_billing}|${s_base_url}|${s_mode}|${s_task}|${cum_group}|${aux_now_ts}" >> "${AUX_LEDGER_FILE}"
       info "Aux reported: session=${orig_sid} label=${label} model=$(_clean_model_name "${s_model}") in=${d_in} out=${d_out}"
+
+      # D-04: the once-per-install permanent step-up notice, gated through
+      # the SAME _aux_warn_once helper Task 2's unrecognised-value warn uses
+      # (constant key "notice-step-up" — never a per-tick value). Placed
+      # HERE, inside the zero-exit branch, so it can only fire after a real
+      # successful emit: a notice about spend that was never reported would
+      # be a lie, and it shares this precondition with the ledger line
+      # directly above it rather than a second, looser one.
+      #
+      # This uses `warn`, not `info` (a deliberate deviation from
+      # CLAUDE.md's usual info/warn split, recorded in 55-02-PLAN.md's
+      # discretionary_decision): this is the one line telling an operator
+      # their effective budget just tightened permanently and that this
+      # tick's figure includes a one-time historical catch-up. In an info
+      # stream it would be lost among ordinary lifecycle lines; the whole
+      # point of D-04 is that it is not.
+      _aux_warn_once "notice-step-up" \
+        "auxiliary LLM usage (compression, title generation, vision, and similar background calls) is now metered, which permanently raises reported spend against unchanged traffic -- a guardrail threshold tuned before this upgrade may now trip earlier. This first tick also reports auxiliary usage accumulated before the upgrade, since the aux ledger started empty while the underlying counters are cumulative -- treat this tick's figure as a one-time historical catch-up, not a new baseline. To turn this off, set REVENIUM_AUX_METERING=disabled -- see docs/migration-auxiliary-usage.md for details."
     else
       # Never append a ledger line — the next tick retries.
       warn "Aux failed: session=${orig_sid} label=${label} exit=${cmd_exit} output=${cmd_output}"

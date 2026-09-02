@@ -484,6 +484,12 @@ class RepositoryTests(unittest.TestCase):
             # session_model_usage row end to end to a metered
             # --operation-type AUX row and an AUX: ledger line.
             ROOT / 'tests' / 'test_phase55_auxiliary_metering.py',
+            # Phase 55 Plan 02 (ROI-09/ROI-10) — the three edges the tracer
+            # deliberately left open: the `auto` provider resolution
+            # (globally, via the one shared _infer_provider function), the
+            # aux_unclassified fallback + its once-per-distinct-value warn,
+            # and the once-per-install permanent step-up notice.
+            ROOT / 'tests' / 'test_phase55_aux_edges.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -2431,6 +2437,25 @@ exit 0
         for ln in mkdir_lines:
             self.assertNotIn('AUX_', ln,
                              'no AUX_ variable belongs in the eager mkdir -p line')
+        # Phase 55 Plan 02 (D-04/D-08): AUX_WARN_FLAGS_DIR, the fifth
+        # sentinel directory in the WARN_FLAGS_DIR family. Created lazily by
+        # its writer (_aux_warn_once) -- deliberately absent from the eager
+        # mkdir -p, reusing the SAME mkdir_lines list computed above rather
+        # than recomputing it, matching every other lazily-created sentinel
+        # directory's own assertion shape in this method.
+        self.assertIn('AUX_WARN_FLAGS_DIR=', text)
+        self.assertIn('markers/.aux-warn', text)
+        self.assertRegex(
+            text,
+            r'AUX_WARN_FLAGS_DIR="\$\{REVENIUM_AUX_WARN_FLAGS_DIR:-\$\{MARKERS_DIR\}/\.aux-warn\}"',
+        )
+        for ln in mkdir_lines:
+            self.assertNotIn(
+                'AUX_WARN_FLAGS_DIR', ln,
+                'AUX_WARN_FLAGS_DIR must NOT be in the eager mkdir -p -- an '
+                'install that never meters an auxiliary row must create no '
+                'auxiliary warn state at all',
+            )
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""

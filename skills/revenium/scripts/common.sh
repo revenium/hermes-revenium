@@ -272,9 +272,10 @@ AUX_TAXONOMY_FILE="${REVENIUM_AUX_TAXONOMY_FILE:-${SKILL_DIR}/aux-taxonomy.json}
 # every other closed-two-literal switch in this file uses, via
 # resolve_switch_setting.
 REVENIUM_AUX_METERING="${REVENIUM_AUX_METERING:-enabled}"
-# Phase 55 Plan 02 (D-04/D-08): fifth sentinel directory in the same family
-# as WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR, PROBE_WARN_FLAGS_DIR, and
-# OUTCOME_WARN_FLAGS_DIR above -- one zero-byte flag file per gated key,
+# Phase 55 Plan 02 (D-04/D-08): fifth sentinel directory (markers/.aux-warn)
+# in the same family as WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR,
+# PROBE_WARN_FLAGS_DIR, and OUTCOME_WARN_FLAGS_DIR above -- one zero-byte
+# flag file per gated key,
 # never a per-tick value (matches every neighbour's own rule: the
 # unknown-<epoch> defeat in pre_llm_call.sh:73-115 is what a per-tick key
 # reproduces). Two non-overlapping key namespaces share this ONE directory

@@ -413,7 +413,12 @@ class UnrecognisedTaskValueTests(_AuxWarnGateTestCase):
         self.assertEqual(len(aux_flags_list), 1, result['meter_invocations'])
         self.assertEqual(aux_flags_list[0].get('--task-type'), 'aux_unclassified')
 
-        sentinels = self._sentinel_names(fixture)
+        # T-55-07: the hostile value must produce exactly one "unknown-"
+        # sentinel. A successful emit also lights the (unrelated,
+        # constant-keyed) "notice-step-up" sentinel Task 3 adds -- filter to
+        # this test's own concern rather than asserting on the directory's
+        # total file count.
+        sentinels = [n for n in self._sentinel_names(fixture) if n.startswith('unknown-')]
         self.assertEqual(len(sentinels), 1, sentinels)
         sentinel_name = sentinels[0]
         for forbidden in ('|', '\n', ':'):
@@ -431,6 +436,159 @@ class UnrecognisedTaskValueTests(_AuxWarnGateTestCase):
             len(parts), 8,
             f'ledger line must still split into 8 pipe-delimited parts, got {len(parts)}: {parts!r}',
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 -- the once-per-install permanent step-up notice (D-04).
+# ---------------------------------------------------------------------------
+def _build_failing_completion_shim(shim_path):
+    """Same probe/capture shape as _compat_helpers.build_shim (squad-capable,
+    jobs-outcome-value-capable), except `revenium meter completion` always
+    exits 1 after logging its argv. Drives Task 3's failure arm: the notice
+    and the ledger line share the zero-exit precondition, so a failing CLI
+    call must produce neither -- proven here by making EVERY completion
+    call fail, main-loop and auxiliary alike."""
+    body = (
+        '#!/usr/bin/env bash\n'
+        'case "$1" in\n'
+        '  config) exit 0 ;;\n'
+        '  guardrails) exit 0 ;;\n'
+        '  meter)\n'
+        '    if [[ "$3" == "--help" ]]; then\n'
+        '      echo "--squad-id string        Squad (root session) identifier"\n'
+        '      echo "--squad-name string       Squad (root session) display name"\n'
+        '      echo "--squad-role string       Squad role: root or subagent"\n'
+        '      echo "--agentic-job-id  Agentic job instance identifier"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    case "$2" in\n'
+        '      completion)\n'
+        '        printf "%q " "$@" >> "${METER_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'
+        '        printf "\\n"      >> "${METER_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'
+        '        exit 1\n'
+        '        ;;\n'
+        '      *)\n'
+        '        printf "%q " "$@" >> "${INVOCATIONS_LOG:-/dev/null}"\n'
+        '        printf "\\n"      >> "${INVOCATIONS_LOG:-/dev/null}"\n'
+        '        ;;\n'
+        '    esac\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  jobs)\n'
+        '    if [[ "$2" == "--help" ]]; then exit 0; fi\n'
+        '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
+        '      echo "--outcome-value string     Business outcome value"\n'
+        '      echo "--outcome-currency string   Business outcome currency"\n'
+        '      exit 0\n'
+        '    fi\n'
+        '    printf "%q " "$@" >> "${JOBS_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'
+        '    printf "\\n"      >> "${JOBS_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'
+        '    exit 0\n'
+        '    ;;\n'
+        '  *) exit 0 ;;\n'
+        'esac\n'
+    )
+    with open(shim_path, 'w') as f:
+        f.write(body)
+    os.chmod(shim_path, 0o755)
+
+
+class StepUpNoticeTests(_AuxWarnGateTestCase):
+    """Task 3 -- the permanent step-up and its one-time historical catch-up
+    are announced exactly once per install, only after a real successful
+    emit, naming the off switch and the migration document."""
+
+    def test_first_successful_emit_fires_the_notice_exactly_once(self):
+        fixture = self._setup_fixture(
+            [self._one_session()], aux_rows=[self._one_aux_row()],
+        )
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+        self.assertEqual(len(self._find_aux_invocation(result['meter_invocations'])), 1)
+
+        log_text = self._log_text(fixture)
+        self.assertEqual(
+            log_text.count('permanently raises reported spend'), 1,
+            f'expected exactly one step-up notice line, log:\n{log_text}',
+        )
+        self.assertIn(
+            'REVENIUM_AUX_METERING', log_text,
+            'the notice must name the off-switch variable by name',
+        )
+        self.assertIn(
+            'docs/migration-auxiliary-usage.md', log_text,
+            'the notice must name the migration document',
+        )
+
+        sentinels = self._sentinel_names(fixture)
+        self.assertIn('notice-step-up.flag', sentinels, sentinels)
+
+    def test_second_run_ships_a_real_aux_row_but_never_repeats_the_notice(self):
+        aux_row = self._one_aux_row()
+        fixture = self._setup_fixture([self._one_session()], aux_rows=[aux_row])
+        self._tick(fixture, 0)
+
+        log_after_tick_1 = self._log_text(fixture)
+        self.assertEqual(log_after_tick_1.count('permanently raises reported spend'), 1)
+
+        _bump_aux_row(
+            fixture['state_db'], session_id=aux_row['session_id'], model=aux_row['model'],
+            billing_provider=aux_row['billing_provider'],
+            billing_base_url=aux_row['billing_base_url'], billing_mode=aux_row['billing_mode'],
+            task=aux_row['task'],
+        )
+        result_2 = self._tick(fixture, 1)
+        aux_flags_list = self._find_aux_invocation(result_2['meter_invocations'])
+        self.assertEqual(
+            len(aux_flags_list), 1,
+            'a real second aux invocation must ship -- the "no repeat notice" '
+            'result below must not be explainable by nothing having run',
+        )
+
+        log_after_tick_2 = self._log_text(fixture)
+        self.assertEqual(
+            log_after_tick_2.count('permanently raises reported spend'), 1,
+            f'the step-up notice must never repeat, log:\n{log_after_tick_2}',
+        )
+
+    def test_failing_cli_call_produces_none_of_notice_sentinel_or_ledger_line(self):
+        fixture = self._setup_fixture(
+            [self._one_session()], aux_rows=[self._one_aux_row()],
+        )
+        _build_failing_completion_shim(os.path.join(fixture['bin_dir'], 'revenium'))
+
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+
+        log_text = self._log_text(fixture)
+        self.assertNotIn(
+            'permanently raises reported spend', log_text,
+            'a failing CLI call must never produce the step-up notice',
+        )
+
+        sentinels = self._sentinel_names(fixture)
+        self.assertNotIn('notice-step-up.flag', sentinels, sentinels)
+
+        ledger_path = self._aux_ledger_path(fixture)
+        self.assertFalse(
+            os.path.exists(ledger_path),
+            'a failing CLI call must never append an aux ledger line',
+        )
+
+    def test_off_switch_never_produces_the_notice(self):
+        fixture = self._setup_fixture(
+            [self._one_session()], aux_rows=[self._one_aux_row()],
+        )
+        result = self._tick(fixture, 0, extra_env={'REVENIUM_AUX_METERING': 'disabled'})
+        self.assertEqual(result['rc'], 0, result['output'])
+
+        self.assertEqual(len(self._find_aux_invocation(result['meter_invocations'])), 0)
+
+        log_text = self._log_text(fixture)
+        self.assertNotIn('permanently raises reported spend', log_text)
+
+        sentinels = self._sentinel_names(fixture)
+        self.assertNotIn('notice-step-up.flag', sentinels, sentinels)
 
 
 if __name__ == '__main__':
