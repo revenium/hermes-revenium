@@ -291,3 +291,238 @@ class OperatorBoundKeyTests(_ValuationBoundaryTestCase):
         got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
         self.assertIsNone(got)
 
+
+# ---------------------------------------------------------------------------
+# Task 2 -- MechanismDeclarationTests
+# ---------------------------------------------------------------------------
+
+_THROWAWAY_SEQ = [0]
+
+
+def _throwaway_registrant_name(prefix='p54_throwaway'):
+    _THROWAWAY_SEQ[0] += 1
+    return f'{prefix}_{_THROWAWAY_SEQ[0]}'
+
+
+class MechanismDeclarationTests(_ValuationBoundaryTestCase):
+    """D-03/ROI-06 -- the declaration ceiling refuses at import time, a
+    returned mechanism outside it is discarded (not fatal) at call time,
+    and a registrant that declares nothing produces a record identical to
+    today's (D-14). Also holds the cross-module vocabulary sync test."""
+
+    # -- 1. The ceiling refuses (D-03, ROI-06) -------------------------------
+
+    def test_declarable_mechanisms_has_exactly_three_members(self):
+        # A shrunken VALUATION_DECLARABLE_MECHANISMS would silently skip
+        # cases below rather than fail loudly -- assert the count first.
+        val = _load_valuation()
+        self.assertEqual(3, len(val.VALUATION_DECLARABLE_MECHANISMS))
+
+    def test_ceiling_refuses_every_evaluator_mechanism_and_malformed_shape(self):
+        mod = _load_classifier({})
+        cases = {
+            'labor_substitution_is_evaluator_only': 'labor_substitution',
+            'augmentation_capacity_expansion_is_evaluator_only':
+                'augmentation_capacity_expansion',
+            'newly_enabled_work_is_evaluator_only': 'newly_enabled_work',
+            'unknown_string': 'not_a_real_mechanism',
+        }
+        for label, member in cases.items():
+            with self.subTest(label):
+                val = _load_valuation()
+                with self.assertRaises(ValueError):
+                    val.register(
+                        _throwaway_registrant_name(), lambda a, c: None, '1',
+                        economic_mechanisms={member},
+                    )
+
+        malformed_collections = {
+            'empty_string_member': {''},
+            'none_member': {None},
+            'non_string_member': {42},
+            'bare_string_not_a_collection': 'incremental_revenue',
+            'non_iterable': 12345,
+        }
+        for label, value in malformed_collections.items():
+            with self.subTest(label):
+                val = _load_valuation()
+                with self.assertRaises(ValueError):
+                    val.register(
+                        _throwaway_registrant_name(), lambda a, c: None, '1',
+                        economic_mechanisms=value,
+                    )
+
+    def test_each_declarable_mechanism_registers_and_round_trips(self):
+        val = _load_valuation()
+        for mechanism in val.VALUATION_DECLARABLE_MECHANISMS:
+            with self.subTest(mechanism):
+                name = _throwaway_registrant_name()
+                val.register(name, lambda a, c: None, '1',
+                             economic_mechanisms={mechanism})
+                self.assertEqual(
+                    frozenset({mechanism}), val.resolve_declared_mechanisms(name))
+
+    def test_refused_registration_leaves_no_half_state(self):
+        val = _load_valuation()
+        name = _throwaway_registrant_name()
+        with self.assertRaises(ValueError):
+            val.register(name, lambda a, c: None, '1',
+                         economic_mechanisms={'labor_substitution'})
+        self.assertIsNone(val.resolve('x-never-registered'))
+        self.assertEqual(frozenset(), val.resolve_declared_mechanisms(name))
+
+    # -- 2. The vocabulary cannot drift ---------------------------------------
+
+    def test_vocabulary_cannot_drift_from_classifier_operator_only_mechanisms(self):
+        val = _load_valuation()
+        mod = _load_classifier({})
+        self.assertEqual(
+            val.VALUATION_DECLARABLE_MECHANISMS, mod.OPERATOR_ONLY_MECHANISMS,
+            'valuation.py (VALUATION_DECLARABLE_MECHANISMS) and '
+            'classifier.py (OPERATOR_ONLY_MECHANISMS) have drifted -- the '
+            'duplication between these two files is deliberate (CLAUDE.md '
+            'forbids sharing code between them), and this test is what '
+            'keeps the two copies honest',
+        )
+
+    # -- 3. A returned mechanism outside the declared set is discarded ------
+
+    def _register_and_load(self, fn, economic_mechanisms):
+        """Register a throwaway implementation into the SHARED `valuation`
+        module (bare `import valuation`, the same sys.modules entry
+        classifier.py's own bare-import fallback resolves to once PLUGIN
+        is on sys.path), so it is resolvable BY NAME from a standalone-
+        loaded classifier module."""
+        import valuation as val  # type: ignore
+        name = _throwaway_registrant_name()
+        val.register(name, fn, '1', evidence_class='CUSTOMER_CONFIGURED',
+                     economic_mechanisms=economic_mechanisms)
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        self.addCleanup(val._MECHANISM_DECLARATIONS.pop, name, None)
+        return name
+
+    def test_mechanism_outside_declared_set_is_discarded_not_fatal(self):
+        def _fn(a, c):
+            return {'estimated_value': 42.0, 'currency': a.get('currency'),
+                    'economic_mechanism': 'incremental_revenue'}
+        name = self._register_and_load(_fn, {'risk_avoidance'})
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(economic_mechanism='labor_substitution')
+        got = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(42.0, got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
+
+        record = mod._build_job_assessment(
+            {'agentic_job_id': 'discard-001', 'job_type': 'code_review', 'status': 'SUCCESS'},
+            got, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(mod._resolve_economic_mechanism(raw), record['economic_mechanism'])
+        self.assertEqual(42.0, record['estimated_value'])
+
+    def test_non_string_and_empty_mechanism_are_discarded(self):
+        for bad_value in (123, '', None, True):
+            with self.subTest(bad_value=bad_value):
+                def _fn(a, c, _bad=bad_value):
+                    return {'estimated_value': 17.0, 'currency': a.get('currency'),
+                            'economic_mechanism': _bad}
+                name = self._register_and_load(_fn, {'incremental_revenue'})
+                mod = self._load(boundaries={'valuation': name})
+                cfg = mod._llm_evaluation_config()
+                raw = self._raw(economic_mechanism='labor_substitution')
+                got = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+                self.assertIsNotNone(got)
+                self.assertNotIn('economic_mechanism', got)
+
+    def test_mechanism_returned_by_registrant_declaring_nothing_is_discarded(self):
+        def _fn(a, c):
+            return {'estimated_value': 17.0, 'currency': a.get('currency'),
+                    'economic_mechanism': 'incremental_revenue'}
+        name = self._register_and_load(_fn, None)
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(economic_mechanism='labor_substitution')
+        got = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertNotIn('economic_mechanism', got)
+
+    # -- 4. The contract test (assumption-delta checkpoint's companion) -----
+
+    def test_every_declared_mechanism_round_trips_and_silence_is_identical(self):
+        import valuation as val  # type: ignore
+        for mechanism in val.VALUATION_DECLARABLE_MECHANISMS:
+            with self.subTest(mechanism=mechanism):
+                def _fn(a, c, _m=mechanism):
+                    return {'estimated_value': 33.0, 'currency': a.get('currency'),
+                            'economic_mechanism': _m}
+                name = self._register_and_load(_fn, {mechanism})
+                mod = self._load(boundaries={'valuation': name})
+                cfg = mod._llm_evaluation_config()
+                raw = self._raw(economic_mechanism='labor_substitution')
+                validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+                self.assertIsNotNone(validated)
+                self.assertEqual(mechanism, validated['economic_mechanism'])
+                record = mod._build_job_assessment(
+                    {'agentic_job_id': f'roundtrip-{mechanism}', 'job_type': 'code_review',
+                     'status': 'SUCCESS'},
+                    validated, raw, cfg, 'stub', 'v1')
+                self.assertIsNotNone(record)
+                self.assertEqual(mechanism, record['economic_mechanism'])
+
+        # Silence: a registrant declaring nothing produces a record
+        # identical, key for key and value for value, to the built-in
+        # hours_times_rate path for the same input -- ts/job_started_at/
+        # job_ended_at normalised since they read the clock.
+        def _silent_fn(a, c):
+            return None  # falls back to the built-in derivation
+
+        name = self._register_and_load(_silent_fn, None)
+        mod_a = self._load(boundaries={'valuation': name})
+        mod_b = self._load(boundaries=None)
+        raw = self._raw(economic_mechanism='labor_substitution')
+        cfg_a = mod_a._llm_evaluation_config()
+        cfg_b = mod_b._llm_evaluation_config()
+        valid_a = mod_a._validate_assessment(raw, cfg_a, 'stub', 'v1')
+        valid_b = mod_b._validate_assessment(raw, cfg_b, 'stub', 'v1')
+        self.assertIsNotNone(valid_a)
+        self.assertIsNotNone(valid_b)
+        job = {'agentic_job_id': 'silence-001', 'job_type': 'code_review', 'status': 'SUCCESS'}
+        record_a = mod_a._build_job_assessment(job, valid_a, raw, cfg_a, 'stub', 'v1')
+        record_b = mod_b._build_job_assessment(job, valid_b, raw, cfg_b, 'stub', 'v1')
+        self.assertIsNotNone(record_a)
+        self.assertIsNotNone(record_b)
+        for key in (
+            'ts', 'job_started_at', 'job_ended_at',
+            'observation_window_start', 'observation_window_end',
+        ):
+            record_a.pop(key, None)
+            record_b.pop(key, None)
+        self.assertEqual(record_a, record_b)
+
+    # -- 5. D-12 is a no-op ----------------------------------------------------
+
+    def test_hours_bound_still_gates_a_priced_revenue_record(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(
+            self._raw(estimated_hours_saved=-1.0), cfg, 'stub', 'v1')
+        self.assertIsNone(got, 'an out-of-bounds hours value must still abstain')
+
+    def test_priced_revenue_record_retains_evaluator_hours_and_rate(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(estimated_hours_saved=3.0, assumed_loaded_rate=90.0)
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(250.0, validated['estimated_value'])
+        self.assertEqual(3.0, validated['assumptions']['estimated_hours_saved'])
+        self.assertEqual(90.0, validated['assumptions']['assumed_loaded_rate'])

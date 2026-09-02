@@ -165,25 +165,47 @@ def register(name: str, fn, version: str = "", evidence_class: str = "",
     mechanism, unconditionally.
 
     Raises `ValueError` -- never a bare `assert` -- on any member outside
-    VALUATION_DECLARABLE_MECHANISMS. `python3 -O` strips asserts, and this
-    is an access-control gate on a money path that must not be optimisable
-    away. The declaration is stored only AFTER validation passes, so a
-    refused registration leaves no half-state for
-    resolve_declared_mechanisms to read.
+    VALUATION_DECLARABLE_MECHANISMS, on a non-`str` or empty-string member,
+    on a bare `str` passed where a collection was expected (Phase 54 Task 2:
+    a bare `"incremental_revenue"` is REJECTED rather than silently iterated
+    into individual characters -- a decision, not an oversight), and on any
+    non-iterable value. `python3 -O` strips asserts, and this is an
+    access-control gate on a money path that must not be optimisable away.
+    The declaration is stored only AFTER validation passes, so a refused
+    registration leaves no half-state for resolve_declared_mechanisms to
+    read.
 
     Last registration wins.
     """
-    declared = (
-        frozenset() if not economic_mechanisms else frozenset(economic_mechanisms)
-    )
-    for _mechanism in declared:
-        if _mechanism not in VALUATION_DECLARABLE_MECHANISMS:
+    if not economic_mechanisms:
+        declared = frozenset()
+    else:
+        if isinstance(economic_mechanisms, str):
             raise ValueError(
-                f"register({name!r}): economic_mechanisms member "
-                f"{_mechanism!r} is not a member of "
-                f"VALUATION_DECLARABLE_MECHANISMS "
-                f"{sorted(VALUATION_DECLARABLE_MECHANISMS)!r}"
+                f"register({name!r}): economic_mechanisms must be a "
+                "collection of strings, not a single string -- a bare "
+                f"{economic_mechanisms!r} would iterate into individual "
+                "characters rather than declaring one mechanism"
             )
+        try:
+            declared = frozenset(economic_mechanisms)
+        except TypeError:
+            raise ValueError(
+                f"register({name!r}): economic_mechanisms must be an "
+                f"iterable collection, got {type(economic_mechanisms).__name__}"
+            ) from None
+        for _mechanism in declared:
+            if (
+                not isinstance(_mechanism, str)
+                or not _mechanism
+                or _mechanism not in VALUATION_DECLARABLE_MECHANISMS
+            ):
+                raise ValueError(
+                    f"register({name!r}): economic_mechanisms member "
+                    f"{_mechanism!r} is not a member of "
+                    f"VALUATION_DECLARABLE_MECHANISMS "
+                    f"{sorted(VALUATION_DECLARABLE_MECHANISMS)!r}"
+                )
     _MECHANISM_DECLARATIONS[name] = declared
     _REGISTRY.register(name, fn, version, evidence_class)
 
