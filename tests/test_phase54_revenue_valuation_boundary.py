@@ -3104,4 +3104,154 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
         # Provenance is kept even though the value is withheld -- the same
         # D-11 shape phase 53's own end-to-end test asserts.
         self.assertIn('evidence_class', record)
+
+
+class IN01ValueBoundsBracketProducedValueTests(_ValuationBoundaryTestCase):
+    """54-REVIEW.md IN-01 fix: value_low/value_base/value_high must bracket
+    the value _validate_assessment actually ACCEPTED as `estimated_value` --
+    whichever boundary produced it -- never a re-derivation of hours*rate
+    that may have nothing to do with it. hours/rate are deliberately set so
+    hours * rate never coincides with the priced value in the revenue/
+    rate-card cases below, so a test that silently kept bracketing hours*rate
+    would fail loudly rather than pass by coincidence."""
+
+    def test_revenue_priced_job_bounds_bracket_its_own_estimated_value(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {
+                'grossPerJob': 1000.0,
+                'attributionFraction': 0.3,
+                'attributionBasis': 'booking attributed at 30% per contract',
+            }},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        # hours * rate == 375.0 -- unrelated to the 300.0 revenue product.
+        raw = self._raw(estimated_hours_saved=2.5, assumed_loaded_rate=150.0)
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(300.0, validated['estimated_value'])
+
+        job = {'agentic_job_id': 'in01-revenue-001',
+               'job_type': 'booking_completion', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(300.0, record['estimated_value'])
+        self.assertEqual('derived', record['bounds_source'])
+        self.assertEqual(300.0, record['value_base'])
+        self.assertLess(record['value_low'], record['value_base'])
+        self.assertGreater(record['value_high'], record['value_base'])
+        # The band brackets the PRODUCT (300.0), never the unrelated
+        # hours*rate figure (375.0) the pre-fix code derived it from.
+        self.assertAlmostEqual(255.0, record['value_low'])
+        self.assertAlmostEqual(345.0, record['value_high'])
+
+    def test_rate_card_priced_job_bounds_bracket_its_own_estimated_value(self):
+        """The Phase 45 half of the same fix: rate_card_valuation_fixture
+        prices strictly from the configured card, never from hours*rate."""
+        mod = self._load(
+            boundaries={'valuation': 'rate_card_valuation_fixture'},
+            rate_card={'senior_engineer': 900.0},
+        )
+        cfg = mod._llm_evaluation_config()
+        # hours * rate == 375.0 -- unrelated to the 900.0 rate-card price.
+        raw = self._raw(
+            inferred_role='senior_engineer',
+            estimated_hours_saved=2.5, assumed_loaded_rate=150.0,
+        )
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(900.0, validated['estimated_value'])
+
+        job = {'agentic_job_id': 'in01-ratecard-001',
+               'job_type': 'code_review', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(900.0, record['estimated_value'])
+        self.assertEqual(900.0, record['value_base'])
+        self.assertAlmostEqual(765.0, record['value_low'])
+        self.assertAlmostEqual(1035.0, record['value_high'])
+
+    def test_default_install_emits_byte_identical_triple(self):
+        """No boundaries configured -- the built-in hours*rate fallback is
+        the only producer, so the triple must be byte-identical to the
+        pre-fix formula: base == round(hours * rate, 2), and the spread
+        band computed from that same base."""
+        mod = self._load(boundaries=None, rate_card=None)
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(estimated_hours_saved=2.5, assumed_loaded_rate=150.0)
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(375.0, validated['estimated_value'])
+
+        job = {'agentic_job_id': 'in01-default-001',
+               'job_type': 'code_review', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            (318.75, 375.0, 431.25, 'derived'),
+            (record['value_low'], record['value_base'], record['value_high'],
+             record['bounds_source']),
+        )
+
+    def test_gross_never_appears_in_any_bound_for_attributed_revenue_job(self):
+        """D-09: a business-gross figure must never reach a persisted
+        bound. grossPerJob=100000.0 with attributionFraction=0.01 prices
+        the product at 1000.0 -- neither the gross nor its half-attributed
+        midpoint may appear in value_low/value_base/value_high."""
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'k': {
+                'grossPerJob': 100000.0,
+                'attributionFraction': 0.01,
+                'attributionBasis': 'one percent attribution',
+            }},
+            revenue_card_key='k',
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(1000.0, validated['estimated_value'])
+
+        job = {'agentic_job_id': 'in01-gross-leak-001',
+               'job_type': 'booking_completion', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        bounds = (record['value_low'], record['value_base'], record['value_high'])
+        for forbidden in (100000.0, 100000, 50000.0, 50000):
+            self.assertNotIn(
+                forbidden, bounds,
+                'the gross (or a gross-derived midpoint) leaked into a '
+                'persisted bound -- D-09 forbids this',
+            )
+        self.assertEqual(1000.0, record['value_base'])
+        self.assertAlmostEqual(850.0, record['value_low'])
+        self.assertAlmostEqual(1150.0, record['value_high'])
+
+    def test_evaluator_supplied_bounds_still_win_over_derivation(self):
+        """The evaluator-supplied path (all three of value_low/value_base/
+        value_high present) is UNCHANGED by this fix: it must still be used
+        verbatim, never overridden by the resolved estimated_value, even on
+        a revenue-priced job where the two legitimately differ."""
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'k': {'grossPerJob': 500.0}},
+            revenue_card_key='k',
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(value_low=400.0, value_base=500.0, value_high=600.0)
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(500.0, validated['estimated_value'])
+
+        job = {'agentic_job_id': 'in01-evaluator-supplied-001',
+               'job_type': 'booking_completion', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            (400.0, 500.0, 600.0, 'evaluator'),
+            (record['value_low'], record['value_base'], record['value_high'],
+             record['bounds_source']),
+        )
         self.assertEqual('stub', record['evaluator'])

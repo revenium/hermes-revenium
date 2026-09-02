@@ -1709,7 +1709,10 @@ BOUNDS_SOURCE_EVALUATOR = "evaluator"
 BOUNDS_SOURCE_DERIVED = "derived"
 
 
-def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float, float, float, str] | None":
+def _resolve_value_bounds(
+    raw: dict, hours: float, rate: float,
+    resolved_amount: "float | None" = None,
+) -> "tuple[float, float, float, str] | None":
     """Resolve the low/base/high value triple for one assessment (EGV-06).
 
     Two paths:
@@ -1718,10 +1721,38 @@ def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float,
         (low <= base <= high) -- EQUAL bounds are a valid degenerate case (a
         point estimate, or an operator's point correction in plan 42-06), not
         a rejection.
-      - Derived: `raw` carries NONE of the three. base is the point estimate
-        (hours * rate, matching _validate_assessment's own derivation); low/
-        high are a symmetric DERIVED_BOUND_SPREAD band around it, with low
-        clamped at zero.
+      - Derived: `raw` carries NONE of the three. base is `resolved_amount`
+        when the caller supplies one -- the amount actually ACCEPTED for
+        this assessment's `estimated_value`, whichever boundary produced it
+        (the built-in hours*rate fallback, or a pluggable registrant such as
+        rate_card_valuation_fixture or revenue_card_valuation_fixture). low/
+        high are a symmetric DERIVED_BOUND_SPREAD band around THAT base,
+        with low clamped at zero.
+
+    54-REVIEW.md IN-01: before this fix, base on the derived path was
+    unconditionally `round(hours * rate, 2)`, which is correct only when the
+    built-in fallback priced the work. Once a pluggable valuation registrant
+    is configured (rate_card_valuation_fixture since Phase 45,
+    revenue_card_valuation_fixture since Phase 54), `estimated_value`
+    already carries the registrant's own number while the bounds silently
+    kept reporting a band around an unrelated hours*rate figure -- for a
+    revenue-priced booking the two can differ by hundreds of dollars.
+    `resolved_amount` closes that gap: the derived-path base is now the
+    value that was actually accepted and reported, never a re-derivation of
+    a formula that may not have produced it. `hours`/`rate` are kept as
+    parameters (rather than removed) purely as the fallback used when
+    `resolved_amount` is absent -- see the call-site note below.
+
+    `resolved_amount` is None at the FIRST of this function's two call
+    sites (_validate_assessment's own abstain-decision gate below, called
+    BEFORE the valuation boundary has even run -- there is no accepted
+    amount yet to thread). That is safe: on the derived path this call
+    never abstains regardless of the numeric value used for base (rounding
+    an already-validated finite hours*rate product cannot fail), so the two
+    call sites can never disagree about whether to ABSTAIN. Only the
+    SECOND call (_build_job_assessment, which always has the accepted
+    `assessment["estimated_value"]` available to pass as `resolved_amount`)
+    ever produces the numeric band that is actually persisted.
 
     A PARTIAL set (one or two of the three present) is disorder, not a hint,
     and abstains -- a half-specified band cannot be trusted more than a fully
@@ -1743,7 +1774,10 @@ def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float,
     supplied = [v for v in (raw_low, raw_base, raw_high) if v is not None]
 
     if len(supplied) == 0:
-        base = round(hours * rate, 2)
+        base = (
+            round(resolved_amount, 2) if resolved_amount is not None
+            else round(hours * rate, 2)
+        )
         low = round(max(0.0, base * (1 - DERIVED_BOUND_SPREAD)), 2)
         high = round(base * (1 + DERIVED_BOUND_SPREAD), 2)
         return (low, base, high, BOUNDS_SOURCE_DERIVED)
@@ -3341,7 +3375,21 @@ def _build_job_assessment(
         # when _validate_assessment already returned a validated dict.
         hours = assessment["assumptions"]["estimated_hours_saved"]
         rate = assessment["assumptions"]["assumed_loaded_rate"]
-        bounds = _resolve_value_bounds(raw, hours, rate)
+        # 54-REVIEW.md IN-01: thread the value _validate_assessment actually
+        # ACCEPTED as `estimated_value` -- whichever boundary produced it --
+        # into the derived-path base, rather than letting
+        # _resolve_value_bounds re-derive hours*rate on its own. On a
+        # default install this is byte-identical to the pre-fix behaviour
+        # (both are round(hours * rate, 2)); for a pluggable registrant
+        # (rate_card_valuation_fixture, revenue_card_valuation_fixture) the
+        # reported band now brackets the number that was actually reported,
+        # not an unrelated hours*rate figure. See _resolve_value_bounds's
+        # own docstring for why the EARLIER call site
+        # (_validate_assessment's abstain gate) cannot thread this same
+        # value and does not need to.
+        bounds = _resolve_value_bounds(
+            raw, hours, rate, resolved_amount=assessment.get("estimated_value"),
+        )
         if bounds is None:
             # _validate_assessment's own EGV-06 gate already accepted this
             # exact (raw, hours, rate) triple, so this branch should be
