@@ -1797,6 +1797,59 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # unconditionally -- see the conditional-emit block below.
         declared_mechanism = ""
     else:
+        # Phase 54 (D-02): re-check the registrant's returned mechanism
+        # against its OWN registration-time ceiling
+        # (valuation_mod.resolve_declared_mechanisms(impl_name)) -- the
+        # same distrust-and-re-check idiom this block already applies to
+        # amount/currency/the lower bound/the ceiling below. A registrant
+        # may assert a mechanism only from the set it declared at import
+        # time; anything else -- absent, non-str, or outside that ceiling
+        # -- is discarded to the empty string here. Unlike the
+        # amount/currency pair below, a malformed mechanism is an OPTIONAL
+        # field: it is discarded silently, never raised and never treated
+        # as an abstention of the whole assessment.
+        #
+        # Phase 54 (D-13): resolved BEFORE the ceiling below (moved ahead
+        # of amount/ceiling resolution in this same task) because the
+        # ceiling itself now depends on whether a declared operator-only
+        # mechanism was accepted for THIS call -- resolved once here and
+        # reused for the ceiling, never re-derived.
+        _declared_mechanisms = (
+            valuation_mod.resolve_declared_mechanisms(impl_name)
+            if valuation_mod is not None else frozenset()
+        )
+        _returned_mechanism = (
+            derived.get("economic_mechanism") if isinstance(derived, dict) else None
+        )
+        declared_mechanism = (
+            _returned_mechanism
+            if (
+                isinstance(_returned_mechanism, str)
+                and _declared_mechanisms
+                and _returned_mechanism in _declared_mechanisms
+            )
+            else ""
+        )
+
+        # Phase 54 (D-07): the fail-CLOSED profile-attribution fence, called
+        # ONLY when a declared operator-only mechanism was just accepted
+        # above -- an ordinary non-revenue session on the same
+        # (potentially multiplexed) host is untouched by this check, which
+        # is what keeps D-04's "a non-revenue session still gets its value"
+        # guarantee intact. Placed BEFORE the amount below is ever
+        # extracted or accepted: the amount came from a config that may
+        # belong to another profile, so it must not become a value even
+        # briefly. See _revenue_profile_attribution_certain's own
+        # docstring for the full reasoning and the defect this fences.
+        if declared_mechanism and not _revenue_profile_attribution_certain(paths):
+            logger.warning(
+                "revenium-classifier: assessment abstained, revenue "
+                "valuation implementation %r could not be attributed to "
+                "this session's owning profile with certainty on this "
+                "host", impl_name,
+            )
+            return None
+
         # Phase 45 (T-45-13): the caller RE-CHECKS a registered
         # implementation's returned amount at all -- registration is
         # trusted code for the purpose of declaring an identity, but it is
@@ -1813,7 +1866,38 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
             if isinstance(derived, dict) else None
         )
         returned_currency = derived.get("currency") if isinstance(derived, dict) else None
-        ceiling = round(max_hours * max_rate, 2)
+
+        # Phase 54 (D-13): the ceiling is `maxRevenueValue` ONLY when both
+        # (a) the mechanism re-check immediately above accepted a declared
+        # operator-only mechanism for THIS call, and (b) the configured
+        # value is itself finite and strictly positive -- a malformed
+        # `maxRevenueValue` never WIDENS a bound, it just falls back to the
+        # ceiling every other job on this host is already held to.
+        # Otherwise the ceiling is the existing labor bound, byte for byte,
+        # exactly as it was before this phase.
+        #
+        # Why a separate bound at all, rather than trusting an operator to
+        # size `maxLoadedRate` for a booking: without one, pricing a
+        # booking above the labor ceiling forces the operator to inflate
+        # `maxLoadedRate` itself -- and that ceiling still guards every
+        # OTHER job on this host, labor-substitution or otherwise.
+        # Widening it to fit one revenue figure corrupts the bound that
+        # every non-revenue job on the same install is silently relying
+        # on. `maxRevenueValue` exists so a revenue ceiling and a labor
+        # ceiling can be sized independently. The caller's distrust of
+        # registered code on the money path is unchanged either way: the
+        # registrant never chooses its own ceiling, it only determines
+        # (via the mechanism it declared and had accepted) WHICH of two
+        # operator-configured ceilings applies to this call.
+        _configured_max_revenue = _finite_number(cfg.get("maxRevenueValue"))
+        if (
+            declared_mechanism
+            and _configured_max_revenue is not None
+            and _configured_max_revenue > 0
+        ):
+            ceiling = round(_configured_max_revenue, 2)
+        else:
+            ceiling = round(max_hours * max_rate, 2)
         # CR-01 (phase-45 code review): the lower bound is exclusive for a
         # THIRD-PARTY registrant and inclusive for the BUILT-IN derivation,
         # and the difference is deliberate.
@@ -1847,34 +1931,6 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
             )
             return None
         estimated_value = amount
-
-        # Phase 54 (D-02): re-check the registrant's returned mechanism
-        # against its OWN registration-time ceiling
-        # (valuation_mod.resolve_declared_mechanisms(impl_name)) -- the
-        # same distrust-and-re-check idiom this block already applies to
-        # amount/currency/the lower bound/the ceiling above. A registrant
-        # may assert a mechanism only from the set it declared at import
-        # time; anything else -- absent, non-str, or outside that ceiling
-        # -- is discarded to the empty string here. Unlike the
-        # amount/currency pair above, a malformed mechanism is an OPTIONAL
-        # field: it is discarded silently, never raised and never treated
-        # as an abstention of the whole assessment.
-        _declared_mechanisms = (
-            valuation_mod.resolve_declared_mechanisms(impl_name)
-            if valuation_mod is not None else frozenset()
-        )
-        _returned_mechanism = (
-            derived.get("economic_mechanism") if isinstance(derived, dict) else None
-        )
-        declared_mechanism = (
-            _returned_mechanism
-            if (
-                isinstance(_returned_mechanism, str)
-                and _declared_mechanisms
-                and _returned_mechanism in _declared_mechanisms
-            )
-            else ""
-        )
 
     # Phase 50 (DECL-01/DECL-02, record site 1): resolve the remaining two
     # boundaries' declarations, then call the ONE rule site once. The
@@ -1913,13 +1969,24 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     # return dict actually priced THIS call (the built-in or a
     # third-party registrant; still None on the fall-back-to-builtin
     # path above), read here and NEVER from `raw`, so a registrant's
-    # caveat cannot be overwritten by the model's own text. A registrant
-    # that returns no basis -- the built-in hours_times_rate, and the
-    # revenue fixture's own delegation branches -- leaves this exactly as
-    # it was before this phase: the evaluator's own raw-authored text,
-    # clamped identically (D-14 byte-identity preserved).
+    # caveat cannot be overwritten by the model's own text.
+    #
+    # Gated on `declared_mechanism` (resolved above, in the else branch
+    # this function's own mechanism re-check lives in): a producer-authored
+    # basis is an operator-declared caveat about an operator-only claim,
+    # the same footing D-13's ceiling and D-10's attribution pair are both
+    # gated on. A registrant that returns no basis, declared no mechanism,
+    # or had its mechanism discarded -- the built-in hours_times_rate, the
+    # revenue fixture's own delegation branches, and any registrant whose
+    # mechanism the re-check above rejected -- leaves this exactly as it
+    # was before this phase: the evaluator's own raw-authored text, clamped
+    # identically (D-14 byte-identity preserved).
     _registrant_basis = derived.get("basis") if isinstance(derived, dict) else None
-    if isinstance(_registrant_basis, str) and _registrant_basis.strip():
+    if (
+        declared_mechanism
+        and isinstance(_registrant_basis, str)
+        and _registrant_basis.strip()
+    ):
         _basis_value = _clamp_assessment_text(_registrant_basis, 200)
     else:
         _basis_value = _clamp_assessment_text(raw.get("basis"), 200)
@@ -1957,29 +2024,49 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # uses for failure_reason and for the assessment dict itself.
         _result["economic_mechanism"] = declared_mechanism
 
-    # Phase 54 (D-10, ROI-07). VERBATIM pass-through, deliberately WITHOUT
-    # a re-check: `attribution_fraction`/`attribution_basis` persist and
-    # ride `--metadata` under the SAME snake_case wire names Phase 51
-    # shipped for the CLI path, present only when the resolved registrant
-    # for THIS call actually returned both. Unlike `economic_mechanism`
-    # above (re-checked against its registration-time ceiling) and `basis`
-    # above (type-checked and clamped), this pair is trusted from the
-    # registrant AS-IS -- no bounds check, no travel-as-a-set enforcement
-    # here. That is a deliberately incomplete step, not an oversight: the
-    # shipped `revenue_card_valuation_fixture` already enforces both rules
-    # itself before returning either key, so a well-behaved registrant's
-    # pair is always well-formed by construction. `54-04` closes the gap
-    # this leaves open for a THIRD-PARTY (hostile) registrant -- see
-    # tests.test_phase54_revenue_valuation_boundary's hostile-registrant
-    # table, which proves this gap with `@unittest.expectedFailure` cases
-    # naming 54-04 as the plan that flips them.
-    if isinstance(derived, dict):
-        _registrant_attribution_fraction = derived.get("attribution_fraction")
-        _registrant_attribution_basis = derived.get("attribution_basis")
-        if _registrant_attribution_fraction is not None:
-            _result["attribution_fraction"] = _registrant_attribution_fraction
-        if _registrant_attribution_basis is not None:
-            _result["attribution_basis"] = _registrant_attribution_basis
+    # Phase 54 (D-10, 54-04 gap closure, ROI-07). The caller RE-CHECKS the
+    # registrant's returned attribution_fraction/attribution_basis pair
+    # before persisting either -- the same distrust-and-re-check idiom
+    # already applied above to amount/currency/the lower bound/the ceiling
+    # and to economic_mechanism. 54-03 shipped this pair as a VERBATIM,
+    # deliberately unchecked pass-through and proved the gap with
+    # `@unittest.expectedFailure` cases naming this plan; those cases now
+    # pass, unmarked.
+    #
+    # Validated exactly like correct-assessment.sh's own CLI-side rules, so
+    # the configured and CLI paths write one representation rather than two
+    # that can diverge:
+    #   - the fraction: _finite_number (already rejects bool/NaN/inf) plus
+    #     0.0 <= f <= 1.0 inclusive at both endpoints.
+    #   - the basis: a non-empty (after .strip()) str, clamped to
+    #     NARRATIVE_CLAMP_BYTES (500 serialized bytes) via
+    #     _clamp_assessment_text -- the same limit correct-assessment.sh's
+    #     _clamp_reason applies to its own --attribution-basis flag, so the
+    #     two producers write byte-comparable text for the same input.
+    #   - travel as a set: accept both or neither.
+    # Gated on declared_mechanism (resolved just above): an attribution
+    # fraction is an operator assertion attached to an operator-declared
+    # claim, so a registrant that declared nothing has nothing to
+    # attribute.
+    #
+    # On ANY malformed value the pair is discarded SILENTLY to absent --
+    # never raised, and never `return None` the way the mandatory
+    # amount/currency pair does above. This is an OPTIONAL field; a
+    # malformed optional field must never take the whole assessment down
+    # with it.
+    if isinstance(derived, dict) and declared_mechanism:
+        _raw_attribution_fraction = derived.get("attribution_fraction")
+        _raw_attribution_basis = derived.get("attribution_basis")
+        _checked_fraction = _finite_number(_raw_attribution_fraction)
+        _fraction_ok = _checked_fraction is not None and 0.0 <= _checked_fraction <= 1.0
+        _basis_ok = (
+            isinstance(_raw_attribution_basis, str)
+            and _raw_attribution_basis.strip() != ""
+        )
+        if _fraction_ok and _basis_ok:
+            _result["attribution_fraction"] = _checked_fraction
+            _result["attribution_basis"] = _clamp_assessment_text(
+                _raw_attribution_basis, NARRATIVE_CLAMP_BYTES)
     return _result
 
 
@@ -2745,6 +2832,17 @@ def _build_job_assessment(
     evaluation is auditable rather than indistinguishable from a broken
     sidecar write.
 
+    Phase 54 (D-10, ROI-07): attribution_fraction and attribution_basis
+    join the same omit family, for the same reason. Both are conditionally
+    emitted on the success-path record.update() below, sourced from
+    `assessment` (present only when _validate_assessment's own caller-side
+    re-check accepted both), and never touch the abstention early-return's
+    base record literal above. A surviving value whose attribution has
+    vanished is exactly the failure Phase 51's shed-tier reasoning already
+    names for the reporter side; the same reasoning applies identically to
+    a record that abstained -- there is no value here for the attribution
+    to explain.
+
     Phase 44 (EGV-14): net_value joins that same omit family on abstention
     -- it is model-derived money, computed from an accepted `assessment`
     that does not exist on this path. supplied_costs and cost_coverage
@@ -3070,6 +3168,22 @@ def _build_job_assessment(
             "assumptions": assessment.get("assumptions", {}),
             "net_value": net_value,
         })
+        # Phase 54 (D-10, ROI-07): the attribution pair joins the value
+        # family here, on the success path only, sourced from `assessment`
+        # -- _validate_assessment's own returned dict, which carries these
+        # two keys only when its own caller-side re-check accepted both
+        # (see that function's own comment for the validation rules). Not
+        # part of the base `record: dict = {...}` literal above: they are
+        # value-family, and D-11's omit family (extended by this same
+        # phase, see this function's own docstring) requires an abstained
+        # record to carry no value-bearing key -- a surviving value whose
+        # attribution has vanished is the failure Phase 51's shed-tier
+        # reasoning already names, and it applies identically to a record
+        # that abstained.
+        if "attribution_fraction" in assessment:
+            record["attribution_fraction"] = assessment["attribution_fraction"]
+        if "attribution_basis" in assessment:
+            record["attribution_basis"] = assessment["attribution_basis"]
         return record
     except Exception as exc:
         logger.warning(
@@ -3452,6 +3566,86 @@ def _boundary_impl_name(key: str, default: str, paths: "_Paths | None" = None) -
         return default
     except Exception:
         return default
+
+
+def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
+    """Phase 54 (D-07): can this process be CERTAIN the `config.json` it
+    just priced a revenue figure from belongs to the profile that owns
+    THIS session?
+
+    This is the one place in the in-session path that DELIBERATELY
+    INVERTS CLAUDE.md's fail-open rule ("Every in-session code path fails
+    open. A broken skill must degrade to 'no enforcement, no
+    classification', never to 'agent blocked'."). Every neighboring
+    function in this module -- _boundary_impl_name immediately above,
+    _paths_for_session, _llm_evaluation_config -- fails OPEN: a missing
+    file, bad JSON, or any other error degrades to the built-in behaviour
+    rather than stopping classification. This function fails CLOSED
+    instead, on purpose, because this is the one place in that whole
+    family where "keep going" and "keep going with the wrong operator's
+    money" are different outcomes and only the first is acceptable.
+
+    The defect this fences: `paths-for-session-regex-may-never-match`
+    (root-caused 2026-08-31, `_NS_RE` above). `_NS_RE` matches a
+    session-KEY-shaped pattern (`agent:<profile>:...`) against a
+    session-ID, so `_paths_for_session` has been proven, on real session
+    ids, to NEVER actually engage per-profile resolution -- every profile
+    on a multiplexed gateway reads the ROOT `config.json` today. This
+    function does not fix that; `paths` is resolved by the caller exactly
+    as it always is, using whatever `_paths_for_session` (or the caller's
+    own default of `_module_paths()`) hands back, and this function only
+    judges whether that resolution visibly engaged.
+
+    A host is treated as MULTIPLEXED when `HERMES_HOME / "profiles"` is a
+    directory containing at least one subdirectory -- a fresh single-
+    profile install has no such directory at all, and an operator who
+    created an empty `profiles/` (e.g. for a future profile not yet
+    provisioned) has created no attribution ambiguity for THIS session
+    either. Attribution is treated as ENGAGED when the resolved
+    `paths.config_file` differs from `_module_paths().config_file` -- the
+    one observable signal available to this function that per-profile
+    resolution actually did something rather than silently falling
+    through. MULTIPLEXED and NOT ENGAGED is exactly the defect's blast
+    radius (today, the common case on any multiplexed host): the answer is
+    False.
+
+    The rejected alternative: price from the root config's card anyway,
+    on the reasoning that a wrong price is still better than no price. It
+    is not. On a single-profile host this function is a no-op (identical
+    paths cannot exist to compare against -- there is no `profiles/`), but
+    on a multiplexed host, pricing from the root config's card would not
+    merely be INERT the way an unresolved profile-scoped classification
+    label is -- it could actively price profile B's booking from profile
+    A's revenue card, an attribution failure a human would have to notice
+    and correct after the fact. "Out of scope" (this function returning
+    False, the revenue path abstaining) and "silently misprices" (pricing
+    anyway) are different outcomes, and only the first is acceptable on a
+    money path.
+
+    Any exception -- a malformed `paths` namedtuple, a `HERMES_HOME` that
+    is not a real path, anything else -- returns False, matching this
+    function's own fail-CLOSED polarity rather than the fail-open default
+    every `except Exception: return <safe-default>` elsewhere in this
+    module uses.
+
+    Deferred, not fixed here: making `_NS_RE`/`_paths_for_session`
+    actually resolve per-profile paths on a real session id is its own
+    piece of work (54-CONTEXT.md names it explicitly as out of scope for
+    this phase). This function is the fence around that gap, not a
+    repair of it -- multi-profile revenue configuration stays blocked
+    until that repair ships.
+    """
+    try:
+        profiles_dir = HERMES_HOME / "profiles"
+        if not profiles_dir.is_dir():
+            return True
+        if not any(p.is_dir() for p in profiles_dir.iterdir()):
+            return True
+        resolved = paths or _module_paths()
+        module = _module_paths()
+        return resolved.config_file != module.config_file
+    except Exception:
+        return False
 
 
 def _load_classification_module():

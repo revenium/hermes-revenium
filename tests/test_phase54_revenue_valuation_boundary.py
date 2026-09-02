@@ -183,7 +183,23 @@ class _ValuationBoundaryTestCase(unittest.TestCase):
             revenue_card=revenue_card, revenue_card_key=revenue_card_key,
             max_revenue_value=max_revenue_value,
         )
-        return _load_classifier({'REVENIUM_CONFIG_FILE': str(self.config_path)})
+        # Phase 54 Task 3 (D-07): HERMES_HOME must be pinned to this test's
+        # OWN tmp directory, not left to default to the real host's
+        # ~/.hermes -- _revenue_profile_attribution_certain reads
+        # HERMES_HOME/profiles LIVE, and a dev host that has ever run a
+        # multiplexed install (this repo's own test/sandbox hosts do) has a
+        # real profiles/ directory with real subdirectories sitting there.
+        # Without this override every test in this module that reaches a
+        # declared-and-accepted revenue mechanism would silently pick up
+        # that unrelated host state and fail closed for a reason that has
+        # nothing to do with what the test is proving. self.tmp has no
+        # profiles/ subdirectory unless a test explicitly creates one
+        # (see ProfileAttributionFenceTests), so this default keeps every
+        # OTHER test's host correctly classified as NOT multiplexed.
+        return _load_classifier({
+            'REVENIUM_CONFIG_FILE': str(self.config_path),
+            'HERMES_HOME': self.tmp,
+        })
 
 
 class DerivationTests(_ValuationBoundaryTestCase):
@@ -1032,6 +1048,483 @@ class AttributionCouplingTests(_ValuationBoundaryTestCase):
         self.assertEqual(validated_delegated['basis'], validated_default['basis'])
         self.assertEqual(raw['basis'], validated_default['basis'])
 
+    # -- 7. The caller's own rejection table (54-04 Task 1) -------------------
+    # The rows above all drive the WELL-BEHAVED shipped
+    # `revenue_card_valuation_fixture`, which enforces every one of these
+    # rules itself before ever returning a key -- so none of them can prove
+    # the CALLER (`_validate_assessment`) re-checks anything. This table
+    # registers a THROWAWAY registrant (the same shape
+    # HostileRegistrantDistrustTests uses) that returns an already-malformed
+    # pair directly, proving the caller's own re-check catches what a
+    # hostile registrant's output would otherwise ship unchecked.
+
+    def _register_throwaway(self, fn, economic_mechanisms=None):
+        import valuation as val  # type: ignore -- shared, sys.path-resolved
+        name = f'p54_attribution_caller_check_{id(fn)}'
+        val.register(name, fn, '1', evidence_class='CUSTOMER_CONFIGURED',
+                     economic_mechanisms=economic_mechanisms)
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        self.addCleanup(val._MECHANISM_DECLARATIONS.pop, name, None)
+        return name
+
+    def test_caller_rejects_a_non_string_empty_or_whitespace_basis(self):
+        for label, bad_basis in (
+            ('non_string', 12345), ('empty', ''), ('whitespace', '   '),
+        ):
+            with self.subTest(label):
+                name = self._register_throwaway(
+                    lambda a, c, _b=bad_basis: {
+                        'estimated_value': 42.0, 'currency': a.get('currency'),
+                        'economic_mechanism': 'incremental_revenue',
+                        'attribution_fraction': 0.5, 'attribution_basis': _b,
+                    },
+                    economic_mechanisms={'incremental_revenue'},
+                )
+                mod = self._load(boundaries={'valuation': name})
+                cfg = mod._llm_evaluation_config()
+                validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+                self.assertIsNotNone(validated)
+                self.assertEqual(42.0, validated['estimated_value'])
+                self.assertNotIn('attribution_fraction', validated)
+                self.assertNotIn('attribution_basis', validated)
+
+    def test_caller_clamps_rather_than_rejects_an_overlong_basis(self):
+        huge = 'y' * 10_000
+        name = self._register_throwaway(
+            lambda a, c: {
+                'estimated_value': 42.0, 'currency': a.get('currency'),
+                'economic_mechanism': 'incremental_revenue',
+                'attribution_fraction': 0.5, 'attribution_basis': huge,
+            },
+            economic_mechanisms={'incremental_revenue'},
+        )
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(0.5, validated['attribution_fraction'])
+        self.assertIn('attribution_basis', validated)
+        self.assertLessEqual(_serialized_len(validated['attribution_basis']), 500)
+
+    def test_caller_discards_the_pair_when_the_mechanism_is_not_declared(self):
+        name = self._register_throwaway(
+            lambda a, c: {
+                'estimated_value': 42.0, 'currency': a.get('currency'),
+                'attribution_fraction': 0.5, 'attribution_basis': 'undeclared claim',
+            },
+            economic_mechanisms=None,
+        )
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(42.0, validated['estimated_value'])
+        self.assertNotIn('attribution_fraction', validated)
+        self.assertNotIn('attribution_basis', validated)
+
+
+# ---------------------------------------------------------------------------
+# Task 1 -- RevenuePathFidelityTests: the relocated coverage
+# ---------------------------------------------------------------------------
+# tests/test_phase38_reporter_path.py::SidecarFixtureFidelityTests'
+# _NON_DEFAULT_ARM_KEYS exempts attribution_fraction/attribution_basis from
+# its hand-authored, DEFAULT-arm _sidecar_record() fixture -- correctly,
+# since that arm never carries them. This class is where that exemption's
+# own comment says the second producer's fidelity coverage lives: it drives
+# the REAL _build_job_assessment on a CONFIGURED-REVENUE arm and proves both
+# keys ARE produced there, are absent from an abstained record and from a
+# default install's record, and are forwardable end to end.
+
+def _extract_forwarder_record_keys(script_text):
+    """Duplicated (not imported) from
+    tests/test_phase38_reporter_path.py::_extract_forwarder_record_keys --
+    this module's own no-shared-code-with-the-producer-or-with-each-other's-
+    test-fixtures convention. See that function's docstring for the
+    LOWER BOUND caveat (the value_low/base/high loop-variable-keyed
+    forwarder is invisible to this literal-argument ast walk)."""
+    anchor = 'outcome_metadata=$('
+    start_marker = script_text.find(anchor)
+    if start_marker == -1:
+        return None
+    heredoc_start = script_text.find("<<'PY'", start_marker)
+    if heredoc_start == -1:
+        return None
+    body_start = script_text.find('\n', heredoc_start) + 1
+    body_end = script_text.find('\nPY\n', body_start)
+    if body_end == -1:
+        return None
+    body = script_text[body_start:body_end]
+    try:
+        tree = ast.parse(body)
+    except SyntaxError:
+        return None
+    keys = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'get'
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == 'record'
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            keys.append(node.args[0].value)
+    return keys
+
+
+class RevenuePathFidelityTests(_ValuationBoundaryTestCase):
+    """The relocated fidelity coverage
+    SidecarFixtureFidelityTests'_NON_DEFAULT_ARM_KEYS comment names by
+    path (see this plan's own <validation_deviation>)."""
+
+    def _revenue_record(self, fraction=0.2, basis='q3 loyalty capture rate'):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {
+                'grossPerJob': 500.0,
+                'attributionFraction': fraction,
+                'attributionBasis': basis,
+            }},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        job = {'agentic_job_id': 'revenue-fidelity-001',
+               'job_type': 'booking_completion', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        return mod, cfg, raw, validated, record
+
+    def test_configured_revenue_arm_produces_both_attribution_keys(self):
+        _, _, _, validated, record = self._revenue_record()
+        self.assertIsNotNone(validated)
+        self.assertEqual(0.2, validated['attribution_fraction'])
+        self.assertEqual('q3 loyalty capture rate', validated['attribution_basis'])
+        self.assertIsNotNone(record)
+        self.assertEqual(0.2, record['attribution_fraction'])
+        self.assertEqual('q3 loyalty capture rate', record['attribution_basis'])
+
+    def test_abstained_record_carries_neither_key(self):
+        mod = self._load(boundaries=None)
+        job = {'agentic_job_id': 'abstain-fidelity-001',
+               'job_type': 'code_review', 'status': 'FAILED'}
+        record = mod._build_job_assessment(
+            job, None, {}, {}, 'stub', 'v1', abstention_reason='no_evaluation')
+        self.assertIsNotNone(record)
+        self.assertNotIn('attribution_fraction', record)
+        self.assertNotIn('attribution_basis', record)
+
+    def test_default_install_record_carries_neither_key(self):
+        mod = self._load(boundaries=None)
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertNotIn('attribution_fraction', validated)
+        self.assertNotIn('attribution_basis', validated)
+        job = {'agentic_job_id': 'default-fidelity-001',
+               'job_type': 'code_review', 'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertNotIn('attribution_fraction', record)
+        self.assertNotIn('attribution_basis', record)
+
+    def test_every_forwardable_key_this_arm_can_produce_is_present(self):
+        """Mirrors test_phase47_end_to_end.py's own
+        test_produced_sidecar_carries_every_literally_keyed_forwarder_key
+        finding for the naked-LLM path: on the configured-revenue arm, the
+        empirical exemption set is EMPTY -- every literally-keyed forwarder
+        key, attribution_fraction/attribution_basis included, is actually
+        present on this arm's produced record."""
+        script_text = HERMES_REPORT_SH.read_text()
+        keys = _extract_forwarder_record_keys(script_text)
+        self.assertIsNotNone(
+            keys,
+            'could not extract record.get(...) keys from hermes-report.sh '
+            '-- the --metadata forwarder heredoc moved and '
+            '_extract_forwarder_record_keys needs updating',
+        )
+        self.assertTrue(keys, 'extracted zero forwarder keys')
+        _, _, _, _, record = self._revenue_record()
+        self.assertIsNotNone(record)
+        missing = set(keys) - set(record.keys())
+        self.assertEqual(
+            missing, set(),
+            f'the configured-revenue arm is missing forwardable keys: '
+            f'{missing} -- record={record!r}',
+        )
+
+    def test_attribution_pair_forwards_through_the_real_metadata_heredoc(self):
+        _, _, _, _, record = self._revenue_record()
+        self.assertIsNotNone(record)
+        script_text = HERMES_REPORT_SH.read_text()
+        body = _extract_outcome_metadata_heredoc(script_text)
+        self.assertIsNotNone(body)
+        env = {**os.environ, **_assessment_env(assessment=record)}
+        result = _run_forwarder(body, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = [l for l in result.stdout.splitlines() if l.strip()]
+        self.assertEqual(1, len(lines))
+        meta = json.loads(lines[0])
+        self.assertEqual(0.2, meta.get('attribution_fraction'))
+        self.assertEqual('q3 loyalty capture rate', meta.get('attribution_basis'))
+
+    def test_representation_parity_with_the_cli_path(self):
+        """The record's two keys are byte-comparable with the pair
+        correct-assessment.sh writes for the same values -- both producers
+        run the same shape of validation (finite float in [0.0, 1.0]; a
+        non-empty basis clamped to 500 serialized bytes with '|'/'\\n'/'\\r'
+        replaced by a space) even though the two implementations are
+        deliberately NOT shared code (CLAUDE.md's duplication-over-coupling
+        rule for this module family)."""
+        basis_with_pipe = 'q3 | loyalty\ncapture\rrate'
+        _, _, _, validated, record = self._revenue_record(
+            fraction=0.4, basis=basis_with_pipe)
+        # The CLI path's own _clamp_reason: strip, replace '|'/'\n'/'\r'
+        # with a space, then clamp to 500 serialized bytes.
+        cli_basis = basis_with_pipe.strip()
+        for bad in ('|', '\n', '\r'):
+            cli_basis = cli_basis.replace(bad, ' ')
+        self.assertEqual(
+            json.dumps(cli_basis), json.dumps(record['attribution_basis']),
+            'the configured path and the CLI path must serialize the same '
+            'attribution_basis text identically',
+        )
+        self.assertEqual(
+            json.dumps(float(0.4)), json.dumps(record['attribution_fraction']))
+
+
+# ---------------------------------------------------------------------------
+# Task 2 -- CeilingSelectionTests (D-08/D-12/D-13)
+# ---------------------------------------------------------------------------
+
+class CeilingSelectionTests(_ValuationBoundaryTestCase):
+    """D-13: the ceiling is `maxRevenueValue` only when a declared
+    operator-only mechanism was accepted for this call AND the configured
+    value is finite and positive; otherwise the existing labor ceiling
+    (`round(maxHoursSaved * maxLoadedRate, 2)`) applies, byte for byte.
+    D-12: the hours/rate bound checks are untouched by any of this. D-08:
+    the producer-authored `basis` is gated on the same mechanism
+    acceptance the ceiling is."""
+
+    def _register(self, fn, economic_mechanisms=None):
+        import valuation as val  # type: ignore -- shared, sys.path-resolved
+        name = f'p54_ceiling_{id(fn)}_{id(economic_mechanisms)}'
+        val.register(name, fn, '1', evidence_class='CUSTOMER_CONFIGURED',
+                     economic_mechanisms=economic_mechanisms)
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        self.addCleanup(val._MECHANISM_DECLARATIONS.pop, name, None)
+        return name
+
+    def _write_full_config(self, boundaries=None, max_revenue_value=None,
+                            max_hours_saved=None, max_loaded_rate=None):
+        outcome_eval = {}
+        if max_revenue_value is not None:
+            outcome_eval['maxRevenueValue'] = max_revenue_value
+        if max_hours_saved is not None:
+            outcome_eval['maxHoursSaved'] = max_hours_saved
+        if max_loaded_rate is not None:
+            outcome_eval['maxLoadedRate'] = max_loaded_rate
+        cfg = {}
+        if boundaries is not None:
+            cfg['boundaries'] = boundaries
+        if outcome_eval:
+            cfg['llmOutcomeEvaluation'] = outcome_eval
+        self.config_path.write_text(json.dumps(cfg))
+        # See _ValuationBoundaryTestCase._load's own comment: HERMES_HOME
+        # must be pinned to this test's tmp dir, never left to the real
+        # host default, or _revenue_profile_attribution_certain reads
+        # whatever unrelated profiles/ directory the host happens to have.
+        return _load_classifier({
+            'REVENIUM_CONFIG_FILE': str(self.config_path),
+            'HERMES_HOME': self.tmp,
+        })
+
+    def _declared_registrant(self, estimated_value, basis=None):
+        result = {'estimated_value': estimated_value, 'currency': 'USD',
+                  'economic_mechanism': 'incremental_revenue'}
+        if basis is not None:
+            result['basis'] = basis
+        return self._register(
+            lambda a, c, _r=result: dict(_r),
+            economic_mechanisms={'incremental_revenue'},
+        )
+
+    # -- 1. maxRevenueValue ceiling: exact acceptance, one cent over abstains
+
+    def test_amount_exactly_at_max_revenue_value_is_accepted(self):
+        name = self._declared_registrant(700.00)
+        mod = self._write_full_config(
+            boundaries={'valuation': name}, max_revenue_value=700)
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(700.00, validated['estimated_value'])
+
+    def test_one_cent_over_max_revenue_value_abstains(self):
+        name = self._declared_registrant(700.01)
+        mod = self._write_full_config(
+            boundaries={'valuation': name}, max_revenue_value=700)
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNone(validated)
+
+    # -- 2. Absent maxRevenueValue: the labor ceiling, exact and one over ----
+
+    def test_amount_exactly_at_labor_ceiling_is_accepted_with_no_max_revenue_value(self):
+        # maxHoursSaved=10, maxLoadedRate=200 -> labor ceiling = 2000.00.
+        # (maxLoadedRate must stay >= the raw fixture's 150.0 rate, or the
+        # upstream hours/rate bound check abstains before the ceiling this
+        # test targets is ever reached.)
+        name = self._declared_registrant(2000.00)
+        mod = self._write_full_config(
+            boundaries={'valuation': name},
+            max_hours_saved=10, max_loaded_rate=200,
+        )
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(2000.00, validated['estimated_value'])
+
+    def test_one_cent_over_labor_ceiling_abstains_with_no_max_revenue_value(self):
+        name = self._declared_registrant(2000.01)
+        mod = self._write_full_config(
+            boundaries={'valuation': name},
+            max_hours_saved=10, max_loaded_rate=200,
+        )
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNone(validated)
+
+    # -- 3. A malformed maxRevenueValue never widens the labor ceiling ------
+
+    def test_malformed_max_revenue_value_falls_back_to_labor_ceiling(self):
+        rows = [
+            ('zero', 0), ('negative', -700), ('non_numeric', '700'),
+            ('boolean', True), ('nan', float('nan')), ('inf', float('inf')),
+        ]
+        for label, bad_value in rows:
+            with self.subTest(label):
+                # 2000.01 exceeds the labor ceiling (2000.00) -- a widened
+                # bound would accept it; the labor ceiling must still refuse.
+                name = self._declared_registrant(2000.01)
+                mod = self._write_full_config(
+                    boundaries={'valuation': name},
+                    max_revenue_value=bad_value,
+                    max_hours_saved=10, max_loaded_rate=200,
+                )
+                cfg = mod._llm_evaluation_config()
+                validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+                self.assertIsNone(
+                    validated,
+                    f'{label}: a malformed maxRevenueValue must not widen '
+                    f'the labor ceiling')
+
+    # -- 4. maxRevenueValue is ignored when no mechanism was declared -------
+
+    def test_max_revenue_value_ignored_when_mechanism_not_declared(self):
+        # No economic_mechanisms declared at all -- the registrant returns
+        # an amount between the (tiny) labor ceiling and the (generous)
+        # configured maxRevenueValue. If maxRevenueValue leaked through
+        # despite no declared mechanism, this would be accepted; it must
+        # abstain against the labor ceiling instead.
+        name = self._register(
+            lambda a, c: {'estimated_value': 2000.01, 'currency': 'USD'},
+            economic_mechanisms=None,
+        )
+        mod = self._write_full_config(
+            boundaries={'valuation': name},
+            max_revenue_value=1_000_000,
+            max_hours_saved=10, max_loaded_rate=200,
+        )
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNone(
+            validated,
+            'distrust rule: maxRevenueValue must never apply to a call '
+            'whose mechanism was not declared-and-accepted')
+
+    # -- 5. D-12: the hours/rate gate is untouched on a revenue-configured --
+    # install -- already covered end to end by
+    # MechanismDeclarationTests.test_hours_bound_still_gates_a_priced_revenue_record
+    # and .test_priced_revenue_record_retains_evaluator_hours_and_rate; this
+    # is the SAME claim, proven again here with a configured
+    # maxRevenueValue in play (a ceiling this large would otherwise mask an
+    # hours/rate bound failure if the two gates were ever accidentally
+    # merged).
+
+    def test_hours_rate_bound_still_gates_even_with_a_generous_max_revenue_value(self):
+        name = self._declared_registrant(50.0)
+        mod = self._write_full_config(
+            boundaries={'valuation': name}, max_revenue_value=1_000_000)
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(estimated_hours_saved=999.0)  # exceeds DEFAULT_MAX_HOURS_SAVED
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNone(
+            validated,
+            'D-12: the hours/rate bound gate must fire BEFORE the '
+            'valuation boundary ever runs, regardless of maxRevenueValue')
+
+    # -- 6. The basis source, across all four combinations ------------------
+
+    def test_basis_switches_source_across_the_four_combinations(self):
+        registrant_basis = 'registrant-authored caveat'
+        evaluator_basis = 'evaluator-authored caveat'
+        raw = self._raw(basis=evaluator_basis)
+
+        # (authored=True, declared=True) -> registrant's basis wins.
+        name = self._register(
+            lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
+                          'economic_mechanism': 'incremental_revenue',
+                          'basis': registrant_basis},
+            economic_mechanisms={'incremental_revenue'},
+        )
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(registrant_basis, validated['basis'])
+
+        # (authored=True, declared=False) -> evaluator's basis wins; the
+        # registrant's own text is discarded along with its mechanism.
+        name = self._register(
+            lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
+                          'basis': registrant_basis},
+            economic_mechanisms=None,
+        )
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(evaluator_basis, validated['basis'])
+
+        # (authored=False, declared=True) -> registrant said nothing;
+        # evaluator's basis wins even though the mechanism WAS accepted.
+        name = self._register(
+            lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
+                          'economic_mechanism': 'incremental_revenue'},
+            economic_mechanisms={'incremental_revenue'},
+        )
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(evaluator_basis, validated['basis'])
+
+        # (authored=False, declared=False) -> evaluator's basis wins, the
+        # unmodified default-install shape.
+        name = self._register(
+            lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency')},
+            economic_mechanisms=None,
+        )
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(evaluator_basis, validated['basis'])
+
 
 # ---------------------------------------------------------------------------
 # Task 3 -- HostileRegistrantDistrustTests
@@ -1045,14 +1538,13 @@ class AttributionCouplingTests(_ValuationBoundaryTestCase):
 # tests/test_phase50_declaration_authority.py's `_register_causal_label_
 # valuation` throwaway-registration shape.
 #
-# Some cases below are marked @unittest.expectedFailure: classifier.py's
-# _validate_assessment threads attribution_fraction/attribution_basis
-# through VERBATIM from whatever a resolved registrant returns, with NO
-# bounds check and NO travel-as-a-set re-check of its own (see that
-# function's own D-10 comment) -- the shipped revenue fixture already
-# enforces both rules itself before ever returning either key, so this is
-# a real, currently-open gap for a THIRD-PARTY registrant, not a defect in
-# the shipped fixture. 54-04 closes it and removes these markers.
+# 54-03 shipped attribution_fraction/attribution_basis threading as a
+# VERBATIM, deliberately unchecked pass-through of whatever a resolved
+# registrant returns, with NO bounds check and NO travel-as-a-set re-check
+# of its own -- a real, then-open gap for a THIRD-PARTY registrant, proven
+# with two `@unittest.expectedFailure` cases naming this plan. Phase 54
+# Task 1 closes that gap (classifier.py's own D-10 comment carries the
+# validation rules); both cases below now pass as ordinary tests, unmarked.
 
 _HOSTILE_THROWAWAY_SEQ = [0]
 
@@ -1103,8 +1595,12 @@ class HostileRegistrantDistrustTests(_ValuationBoundaryTestCase):
             ('inf', float('inf')), ('boolean', True), ('string', '0.5'),
         ]
 
-    @unittest.expectedFailure  # flips in 54-04 -- the attribution re-check
     def test_malformed_attribution_fraction_is_discarded_amount_still_ships(self):
+        # Declares AND returns a legitimate operator-only mechanism, so the
+        # caller's mechanism gate accepts it -- this test is specifically
+        # about the ATTRIBUTION re-check, not about the mechanism gate
+        # rejecting an undeclared one (that is
+        # test_undeclared_economic_mechanism_is_discarded, below).
         rows = self._malformed_fraction_table()
         self.assertGreaterEqual(len(rows), 6)
         for label, fraction in rows:
@@ -1112,28 +1608,36 @@ class HostileRegistrantDistrustTests(_ValuationBoundaryTestCase):
                 name = self._register(
                     lambda a, c, _f=fraction: {
                         'estimated_value': 42.0, 'currency': a.get('currency'),
+                        'economic_mechanism': 'incremental_revenue',
                         'attribution_fraction': _f, 'attribution_basis': 'hostile basis',
-                    })
+                    },
+                    economic_mechanisms={'incremental_revenue'},
+                )
                 _, _, _, validated = self._validate(name)
                 self.assertIsNotNone(
                     validated,
                     'distrust rule: a malformed OPTIONAL field must never '
                     'abstain the whole assessment')
                 self.assertEqual(42.0, validated['estimated_value'])
+                self.assertEqual('incremental_revenue', validated['economic_mechanism'])
                 self.assertNotIn(
                     'attribution_fraction', validated,
                     'distrust rule: a malformed fraction must be discarded, '
                     'not shipped')
+                self.assertNotIn('attribution_basis', validated)
 
     # -- 3. attribution_fraction with no attribution_basis -- both discarded -
 
-    @unittest.expectedFailure  # flips in 54-04 -- the attribution re-check
     def test_fraction_with_no_basis_from_hostile_registrant_discards_both(self):
         name = self._register(
             lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
-                          'attribution_fraction': 0.5})
+                          'economic_mechanism': 'incremental_revenue',
+                          'attribution_fraction': 0.5},
+            economic_mechanisms={'incremental_revenue'},
+        )
         _, _, _, validated = self._validate(name)
         self.assertIsNotNone(validated)
+        self.assertEqual('incremental_revenue', validated['economic_mechanism'])
         self.assertNotIn(
             'attribution_fraction', validated,
             'distrust rule: travel-as-a-set applies at the caller too, not '
@@ -1145,11 +1649,19 @@ class HostileRegistrantDistrustTests(_ValuationBoundaryTestCase):
     # marker needed for either row.)
 
     def test_non_string_basis_falls_back_to_evaluators_own(self):
+        # Declares AND returns an accepted mechanism -- D-08's basis
+        # authoring is gated on that acceptance (Task 2), so this case must
+        # clear that gate to exercise the TYPE check on basis specifically,
+        # not merely the mechanism gate.
         name = self._register(
             lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
-                          'basis': 12345})
+                          'economic_mechanism': 'incremental_revenue',
+                          'basis': 12345},
+            economic_mechanisms={'incremental_revenue'},
+        )
         _, _, raw, validated = self._validate(name)
         self.assertIsNotNone(validated)
+        self.assertEqual('incremental_revenue', validated['economic_mechanism'])
         self.assertIsInstance(validated['basis'], str)
         self.assertEqual(raw['basis'], validated['basis'])
 
@@ -1157,11 +1669,18 @@ class HostileRegistrantDistrustTests(_ValuationBoundaryTestCase):
         huge = 'x' * 10_000
         name = self._register(
             lambda a, c, _b=huge: {'estimated_value': 42.0, 'currency': a.get('currency'),
-                                    'basis': _b})
+                                    'economic_mechanism': 'incremental_revenue',
+                                    'basis': _b},
+            economic_mechanisms={'incremental_revenue'},
+        )
         _, _, _, validated = self._validate(name)
         self.assertIsNotNone(validated)
+        self.assertEqual('incremental_revenue', validated['economic_mechanism'])
         self.assertIsInstance(validated['basis'], str)
         self.assertLessEqual(_serialized_len(validated['basis']), 200)
+        # Proves the clamp actually engaged on the REGISTRANT's text, not a
+        # silent fallback to the (short) evaluator basis.
+        self.assertTrue(validated['basis'].startswith('x'))
 
     # -- 5. undeclared economic_mechanism is discarded (ALREADY real) -------
 
@@ -1211,3 +1730,126 @@ class HostileRegistrantDistrustTests(_ValuationBoundaryTestCase):
             'PA-15: assumptions is caller-constructed from already-'
             'validated fields; raw must never be threaded through',
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 -- ProfileAttributionFenceTests (D-07, T-54-04)
+# ---------------------------------------------------------------------------
+# Seven cases, one per <behavior> bullet. Host shapes are built with
+# tempfile directories and HERMES_HOME/REVENIUM_CONFIG_FILE env overrides in
+# the module's own _load_classifier idiom -- CONFIG_FILE and HERMES_HOME
+# resolve INDEPENDENTLY (classifier.py:41-53), so a test can put the config
+# anywhere while controlling only whether HERMES_HOME/profiles/ looks
+# multiplexed.
+
+class ProfileAttributionFenceTests(_ValuationBoundaryTestCase):
+    """T-54-04: a host whose owning profile cannot be attributed abstains
+    from pricing revenue rather than pricing from the root config's card;
+    an ordinary non-revenue session on the same host is unaffected."""
+
+    def _classifier_with_home(self, hermes_home):
+        return _load_classifier({
+            'HERMES_HOME': str(hermes_home),
+            'REVENIUM_CONFIG_FILE': str(self.config_path),
+        })
+
+    # -- 1. No profiles/ directory at all -> True ----------------------------
+
+    def test_no_profiles_directory_returns_true(self):
+        home = Path(self.tmp) / 'no-profiles'
+        home.mkdir()
+        mod = self._classifier_with_home(home)
+        self.assertTrue(mod._revenue_profile_attribution_certain(None))
+
+    # -- 2. profiles/ exists but holds no subdirectory -> True ---------------
+
+    def test_empty_profiles_directory_returns_true(self):
+        home = Path(self.tmp) / 'empty-profiles'
+        (home / 'profiles').mkdir(parents=True)
+        mod = self._classifier_with_home(home)
+        self.assertTrue(mod._revenue_profile_attribution_certain(None))
+
+    # -- 3. Multiplexed, resolution NOT engaged (identical paths) -> False --
+
+    def test_multiplexed_and_not_engaged_returns_false(self):
+        home = Path(self.tmp) / 'multiplexed-not-engaged'
+        (home / 'profiles' / 'acme').mkdir(parents=True)
+        mod = self._classifier_with_home(home)
+        # paths=None -- the caller's own default -- falls back to
+        # _module_paths() internally, so resolution provably never engaged.
+        self.assertFalse(mod._revenue_profile_attribution_certain(None))
+        # The same outcome holds when a caller explicitly hands back the
+        # module's OWN paths object, not just the None default.
+        self.assertFalse(
+            mod._revenue_profile_attribution_certain(mod._module_paths()))
+
+    # -- 4. Multiplexed, resolution ENGAGED (a distinct config_file) -> True -
+
+    def test_multiplexed_and_engaged_returns_true(self):
+        home = Path(self.tmp) / 'multiplexed-engaged'
+        (home / 'profiles' / 'acme').mkdir(parents=True)
+        mod = self._classifier_with_home(home)
+        module_paths = mod._module_paths()
+        distinct = module_paths._replace(
+            config_file=home / 'profiles' / 'acme' / 'state' / 'revenium'
+            / 'config.json')
+        self.assertTrue(mod._revenue_profile_attribution_certain(distinct))
+
+    # -- 5. Any exception inside the fence -> False --------------------------
+
+    def test_exception_inside_the_fence_returns_false(self):
+        home = Path(self.tmp) / 'exception-case'
+        (home / 'profiles' / 'acme').mkdir(parents=True)
+        mod = self._classifier_with_home(home)
+
+        class _RaisingPaths:
+            @property
+            def config_file(self):
+                raise RuntimeError('boom -- attribute access must not escape')
+
+        self.assertFalse(
+            mod._revenue_profile_attribution_certain(_RaisingPaths()))
+
+    # -- 6. False + a declared, accepted mechanism -> abstains, distinctly --
+
+    def test_false_fence_with_declared_mechanism_abstains_with_distinct_reason(self):
+        home = Path(self.tmp) / 'multiplexed-abstain'
+        (home / 'profiles' / 'acme').mkdir(parents=True)
+        _write_config(
+            self.config_path,
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        mod = self._classifier_with_home(home)
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+
+        with self.assertLogs('revenium_classifier', level='WARNING') as cm:
+            validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+
+        self.assertIsNone(validated)
+        fence_lines = [l for l in cm.output if 'owning profile' in l]
+        self.assertEqual(
+            1, len(fence_lines),
+            'exactly one fence-abstention warning must fire; '
+            f'got: {cm.output}')
+        # Distinct from every OTHER abstention wording this function can
+        # emit -- a human reading the log must be able to tell this
+        # abstention reason apart from the others.
+        other_lines = [l for l in cm.output if 'owning profile' not in l]
+        for line in other_lines:
+            self.assertNotIn('owning profile', line)
+
+    # -- 7. False fence + NO declared mechanism -> non-revenue path unaffected
+
+    def test_false_fence_does_not_touch_the_non_revenue_path(self):
+        home = Path(self.tmp) / 'multiplexed-non-revenue'
+        (home / 'profiles' / 'acme').mkdir(parents=True)
+        # No boundaries object at all -- an ordinary, non-revenue session.
+        mod = self._classifier_with_home(home)
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        self.assertEqual(round(2.5 * 150.0, 2), validated['estimated_value'])
