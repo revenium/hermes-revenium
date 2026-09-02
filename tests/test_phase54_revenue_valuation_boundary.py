@@ -2183,3 +2183,371 @@ class ProfileAttributionFenceTests(_ValuationBoundaryTestCase):
         validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
         self.assertIsNotNone(validated)
         self.assertEqual(round(2.5 * 150.0, 2), validated['estimated_value'])
+
+
+# ---------------------------------------------------------------------------
+# Task 2 (Plan 06) -- GrossLeakFixtureTests (D-11, T-54-02)
+# ---------------------------------------------------------------------------
+
+class GrossLeakFixtureTests(_ValuationBoundaryTestCase):
+    """D-11's adversarial fixture: a configured business gross must never
+    appear on any of four named surfaces -- the persisted sidecar record,
+    the `meter`/`outcome` argv, the `--metadata` envelope, and
+    `revenium-metering.log` -- on the happy path AND on every path where
+    the registrant read the configured gross (or the raw config value that
+    would have BECOME the gross had it been well-formed) and refused it.
+
+    Each scenario drives the REAL pipeline end to end in one isolated
+    per-scenario HERMES_HOME: config -> the real
+    `revenue_card_valuation_fixture` registrant via `_validate_assessment`
+    -> `_build_job_assessment` -> the REAL `_write_job_assessment` sidecar
+    writer (surface 1, read back from disk) -> the REAL hermes-report.sh
+    outcome stage against that SAME persisted file (surfaces 2-4).
+
+    WHAT THIS FIXTURE PROVES, AND WHAT WOULD MAKE IT A LIE: it proves
+    absence across these four named surfaces for ONE configured gross
+    value on ONE code path (the shipped `revenue_card_valuation_fixture`
+    registrant), driven for real rather than asserted from the shape of
+    the code. It does NOT prove no future surface could carry the gross --
+    FA-03 in 54-06-PLAN.md's flagged assumptions names the two candidates
+    this fixture does not cover (a traceback frame local surviving an
+    outer `except`, and an operator's own config.json backup or fleet copy).
+
+    CORRECTED READING (54-06-PLAN.md's own "read, not assume" instruction,
+    applied to this task's own behavior list): the plan's behavior bullet
+    7 states the product is present on "each of the four surfaces" on the
+    happy path. Reading every `log`/`info`/`warn` call site on
+    hermes-report.sh's outcome path (and confirming empirically by driving
+    a real tick) shows NONE of them ever references the resolved value --
+    only job ids, exit codes and status words. `revenium-metering.log`
+    therefore never carries the PRODUCT either, by the same design that
+    keeps the GROSS off it -- verified, not merely assumed, and the
+    absence is intentional (D-11/ROI-08 forbid a business figure appearing
+    there at all). The positive control for the log surface is therefore
+    the job id appearing in its one "Outcome reported" line -- proof the
+    driven tick actually processed this scenario's job -- rather than the
+    unobtainable literal product. The other three surfaces (record, argv,
+    metadata) all carry the real product and are asserted directly.
+    """
+
+    GROSS = 4321.0
+    FRACTION = 0.15
+    PRODUCT = 648.15  # round(4321.0 * 0.15, 2)
+    CARD_KEY = 'hospitality-booking-agent'
+
+    @staticmethod
+    def _forbidden_forms(value):
+        """Every representation of `value` this fixture checks for,
+        built programmatically from `value` itself rather than
+        hand-typed. repr() and json.dumps() of a Python float are
+        byte-identical (CPython's json encoder calls float.__repr__
+        internally), so a hex representation is added defensively --
+        both a genuinely distinct fifth form and a legitimate extra
+        guard against an even more exotic accidental serialization."""
+        forms = {
+            str(int(value)),
+            '{:.2f}'.format(value),
+            repr(float(value)),
+            json.dumps(float(value)),
+            float(value).hex(),
+        }
+        return sorted(forms)
+
+    def test_forbidden_forms_are_independent_of_unrelated_defaults(self):
+        """A later fixture edit that accidentally makes the gross a
+        substring of the product, the default bounds, or the default
+        ceilings must not silently turn every absence assertion in this
+        class into a tautology."""
+        forms = self._forbidden_forms(self.GROSS)
+        self.assertGreaterEqual(
+            len(forms), 4,
+            f'need at least 4 distinct forbidden forms, got {forms!r}',
+        )
+        unrelated = [
+            repr(self.PRODUCT), json.dumps(self.PRODUCT),
+            '{:.2f}'.format(self.PRODUCT),
+            repr(40.0), repr(500.0), repr(round(40.0 * 500.0, 2)),
+            '2.5', '150.0', repr(round(2.5 * 150.0, 2)),
+            '1715516000.5', '1715516001.000', '1715516002.0',
+        ]
+        for form in forms:
+            for u in unrelated:
+                self.assertNotIn(
+                    form, u,
+                    f'forbidden form {form!r} is a substring of unrelated '
+                    f'value {u!r} -- choose a different GROSS/FRACTION',
+                )
+
+    @staticmethod
+    def _metadata_value(argv):
+        for i, tok in enumerate(argv):
+            if tok == '--metadata' and i + 1 < len(argv):
+                return argv[i + 1]
+        return None
+
+    def _run_reporter_stage(self, hermes_home, job_id):
+        """Drive the REAL hermes-report.sh outcome stage against
+        `hermes_home`, which already holds the classifier's real sidecar
+        write for `job_id` -- proving surfaces 2-4 against the SAME
+        persisted bytes surface 1 read, not a second, hand-built record."""
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        markers_dir = os.path.join(state_dir, 'markers')
+        os.makedirs(markers_dir, mode=0o700, exist_ok=True)
+        state_db = os.path.join(hermes_home, 'state.db')
+        jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+        shim_home = os.path.join(hermes_home, 'shim-home')
+        bin_dir = os.path.join(shim_home, '.local', 'bin')
+        os.makedirs(bin_dir, exist_ok=True)
+        meter_log = os.path.join(hermes_home, 'meter.log')
+        jobs_log = os.path.join(hermes_home, 'jobs.log')
+        inv_log = os.path.join(hermes_home, 'inv.log')
+        shim = os.path.join(bin_dir, 'revenium')
+
+        sid = f'{job_id}-sid'
+        build_state_db(state_db, [{
+            'id': sid,
+            'model': 'claude-sonnet-4-6',
+            'source': 'test',
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': 1715514000.0,
+            'ended_at': 1715514000.0,
+            'billing_provider': 'anthropic',
+        }])
+        with open(jobs_ledger, 'w') as f:
+            f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+        task_marker = {
+            'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+            'task_type': 'code_review', 'operation_type': 'CHAT',
+        }
+        job_marker = {
+            'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+            'agentic_job_id': job_id,
+            'job_name': 'Phase 54 Plan 06 Gross Leak Test Job',
+            'job_type': 'booking_completion', 'status': 'SUCCESS',
+        }
+        with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+            f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+            f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+        build_shim(shim, outcome_value_capable=True)
+        base_env = {
+            **os.environ,
+            'HOME': shim_home,
+            'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': inv_log,
+            'METER_LOG': meter_log,
+            'JOBS_LOG': jobs_log,
+            'TZ': 'UTC',
+            'REVENIUM_ORGANIZATION_NAME': '',
+        }
+        rc, _ignored, output = run_script(
+            SCRIPTS_DIR / 'hermes-report.sh', base_env, inv_log
+        )
+        self.assertEqual(rc, 0, f'hermes-report.sh failed (rc={rc}): {output}')
+
+        outcome_inv = []
+        if os.path.exists(jobs_log):
+            with open(jobs_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if not line:
+                        continue
+                    argv = shlex.split(line)
+                    if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome':
+                        outcome_inv.append(argv)
+        self.assertEqual(
+            len(outcome_inv), 1,
+            f'expected exactly 1 "jobs outcome" invocation, got {len(outcome_inv)}: '
+            f'{outcome_inv!r}\nOutput: {output}'
+        )
+        argv = outcome_inv[0]
+
+        log_path = os.path.join(state_dir, 'revenium-metering.log')
+        log_bytes = b''
+        if os.path.exists(log_path):
+            log_bytes = Path(log_path).read_bytes()
+        return argv, log_bytes
+
+    def _drive_scenario(self, entry, job_id, reportable=False):
+        """Config -> the REAL registrant -> the REAL record ->
+        the REAL sidecar write -> the REAL hermes-report.sh outcome stage,
+        all rooted at one fresh, isolated HERMES_HOME.
+
+        `reportable=True` sets `experimentalReportEstimates: true` so the
+        happy path's CUSTOMER_CONFIGURED record actually resolves to
+        `reportable` rather than `candidate` -- otherwise the reportability
+        gate Task 1 hardened would strip the value before it ever reached
+        argv/metadata, and this class's own positive control would fail
+        for the wrong reason (a shed value, not a harness bug)."""
+        run_home = tempfile.mkdtemp(prefix='gsd-p54-06-leak-')
+        self.addCleanup(shutil.rmtree, run_home, ignore_errors=True)
+        config_path = Path(run_home) / 'config.json'
+        cfg_dict = {
+            'boundaries': {'valuation': 'revenue_card_valuation_fixture'},
+            'llmOutcomeEvaluation': {
+                'revenueCard': {self.CARD_KEY: entry},
+                'revenueCardKey': self.CARD_KEY,
+            },
+        }
+        if reportable:
+            cfg_dict['llmOutcomeEvaluation']['experimentalReportEstimates'] = True
+        config_path.write_text(json.dumps(cfg_dict))
+        mod = _load_classifier({
+            'REVENIUM_CONFIG_FILE': str(config_path),
+            'HERMES_HOME': run_home,
+        })
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        job = {'agentic_job_id': job_id, 'job_type': 'booking_completion',
+               'status': 'SUCCESS'}
+        if validated is not None:
+            record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        else:
+            record = mod._build_job_assessment(
+                job, None, raw, cfg, 'stub', 'v1', abstention_reason='no_evaluation')
+        self.assertIsNotNone(
+            record, 'record construction must succeed regardless of abstention')
+
+        sidecar_path = mod._write_job_assessment(record, paths=mod._module_paths())
+        self.assertIsNotNone(
+            sidecar_path,
+            'the real sidecar writer must succeed for this fixture to be non-trivial')
+        persisted_bytes = Path(sidecar_path).read_bytes()
+
+        argv, log_bytes = self._run_reporter_stage(run_home, job_id)
+        metadata_raw = self._metadata_value(argv) or ''
+        try:
+            metadata_reserialized = json.dumps(
+                json.loads(metadata_raw), sort_keys=True) if metadata_raw else ''
+        except ValueError:
+            metadata_reserialized = metadata_raw
+
+        return {
+            'record': record,
+            'validated': validated,
+            'persisted': persisted_bytes.decode('utf-8', errors='replace'),
+            'argv': ' '.join(argv),
+            'metadata': metadata_reserialized,
+            'log': log_bytes.decode('utf-8', errors='replace'),
+        }
+
+    def _assert_forms_absent(self, forms, surfaces):
+        for surface_name, haystack in surfaces.items():
+            for form in forms:
+                self.assertNotIn(
+                    form, haystack,
+                    f'forbidden form {form!r} leaked on surface {surface_name!r}: '
+                    f'{haystack!r}',
+                )
+
+    def _surfaces(self, result):
+        return {
+            'persisted_record': result['persisted'],
+            'meter_outcome_argv': result['argv'],
+            'metadata_envelope': result['metadata'],
+            'revenium_metering_log': result['log'],
+        }
+
+    def test_happy_path_positive_control_and_gross_absence(self):
+        """The product ships on three of the four surfaces (record, argv,
+        metadata); the log carries neither the gross nor the product, by
+        design (see class docstring). The gross itself is absent from all
+        four -- 4 of this class's 16 absence assertions."""
+        entry = {
+            'grossPerJob': self.GROSS,
+            'attributionFraction': self.FRACTION,
+            'attributionBasis': 'q3 loyalty capture rate',
+        }
+        result = self._drive_scenario(entry, 'p54-06-leak-happy-001', reportable=True)
+        self.assertIsNotNone(
+            result['validated'],
+            'test setup invalid: the happy path must be accepted, not abstained')
+        self.assertEqual(self.PRODUCT, result['record'].get('estimated_value'))
+        self.assertEqual(self.PRODUCT, result['validated'].get('estimated_value'))
+
+        product_form = repr(self.PRODUCT)
+        surfaces = self._surfaces(result)
+        for name in ('persisted_record', 'meter_outcome_argv', 'metadata_envelope'):
+            self.assertIn(
+                product_form, surfaces[name],
+                f'positive control failed: product {product_form!r} missing '
+                f'from surface {name!r} -- a harness producing nothing would '
+                f'otherwise pass every absence assertion below',
+            )
+        # revenium-metering.log positive control: the job id, not the
+        # product (see class docstring's "CORRECTED READING").
+        self.assertIn(
+            'p54-06-leak-happy-001', surfaces['revenium_metering_log'],
+            'positive control failed: the driven job id is missing from '
+            'revenium-metering.log -- the tick may not have processed '
+            'this scenario at all',
+        )
+
+        forms = self._forbidden_forms(self.GROSS)
+        self._assert_forms_absent(forms, surfaces)
+
+    def test_malformed_entry_abstains_and_gross_is_absent(self):
+        """The card entry is a bare number, not a dict -- `malformed_entry`.
+        The literal value sat in the raw config the registrant inspected
+        (isinstance(entry, dict) is checked before grossPerJob is ever
+        read) even though it was never extracted into a `gross` variable;
+        4 more of this class's 16 absence assertions."""
+        result = self._drive_scenario(self.GROSS, 'p54-06-leak-entry-001')
+        self.assertIsNone(
+            result['validated'],
+            'test setup invalid: a non-dict entry must abstain the whole assessment')
+        self.assertNotIn('attribution_fraction', result['record'])
+        self.assertNotIn('estimated_value', result['record'])
+
+        forms = self._forbidden_forms(self.GROSS)
+        self._assert_forms_absent(forms, self._surfaces(result))
+
+    def test_out_of_range_fraction_abstains_and_gross_is_absent(self):
+        """The registrant reads a VALID gross, then reads an
+        out-of-[0.0, 1.0] fraction and abstains (`malformed_attribution`)
+        -- the registrant read the gross and is now explaining why it
+        refused the entry; 4 more of this class's 16 absence assertions."""
+        entry = {
+            'grossPerJob': self.GROSS,
+            'attributionFraction': 1.5,
+            'attributionBasis': 'q3 loyalty capture rate',
+        }
+        result = self._drive_scenario(entry, 'p54-06-leak-fraction-001')
+        self.assertIsNone(
+            result['validated'],
+            'test setup invalid: an out-of-range fraction must abstain the whole assessment')
+        self.assertNotIn('attribution_fraction', result['record'])
+        self.assertNotIn('estimated_value', result['record'])
+
+        forms = self._forbidden_forms(self.GROSS)
+        self._assert_forms_absent(forms, self._surfaces(result))
+
+    def test_fraction_with_no_basis_abstains_and_gross_is_absent(self):
+        """The registrant reads a VALID gross and a valid fraction, then
+        finds no basis and abstains (`malformed_attribution`, travel-as-a-
+        set direction 1) -- the final 4 of this class's 16 absence
+        assertions."""
+        entry = {
+            'grossPerJob': self.GROSS,
+            'attributionFraction': self.FRACTION,
+        }
+        result = self._drive_scenario(entry, 'p54-06-leak-basis-001')
+        self.assertIsNone(
+            result['validated'],
+            'test setup invalid: a fraction with no basis must abstain the whole assessment')
+        self.assertNotIn('attribution_fraction', result['record'])
+        self.assertNotIn('estimated_value', result['record'])
+
+        forms = self._forbidden_forms(self.GROSS)
+        self._assert_forms_absent(forms, self._surfaces(result))
