@@ -291,6 +291,113 @@ class OperatorBoundKeyTests(_ValuationBoundaryTestCase):
         got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
         self.assertIsNone(got)
 
+    # -- Task 1: the full rejection matrix, called directly on the
+    # registrant through a freshly-loaded valuation module (not through
+    # _validate_assessment -- this proves the registrant's OWN abstention
+    # discipline, independent of the caller's re-checks). Modelled on
+    # test_phase36_evaluator_seam.py's RejectionMatrixTests table shape.
+    #
+    # Each row: (label, assumptions, config). `_DISTINCTIVE_GROSS` is
+    # embedded in every config that carries a real entry, so the redaction
+    # proof below can assert it never appears in any captured log record.
+
+    _DISTINCTIVE_GROSS = 4321.0
+
+    def _rejection_matrix(self):
+        gross = self._DISTINCTIVE_GROSS
+        return [
+            ('assumptions_none', None,
+             {'revenueCard': {'k': {'grossPerJob': gross}}, 'revenueCardKey': 'k'}),
+            ('assumptions_list', [],
+             {'revenueCard': {'k': {'grossPerJob': gross}}, 'revenueCardKey': 'k'}),
+            ('assumptions_string', 'not-a-dict',
+             {'revenueCard': {'k': {'grossPerJob': gross}}, 'revenueCardKey': 'k'}),
+            ('config_none', {'currency': 'USD'}, None),
+            ('config_list', {'currency': 'USD'}, []),
+            ('config_string', {'currency': 'USD'}, 'not-a-dict'),
+            ('revenue_card_absent', {'currency': 'USD'}, {'revenueCardKey': 'k'}),
+            ('revenue_card_none', {'currency': 'USD'},
+             {'revenueCard': None, 'revenueCardKey': 'k'}),
+            ('revenue_card_list', {'currency': 'USD'},
+             {'revenueCard': [], 'revenueCardKey': 'k'}),
+            ('revenue_card_string', {'currency': 'USD'},
+             {'revenueCard': 'not-a-dict', 'revenueCardKey': 'k'}),
+            ('revenue_card_empty', {'currency': 'USD'},
+             {'revenueCard': {}, 'revenueCardKey': 'k'}),
+            ('revenue_card_key_absent', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': gross}}}),
+            ('revenue_card_key_empty_string', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': gross}}, 'revenueCardKey': ''}),
+            ('revenue_card_key_non_string', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': gross}}, 'revenueCardKey': 42}),
+            ('revenue_card_key_unmatched', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': gross}}, 'revenueCardKey': 'other'}),
+            ('entry_not_dict', {'currency': 'USD'},
+             {'revenueCard': {'k': gross}, 'revenueCardKey': 'k'}),
+            ('gross_absent', {'currency': 'USD'},
+             {'revenueCard': {'k': {}}, 'revenueCardKey': 'k'}),
+            ('gross_string', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': str(gross)}}, 'revenueCardKey': 'k'}),
+            ('gross_bool', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': True}}, 'revenueCardKey': 'k'}),
+            ('gross_nan', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': float('nan')}}, 'revenueCardKey': 'k'}),
+            ('gross_inf', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': float('inf')}}, 'revenueCardKey': 'k'}),
+            ('gross_zero', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': 0}}, 'revenueCardKey': 'k'}),
+            ('gross_negative', {'currency': 'USD'},
+             {'revenueCard': {'k': {'grossPerJob': -gross}}, 'revenueCardKey': 'k'}),
+        ]
+
+    def test_rejection_matrix_every_row_abstains(self):
+        rows = self._rejection_matrix()
+        # A shrunken table would silently skip cases rather than fail
+        # loudly -- assert the length first (acceptance criteria: >= 12).
+        self.assertGreaterEqual(len(rows), 12)
+        val = _load_valuation()
+        for label, assumptions, config in rows:
+            with self.subTest(label):
+                self.assertIsNone(
+                    val._revenue_card_valuation_fixture(assumptions, config))
+
+    def test_happy_path_prices_and_emits_no_log(self):
+        val = _load_valuation()
+        with self.assertNoLogs('revenium_classifier.valuation', level='WARNING'):
+            got = val._revenue_card_valuation_fixture(
+                {'currency': 'USD'},
+                {'revenueCard': {'k': {'grossPerJob': self._DISTINCTIVE_GROSS}},
+                 'revenueCardKey': 'k'},
+            )
+        self.assertIsNotNone(got)
+        self.assertEqual(self._DISTINCTIVE_GROSS, got['estimated_value'])
+
+    # Branches where the card key is a meaningful, resolvable string --
+    # the diagnostic must positively name it (mitigates T-54-02: proves
+    # the log is useful, not merely empty).
+    _KEY_RELATED_LABELS = frozenset({
+        'revenue_card_key_unmatched', 'entry_not_dict', 'gross_absent',
+        'gross_string', 'gross_bool', 'gross_nan', 'gross_inf',
+        'gross_zero', 'gross_negative',
+    })
+
+    def test_redaction_no_abstain_branch_ever_logs_the_configured_gross(self):
+        val = _load_valuation()
+        gross_str = str(self._DISTINCTIVE_GROSS)
+        for label, assumptions, config in self._rejection_matrix():
+            with self.subTest(label):
+                with self.assertLogs(
+                        'revenium_classifier.valuation', level='WARNING') as cap:
+                    got = val._revenue_card_valuation_fixture(assumptions, config)
+                self.assertIsNone(got)
+                self.assertGreaterEqual(len(cap.records), 1)
+                for record in cap.records:
+                    self.assertNotIn(gross_str, record.getMessage())
+                    self.assertNotIn(gross_str, str(record))
+                if label in self._KEY_RELATED_LABELS:
+                    joined = ' '.join(r.getMessage() for r in cap.records)
+                    self.assertIn('k', joined)
+
 
 # ---------------------------------------------------------------------------
 # Task 2 -- MechanismDeclarationTests

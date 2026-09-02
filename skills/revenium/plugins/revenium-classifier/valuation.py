@@ -457,82 +457,134 @@ register(
 # value PER COMPLETED BOOKING -- an operator policy, not this booking's
 # actual revenue.
 #
-# Redacted logging (D-11) and delegation to the built-in derivation when
-# nothing revenue-shaped can be priced (D-04) are explicitly NOT this
-# task's job -- 54-03 and 54-02 own them respectively; no placeholder for
-# either is written here, per this task's own instruction to leave them
-# absent rather than stub them.
+# Redaction-safe logging (D-11, ROI-08, T-54-02). The sibling
+# _rate_card_valuation_fixture above logs the REJECTED CONFIGURED VALUE
+# itself on every one of its five warning call sites (the role, the
+# amount, or the whole `assumptions` dict on its outer except) -- that
+# habit is deliberately NOT copied here. `revenium-metering.log` is
+# PERSISTED, so a logged gross is a persisted gross, which is exactly what
+# ROI-08 forbids for a business figure. Every branch below therefore logs
+# only a FIXED reason word from a closed vocabulary this module defines
+# (_REVENUE_ABSTAIN_REASONS) plus the card key name, formatted with %r --
+# never the configured amount, never the entry dict, and never the whole
+# `config`. The card key is an operator-authored identifier, not the
+# money; logging it keeps the T-28-07 %r-not-%s/no-f-string rule (a
+# newline embedded in operator text must not forge a second log record)
+# while making the diagnostic useful rather than merely empty.
+#
+# Delegation to the built-in derivation when nothing revenue-shaped can be
+# priced (D-04) is explicitly NOT this task's job -- 54-02 (Task 2 of this
+# same plan) owns it; no placeholder is written here, per this task's own
+# instruction to leave it absent rather than stub it.
 
 REVENUE_CARD_FIXTURE_VERSION = "1"
+
+# Phase 54 (D-11, ROI-08, T-54-02): the closed set of reason words this
+# fixture's diagnostics may ever emit. A branch names exactly one of these
+# plus the card key -- never the offending value, never the configured
+# amount. Keeping the vocabulary closed (rather than free-text) is what
+# makes "never leaks the value" provable rather than merely intended: a
+# reviewer or a future edit can grep this frozenset for the complete list
+# of things this fixture is allowed to say when it abstains.
+_REVENUE_ABSTAIN_REASONS = frozenset({
+    "malformed_assumptions",
+    "malformed_config",
+    "no_configured_card",
+    "unmatched_key",
+    "malformed_entry",
+    "malformed_gross",
+    "internal_error",
+})
 
 
 def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | None":
     """Price a completed booking from an operator-approved revenue card,
     keyed by an OPERATOR-BOUND identity -- never by inferred role.
 
-    Reads `config["revenueCard"]` when that is a dict, selects the entry
-    named by `config["revenueCardKey"]` (a non-empty str present in the
-    card -- a multi-entry card with no configured key, or a key the card
-    does not name, abstains rather than guessing), reads that entry's
+    Reads `config["revenueCard"]` when that is a non-empty dict, selects
+    the entry named by `config["revenueCardKey"]` (a non-empty str present
+    in the card -- a multi-entry card with no configured key, or a key the
+    card does not name, abstains rather than guessing), reads that entry's
     `grossPerJob` through `_finite_number`, and returns
     `{"estimated_value": round(gross, 2), "currency": <the assumptions'
     currency>, "economic_mechanism": "incremental_revenue"}` when the
     amount is finite and positive. Every other case -- a non-dict
-    `assumptions` or `config`, an absent or non-dict revenue card, a
-    missing/non-str/empty/unmatched `revenueCardKey`, a non-dict selected
-    entry, or a non-finite/boolean/non-positive `grossPerJob` -- returns
-    None. A card that has nothing configured for the operator-bound
+    `assumptions`, a non-dict `config`, an absent/non-dict/empty revenue
+    card, a missing/non-str/empty/unmatched `revenueCardKey`, a non-dict
+    selected entry, or a non-finite/boolean/non-positive `grossPerJob` --
+    returns None. A card that has nothing configured for the operator-bound
     identity is a reason to abstain, not to guess.
+
+    Its honest limit, stated the way the rate-card fixture states its own:
+    configuration establishes an approved value PER COMPLETED BOOKING --
+    an operator policy, not this booking's actual revenue.
 
     `estimated_hours_saved` and `assumed_loaded_rate` on `assumptions` are
     deliberately never read (D-12): revenue is not derived from effort,
     so those two fields stay on the record as the evaluator's own
     assumptions without determining this fixture's value.
 
-    The whole body runs inside one try/except returning None, logging
-    with %r -- never %s, never an f-string, because a card key or amount
-    can be operator-supplied text and a newline embedded in it must not
-    be able to forge a second log record (the T-28-07 rule the rest of
-    this plugin already follows). D-11's redaction requirement for the
-    configured gross amount itself is 54-03's job, not this task's.
+    The whole body runs inside one try/except returning None. Every
+    abstain branch, including this outer except, logs ONLY a fixed reason
+    word from `_REVENUE_ABSTAIN_REASONS` and the card key name (%r,
+    never %s, never an f-string -- T-28-07) -- never the configured
+    amount, never the entry dict, and never the whole `config` (D-11,
+    ROI-08, T-54-02; see the module comment above this function for why
+    this deliberately does NOT copy the sibling rate-card fixture's habit
+    of logging the rejected value). The happy path emits no log record at
+    all.
 
     Reads no clock, makes no model call and makes no network call: the
-    whole derivation is a dict lookup and a bounds check.
+    whole derivation is a dict lookup, a bounds check and one
+    multiplication-free lookup.
     """
+    card_key = None
     try:
-        a = assumptions if isinstance(assumptions, dict) else {}
-        cfg = config if isinstance(config, dict) else {}
-
-        revenue_card = cfg.get("revenueCard")
-        if not isinstance(revenue_card, dict):
+        if not isinstance(assumptions, dict):
             logger.warning(
-                "valuation: revenue card fixture found no configured "
-                "revenue card: %r", revenue_card,
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "malformed_assumptions", card_key,
+            )
+            return None
+        if not isinstance(config, dict):
+            logger.warning(
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "malformed_config", card_key,
             )
             return None
 
+        a = assumptions
+        cfg = config
         card_key = cfg.get("revenueCardKey")
+
+        revenue_card = cfg.get("revenueCard")
+        if not isinstance(revenue_card, dict) or not revenue_card:
+            logger.warning(
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "no_configured_card", card_key,
+            )
+            return None
+
         if not isinstance(card_key, str) or not card_key or card_key not in revenue_card:
             logger.warning(
-                "valuation: revenue card fixture has no configured "
-                "revenueCardKey selecting a configured entry: %r", card_key,
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "unmatched_key", card_key,
             )
             return None
 
         entry = revenue_card.get(card_key)
         if not isinstance(entry, dict):
             logger.warning(
-                "valuation: revenue card fixture's entry for key %r is "
-                "not a dict: %r", card_key, entry,
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "malformed_entry", card_key,
             )
             return None
 
         gross = _finite_number(entry.get("grossPerJob"))
         if gross is None or gross <= 0:
             logger.warning(
-                "valuation: revenue card fixture rejected non-positive or "
-                "non-finite grossPerJob for key %r: %r",
-                card_key, entry.get("grossPerJob"),
+                "valuation: revenue card fixture abstained (%s) for key %r",
+                "malformed_gross", card_key,
             )
             return None
 
@@ -543,8 +595,8 @@ def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | 
         }
     except Exception:
         logger.warning(
-            "valuation: revenue card fixture raised internally, rejecting "
-            "assumptions: %r", assumptions,
+            "valuation: revenue card fixture abstained (%s) for key %r",
+            "internal_error", card_key,
         )
         return None
 
