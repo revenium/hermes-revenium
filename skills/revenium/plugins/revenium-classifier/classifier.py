@@ -1593,6 +1593,108 @@ def _finite_number(value) -> "float | None":
     return f
 
 
+def _resolve_delegation_identity_check(valuation_mod, derived: dict) -> "bool | None":
+    """WR-01 fix (phase-54 code review), extended for the sibling
+    evidence_class defect (also phase-54 code review, same root cause,
+    different field): the ONE call site that ever invokes
+    `valuation.is_delegated_builtin_result`.
+
+    That function is READ-AND-CLEAR (see valuation.py's own module
+    comment above `_delegated_builtin_result`): it consumes the marker it
+    reads, so a second call within the same turn can never re-observe the
+    first call's answer. `_validate_assessment` needs this identity
+    check's verdict for TWO purposes that want OPPOSITE fail-closed
+    defaults on doubt -- the amount lower-bound re-check (below) and the
+    evidence_class resolution (also below, at this function's own
+    "record site 1") -- so this function calls the underlying check
+    EXACTLY ONCE and returns its raw TRI-STATE outcome, leaving each
+    caller to apply its own default for the uncertain case:
+
+      True   the identity check ran and confirmed `derived` IS (by
+             object identity) the exact dict
+             `_delegate_to_builtin_hours_times_rate` produced.
+      False  the identity check ran and found no match -- a genuine
+             third-party result.
+      None   the identity check itself raised (e.g. an older valuation.py
+             predating this marker). Neither True nor False: an honest
+             "cannot tell," never coerced to a default here.
+
+    `run_classification_async` must never raise (see this module's own
+    top-level contract), so this wrapper -- not a bare
+    `valuation_mod.is_delegated_builtin_result(derived)` call -- is what
+    every caller in this module uses.
+    """
+    try:
+        return bool(valuation_mod.is_delegated_builtin_result(derived))
+    except Exception:
+        logger.warning(
+            "revenium-classifier: delegated-builtin identity check raised; "
+            "each caller applies its own fail-closed default",
+        )
+        return None
+
+
+def _valuation_evidence_impl_name(
+    impl_name: str, fall_back_to_builtin: bool, delegation_check: "bool | None",
+) -> str:
+    """Sibling fix to WR-01 (phase-54 code review), same root cause,
+    different field: resolve the registrant NAME whose declared
+    evidence_class should describe THIS call's valuation result, rather
+    than reflexively resolving `impl_name` -- the CONFIGURED boundary
+    name -- as WR-01's own comment above the lower-bound re-check already
+    explains `impl_name` alone cannot be trusted to mean.
+
+    D-04's `revenue_card_valuation_fixture` delegates to the real
+    `hours_times_rate` registrant whenever it has nothing revenue-shaped
+    to price and returns that registrant's OWN dict VERBATIM. Before this
+    fix, `boundaries.valuation="revenue_card_valuation_fixture"` on a host
+    with no matching card made `valuation_mod.resolve_evidence_class(
+    impl_name)` resolve the FIXTURE's own registered class
+    (CUSTOMER_CONFIGURED) for a value the fixture never actually
+    produced -- the builtin did. Under phase 53's
+    `_REPORTABLE_EVIDENCE_CLASSES` gate that flips an ordinary,
+    non-revenue, model-estimated session from "withheld from the wire" to
+    "shipped via --outcome-value, labelled customer-configured," which is
+    exactly the provenance lie that gate exists to prevent.
+
+    Returns "hours_times_rate" -- the builtin's own registered name,
+    whose registration (classifier.py's `_register_valuation_impl`) fixes
+    its declared class at MODEL_ESTIMATED_DEMO -- whenever this call's
+    value came from the builtin:
+      * `fall_back_to_builtin`: the configured implementation could not
+        be resolved, or raised, so `_validate_assessment` computed
+        `round(hours * rate, 2)` directly with no registrant call at all.
+      * `impl_name == "hours_times_rate"`: the configured boundary NAME
+        literally is the builtin already (no delegation needed to reach
+        this conclusion).
+      * `delegation_check is not False`: the identity check
+        (`_resolve_delegation_identity_check`, called ONCE per call --
+        see that function's own docstring for why) confirmed this exact
+        result IS the builtin's own dict (`True`), OR the check itself
+        could not run (`None`).
+
+    Returns `impl_name` unchanged (the CONFIGURED boundary name) only
+    when `delegation_check` is the definite `False` a completed identity
+    check returns for a genuine third-party result -- e.g. a real
+    revenue-card match, which must keep its CUSTOMER_CONFIGURED
+    provenance untouched.
+
+    FAILS CLOSED in the OPPOSITE direction from the amount lower-bound
+    re-check that shares this same `delegation_check` tri-state value:
+    that check treats `None` (identity check raised) as "assume
+    third-party," because the safe direction there is the STRICTER
+    bound. Evidence_class resolution treats `None` as "assume builtin"
+    instead, because the risk here runs the other way: shipping a model
+    estimate as CUSTOMER_CONFIGURED (reportable) is the defect this fixes;
+    treating a genuinely customer-configured value as MODEL_ESTIMATED_DEMO
+    (non-reportable) on mere doubt about an identity check is a lost row,
+    never a provenance lie.
+    """
+    if fall_back_to_builtin or impl_name == "hours_times_rate" or delegation_check is not False:
+        return "hours_times_rate"
+    return impl_name
+
+
 # Phase 42 (EGV-06/D-09 site one): the fractional half-width used to DERIVE a
 # low/base/high band when the evaluator supplies no bounds of its own -- the
 # only path today's naked-LLM evaluator can take. This is a declared
@@ -1607,7 +1709,10 @@ BOUNDS_SOURCE_EVALUATOR = "evaluator"
 BOUNDS_SOURCE_DERIVED = "derived"
 
 
-def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float, float, float, str] | None":
+def _resolve_value_bounds(
+    raw: dict, hours: float, rate: float,
+    resolved_amount: "float | None" = None,
+) -> "tuple[float, float, float, str] | None":
     """Resolve the low/base/high value triple for one assessment (EGV-06).
 
     Two paths:
@@ -1616,10 +1721,38 @@ def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float,
         (low <= base <= high) -- EQUAL bounds are a valid degenerate case (a
         point estimate, or an operator's point correction in plan 42-06), not
         a rejection.
-      - Derived: `raw` carries NONE of the three. base is the point estimate
-        (hours * rate, matching _validate_assessment's own derivation); low/
-        high are a symmetric DERIVED_BOUND_SPREAD band around it, with low
-        clamped at zero.
+      - Derived: `raw` carries NONE of the three. base is `resolved_amount`
+        when the caller supplies one -- the amount actually ACCEPTED for
+        this assessment's `estimated_value`, whichever boundary produced it
+        (the built-in hours*rate fallback, or a pluggable registrant such as
+        rate_card_valuation_fixture or revenue_card_valuation_fixture). low/
+        high are a symmetric DERIVED_BOUND_SPREAD band around THAT base,
+        with low clamped at zero.
+
+    54-REVIEW.md IN-01: before this fix, base on the derived path was
+    unconditionally `round(hours * rate, 2)`, which is correct only when the
+    built-in fallback priced the work. Once a pluggable valuation registrant
+    is configured (rate_card_valuation_fixture since Phase 45,
+    revenue_card_valuation_fixture since Phase 54), `estimated_value`
+    already carries the registrant's own number while the bounds silently
+    kept reporting a band around an unrelated hours*rate figure -- for a
+    revenue-priced booking the two can differ by hundreds of dollars.
+    `resolved_amount` closes that gap: the derived-path base is now the
+    value that was actually accepted and reported, never a re-derivation of
+    a formula that may not have produced it. `hours`/`rate` are kept as
+    parameters (rather than removed) purely as the fallback used when
+    `resolved_amount` is absent -- see the call-site note below.
+
+    `resolved_amount` is None at the FIRST of this function's two call
+    sites (_validate_assessment's own abstain-decision gate below, called
+    BEFORE the valuation boundary has even run -- there is no accepted
+    amount yet to thread). That is safe: on the derived path this call
+    never abstains regardless of the numeric value used for base (rounding
+    an already-validated finite hours*rate product cannot fail), so the two
+    call sites can never disagree about whether to ABSTAIN. Only the
+    SECOND call (_build_job_assessment, which always has the accepted
+    `assessment["estimated_value"]` available to pass as `resolved_amount`)
+    ever produces the numeric band that is actually persisted.
 
     A PARTIAL set (one or two of the three present) is disorder, not a hint,
     and abstains -- a half-specified band cannot be trusted more than a fully
@@ -1641,7 +1774,10 @@ def _resolve_value_bounds(raw: dict, hours: float, rate: float) -> "tuple[float,
     supplied = [v for v in (raw_low, raw_base, raw_high) if v is not None]
 
     if len(supplied) == 0:
-        base = round(hours * rate, 2)
+        base = (
+            round(resolved_amount, 2) if resolved_amount is not None
+            else round(hours * rate, 2)
+        )
         low = round(max(0.0, base * (1 - DERIVED_BOUND_SPREAD)), 2)
         high = round(base * (1 + DERIVED_BOUND_SPREAD), 2)
         return (low, base, high, BOUNDS_SOURCE_DERIVED)
@@ -1772,12 +1908,42 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     impl = valuation_mod.resolve(impl_name) if valuation_mod is not None else None
     fall_back_to_builtin = impl is None
     derived = None
+    # Tri-state verdict from the ONE call this function ever makes to
+    # `_resolve_delegation_identity_check` (see that function's own
+    # docstring for why it can only be called once per assessment).
+    # Defaults to False here -- "no delegation" -- for every path that
+    # never reaches the registrant-invocation branch below at all
+    # (`fall_back_to_builtin`); that branch's own evidence_class handling
+    # (below, at this function's "record site 1") short-circuits on
+    # `fall_back_to_builtin` itself before ever consulting this variable,
+    # so its value in that case is never actually read for a builtin
+    # decision -- it stays False only so the name is never undefined.
+    _delegation_check: "bool | None" = False
     if impl is None:
         logger.warning(
             "revenium-classifier: valuation implementation %r unresolved, "
             "falling back to the built-in derivation", impl_name,
         )
     else:
+        # Phase 54 (WR-01 fix): reset the cross-module delegation marker
+        # BEFORE invoking the registrant, so a marker left behind by an
+        # earlier, unrelated assessment can never be mistaken for this
+        # call's own delegation. Guarded independently of the impl() call
+        # below -- a failure here must never block the derivation itself,
+        # only cost this call the (already rare) delegated-builtin lower
+        # bound, which is the fail-closed/fail-strict direction: worst
+        # case is the pre-existing WR-01 behaviour, never a wrongly
+        # WIDENED bound. See valuation.reset_delegation_marker()'s own
+        # docstring and the module comment above
+        # valuation._delegated_builtin_result for the full mechanism.
+        try:
+            valuation_mod.reset_delegation_marker()
+        except Exception:
+            logger.warning(
+                "revenium-classifier: failed to reset the valuation "
+                "delegation marker; delegated-builtin lower bound will "
+                "not apply for this call",
+            )
         try:
             derived = impl(assumptions, cfg)
         except Exception:
@@ -1792,7 +1958,64 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # exactly the path that lets an unbounded total through while the
         # bound checks guard inputs nobody used.
         estimated_value = round(hours * rate, 2)
+        # Phase 54 (D-14): the built-in derivation declares no mechanism,
+        # so the record falls back to the evaluator's own answer,
+        # unconditionally -- see the conditional-emit block below.
+        declared_mechanism = ""
     else:
+        # Phase 54 (D-02): re-check the registrant's returned mechanism
+        # against its OWN registration-time ceiling
+        # (valuation_mod.resolve_declared_mechanisms(impl_name)) -- the
+        # same distrust-and-re-check idiom this block already applies to
+        # amount/currency/the lower bound/the ceiling below. A registrant
+        # may assert a mechanism only from the set it declared at import
+        # time; anything else -- absent, non-str, or outside that ceiling
+        # -- is discarded to the empty string here. Unlike the
+        # amount/currency pair below, a malformed mechanism is an OPTIONAL
+        # field: it is discarded silently, never raised and never treated
+        # as an abstention of the whole assessment.
+        #
+        # Phase 54 (D-13): resolved BEFORE the ceiling below (moved ahead
+        # of amount/ceiling resolution in this same task) because the
+        # ceiling itself now depends on whether a declared operator-only
+        # mechanism was accepted for THIS call -- resolved once here and
+        # reused for the ceiling, never re-derived.
+        _declared_mechanisms = (
+            valuation_mod.resolve_declared_mechanisms(impl_name)
+            if valuation_mod is not None else frozenset()
+        )
+        _returned_mechanism = (
+            derived.get("economic_mechanism") if isinstance(derived, dict) else None
+        )
+        declared_mechanism = (
+            _returned_mechanism
+            if (
+                isinstance(_returned_mechanism, str)
+                and _declared_mechanisms
+                and _returned_mechanism in _declared_mechanisms
+            )
+            else ""
+        )
+
+        # Phase 54 (D-07): the fail-CLOSED profile-attribution fence, called
+        # ONLY when a declared operator-only mechanism was just accepted
+        # above -- an ordinary non-revenue session on the same
+        # (potentially multiplexed) host is untouched by this check, which
+        # is what keeps D-04's "a non-revenue session still gets its value"
+        # guarantee intact. Placed BEFORE the amount below is ever
+        # extracted or accepted: the amount came from a config that may
+        # belong to another profile, so it must not become a value even
+        # briefly. See _revenue_profile_attribution_certain's own
+        # docstring for the full reasoning and the defect this fences.
+        if declared_mechanism and not _revenue_profile_attribution_certain(paths):
+            logger.warning(
+                "revenium-classifier: assessment abstained, revenue "
+                "valuation implementation %r could not be attributed to "
+                "this session's owning profile with certainty on this "
+                "host", impl_name,
+            )
+            return None
+
         # Phase 45 (T-45-13): the caller RE-CHECKS a registered
         # implementation's returned amount at all -- registration is
         # trusted code for the purpose of declaring an identity, but it is
@@ -1809,7 +2032,38 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
             if isinstance(derived, dict) else None
         )
         returned_currency = derived.get("currency") if isinstance(derived, dict) else None
-        ceiling = round(max_hours * max_rate, 2)
+
+        # Phase 54 (D-13): the ceiling is `maxRevenueValue` ONLY when both
+        # (a) the mechanism re-check immediately above accepted a declared
+        # operator-only mechanism for THIS call, and (b) the configured
+        # value is itself finite and strictly positive -- a malformed
+        # `maxRevenueValue` never WIDENS a bound, it just falls back to the
+        # ceiling every other job on this host is already held to.
+        # Otherwise the ceiling is the existing labor bound, byte for byte,
+        # exactly as it was before this phase.
+        #
+        # Why a separate bound at all, rather than trusting an operator to
+        # size `maxLoadedRate` for a booking: without one, pricing a
+        # booking above the labor ceiling forces the operator to inflate
+        # `maxLoadedRate` itself -- and that ceiling still guards every
+        # OTHER job on this host, labor-substitution or otherwise.
+        # Widening it to fit one revenue figure corrupts the bound that
+        # every non-revenue job on the same install is silently relying
+        # on. `maxRevenueValue` exists so a revenue ceiling and a labor
+        # ceiling can be sized independently. The caller's distrust of
+        # registered code on the money path is unchanged either way: the
+        # registrant never chooses its own ceiling, it only determines
+        # (via the mechanism it declared and had accepted) WHICH of two
+        # operator-configured ceilings applies to this call.
+        _configured_max_revenue = _finite_number(cfg.get("maxRevenueValue"))
+        if (
+            declared_mechanism
+            and _configured_max_revenue is not None
+            and _configured_max_revenue > 0
+        ):
+            ceiling = round(_configured_max_revenue, 2)
+        else:
+            ceiling = round(max_hours * max_rate, 2)
         # CR-01 (phase-45 code review): the lower bound is exclusive for a
         # THIRD-PARTY registrant and inclusive for the BUILT-IN derivation,
         # and the difference is deliberate.
@@ -1829,7 +2083,45 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # trust the built-in has by being the same code main ran. It still
         # abstains. Negative amounts are refused from everyone -- the skill
         # must never assert a negative value it never measured (phase 44 D-14).
-        _is_builtin = impl_name == "hours_times_rate"
+        #
+        # WR-01 (phase-54 code review): `impl_name == "hours_times_rate"`
+        # alone is not enough to recognise "the builtin", because D-04's
+        # `revenue_card_valuation_fixture` DELEGATES to the real
+        # `hours_times_rate` registrant internally and returns its result
+        # VERBATIM (valuation.py's own module comment above
+        # `_delegate_to_builtin_hours_times_rate`) precisely so an
+        # ordinary, non-revenue session on a revenue-configured host is
+        # priced exactly as it would be on a default install. On such a
+        # host `impl_name` is `"revenue_card_valuation_fixture"` -- the
+        # CONFIGURED boundary name, not the name of whatever actually
+        # produced `derived` -- so a name-only check applied the
+        # THIRD-PARTY exclusive bound to a session whose hours*rate
+        # legitimately rounds to 0.00, silently dropping the whole
+        # assessment (`_validate_assessment` returning None) instead of
+        # keeping it visible the way this comment's own preceding
+        # paragraph requires. `is_delegated_builtin_result(derived)` closes
+        # that gap by asking "did this call's registrant actually delegate
+        # to the real builtin and hand back ITS unmodified dict" rather
+        # than "what name is `boundaries.valuation` configured to" -- see
+        # valuation.py's module comment above `_delegated_builtin_result`
+        # for why that check cannot be spoofed by a third-party dict.
+        #
+        # `_delegation_check` is resolved here -- the ONE call this
+        # function makes to `_resolve_delegation_identity_check` -- and
+        # reused below at "record site 1" for evidence_class, because the
+        # underlying check is read-and-clear and cannot be called twice
+        # (see that function's own docstring). This bound check fails
+        # CLOSED to False on doubt (`_delegation_check is True`, never
+        # `is not False`): the worst outcome of a raised identity check
+        # here is the PRE-EXISTING WR-01 behaviour (a delegated builtin
+        # result held to the stricter third-party lower bound, so an
+        # occasional legitimate zero-value assessment abstains), never a
+        # wrongly WIDENED bound.
+        _delegation_check = (
+            _resolve_delegation_identity_check(valuation_mod, derived)
+            if isinstance(derived, dict) else False
+        )
+        _is_builtin = impl_name == "hours_times_rate" or _delegation_check is True
         _lower_ok = (amount is not None) and (
             amount >= 0 if _is_builtin else amount > 0
         )
@@ -1855,8 +2147,17 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     # following `_resolve_reportability_status`'s exact
     # `_boundary_impl_name(key, default)` -> module load ->
     # `resolve_evidence_class(name)` idiom, verbatim.
+    #
+    # Sibling fix to WR-01 (phase-54 code review): resolve evidence_class
+    # from `_valuation_evidence_impl_name(...)`, NOT bare `impl_name` --
+    # see that function's own docstring for why a delegated builtin
+    # result must declare the BUILTIN's class, never the configured
+    # boundary name's.
     valuation_declared = (
-        valuation_mod.resolve_evidence_class(impl_name) if valuation_mod is not None else ""
+        valuation_mod.resolve_evidence_class(
+            _valuation_evidence_impl_name(impl_name, fall_back_to_builtin, _delegation_check)
+        )
+        if valuation_mod is not None else ""
     )
     _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
     _evidence_mod = _load_evidence_module()
@@ -1874,10 +2175,39 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         evaluator, valuation_declared, evidence_declared, classification_declared,
     )
 
-    return {
+    # Phase 54 (D-08): the boundary that DERIVED the value authors the
+    # `basis` that explains it -- the same producer-names-it rule D-02
+    # already applies to `economic_mechanism`, applied here to the field
+    # that explains the number. `derived` is whichever registrant's
+    # return dict actually priced THIS call (the built-in or a
+    # third-party registrant; still None on the fall-back-to-builtin
+    # path above), read here and NEVER from `raw`, so a registrant's
+    # caveat cannot be overwritten by the model's own text.
+    #
+    # Gated on `declared_mechanism` (resolved above, in the else branch
+    # this function's own mechanism re-check lives in): a producer-authored
+    # basis is an operator-declared caveat about an operator-only claim,
+    # the same footing D-13's ceiling and D-10's attribution pair are both
+    # gated on. A registrant that returns no basis, declared no mechanism,
+    # or had its mechanism discarded -- the built-in hours_times_rate, the
+    # revenue fixture's own delegation branches, and any registrant whose
+    # mechanism the re-check above rejected -- leaves this exactly as it
+    # was before this phase: the evaluator's own raw-authored text, clamped
+    # identically (D-14 byte-identity preserved).
+    _registrant_basis = derived.get("basis") if isinstance(derived, dict) else None
+    if (
+        declared_mechanism
+        and isinstance(_registrant_basis, str)
+        and _registrant_basis.strip()
+    ):
+        _basis_value = _clamp_assessment_text(_registrant_basis, 200)
+    else:
+        _basis_value = _clamp_assessment_text(raw.get("basis"), 200)
+
+    _result: dict = {
         "estimated_value": estimated_value,
         "currency": currency,
-        "basis": _clamp_assessment_text(raw.get("basis"), 200),
+        "basis": _basis_value,
         "assumptions": {
             "inferred_role": inferred_role,
             "estimated_hours_saved": hours,
@@ -1897,6 +2227,60 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # monetary value).
         "evidence_class_authority": _evidence_class_authority,
     }
+    if declared_mechanism:
+        # Phase 54 (D-02/D-14): emitted ONLY when a registrant's returned
+        # mechanism passed its own registration-time ceiling above.
+        # Unconditional emission would change the job marker's nested
+        # `assessment` object on a default install -- _write_job_marker
+        # persists this dict verbatim -- and break D-14's byte-identity
+        # guarantee. Same conditional-emit idiom _write_job_marker already
+        # uses for failure_reason and for the assessment dict itself.
+        _result["economic_mechanism"] = declared_mechanism
+
+    # Phase 54 (D-10, 54-04 gap closure, ROI-07). The caller RE-CHECKS the
+    # registrant's returned attribution_fraction/attribution_basis pair
+    # before persisting either -- the same distrust-and-re-check idiom
+    # already applied above to amount/currency/the lower bound/the ceiling
+    # and to economic_mechanism. 54-03 shipped this pair as a VERBATIM,
+    # deliberately unchecked pass-through and proved the gap with
+    # `@unittest.expectedFailure` cases naming this plan; those cases now
+    # pass, unmarked.
+    #
+    # Validated exactly like correct-assessment.sh's own CLI-side rules, so
+    # the configured and CLI paths write one representation rather than two
+    # that can diverge:
+    #   - the fraction: _finite_number (already rejects bool/NaN/inf) plus
+    #     0.0 <= f <= 1.0 inclusive at both endpoints.
+    #   - the basis: a non-empty (after .strip()) str, clamped to
+    #     NARRATIVE_CLAMP_BYTES (500 serialized bytes) via
+    #     _clamp_assessment_text -- the same limit correct-assessment.sh's
+    #     _clamp_reason applies to its own --attribution-basis flag, so the
+    #     two producers write byte-comparable text for the same input.
+    #   - travel as a set: accept both or neither.
+    # Gated on declared_mechanism (resolved just above): an attribution
+    # fraction is an operator assertion attached to an operator-declared
+    # claim, so a registrant that declared nothing has nothing to
+    # attribute.
+    #
+    # On ANY malformed value the pair is discarded SILENTLY to absent --
+    # never raised, and never `return None` the way the mandatory
+    # amount/currency pair does above. This is an OPTIONAL field; a
+    # malformed optional field must never take the whole assessment down
+    # with it.
+    if isinstance(derived, dict) and declared_mechanism:
+        _raw_attribution_fraction = derived.get("attribution_fraction")
+        _raw_attribution_basis = derived.get("attribution_basis")
+        _checked_fraction = _finite_number(_raw_attribution_fraction)
+        _fraction_ok = _checked_fraction is not None and 0.0 <= _checked_fraction <= 1.0
+        _basis_ok = (
+            isinstance(_raw_attribution_basis, str)
+            and _raw_attribution_basis.strip() != ""
+        )
+        if _fraction_ok and _basis_ok:
+            _result["attribution_fraction"] = _checked_fraction
+            _result["attribution_basis"] = _clamp_assessment_text(
+                _raw_attribution_basis, NARRATIVE_CLAMP_BYTES)
+    return _result
 
 
 def _write_job_marker(sid: str, job: dict, paths: "_Paths | None" = None) -> Path:
@@ -2661,6 +3045,17 @@ def _build_job_assessment(
     evaluation is auditable rather than indistinguishable from a broken
     sidecar write.
 
+    Phase 54 (D-10, ROI-07): attribution_fraction and attribution_basis
+    join the same omit family, for the same reason. Both are conditionally
+    emitted on the success-path record.update() below, sourced from
+    `assessment` (present only when _validate_assessment's own caller-side
+    re-check accepted both), and never touch the abstention early-return's
+    base record literal above. A surviving value whose attribution has
+    vanished is exactly the failure Phase 51's shed-tier reasoning already
+    names for the reporter side; the same reasoning applies identically to
+    a record that abstained -- there is no value here for the attribution
+    to explain.
+
     Phase 44 (EGV-14): net_value joins that same omit family on abstention
     -- it is model-derived money, computed from an accepted `assessment`
     that does not exist on this path. supplied_costs and cost_coverage
@@ -2744,29 +3139,58 @@ def _build_job_assessment(
         # `resolve_evidence_class(name)` idiom, verbatim. Computed once,
         # shared by the abstention early-return and the success-path
         # continuation below, exactly like study_id/supplied_costs above.
-        _valuation_impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
-        _valuation_mod = _load_valuation_module()
-        valuation_declared = (
-            _valuation_mod.resolve_evidence_class(_valuation_impl_name)
-            if _valuation_mod is not None else ""
-        )
-        _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
-        _evidence_mod = _load_evidence_module()
-        evidence_declared = (
-            _evidence_mod.resolve_evidence_class(_evidence_impl_name)
-            if _evidence_mod is not None else ""
-        )
-        _classification_impl_name = _boundary_impl_name("classification", "llm", paths=paths)
-        _classification_mod = _load_classification_module()
-        classification_declared = (
-            _classification_mod.resolve_evidence_class(_classification_impl_name)
-            if _classification_mod is not None else ""
-        )
-        # THE ONE RULE SITE (DECL-02), called ONCE, both tuple elements used
-        # below -- never re-derived, never compared a second time.
-        _evidence_class, _evidence_class_authority = _evidence_class_precedence(
-            evaluator, valuation_declared, evidence_declared, classification_declared,
-        )
+        #
+        # Sibling fix to WR-01 (phase-54 code review), same root cause as
+        # `_valuation_evidence_impl_name` above (classifier.py's own
+        # "record site 1", inside `_validate_assessment`), different call
+        # site. On the SUCCESS path, `assessment` IS `_validate_assessment`'s
+        # own returned dict, which already carries the evidence_class /
+        # evidence_class_authority pair THAT function's record site 1
+        # resolved -- correctly, because that call site still has
+        # `derived` / `fall_back_to_builtin` / the delegation identity
+        # check's verdict in scope. This function does not: the identity
+        # check (`valuation.is_delegated_builtin_result`) is READ-AND-CLEAR
+        # (see `_resolve_delegation_identity_check`'s own docstring), so by
+        # the time this function runs -- always AFTER `_validate_assessment`
+        # has already returned -- the marker it consulted has already been
+        # consumed. A fresh, independent `_boundary_impl_name`-only
+        # resolution here can never tell a delegated builtin result from a
+        # genuine third-party one; it can only ever repeat record site 1's
+        # PRE-fix mistake. So: REUSE `assessment`'s own already-resolved
+        # pair on the success path; fall back to the independent
+        # per-boundary walk only on abstention (`assessment` is None here
+        # -- no valuation call ever happened for this record, so there is
+        # no delegation outcome to consult, and today's config-name-only
+        # resolution is unchanged).
+        if isinstance(assessment, dict) and "evidence_class" in assessment:
+            _evidence_class = assessment.get("evidence_class") or _forced_evidence_class()
+            _evidence_class_authority = assessment.get("evidence_class_authority") or "evaluator"
+        else:
+            _valuation_impl_name = _boundary_impl_name(
+                "valuation", "hours_times_rate", paths=paths)
+            _valuation_mod = _load_valuation_module()
+            valuation_declared = (
+                _valuation_mod.resolve_evidence_class(_valuation_impl_name)
+                if _valuation_mod is not None else ""
+            )
+            _evidence_impl_name = _boundary_impl_name("evidence", "config_opt_in", paths=paths)
+            _evidence_mod = _load_evidence_module()
+            evidence_declared = (
+                _evidence_mod.resolve_evidence_class(_evidence_impl_name)
+                if _evidence_mod is not None else ""
+            )
+            _classification_impl_name = _boundary_impl_name(
+                "classification", "llm", paths=paths)
+            _classification_mod = _load_classification_module()
+            classification_declared = (
+                _classification_mod.resolve_evidence_class(_classification_impl_name)
+                if _classification_mod is not None else ""
+            )
+            # THE ONE RULE SITE (DECL-02), called ONCE, both tuple elements
+            # used below -- never re-derived, never compared a second time.
+            _evidence_class, _evidence_class_authority = _evidence_class_precedence(
+                evaluator, valuation_declared, evidence_declared, classification_declared,
+            )
 
         record: dict = {
             "kind": "job_assessment",
@@ -2804,7 +3228,28 @@ def _build_job_assessment(
             # _resolve_economic_mechanism(raw) now correctly resolves to
             # ECONOMIC_MECHANISM_UNKNOWN there -- the D-04 correction, not a
             # regression.
-            "economic_mechanism": _resolve_economic_mechanism(raw),
+            #
+            # Phase 54 (D-02, D-14): PROMOTED -- the producing boundary
+            # names the mechanism, and _resolve_economic_mechanism(raw) is
+            # the answer that variant gives when the producing boundary
+            # (a valuation registrant) declared and returned none.
+            # `assessment` carries `economic_mechanism` only when
+            # _validate_assessment's own re-check accepted a registrant's
+            # declared-and-returned value (see that function's conditional
+            # emit); every other case, including every abstention path
+            # (`assessment` is None there) and every call from a registrant
+            # that declares nothing -- the built-in `hours_times_rate`
+            # included -- falls back to today's `raw`-side derivation
+            # unmodified. This is additive: the `raw`-side refusal is
+            # untouched, which is why
+            # tests/test_phase44_economic_mechanisms.py::MechanismAuthorityTests
+            # keeps passing unmodified (it calls this function with
+            # assessment=None).
+            "economic_mechanism": (
+                assessment.get("economic_mechanism")
+                if isinstance(assessment, dict) and assessment.get("economic_mechanism")
+                else _resolve_economic_mechanism(raw)
+            ),
 
             # Phase 44 (EGV-16, D-12/D-13): caller-supplied structural
             # identity, never read from raw -- see this function's own
@@ -2930,7 +3375,21 @@ def _build_job_assessment(
         # when _validate_assessment already returned a validated dict.
         hours = assessment["assumptions"]["estimated_hours_saved"]
         rate = assessment["assumptions"]["assumed_loaded_rate"]
-        bounds = _resolve_value_bounds(raw, hours, rate)
+        # 54-REVIEW.md IN-01: thread the value _validate_assessment actually
+        # ACCEPTED as `estimated_value` -- whichever boundary produced it --
+        # into the derived-path base, rather than letting
+        # _resolve_value_bounds re-derive hours*rate on its own. On a
+        # default install this is byte-identical to the pre-fix behaviour
+        # (both are round(hours * rate, 2)); for a pluggable registrant
+        # (rate_card_valuation_fixture, revenue_card_valuation_fixture) the
+        # reported band now brackets the number that was actually reported,
+        # not an unrelated hours*rate figure. See _resolve_value_bounds's
+        # own docstring for why the EARLIER call site
+        # (_validate_assessment's abstain gate) cannot thread this same
+        # value and does not need to.
+        bounds = _resolve_value_bounds(
+            raw, hours, rate, resolved_amount=assessment.get("estimated_value"),
+        )
         if bounds is None:
             # _validate_assessment's own EGV-06 gate already accepted this
             # exact (raw, hours, rate) triple, so this branch should be
@@ -2965,6 +3424,22 @@ def _build_job_assessment(
             "assumptions": assessment.get("assumptions", {}),
             "net_value": net_value,
         })
+        # Phase 54 (D-10, ROI-07): the attribution pair joins the value
+        # family here, on the success path only, sourced from `assessment`
+        # -- _validate_assessment's own returned dict, which carries these
+        # two keys only when its own caller-side re-check accepted both
+        # (see that function's own comment for the validation rules). Not
+        # part of the base `record: dict = {...}` literal above: they are
+        # value-family, and D-11's omit family (extended by this same
+        # phase, see this function's own docstring) requires an abstained
+        # record to carry no value-bearing key -- a surviving value whose
+        # attribution has vanished is the failure Phase 51's shed-tier
+        # reasoning already names, and it applies identically to a record
+        # that abstained.
+        if "attribution_fraction" in assessment:
+            record["attribution_fraction"] = assessment["attribution_fraction"]
+        if "attribution_basis" in assessment:
+            record["attribution_basis"] = assessment["attribution_basis"]
         return record
     except Exception as exc:
         logger.warning(
@@ -3347,6 +3822,86 @@ def _boundary_impl_name(key: str, default: str, paths: "_Paths | None" = None) -
         return default
     except Exception:
         return default
+
+
+def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
+    """Phase 54 (D-07): can this process be CERTAIN the `config.json` it
+    just priced a revenue figure from belongs to the profile that owns
+    THIS session?
+
+    This is the one place in the in-session path that DELIBERATELY
+    INVERTS CLAUDE.md's fail-open rule ("Every in-session code path fails
+    open. A broken skill must degrade to 'no enforcement, no
+    classification', never to 'agent blocked'."). Every neighboring
+    function in this module -- _boundary_impl_name immediately above,
+    _paths_for_session, _llm_evaluation_config -- fails OPEN: a missing
+    file, bad JSON, or any other error degrades to the built-in behaviour
+    rather than stopping classification. This function fails CLOSED
+    instead, on purpose, because this is the one place in that whole
+    family where "keep going" and "keep going with the wrong operator's
+    money" are different outcomes and only the first is acceptable.
+
+    The defect this fences: `paths-for-session-regex-may-never-match`
+    (root-caused 2026-08-31, `_NS_RE` above). `_NS_RE` matches a
+    session-KEY-shaped pattern (`agent:<profile>:...`) against a
+    session-ID, so `_paths_for_session` has been proven, on real session
+    ids, to NEVER actually engage per-profile resolution -- every profile
+    on a multiplexed gateway reads the ROOT `config.json` today. This
+    function does not fix that; `paths` is resolved by the caller exactly
+    as it always is, using whatever `_paths_for_session` (or the caller's
+    own default of `_module_paths()`) hands back, and this function only
+    judges whether that resolution visibly engaged.
+
+    A host is treated as MULTIPLEXED when `HERMES_HOME / "profiles"` is a
+    directory containing at least one subdirectory -- a fresh single-
+    profile install has no such directory at all, and an operator who
+    created an empty `profiles/` (e.g. for a future profile not yet
+    provisioned) has created no attribution ambiguity for THIS session
+    either. Attribution is treated as ENGAGED when the resolved
+    `paths.config_file` differs from `_module_paths().config_file` -- the
+    one observable signal available to this function that per-profile
+    resolution actually did something rather than silently falling
+    through. MULTIPLEXED and NOT ENGAGED is exactly the defect's blast
+    radius (today, the common case on any multiplexed host): the answer is
+    False.
+
+    The rejected alternative: price from the root config's card anyway,
+    on the reasoning that a wrong price is still better than no price. It
+    is not. On a single-profile host this function is a no-op (identical
+    paths cannot exist to compare against -- there is no `profiles/`), but
+    on a multiplexed host, pricing from the root config's card would not
+    merely be INERT the way an unresolved profile-scoped classification
+    label is -- it could actively price profile B's booking from profile
+    A's revenue card, an attribution failure a human would have to notice
+    and correct after the fact. "Out of scope" (this function returning
+    False, the revenue path abstaining) and "silently misprices" (pricing
+    anyway) are different outcomes, and only the first is acceptable on a
+    money path.
+
+    Any exception -- a malformed `paths` namedtuple, a `HERMES_HOME` that
+    is not a real path, anything else -- returns False, matching this
+    function's own fail-CLOSED polarity rather than the fail-open default
+    every `except Exception: return <safe-default>` elsewhere in this
+    module uses.
+
+    Deferred, not fixed here: making `_NS_RE`/`_paths_for_session`
+    actually resolve per-profile paths on a real session id is its own
+    piece of work (54-CONTEXT.md names it explicitly as out of scope for
+    this phase). This function is the fence around that gap, not a
+    repair of it -- multi-profile revenue configuration stays blocked
+    until that repair ships.
+    """
+    try:
+        profiles_dir = HERMES_HOME / "profiles"
+        if not profiles_dir.is_dir():
+            return True
+        if not any(p.is_dir() for p in profiles_dir.iterdir()):
+            return True
+        resolved = paths or _module_paths()
+        module = _module_paths()
+        return resolved.config_file != module.config_file
+    except Exception:
+        return False
 
 
 def _load_classification_module():

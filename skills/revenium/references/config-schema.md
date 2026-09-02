@@ -139,6 +139,10 @@ Absent from `config.json` is the same as disabled.
         "human_review": 25,
         "handoff": 0
       }
+    },
+    "rateCard": {
+      "backend_engineer": 150,
+      "support_specialist": 45
     }
   }
 }
@@ -151,10 +155,138 @@ Absent from `config.json` is the same as disabled.
 | `currency` | `"USD"` | ISO 4217. An assessment naming a different currency is rejected. |
 | `maxHoursSaved` | `40` | Upper bound on the estimated hours saved. |
 | `maxLoadedRate` | `500` | Upper bound on the assumed loaded hourly rate. |
+| `rateCard` | absent | Object keyed by the evaluator's inferred role; a matching role's amount replaces the `hours x rate` derivation. Selected via `boundaries.valuation = "rate_card_valuation_fixture"`. Nests **inside** `llmOutcomeEvaluation` — see "The placement trap" below. |
+| `revenueCard` | absent | Object keyed by an operator-bound identity; each entry prices a completed booking. Selected via `boundaries.valuation = "revenue_card_valuation_fixture"` together with `revenueCardKey`. Nests **inside** `llmOutcomeEvaluation` — see "The placement trap" and "`revenueCard`" below. |
+| `revenueCardKey` | `""` | The non-empty string naming which `revenueCard` entry applies on this host, read from configuration only. |
+| `maxRevenueValue` | absent | Optional ceiling on a configured revenue amount, consulted only when the producing registrant declared and had accepted an operator-only mechanism for the call. See "`maxRevenueValue`" below. |
 | `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. **As of Phase 53 this flag alone is necessary but no longer sufficient** — see "Reporting the estimate's value" below for the record's evidence-class gate this flag now composes with. |
 | `studyId` | `""` | A non-empty string naming an `ImpactStudyResult` this install's job assessments reference. Recorded on every assessment this install produces; never changes an assessment's own `evidence_class` (EGV-13, D-08). |
 | `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. The pair is **all-or-none in both directions**: if either field is missing or malformed (a blank `studyId`, a non-integer or `< 1` `studyVersion`), both resolve to their absent defaults. A half-reference could never name a real `ImpactStudyResult`, so none is recorded. |
 | `costs` | `{}` | An object keyed by job type (EGV-14). Each job type's value is an object whose keys are drawn from the four `COST_CATEGORIES` names — `human_review`, `rework_or_error`, `handoff`, `training_or_change`. There is **no fleet-wide default bucket**: an absent job-type key means every category is unknown for that job type, exactly as if `costs` were absent entirely. A supplied `0` is knowledge and participates in the subtraction as a known zero; an absent category is unknown and does not participate (D-10) — these are different and both explicit. A malformed, non-numeric, boolean, or negative value resolves that category to unknown, never to zero. |
+
+### Rate card and revenue card (ROI-05, ROI-06, ROI-07, ROI-08)
+
+Two config-driven, non-model alternatives to the `hours x rate` derivation, each
+selected through `boundaries` (documented further below). Both nest **inside**
+`llmOutcomeEvaluation` — the same place `costs` and `maxHoursSaved` already live.
+
+**The placement trap.** `rateCard`, `revenueCard`, `revenueCardKey` and
+`maxRevenueValue` all nest inside `llmOutcomeEvaluation`. `boundaries` is read
+from the **TOP LEVEL** of `config.json`, as a **sibling** of
+`llmOutcomeEvaluation`, not from inside it — a different placement rule for an
+adjacent surface. That is the exact shape that made a production host's
+`rateCard` structurally invisible: the host nested it as a top-level sibling of
+`llmOutcomeEvaluation`, following `boundaries`' placement rule instead of
+`rateCard`'s own, and 85 sessions went unpriced with no error anywhere (Phase
+53). **A wrongly-nested card is not an error** — resolution fails open, so the
+resolver simply never sees a misplaced card and the boundary silently keeps its
+built-in derivation, with no log line to say so. That silence is exactly why
+this note exists: read it before configuring either card.
+
+#### `rateCard`
+
+An object keyed by the evaluator's inferred role (`assumptions.inferred_role`
+— model-produced text, e.g. `"backend_engineer"`); each value is the approved
+hourly rate for that role. When `boundaries.valuation` selects
+`"rate_card_valuation_fixture"` and the inferred role matches a key in the
+card, the matching amount **displaces the `hours x rate` derivation entirely**
+— the hours side of the arithmetic is not consulted for the amount, though it
+still rides the record as an evaluator assumption. Declares
+`CUSTOMER_CONFIGURED`.
+
+Its honest limit, in the code's own words: **configuration establishes an
+approved RATE, not actual hours worked.**
+
+#### `revenueCard`
+
+An object keyed by an **operator-bound** identity — the agent, profile, or
+squad name the operator chooses, never a value read from the model. Selected
+via `boundaries.valuation = "revenue_card_valuation_fixture"` together with
+`revenueCardKey` below. Each entry is an object:
+
+| entry field | required | notes |
+|---|---|---|
+| `grossPerJob` | yes | A finite number greater than zero — the approved value per completed booking. |
+| `attributionFraction` | no | A finite number from 0 through 1, both endpoints legal — but see the note on `0.0` below. |
+| `attributionBasis` | required whenever `attributionFraction` is present | The stated basis the fraction rests on, clamped to 500 serialized bytes. |
+
+`attributionFraction` and `attributionBasis` **travel as a set in both
+directions** — the same rule `correct-assessment.sh --attribution-fraction`
+already enforces on its own CLI flag pair (documented below). One present
+without the other abstains the whole entry.
+
+When both are configured, the skill **multiplies `grossPerJob` by
+`attributionFraction` and records only the product** — `estimated_value`. The
+gross figure itself reaches no persisted record, no `meter` argv, no
+`--metadata` envelope, and no log line. See `docs/value-and-roi.md`'s
+Attribution section for the full reasoning behind this narrow reversal of a
+prior decision (D-09).
+
+**A fraction of exactly `0.0` validates but produces no record.** It is legal
+input and the multiplication yields `0.00`, but a configured valuation is held
+to a strictly-positive lower bound, so the assessment then abstains. Nothing is
+misreported and no error is raised — the job simply reports its outcome with no
+value. If you mean "this work is attributed nothing", omitting the entry says
+so more clearly than a zero fraction does.
+
+Its honest limit, in the rate card's own sentence shape: **configuration
+establishes an approved value per completed booking, an operator policy, not
+this booking's actual revenue.**
+
+```json
+{
+  "llmOutcomeEvaluation": {
+    "revenueCard": {
+      "front-desk-agent": {
+        "grossPerJob": 320,
+        "attributionFraction": 0.15,
+        "attributionBasis": "15% per policy REV-2024-03; agent-initiated chat, no prior web session"
+      }
+    },
+    "revenueCardKey": "front-desk-agent"
+  }
+}
+```
+
+#### `revenueCardKey`
+
+The non-empty string naming which `revenueCard` entry applies on this host,
+read from configuration only — never inferred. This exists rather than being
+inferred because the shipped rate card keys on the evaluator's inferred role,
+which is model output, and handing a model the selector for a revenue figure
+would create a gradient that rewards pointing agents at high-margin
+transactions. A `revenueCard` with several entries and no configured
+`revenueCardKey` (or a key naming an entry the card does not hold) selects
+nothing: the resolver does not guess or fall back to the card's sole entry —
+it delegates internally to the ordinary `hours x rate` derivation instead, so
+an ordinary, non-revenue session on the same host still gets its value.
+
+#### `maxRevenueValue`
+
+Optional. Consulted only when the producing registrant declared, and had
+accepted for this call, an operator-only economic mechanism. Absent or
+malformed, the existing `round(maxHoursSaved x maxLoadedRate, 2)` ceiling
+applies unchanged — a malformed `maxRevenueValue` never widens a bound, it
+only falls back to the ceiling every other job on the host is already held to.
+
+**Why a separate ceiling:** without one, an operator must inflate
+`maxLoadedRate` to price a booking above the labor ceiling — corrupting the
+labor bound that still guards every other, non-revenue job on the same host.
+`maxRevenueValue` lets the two ceilings be sized independently.
+
+#### The multi-profile fence
+
+On a host whose owning profile cannot be attributed with certainty — a
+multiplexed gateway serving several profiles, where per-profile config
+resolution did not visibly engage — a revenue valuation **abstains** rather
+than pricing from the root `config.json`'s card. This is the opposite polarity
+from the rest of this config surface, which fails *open* (a missing or
+malformed key degrades to the built-in derivation): on this one money path the
+skill fails *closed*, deliberately, for the same reason `guardrail-status.json`'s
+own fail-closed inversion is called out above — "keep going" and "keep going
+with the wrong operator's money" are different outcomes, and only the first is
+acceptable here. An ordinary, non-revenue session on the same host is
+unaffected by this fence.
 
 ### Economic mechanisms (EGV-05)
 
@@ -175,14 +307,20 @@ An unrecognised value or operator-only mechanism in an evaluator response resolv
 to the `unknown` abstain sentinel. The mechanism is then absent from the assessment
 instead of being replaced with a default.
 
-**These three are reserved, not yet assignable.** As of Phase 44 they are
-declared, accepted by the reporter's allow-list, and would forward on the wire
-if a record carried one. No producer exists: there is no configuration key
-and no CLI flag that sets a job's mechanism, and `correct-assessment.sh` does
-not carry one either. The record can *represent* all six (EGV-05); an operator
-cannot yet *assert* the operator-only three. The intended path is a study
-reference (`studyId`/`studyVersion`), which is Phase 45 work. Do not configure
-these values today because nothing reads them.
+**Two producers now exist for the operator-only three.**
+`correct-assessment.sh --mechanism` (Phase 51) files any of the six directly
+as an operator correction. As of this phase, a valuation registrant may also
+**declare** one of the three at registration — the shipped
+`revenue_card_valuation_fixture` declares `incremental_revenue` — and have it
+accepted on any call whose own returned mechanism matches that declaration
+(see `skills/revenium/plugins/revenium-classifier/valuation.py`'s `register()`
+contract). The evaluator still structurally cannot select any of the three:
+`_resolve_economic_mechanism`'s membership test runs only against
+`EVALUATOR_MECHANISMS`, never `ECONOMIC_MECHANISMS`, so a value outside that
+set — including all three operator-only mechanisms — resolves to the
+`unknown` abstain sentinel in an evaluator response. The authority split
+(`51-CONTEXT.md` D-01) holds regardless of which producer configured a
+mechanism.
 
 ### Net value and cost coverage (EGV-14, EGV-15)
 

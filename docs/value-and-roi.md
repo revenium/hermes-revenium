@@ -557,6 +557,12 @@ other.
 
 ### Attribution
 
+Two separate paths can now attach an attribution fraction to a value, and they
+behave differently since Phase 54 — a reader must not have to infer which one
+a sentence below describes.
+
+#### The CLI path (`correct-assessment.sh`)
+
 When an operator supplies a value that represents only part of a larger
 figure, two optional flags record how they got there:
 
@@ -575,23 +581,6 @@ out of an agent record is deliberate: that same figure is typically claimed by
 several other systems at once — a sales channel, a loyalty programme, a
 pricing engine, a marketing attribution model — and a copy of it sitting here
 would be summed alongside theirs.
-
-**The fraction is a declared assumption, not a measurement.** Nothing
-validates it, because there is nothing here to validate it against. It is
-checked only for shape: a finite number from 0 through 1, with both endpoints
-legal. That is why `--attribution-basis` is required whenever
-`--attribution-fraction` is given — a bare number carries the appearance of
-precision without anything to answer for it, and a stated basis is what makes
-it auditable.
-
-For the same reason, an attribution fraction is not meaningful to average or
-aggregate across jobs. Each one is a separate operator assertion resting on
-its own stated basis, not a sample from a common measurement.
-
-**It does not change the evidence label.** A declared fraction cannot promote
-a record toward any of the three labels reserved for study-backed claims, and
-does not set `CUSTOMER_CONFIGURED` either. Whatever the fraction says, the
-label continues to reflect the evidence that actually exists.
 
 **A fraction requires a value to attribute.** `--attribution-fraction` is
 refused without `--value`, the same way `--attribution-basis` is refused
@@ -613,14 +602,62 @@ A mechanism-only correction is unaffected and stays legal — drop the
 attribution pair and file the mechanism on its own, then attribute later when
 a figure exists.
 
-**What it does not establish.** An attributed figure is still a figure
-attached to an outcome this skill did not observe. The chain from the agent's
-output to a business result — acceptance, adoption, operational change,
-business change — is unobserved here regardless of what fraction is declared;
-see [claim distinctions](claim-distinctions-and-evidence-boundaries.md). Where
-a defensible number is wanted rather than a plausible one, the route is a
-holdout comparison — route some work through the agent and some not — which is
-a study, needs the study contract, and is not what this flag provides.
+This CLI path's behavior is unchanged by Phase 54's configured path below.
+Whether `correct-assessment.sh` should also accept a gross figure and a
+fraction and multiply, now that D-09 permits that for the configured path, was
+deliberately left undecided — the CLI path works today and changing it is a
+separate, user-visible surface change (`54-CONTEXT.md`, Deferred Ideas).
+
+#### The configured path (`revenueCard`, D-09)
+
+An operator may instead configure a `revenueCard` entry (see
+[`skills/revenium/references/config-schema.md`](../skills/revenium/references/config-schema.md)
+for the full key shapes) carrying `grossPerJob` and, optionally,
+`attributionFraction`/`attributionBasis`. When both are present, **the skill
+multiplies them and records only the product** — `estimated_value`. The gross
+figure itself reaches no persisted record, no `meter` argv, no `--metadata`
+envelope, and no log line.
+
+**This narrowly revisits `51-CONTEXT.md` D-05's "recorded, never computed"
+rule, for the configured path only.** D-05 gave two reasons for keeping
+attribution recorded rather than computed:
+
+- **What survives.** D-05's first reason — the structural defence against
+  cross-system double counting — is intact: the same stay margin is already
+  claimed by the channel, the loyalty programme, the pricing engine and
+  marketing attribution, and gross still never reaches a record where any of
+  them could sum it. The gross is read, multiplied, and discarded inside the
+  revenue registrant; it is bound to no other name, returned under no key, and
+  named in no diagnostic.
+- **What is reversed, and the cost, recorded rather than minimised.** D-05's
+  second reason — keeping this skill from becoming the site where a
+  business-gross figure meets an attribution policy — is genuinely given up
+  for this path. Say so plainly: this skill now *is* that site, for the
+  configured path. **The drift the reversal prevents:** if an operator
+  pre-multiplied off-system instead, a later fraction edit would silently
+  desynchronise from an amount nobody recomputed, so the fraction sitting
+  beside the record would stop explaining the value it is supposed to
+  explain. Multiplying in-skill makes that drift impossible by construction —
+  the fraction and the amount can never disagree, because the amount is
+  derived from the fraction on every call.
+
+**What it still does not establish.** A configured fraction is an operator
+assertion, not evidence, exactly like the CLI path's fraction above. It does
+not move `evidence_class`, does not promote toward the three labels reserved
+for study-backed claims, and does not close any link in the results chain —
+the agent's *share* of an outcome sits at results-chain link 6, outside this
+product, whichever path supplied the fraction; see
+[claim distinctions](claim-distinctions-and-evidence-boundaries.md). A holdout
+comparison is still the only version that survives "how do you know?" The
+existing rule that a fraction is not meaningful to average or aggregate across
+jobs applies to configured fractions too — each one is a separate operator
+assertion resting on its own stated basis, not a sample from a common
+measurement.
+
+**It does not change the evidence label.** A declared fraction cannot promote
+a record toward any of the three labels reserved for study-backed claims,
+whichever path supplied it. Whatever the fraction says, the label continues to
+reflect the evidence that actually exists.
 
 The split is an authority split, enforced in code rather than described in prose. A
 mechanism is a claim about the work, which the transcript evidences — so the evaluator may
@@ -630,10 +667,17 @@ the evaluator may never assert them: an operator-only mechanism appearing in a r
 resolves to the `unknown` sentinel and abstains, rather than being clamped to a working
 default.
 
-> **Reserved, not yet assignable.** All six are *representable* on the wire and accepted by
-> the reporter's allow-list. Only the three evaluator-selectable ones are currently
-> *reachable*: no configuration key, no CLI flag, and no `correct-assessment.sh` option sets
-> a job's mechanism. Do not configure against the other three today — nothing reads them.
+> **Two producers now exist for the operator-only three.**
+> `correct-assessment.sh --mechanism` (Phase 51) files any of the six directly
+> as an operator correction. As of Phase 54, a valuation registrant may also
+> **declare** one of the three at registration — the shipped
+> `revenue_card_valuation_fixture` declares `incremental_revenue` — and have it
+> accepted on any call whose own returned mechanism matches that declaration.
+> The evaluator still structurally cannot select any of the three:
+> `_resolve_economic_mechanism`'s membership test runs only against
+> `EVALUATOR_MECHANISMS`, never `ECONOMIC_MECHANISMS`, so a value outside that
+> set resolves to the `unknown` abstain sentinel in an evaluator response,
+> whichever producer is configured.
 
 ## 10. The nine evidence classes
 

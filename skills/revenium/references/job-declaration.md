@@ -174,12 +174,21 @@ three it can evidence from what it actually observed. Revenue, risk
 avoidance, and quality or decision improvement are claims a transcript cannot
 support, so the evaluator may never assert them.
 
-**Reserved, not yet assignable.** As of Phase 44 those three are declared and
-would forward on the wire if a record carried one, but nothing produces such a
-record: no configuration key, no CLI flag, and no `correct-assessment.sh`
-option sets a job's mechanism. All six are *representable* (EGV-05); only the
-three evaluator-selectable ones are currently *reachable*. The intended
-producer is a study reference, which is Phase 45 work.
+**Producible by an operator, never by the evaluator.** Phase 44 declared these
+three with no producer at all. Two now exist, and both are operator-driven by
+construction: `correct-assessment.sh --mechanism` (Phase 51), and a valuation
+registrant that declares one at registration (Phase 54) — the shipped
+`revenueCard` fixture declares `incremental_revenue`, reached by configuring
+`boundaries.valuation` plus a `revenueCard` entry.
+
+What has NOT changed is the part that matters: the evaluator still cannot
+select any of the three. `_resolve_economic_mechanism`'s membership test runs
+only against `EVALUATOR_MECHANISMS`, never the full set, so a transcript alone
+can never assert `quality_decision_improvement`, `risk_avoidance`, or
+`incremental_revenue`. That is a structural guarantee, not a gap awaiting a
+producer — a mechanism a transcript cannot evidence must come from an operator
+who can. `quality_decision_improvement` and `risk_avoidance` still have no
+producer; the intended one remains a study reference.
 
 An unrecognised value, or one of the three operator-only mechanisms,
 appearing in an evaluator response resolves to the `unknown` sentinel and

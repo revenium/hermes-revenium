@@ -209,25 +209,41 @@ def _extract_forwarder_record_keys(script_text):
 # does not require it).
 # Phase 51: the set is no longer empty, and the justification is
 # structural rather than convenient. `attribution_fraction` and
-# `attribution_basis` are written ONLY by correct-assessment.sh, an operator
-# CLI; classifier.py's _build_job_assessment never produces them, so no
-# naked-LLM valued path can ever carry them. Verified rather than asserted:
-# neither string occurs anywhere in classifier.py.
+# `attribution_basis` were, at that point, written ONLY by
+# correct-assessment.sh, an operator CLI; classifier.py's
+# _build_job_assessment did not produce them on any arm.
+#
+# Phase 54 (D-10) CHANGED this: _build_job_assessment now has a SECOND
+# producer for this pair, on its CONFIGURED-REVENUE arm only (a valuation
+# registrant declaring an operator-only mechanism, re-checked by
+# _validate_assessment before either key is persisted). Both strings now
+# occur in classifier.py. This test's own arc -- _drive_produced_arc's
+# SUCCESS/reportable path, with no revenue card configured -- still never
+# reaches that arm, so the produced sidecar here still correctly carries
+# neither key; the exemption's OUTCOME for THIS test is unchanged, even
+# though its original blanket justification ("no naked-LLM valued path can
+# ever carry them") no longer holds for every arm this module's own
+# classifier can drive. The second producer's own fidelity coverage lives
+# in
+# tests/test_phase54_revenue_valuation_boundary.py::RevenuePathFidelityTests,
+# which drives the REAL _build_job_assessment on a configured revenue arm
+# and asserts both keys ARE produced there.
 #
 # This test drives the real classifier and asserts on the artifact it
 # actually produced -- which is precisely why the exemption belongs here.
-# Requiring the produced sidecar to carry a key the producer cannot write
-# would be unsatisfiable, and satisfying it by teaching the classifier to
-# emit an empty attribution would put an operator-only assertion on every
-# ordinary record: this guard's own defect, inverted.
+# Requiring the produced sidecar to carry a key this arc's producer cannot
+# write would be unsatisfiable, and satisfying it by teaching the
+# classifier to emit an empty attribution would put an operator-only
+# assertion on every ordinary record: this guard's own defect, inverted.
 #
 # Coverage is relocated, not dropped. tests/test_phase38_reporter_path.py's
 # SidecarFixtureFidelityTests carries the same two keys on
 # _correction_sidecar_record(), and its
-# test_correction_only_keys_are_present_in_the_correction_record asserts
-# every correction-only exemption actually appears there -- so neither key
-# escapes fidelity checking, it just happens on the record type that can
-# hold it.
+# test_non_default_arm_keys_keep_relocated_fidelity_coverage (renamed from
+# test_correction_only_keys_are_present_in_the_correction_record in Phase
+# 54 Task 1, membership unchanged) asserts every non-default-arm exemption
+# actually appears there -- so neither key escapes fidelity checking, it
+# just happens on record shapes other than this test's own default arc.
 _UNREACHABLE_ON_THE_NAKED_LLM_VALUED_PATH = frozenset({
     'attribution_fraction', 'attribution_basis',
 })
