@@ -473,6 +473,17 @@ class RepositoryTests(unittest.TestCase):
             # selector key that refuses to guess from model output or
             # dict order.
             ROOT / 'tests' / 'test_phase54_revenue_valuation_boundary.py',
+            # Phase 55 Plan 01 (ROI-09/ROI-11) — the fixed six-label
+            # auxiliary-usage vocabulary. Read from the skill directory and
+            # NEVER copied into STATE_DIR (D-07) -- deleting it silently
+            # degrades every auxiliary row's --task-type to a taxonomy miss
+            # (skipped with no emit, in this plan; the aux_unclassified
+            # fallback lands in Plan 02).
+            SKILL / 'aux-taxonomy.json',
+            # Phase 55 Plan 01 — the auxiliary-usage metering tracer: one
+            # session_model_usage row end to end to a metered
+            # --operation-type AUX row and an AUX: ledger line.
+            ROOT / 'tests' / 'test_phase55_auxiliary_metering.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -2382,6 +2393,44 @@ exit 0
             'JOB_ASSESSMENTS_DIR must be in the eager mkdir -p — it is a '
             'first-class spool like EVENT_SPOOL_DIR, always present',
         )
+        # Phase 55 (D-13): the auxiliary-usage ledger gets its own key
+        # domain, in the shape of the EVENT_LEDGER_FILE block above.
+        self.assertIn('AUX_LEDGER_FILE=', text)
+        self.assertIn('revenium-aux.ledger', text)
+        self.assertRegex(
+            text,
+            r'AUX_LEDGER_FILE="\$\{REVENIUM_AUX_LEDGER_FILE:-\$\{STATE_DIR\}/revenium-aux\.ledger\}"',
+        )
+        # Phase 55 (D-05/D-07): the fixed six-label auxiliary vocabulary
+        # resolves under SKILL_DIR, NEVER STATE_DIR -- unlike
+        # TAXONOMY_FILE/JOB_TAXONOMY_FILE, this is a fixed vocabulary the
+        # reporter only reads, not one the classifier grows, and a
+        # skill-dir read cannot inherit the tap-install seeding gap that
+        # leaves TAXONOMY_FILE empty on bootstrap hosts. This is the
+        # assertion that makes a later "fix" into the seeded-taxonomy shape
+        # fail loudly.
+        self.assertIn('AUX_TAXONOMY_FILE=', text)
+        self.assertIn('aux-taxonomy.json', text)
+        self.assertRegex(
+            text,
+            r'AUX_TAXONOMY_FILE="\$\{REVENIUM_AUX_TAXONOMY_FILE:-\$\{SKILL_DIR\}/aux-taxonomy\.json\}"',
+        )
+        self.assertNotIn('STATE_DIR}/aux-taxonomy.json', text)
+        # Phase 55 (D-01): the activation tunable defaults ON. A silent
+        # flip of the default to "disabled" -- the exact failure this
+        # milestone opened by naming -- must turn this suite red.
+        self.assertIn('REVENIUM_AUX_METERING=', text)
+        self.assertRegex(
+            text,
+            r'REVENIUM_AUX_METERING="\$\{REVENIUM_AUX_METERING:-enabled\}"',
+        )
+        # None of the three new AUX_ declarations belong in the eager
+        # mkdir -p -- AUX_LEDGER_FILE is append-only (created by its first
+        # writer, like the other ledgers) and AUX_TAXONOMY_FILE/
+        # REVENIUM_AUX_METERING are not directories at all.
+        for ln in mkdir_lines:
+            self.assertNotIn('AUX_', ln,
+                             'no AUX_ variable belongs in the eager mkdir -p line')
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
@@ -15939,15 +15988,17 @@ exit 0
     def test_trace_type_wired_in_both_emit_paths_behind_capability_gate(self):
         # quick-260625-mlc (TRACE-TYPE-01): --trace-type must be probed once,
         # resolved once-per-session to the root job type (fallback "uncategorized"),
-        # and appended in BOTH emit paths behind the capability gate — without ever
+        # and appended in every emit path behind the capability gate — without ever
         # leaking into --transaction-id (idempotency invariant).
         text = (SKILL / 'scripts' / 'hermes-report.sh').read_text()
         # Capability probe exists and greps the CLI help for the flag.
         self.assertIn('TRACE_TYPE_CLI_CAPABLE', text)
         self.assertIn('meter completion --help', text)
         self.assertIn('--trace-type', text)
-        # Appended in exactly two cmd+= sites (per-marker + zero-marker).
-        self.assertEqual(text.count('cmd+=(--trace-type'), 2)
+        # Appended in exactly three cmd+= sites: per-marker, zero-marker
+        # (markerless), and (Phase 55) the post-loop auxiliary pass —
+        # reusing the SAME cached capability boolean, never re-probed.
+        self.assertEqual(text.count('cmd+=(--trace-type'), 3)
         # Resolved once-per-session with the literal hard fallback.
         self.assertIn('root_trace_type', text)
         self.assertIn('uncategorized', text)
