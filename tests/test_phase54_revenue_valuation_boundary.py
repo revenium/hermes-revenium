@@ -255,9 +255,20 @@ class DerivationTests(_ValuationBoundaryTestCase):
 class OperatorBoundKeyTests(_ValuationBoundaryTestCase):
     """ROI-06/D-06 -- the card entry is selected by an operator-bound key,
     never by the model's own inferred_role, and never by dict order when
-    no key is configured."""
+    no key is configured.
 
-    def test_multi_entry_card_with_no_key_selects_nothing(self):
+    DEVIATION from 54-01, recorded deliberately (Rule 1 -- these three
+    tests asserted the PRE-D-04 behaviour): before Task 2's internal
+    delegation, "nothing revenue-shaped to price" aborted the whole
+    assessment. Task 2 changes that outcome on purpose (D-04) -- these
+    three cases are exactly the "nothing revenue-shaped to price" class,
+    so they now delegate to the built-in hours_times_rate derivation
+    instead of aborting. What each test still proves is unchanged: the
+    model's inferred_role and dict order never select a card entry. Only
+    the no-selection OUTCOME changed, from "abstain" to "delegate".
+    """
+
+    def test_multi_entry_card_with_no_key_delegates_to_builtin(self):
         mod = self._load(
             boundaries={'valuation': 'revenue_card_valuation_fixture'},
             revenue_card={
@@ -268,7 +279,9 @@ class OperatorBoundKeyTests(_ValuationBoundaryTestCase):
         )
         cfg = mod._llm_evaluation_config()
         got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
-        self.assertIsNone(got)
+        self.assertIsNotNone(got)
+        self.assertEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
 
     def test_inferred_role_naming_a_card_entry_does_not_select_it(self):
         mod = self._load(
@@ -279,9 +292,13 @@ class OperatorBoundKeyTests(_ValuationBoundaryTestCase):
         cfg = mod._llm_evaluation_config()
         got = mod._validate_assessment(
             self._raw(inferred_role='hospitality-booking-agent'), cfg, 'stub', 'v1')
-        self.assertIsNone(got)
+        self.assertIsNotNone(got)
+        # The model's inferred_role never selects a card entry -- the
+        # fixture still delegates (hours x rate), not the card's 250.0.
+        self.assertEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
 
-    def test_key_naming_an_absent_entry_abstains(self):
+    def test_key_naming_an_absent_entry_delegates_to_builtin(self):
         mod = self._load(
             boundaries={'valuation': 'revenue_card_valuation_fixture'},
             revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
@@ -289,7 +306,9 @@ class OperatorBoundKeyTests(_ValuationBoundaryTestCase):
         )
         cfg = mod._llm_evaluation_config()
         got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
-        self.assertIsNone(got)
+        self.assertIsNotNone(got)
+        self.assertEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
 
     # -- Task 1: the full rejection matrix, called directly on the
     # registrant through a freshly-loaded valuation module (not through
@@ -633,3 +652,134 @@ class MechanismDeclarationTests(_ValuationBoundaryTestCase):
         self.assertEqual(250.0, validated['estimated_value'])
         self.assertEqual(3.0, validated['assumptions']['estimated_hours_saved'])
         self.assertEqual(90.0, validated['assumptions']['assumed_loaded_rate'])
+
+
+# ---------------------------------------------------------------------------
+# Task 2 -- DelegationTests
+# ---------------------------------------------------------------------------
+
+class DelegationTests(_ValuationBoundaryTestCase):
+    """D-04/ROI-06 -- pointing an install at the revenue registrant no
+    longer strips value from ordinary sessions; an unreadable card entry
+    still abstains outright rather than delegating; and abstention still
+    means abstention when the built-in cannot be resolved. One method per
+    numbered case of 54-02-PLAN.md Task 2's own action section."""
+
+    # -- 1. The four delegation cases: round(hours * rate, 2), no
+    #    economic_mechanism key on the returned dict --------------------
+
+    def test_no_revenue_card_configured_delegates(self):
+        mod = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
+
+    def test_empty_revenue_card_delegates(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={},
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
+
+    def test_revenue_card_present_no_key_configured_delegates(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
+
+    def test_key_naming_an_absent_entry_delegates(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
+            revenue_card_key='car-rental-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(round(2.5 * 150.0, 2), got['estimated_value'])
+        self.assertNotIn('economic_mechanism', got)
+
+    # -- 2. The malformed-entry case abstains, it does not delegate ------
+
+    def test_malformed_entry_abstains_rather_than_delegating(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 'not-a-number'}},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNone(got)
+
+    # -- 3. A revenue-shaped job on the same config still prices ---------
+
+    def test_revenue_shaped_job_on_same_install_still_prices_from_the_card(self):
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {'grossPerJob': 250.0}},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self.assertIsNotNone(got)
+        self.assertEqual(250.0, got['estimated_value'])
+        self.assertEqual('incremental_revenue', got['economic_mechanism'])
+
+    # -- 4. Standalone valuation.py (no classifier => no hours_times_rate) --
+
+    def test_standalone_valuation_module_delegation_returns_none(self):
+        val = _load_valuation()
+        got = val._revenue_card_valuation_fixture({'currency': 'USD'}, {})
+        self.assertIsNone(got)
+
+    def test_registrant_never_delegates_to_itself(self):
+        val = _load_valuation()
+        # Simulate an operator pointing hours_times_rate's own registered
+        # name at THIS very fixture -- last-registration-wins would
+        # otherwise make the delegation call resolve right back to itself,
+        # recursing until the interpreter's stack limit.
+        val.register(
+            'hours_times_rate', val._revenue_card_valuation_fixture, '1',
+            evidence_class='CUSTOMER_CONFIGURED',
+        )
+        got = val._revenue_card_valuation_fixture({'currency': 'USD'}, {})
+        self.assertIsNone(got)
+
+    # -- 5. Whole-dict equality against the default install --------------
+
+    def test_whole_dict_equality_against_default_install(self):
+        mod_revenue = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        mod_default = self._load(boundaries=None)
+        raw = self._raw(economic_mechanism='labor_substitution')
+        cfg_revenue = mod_revenue._llm_evaluation_config()
+        cfg_default = mod_default._llm_evaluation_config()
+        valid_revenue = mod_revenue._validate_assessment(raw, cfg_revenue, 'stub', 'v1')
+        valid_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
+        self.assertIsNotNone(valid_revenue)
+        self.assertIsNotNone(valid_default)
+        job = {'agentic_job_id': 'delegation-identity-001', 'job_type': 'code_review',
+               'status': 'SUCCESS'}
+        record_revenue = mod_revenue._build_job_assessment(
+            job, valid_revenue, raw, cfg_revenue, 'stub', 'v1')
+        record_default = mod_default._build_job_assessment(
+            job, valid_default, raw, cfg_default, 'stub', 'v1')
+        self.assertIsNotNone(record_revenue)
+        self.assertIsNotNone(record_default)
+        for key in (
+            'ts', 'job_started_at', 'job_ended_at',
+            'observation_window_start', 'observation_window_end',
+        ):
+            record_revenue.pop(key, None)
+            record_default.pop(key, None)
+        self.assertEqual(record_revenue, record_default)

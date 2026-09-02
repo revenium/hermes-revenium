@@ -472,12 +472,67 @@ register(
 # newline embedded in operator text must not forge a second log record)
 # while making the diagnostic useful rather than merely empty.
 #
-# Delegation to the built-in derivation when nothing revenue-shaped can be
-# priced (D-04) is explicitly NOT this task's job -- 54-02 (Task 2 of this
-# same plan) owns it; no placeholder is written here, per this task's own
-# instruction to leave it absent rather than stub it.
+# Internal delegation to the built-in derivation (D-04). `boundaries.valuation`
+# is a single GLOBAL selection -- pointing an install at this registrant would
+# otherwise silently strip value from every ORDINARY, non-revenue session on
+# that host, because a registrant returning None aborts the whole assessment
+# (classifier.py's caller re-check). The abstain branches above split into
+# two classes, and the split is the composition D-04 requires, visible here
+# in one registrant's own code rather than as a caller-side special case:
+#
+#   - NOTHING REVENUE-SHAPED TO PRICE -- `revenueCard` absent/not a
+#     dict/empty, `revenueCardKey` absent/empty/not a string, or a
+#     `revenueCardKey` naming an entry the card does not hold. The operator
+#     has not asked for THIS job to be priced as revenue at all, so the
+#     fixture DELEGATES to `resolve("hours_times_rate")` and returns its
+#     result verbatim -- no `economic_mechanism`, no attribution. When that
+#     resolves to nothing (a `valuation.py` loaded with no classifier to
+#     register the built-in), the delegation itself returns None:
+#     abstention keeps meaning abstention, rather than this fixture growing
+#     a second, local copy of the built-in's own arithmetic.
+#   - ASKED TO PRICE AND CANNOT -- the entry exists but is not a dict, or
+#     `grossPerJob` is unusable. This is a configuration error about THIS
+#     job specifically, not an absence of revenue configuration, so it
+#     abstains outright (returns None) rather than quietly pricing the
+#     booking as ordinary labour.
+#
+# Self-delegation is guarded explicitly: this fixture never resolves and
+# calls its OWN registered name, even if an operator has pointed
+# `hours_times_rate` at `revenue_card_valuation_fixture` itself. A
+# delegation cycle inside a registrant contracted to never raise would
+# recurse until the interpreter's stack limit -- there is no try/except
+# shallow enough to catch a RecursionError gracefully on a money path.
+#
+# The composition lives here, visibly, in this registrant's own code; the
+# boundary contract itself is untouched -- `boundaries.valuation` remains a
+# single global selection and `None` still means abstain.
 
 REVENUE_CARD_FIXTURE_VERSION = "1"
+
+
+def _delegate_to_builtin_hours_times_rate(assumptions: dict, config: dict) -> "dict | None":
+    """D-04: delegate to the `hours_times_rate` registrant when this
+    fixture has nothing revenue-shaped to price.
+
+    Returns the built-in's result VERBATIM (which may itself be None, on
+    the built-in's own abstain path), or None when `hours_times_rate` is
+    unresolved -- a `valuation.py` loaded standalone with no classifier to
+    register it, in which case abstention keeps meaning abstention rather
+    than this fixture inventing a local copy of the built-in's own
+    arithmetic.
+
+    Guards against self-delegation: if the name `hours_times_rate` has
+    been registered to THIS very function (an operator pointing the
+    built-in's own name at the revenue fixture), resolving and calling it
+    here would recurse into itself forever, inside a function contracted
+    to never raise. The identity check refuses that call and returns None
+    instead -- a self-referential configuration is itself a reason to
+    abstain, not a delegation.
+    """
+    builtin = resolve("hours_times_rate")
+    if builtin is None or builtin is _revenue_card_valuation_fixture:
+        return None
+    return builtin(assumptions, config)
 
 # Phase 54 (D-11, ROI-08, T-54-02): the closed set of reason words this
 # fixture's diagnostics may ever emit. A branch names exactly one of these
@@ -503,17 +558,32 @@ def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | 
 
     Reads `config["revenueCard"]` when that is a non-empty dict, selects
     the entry named by `config["revenueCardKey"]` (a non-empty str present
-    in the card -- a multi-entry card with no configured key, or a key the
-    card does not name, abstains rather than guessing), reads that entry's
-    `grossPerJob` through `_finite_number`, and returns
-    `{"estimated_value": round(gross, 2), "currency": <the assumptions'
-    currency>, "economic_mechanism": "incremental_revenue"}` when the
-    amount is finite and positive. Every other case -- a non-dict
-    `assumptions`, a non-dict `config`, an absent/non-dict/empty revenue
-    card, a missing/non-str/empty/unmatched `revenueCardKey`, a non-dict
-    selected entry, or a non-finite/boolean/non-positive `grossPerJob` --
-    returns None. A card that has nothing configured for the operator-bound
-    identity is a reason to abstain, not to guess.
+    in the card), reads that entry's `grossPerJob` through
+    `_finite_number`, and returns `{"estimated_value": round(gross, 2),
+    "currency": <the assumptions' currency>, "economic_mechanism":
+    "incremental_revenue"}` when the amount is finite and positive.
+
+    Two DIFFERENT things happen when this fixture cannot price the job
+    (D-04), and they are deliberately not the same outcome:
+
+    - NOTHING REVENUE-SHAPED TO PRICE -- an absent, non-dict, or empty
+      `revenueCard`; an absent, empty, non-str, or unmatched
+      `revenueCardKey` -- DELEGATES internally to the built-in
+      `hours_times_rate` registrant and returns its result verbatim, so
+      an ordinary non-revenue session on a revenue-configured host still
+      gets its value. A multi-entry card with no configured key, or a
+      key the card does not name, is exactly this case: the operator has
+      not asked for THIS job to be priced as revenue at all.
+    - ASKED TO PRICE AND CANNOT -- the selected entry is not a dict, or
+      its `grossPerJob` is non-finite/boolean/non-positive -- ABSTAINS
+      outright (returns None). A card that names this job but cannot be
+      read is a configuration error about this job, not an absence of
+      revenue configuration, and abstaining beats quietly pricing the
+      booking as ordinary labour.
+
+    A non-dict `assumptions` or a non-dict `config` also abstains outright
+    (also None) -- see `_delegate_to_builtin_hours_times_rate` for the
+    delegation itself and its own self-delegation guard.
 
     Its honest limit, stated the way the rate-card fixture states its own:
     configuration establishes an approved value PER COMPLETED BOOKING --
@@ -560,17 +630,19 @@ def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | 
         revenue_card = cfg.get("revenueCard")
         if not isinstance(revenue_card, dict) or not revenue_card:
             logger.warning(
-                "valuation: revenue card fixture abstained (%s) for key %r",
-                "no_configured_card", card_key,
+                "valuation: revenue card fixture found nothing revenue-shaped "
+                "to price (%s), delegating to the built-in derivation for "
+                "key %r", "no_configured_card", card_key,
             )
-            return None
+            return _delegate_to_builtin_hours_times_rate(assumptions, config)
 
         if not isinstance(card_key, str) or not card_key or card_key not in revenue_card:
             logger.warning(
-                "valuation: revenue card fixture abstained (%s) for key %r",
-                "unmatched_key", card_key,
+                "valuation: revenue card fixture found nothing revenue-shaped "
+                "to price (%s), delegating to the built-in derivation for "
+                "key %r", "unmatched_key", card_key,
             )
-            return None
+            return _delegate_to_builtin_hours_times_rate(assumptions, config)
 
         entry = revenue_card.get(card_key)
         if not isinstance(entry, dict):
