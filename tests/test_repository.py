@@ -500,6 +500,14 @@ class RepositoryTests(unittest.TestCase):
             # contract, and its runner.
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-aux.golden.json',
             ROOT / 'tests' / 'test_compat_meter_completion_aux.py',
+            # Phase 55 Plan 04 (D-03) — the tracked operator record for the
+            # auxiliary-usage step-up. docs/internal/ is gitignored, and an
+            # unpinned copy of this document can vanish exactly the way the
+            # sizing measurement and the v1.3/v1.4 closeouts did -- deleting
+            # this file must turn the suite red, not silently repeat that
+            # loss.
+            ROOT / 'docs' / 'migration-auxiliary-usage.md',
+            ROOT / 'tests' / 'test_phase55_aux_docs.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -989,7 +997,11 @@ exit 0
                           'the report must reach its own end marker')
 
             # Read-only without --tick: no ledger, no log, no shipped data.
-            for artifact in ('revenium-hermes.ledger', 'revenium-metering.log'):
+            # revenium-aux.ledger added (Phase 55 Plan 04, T-55-15): a future
+            # edit that makes the auxiliary section touch its own ledger
+            # must fail here, not in production.
+            for artifact in ('revenium-hermes.ledger', 'revenium-metering.log',
+                              'revenium-aux.ledger'):
                 self.assertFalse(
                     os.path.exists(os.path.join(state, artifact)),
                     f'diagnose.sh created {artifact} — a diagnostic must not mutate '
