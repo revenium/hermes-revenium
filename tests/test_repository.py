@@ -597,7 +597,8 @@ class RepositoryTests(unittest.TestCase):
         )
 
         cs = (SKILL / 'references' / 'config-schema.md').read_text(errors='ignore')
-        for needle in ('llmOutcomeEvaluation', 'maxLoadedRate', 'maxHoursSaved'):
+        for needle in ('llmOutcomeEvaluation', 'maxLoadedRate', 'maxHoursSaved',
+                       'rateCard', 'revenueCard', 'revenueCardKey', 'maxRevenueValue'):
             self.assertIn(needle, cs, f'config-schema.md no longer documents {needle!r}')
         self.assertIn(
             'fails closed', cs,
