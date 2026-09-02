@@ -87,9 +87,17 @@ class ContractTests(unittest.TestCase):
         self.val = _load_valuation()
         self.br = _load_boundary_registry()
 
-    def test_fresh_import_resolves_only_the_shipped_fixture(self):
-        self.assertEqual(['rate_card_valuation_fixture'], self.val.registered())
+    def test_fresh_import_resolves_only_the_shipped_fixtures(self):
+        # Phase 54 (ROI-05): revenue_card_valuation_fixture joined the
+        # module's shipped registrants alongside rate_card_valuation_fixture
+        # -- both CUSTOMER_CONFIGURED, neither the built-in hours_times_rate
+        # (registered by classifier.py, not this module).
+        self.assertEqual(
+            ['rate_card_valuation_fixture', 'revenue_card_valuation_fixture'],
+            self.val.registered(),
+        )
         self.assertIsNotNone(self.val.resolve('rate_card_valuation_fixture'))
+        self.assertIsNotNone(self.val.resolve('revenue_card_valuation_fixture'))
         self.assertIsNone(self.val.resolve('hours_times_rate'))
 
     def test_shipped_fixture_declares_customer_configured(self):

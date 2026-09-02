@@ -110,18 +110,81 @@ logger = logging.getLogger("revenium_classifier.valuation")
 # evaluators.py has shipped `stub` since Phase 36).
 _REGISTRY = _br.BoundaryRegistry("valuation")
 
+# Phase 54 (D-01, D-03): the three operator-only economic mechanisms a
+# valuation registrant may ever declare it can assert -- the ground the
+# evaluator structurally cannot reach (classifier.py's
+# OPERATOR_ONLY_MECHANISMS). Duplicated here as plain string literals,
+# NOT imported from classifier.py -- this module's own DEPENDENCY
+# DIRECTION paragraph above forbids importing classifier.py, and
+# _clamp_text/_finite_number below already set the precedent for this
+# kind of deliberate duplication. What keeps this copy honest:
+# tests/test_phase54_revenue_valuation_boundary.py's
+# MechanismDeclarationTests's cross-module sync test, which loads both
+# modules standalone and asserts the two frozensets are member-for-member
+# equal.
+VALUATION_DECLARABLE_MECHANISMS = frozenset({
+    "risk_avoidance",
+    "incremental_revenue",
+    "quality_decision_improvement",
+})
 
-def register(name: str, fn, version: str = "", evidence_class: str = "") -> None:
-    """Register a valuation implementation under `name`, with the version
-    and evidence_class IT declares.
+# Phase 54 (D-01): name -> the frozenset of economic mechanisms THAT
+# registrant declared at registration time. This is a CEILING on what the
+# registrant may EVER assert across every call it makes, NOT the value
+# written to any one record it produces -- that per-call value rides the
+# registrant's own return dict (see resolve_declared_mechanisms's own
+# docstring for the asymmetry with resolve_evidence_class, which IS the
+# per-registrant value). Populated only by register() below, via
+# _REGISTRY-adjacent module state rather than widening
+# BoundaryRegistry.register()'s own shared four-argument signature, which
+# boundary_registry.py's own module docstring calls a five-boundary blast
+# radius.
+_MECHANISM_DECLARATIONS: dict = {}
+
+
+def register(name: str, fn, version: str = "", evidence_class: str = "",
+             *, economic_mechanisms=None) -> None:
+    """Register a valuation implementation under `name`, with the version,
+    evidence_class, and economic_mechanisms IT declares.
 
     Same reasoning as evaluators.py's own register(): a future ONNX,
     deterministic-policy, or vertical valuation must be able to report its
     own identity and its own evidence class without this registry -- or any
     caller -- knowing its name.
 
+    `economic_mechanisms` (Phase 54, D-01/D-03) is keyword-only -- chosen
+    over a fifth positional parameter so no existing or future positional
+    call site (including every registrant already shipped) can break. It
+    declares the CEILING of economic mechanisms this registrant may EVER
+    assert: every member must belong to VALUATION_DECLARABLE_MECHANISMS,
+    the three mechanisms an evaluator structurally cannot select. `None` or
+    an empty collection both declare nothing -- what the shipped
+    `hours_times_rate` and `rate_card_valuation_fixture` registrants do,
+    which is what keeps a default install byte-identical (D-14): a
+    registrant that declares nothing defers to the evaluator's own
+    mechanism, unconditionally.
+
+    Raises `ValueError` -- never a bare `assert` -- on any member outside
+    VALUATION_DECLARABLE_MECHANISMS. `python3 -O` strips asserts, and this
+    is an access-control gate on a money path that must not be optimisable
+    away. The declaration is stored only AFTER validation passes, so a
+    refused registration leaves no half-state for
+    resolve_declared_mechanisms to read.
+
     Last registration wins.
     """
+    declared = (
+        frozenset() if not economic_mechanisms else frozenset(economic_mechanisms)
+    )
+    for _mechanism in declared:
+        if _mechanism not in VALUATION_DECLARABLE_MECHANISMS:
+            raise ValueError(
+                f"register({name!r}): economic_mechanisms member "
+                f"{_mechanism!r} is not a member of "
+                f"VALUATION_DECLARABLE_MECHANISMS "
+                f"{sorted(VALUATION_DECLARABLE_MECHANISMS)!r}"
+            )
+    _MECHANISM_DECLARATIONS[name] = declared
     _REGISTRY.register(name, fn, version, evidence_class)
 
 
@@ -144,6 +207,26 @@ def resolve_evidence_class(name: str) -> str:
     registration, or "" if unknown -- a trusted-code declaration, never a
     value read from the implementation's output."""
     return _REGISTRY.resolve_evidence_class(name)
+
+
+def resolve_declared_mechanisms(name: str) -> frozenset:
+    """The economic mechanisms the named implementation DECLARED at
+    registration, or an empty frozenset if unknown. Never raises.
+
+    Modelled on resolve_evidence_class's exact shape, but states what that
+    function cannot: THIS is a CEILING on what the registrant may EVER
+    assert, not the value written to every record it produces. A
+    registrant declaring {"incremental_revenue"} may still return no
+    mechanism on any given call where it has nothing revenue-shaped to
+    price -- see _revenue_card_valuation_fixture's own delegation
+    behaviour. The per-call value that actually reaches a record rides
+    that call's own return dict, re-checked by the caller against this
+    ceiling; this function only answers "is X ever ALLOWED to be asserted
+    by this registrant".
+    """
+    if not isinstance(name, str):
+        return frozenset()
+    return _MECHANISM_DECLARATIONS.get(name, frozenset())
 
 
 def registered() -> list:
@@ -317,4 +400,143 @@ register(
     _rate_card_valuation_fixture,
     RATE_CARD_FIXTURE_VERSION,
     evidence_class="CUSTOMER_CONFIGURED",
+)
+
+
+# --- _revenue_card_valuation_fixture --------------------------------------
+#
+# Phase 54 (ROI-05, D-01/D-02/D-05/D-06): the revenue registrant proving
+# EGV-05's deferred producer for `incremental_revenue`. Modelled on
+# _rate_card_valuation_fixture immediately above -- same file, same
+# try/except-returning-None shape, same CUSTOMER_CONFIGURED evidence class
+# -- but keyed and gated differently in three deliberate ways:
+#
+#   1. (D-06) The card entry is selected by `config["revenueCardKey"]`, an
+#      OPERATOR-BOUND identity resolved from config, never from
+#      `assumptions["inferred_role"]` -- that field is clamped MODEL
+#      output (classifier.py's inferred_role, model-produced), and handing
+#      the model the selector on a revenue figure would open exactly the
+#      "gaming gradient that rewards pointing agents at high-margin
+#      transactions" hazard 51-CONTEXT.md names. A card with several
+#      entries and no configured key selects nothing; this fixture never
+#      iterates the card or falls back to its sole entry.
+#   2. (D-12) `estimated_hours_saved` and `assumed_loaded_rate` are
+#      IGNORED entirely -- unlike the rate-card fixture, which still gates
+#      on positive finite hours/rate before pricing. Revenue is not
+#      derived from effort; a clerk taking a booking may show real saved
+#      time, but that time is not what values the booking.
+#   3. (D-01/D-02) It declares (and returns) `economic_mechanism:
+#      "incremental_revenue"` -- the producing boundary names the
+#      mechanism it priced, re-checked by the caller against this
+#      registrant's own registration-time declaration below.
+#
+# Its honest limit, stated the way the rate-card fixture's own comment
+# states its (valuation.py, above): configuration establishes an approved
+# value PER COMPLETED BOOKING -- an operator policy, not this booking's
+# actual revenue.
+#
+# Redacted logging (D-11) and delegation to the built-in derivation when
+# nothing revenue-shaped can be priced (D-04) are explicitly NOT this
+# task's job -- 54-03 and 54-02 own them respectively; no placeholder for
+# either is written here, per this task's own instruction to leave them
+# absent rather than stub them.
+
+REVENUE_CARD_FIXTURE_VERSION = "1"
+
+
+def _revenue_card_valuation_fixture(assumptions: dict, config: dict) -> "dict | None":
+    """Price a completed booking from an operator-approved revenue card,
+    keyed by an OPERATOR-BOUND identity -- never by inferred role.
+
+    Reads `config["revenueCard"]` when that is a dict, selects the entry
+    named by `config["revenueCardKey"]` (a non-empty str present in the
+    card -- a multi-entry card with no configured key, or a key the card
+    does not name, abstains rather than guessing), reads that entry's
+    `grossPerJob` through `_finite_number`, and returns
+    `{"estimated_value": round(gross, 2), "currency": <the assumptions'
+    currency>, "economic_mechanism": "incremental_revenue"}` when the
+    amount is finite and positive. Every other case -- a non-dict
+    `assumptions` or `config`, an absent or non-dict revenue card, a
+    missing/non-str/empty/unmatched `revenueCardKey`, a non-dict selected
+    entry, or a non-finite/boolean/non-positive `grossPerJob` -- returns
+    None. A card that has nothing configured for the operator-bound
+    identity is a reason to abstain, not to guess.
+
+    `estimated_hours_saved` and `assumed_loaded_rate` on `assumptions` are
+    deliberately never read (D-12): revenue is not derived from effort,
+    so those two fields stay on the record as the evaluator's own
+    assumptions without determining this fixture's value.
+
+    The whole body runs inside one try/except returning None, logging
+    with %r -- never %s, never an f-string, because a card key or amount
+    can be operator-supplied text and a newline embedded in it must not
+    be able to forge a second log record (the T-28-07 rule the rest of
+    this plugin already follows). D-11's redaction requirement for the
+    configured gross amount itself is 54-03's job, not this task's.
+
+    Reads no clock, makes no model call and makes no network call: the
+    whole derivation is a dict lookup and a bounds check.
+    """
+    try:
+        a = assumptions if isinstance(assumptions, dict) else {}
+        cfg = config if isinstance(config, dict) else {}
+
+        revenue_card = cfg.get("revenueCard")
+        if not isinstance(revenue_card, dict):
+            logger.warning(
+                "valuation: revenue card fixture found no configured "
+                "revenue card: %r", revenue_card,
+            )
+            return None
+
+        card_key = cfg.get("revenueCardKey")
+        if not isinstance(card_key, str) or not card_key or card_key not in revenue_card:
+            logger.warning(
+                "valuation: revenue card fixture has no configured "
+                "revenueCardKey selecting a configured entry: %r", card_key,
+            )
+            return None
+
+        entry = revenue_card.get(card_key)
+        if not isinstance(entry, dict):
+            logger.warning(
+                "valuation: revenue card fixture's entry for key %r is "
+                "not a dict: %r", card_key, entry,
+            )
+            return None
+
+        gross = _finite_number(entry.get("grossPerJob"))
+        if gross is None or gross <= 0:
+            logger.warning(
+                "valuation: revenue card fixture rejected non-positive or "
+                "non-finite grossPerJob for key %r: %r",
+                card_key, entry.get("grossPerJob"),
+            )
+            return None
+
+        return {
+            "estimated_value": round(gross, 2),
+            "currency": a.get("currency"),
+            "economic_mechanism": "incremental_revenue",
+        }
+    except Exception:
+        logger.warning(
+            "valuation: revenue card fixture raised internally, rejecting "
+            "assumptions: %r", assumptions,
+        )
+        return None
+
+
+# Registered at import time, same reasoning as rate_card_valuation_fixture
+# above -- a shipped second CUSTOMER_CONFIGURED fixture, this time
+# declaring the one operator-only mechanism it is ever permitted to
+# assert (D-01/D-03). CUSTOMER_CONFIGURED is already a member of Phase
+# 53's derived reportable set, so no new reportability gate is needed for
+# a configured revenue value to report.
+register(
+    "revenue_card_valuation_fixture",
+    _revenue_card_valuation_fixture,
+    REVENUE_CARD_FIXTURE_VERSION,
+    evidence_class="CUSTOMER_CONFIGURED",
+    economic_mechanisms={"incremental_revenue"},
 )

@@ -1792,6 +1792,10 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # exactly the path that lets an unbounded total through while the
         # bound checks guard inputs nobody used.
         estimated_value = round(hours * rate, 2)
+        # Phase 54 (D-14): the built-in derivation declares no mechanism,
+        # so the record falls back to the evaluator's own answer,
+        # unconditionally -- see the conditional-emit block below.
+        declared_mechanism = ""
     else:
         # Phase 45 (T-45-13): the caller RE-CHECKS a registered
         # implementation's returned amount at all -- registration is
@@ -1844,6 +1848,34 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
             return None
         estimated_value = amount
 
+        # Phase 54 (D-02): re-check the registrant's returned mechanism
+        # against its OWN registration-time ceiling
+        # (valuation_mod.resolve_declared_mechanisms(impl_name)) -- the
+        # same distrust-and-re-check idiom this block already applies to
+        # amount/currency/the lower bound/the ceiling above. A registrant
+        # may assert a mechanism only from the set it declared at import
+        # time; anything else -- absent, non-str, or outside that ceiling
+        # -- is discarded to the empty string here. Unlike the
+        # amount/currency pair above, a malformed mechanism is an OPTIONAL
+        # field: it is discarded silently, never raised and never treated
+        # as an abstention of the whole assessment.
+        _declared_mechanisms = (
+            valuation_mod.resolve_declared_mechanisms(impl_name)
+            if valuation_mod is not None else frozenset()
+        )
+        _returned_mechanism = (
+            derived.get("economic_mechanism") if isinstance(derived, dict) else None
+        )
+        declared_mechanism = (
+            _returned_mechanism
+            if (
+                isinstance(_returned_mechanism, str)
+                and _declared_mechanisms
+                and _returned_mechanism in _declared_mechanisms
+            )
+            else ""
+        )
+
     # Phase 50 (DECL-01/DECL-02, record site 1): resolve the remaining two
     # boundaries' declarations, then call the ONE rule site once. The
     # valuation declaration reuses `impl_name`/`valuation_mod` ALREADY
@@ -1874,7 +1906,7 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         evaluator, valuation_declared, evidence_declared, classification_declared,
     )
 
-    return {
+    _result: dict = {
         "estimated_value": estimated_value,
         "currency": currency,
         "basis": _clamp_assessment_text(raw.get("basis"), 200),
@@ -1897,6 +1929,16 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # monetary value).
         "evidence_class_authority": _evidence_class_authority,
     }
+    if declared_mechanism:
+        # Phase 54 (D-02/D-14): emitted ONLY when a registrant's returned
+        # mechanism passed its own registration-time ceiling above.
+        # Unconditional emission would change the job marker's nested
+        # `assessment` object on a default install -- _write_job_marker
+        # persists this dict verbatim -- and break D-14's byte-identity
+        # guarantee. Same conditional-emit idiom _write_job_marker already
+        # uses for failure_reason and for the assessment dict itself.
+        _result["economic_mechanism"] = declared_mechanism
+    return _result
 
 
 def _write_job_marker(sid: str, job: dict, paths: "_Paths | None" = None) -> Path:
@@ -2804,7 +2846,28 @@ def _build_job_assessment(
             # _resolve_economic_mechanism(raw) now correctly resolves to
             # ECONOMIC_MECHANISM_UNKNOWN there -- the D-04 correction, not a
             # regression.
-            "economic_mechanism": _resolve_economic_mechanism(raw),
+            #
+            # Phase 54 (D-02, D-14): PROMOTED -- the producing boundary
+            # names the mechanism, and _resolve_economic_mechanism(raw) is
+            # the answer that variant gives when the producing boundary
+            # (a valuation registrant) declared and returned none.
+            # `assessment` carries `economic_mechanism` only when
+            # _validate_assessment's own re-check accepted a registrant's
+            # declared-and-returned value (see that function's conditional
+            # emit); every other case, including every abstention path
+            # (`assessment` is None there) and every call from a registrant
+            # that declares nothing -- the built-in `hours_times_rate`
+            # included -- falls back to today's `raw`-side derivation
+            # unmodified. This is additive: the `raw`-side refusal is
+            # untouched, which is why
+            # tests/test_phase44_economic_mechanisms.py::MechanismAuthorityTests
+            # keeps passing unmodified (it calls this function with
+            # assessment=None).
+            "economic_mechanism": (
+                assessment.get("economic_mechanism")
+                if isinstance(assessment, dict) and assessment.get("economic_mechanism")
+                else _resolve_economic_mechanism(raw)
+            ),
 
             # Phase 44 (EGV-16, D-12/D-13): caller-supplied structural
             # identity, never read from raw -- see this function's own

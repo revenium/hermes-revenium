@@ -466,6 +466,13 @@ class RepositoryTests(unittest.TestCase):
             # truncation-diagnostic's never-raises contract.
             ROOT / 'tests' / 'test_phase53_evaluator_token_budget.py',
             ROOT / 'tests' / 'test_phase53_reportable_class_gate.py',
+            # Phase 54 Plan 01 (ROI-05/ROI-06) — the revenue valuation
+            # boundary's declaration contract: a configured revenueCard
+            # prices a job end to end through boundaries.valuation, the
+            # registration-time mechanism ceiling, and the operator-bound
+            # selector key that refuses to guess from model output or
+            # dict order.
+            ROOT / 'tests' / 'test_phase54_revenue_valuation_boundary.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
