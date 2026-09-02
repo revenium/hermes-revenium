@@ -490,6 +490,16 @@ class RepositoryTests(unittest.TestCase):
             # aux_unclassified fallback + its once-per-distinct-value warn,
             # and the once-per-install permanent step-up notice.
             ROOT / 'tests' / 'test_phase55_aux_edges.py',
+            # Phase 55 Plan 03 (ROI-09/ROI-10/ROI-11) — the D-15 adversarial
+            # mirror-bucket proof with positive control, the cross-profile
+            # arm (T-55-06), the multi-tick idempotency arm, the seven edge
+            # predicates, and the ROI-10 scope-parity assertion.
+            ROOT / 'tests' / 'test_phase55_aux_proofs.py',
+            # Phase 55 Plan 03 (D-02) — the auxiliary path's own argv-shape
+            # golden, additive to (not part of) the v1.x immutability
+            # contract, and its runner.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-aux.golden.json',
+            ROOT / 'tests' / 'test_compat_meter_completion_aux.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

@@ -31,6 +31,7 @@ Rule 2 deviation (auto-added missing critical functionality against a
 threat-register HIGH severity item, T-55-06) documented in the plan's own
 SUMMARY.md, not a pre-planned artifact.
 """
+import json
 import os
 import shutil
 import sqlite3
@@ -68,6 +69,29 @@ def _bump_aux_row_with_cost(state_db, session_id, model, billing_provider='', bi
     )
     conn.commit()
     conn.close()
+
+
+def _make_trace_type_capable(shim_path):
+    """Patch a build_shim-produced shim to additionally advertise
+    --trace-type in its `meter completion --help` probe response, so
+    TRACE_TYPE_CLI_CAPABLE resolves true and the scope-parity assertions on
+    --trace-type below are not vacuously true-by-absence (every existing
+    driven test in this repo uses the default shim, which never advertises
+    --trace-type, matching the four immutable goldens' own omission of it).
+    Inserted BEFORE the --agentic-job-id line, which build_shim's own
+    comment requires stay last (a live `grep -q` probe elsewhere depends on
+    it) -- supports_flag's two-step full-text capture for --trace-type has
+    no such ordering requirement, so this insertion is safe."""
+    with open(shim_path) as f:
+        body = f.read()
+    marker = '      echo "--agentic-job-id  Agentic job instance identifier"\n'
+    assert marker in body, 'build_shim shape changed -- update this patch'
+    body = body.replace(
+        marker,
+        '      echo "--trace-type string        Trace type"\n' + marker,
+    )
+    with open(shim_path, 'w') as f:
+        f.write(body)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +550,110 @@ class AuxIdempotencyTests(_AuxMeteringTestCase):
             'emission order must be identical across two independent runs of the '
             'same insertion-scrambled input -- total and stable, not insertion-dependent',
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 -- scope parity (ROI-10, D-09/D-11).
+# ---------------------------------------------------------------------------
+class AuxScopeParityTests(_AuxMeteringTestCase):
+    """An auxiliary row's session-resolved scope dimensions must equal the
+    same session's primary completion argv's, so a rule scoped on any of
+    them counts the session's overhead WITH the session (ROI-10). Two
+    per-row divergences are deliberate and asserted directly: MODEL/PROVIDER
+    are the auxiliary row's own facts (a small model serving an approval
+    call reports THAT model, corroborated by --model-source), and
+    TASK_TYPE/OPERATION_TYPE differ by design (the whole point of the
+    aux_ prefix).
+
+    WRITTEN LIMIT (D-11): server-side *counting* is Revenium's own effect on
+    what it ingested, scoped by the rule's filter -- no local test can
+    observe it. This class proves only the local, falsifiable half: the row
+    is emitted inside the SAME rule scope as its session's primary row. The
+    counting half is confirmed live in Phase 56.
+    """
+
+    def test_agent_organization_and_attribution_parity_with_a_job_marker(self):
+        sid = 'aux-parity-withjob-sid-001'
+        job_id = 'aux-parity-withjob-job-001'
+
+        fixture = self._setup_fixture(
+            [self._one_session(id=sid)],
+            aux_rows=[self._one_aux_row(
+                session_id=sid, model='gpt-4o-mini', billing_provider='openai',
+            )],
+        )
+        _make_trace_type_capable(os.path.join(fixture['bin_dir'], 'revenium'))
+
+        markers_path = os.path.join(fixture['state_dir'], 'markers', f'{sid}.jsonl')
+        with open(markers_path, 'w') as f:
+            f.write(json.dumps({
+                'muid': 'aux-parity-muid-001', 'ts': 1715515000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }, separators=(',', ':')) + '\n')
+            f.write(json.dumps({
+                'kind': 'job', 'ts': 1715515001.0, 'sid': sid,
+                'agentic_job_id': job_id, 'job_name': 'Scope Parity Job',
+                'job_type': 'code_review', 'status': 'IN_PROGRESS',
+            }, separators=(',', ':')) + '\n')
+
+        config_path = os.path.join(fixture['state_dir'], 'config.json')
+        with open(config_path, 'w') as f:
+            json.dump({'organizationName': 'acme-corp'}, f)
+
+        result = self._tick(fixture, 0, extra_env={'REVENIUM_AGENT_NAME': 'Hermes-scopeparity'})
+        self.assertEqual(result['rc'], 0, result['output'])
+
+        aux_list = self._find_aux_invocation(result['meter_invocations'])
+        main_list = self._find_non_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_list), 1, result['meter_invocations'])
+        self.assertEqual(len(main_list), 1, result['meter_invocations'])
+        aux_flags, main_flags = aux_list[0], main_list[0]
+
+        # Session-resolved dimensions: equal across both, and NOT a
+        # hardcoded literal (proven by the non-default REVENIUM_AGENT_NAME).
+        self.assertEqual(aux_flags.get('--agent'), main_flags.get('--agent'))
+        self.assertEqual(aux_flags.get('--agent'), 'Hermes-scopeparity')
+
+        self.assertEqual(aux_flags.get('--organization-name'), main_flags.get('--organization-name'))
+        self.assertEqual(aux_flags.get('--organization-name'), 'acme-corp')
+
+        self.assertEqual(aux_flags.get('--environment'), main_flags.get('--environment'))
+        self.assertEqual(aux_flags.get('--trace-id'), main_flags.get('--trace-id'))
+        self.assertEqual(aux_flags.get('--trace-type'), main_flags.get('--trace-type'))
+        self.assertIsNotNone(aux_flags.get('--trace-type'))
+
+        self.assertEqual(aux_flags.get('--squad-id'), main_flags.get('--squad-id'))
+        self.assertEqual(aux_flags.get('--squad-name'), main_flags.get('--squad-name'))
+        self.assertEqual(aux_flags.get('--squad-role'), main_flags.get('--squad-role'))
+
+        # --agentic-job-id: present and equal on both, given the job marker.
+        self.assertEqual(aux_flags.get('--agentic-job-id'), job_id)
+        self.assertEqual(main_flags.get('--agentic-job-id'), job_id)
+
+        # Deliberate row-own divergences.
+        self.assertNotEqual(aux_flags.get('--operation-type'), main_flags.get('--operation-type'))
+        self.assertNotEqual(aux_flags.get('--task-type'), main_flags.get('--task-type'))
+        self.assertEqual(aux_flags.get('--model'), 'gpt-4o-mini')
+        self.assertEqual(aux_flags.get('--provider'), 'openai')
+        self.assertNotEqual(aux_flags.get('--model'), main_flags.get('--model'))
+        self.assertNotEqual(aux_flags.get('--provider'), main_flags.get('--provider'))
+
+    def test_agentic_job_id_absent_from_both_without_a_job_marker(self):
+        sid = 'aux-parity-nojob-sid-001'
+        fixture = self._setup_fixture(
+            [self._one_session(id=sid)],
+            aux_rows=[self._one_aux_row(session_id=sid)],
+        )
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+
+        aux_list = self._find_aux_invocation(result['meter_invocations'])
+        main_list = self._find_non_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_list), 1, result['meter_invocations'])
+        self.assertEqual(len(main_list), 1, result['meter_invocations'])
+
+        self.assertNotIn('--agentic-job-id', aux_list[0])
+        self.assertNotIn('--agentic-job-id', main_list[0])
 
 
 if __name__ == '__main__':
