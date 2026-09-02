@@ -1929,12 +1929,32 @@ PY
     # that spend permanently, not just defer it. `source` is populated
     # earlier in this same iteration (the sessions query column), consumed
     # here as ctx_source by report_auxiliary_usage as the --environment value.
-    local _aux_ctx_sid="${sid//[|$'\n'$'\r']/_}"
-    local _aux_ctx_root_sid="${root_sid//[|$'\n'$'\r']/_}"
-    local _aux_ctx_root_agent_name="${root_agent_name//[|$'\n'$'\r']/_}"
-    local _aux_ctx_aux_job_id="${aux_job_id//[|$'\n'$'\r']/_}"
-    local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
-    aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}"$'\n'
+    #
+    # Phase 55 Plan 03 (T-55-06): gated on session_markers_dir (already
+    # resolved above, no re-derivation) matching THIS process's own
+    # MARKERS_DIR. A multiplexed host can run one cron tick per profile, each
+    # with its own REVENIUM_STATE_DIR, against sessions/session_model_usage
+    # tables that carry namespaced `agent:<profile>:...` ids with no
+    # profile-scoping WHERE clause -- every tick sees every profile's rows.
+    # resolve_markers_dir routes a namespaced sid to the markers directory
+    # its OWN profile owns, independent of which process is asking; when that
+    # owning directory is NOT this process's own MARKERS_DIR, the session
+    # belongs to (and will be correctly reported by) a DIFFERENT profile's own
+    # tick, so this process must not cache it for its auxiliary pass --
+    # AUX_LEDGER_FILE has no cross-profile coordination of its own (each
+    # profile keeps its own ledger), so caching here would double-ship. A
+    # session with no `agent:<profile>:` prefix (every existing install
+    # today) always resolves session_markers_dir to MARKERS_DIR, so this
+    # guard is a no-op everywhere except a genuinely namespaced multiplex
+    # deployment.
+    if [[ "${session_markers_dir}" == "${MARKERS_DIR}" ]]; then
+      local _aux_ctx_sid="${sid//[|$'\n'$'\r']/_}"
+      local _aux_ctx_root_sid="${root_sid//[|$'\n'$'\r']/_}"
+      local _aux_ctx_root_agent_name="${root_agent_name//[|$'\n'$'\r']/_}"
+      local _aux_ctx_aux_job_id="${aux_job_id//[|$'\n'$'\r']/_}"
+      local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
+      aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}"$'\n'
+    fi
 
     # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.
     # Runs BEFORE the token pre-filter guards so that token-stable sessions
