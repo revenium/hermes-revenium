@@ -1031,3 +1031,183 @@ class AttributionCouplingTests(_ValuationBoundaryTestCase):
         self.assertIsNotNone(validated_default)
         self.assertEqual(validated_delegated['basis'], validated_default['basis'])
         self.assertEqual(raw['basis'], validated_default['basis'])
+
+
+# ---------------------------------------------------------------------------
+# Task 3 -- HostileRegistrantDistrustTests
+# ---------------------------------------------------------------------------
+#
+# The caller's distrust of registered code, proven against a HOSTILE
+# registrant for every field the revenue path adds -- not only against the
+# well-behaved shipped `revenue_card_valuation_fixture`. Modelled on
+# tests/test_phase45_valuation_boundary.py's BoundReassertionTests (the
+# adversarial half of that phase's own boundary tests) and
+# tests/test_phase50_declaration_authority.py's `_register_causal_label_
+# valuation` throwaway-registration shape.
+#
+# Some cases below are marked @unittest.expectedFailure: classifier.py's
+# _validate_assessment threads attribution_fraction/attribution_basis
+# through VERBATIM from whatever a resolved registrant returns, with NO
+# bounds check and NO travel-as-a-set re-check of its own (see that
+# function's own D-10 comment) -- the shipped revenue fixture already
+# enforces both rules itself before ever returning either key, so this is
+# a real, currently-open gap for a THIRD-PARTY registrant, not a defect in
+# the shipped fixture. 54-04 closes it and removes these markers.
+
+_HOSTILE_THROWAWAY_SEQ = [0]
+
+
+def _hostile_registrant_name():
+    _HOSTILE_THROWAWAY_SEQ[0] += 1
+    return f'p54_hostile_{_HOSTILE_THROWAWAY_SEQ[0]}'
+
+
+class HostileRegistrantDistrustTests(_ValuationBoundaryTestCase):
+    """Task 3: the caller's distrust of registered code, adversarially, in
+    one table. Each case registers a THROWAWAY implementation (unique name
+    per case) into the SHARED bare-imported `valuation` module --
+    last-registration-wins is documented, and a leaked registrant would
+    let these tests lie to each other -- then drives it through a FRESH
+    classifier module per case, never reusing one across subtests."""
+
+    def _register(self, fn, economic_mechanisms=None):
+        import valuation as val  # type: ignore -- shared, sys.path-resolved
+        name = _hostile_registrant_name()
+        val.register(name, fn, '1', evidence_class='CUSTOMER_CONFIGURED',
+                     economic_mechanisms=economic_mechanisms)
+        self.addCleanup(val._REGISTRY._entries.pop, name, None)
+        self.addCleanup(val._MECHANISM_DECLARATIONS.pop, name, None)
+        return name
+
+    def _validate(self, name, raw=None):
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        raw = raw if raw is not None else self._raw()
+        return mod, cfg, raw, mod._validate_assessment(raw, cfg, 'stub', 'v1')
+
+    # -- 1. Ceiling refusal (mitigates T-54-06; ALREADY real -- no marker) --
+
+    def test_gross_sized_amount_above_ceiling_is_refused(self):
+        name = self._register(
+            lambda a, c: {'estimated_value': 10_000_000.0, 'currency': a.get('currency')})
+        _, _, _, validated = self._validate(name)
+        self.assertIsNone(
+            validated,
+            'distrust rule: a registrant cannot widen the configured ceiling')
+
+    # -- 2. Malformed attribution_fraction discarded, amount still ships ----
+
+    def _malformed_fraction_table(self):
+        return [
+            ('above_one', 1.5), ('negative', -0.5), ('nan', float('nan')),
+            ('inf', float('inf')), ('boolean', True), ('string', '0.5'),
+        ]
+
+    @unittest.expectedFailure  # flips in 54-04 -- the attribution re-check
+    def test_malformed_attribution_fraction_is_discarded_amount_still_ships(self):
+        rows = self._malformed_fraction_table()
+        self.assertGreaterEqual(len(rows), 6)
+        for label, fraction in rows:
+            with self.subTest(label):
+                name = self._register(
+                    lambda a, c, _f=fraction: {
+                        'estimated_value': 42.0, 'currency': a.get('currency'),
+                        'attribution_fraction': _f, 'attribution_basis': 'hostile basis',
+                    })
+                _, _, _, validated = self._validate(name)
+                self.assertIsNotNone(
+                    validated,
+                    'distrust rule: a malformed OPTIONAL field must never '
+                    'abstain the whole assessment')
+                self.assertEqual(42.0, validated['estimated_value'])
+                self.assertNotIn(
+                    'attribution_fraction', validated,
+                    'distrust rule: a malformed fraction must be discarded, '
+                    'not shipped')
+
+    # -- 3. attribution_fraction with no attribution_basis -- both discarded -
+
+    @unittest.expectedFailure  # flips in 54-04 -- the attribution re-check
+    def test_fraction_with_no_basis_from_hostile_registrant_discards_both(self):
+        name = self._register(
+            lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
+                          'attribution_fraction': 0.5})
+        _, _, _, validated = self._validate(name)
+        self.assertIsNotNone(validated)
+        self.assertNotIn(
+            'attribution_fraction', validated,
+            'distrust rule: travel-as-a-set applies at the caller too, not '
+            "only inside a well-behaved registrant")
+        self.assertNotIn('attribution_basis', validated)
+
+    # -- 4. basis: non-string discarded, unbounded string clamped -----------
+    # (ALREADY real -- Task 2's D-08 threading type-checks and clamps; no
+    # marker needed for either row.)
+
+    def test_non_string_basis_falls_back_to_evaluators_own(self):
+        name = self._register(
+            lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
+                          'basis': 12345})
+        _, _, raw, validated = self._validate(name)
+        self.assertIsNotNone(validated)
+        self.assertIsInstance(validated['basis'], str)
+        self.assertEqual(raw['basis'], validated['basis'])
+
+    def test_10000_char_basis_is_clamped_never_unbounded(self):
+        huge = 'x' * 10_000
+        name = self._register(
+            lambda a, c, _b=huge: {'estimated_value': 42.0, 'currency': a.get('currency'),
+                                    'basis': _b})
+        _, _, _, validated = self._validate(name)
+        self.assertIsNotNone(validated)
+        self.assertIsInstance(validated['basis'], str)
+        self.assertLessEqual(_serialized_len(validated['basis']), 200)
+
+    # -- 5. undeclared economic_mechanism is discarded (ALREADY real) -------
+
+    def test_undeclared_economic_mechanism_is_discarded(self):
+        name = self._register(
+            lambda a, c: {'estimated_value': 42.0, 'currency': a.get('currency'),
+                          'economic_mechanism': 'incremental_revenue'},
+            economic_mechanisms=None,  # declares NOTHING
+        )
+        raw = self._raw(economic_mechanism='labor_substitution')
+        _, cfg, raw, validated = self._validate(name, raw=raw)
+        self.assertIsNotNone(validated)
+        self.assertNotIn(
+            'economic_mechanism', validated,
+            'distrust rule: a registrant may assert only a mechanism it '
+            'declared at registration')
+        mod = self._load(boundaries={'valuation': name})
+        record = mod._build_job_assessment(
+            {'agentic_job_id': 'hostile-mechanism-001', 'job_type': 'code_review',
+             'status': 'SUCCESS'}, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(mod._resolve_economic_mechanism(raw), record['economic_mechanism'])
+
+    # -- PA-15: the registrant never sees `raw`, only the caller-constructed -
+    # `assumptions` dict (mitigates T-54-03) -------------------------------
+
+    def test_registrant_never_sees_raw_only_the_five_caller_constructed_keys(self):
+        captured = {}
+
+        def _capture(assumptions, config):
+            captured.update(assumptions)
+            return None  # abstain -- this test only cares what it was HANDED
+
+        name = self._register(_capture)
+        mod = self._load(boundaries={'valuation': name})
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw(
+            a_forbidden_key='should never reach the registrant',
+            estimated_value=999999.0,
+            model='gpt-attacker-9000',
+        )
+        mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertEqual(
+            {'estimated_hours_saved', 'assumed_loaded_rate', 'currency',
+             'economic_mechanism', 'inferred_role'},
+            set(captured.keys()),
+            'PA-15: assumptions is caller-constructed from already-'
+            'validated fields; raw must never be threaded through',
+        )

@@ -1956,6 +1956,30 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         # guarantee. Same conditional-emit idiom _write_job_marker already
         # uses for failure_reason and for the assessment dict itself.
         _result["economic_mechanism"] = declared_mechanism
+
+    # Phase 54 (D-10, ROI-07). VERBATIM pass-through, deliberately WITHOUT
+    # a re-check: `attribution_fraction`/`attribution_basis` persist and
+    # ride `--metadata` under the SAME snake_case wire names Phase 51
+    # shipped for the CLI path, present only when the resolved registrant
+    # for THIS call actually returned both. Unlike `economic_mechanism`
+    # above (re-checked against its registration-time ceiling) and `basis`
+    # above (type-checked and clamped), this pair is trusted from the
+    # registrant AS-IS -- no bounds check, no travel-as-a-set enforcement
+    # here. That is a deliberately incomplete step, not an oversight: the
+    # shipped `revenue_card_valuation_fixture` already enforces both rules
+    # itself before returning either key, so a well-behaved registrant's
+    # pair is always well-formed by construction. `54-04` closes the gap
+    # this leaves open for a THIRD-PARTY (hostile) registrant -- see
+    # tests.test_phase54_revenue_valuation_boundary's hostile-registrant
+    # table, which proves this gap with `@unittest.expectedFailure` cases
+    # naming 54-04 as the plan that flips them.
+    if isinstance(derived, dict):
+        _registrant_attribution_fraction = derived.get("attribution_fraction")
+        _registrant_attribution_basis = derived.get("attribution_basis")
+        if _registrant_attribution_fraction is not None:
+            _result["attribution_fraction"] = _registrant_attribution_fraction
+        if _registrant_attribution_basis is not None:
+            _result["attribution_basis"] = _registrant_attribution_basis
     return _result
 
 
