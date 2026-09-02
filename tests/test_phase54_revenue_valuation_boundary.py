@@ -29,12 +29,15 @@ import ast
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+from tests._compat_helpers import build_shim, build_state_db, run_script, SCRIPTS_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
@@ -1294,6 +1297,333 @@ class RevenuePathFidelityTests(_ValuationBoundaryTestCase):
         )
         self.assertEqual(
             json.dumps(float(0.4)), json.dumps(record['attribution_fraction']))
+
+
+def _extract_value_omit_family(script_text):
+    """Extract `_VALUE_OMIT_FAMILY`'s member list from the live
+    hermes-report.sh text rather than retyping it, so a future edit to that
+    tuple cannot silently desync from this plan's intent. Duplicated
+    (not imported) from tests/test_phase46_metadata_envelope.py's own
+    helper of the same name, per this module's own no-shared-code-between-
+    test-fixtures convention."""
+    import re
+    match = re.search(r'_VALUE_OMIT_FAMILY\s*=\s*\(([^)]*)\)', script_text, re.DOTALL)
+    if not match:
+        return None
+    return re.findall(r"'([^']*)'", match.group(1))
+
+
+# ---------------------------------------------------------------------------
+# Task 1 (Plan 06) -- AttributionSheddingTests (T-54-05, ROI-08)
+# ---------------------------------------------------------------------------
+
+class AttributionSheddingTests(_ValuationBoundaryTestCase):
+    """T-54-05: a not-reportable job_assessment record sheds
+    attribution_fraction/attribution_basis TOGETHER with the value they
+    describe. Proven by driving the REAL hermes-report.sh outcome stage end
+    to end -- not the extracted --metadata heredoc alone (that heredoc runs
+    downstream of the branch under test and would only prove the forwarder
+    has no `kind` guard, not that the reportability gate sheds the pair).
+
+    Duplicates TestPhase38ReporterPath._run_one_outcome / _metadata_value
+    from tests/test_phase38_reporter_path.py into this module rather than
+    importing it, per this repo's fixtures-do-not-share-code-with-each-
+    other-or-with-the-producer convention (stated explicitly by that
+    module's own docstring and by test_phase46_metadata_envelope.py's own
+    duplication of the same shape)."""
+
+    def _run_one_outcome(self, sid, job_id, sidecar):
+        """Drive hermes-report.sh for one job arc; return the parsed
+        `jobs outcome` argv. Narrowed to this class's own needs relative to
+        test_phase38's copy: always exactly one sidecar record, always a
+        SUCCESS job marker, no marker-side `assessment` key."""
+        tmpdir = tempfile.mkdtemp(prefix='gsd-p54-06-outcome-')
+        try:
+            hermes_home = os.path.join(tmpdir, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            assessments_dir = os.path.join(state_dir, 'job-assessments')
+            os.makedirs(markers_dir, mode=0o700)
+            os.makedirs(assessments_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+            jobs_ledger = os.path.join(state_dir, 'revenium-jobs.ledger')
+
+            shim_home = os.path.join(tmpdir, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            jobs_log = os.path.join(tmpdir, 'jobs.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            shim = os.path.join(bin_dir, 'revenium')
+
+            build_state_db(state_db, [{
+                'id': sid,
+                'model': 'claude-sonnet-4-6',
+                'source': 'test',
+                'input_tokens': 100,
+                'output_tokens': 50,
+                'cache_read': 0,
+                'cache_write': 0,
+                'reasoning': 0,
+                'estimated_cost': '0',
+                'api_calls': 1,
+                'started_at': 1715514000.0,
+                'ended_at': 1715514000.0,
+                'billing_provider': 'anthropic',
+            }])
+
+            # Pre-seed created line so the outcome stage does not defer.
+            os.makedirs(os.path.dirname(jobs_ledger), exist_ok=True)
+            with open(jobs_ledger, 'w') as f:
+                f.write(f'JOB:{job_id}:created:1715516001.000\n')
+
+            task_marker = {
+                'muid': f'{job_id}-task', 'ts': 1715516000.5, 'sid': sid,
+                'task_type': 'code_review', 'operation_type': 'CHAT',
+            }
+            job_marker = {
+                'kind': 'job', 'ts': 1715516002.0, 'sid': sid,
+                'agentic_job_id': job_id,
+                'job_name': 'Phase 54 Plan 06 Attribution Shedding Test Job',
+                'job_type': 'booking_completion', 'status': 'SUCCESS',
+            }
+            with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
+                f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
+                f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+
+            # Phase 42 (D-10): the sidecar is the ONLY value/provenance
+            # source the outcome stage reads.
+            with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
+                f.write(json.dumps(sidecar, separators=(',', ':')) + '\n')
+
+            build_shim(shim, outcome_value_capable=True)
+
+            base_env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'INVOCATIONS_LOG': inv_log,
+                'METER_LOG': meter_log,
+                'JOBS_LOG': jobs_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+            }
+
+            rc, _ignored, output = run_script(
+                SCRIPTS_DIR / 'hermes-report.sh', base_env, inv_log
+            )
+            self.assertEqual(rc, 0, f'hermes-report.sh failed (rc={rc}): {output}')
+
+            outcome_inv = []
+            if os.path.exists(jobs_log):
+                with open(jobs_log) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if not line:
+                            continue
+                        argv = shlex.split(line)
+                        if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome':
+                            outcome_inv.append(argv)
+
+            self.assertEqual(
+                len(outcome_inv), 1,
+                f'expected exactly 1 "jobs outcome" invocation, got {len(outcome_inv)}: '
+                f'{outcome_inv!r}\nOutput: {output}'
+            )
+            return outcome_inv[0]
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _metadata_value(argv):
+        for i, tok in enumerate(argv):
+            if tok == '--metadata' and i + 1 < len(argv):
+                return argv[i + 1]
+        return None
+
+    def _revenue_sidecar(self, job_id, reportability_status, evidence_class,
+                          fraction=0.2, basis='q3 loyalty capture rate'):
+        """A job_assessment sidecar record shaped like
+        tests/test_phase38_reporter_path.py::_sidecar_record, with the
+        evidence_class/reportability_status pair overridden per case and
+        the Phase 54 attribution pair always present -- the shape
+        _build_job_assessment's success path actually produces for a
+        configured-revenue arm (RevenuePathFidelityTests proves the
+        producer side; this class proves the reporter's consumption of it)."""
+        return {
+            'kind': 'job_assessment',
+            'ts': 1715516002.5,
+            'agentic_job_id': job_id,
+            'assessment_id': f'{job_id}:0',
+            'assessment_schema_version': 1,
+            'taxonomy_version': 1,
+            'prompt_version': 1,
+            'policy_version': 1,
+            'model': 'unknown',
+            'inference_provider': '',
+            'inference_address_class': 'unset',
+            'value_low': 340.0,
+            'value_base': 400.0,
+            'value_high': 460.0,
+            'bounds_source': 'derived',
+            'currency': 'USD',
+            'estimated_value': 400.0,
+            'evaluator': 'llm',
+            'evaluator_version': 'v1',
+            'confidence': 0.5,
+            'evidence_class': evidence_class,
+            'evidence_class_authority': 'boundary:revenue_card_valuation_fixture',
+            'assumptions': {
+                'estimated_hours_saved': 2.5,
+                'assumed_loaded_rate': 150.0,
+            },
+            'economic_mechanism': 'incremental_revenue',
+            'net_value': 400.0,
+            'supplied_costs': {},
+            'cost_coverage': {
+                'included': [], 'known_zero': [], 'unknown': [],
+                'excluded': ['metered_ai_cost'],
+            },
+            'double_counting_group': job_id,
+            'reportability_status': reportability_status,
+            'attribution_fraction': fraction,
+            'attribution_basis': basis,
+        }
+
+    def test_candidate_revenue_record_sheds_attribution_pair_with_the_value(self):
+        """Behavior 1: reportability_status="candidate" -- the reportability
+        gate's own refusal branch -- sheds both attribution keys AND every
+        other value-family key."""
+        record = self._revenue_sidecar(
+            'p54-06-cand-001', 'candidate', 'CUSTOMER_CONFIGURED')
+        argv = self._run_one_outcome('p54-06-sid-cand', 'p54-06-cand-001', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('attribution_fraction', meta)
+        self.assertNotIn('attribution_basis', meta)
+        self.assertNotIn('value_low', meta)
+        self.assertNotIn('estimated_value', meta)
+
+    def test_reportable_revenue_record_ships_attribution_pair(self):
+        """Behavior 2: reportability_status="reportable" with a permitted
+        evidence_class ships both attribution keys unchanged."""
+        record = self._revenue_sidecar(
+            'p54-06-rep-001', 'reportable', 'CUSTOMER_CONFIGURED')
+        argv = self._run_one_outcome('p54-06-sid-rep', 'p54-06-rep-001', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(0.2, meta.get('attribution_fraction'))
+        self.assertEqual('q3 loyalty capture rate', meta.get('attribution_basis'))
+
+    def test_evidence_class_refused_record_sheds_attribution_pair(self):
+        """Behavior 3: a record refused by the SECOND refusal branch (a
+        recognized-but-not-reportable evidence_class, e.g.
+        MODEL_ESTIMATED_DEMO) also sheds both keys, regardless of
+        reportability_status."""
+        record = self._revenue_sidecar(
+            'p54-06-mod-001', 'reportable', 'MODEL_ESTIMATED_DEMO')
+        argv = self._run_one_outcome('p54-06-sid-mod', 'p54-06-mod-001', record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('attribution_fraction', meta)
+        self.assertNotIn('attribution_basis', meta)
+
+    def test_correction_record_still_ships_attribution_pair_unchanged(self):
+        """Behavior 4: a kind:"correction" record carrying the pair still
+        ships both, unchanged -- `_reportable` is true by construction for
+        a correction, so `_strip_value_family` is never reached on that
+        path. Shaped like
+        tests/test_phase38_reporter_path.py::_correction_sidecar_record."""
+        job_id = 'p54-06-corr-001'
+        correction = {
+            'kind': 'correction',
+            'ts': 1715516010.0,
+            'agentic_job_id': job_id,
+            'assessment_id': f'{job_id}:1',
+            'sequence': 1,
+            'assessment_schema_version': 1,
+            'prior_value_low': 340.0,
+            'prior_value_base': 400.0,
+            'prior_value_high': 460.0,
+            'prior_currency': 'USD',
+            'value_low': 100.0,
+            'value_base': 110.0,
+            'value_high': 120.0,
+            'currency': 'USD',
+            'reason': 'operator correction',
+            'attribution_fraction': 0.15,
+            'attribution_basis': '15% per policy REV-2024-03',
+        }
+        argv = self._run_one_outcome('p54-06-sid-corr', job_id, correction)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(0.15, meta.get('attribution_fraction'))
+        self.assertEqual('15% per policy REV-2024-03', meta.get('attribution_basis'))
+
+    def test_revenue_configured_install_with_report_estimates_off_is_reachable_and_sheds(self):
+        """Behavior 5: establishing reachability by reading, not assuming.
+        _resolve_reportability_status's evidence-class gate (classifier.py)
+        admits CUSTOMER_CONFIGURED -- the class a configured revenue
+        registrant's record carries -- into the resolution step; with no
+        registered evidence boundary overriding it and
+        experimentalReportEstimates NOT set to True, the inline fallback
+        rule resolves REPORTABILITY_CANDIDATE. This drives that exact case
+        through the REAL classifier (not a hand-built record) and confirms
+        the resulting record is a `candidate`, THEN feeds that same record
+        through the real reporter and confirms the shed."""
+        mod = self._load(
+            boundaries={'valuation': 'revenue_card_valuation_fixture'},
+            revenue_card={'hospitality-booking-agent': {
+                'grossPerJob': 500.0,
+                'attributionFraction': 0.2,
+                'attributionBasis': 'q3 loyalty capture rate',
+            }},
+            revenue_card_key='hospitality-booking-agent',
+        )
+        cfg = mod._llm_evaluation_config()
+        self.assertIsNot(
+            cfg.get('experimentalReportEstimates'), True,
+            'test setup invalid: experimentalReportEstimates must be off '
+            'for this to exercise the candidate case',
+        )
+        raw = self._raw()
+        validated = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(validated)
+        job_id = 'p54-06-driven-001'
+        job = {'agentic_job_id': job_id, 'job_type': 'booking_completion',
+               'status': 'SUCCESS'}
+        record = mod._build_job_assessment(job, validated, raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            'CUSTOMER_CONFIGURED', record.get('evidence_class'),
+            'test setup invalid: expected the configured-revenue arm to '
+            'produce CUSTOMER_CONFIGURED',
+        )
+        self.assertEqual(
+            'candidate', record.get('reportability_status'),
+            'the not-reportable revenue case is unreachable under this '
+            'configuration -- re-derive the test setup rather than assume',
+        )
+        self.assertIn('attribution_fraction', record)
+        self.assertIn('attribution_basis', record)
+
+        argv = self._run_one_outcome('p54-06-sid-driven', job_id, record)
+        meta = json.loads(self._metadata_value(argv))
+        self.assertNotIn('attribution_fraction', meta)
+        self.assertNotIn('attribution_basis', meta)
+        self.assertNotIn('value_low', meta)
+
+    def test_value_omit_family_contains_the_attribution_pair(self):
+        """Drift guard: extract `_VALUE_OMIT_FAMILY` from the live script
+        text rather than retyping it, so a future edit to that tuple cannot
+        silently desync from this plan's intent."""
+        script_text = HERMES_REPORT_SH.read_text()
+        family = _extract_value_omit_family(script_text)
+        self.assertIsNotNone(
+            family,
+            '_VALUE_OMIT_FAMILY anchor moved in hermes-report.sh -- update '
+            'the extraction before trusting this test',
+        )
+        self.assertIn('attribution_fraction', family)
+        self.assertIn('attribution_basis', family)
 
 
 # ---------------------------------------------------------------------------

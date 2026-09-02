@@ -3284,8 +3284,25 @@ _reportable = _is_correction or found.get('reportability_status') == _REPORTABIL
 # make a null ROI unreadable (D-07's second sentence) -- they ship
 # unconditionally via their own --metadata forwarders further below,
 # regardless of reportability_status.
+#
+# Phase 54 (D-10/T-54-05, ROI-08): 'attribution_fraction' and
+# 'attribution_basis' join this tuple because, as of this phase, a
+# job_assessment record (not only a kind:"correction" record) can carry the
+# pair -- _build_job_assessment's success-path record.update() emits both
+# when a configured revenue registrant's attribution was accepted. They join
+# for the same reason net_value did above and the same reason the pair
+# already sits in _VALUE_FAMILY_META_KEYS' tier-1 shed further below in this
+# file: a surviving value whose attribution has vanished is the failure
+# worth preventing, and a surviving ATTRIBUTION whose value has vanished is
+# that same failure inverted -- a fraction and a basis attributing a number
+# that never reached the wire is exactly as misleading as a number with no
+# caveat. A kind:"correction" record is unaffected: `_reportable` is true by
+# construction for it (see `_is_correction` above), so this branch -- and
+# `_strip_value_family` -- is never reached on that path, and both keys
+# still ride to --metadata via the unconditional forwarder further below.
 _VALUE_OMIT_FAMILY = ('value_low', 'value_base', 'value_high', 'bounds_source',
-                      'currency', 'estimated_value', 'assumptions', 'net_value')
+                      'currency', 'estimated_value', 'assumptions', 'net_value',
+                      'attribution_fraction', 'attribution_basis')
 
 
 def _strip_value_family(rec):
