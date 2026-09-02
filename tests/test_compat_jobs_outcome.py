@@ -267,10 +267,18 @@ _INFERENCE_PROVIDER_CHARS = 32
 _EVALUATOR_VERSION_CHARS = 16
 _BOUNDS_SOURCE_CHARS = 16
 _SOURCE_CHARS = 61
-# The longest of the 9 real _EVIDENCE_CLASSES literals (hermes-report.sh) --
-# evidence_class cannot be emoji-padded (see allow-list note above), so this
-# is the most this field can legitimately contribute.
-_EVIDENCE_CLASS = 'QUASI_EXPERIMENTAL_IMPACT'
+# The longest of the literals this field may legitimately hold ON A RECORD
+# THAT SHIPS A VALUE -- evidence_class cannot be emoji-padded (see allow-list
+# note above), so this is the most it can contribute to the payload size.
+#
+# Phase 53 (ROI-01) narrowed which literal that is. This was
+# QUASI_EXPERIMENTAL_IMPACT, the longest of all 9 -- but that is a
+# causal-impact label the value gate refuses, so the reporter stripped the
+# value family, the record fell BELOW the ceiling, and the truncation path
+# this fixture exists to exercise stopped running at all. CUSTOMER_CONFIGURED
+# is the longest of the five classes that may carry a value (19 chars vs 24),
+# which costs a little padding headroom and buys back the whole value family.
+_EVIDENCE_CLASS = 'CUSTOMER_CONFIGURED'
 
 
 def _build_over_ceiling_sidecar_record(job_id):

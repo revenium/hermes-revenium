@@ -68,6 +68,10 @@ the runtime work. `SKILL.md` is only a halt-check backstop. The README's
   a live tenant: LIVE-02 through LIVE-06 plus two arms added in the open, with
   one criterion recorded NOT CONFIRMED live and its finding stated with its
   limit.
+- **[ROI read-surface ask](roi-read-surface-ask.md)** — the tracked, standing
+  ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
+  on `jobs roi`, and the Phase 53 gate this skill shipped instead of waiting
+  on it.
 
 ## Inside the skill bundle
 

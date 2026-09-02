@@ -415,7 +415,12 @@ def _mechanism_sidecar_record(job_id, economic_mechanism):
         'evaluator': 'llm',
         'evaluator_version': 'v1',
         'confidence': 0.8,
-        'evidence_class': 'MODEL_ESTIMATED_DEMO',
+        # Phase 53 (ROI-01): a value-shipping helper needs a class the gate
+        # permits. MODEL_ESTIMATED_DEMO + reportable is a pairing production
+        # can no longer emit -- the reporter strips the value family from it
+        # while keeping provenance, which is exactly what this helper's
+        # callers are NOT trying to exercise.
+        'evidence_class': 'CUSTOMER_CONFIGURED',
         'assumptions': {
             'estimated_hours_saved': 1.0,
             'assumed_loaded_rate': 110.0,
@@ -928,14 +933,23 @@ class CoverageOrderTests(unittest.TestCase):
 
 
 def _cost_sidecar_record(job_id, reportability_status='reportable',
-                          evidence_class='MODEL_ESTIMATED_DEMO', **overrides):
+                          evidence_class='CUSTOMER_CONFIGURED', **overrides):
     """Minimal job-assessments sidecar record for driving hermes-report.sh's
     --metadata forwarder end to end, with net_value/supplied_costs/
     cost_coverage as the fields under test. Mirrors this module's own
     _mechanism_sidecar_record (itself mirroring
     tests/test_phase38_reporter_path.py's _sidecar_record) -- not imported
     across test modules, per this repo's per-file self-containment
-    convention."""
+    convention.
+
+    Phase 53 (ROI-01): the default evidence_class moved from
+    MODEL_ESTIMATED_DEMO to CUSTOMER_CONFIGURED. This helper's whole
+    purpose is driving a VALUE end to end, and after the class gate a
+    model-estimated record can never carry one -- the old default paired
+    reportable with a class that forbids it, describing a record
+    production cannot emit. Tests here that specifically want the
+    withheld path pass evidence_class='MODEL_ESTIMATED_DEMO' explicitly.
+    """
     record = {
         'kind': 'job_assessment',
         'ts': 1715516002.5,

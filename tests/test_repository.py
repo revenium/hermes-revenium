@@ -295,6 +295,14 @@ class RepositoryTests(unittest.TestCase):
             # record, and `.planning/` is gitignored, so an unpinned copy
             # can vanish the way the v1.3 and v1.4 closeouts did.
             ROOT / 'docs' / 'live-tenant-proof.md',
+            # Phase 53 (ROI-04) — the tracked, standing ask to the Revenium
+            # API team for evidence_class/evaluator/confidence on
+            # `jobs roi`. Pinned for the same reason as the closeout records
+            # above: this is exactly the kind of record that was lost before
+            # (docs/internal/ and .planning/ are both gitignored), and this
+            # one lives in the tracked docs/ tree specifically so it can't
+            # recur.
+            ROOT / 'docs' / 'roi-read-surface-ask.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -453,6 +461,11 @@ class RepositoryTests(unittest.TestCase):
             # The README's hero banner; pinned so deleting it fails the suite instead
             # of silently rendering a broken image on GitHub.
             ROOT / 'assets' / 'hermes-revenium.png',
+            # Phase 53-04 (gap closure on 53-03's finding) — the re-sized
+            # _EVAL_MAX_TOKENS regression guard and the finish_reason
+            # truncation-diagnostic's never-raises contract.
+            ROOT / 'tests' / 'test_phase53_evaluator_token_budget.py',
+            ROOT / 'tests' / 'test_phase53_reportable_class_gate.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

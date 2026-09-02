@@ -132,8 +132,14 @@ class BudgetTests(unittest.TestCase):
         self._run(rec)
         self.assertEqual(1, len(rec.calls))
         kw = rec.calls[0]
-        self.assertEqual(256, kw['max_tokens'], 'sized in 37-RESEARCH.md, not inherited')
-        self.assertEqual(15.0, kw['timeout'])
+        # Phase 53-04: re-sized from 256 to 512 from measured evaluator
+        # responses (see classifier.py's _EVAL_MAX_TOKENS comment for the
+        # evidence). Asserted against the module constant, not a hardcoded
+        # literal, so this pin cannot drift from the shipped value the way
+        # the stale "256" copy here did.
+        self.assertEqual(self.c._EVAL_MAX_TOKENS, kw['max_tokens'],
+                          "must match the module's own sized constant")
+        self.assertEqual(self.c._EVAL_TIMEOUT_SECONDS, kw['timeout'])
 
     def test_no_task_kwarg(self):
         """ROI-07. The absence of task= is what keeps the call on the user's

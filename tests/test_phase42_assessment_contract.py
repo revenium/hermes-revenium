@@ -411,7 +411,19 @@ def _tracer_assessment_record(job_id, **overrides):
         # production cannot produce -- and the reporter now refuses an
         # absent evidence_class on a job_assessment, which is what
         # surfaced the gap.
-        'evidence_class': 'MODEL_ESTIMATED_DEMO',
+        #
+        # Phase 53 (ROI-01): the default moved from MODEL_ESTIMATED_DEMO to
+        # CUSTOMER_CONFIGURED, for the same reason the identical helpers in
+        # tests/test_phase44_economic_mechanisms.py did. This helper's whole
+        # job is driving a VALUE down the outcome path, and after the
+        # evidence-class gate a model-estimated record can never carry one --
+        # the old default paired reportability_status 'reportable' with the
+        # one class the gate exists to refuse, describing a record production
+        # cannot emit. Tests below that want the WITHHELD path get it from
+        # their own condition (reversed bounds, negative low, unrecognized
+        # schema, absent sidecar), not from a class that short-circuits the
+        # gate before those conditions are ever reached.
+        'evidence_class': 'CUSTOMER_CONFIGURED',
         'ts': 1715516002.5,
         'agentic_job_id': job_id,
         'assessment_id': f'{job_id}:0',

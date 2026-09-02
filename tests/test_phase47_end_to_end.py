@@ -588,7 +588,7 @@ class TestPhase47EndToEnd(unittest.TestCase):
         'confidence': 0.7,
     }
 
-    def test_valued_happy_path_ships_outcome_value_and_model_estimated_demo(self):
+    def test_valued_happy_path_withholds_value_but_keeps_provenance(self):
         """D-07 path 1: a SUCCESS arc, classified and evaluated by the REAL
         classifier with only call_llm stubbed, produces a job-assessment
         sidecar that resolves to MODEL_ESTIMATED_DEMO / reportable, and a
@@ -618,27 +618,39 @@ class TestPhase47EndToEnd(unittest.TestCase):
         sidecar = json.loads(sidecar_lines[0])
         self.assertIn('value_low', sidecar, sidecar)
 
-        self.assertIn('--outcome-value', argv, argv)
-        value_out = argv[argv.index('--outcome-value') + 1]
-        self.assertEqual(
-            value_out, str(sidecar['value_low']),
-            '--outcome-value must equal the sidecar\'s OWN value_low bound, '
-            f'sidecar={sidecar!r} argv={argv!r}',
-        )
-        self.assertIn('--outcome-currency', argv, argv)
-        self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
+        # Phase 53 (ROI-01) INVERTED the second half of this test, and the
+        # inversion is the point rather than a regression.
+        #
+        # Before: the naked-LLM valued happy path shipped --outcome-value with
+        # evidence_class MODEL_ESTIMATED_DEMO. That is exactly the pairing the
+        # class gate now refuses -- `revenium jobs roi` displays a value with no
+        # provenance, so a model-estimated number there is indistinguishable
+        # from a measured one.
+        #
+        # After: the LOCAL sidecar still computes and keeps the value (asserted
+        # above -- value_low is present), and the WIRE carries provenance
+        # without the money. This test now proves the gate end to end, through
+        # the real classifier and the real reporter, which is a stronger thing
+        # to own than the old assertion was.
+        self.assertNotIn('--outcome-value', argv, argv)
+        self.assertNotIn('--outcome-currency', argv, argv)
 
         metadata_raw = _metadata_of(argv)
         self.assertIsNotNone(metadata_raw, argv)
         meta = json.loads(metadata_raw)
         self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO', meta)
-        self.assertEqual(meta.get('reportability_status'), 'reportable', meta)
+        self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
+        # Provenance survives the withholding -- Phase 43's rule that
+        # withholding the VALUE must not withhold the FACT that an estimate
+        # happened. An auditor still sees a model produced a judgment here.
         self.assertEqual(meta.get('evaluator'), 'llm', meta)
         self.assertIn('evaluator_version', meta, meta)
         self.assertEqual(meta.get('model'), 'claude-sonnet-4-6', meta)
-        self.assertIn('net_value', meta, meta)
         self.assertIn('confidence', meta, meta)
-        self.assertIn('assumptions', meta, meta)
+        # ...and the value family is gone, all of it, not just the CLI scalars.
+        for k in ('value_low', 'value_base', 'value_high', 'estimated_value',
+                  'net_value', 'bounds_source', 'assumptions'):
+            self.assertNotIn(k, meta, f'{k} rode out on a refused record: {meta!r}')
 
     def test_no_transcript_text_reaches_any_captured_argv(self):
         """T-47-03 (EGV-20 posture, carried into the produced-artifact
@@ -897,11 +909,30 @@ class TestPhase47EndToEnd(unittest.TestCase):
         metadata_raw = _metadata_of(argv)
         self.assertIsNotNone(metadata_raw, argv)
         meta = json.loads(metadata_raw)
-        self.assertIn('net_value', meta, meta)
-        self.assertEqual(meta['net_value'], sidecar['net_value'], meta)
-        self.assertIn('value_low', meta, meta)
-        self.assertIn('value_base', meta, meta)
-        self.assertIn('value_high', meta, meta)
+
+        # Phase 53 (ROI-01): EGV-17's actual concern is preserved, and it is
+        # worth being precise about what moved and what did not.
+        #
+        # EGV-17 exists so a negative result cannot VANISH -- "a negative
+        # result that vanished from the record would look identical to a job
+        # that was never valued". That property is untouched and is asserted
+        # twice above: the sidecar carries the negative net_value, computed
+        # from its own operands, and the outcome report is still made (exactly
+        # one invocation, not suppressed).
+        #
+        # What Phase 53 changed is narrower: this arc's evidence_class is
+        # MODEL_ESTIMATED_DEMO (no valuation boundary is configured here), so
+        # the value family is withheld from the WIRE. The negative number is
+        # not clamped, not zeroed and not dropped -- it lives on the sidecar,
+        # and the wire says plainly that an estimate happened and was withheld.
+        # A reader can still tell this job from one that was never valued,
+        # which is the substitution EGV-17 prevents.
+        self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO', meta)
+        self.assertEqual(meta.get('evaluator'), 'llm', meta)
+        for k in ('net_value', 'value_low', 'value_base', 'value_high',
+                  'estimated_value'):
+            self.assertNotIn(k, meta, f'{k} rode out on a refused record: {meta!r}')
         self.assertIn('supplied_costs', meta, meta)
         self.assertIn('cost_coverage', meta, meta)
 

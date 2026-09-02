@@ -341,12 +341,59 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
 
 
 # Phase 37: the evaluator call's own budgets. NOT inherited from the job path.
-# Sized from 37-RESEARCH.md, which measured a worst-case single-job assessment at
-# ~149 tokens under the phase-36 clamps (basis 200, inferred_role 60). 256 gives
-# ~1.7x margin. The timeout sits under _infer_jobs_via_llm's 20.0s because this
-# call runs AFTER job inference has already spent its budget, and the turn should
+# Originally sized from 37-RESEARCH.md at ~149 tokens worst-case (basis 200,
+# inferred_role 60) under the phase-36 clamps, with 256 as ~1.7x margin. That
+# basis predates Phase 44 (EGV-05), which replaced the flat field list with
+# three labelled mechanism branches (_mechanism_instruction_block) -- the
+# PROMPT grew, and 53-03 (2026-09-01) circumstantially suspected the
+# COMPLETION cap was now too tight, from an 88% live rejection rate on
+# `confidence outside [0,1]: None`.
+#
+# Phase 53-04 (2026-09-01) MEASURED this directly rather than resizing from
+# that suspicion: 8 real evaluator calls (5 replayed against actual 53-03
+# session transcripts pulled from state.db, 3 against fresh synthetic
+# transcripts shaped to probe each of the three EVALUATOR_MECHANISMS
+# branches), each run BOTH at the shipped cap (256) and at a generous one
+# (800). Result: finish_reason was "stop" in all 8 at BOTH caps, and
+# completion_tokens was IDENTICAL between the capped and uncapped run for
+# every case that matched (69-86 tokens observed; the single case that
+# differed did so by wording, not length, at 69 vs 70 tokens). The model
+# never once hit the 256-token ceiling. Confidence was still missing in 7 of
+# the 8 responses anyway -- at 86 tokens against a 256-token budget, nowhere
+# near the cap. **The 53-03 truncation theory does not hold under direct
+# measurement**: this is the model omitting a trailer field it was never
+# short on room to write, not a token-budget defect. See 53-04-SUMMARY.md
+# for the full transcript-level evidence; this comment carries the number,
+# not the argument.
+#
+# The cap is still re-sized here, per 53-04's own instruction to act on the
+# measurement rather than leave a stale, disproven basis in place -- but as
+# a margin correction, not a promised fix for the confidence-omission rate.
+# Measured worst COMPLETE response: 86 tokens (labor_substitution, the
+# shared shape with augmentation_capacity_expansion -- the two branches ask
+# for the identical field set, so the worst case is either of them, never
+# the shorter newly_enabled_work branch, which omits the role/hours/rate/
+# currency fields entirely). augmentation_capacity_expansion's mechanism
+# name is 13 characters longer than labor_substitution's ("augmentation_
+# capacity_expansion" vs "labor_substitution"), worth roughly 4 more tokens
+# echoed back. The wild sidecar record with the single longest observed
+# `basis` text (147 chars vs this measurement's ~110-char median) adds
+# roughly another 10-15 tokens of headroom nobody has yet produced a
+# complete response for. 512 -- not a fresh guess, but the SAME budget
+# already shipped and proven for _infer_jobs_via_llm's structurally similar
+# one-shot JSON-generation call (a strictly larger array-of-jobs output) --
+# gives ~5x margin over the measured worst case, more than the original
+# ~1.7x, without inventing a new number for this codebase to carry.
+#
+# The timeout is NOT moved. Latency is bound by tokens actually generated,
+# not by the ceiling: the capped and uncapped runs above produced
+# statistically the same completion_tokens and, observed informally during
+# the same measurement pass, the same response latency -- raising the cap
+# does not make the model write more, so 15.0s still holds. It stays under
+# _infer_jobs_via_llm's 20.0s for the original reason too: this call runs
+# AFTER job inference has already spent its own budget, and the turn should
 # not pay both in full.
-_EVAL_MAX_TOKENS = 256
+_EVAL_MAX_TOKENS = 512
 _EVAL_TIMEOUT_SECONDS = 15.0
 # Same 6000-char cap as _build_job_inference_prompt's transcript_preview. One
 # number, not two, so they cannot drift apart.
@@ -599,8 +646,10 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
 
     Mirror of _infer_jobs_via_llm with these deviations:
     - Returns None (abstain) rather than [] when call_llm is None.
-    - max_tokens=256, timeout=15.0 -- this call's OWN budgets, sized in
-      37-RESEARCH.md, not inherited from the job path.
+    - max_tokens=_EVAL_MAX_TOKENS (512), timeout=_EVAL_TIMEOUT_SECONDS (15.0)
+      -- this call's OWN budgets, not inherited from the job path. See the
+      constants' own comment (Phase 37, re-measured Phase 53-04) for the
+      sizing evidence.
     - Accepts a bare `null` response as a deliberate abstention, not an error.
     - CRITICALLY, and for the same reason as _infer_jobs_via_llm: NO `task=`
       kwarg. That is what keeps the call on the user's configured provider and
@@ -636,6 +685,23 @@ async def _evaluate_outcome_via_llm(job: dict, transcript: str, config: dict):
             raw = response.choices[0].message.content
         except AttributeError:
             raw = response["choices"][0]["message"]["content"]
+        # Phase 53-04 (Task 3, gap closure on 53-03's finding): diagnostic
+        # ONLY -- see _resolve_finish_reason's own docstring. 53-03 spent 85
+        # live sessions unable to tell a truncated response apart from a
+        # genuinely malformed one, because nothing at this call site ever
+        # looked at finish_reason; both collapsed into the same
+        # _EVAL_INVALID / rejected signature downstream. This branch changes
+        # NEITHER `raw` nor this function's return value -- a response
+        # object with no finish_reason at all falls through
+        # _resolve_finish_reason's own sentinel and this `if` is simply
+        # False, identical to before this change existed.
+        if _resolve_finish_reason(response) == _FINISH_REASON_LENGTH:
+            logger.warning(
+                "revenium-classifier: outcome evaluation response truncated "
+                "(finish_reason=length) for job=%s -- distinct from a "
+                "malformed response, see _EVAL_MAX_TOKENS",
+                (job or {}).get("agentic_job_id", ""),
+            )
         parsed = _parse_assessment_object(raw or "")
         if isinstance(parsed, dict):
             # Phase 45 (EGV-08, D-10/PA-07): unconditional -- overwrites
@@ -1204,6 +1270,56 @@ assert len(_DECLARABLE_EVIDENCE_CLASSES) == 6, (
     f"_DECLARABLE_EVIDENCE_CLASSES has {len(_DECLARABLE_EVIDENCE_CLASSES)} "
     "members, not the expected 6 -- EVIDENCE_CLASSES or the three refused "
     "causal-impact labels have drifted out of sync with each other"
+)
+
+
+# Phase 53 (ROI-01, D-02/D-04): which evidence classes may carry a VALUE onto
+# the wire. DERIVED from the declarable set minus the one forced constant --
+# never hand-listed -- so it cannot drift from the vocabulary the way a third
+# hand-synced list would.
+#
+# WHY MODEL_ESTIMATED_DEMO IS REFUSED, and why that is not a ranking:
+# `revenium jobs roi <id>` surfaces no evidence_class, no evaluator and no
+# confidence, in either its JSON or its table output -- established by live
+# verification and recorded in docs/claim-distinctions-and-evidence-boundaries.md.
+# An estimate displayed there is visually indistinguishable from a measurement.
+# So a value may reach that surface only when something other than a model
+# constituted it.
+#
+# This is a PARTITION, not a confidence ladder. EGV-10 (D-01) forbids ranking
+# these labels and nothing here does: the five permitted members are not claimed
+# to be stronger than each other or than the refused one. The single property
+# that separates them is whether a model, and only a model, is the basis. That
+# is a membership question, not an ordering one -- no sort, no comparison, no
+# index.
+#
+# NOT operator-widenable, on purpose (D-02). There is deliberately no config key
+# that admits MODEL_ESTIMATED_DEMO here: a value-reporting gate an operator can
+# configure away is not a gate. Widening this requires a code change and review,
+# the same discipline Phase 43 and Phase 50 chose over policy wherever both were
+# available.
+_REPORTABLE_EVIDENCE_CLASSES = _DECLARABLE_EVIDENCE_CLASSES - {
+    EVIDENCE_CLASS_MODEL_ESTIMATED,
+}
+assert (
+    # .issubset()/!= rather than `<`, for the same reason the declarable-set
+    # assert above spells it that way: LabelTests' static guard flags ordering
+    # operators applied to label constants.
+    _REPORTABLE_EVIDENCE_CLASSES.issubset(_DECLARABLE_EVIDENCE_CLASSES)
+    and _REPORTABLE_EVIDENCE_CLASSES != _DECLARABLE_EVIDENCE_CLASSES
+), (
+    "_REPORTABLE_EVIDENCE_CLASSES must be a STRICT subset of "
+    "_DECLARABLE_EVIDENCE_CLASSES -- refusing the forced model-estimate "
+    "constant is the whole point of this constant existing separately"
+)
+assert EVIDENCE_CLASS_MODEL_ESTIMATED not in _REPORTABLE_EVIDENCE_CLASSES, (
+    "MODEL_ESTIMATED_DEMO is a member of _REPORTABLE_EVIDENCE_CLASSES -- the "
+    "one label this gate exists to refuse has drifted back into it"
+)
+assert len(_REPORTABLE_EVIDENCE_CLASSES) == 5, (
+    f"_REPORTABLE_EVIDENCE_CLASSES has {len(_REPORTABLE_EVIDENCE_CLASSES)} "
+    "members, not the expected 5 -- the declarable set or the forced constant "
+    "have drifted out of sync with each other"
 )
 
 
@@ -2175,9 +2291,60 @@ def _resolve_served_model(response) -> str:
         return PROVENANCE_MODEL_UNKNOWN
 
 
+# Phase 53-04 (Task 3, gap closure on 53-03's finding): the sentinel
+# _resolve_finish_reason falls back to when finish_reason is genuinely
+# absent, malformed, or the access itself raises. NOT one of the API's own
+# literal values ("stop", "length", "tool_calls", "content_filter",
+# "function_call"), so it can never collide with a real provider value.
+_FINISH_REASON_UNKNOWN = "unknown"
+# The one value this module's diagnostic actually branches on -- the
+# OpenAI-shaped literal a provider returns when generation was cut off by
+# max_tokens rather than stopping on its own.
+_FINISH_REASON_LENGTH = "length"
+
+
+def _resolve_finish_reason(response) -> str:
+    """Return response.choices[0].finish_reason, or the unknown sentinel.
+
+    DIAGNOSTIC ONLY (D-04/ROI-08 fail-open, same footing as
+    _resolve_served_model immediately above): this function's return value
+    is never fed into a control-flow decision anywhere outside a single
+    logging branch at its one call site (_evaluate_outcome_via_llm). It
+    does not change what that function returns, does not touch `raw`, and
+    is never attached to a persisted record.
+
+    Mirrors _resolve_served_model's exact shape -- dual object/dict access
+    (response.choices[0].finish_reason first, then
+    response["choices"][0]["finish_reason"] for a dict-shaped response),
+    the whole body inside one try/except returning the sentinel, so a
+    response object missing this attribute, or one where access itself
+    raises, falls straight through to the sentinel and changes nothing
+    about today's behavior. A response object that lacks finish_reason
+    entirely (a third-party evaluator, a stub, a future SDK shape) is
+    exactly the case this must survive without raising.
+    """
+    try:
+        reason = None
+        try:
+            reason = response.choices[0].finish_reason
+        except (AttributeError, IndexError, TypeError, KeyError):
+            if isinstance(response, dict):
+                try:
+                    reason = response["choices"][0]["finish_reason"]
+                except (KeyError, IndexError, TypeError):
+                    reason = None
+        if isinstance(reason, str):
+            reason = reason.strip()
+            if reason:
+                return reason
+        return _FINISH_REASON_UNKNOWN
+    except Exception:
+        return _FINISH_REASON_UNKNOWN
+
+
 def _resolve_reportability_status(
     cfg: "dict | None", abstained: bool, job: "dict | None" = None,
-    paths: "_Paths | None" = None,
+    paths: "_Paths | None" = None, evidence_class: "str | None" = None,
 ) -> str:
     """Resolve EGV-18's reportability_status for one JobAssessment record.
 
@@ -2233,6 +2400,28 @@ def _resolve_reportability_status(
     # Load-bearing position (PA-18, D-05): unconditional, before the
     # resolution step below runs at all. Do not move this check.
     if abstained:
+        return REPORTABILITY_CANDIDATE
+
+    # Phase 53 (ROI-01, D-01/D-04): the evidence-class gate. SAME LOAD-BEARING
+    # POSITION as the abstention check above and for the same reason -- it runs
+    # unconditionally, before any registered implementation is consulted, so a
+    # registrant cannot return its way past it. A confirmation workflow may
+    # decide that a REAL estimate is reportable; it may not decide that a
+    # MODEL-ESTIMATED one is. Do not move this below the resolution step.
+    #
+    # Fail-CLOSED on an unknown class, deliberately, and note this is the
+    # opposite of this module's usual fail-open posture: everywhere else a
+    # missing input degrades to "no enforcement", but here degrading means
+    # shipping a value onto a surface that cannot say where it came from. The
+    # safe direction is to withhold. `candidate` still ships full provenance --
+    # nothing is lost but the value itself.
+    #
+    # evidence_class=None means a caller did not supply one. That is also
+    # refused rather than waved through: the sole production call site threads
+    # it, so None reaching here means either a test or a future caller that has
+    # not been taught the gate, and neither should obtain `reportable` by
+    # omission.
+    if evidence_class not in _REPORTABLE_EVIDENCE_CLASSES:
         return REPORTABILITY_CANDIDATE
 
     impl_name = "config_opt_in"
@@ -2725,6 +2914,11 @@ def _build_job_assessment(
             "reportability_status": _resolve_reportability_status(
                 cfg, bool(abstention_reason), job={"agentic_job_id": job_id, "job_type": job_type},
                 paths=paths,
+                # Phase 53 (ROI-01): the class the precedence walk actually
+                # resolved above (:2628), the same value persisted as this
+                # record's evidence_class -- never re-derived, so the gate and
+                # the record can never disagree about what class this is.
+                evidence_class=_evidence_class,
             ),
         }
 

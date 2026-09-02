@@ -137,9 +137,20 @@ class ResolverTests(unittest.TestCase):
 
     def test_literal_true_config_and_not_abstained_is_reportable(self):
         """Behavior 1: cfg {"experimentalReportEstimates": True}, abstained
-        False -> "reportable"."""
+        False -> "reportable".
+
+        Phase 53 (ROI-01) added a second, independent precondition: the
+        record's evidence_class must be one the class gate permits. This test
+        still proves exactly what it always proved -- that a literal-True
+        config on a non-abstained record yields reportable -- so the
+        assertion is unchanged. The evidence_class argument is added to the
+        SETUP only, supplying what the sole production call site has always
+        supplied, so the config rule this test is about is still the thing
+        being exercised rather than being masked by the new gate.
+        """
         status = self.mod._resolve_reportability_status(
-            {'experimentalReportEstimates': True}, False)
+            {'experimentalReportEstimates': True}, False,
+            evidence_class='CUSTOMER_CONFIGURED')
         self.assertEqual(status, self.mod.REPORTABILITY_REPORTABLE)
 
     def test_empty_config_is_candidate(self):
@@ -982,7 +993,25 @@ def _extract_frozenset_assignment_fragment(text, target_name):
     `NAME = frozenset({...})` assignment of string constants.
     """
     anchor = f'{target_name} = frozenset({{'
-    occurrences = [i for i in range(len(text)) if text.startswith(anchor, i)]
+    occurrences = [
+        i for i in range(len(text))
+        if text.startswith(anchor, i)
+        # WORD BOUNDARY, not line start. The bare substring anchor also matched
+        # any assignment whose name merely ENDS with target_name --
+        # `_REPORTABLE_EVIDENCE_CLASSES = frozenset({` contains
+        # `_EVIDENCE_CLASSES = frozenset({` -- so Phase 53 adding that sibling
+        # constant to hermes-report.sh made the anchor match twice and this
+        # extractor return None, failing the drift guard for a reason unrelated
+        # to drift.
+        #
+        # A line-start anchor (`\n` + name) was tried first and was WRONG: it
+        # missed `_ECONOMIC_MECHANISMS`, which is INDENTED inside a heredoc, and
+        # broke test_phase44's mechanism drift guard instead. Requiring the
+        # preceding character to be a non-identifier one fixes the collision
+        # without caring about indentation, which is the property actually
+        # wanted. This TIGHTENS the guard; it does not loosen it.
+        and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == '_'))
+    ]
     if len(occurrences) != 1:
         return None
     start = occurrences[0]

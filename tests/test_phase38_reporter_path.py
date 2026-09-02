@@ -177,11 +177,23 @@ def _sidecar_record(job_id, **overrides):
         "double_counting_group": "g38-sid-002",
         # Phase 43 (EGV-18, D-05/D-09): classifier.py's _build_job_assessment
         # populates this UNCONDITIONALLY on every record it builds (Phase 42
-        # onward). Default here is the reportable literal so every existing
-        # test in this file -- written before hermes-report.sh read this
-        # field at all -- keeps describing a record that ships its value,
-        # unless a test explicitly overrides it to exercise the gate.
-        "reportability_status": "reportable",
+        # onward).
+        #
+        # Phase 53 (ROI-01) CHANGED THIS DEFAULT from "reportable" to
+        # "candidate", and the reason matters more than the value. This
+        # fixture's evidence_class is MODEL_ESTIMATED_DEMO (above), and after
+        # Phase 53's class gate a MODEL_ESTIMATED_DEMO record can NEVER be
+        # reportable -- production resolves it to candidate. The old pairing
+        # described a record production cannot emit, which is precisely what
+        # FixtureFidelityTests exists to catch; it caught this one.
+        #
+        # A test that needs a value-shipping record must now override BOTH
+        # keys to a COHERENT pair, e.g.
+        #   _sidecar_record(jid, reportability_status="reportable",
+        #                   evidence_class="CUSTOMER_CONFIGURED")
+        # Overriding reportability_status alone re-creates the impossible
+        # record this change removed.
+        "reportability_status": "candidate",
     }
     record.update(overrides)
     return record
@@ -422,7 +434,13 @@ class TestPhase38ReporterPath(unittest.TestCase):
         provenance fields."""
         argv = self._run_one_outcome(
             'o38-sid-001', 'o38-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
-            sidecar=_sidecar_record('o38-job-001'),
+            sidecar=_sidecar_record(
+                'o38-job-001',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         self.assertEqual(argv[argv.index('--outcome-type') + 1], 'CONVERTED')
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
@@ -430,7 +448,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
 
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta.get('source'), 'test')
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
         self.assertEqual(meta.get('evaluator'), 'llm')
         self.assertEqual(meta.get('evaluator_version'), 'v1')
         self.assertEqual(meta.get('confidence'), 0.8)
@@ -497,7 +515,13 @@ class TestPhase38ReporterPath(unittest.TestCase):
         itself (Task 2, Test 1)."""
         argv = self._run_one_outcome(
             'r43-sid-001', 'r43-job-001', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
-            sidecar=_sidecar_record('r43-job-001'),
+            sidecar=_sidecar_record(
+                'r43-job-001',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
@@ -510,7 +534,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             meta.get('assumptions'),
             {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
         )
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
         self.assertEqual(meta.get('reportability_status'), 'reportable')
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
@@ -713,12 +737,18 @@ class TestPhase38ReporterPath(unittest.TestCase):
         and the nominal case."""
         argv = self._run_one_outcome(
             'ec43-sid-004', 'ec43-job-004', 'SUCCESS', assessment=ASSESSMENT_FIXTURE,
-            sidecar=_sidecar_record('ec43-job-004'),
+            sidecar=_sidecar_record(
+                'ec43-job-004',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
 
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
@@ -737,7 +767,13 @@ class TestPhase38ReporterPath(unittest.TestCase):
         shape, not the marker's frozen 9 keys)."""
         argv = self._run_one_outcome(
             'g38-sid-002', 'assessment-golden-job', 'SUCCESS',
-            sidecar=_sidecar_record('assessment-golden-job'),
+            sidecar=_sidecar_record(
+                'assessment-golden-job',
+                # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # reportable is no longer a record production can emit.
+                reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
+                evidence_class_authority='valuation'),
         )
         # CF-1: the genuine call site (kept on one line so it is grep-able
         # as a pair with the golden's own filename, closing the gap plan
@@ -1590,15 +1626,20 @@ class TestPhase38MultiTick(unittest.TestCase):
             )
             argv2 = outcome_inv2[0]
 
-            # D-08's meaning survives the deferral too: --outcome-value
-            # carries the LOW bound the sidecar held before tick 1.
-            self.assertIn(
-                '--outcome-value', argv2, f'expected --outcome-value in tick 2 argv: {argv2}',
-            )
-            self.assertEqual(
-                argv2[argv2.index('--outcome-value') + 1], str(on_disk_before['value_low']),
-                'the LOW bound must survive the deferral onto --outcome-value unchanged',
-            )
+            # Phase 53 (ROI-01): this record is built by the REAL constructor
+            # (_build_real_sidecar_record), so its evidence_class is the forced
+            # MODEL_ESTIMATED_DEMO of the naked-LLM path -- and the class gate
+            # withholds the value family from the wire for exactly that class.
+            #
+            # D-08's meaning is UNCHANGED and still asserted, just one level in:
+            # the sidecar on disk still holds the low bound across the deferral
+            # (`on_disk_before['value_low']` is compared to the post-retry
+            # on-disk record below). What this test is actually for -- that a
+            # deferred create followed by a retry does not lose or mutate the
+            # record -- is proven by the provenance sweep that follows, which is
+            # the stronger half and is untouched.
+            self.assertNotIn('--outcome-value', argv2, argv2)
+            self.assertNotIn('--outcome-currency', argv2, argv2)
 
             meta2 = json.loads(_metadata_of(argv2))
             for field in provenance_fields:
@@ -1895,7 +1936,14 @@ class TestPhase38Canary(unittest.TestCase):
     _P38_TRUNC_EVALUATOR_VERSION_CHARS = 16
     _P38_TRUNC_BOUNDS_SOURCE_CHARS = 16
     _P38_TRUNC_SOURCE_CHARS = 61
-    _P38_TRUNC_EVIDENCE_CLASS = 'QUASI_EXPERIMENTAL_IMPACT'
+    # Phase 53 (ROI-01): was QUASI_EXPERIMENTAL_IMPACT. That label is one of
+    # the three causal-impact classes -- undeclarable since Phase 50 and now
+    # refused by the value gate, so the reporter stripped the value family
+    # from this record, shrank it below the metadata ceiling, and the
+    # truncation path this canary exists to watch stopped firing at all.
+    # This sweep is about SIZE and truncation visibility, not evidence, so
+    # it needs a class that actually carries a value onto the wire.
+    _P38_TRUNC_EVIDENCE_CLASS = 'CUSTOMER_CONFIGURED'
 
     def tearDown(self):
         # _load_classifier touches REVENIUM_STATE_DIR/MARKERS_DIR/CONFIG_FILE
