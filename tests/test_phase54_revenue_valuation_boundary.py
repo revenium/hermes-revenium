@@ -2551,3 +2551,231 @@ class GrossLeakFixtureTests(_ValuationBoundaryTestCase):
 
         forms = self._forbidden_forms(self.GROSS)
         self._assert_forms_absent(forms, self._surfaces(result))
+
+
+def _extract_ceiling_bytes(body):
+    """Read `_METADATA_CEILING_BYTES` out of the extracted heredoc source
+    rather than retyping 4096 in this test, so the constant has exactly
+    one authority (the heredoc itself). Duplicated (not imported) from
+    tests/test_phase46_metadata_envelope.py's own helper of the same
+    name, per this module's own no-shared-code-between-test-fixtures
+    convention."""
+    import re
+    match = re.search(r'_METADATA_CEILING_BYTES\s*=\s*(\d+)', body)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (Plan 06) -- RevenueArmEnvelopeBudgetTests (D-10, 51-CONTEXT.md D-09)
+# ---------------------------------------------------------------------------
+
+class RevenueArmEnvelopeBudgetTests(_ValuationBoundaryTestCase):
+    """51-CONTEXT.md D-09's ceiling-margin requirement, discharged as the
+    named task it asks for. The tier-1 shed content grew in this phase --
+    a job_assessment record can now carry attribution_fraction,
+    attribution_basis and a declared economic_mechanism -- and Phase 46's
+    worst-case measurement (MetadataEnvelopeBudgetTests) was taken before
+    any of that was possible.
+
+    Mirrors tests/test_phase46_metadata_envelope.py::MetadataEnvelopeBudgetTests
+    method for method against the REVENUE arm's own worst case: compute the
+    worst case PROGRAMMATICALLY from the real clamps, call the REAL
+    constructors, assert acceptance before measuring, serialize exactly as
+    the writer does, assert under the extracted ceiling AND a stated
+    MARGIN_BYTES, and sweep the same five encodings.
+
+    CORRECTED READING (54-06-PLAN.md's own "read, not assume" instruction):
+    the plan's own acceptance criterion states attribution_basis "measures
+    exactly at the 500-byte serialized clamp." Reading
+    `_clamp_assessment_text` shows its binary search truncates on a WHOLE
+    code-point boundary, never splitting a surrogate pair -- so a
+    multi-byte encoding undershoots the 500-byte budget whenever 500 does
+    not divide evenly by that encoding's escaped-character width (6 bytes
+    for accented/CJK, 12 for emoji). Only ASCII (and any width dividing
+    500 evenly, which "mixed" happens to hit by coincidence of its 4-char,
+    25-byte cycle) lands at exactly 500. Every existing clamp assertion in
+    this repo (test_phase46_metadata_envelope.py's own) uses
+    assertLessEqual for exactly this reason; this class follows the same
+    convention rather than asserting an equality that is only true for
+    some encodings."""
+
+    MARGIN_BYTES = 1024
+    CARD_KEY = 'hospitality-booking-agent'
+
+    # The fraction with the longest legal serialized form among a small,
+    # explicit candidate set -- computed, not guessed, so a future
+    # candidate that serializes even longer is one line to add rather
+    # than a silent gap. Floating-point representation error (0.1 + 0.2)
+    # beats the "obvious" repeating-decimal candidates (1/3, 2/3) by one
+    # character, which is exactly the kind of worst case a hand-picked
+    # value would miss.
+    _FRACTION_CANDIDATES = (
+        0.1 + 0.2, 1.0 / 3.0, 2.0 / 3.0, 0.1, 0.9999999999999999,
+        1e-16, 0.1234567890123456,
+    )
+    WORST_CASE_FRACTION = max(_FRACTION_CANDIDATES, key=lambda f: len(repr(f)))
+
+    def setUp(self):
+        super().setUp()
+        self.script_text = HERMES_REPORT_SH.read_text()
+        self.body = _extract_outcome_metadata_heredoc(self.script_text)
+        self.assertIsNotNone(
+            self.body,
+            "outcome_metadata=$( ... <<'PY' ... \\nPY\\n anchor moved in "
+            'hermes-report.sh -- update the extraction before trusting this test',
+        )
+        self.ceiling = _extract_ceiling_bytes(self.body)
+        self.assertIsNotNone(
+            self.ceiling,
+            '_METADATA_CEILING_BYTES not found in the extracted heredoc body',
+        )
+
+    # -- worst-case JobAssessment construction, mirroring
+    # MetadataEnvelopeBudgetTests method for method, plus the revenue
+    # card's own config-on-disk (boundaries.valuation is read from the
+    # config FILE, never from the in-memory cfg argument) --
+
+    def _worst_case_valid(self, job_id):
+        return {
+            'agentic_job_id': job_id,
+            'job_type': 'a' + 'b' * 46 + 'c',
+            'status': 'FAILED',
+        }
+
+    def _worst_case_raw(self, narrative_char='n'):
+        return {
+            'economic_mechanism': 'augmentation_capacity_expansion',
+            'inferred_role': narrative_char * 60,
+            'estimated_hours_saved': 40.0,
+            'assumed_loaded_rate': 500.0,
+            'currency': 'USD',
+            'basis': narrative_char * 1000,
+            'confidence': 0.999999,
+            'candidate_downstream_outcome': narrative_char * 1000,
+            'counterfactual_assumption': narrative_char * 1000,
+        }
+
+    def _write_revenue_config(self, mod, job_type, narrative_char):
+        cfg_dict = {
+            'boundaries': {'valuation': 'revenue_card_valuation_fixture'},
+            'llmOutcomeEvaluation': {
+                'revenueCard': {
+                    self.CARD_KEY: {
+                        # Overlong on purpose -- the registrant's own
+                        # NARRATIVE_CLAMP_BYTES (500) clamp is the real
+                        # ceiling being measured, not a value this test
+                        # guessed.
+                        'grossPerJob': 1000.0,
+                        'attributionFraction': self.WORST_CASE_FRACTION,
+                        'attributionBasis': narrative_char * 1000,
+                    },
+                },
+                'revenueCardKey': self.CARD_KEY,
+                # Every cost category as a literal 0 -- lands in BOTH
+                # "included" and "known_zero" simultaneously, which costs
+                # MORE serialized bytes than a large nonzero value would
+                # (SidecarBudgetTests' own D-10 finding, reused here for
+                # the same reason Phase 46 reused it).
+                'costs': {job_type: {cat: 0 for cat in mod.COST_CATEGORIES}},
+            },
+        }
+        self.config_path.write_text(json.dumps(cfg_dict))
+
+    def _worst_case_record(self, mod, job_id, narrative_char='n'):
+        raw = self._worst_case_raw(narrative_char)
+        valid = self._worst_case_valid(job_id)
+        self._write_revenue_config(mod, valid['job_type'], narrative_char)
+        cfg = mod._llm_evaluation_config()
+        # Evaluator/model overlong on purpose -- _build_job_assessment's
+        # own internal clamps (32/16/64 bytes respectively) are the real
+        # ceilings; passing something longer proves those internal
+        # clamps, not a value this test guessed, are what bounds the
+        # record.
+        evaluator = 'e' * 100
+        evaluator_version = 'v' * 100
+        model = 'm' * 100
+        assessment = mod._validate_assessment(raw, cfg, evaluator, evaluator_version)
+        self.assertIsNotNone(
+            assessment,
+            'max-bound revenue-arm inputs must be accepted, not rejected')
+        self.assertEqual(
+            'incremental_revenue', assessment.get('economic_mechanism'),
+            'test setup invalid: expected the revenue registrant\'s '
+            'declared mechanism to be accepted')
+        self.assertIn('attribution_fraction', assessment)
+        self.assertIn('attribution_basis', assessment)
+        # Behavior: attribution_basis measures AT OR UNDER the 500-byte
+        # serialized clamp -- asserted here, not assumed, and never over
+        # (that would be the actual clamp failing). NOT asserted equal to
+        # exactly 500: _clamp_assessment_text truncates on a WHOLE
+        # code-point boundary (never splitting a surrogate pair), so a
+        # multi-byte encoding can undershoot the byte budget by up to
+        # (bytes-per-char - 1) when 500 does not divide evenly by that
+        # width -- e.g. accented/cjk (6 bytes/escaped char) land at 498,
+        # emoji (12 bytes/escaped char) at 492. Every existing precedent
+        # in this repo (test_phase46_metadata_envelope.py's own clamp
+        # assertions) uses assertLessEqual for exactly this reason; only
+        # ASCII (and any width that divides 500 evenly) reaches exactly
+        # 500. See this class's docstring for the corrected reading.
+        basis_serialized = len(
+            json.dumps(assessment['attribution_basis'], ensure_ascii=True)
+            .encode('utf-8')) - 2
+        self.assertLessEqual(
+            basis_serialized, mod.NARRATIVE_CLAMP_BYTES,
+            f'attribution_basis worst case measured {basis_serialized} '
+            f'serialized bytes, over the {mod.NARRATIVE_CLAMP_BYTES}-byte clamp',
+        )
+        rec = mod._build_job_assessment(
+            valid, assessment, raw, cfg, evaluator, evaluator_version,
+            double_counting_group='g' * 100, model=model)
+        self.assertIsNotNone(rec, 'worst-case revenue-arm record construction must succeed')
+        self.assertIn('attribution_fraction', rec)
+        self.assertIn('attribution_basis', rec)
+        self.assertEqual('incremental_revenue', rec.get('economic_mechanism'))
+        return rec
+
+    def _measure(self, mod, narrative_char):
+        rec = self._worst_case_record(
+            mod, job_id=f'p54-06-budget-{narrative_char!r}', narrative_char=narrative_char)
+        failure_reason = mod._clamp_assessment_text(
+            narrative_char * 1000, mod.FAILURE_REASON_CLAMP_BYTES)
+        env = _assessment_env(
+            assessment=rec, source='prod', status='FAILED', failure_reason=failure_reason)
+        result = _run_forwarder(self.body, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout.strip()
+        json.loads(out)  # must parse
+        return len(out.encode('utf-8'))
+
+    _ENCODINGS = (('ascii', 'n'), ('accented', 'é'), ('cjk', '漢'), ('emoji', '😀'), ('mixed', 'a😀é漢'))
+
+    def test_worst_case_swept_across_encodings_stays_under_ceiling(self):
+        """Behavior 1."""
+        mod = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        for label, ch in self._ENCODINGS:
+            with self.subTest(label):
+                measured = self._measure(mod, ch)
+                self.assertLessEqual(
+                    measured, self.ceiling,
+                    f'{label} revenue-arm worst case is {measured} bytes, '
+                    f'over the {self.ceiling}-byte ceiling',
+                )
+                print(f'[54-06 RevenueArmEnvelopeBudgetTests] {label} '
+                      f'worst-case envelope: {measured} bytes')
+
+    def test_margin_asserted_not_assumed(self):
+        """Behavior 2: the largest measured revenue-arm worst case plus
+        MARGIN_BYTES is still at or under the ceiling -- the headroom is
+        asserted, not assumed."""
+        mod = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
+        largest = max(self._measure(mod, ch) for _label, ch in self._ENCODINGS)
+        self.assertLessEqual(
+            largest + self.MARGIN_BYTES, self.ceiling,
+            f'largest measured revenue-arm worst case ({largest} bytes) + '
+            f'{self.MARGIN_BYTES}-byte margin exceeds the {self.ceiling}-byte '
+            'ceiling -- re-derive the ceiling or the clamps',
+        )
+        print(f'[54-06 RevenueArmEnvelopeBudgetTests] largest worst-case '
+              f'revenue-arm envelope: {largest} bytes, margin {self.ceiling - largest}')
