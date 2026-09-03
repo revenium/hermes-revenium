@@ -26,6 +26,7 @@ or writes that file itself.
 | `autonomousMode` | no | When `true`, a blocked rule halts the agent and sends a notification. |
 | `notifyChannel` | autonomous only | Hermes messaging channel for halt notifications — `slack`, `discord`. |
 | `notifyTarget` | autonomous only | Channel-specific target — `channel:<id>`, `user:<id>`, `@username`. |
+| `auxMetering` | no | Set to the string `"disabled"` to stand down the auxiliary-usage metering pass. `REVENIUM_AUX_METERING` in the environment takes precedence when both are set. |
 
 An upgraded host keeps its legacy `alertId` field, but nothing reads it. See
 [Guardrails migration](migration-guardrails.md).
@@ -176,6 +177,18 @@ with an agent name is a common enough mistake that the installer warns about it.
 
 Setting `MODE=live` by itself does not cut over. [Event metering](event-metering.md)
 explains why.
+
+### Auxiliary usage metering
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REVENIUM_AUX_METERING` | `enabled` | `enabled` meters Hermes' auxiliary LLM calls as their own `--operation-type AUX` completions; `disabled` ships none and writes no auxiliary ledger. |
+
+This is ON by default and is a permanent step-up in reported spend against unchanged
+traffic. The first tick after upgrading reports pre-upgrade accumulated history, because
+the counters are cumulative and the ledger starts empty. See
+[Auxiliary usage migration](migration-auxiliary-usage.md) for the measured size of the
+step-up and its caveat.
 
 ### Housekeeping
 

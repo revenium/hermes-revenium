@@ -16,8 +16,8 @@ the runtime work. `SKILL.md` is only a halt-check backstop. The README's
 
 ## Running it
 
-- **[How it works](how-it-works.md)** — the classification pipeline, both metering paths,
-  agentic jobs, tool events, and guardrail enforcement.
+- **[How it works](how-it-works.md)** — the classification pipeline, all three metering
+  paths, agentic jobs, tool events, and guardrail enforcement.
 - **[Multi-profile / fleet installs](fleet.md)** — per-profile wiring and the failure modes
   that look like nothing is wrong.
 - **[Upgrading](upgrading.md)** — four upgrade paths and what has to be re-run after each.
@@ -51,6 +51,9 @@ the runtime work. `SKILL.md` is only a halt-check backstop. The README's
   `ruleIds`.
 - **[AGENT dimension migration](migration-agent-dimension.md)** — the per-profile agent name
   and its no-observable-change guarantee.
+- **[Auxiliary usage migration](migration-auxiliary-usage.md)** — metering Hermes' own
+  compression, title-generation, approval, vision, web-extract, and session-search calls;
+  the reported-spend step-up and its off switch.
 
 ## For contributors
 

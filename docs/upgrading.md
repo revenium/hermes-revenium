@@ -104,6 +104,15 @@ bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 **Delete any `.bak` copies** of the skill under `~/.hermes/skills/`. Plugin discovery
 scans their bundled `plugins/` directories, and a stale duplicate can shadow the real one.
 
+**Auxiliary usage metering turns on with this upgrade.** Reported spend steps up
+permanently against unchanged traffic — nothing about your traffic changes, but a
+category of spend that was never reported before now is. The first tick after upgrading
+additionally reports each identity's whole accumulated pre-upgrade auxiliary usage,
+because the counters are cumulative and the new ledger starts empty. If you run an
+autonomous-mode guardrail close to its limit, read
+[Auxiliary usage migration](migration-auxiliary-usage.md) before upgrading. The off
+switch is `REVENIUM_AUX_METERING=disabled`.
+
 **Verify.** `diagnose.sh` produces one read-only report covering credentials, cron,
 ledgers, the settle gate, plugin and hook state, and a per-profile summary:
 

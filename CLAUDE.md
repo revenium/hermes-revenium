@@ -60,7 +60,7 @@ The skill has three parts. Nothing calls anything else across the boundaries —
 
 2. **State files (`~/.hermes/state/revenium/`).** The whole public interface: `config.json`, `guardrail-status.json`, `plugin-status.json`, `markers/`, `tool-events/`, the ledgers, the taxonomies, the log. Every process re-reads what it needs; there is no shared memory and no IPC.
 
-3. **The cron pipeline (every minute, out of process).** `cron.sh` takes `cron.lock`, then runs six stages: plugin health → completion metering → guardrail evaluation → tool-event metering → api-event metering → drain status. (A conditional legacy `alertId` migration runs first when one is present; it is not one of the six.) This is the only part that talks to the Revenium API, and (via one `hermes chat` call on a new halt) the only part that talks back to Hermes.
+3. **The cron pipeline (every minute, out of process).** `cron.sh` takes `cron.lock`, then runs six stages: plugin health → completion metering → guardrail evaluation → tool-event metering → api-event metering → drain status. (A conditional legacy `alertId` migration runs first when one is present; it is not one of the six.) This is the only part that talks to the Revenium API, and (via one `hermes chat` call on a new halt) the only part that talks back to Hermes. The completion-metering stage additionally runs a post-loop auxiliary-usage pass inside `hermes-report.sh` after its main work — that pass is not one of the six stages.
 
 ```mermaid
 flowchart TB
@@ -80,11 +80,12 @@ flowchart TB
         PST["plugin-status.json"]
         MK["markers/&lt;sid&gt;.jsonl<br/>GUARDRAIL + CHAT pairs"]
         RDY["markers/.ready/&lt;sid&gt;<br/>settle sentinel"]
-        WARN["markers/.warn, .fallback-warn<br/>once-per-(session, rule) flags"]
+        WARN["markers/.warn, .fallback-warn, .aux-warn<br/>once-per-(session, rule) flags"]
         TEV["tool-events/&lt;sid&gt;.jsonl"]
         LED["revenium-hermes.ledger"]
         JLED["revenium-jobs.ledger"]
         TLED["revenium-tool-events.ledger"]
+        ALED["revenium-aux.ledger"]
         TAX["task-taxonomy.json<br/>job-taxonomy.json"]
         LOG["revenium-metering.log<br/>in-place rotation"]
         LOCKS["cron.lock, rules.lock, prune.lock"]
@@ -94,7 +95,7 @@ flowchart TB
         CS["cron.sh<br/>flock cron.lock, optional sub-minute loop"]
         MIG["setup-guardrails.sh --from-alert --auto<br/>legacy alertId to ruleIds"]
         PS["plugin-status.sh<br/>alert-only plugin health"]
-        HR["hermes-report.sh<br/>delta split + meter"]
+        HR["hermes-report.sh<br/>delta split + meter<br/>+ auxiliary usage post-loop pass"]
         GC["guardrail-check.sh<br/>rule state + halt transition"]
         TER["tool-event-report.sh"]
         SPLIT["split_strategies.equal_split<br/>conservation invariant"]
@@ -127,8 +128,9 @@ flowchart TB
     SKILL -.->|fail-open read| GST
 
     HR --> DB
-    HR --> MK & RDY & LED & JLED & PST & CFG
+    HR --> MK & RDY & LED & JLED & PST & CFG & ALED
     HR -->|"jobs create/outcome + meter completion<br/>--task-type --trace-type --agentic-job-id --squad-name"| RCLI
+    HR -->|"auxiliary pass: meter completion --operation-type AUX --task-type aux_*"| RCLI
     GC --> CFG
     GC -->|"enforcement-rules get + budget-rules list"| RCLI
     GC --> GST
@@ -173,6 +175,24 @@ Agentic jobs use a second ledger, `revenium-jobs.ledger`, with `JOB:<id>:created
 If you change how sessions are identified, split, or written to either ledger, preserve idempotency: re-running the cron must never double-report.
 
 Provider inference (`anthropic` / `openai` / `google` / `xai` / `deepseek` / `meta`) is done from the `model` and `billing_provider` columns in Python heredocs inside `hermes-report.sh`. OpenRouter and Bedrock are special-cased to map to the underlying model provider.
+
+#### Auxiliary usage metering
+
+`report_auxiliary_usage` is a post-loop pass inside `hermes-report.sh`, running after the agentic-jobs outcome stage and before cost reconciliation. It is not a cron stage — the cron still runs six.
+
+It reads `session_model_usage` from `state.db`, read-only, and ships each row whose `task` column is non-empty as its own `revenium meter completion --operation-type AUX --task-type aux_<label>` from a fixed six-label vocabulary. An unrecognised `task` value ships as `aux_unclassified` rather than being dropped — the spend is never lost, only the label — gated by `_aux_warn_once` on `AUX_WARN_FLAGS_DIR`.
+
+**The empty-`task` row is a mirror of the `sessions` row's own totals and must never be shipped.** Shipping it double-counts the main loop. This is the hazard `tests/test_phase55_aux_proofs.py::AuxMirrorLeakFixtureTests` exists to catch.
+
+`revenium-aux.ledger` has its OWN key domain (`AUX:` lines, six-column cumulative identity), deliberately not shared with `revenium-hermes.ledger`. Idempotency is per-column subtraction against the previous cumulative counters, NOT the main loop's ratio scaling, because the auxiliary row hands over every cumulative column directly. A twelve-hex digest enters `--transaction-id` but never the ledger key.
+
+On a multiplexed host the per-session cache append is gated on `session_markers_dir == MARKERS_DIR`, reusing the existing `resolve_markers_dir` ownership primitive, so N profile processes sharing one `state.db` cannot each ship the same auxiliary row (the T-55-06 fix).
+
+Default ON (C-5). `REVENIUM_AUX_METERING=disabled` in `${STATE_DIR}/env`, or `auxMetering: "disabled"` in `config.json`; the env var wins. Disabled, or an install whose Hermes build has no `session_model_usage` table, meters byte-identically to before.
+
+The first tick after upgrade reports each identity's whole accumulated pre-upgrade history, because the counters are cumulative and the ledger starts empty. Deliberate; do not "fix" it with a baseline write.
+
+Local proof establishes scope match at emission — an auxiliary row carries the same session-resolved dimensions as its session's main-loop row. Whether a Revenium-side guardrail counter (e.g. ROI-10) actually moves for an ingested auxiliary row is not demonstrated here; that confirmation is Phase 56's, against a live tenant.
 
 ### Tool-event capture
 
@@ -298,7 +318,7 @@ protocol works.
 - `REVENIUM_STATE_DIR` — defaults to `${HERMES_HOME}/state/revenium`, overridable (`common.sh`).
 - `REVENIUM_API_KEY`, `REVENIUM_API_URL`, `REVENIUM_TEAM_ID` — declared as `required_environment_variables` in `SKILL.md`; consumed by the `revenium` CLI, not by this repo directly. `resolve_team_id` in `common.sh` prefers the env var and falls back to parsing `revenium config show`.
 - `REVENIUM_AGENT_NAME` / `REVENIUM_SQUAD_NAME` — the AGENT and SQUAD dimensions (see "State separation").
-- Tunables with `:-` defaults in `common.sh`: `REVENIUM_CRON_SETTLE_SECONDS`, `REVENIUM_JOBS_STALE_SECONDS`, `REVENIUM_MARKER_RETENTION_DAYS`, `REVENIUM_PAGE_BATCH_SIZE`, `REVENIUM_LOG_MAX_BYTES`, `REVENIUM_LOG_KEEP_BYTES`.
+- Tunables with `:-` defaults in `common.sh`: `REVENIUM_CRON_SETTLE_SECONDS`, `REVENIUM_JOBS_STALE_SECONDS`, `REVENIUM_MARKER_RETENTION_DAYS`, `REVENIUM_PAGE_BATCH_SIZE`, `REVENIUM_LOG_MAX_BYTES`, `REVENIUM_LOG_KEEP_BYTES`, `REVENIUM_AUX_METERING` (default `enabled`) — the one tunable in this list resolved through `resolve_switch_setting`'s env-then-`config.json` (`auxMetering`) precedence rather than a bare `:-` default.
 - Optional per-state env file at `${STATE_DIR}/env` (`ENV_FILE`), sourced with `allexport` by `cron.sh` when present.
 - `~/.config/revenium/config.yaml` — Revenium CLI credentials. The skill never reads or writes it directly.
 
@@ -306,10 +326,10 @@ protocol works.
 - `config.json` — `ruleIds` (and legacy `alertId`), `organizationName`, `autonomousMode`, `notifyChannel`, `notifyTarget`. Schema documented in `skills/revenium/references/config-schema.md`.
 - `guardrail-status.json` — per-rule warn/block/ok snapshot plus `halted`, `haltedAt`, `haltedRule`, `lastChecked`. Written only by `guardrail-check.sh`; `halted` cleared only by `clear-halt.sh`.
 - `plugin-status.json` — classifier registration health; written by `plugin-status.sh`, read by `hermes-report.sh` to distinguish a registration outage from a genuinely unclassified session.
-- `markers/<sid>.jsonl`, `markers/.ready/<sid>`, `markers/.warn/`, `markers/.fallback-warn/` — classification markers, the settle sentinel, and the two once-per-`(session, reason)` warn gates.
+- `markers/<sid>.jsonl`, `markers/.ready/<sid>`, `markers/.warn/`, `markers/.fallback-warn/`, `markers/.probe-warn/`, `markers/.outcome-warn/`, `markers/.aux-warn/` — classification markers, the settle sentinel, and five once-per-`(session, reason)` warn gates.
 - `tool-events/<sid>.jsonl` — captured tool calls.
-- `revenium-hermes.ledger`, `revenium-jobs.ledger`, `revenium-tool-events.ledger` — append-only idempotency ledgers.
-- `task-taxonomy.json`, `job-taxonomy.json` — the controlled vocabularies, seeded from the skill dir and grown by the classifier.
+- `revenium-hermes.ledger`, `revenium-jobs.ledger`, `revenium-tool-events.ledger`, `revenium-aux.ledger` — four append-only idempotency ledgers.
+- `task-taxonomy.json`, `job-taxonomy.json` — the controlled vocabularies, seeded from the skill dir and grown by the classifier. `aux-taxonomy.json` is the asymmetric exception: a fixed six-label vocabulary that lives in the SKILL dir (never copied into `STATE_DIR`) and is never grown by the classifier.
 - `revenium-metering.log` — cron log, truncated in place by `rotate_log_if_needed`.
 - `cron.lock`, `rules.lock`, `prune.lock` — flock targets.
 
@@ -329,7 +349,7 @@ protocol works.
 - Library/sourced bash: lowercase single word — `common.sh`.
 - Python sidecars: `kebab-case.py` when shelled out to (`get-root-session-id.py`, `resolve-markers-dir.py`), `snake_case.py` when imported (`split_strategies.py`).
 - Python tests: `test_*.py`.
-- Exported / config-like globals: `SCREAMING_SNAKE_CASE` — `STATE_DIR`, `CONFIG_FILE`, `GUARDRAIL_STATUS_FILE`, `PLUGIN_STATUS_FILE`, `LEDGER_FILE`, `JOBS_LEDGER_FILE`, `TOOL_EVENTS_LEDGER_FILE`, `MARKERS_DIR`, `MARKERS_READY_DIR`, `TOOL_EVENTS_DIR`, `LOG_FILE`, `STATE_DB`, `ENV_FILE`, `LOCK_FILE`, `SKILL_DIR`, `SCRIPT_DIR`.
+- Exported / config-like globals: `SCREAMING_SNAKE_CASE` — `STATE_DIR`, `CONFIG_FILE`, `GUARDRAIL_STATUS_FILE`, `PLUGIN_STATUS_FILE`, `LEDGER_FILE`, `JOBS_LEDGER_FILE`, `TOOL_EVENTS_LEDGER_FILE`, `AUX_LEDGER_FILE`, `AUX_TAXONOMY_FILE`, `AUX_WARN_FLAGS_DIR`, `MARKERS_DIR`, `MARKERS_READY_DIR`, `TOOL_EVENTS_DIR`, `LOG_FILE`, `STATE_DB`, `ENV_FILE`, `LOCK_FILE`, `SKILL_DIR`, `SCRIPT_DIR`.
 - Loop / local / transient variables: `lower_snake_case`, declared `local`.
 - Shell functions: `lower_snake_case` — `ensure_path`, `log`, `info`, `warn`, `error`, `read_config_field`, `main`.
 - JSON fields: `camelCase` — `ruleIds`, `autonomousMode`, `notifyChannel`, `notifyTarget`, `organizationName`, `halted`, `haltedAt`, `haltedRule`, `lastChecked`, `currentValue`, `hardLimit`, `metricType`, `windowType`. Marker records are the exception and use `snake_case` (`task_type`, `operation_type`, `trace_id`, `agentic_job_id`) because they are produced by Python.
@@ -360,14 +380,17 @@ protocol works.
 | `LEDGER_FILE` | `${STATE_DIR}/revenium-hermes.ledger` |
 | `JOBS_LEDGER_FILE` | `${STATE_DIR}/revenium-jobs.ledger` |
 | `TOOL_EVENTS_LEDGER_FILE` | `${STATE_DIR}/revenium-tool-events.ledger` |
+| `AUX_LEDGER_FILE` | `${STATE_DIR}/revenium-aux.ledger` |
 | `MARKERS_DIR` | `${STATE_DIR}/markers` |
 | `MARKERS_READY_DIR` | `${STATE_DIR}/markers/.ready` |
 | `WARN_FLAGS_DIR` | `${MARKERS_DIR}/.warn` |
 | `FALLBACK_WARN_FLAGS_DIR` | `${MARKERS_DIR}/.fallback-warn` |
+| `AUX_WARN_FLAGS_DIR` | `${MARKERS_DIR}/.aux-warn` |
 | `TOOL_EVENTS_DIR` | `${STATE_DIR}/tool-events` |
 | `JOB_ASSESSMENTS_DIR` | `${STATE_DIR}/job-assessments` |
 | `TAXONOMY_FILE` | `${STATE_DIR}/task-taxonomy.json` |
 | `JOB_TAXONOMY_FILE` | `${STATE_DIR}/job-taxonomy.json` |
+| `AUX_TAXONOMY_FILE` | `${SKILL_DIR}/aux-taxonomy.json` — the only taxonomy path in this table that is NOT under `STATE_DIR` |
 | `LOG_FILE` | `${STATE_DIR}/revenium-metering.log` |
 | `ENV_FILE` | `${STATE_DIR}/env` |
 | `LOCK_FILE` / `RULES_LOCK_FILE` / `PRUNE_LOCK_FILE` | `${STATE_DIR}/cron.lock`, `rules.lock`, `prune.lock` |
@@ -445,7 +468,7 @@ See the mermaid diagram under "Architecture" above for the component and data-fl
 | Post-tool hook | Append a tool-event record; never blocks, never calls out | `skills/revenium/scripts/post_tool_call.sh` |
 | Path resolver / shared helpers | Single source of truth for state paths; `ensure_path`, logging, rotation, capability probes, session-identity helpers | `skills/revenium/scripts/common.sh` |
 | Cron orchestrator | Take `cron.lock`, source `env`, rotate the log, run the six stages with `\|\| true` | `skills/revenium/scripts/cron.sh` |
-| Metering reporter | Read `state.db`, diff vs ledger, split the delta across markers, create/close jobs, ship completions, append ledgers | `skills/revenium/scripts/hermes-report.sh` |
+| Metering reporter | Read `state.db`, diff vs ledger, split the delta across markers, create/close jobs, ship completions, append ledgers, plus the post-loop auxiliary-usage pass | `skills/revenium/scripts/hermes-report.sh` |
 | Split strategies | Conservation-exact delta splitting across N markers | `skills/revenium/scripts/split_strategies.py` |
 | Guardrail checker | Poll rules, write `guardrail-status.json`, detect new halts, notify with the embedded enforcement event | `skills/revenium/scripts/guardrail-check.sh` |
 | Tool-event reporter | Ship unledgered tool events | `skills/revenium/scripts/tool-event-report.sh` |
@@ -478,7 +501,7 @@ See the mermaid diagram under "Architecture" above for the component and data-fl
 ### Data flow
 **Classification (in-session).** Session ends or a turn completes → plugin hook → transcript read from `state.db` → auxiliary LLM → label validated against the taxonomy → `GUARDRAIL` + `CHAT` marker pair written under one lock → `.ready/<sid>` sentinel touched.
 
-**Metering (per minute).** `cron.sh` takes `cron.lock` → `hermes-report.sh` reads `state.db` and the ledger → sessions without a `.ready` sentinel and younger than the settle window are deferred → the delta is split across markers → jobs are created/closed and completions metered → ledger lines appended on success only.
+**Metering (per minute).** `cron.sh` takes `cron.lock` → `hermes-report.sh` reads `state.db` and the ledger → sessions without a `.ready` sentinel and younger than the settle window are deferred → the delta is split across markers → jobs are created/closed and completions metered → ledger lines appended on success only → a post-loop auxiliary-usage pass ships `session_model_usage` rows the same way, into `revenium-aux.ledger`.
 
 **Guardrails (per minute).** `guardrail-check.sh` polls the rules → writes `guardrail-status.json` atomically → on a new ok→block transition under autonomous mode, fetches the enforcement event and notifies through Hermes messaging.
 
@@ -535,6 +558,7 @@ See the mermaid diagram under "Architecture" above for the component and data-fl
 - **Metering a session before its marker lands** — that orphans the completion from its job permanently.
 - **Adding an ungated per-tick warn** — rate-limit through a sentinel directory.
 - **Sharing code between `classifier.py` and the bash sidecars** — the duplication is deliberate; the plugin must stay importable without the skill's shell environment.
+- **Shipping the empty-`task` `session_model_usage` mirror row as an auxiliary row** — it mirrors the `sessions` row's own totals, and shipping it double-counts the main loop.
 
 ### Error handling and cross-cutting concerns
 - Preflight checks `warn` + `exit 0` on missing tooling; the cron pipeline never aborts on a fresh machine.

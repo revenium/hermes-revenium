@@ -9,10 +9,13 @@ this repository.
 
 ## [Unreleased]
 
-Two rounds of work on the same experimental feature. The first shipped LLM outcome
-evaluation; the second replaced most of its internals so a model estimate can no longer
-read as an observed result. The feature stays **opt-in and off by default** throughout,
-and an install that leaves it off meters byte-identically to before.
+Two rounds of work on the same experimental **job-value estimation** feature: the first
+shipped it, the second replaced most of its internals so a model estimate can no longer
+read as an observed result. That feature stays **opt-in and off by default** throughout,
+and an install that leaves it off meters byte-identically to before. This release also
+carries auxiliary usage metering, which is **on by default** and is a permanent step-up
+in reported spend against unchanged traffic, documented in
+[Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 
 ### Documentation
 
@@ -171,6 +174,48 @@ and an install that leaves it off meters byte-identically to before.
   `revenium jobs outcome-history` to read them back.
 - This round has not been exercised against a live tenant. The end-to-end proof is a
   fixture harness driving the real classifier and reporter with a stubbed model response.
+- Whether a Revenium-side guardrail counter actually increases for an ingested auxiliary
+  row inside a rule's scope is **not demonstrated by this release** — the proof shipped
+  here establishes that an auxiliary row is emitted carrying the same session-resolved
+  dimensions as its session's main-loop completion; the server-side counting half remains
+  to be confirmed separately against a live tenant.
+
+### Added — auxiliary usage metering
+
+- **Auxiliary LLM calls are now metered.** `hermes-report.sh` gained
+  `report_auxiliary_usage`, a post-loop pass reading Hermes' `session_model_usage` table
+  read-only, shipping each non-empty-`task` row as its own `revenium meter completion`
+  with `--operation-type AUX` and a `--task-type` from a fixed six-label `aux_*`
+  vocabulary (`aux_approval`, `aux_title_generation`, `aux_compression`, `aux_vision`,
+  `aux_web_extract`, `aux_session_search`). Compression, title generation, approval,
+  vision, web extraction, and session search were previously reported nowhere. **Not a
+  new cron stage — the cron still runs six.**
+- **On by default, with an off switch.** `REVENIUM_AUX_METERING=disabled` in the state env
+  file, or `auxMetering: "disabled"` in `config.json` (env wins), ships no auxiliary rows
+  and writes no auxiliary ledger; main-loop metering is then byte-identical to before. An
+  install whose Hermes build has no `session_model_usage` table is byte-identical by
+  construction and needs no setting.
+- **A permanent step-up in reported spend against unchanged traffic**, measured
+  fleet-wide at 0.4598% of cost — with the near-zero-denominator outlier caveat, the
+  re-runnable sizing SQL, and the guardrail implications in
+  [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
+- **The first tick after upgrading is a one-time historical catch-up**: the counters are
+  cumulative and `revenium-aux.ledger` starts empty, so that tick reports each identity's
+  whole accumulated pre-upgrade auxiliary usage into the current guardrail window.
+  Deliberate, and warned about once per install by the reporter itself.
+- **A fourth ledger**, `revenium-aux.ledger`, with its own key domain and per-column
+  cumulative subtraction. Like the other three it is never pruned automatically.
+- **An unrecognised `session_model_usage.task` value ships as `aux_unclassified`** rather
+  than being dropped, with one warn per distinct value per install, so a future upstream
+  addition never silently loses spend.
+- **`billing_provider` of the literal `auto` is now resolved through model-name
+  inference** on both the main-loop and auxiliary emit paths, from one shared function.
+  This is **global** — provider-scoped counting changes for main-loop rows too — and rows
+  Revenium already ingested carrying `auto` are not back-filled.
+- **`diagnose.sh` gained a read-only `10. AUXILIARY USAGE PASS` section** (`--tick`
+  renumbered 10 to 11), reporting tunable resolution and its source, table presence,
+  auxiliary-vs-mirror row and cost counts side by side, dominant task values, the
+  `aux-taxonomy.json` label count, and any fired `.aux-warn` sentinels.
 
 ### Added — LLM outcome evaluation (initial)
 - Opt-in, off-by-default **LLM outcome evaluation** (`llmOutcomeEvaluation` in
