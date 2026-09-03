@@ -1243,7 +1243,9 @@ PY
       --is-streamed
       --quiet
       --task-type "${label}"
-      --operation-type "AUX"
+      # D-01/D-02: spec-sourced constant, declared with its evidence in
+      # common.sh -- see AUX_OPERATION_TYPE there for the full rationale.
+      --operation-type "${AUX_OPERATION_TYPE}"
     )
 
     # Main path's own flag order: --model-source ships the row's RAW
