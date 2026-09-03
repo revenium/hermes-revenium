@@ -14,8 +14,13 @@ A live verification against a real Revenium tenant, recorded in
 found that `revenium jobs roi <id>` surfaces no `evidence_class`, no
 `evaluator`, and no `confidence` — in either its JSON or its table output.
 Only the separate `jobs outcome-history` command echoes that metadata blob at
-all. This finding is dated 2026-08-31, at the Phase 53 plan gate, and has not
-been re-verified since.
+all. This finding is dated 2026-08-31, at the Phase 53 plan gate.
+
+**Re-verified 2026-09-03, live, during Phase 56's induced-probe arm
+(`docs/comprehensive-roi-proof.md`, "D-06 — the read-surface finding,
+re-verified and re-dated").** Both fields remain absent from `jobs roi`, in
+both JSON and table output, on two fresh tenant rows read that day. No change
+on Revenium's side has occurred between the two dates.
 
 `jobs roi` is not broken. It carries no provenance because none was designed
 into it — this is a gap in a display surface, not a defect in a working
@@ -44,6 +49,14 @@ withheld record. This was observed against
 Phase 53 evidence-class gate correctly withheld (its `evidence_class` is
 the forced `MODEL_ESTIMATED_DEMO` constant — see "What this skill did about
 it" below).
+
+**Re-verified 2026-09-03, live, during Phase 56's induced-probe arm**
+(`docs/comprehensive-roi-proof.md`, "Toggle comparison (D-05) and the matched
+disabled-arm job") **— the boundary still holds, unchanged.** A fresh
+withheld row (`flatten_nested_list_python_function_23b5`) rendered
+`Outcome Value $0.00` / `ROI % 0.00%` in the table form while its JSON form
+correctly returned `"outcomeValue": null` and `"roi": null` for the same
+job — the identical gap, on a different row, two days later.
 
 This compounds the first gap rather than duplicating it: even a reader who
 already knows to distrust a `jobs roi` figure with no `evidence_class` has
@@ -128,3 +141,13 @@ in its `--metadata` payload, and `jobs outcome-history` already echoes them
 back. The gap is entirely on the `jobs roi` display path — the data exists
 server-side and is retrievable through one command; it simply isn't rendered
 by the other.
+
+## Where the re-verification evidence lives
+
+Both findings on this page were re-verified live on 2026-09-03, alongside
+Phase 56's comprehensive ROI proof. The full captures — both `jobs roi`
+forms, both jobs, and the point read-back that shows the same fields present
+in `jobs outcome-history` — are in
+[`docs/comprehensive-roi-proof.md`](comprehensive-roi-proof.md), sections
+"D-06 — the read-surface finding, re-verified and re-dated" and "Toggle
+comparison (D-05) and the matched disabled-arm job."

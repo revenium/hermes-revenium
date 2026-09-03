@@ -303,6 +303,15 @@ class RepositoryTests(unittest.TestCase):
             # one lives in the tracked docs/ tree specifically so it can't
             # recur.
             ROOT / 'docs' / 'roi-read-surface-ask.md',
+            # Phase 56 (ROI-12/ROI-13) — the tracked comprehensive live-tenant
+            # proof that one row carries a configured revenue value,
+            # aux-inclusive cost, and a readable ROI together, with the
+            # NOT CONFIRMED LIVE aux-rejection finding recorded plainly.
+            # Pinned for the same reason as its neighbours above:
+            # `docs/internal/` and `.planning/` are both gitignored, and an
+            # unpinned copy can vanish the way the v1.3 and v1.4 closeouts
+            # did.
+            ROOT / 'docs' / 'comprehensive-roi-proof.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
