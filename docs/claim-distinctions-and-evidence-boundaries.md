@@ -2,20 +2,18 @@
 
 [← Back to the docs index](README.md)
 
-This page is repo-only — it is not part of the skill bundle and a tap-installed host never
-sees it. It owns the conceptual frame this milestone needs and that no shipped file owns:
-the distinctions between output, outcome, valuation, impact, and ROI; the chain that connects
-them; the product-truth boundary; the vocabulary this project uses; and what this milestone
-deliberately does not ship. Every contract term — the nine evidence labels, the config keys,
-the assessment schema — stays owned by the shipped references this page links to. This page
-never duplicates a contract; it only explains the frame the contracts sit inside.
+This repo-only page defines the distinctions among output, outcome, valuation, impact, and
+ROI; the chain connecting them; the product-truth boundary; the project's vocabulary; and
+the milestone's exclusions. It is not part of the skill bundle and is unavailable on a
+tap-installed host. The linked shipped references remain authoritative for contract terms,
+including the nine evidence labels, config keys, and assessment schema.
 
 Once the frame is clear, [Job value and ROI](value-and-roi.md) is the mechanism: how the
 number is produced, bounded, recorded, and reported.
 
 ## Output, outcome, valuation, impact, ROI
 
-Five words get used loosely in this space. Here they are held apart.
+This project distinguishes five commonly conflated terms.
 
 **Output** is what the work produced — a merged diff, a passed test suite, a shipped
 endpoint. It is the thing an agent can self-verify at the moment it finishes. This skill
@@ -46,17 +44,14 @@ built from, plus whatever imprecision the cost side carries. A ROI computed from
 model estimate is not made more certain by the division; it is simply a ratio of one soft
 number to one hard one.
 
-**What this skill can produce today:** output (observed), a coarse outcome signal (self-
-verified success/failure), and valuation (a model-estimated hypothesis). **What it cannot
-produce:** a verified outcome (nothing downstream is observed), impact (no identification
-strategy runs), or a ROI grounded in anything stronger than its own valuation input.
+The skill can produce observed output, a coarse self-verified success/failure signal, and a
+model-estimated valuation hypothesis. It cannot produce a verified downstream outcome,
+impact without an identification strategy, or ROI stronger than its valuation input.
 
 ## The results chain
 
-The five distinctions above are definitional. This chain is what makes them operational — an
-ordered sequence from the moment an agent acts to the moment a business outcome could, in
-principle, be monetized. Each link names the evidence that would be needed to assert it, and
-whether this skill actually observes that evidence.
+The results chain runs from agent execution to a potentially monetized business outcome.
+Each link names the evidence required and whether the skill observes it.
 
 1. **Execution** — the agent ran. Observed directly (the session exists).
 2. **Output** — the agent produced something. Observed directly (the transcript, self-
@@ -88,8 +83,8 @@ a given assessment are owned by
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)'s "The
 nine evidence-class labels" section — this page does not re-enumerate them.
 
-Why a ladder is the wrong mental model: customer confirmation may be commercially
-authoritative — a customer said the outcome happened — yet causally weak, because a customer
+The labels do not form a ladder. Customer confirmation may be commercially
+authoritative because a customer said the outcome happened, yet causally weak, because a customer
 confirming an outcome is not the same as observing that the agent's work caused it.
 Observation proves occurrence, not cause — seeing an event happen does not establish what
 made it happen. Configuration establishes an approved rate, not actual hours worked — a
@@ -109,8 +104,8 @@ table output. A model-estimated value is displayed with the exact same visual we
 measured value would get on that read-back surface. Only the separate `jobs outcome-history`
 command echoes the metadata blob at all.
 
-**The skill's `--metadata` payload and this documentation are the only places that state a
-value is an unverified model estimate; Revenium's primary read-back surfaces do not.**
+The skill's `--metadata` payload and this documentation are the only places that state a
+value is an unverified model estimate; Revenium's primary read-back surfaces do not.
 Revenium's product does not draw the
 distinction this page draws; nothing downstream of the wire enforces it. If this skill's
 `--metadata` payload ever stopped carrying `evidence_class`, or if a reader never opened this
@@ -121,7 +116,7 @@ metadata and documentation carry it, and no further.
 ## Why a model-estimated value is a hypothesis
 
 The naked-LLM evaluation path always resolves to the `MODEL_ESTIMATED_DEMO` evidence class.
-Four reasons that class is a hypothesis rather than an established result:
+Four properties make that class a hypothesis rather than an established result:
 
 1. **The figure is derived, not asserted.** `estimated_value` is computed as
    `estimated_hours_saved x assumed_loaded_rate` from two independently capped assumption
@@ -209,8 +204,7 @@ an accepted outcome converts to a number), evidence resolution and reportability
 implementation registers a name, and an operator selects among registered implementations by
 that name.
 
-The rule that gives these contracts their value: **a non-LLM implementation reports its OWN
-evidence class rather than masquerading as an LLM evaluator.** A deterministic rate-card
+Each non-LLM implementation reports its own evidence class. A deterministic rate-card
 valuation does not borrow the naked-LLM path's evidence class just because it produces a
 similar-looking number; it declares its own, honest label. This is what makes "fits without
 masquerading" a structural property rather than a promise — a later ONNX classifier,
@@ -249,10 +243,9 @@ carries the same `sequence` number and the same prior-value fields the local rec
 this is the marker a downstream consumer uses to tell a revision from an original, since an
 ordinary, uncorrected `jobs outcome` payload never carries a `sequence` key at all.
 
-The correction path is deliberately unreachable from the per-minute cron pipeline —
-`correct-assessment.sh` is never named in `cron.sh` or `install-cron.sh`. It exists only as an
-action a human operator takes at a terminal, on purpose, never as something the automated
-pipeline could trigger on its own.
+The per-minute cron pipeline cannot reach the correction path:
+`correct-assessment.sh` is never named in `cron.sh` or `install-cron.sh`. Only a human
+operator can invoke it from a terminal.
 
 ## Abstention, zero, and negative value
 

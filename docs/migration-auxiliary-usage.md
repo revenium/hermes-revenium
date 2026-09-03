@@ -1,14 +1,13 @@
 # Migrating to Auxiliary Usage Metering (v1.5)
 
-This guide documents the Phase 55 upgrade that starts metering the auxiliary LLM
-calls Hermes makes around its own main loop — compression, title generation,
+This guide documents the Phase 55 upgrade that meters the auxiliary LLM calls
+Hermes makes around its main loop: compression, title generation,
 approval, vision, web extraction, and session search. Before this upgrade, none
 of that spend was reported to Revenium or counted by any guardrail rule. After
 it, every auxiliary call ships as its own metered completion.
 
-**This is a permanent step-up in reported spend against unchanged traffic.**
-Nothing about what your agent does changes; what changes is that spend which
-was always happening is now visible. A guardrail threshold tuned before this
+Reported spend permanently increases for unchanged traffic because existing
+auxiliary spend becomes visible. A guardrail threshold tuned before this
 upgrade may trip earlier than it used to. Read this document before upgrading
 if you run autonomous-mode guardrails close to their limit.
 
@@ -34,9 +33,8 @@ label ships anyway, as `--task-type aux_unclassified`, so a future upstream
 addition never silently drops spend — it surfaces as one warn per distinct
 unrecognised value per install instead.
 
-The same underlying traffic now produces more rows and a higher reported
-total. Nothing about the traffic itself changed; what changed is that a
-category of spend which was always real and always incurred is now reported.
+The same traffic now produces more rows and a higher reported total because
+the reporter includes previously unreported auxiliary spend.
 
 ## The step-up, with its caveat
 
@@ -49,7 +47,7 @@ this section summarizes for the tracked record):
 - Two per-profile outliers crossed the fleet figure by a wide margin:
   **`cfo` at 3.0634%** and **`playtester` at 2.0723%**.
 
-**Both outliers sit on near-zero denominators and are not representative.**
+Both outliers have near-zero denominators and are not representative.
 `cfo`'s total spend across its whole retained history was $3.66; `playtester`'s
 was $0.026. On both profiles a handful of `approval` calls dominate the
 auxiliary figure, so a 3% or 2% share is an artifact of a tiny total, not a
@@ -59,9 +57,9 @@ install — the fleet-wide 0.4598% is the representative number, and even that
 carries the same caveat in miniature (`approval` alone is 95.83% of all
 auxiliary cost fleet-wide).
 
-**This measurement is re-runnable, read-only, against your own `state.db`.**
-Run these three `sqlite3` `SELECT` statements — nothing is written to any
-session database:
+You can rerun this read-only measurement against your own `state.db` with the
+following three `sqlite3` `SELECT` statements. They do not write to any session
+database.
 
 ```sql
 -- Total spend and tokens, same population hermes-report.sh already meters.
@@ -103,12 +101,10 @@ it — into the current guardrail window**, exactly the same way the main-loop
 reporter has always behaved on a session it has never seen before (a
 zero-previous-total session ships its full cumulative total on first sight).
 
-This is real, previously-unreported spend, not a duplicate and not a bug. The
-alternative — writing a ledger baseline on the first tick without shipping
-anything — was rejected during planning because it would silently discard
-observed spend, which inverts the entire purpose of this phase. The
-consequence is made visible instead: **a guardrail threshold sitting close to
-its hard limit may trip specifically on the first tick after upgrade**,
+This is previously unreported spend, not a duplicate. Planning rejected a
+ledger baseline that would discard observed spend on the first tick. As a
+result, a guardrail threshold near its hard limit may trip on the first tick
+after upgrade,
 because that tick's figure includes a one-time historical catch-up on top of
 ordinary current-window spend. Treat the first post-upgrade tick's auxiliary
 total as a one-time historical figure, not a new baseline for future ticks.
@@ -155,7 +151,7 @@ count every `aux_*` label must enumerate them.
 
 ## The limit on ROI-10, stated with the passes
 
-Guardrail counting is a **server-side** effect: Revenium counts what it
+Guardrail counting occurs server-side: Revenium counts what it
 actually ingested, filtered through the rule's own scope, against the
 currently-billed window. This phase proves, locally and repeatably, that an
 auxiliary row is *emitted* carrying the same scope-bearing dimensions as its
@@ -164,8 +160,8 @@ own session's main-loop completion — `--agent`, `--organization-name`,
 `--agentic-job-id` all match; `MODEL` and `PROVIDER` are the row's own facts
 (named above); `TASK_TYPE` and `OPERATION_TYPE` diverge by design.
 
-**This phase does not observe the Revenium-side counter actually moving.**
-That confirmation — that a real tenant's guardrail evaluation increases by an
+This phase does not observe the Revenium-side counter moving. Confirmation that
+a real tenant's guardrail evaluation increases by an
 auxiliary row's metered amount once ingested inside a rule's scope — is
 Phase 56's, against a real tenant. Stated here, in the same place as the
 passes, rather than left as a silent gap: the local proof establishes *scope
@@ -189,11 +185,9 @@ absence via a read-only `sqlite_master` probe, logs one `info` line naming
 that exact reason, and ships nothing. It needs no `REVENIUM_AUX_METERING`
 setting to behave this way.
 
-`REVENIUM_AUX_METERING=disabled` is an escape hatch for an operator mid a
-guardrail cutover who needs to hold reported spend steady while they retune
-thresholds — it is not a recommended posture. The default is on, deliberately:
-auxiliary spend has always been real spend, and a denominator fix nobody
-enables repeats the exact failure this milestone exists to close.
+`REVENIUM_AUX_METERING=disabled` lets an operator hold reported spend steady
+during a guardrail cutover while retuning thresholds. It is not the recommended
+posture. The default is on because auxiliary spend is part of total spend.
 
 ## Auxiliary ledger growth (out of scope, recorded here so it is not a surprise)
 

@@ -2,8 +2,8 @@
 
 [← Documentation index](README.md)
 
-Configuration lives in two places, and they are not interchangeable. The skill's own
-settings sit in `~/.hermes/state/revenium/config.json`. Your Revenium credentials sit in
+Configuration uses two separate files. Skill settings are in
+`~/.hermes/state/revenium/config.json`. Revenium credentials are in
 `~/.config/revenium/config.yaml`, written by `revenium config set`; the skill never reads
 or writes that file itself.
 
@@ -60,27 +60,21 @@ An upgraded host keeps its legacy `alertId` field, but nothing reads it. See
 | `studyId`, `studyVersion` | no | Name an impact study (EGV-12/EGV-13) this install's job assessments reference — a non-empty string id paired with an integer version >= 1, all-or-none (configure one without the other and neither is recorded). Recorded on every assessment; referencing a study never changes that assessment's own `evidence_class`. |
 | `costs` | no | An object keyed by job type, each value an object of non-AI cost categories (`human_review`, `rework_or_error`, `handoff`, `training_or_change`) that subtract from `estimated_value` into a `net_value`. No fleet-wide default — an unconfigured job type nets nothing. Run `costs-status.sh` to list classified job types that have no configured costs. A supplied `0` and an absent category are different and both explicit in the record; see the full schema. |
 
-The value this produces is an **unverified model estimate** — see
+This produces an unverified model estimate. See
 [How it works](how-it-works.md#llm-outcome-value-evaluation-experimental) for what that
-means and how Revenium combines it with metered cost into a displayed ROI, and
-**[Job value and ROI](value-and-roi.md)** for the complete reference: the evaluator, the
+means and how Revenium combines it with metered cost into a displayed ROI.
+[Job value and ROI](value-and-roi.md) provides the complete reference: the evaluator,
 abstention vocabulary, the derivation, the records, the wire shape, and troubleshooting.
 [Job value: a practical overview](value-overview.md) is the short version, with an annotated
 worked configuration for a software engineering team.
 
-`net_value`, the cost coverage list, and the six `economic_mechanism` values
-(three the evaluator may select, three only an operator can declare) are all
-part of this same block's effect and are documented in full — including why
-no ROI ratio is ever emitted — in the full schema below.
-
-The full schema is in
+The full schema documents `net_value`, cost coverage, the six `economic_mechanism` values,
+and why the skill never emits an ROI ratio. It is in
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md).
 
 ### Opt-in surfaces and how they compose (D-09, EGV-23)
 
-Everything under `llmOutcomeEvaluation` is **experimental**, including the
-`boundaries` object below, which selects an implementation for one assessment
-step. Five settings control separate parts of the opt-in feature:
+The experimental outcome-evaluation feature has five independent settings:
 
 | Surface | Governs |
 |---|---|
@@ -90,15 +84,10 @@ step. Five settings control separate parts of the opt-in feature:
 | `costs` | Operator-supplied inputs that net against a computed estimate. |
 | `studyId` / `studyVersion` | Reference an impact study; referencing one never changes an assessment's own evidence class. |
 
-These five are **independent. There is no master flag, and none of them will be
-renamed.**
-
-Adding a master flag to the billing path would create a second way to disable
-metering and mix fail-open enrichment with deterministic budget enforcement,
-which EGV-22 forbids. No setting will be renamed because `enabled` and
-`experimentalReportEstimates` are already set in live installs; renaming
-either is a breaking config change for exactly the installs this milestone
-promises unchanged behaviour to.
+There is no master flag. Adding one would create a second way to disable metering and mix
+fail-open enrichment with deterministic budget enforcement, which EGV-22 forbids. The
+settings will not be renamed because `enabled` and `experimentalReportEstimates` are
+already used in live installs.
 
 ### Pluggable boundaries (experimental)
 
@@ -112,8 +101,8 @@ promises unchanged behaviour to.
 }
 ```
 
-`boundaries` is a **top-level key of `config.json`, a sibling of `llmOutcomeEvaluation`** —
-the JSON above is the whole file's shape, not a fragment to paste inside the
+`boundaries` is a top-level key of `config.json` and a sibling of `llmOutcomeEvaluation`.
+The JSON above is the whole file's shape, not a fragment to paste inside the
 `llmOutcomeEvaluation` object. It is one of that feature's five opt-in *surfaces*
 conceptually, but it is not one of its members structurally. Nesting it is silent: the
 resolver reads the top level, and a `boundaries` object it does not find is
@@ -136,8 +125,8 @@ The full schema, including the shipped non-LLM classifier fixture, is in
 
 ## Environment variables
 
-Every value below has a working default in `scripts/common.sh`. Set one only when you have
-a reason to. The cron reads them from an optional env file at
+Every value below has a default in `scripts/common.sh`. The cron reads overrides from
+an optional env file at
 `~/.hermes/state/revenium/env`, sourced at the start of each tick.
 
 ### Identity

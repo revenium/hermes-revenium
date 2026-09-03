@@ -1,16 +1,15 @@
 # Live-tenant proof (LIVE-02 through LIVE-06, plus D-02 and D-03)
 
-Whether the declaration-authority and operator-mechanism work — and the
-sidecar carrier under both — behaves as shipped against a real tenant rather
-than fixtures, established on 2026-08-31 against the same host and pre-prod
-tenant Phase 49 used.
+This record tests declaration authority, operator mechanisms, and their sidecar
+carrier against a real tenant. Verification ran on 2026-08-31 against the host
+and pre-prod tenant used in Phase 49.
 
-This phase **observes** shipped behaviour. It builds no new capability. Seven
+This phase observes shipped behaviour and builds no new capability. Seven
 criteria were in scope: the five ROADMAP names for LIVE-02 through LIVE-06,
 plus two added in the open during planning (D-02, D-03) because they were
 cheap on this specific host and otherwise would not have been.
 
-**Verdict, up front — all seven, in one table:**
+The seven verdicts are:
 
 | # | Criterion | Source | Verdict |
 |---|---|---|---|
@@ -27,16 +26,15 @@ shipped and the won't-fix trigger named in that wording did not fire, so
 criterion 2 stands as originally written; this file scores it as written,
 not as a fallback.
 
-No criterion here is rounded up. Criterion 6 is recorded as a miss with its
-reason, in the same table as the passes, not as a footnote.
+Criterion 6 remains a miss with its reason in the table.
 
 ## How each arm was scored
 
-By read-back from the tenant, corroborated by a point lookup, never by exit
-status. This project's own instrument-trust history is the reason: on
+Each arm was scored by tenant read-back corroborated by a point lookup, not by
+exit status. On
 2026-08-19 the Revenium API returned success and persisted nothing for
 roughly seven hours. A `0` exit code is recorded where it occurred, but it
-carries no evidentiary weight on its own — only `revenium jobs
+carries no evidentiary weight on its own. Only `revenium jobs
 outcome-history` and `revenium jobs get` returning the row, with the
 expected fields, counted as confirmation.
 
@@ -122,8 +120,7 @@ number, not `2.0 hrs × $100/hr = $200`, which the local `value_base` field
 still separately shows), before the reportability gate withheld it from the
 wire.
 
-**Why this configuration is the honest one, and the alternative would not
-have been:** LIVE-03 only requires a non-forced evidence class, and two
+LIVE-03 requires a non-forced evidence class, and two
 fixtures could have supplied one. Writing real rates into
 `config["rateCard"]` **is** the configuration being claimed — the claim is
 true by construction. The other available route, a confirmation-workflow
@@ -359,7 +356,7 @@ live result, and no tenant row was written for this arm. This was a
 decision, not an oversight: forcing the condition would have produced a
 result about a fabricated code path, not about what actually runs.
 
-**The finding, stated with its limit, not without it.** This does *not*
+This finding does *not*
 establish that the `_paths_for_session` regex can never match a real
 session id anywhere on this deployed Hermes version. Only one platform
 (`api_server`) was exercised, on one host, in this run. A code read of the
@@ -375,9 +372,9 @@ silently into "could not reach multiplex."
 
 ### Amendment 2026-08-31 — the root cause, found after the phase closed
 
-Everything above stands as the record of what the arm established while it ran.
-This block records what was learned afterwards, during the post-phase cleanup of
-the same host, and it changes the *diagnosis* — not the verdict.
+The preceding text remains the record of what the arm established. This block
+records what post-phase cleanup on the same host later revealed. It changes the
+*diagnosis*, not the verdict.
 
 The blocker is not a drifted id shape. It is a **namespace mismatch**:
 `agent:<ns>:` is the session-**key** namespace, it is alive and well in this
@@ -410,7 +407,7 @@ None is `agent:`-prefixed — including the `cli` and `subagent` sources the
 ordinary metering path runs on daily, not just the `api_server` route the arm
 exercised.
 
-**The fix is not "teach the regex the new shape."** There is no id shape to
+The fix is not to teach the regex a new shape. There is no id shape to
 learn; the profile is not in the id. It is in the row: `sessions.profile_name`,
 populated correctly on exactly the sessions where resolution failed —
 `p52alpha` and `p52beta` on the two profile databases, `NULL` on the
@@ -436,7 +433,7 @@ their own `sessions.id` shapes first. Recorded in full in the todo
 `paths-for-session-regex-may-never-match`, which this amendment supersedes as
 the durable copy.
 
-**Criterion 6 verdict: NOT CONFIRMED LIVE.** Accepted as the honest close.
+**Criterion 6 verdict: NOT CONFIRMED LIVE.**
 
 ## What this does not establish
 

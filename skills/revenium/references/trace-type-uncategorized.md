@@ -4,14 +4,14 @@ Metered completions in Revenium carry `traceType: uncategorized` instead of the
 classified job type (e.g. `code_review`, `refactor`, `planning`) for one session or across an
 entire fleet. The cron log is otherwise healthy: `revenium-metering.log` is full of successful
 `Reported: session=...` lines and the ledger (`revenium-hermes.ledger`) keeps growing. Metering
-itself is working; the job label just never made it onto the wire.
+works, but the job label never reached the wire.
 
 `--trace-type` is sent only when the installed `revenium` CLI advertises the flag. A CLI that
 lacks it gets no `--trace-type` argument at all, not a literal
-`uncategorized` one. So if you are actually seeing the string `uncategorized` in Revenium (not
-just a missing field), that already proves the CLI is capable and the reporter got as far as
-looking up a job classification for the session and found nothing usable. Don't spend time
-checking `revenium --version` or CLI flags for this symptom. Start at the marker lookup instead.
+`uncategorized` one. Seeing the string `uncategorized` in Revenium rather than
+a missing field proves the CLI supports the flag and the reporter reached the
+job-classification lookup but found nothing usable. Start at the marker lookup instead of
+checking `revenium --version` or CLI flags.
 
 Two independent processes must agree on the marker location. The
 `revenium-classifier` Hermes plugin writes a `kind:"job"` record into the session's marker file,
@@ -45,8 +45,7 @@ ls -la ~/.hermes/state/revenium/markers/<root-session-id>.jsonl
 
 The classifier's `on_session_end` hook either never ran for this session or failed before
 writing the marker. A registration outage, where Hermes never loaded the plugin,
-produced a live nine-day fleet-wide incident and
-is the one the check below is built to catch.
+caused a nine-day fleet-wide incident. The check below detects this outage.
 
 First confirm which process serves this profile. The plugin is loaded once
 at process start, and on a desktop-app host the gateway is usually not the owner:

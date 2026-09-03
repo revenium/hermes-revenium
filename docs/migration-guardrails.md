@@ -2,9 +2,9 @@
 
 This guide documents the v1.3 upgrade from polling-style `revenium alerts budget`
 enforcement to `revenium guardrails` budget rules. It covers the `config.json`
-schema change, the automatic migration on the next cron tick, preserved and
-orphaned state, and manual recovery. Most operators only need to upgrade the
-skill; the cron performs the migration.
+schema change, automatic migration on the next cron tick, preserved and orphaned
+state, and manual recovery. For most operators, cron performs the migration after
+the skill upgrade.
 
 ## What changed
 
@@ -49,7 +49,7 @@ migration script does the following:
    deprecation: legacy alertId <id> orphaned, migrated to ruleId <new-id>
    ```
 
-**No operator action is required for the common case.** The script is idempotent:
+The common case requires no operator action. The script is idempotent:
 every cron tick after the first successful migration is a fast no-op. The
 `ruleIds`-presence check in `config.json` exits early before any API call is made.
 
@@ -60,16 +60,15 @@ budget data independently. If you want to remove the orphan `alertId` key from
 
 ## We preserve your enforcement posture
 
-Migrated rules enforce **immediately by default**. They are NOT created in shadow
-mode. If the legacy alert was halting your agent under autonomous mode in v1.2, the
-same hard-limit number will halt the agent under v1.3. Auto-shadowing on migration would silently lift enforcement during an active budget
-breach.
+Migrated rules enforce immediately by default; they are not created in shadow
+mode. If the legacy alert halted your agent under autonomous mode in v1.2, the
+same hard limit halts it under v1.3. Auto-shadowing would lift enforcement during
+an active budget breach.
 
-In practice: if your agent was being halted Monday under v1.2, it will continue to
-be halted Tuesday after the v1.3 upgrade.
+An agent halted before the upgrade remains halted afterward.
 
-**If you want to validate the v1.3 enforcement path against real traffic before
-turning enforcement on**, you can run the upgrade in shadow-on-migration mode. Before
+To validate the v1.3 enforcement path against real traffic before enabling
+enforcement, run the upgrade in shadow-on-migration mode. Before
 the first cron tick after upgrading, add this line to
 `~/.hermes/state/revenium/env`:
 
@@ -111,8 +110,8 @@ through to the auto-discovery `UNCLASSIFIED` subscription. With
 by agent name and accumulates into a stable per-agent bucket that evaluates
 correctly out of the box.
 
-**The agent name is `Hermes` by default and centralized in
-`scripts/common.sh::REVENIUM_AGENT_NAME`.** Override it via environment when
+The agent name defaults to `Hermes` and is centralized in
+`scripts/common.sh::REVENIUM_AGENT_NAME`. Override it via environment when
 running multiple distinct Hermes installs against one Revenium tenant:
 
 ```bash
@@ -122,7 +121,7 @@ echo 'REVENIUM_AGENT_NAME=HermesProd' >> ~/.hermes/state/revenium/env
 The same variable is read by `hermes-report.sh` when shipping `--agent`, so
 the rule filter and the per-call agent argv always agree.
 
-**To override the default filter scope** (e.g. scope a rule to a specific
+To override the default filter scope, such as scoping a rule to a specific
 model instead of agent), pass `--filter` or `--filters-json` to
 `setup-guardrails.sh`:
 
@@ -220,13 +219,12 @@ When a rule actually breaches its hard-limit under autonomous mode, the Hermes n
 Guardrail halt active — rule 'Engineering Budget' (TOTAL_COST, MONTHLY) at 102.5 of 100.0 hard-limit. To resume: bash ~/.hermes/skills/revenium/scripts/clear-halt.sh | Event: [2026-05-22T14:03:38.478Z] Rule 'Engineering Budget' blocked 1 request: TOTAL_COST $102.50 exceeded hard limit $100.00
 ```
 
-The text after the `|` separator is the most recent `revenium guardrails enforcement-events list` entry. If the events list API is unavailable or returns empty, the suffix degrades to `Event: [(unavailable)] (unavailable)` — the halt still fires; only the audit detail is missing.
+The text after the `|` separator is the most recent `revenium guardrails enforcement-events list` entry. If the events list API is unavailable or empty, the suffix becomes `Event: [(unavailable)] (unavailable)`. The halt still fires; only the audit detail is missing.
 
 ## Loud-on-failure behavior
 
 Migration failures are logged and notified. The cron pipeline continues metering
-and checking budgets regardless of migration outcome — a migration failure does
-not block the other pipeline stages.
+and checking budgets; a migration failure does not block the other stages.
 
 Failure classes and their behavior:
 

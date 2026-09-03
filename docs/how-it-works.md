@@ -2,21 +2,21 @@
 
 [← Documentation index](README.md)
 
-This ships as a Hermes skill bundle, but `SKILL.md` only carries a halt-check backstop. A
+This Hermes skill bundle uses `SKILL.md` only as a halt-check backstop. A
 plugin, three shell hooks, and a cron perform the runtime work. See
 [What's actually installed](../README.md#whats-actually-installed) for the split.
 
-Those pieces fall into three parts, and they never call each other. The only coupling is
-files under `~/.hermes/state/revenium/`.
+The components do not call each other. They communicate through files under
+`~/.hermes/state/revenium/`.
 
-1. **In-session.** The `revenium-classifier` **plugin** — Python that Hermes loads from
-   `~/.hermes/plugins/` and calls at four lifecycle hooks — labels what each session was
-   doing and writes marker files. Three **shell hooks**, registered in `config.yaml`,
+1. In-session: Hermes loads the Python `revenium-classifier` plugin from
+   `~/.hermes/plugins/` and calls it at four lifecycle hooks. It labels each session and
+   writes marker files. Three shell hooks registered in `config.yaml`
    enforce guardrails and capture tool calls. None of this makes a network call.
-2. **State files.** `config.json`, `guardrail-status.json`, the markers, the ledgers, the
+2. State files: `config.json`, `guardrail-status.json`, markers, ledgers, and
    taxonomies. Every process re-reads what it needs; there is no shared memory and no IPC.
-3. **The cron pipeline.** Once a minute, out of process, under one lock. This is the only
-   part that talks to Revenium.
+3. The cron pipeline: runs once a minute, out of process, under one lock. Only this
+   component talks to Revenium.
 
 This separation makes a broken install fail open with no enforcement or classification
 instead of blocking the agent.
@@ -70,7 +70,7 @@ Two switches control it:
 | `REVENIUM_EVENT_METERING_MODE` | `shadow` | `shadow` computes rows without shipping; `live` ships them. |
 | `REVENIUM_LEGACY_COMPLETIONS` | `enabled` | `enabled` keeps the delta reporter billing; `disabled` stands it down. |
 
-**Setting `MODE=live` alone does not cut over.** While legacy stays enabled, an ownership
+Setting `MODE=live` alone does not cut over. While legacy stays enabled, an ownership
 record decides which path bills a given session, and the outcome turns on a race you cannot
 predict from the switches. A real cutover needs `REVENIUM_LEGACY_COMPLETIONS=disabled`.
 [Event metering](event-metering.md) has the mechanism and the evidence.
@@ -81,8 +81,8 @@ rest keep billing through the legacy path until they drain, then cut over on the
 
 A session's effective stale threshold is
 `max(REVENIUM_DRAIN_STALE_SECONDS, REVENIUM_CRON_SETTLE_SECONDS + 86400)`, and it sets the
-floor on how fast a profile can converge. **Check yours before planning a cutover — the
-default is not the fast case.** At the stock `REVENIUM_DRAIN_STALE_SECONDS=604800`, a quiet
+floor on how fast a profile can converge. Check it before planning a cutover. At the
+default `REVENIUM_DRAIN_STALE_SECONDS=604800`, a quiet
 open session takes seven days to clear. Lower it to `86400` and the `settle + 86400` term
 takes over, giving 87,000 seconds, or about 24.17 hours. That is the figure quoted in
 [Event metering](event-metering.md), and it reflects one fleet's tuned configuration rather
@@ -93,12 +93,12 @@ Rollback is the reverse: set `REVENIUM_LEGACY_COMPLETIONS=enabled` again, then
 
 ## Auxiliary usage metering
 
-This pass meters the auxiliary LLM calls Hermes makes around its own main loop —
+This pass meters the auxiliary LLM calls Hermes makes around its main loop:
 compression, title generation, approval, vision, web extraction, and session search.
 None of it was reported before this feature shipped.
 
 It runs as `report_auxiliary_usage`, a post-loop pass inside `hermes-report.sh`, after the
-agentic-jobs outcome stage. **This is not a seventh cron stage** — the cron still runs
+agentic-jobs outcome stage. It is not a seventh cron stage; the cron still runs
 six.
 
 It reads `session_model_usage` in `state.db`, read-only, and considers only rows whose
@@ -117,15 +117,13 @@ The switch is `REVENIUM_AUX_METERING` (env) or `auxMetering` (`config.json`), en
 `disabled` — or a Hermes build with no `session_model_usage` table — meters
 byte-identically to before.
 
-**Guardrail scope.** A rule left at the default `AGENT:IS:` scope has the same scope on
-an auxiliary row as on that session's main-loop row, because the auxiliary row carries
-the same `--agent` value. A `MODEL`- or `PROVIDER`-scoped rule is different: those are the
-auxiliary row's OWN facts, and an auxiliary call frequently runs on a smaller model than
-the session's main-loop model, so a `MODEL`-scoped rule built around your primary model
-will not see it. A `TASK_TYPE`-scoped rule is opt-in by construction and the `aux_*`
-labels must be enumerated. **Whether the Revenium-side guardrail counter actually moves
-for an ingested auxiliary row is not demonstrated by this work** — that confirmation is a
-separate, later effort against a live tenant.
+Auxiliary rows carry the session's `--agent`, so default `AGENT:IS:` rules include them.
+`MODEL` and `PROVIDER` rules evaluate the auxiliary call's own model and provider, which
+may differ from the main loop. `TASK_TYPE` rules must explicitly include the `aux_*`
+labels.
+
+Whether Revenium's server-side guardrail counter advances for an auxiliary row has not
+yet been verified against a live tenant.
 
 See [Auxiliary usage migration](migration-auxiliary-usage.md) for the measured step-up,
 the re-runnable sizing SQL, and the off switch.
@@ -166,11 +164,9 @@ capability is invented here.
   evaluator) decided `evidence_class` — see
   [Evidence-class precedence and declaration authority](evidence-class-precedence.md).
 
-**A byte ceiling is enforced once, in the reporter, at emit** — the one place the actual
-wire bytes exist before the payload leaves the machine. The ceiling is **4096 bytes**. This
-figure is quoted here safely because a guard test pins it to the source constant
-(`_METADATA_CEILING_BYTES` in `skills/revenium/scripts/hermes-report.sh`) — the two can't
-drift apart without the guard failing.
+**A byte ceiling is enforced once, in the reporter, at emit.** The ceiling is **4096 bytes**
+and is pinned by test to `_METADATA_CEILING_BYTES` in
+`skills/revenium/scripts/hermes-report.sh`.
 
 The figure is a **defensive** choice, not a measured server bound: there is no observed
 Revenium server-side `--metadata` limit to derive a ceiling from. What DOES stand behind it
@@ -183,14 +179,14 @@ contract.
 The source constant remains the authoritative place the value lives; the number here is a
 convenience for the reader, with the guard preventing drift. It is not a second source of truth.
 
-**When a payload exceeds the ceiling**, the value family is dropped first, the provenance
+When a payload exceeds the ceiling, the value family is dropped first, the provenance
 family second, and base metering is never dropped — metering never breaks, only the
 enrichment yields. A record whose payload was cut carries `metadata_truncated: true`, so a
 consumer can tell "this job had no value" (both value keys and the marker absent) from "the
 value did not fit" (`metadata_truncated` present). An unmarked partial record would be the
 silent substitution this milestone exists to prevent.
 
-**Transport, not policy.** The ceiling decides only what physically fits on the wire. It
+The ceiling decides only what fits on the wire. It
 does not decide what is worth reporting. The reportability decision (EGV-18) is made
 upstream, by the resolver; the reporter only reads that decision and never computes it.
 
@@ -209,22 +205,21 @@ derived from two independently bounded inputs (an assumed hours-saved figure and
 loaded hourly rate, each capped by `maxHoursSaved` / `maxLoadedRate`), never asserted
 directly by the model.
 
-**What the number is.** The result is an **unverified model estimate** — not measured, not
+The result is an unverified model estimate: not measured,
 observed, not customer-confirmed, and not defensible ROI on its own. Revenium computes the
 ROI figure it displays from this reported value **combined with metered cost**; the estimate
 is one input to that calculation, not the whole of it. See the assessment contract in
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md)
 for the full bounds and validation rules.
 
-**Default and upgrade behaviour.** `llmOutcomeEvaluation` is absent from `config.json` by
+`llmOutcomeEvaluation` is absent from `config.json` by
 default, and the read **fails closed**: a missing, unreadable, or malformed config resolves
 to disabled, never to estimating money by accident. An existing install upgrading into this
 feature meters **byte-identically** to before — this is proven, not asserted by inspection:
 the `jobs-outcome.golden.json` wire-shape fixture is unchanged by this feature, and the
 fail-closed default is covered by its own tests.
 
-**The log taxonomy spans two log destinations.** Six words describe every outcome an
-evaluation attempt can reach, and they are not all written to the same place:
+Six terms describe evaluation outcomes across two log destinations:
 
 - `evaluated`, `abstained`, `invalid`, and `timed-out` are written **in-process** by the
   classifier plugin, on the Python logger `revenium_classifier`, and land wherever Hermes'
@@ -243,65 +238,24 @@ reports, per profile, whether the switch is enabled, which evaluator is selected
 two cron-side counts (`deferred`/`wedged`, `reported`) from that profile's own log — and
 names where the other four are written, rather than attempting to show them.
 
-**Live verification against a real tenant (2026-08-24).** Every earlier phase of this
-feature proved the chain above against fixtures, stubs, and a shell test double. It has
-since been run once, end to end, against a real Hermes session and a real Revenium tenant:
-a session produced an inferred job, the evaluator produced or correctly withheld an
-assessment, the outcome was reported through the normal cron pipeline exactly once across
-two ticks, and the result was read back live with `revenium jobs roi <id>`.
+**Live verification against a real tenant (2026-08-24).** A real Hermes session against an
+isolated development tenant produced an inferred job and reported its outcome exactly once
+across two cron ticks. `revenium jobs roi <id>` returned the value but omitted
+`evidence_class: MODEL_ESTIMATED_DEMO`, evaluator, confidence, and other provenance. That
+metadata was visible through `jobs outcome-history` only. The primary ROI view therefore
+does not distinguish this model estimate from a measured value.
 
-The run did not use the dedicated sandbox host this verification was originally scoped
-against — that host was unreachable, and the only other available host with a real tenant
-was a production fleet host deliberately excluded from this work, because the feature
-writes estimated money into whatever tenant it touches. It ran instead on a throwaway
-profile on a developer workstation, against an isolated development tenant. The substitution
-narrows what the result covers, and the limits below are stated with that in mind.
+The evaluator declined to produce a value for a trivial task. For a separate engineering
+task, it produced a bounded `$250.00` estimate (`2.0` hours at `$125/hr`, confidence `0.9`).
+The outcome is immutable and remains in the development tenant.
 
-What it wrote is permanent. The verification job and its reported outcome remain in that
-development tenant: `revenium jobs outcome` is labelled immutable by the CLI itself, and
-nothing this skill calls can retract a reported outcome. Whether deleting a job also
-removes its outcome revisions was not tested. Anyone repeating this procedure should expect
-the rows to stay.
+**What this run did NOT prove.** It covered one workstation, one development tenant, one
+evaluator model, and two ticks. It did not test fleet behavior, concurrent ticks, another
+provider, or value divided by non-zero metered cost. The free-tier model produced `$0.00`
+metered cost and a null ROI.
 
-The reported outcome carried `evidence_class: MODEL_ESTIMATED_DEMO` in its metadata,
-alongside `evaluator`, `evaluator_version`, `confidence`, and both numeric assumptions the
-estimate is built from. A reader inspecting the outcome's own metadata can tell this number
-apart from a measured one, but `revenium jobs roi <id>` itself, in both its JSON and table
-output, surfaced none of that: no `evidence_class`, no `evaluator`, no `confidence`, nothing
-distinguishing an estimate from a measurement. The estimated value is shown with the exact
-same visual weight a measured value would get. Only the separate `jobs outcome-history`
-command echoes the metadata blob at all. **The honesty burden for stating that a value is an
-unverified model estimate therefore rests entirely on this skill's own `--metadata` payload
-and on documentation like this page — not on anything Revenium's primary read-back
-surfaces.**
-
-Both outcomes were observed, not just the successful one. A trivial, low-stakes task
-produced a genuine `SUCCESS` job, and the evaluator declined to produce a value — no
-assessment, nothing reported. A separate, realistic, bounded engineering task produced a
-`SUCCESS` job with a complete, non-inflated assessment (`$250.00` USD, `2.0` hours at
-`$125/hr`, confidence `0.9`), which was reported and read back unchanged. Read together, the
-pair shows the evaluator discriminating rather than assigning a number to every successful
-arc regardless of merit — an evaluator that never abstains would be indistinguishable from
-one that always inflates.
-
-**What this run did NOT prove.** One arc reported, on one workstation, against one isolated
-dev tenant, with one evaluator model, across two cron ticks. It says nothing about fleet or
-multi-profile behavior, nothing about idempotency across more than two ticks or concurrent
-ticks, and nothing about evaluator behavior on a different LLM provider.
-
-It also did not exercise the value-against-cost calculation. The verification session ran on
-a free-tier model, so its metered cost was genuinely `$0.00` and the read-back returned a
-null ROI — the correct answer to a value divided by no cost, but a degenerate one. The
-reported value was proven end to end; the ratio Revenium computes from that value and the
-metered cost was not.
-
-One provenance limit is worth stating alongside the metadata above. `evaluator` and
-`evaluator_version` identify the evaluator *implementation*, not the deciding model — the
-evaluator issues an unpinned call and the host routes it, so a provider failover can change
-the deciding model without changing either field. A third, separately recorded field closes
-that gap: `model` is read directly from the LLM response (`response.model`) and clamped to a
-fixed byte budget before persistence, so an estimate's metadata establishes not just that a
-model produced it under stated assumptions, but which one served the call.
+Evaluator metadata identifies the implementation. The separately recorded `model` field,
+read from `response.model`, identifies the model returned by the provider response.
 
 ### Inference locality facts (D-06, AMEND-D-07, EGV-21)
 
@@ -319,14 +273,14 @@ The class is derived without any name resolution, so an endpoint named by a host
 skill cannot verify is recorded in the conservative direction (`public`), never guessed as
 `private` or `loopback`.
 
-**This limit matches the one stated above for the deciding model.** The class reflects the
+As with the deciding model, the class reflects the
 CONFIGURED endpoint at the moment it was read, not a verified connection — exactly as
 `evaluator`/`evaluator_version` above identify the implementation, not the deciding model.
 A mid-flight provider failover is not observed by this field, the same way it is not
 observed by `evaluator`/`evaluator_version` — only the separate `model` field, read from the
 response itself, can capture it.
 
-**What these two facts are NOT.** They are inputs to an operator's own judgment about their
+These two facts support an operator's judgment about their
 deployment, not a conclusion about it. The skill can observe only where inference was
 configured to go; it cannot observe the preprocessing, logging, or retention halves of the
 path, so it records the part it can see and draws no conclusion from it. No statement here
@@ -374,7 +328,7 @@ The full halt contract, including the exact string the agent must emit verbatim,
 
 Run `/revenium` inside a Hermes session to:
 
-- **View budget status** — current spend, threshold, percent used, halt state.
-- **Reset** — recreate the budget rule with the same settings, zeroing current spend.
-- **Reconfigure** — change API key, budget amount, or period. This deletes the old rule and
+- View budget status: current spend, threshold, percent used, and halt state.
+- Reset: recreate the budget rule with the same settings and zero current spend.
+- Reconfigure: change the API key, budget amount, or period. This deletes the old rule and
   creates a new one.

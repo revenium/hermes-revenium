@@ -1,8 +1,7 @@
 # Contributing
 
 This is a [Revenium Labs](https://github.com/revenium/.github/blob/main/LABS.md)
-project: field-developed, best-effort software. Issues and PRs are welcome, and we will
-work with you to adapt it to your environment.
+project: field-developed, best-effort software. Issues and PRs are welcome.
 [Come talk to us on Discord](https://discord.gg/J2DbmjZ2nA).
 
 ## What this repo is
@@ -44,30 +43,30 @@ bash install.sh
 
 The tests enforce these invariants:
 
-**State paths live in `scripts/common.sh` and nowhere else.** Adding a state file means
+State paths live in `scripts/common.sh` and nowhere else. Adding a state file means
 adding its variable there, above the `mkdir -p`. Never hardcode `~/.hermes/...` in a
 calling script. `test_runtime_paths_are_hermes_native` fails the build otherwise.
 
-**Metering must stay idempotent.** Re-running the cron can never double-report. The
+Metering must stay idempotent. Re-running the cron can never double-report. The
 append-only ledgers and the deterministic `--transaction-id` guarantee that together;
 changes to session identity, splitting, or ledger writes must preserve it.
 
-**Wire shape is pinned by golden fixtures.** `tests/fixtures/compat/*.golden.json` pin the
+Wire shape is pinned by golden fixtures. `tests/fixtures/compat/*.golden.json` pin the
 exact argv of `meter completion`, `meter tool-event`, `jobs create`, and `jobs outcome`.
 Changing argv means changing a golden, deliberately, in the same commit.
 
-**New CLI flags must be capability-probed and fail open.** Use `supports_flag` from
+New CLI flags must be capability-probed and fail open. Use `supports_flag` from
 `common.sh`, so an older `revenium` CLI keeps metering exactly as it did before the flag
 existed.
 
-**Every in-session code path fails open.** A missing or corrupt status file, bad JSON, any
-error at all — the answer is "not halted". A broken skill degrades to no enforcement, never
+Every in-session code path fails open. For a missing or corrupt status file, bad JSON, or
+any other error, the answer is "not halted". A broken skill degrades to no enforcement, never
 to a blocked agent.
 
-**A halt is cleared only by `clear-halt.sh`.** Do not add a code path anywhere else that
+A halt is cleared only by `clear-halt.sh`. Do not add a code path anywhere else that
 sets `halted` back to false.
 
-**Preserve each script's `set` flags.** `common.sh` and `hermes-report.sh` run `-uo
+Preserve each script's `set` flags. `common.sh` and `hermes-report.sh` run `-uo
 pipefail` on purpose, because they must survive per-item failures and keep logging.
 Everything else runs `-euo pipefail`.
 
@@ -75,7 +74,7 @@ Everything else runs `-euo pipefail`.
 
 Every new script in `skills/revenium/scripts/` must:
 
-1. Source `common.sh`, then call `ensure_path` immediately — cron starts with an almost
+1. Source `common.sh`, then call `ensure_path` immediately. Cron starts with an almost
    empty `PATH`.
 2. Be added to the `expected` list in `tests/test_repository.py::test_expected_files_exist`.
 3. Ship executable.
@@ -84,8 +83,8 @@ Every new script in `skills/revenium/scripts/` must:
 ## Hermes' plugin surface
 
 [`docs/plugin-interface.md`](docs/plugin-interface.md) records what that surface
-actually does, measured live rather than inferred. Read it before changing the
-classifier or the event spool — it carries the payload contract
+does, based on live measurements. Read it before changing the classifier or the event
+spool. It carries the payload contract
 `api_event_spool.py` parses, a negative result that forbids moving live halt state
 into a prompt section, two dead ends not worth chasing, and the reason
 `tests/test_phase29_no_session_reset_change.py` exists.
@@ -100,13 +99,13 @@ There is no linter or formatter. Match the neighbouring file.
 - Resolve `SCRIPT_DIR` from `BASH_SOURCE[0]`, never `$0`.
 - Build long CLI invocations as arrays; append optional flags conditionally.
 - Comments explain *why*. Several in this codebase carry measured evidence and rejected
-  alternatives — that is the record of why the code has its current shape. Preserve it when
+  alternatives. This records why the code has its current shape. Preserve it when
   editing nearby.
 
 ## Documentation
 
 Operator documentation lives in [`docs/`](docs/). Reference material that ships inside the
-skill bundle and is read at runtime lives in `skills/revenium/references/` — `docs/` links
+skill bundle and is read at runtime lives in `skills/revenium/references/`. `docs/` links
 to it rather than restating it, because restating it is how the two fell out of sync
 before.
 

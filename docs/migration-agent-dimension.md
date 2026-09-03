@@ -1,10 +1,9 @@
 # Migrating to Root-Inherited Agent Attribution (v1.4)
 
-This guide covers two changes shipped together in the v1.4 release: how `--agent`
-is resolved on zero-marker (subagent) completions, and the three new squad
-attribution flags. The first half is a code change with **no observable effect**
-on any current install; the second half is new, observable behavior. Both are
-covered here because they touch the same emit paths in
+This guide covers two v1.4 changes: `--agent` resolution on zero-marker
+(subagent) completions and three new squad-attribution flags. Agent resolution
+has no observable effect on current installs; the squad fields add observable
+behavior. Both changes touch the same emit paths in
 `skills/revenium/scripts/hermes-report.sh`.
 
 ## The AGENT dimension: nothing changes
@@ -15,7 +14,7 @@ resolves `--agent` through the session's root — a subagent inherits the agent
 name of the root session that dispatched it, via the same once-per-session
 `root_agent_name` resolution the squad flags below already use.
 
-**The emitted value is identical on every current install.** No code path in
+The emitted value is identical on every current install. No code path in
 this skill has ever written an `agent` field into a marker record — not
 `_write_marker_pair`, not `_write_job_marker`. Root-inherited resolution
 therefore falls back to `REVENIUM_AGENT_NAME` exactly as before, for every
@@ -23,11 +22,10 @@ session, on every install, today.
 
 The current behavior has these consequences:
 
-- **Saved Revenium views keyed on AGENT need no change.**
-- **`AGENT:IS:` guardrail filters** (see `scripts/common.sh:26`) keep matching
+- Saved Revenium views keyed on AGENT need no change.
+- `AGENT:IS:` guardrail filters (see `scripts/common.sh:26`) keep matching
   exactly the sessions they matched before.
-- **There is no migration step to perform.** This section exists to document
-  the absence of change, not to prescribe one.
+- There is no migration step. This section records the absence of change.
 
 **What would invalidate this.** If a future change adds an `"agent"` key to
 `_write_marker_pair`'s record closure or `_write_job_marker`'s record dict in
@@ -40,8 +38,8 @@ the moment a markerless completion's `--agent` value stops matching
 
 ## Squad grouping: three new fields do appear
 
-This is the observable half of the release. Every metered completion — marker-
-bearing or markerless — now carries three additional flags when the installed
+Every metered completion, marker-bearing or markerless, now carries three
+additional flags when the installed
 `revenium` CLI supports them (older CLIs see no change; the flags are omitted
 entirely):
 
@@ -62,10 +60,9 @@ fallback this table originally described. See
 `skills/revenium/references/setup.md` → **Squad grouping across the fleet**
 for the fleet recipe.
 
-**This vocabulary describes topology, not function.** `--squad-role` describes where a
+`--squad-role` describes topology, not function: where a
 session sits in the dispatch tree, not what it did (`planner`, `executor`,
-`reviewer`, etc.). Function-derived roles were deliberately deferred rather
-rather than shipped now and migrated later. Topology is derivable from the existing
+`reviewer`, etc.). Function-derived roles were deferred. Topology is derivable from the existing
 root-walk with no marker dependency, so it is available on every session,
 whereas a functional label would degrade to a fallback exactly when markers
 are missing.
@@ -86,8 +83,8 @@ As of v1.4, the `revenium-classifier` plugin registers three hooks
 
 Before this release, exactly one of the three fired: `on_session_end`.
 
-**The practical effect: interactive gateway session conversation content now
-reaches the auxiliary classifier LLM.** Before this release, in practice only
+Interactive gateway session conversation content now reaches the auxiliary
+classifier LLM. Before this release, in practice only
 the scheduled `cron_*` sessions' content reached it — interactive gateway
 sessions never fired any hook at all. `_read_session_messages` (called at
 `classifier.py:1079`) and `_read_session_transcript` (called at
@@ -95,13 +92,10 @@ sessions never fired any hook at all. `_read_session_messages` (called at
 classification call, for every session kind alike; what changed is which
 session kinds now reach them.
 
-**Same destination, same data category — a wider source set.** This is not a
-new data-sharing behavior, a new egress, or a new recipient: the auxiliary LLM
-is the same auxiliary LLM, and conversation content is the same data category
-it always sent. What changed is which sessions feed that existing flow.
-Unlike the AGENT dimension above, this is a real change to disclose, not an
-absence of one — an operator with a data-handling policy needs to know the
-source set widened.
+The destination and data category are unchanged, but the source set is wider.
+The same auxiliary LLM receives the same category of conversation content from
+more session types. Operators with data-handling policies need to account for
+the wider source set.
 
 **Bounded to one inference per session.** Classification happens at most once
 per session, not once per turn. `_session_already_classified`

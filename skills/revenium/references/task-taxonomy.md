@@ -2,7 +2,7 @@
 
 ## What this is
 
-The task taxonomy is an agent-owned controlled vocabulary stored at `${TAXONOMY_FILE}` (declared
+The task taxonomy is an agent-owned vocabulary stored at `${TAXONOMY_FILE}` (declared
 in `common.sh`; defaults to `~/.hermes/state/revenium/task-taxonomy.json`). Fresh installs copy
 the seed file at `skills/revenium/task-taxonomy.json` into `${TAXONOMY_FILE}` through the
 root `install.sh` on the repo-clone path, and by `scripts/install.sh` on the tap path
@@ -88,7 +88,7 @@ When uncertain whether to mint or reuse, mint a new specific label rather than c
 a bland catch-all. Catch-alls to avoid when a more specific label fits: `generation`, `analysis`,
 `review`, `task`.
 
-These four are deliberately **absent from the seed file**. Seeding a catch-all contradicts the
+These four are deliberately absent from the seed file. Seeding a catch-all contradicts the
 mint-first policy above: the prompt tells the classifier to avoid emitting them while the seed
 offers them as reusable vocabulary. The seed shipped 2026-05-12 under the earlier closed-set
 design ("pick the best-fitting label"); the 2026-05-14 mint-first rewrite superseded that model

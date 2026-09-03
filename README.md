@@ -4,10 +4,10 @@
 
 # Hermes Revenium
 
-**Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event
-metering for [Hermes Agent](https://hermes-agent.nousresearch.com), on the
-[Revenium](https://www.revenium.ai) platform. Ships as a Hermes skill bundle; the work is
-done by a plugin, three shell hooks, and a cron.**
+Budget enforcement, semantic task-type metering, agentic job tracking, and tool-event
+metering for [Hermes Agent](https://hermes-agent.nousresearch.com) on the
+[Revenium](https://www.revenium.ai) platform. It ships as a Hermes skill bundle and runs
+through a plugin, three shell hooks, and a cron job.
 
 ![Revenium Labs](https://img.shields.io/badge/Revenium-Labs-6f42c1?style=for-the-badge)
 ![Status: Beta](https://img.shields.io/badge/status-beta%20(best--effort)-f0a020?style=for-the-badge)
@@ -26,15 +26,14 @@ done by a plugin, three shell hooks, and a cron.**
 </div>
 
 > ### 🧪 This is a Revenium Labs project
-> **Revenium Labs** projects are field-developed, best-effort solutions. They are working,
-> beta-quality software, built to solve real customer problems and shared in the open. They are
+> **Revenium Labs** projects are field-developed, best-effort, beta-quality software shared
+> in the open. They are
 > **not** part of Revenium's officially supported products.
 >
-> - It works and solves a real problem, but may need adaptation to fit your exact environment.
+> - It may need adaptation for your environment.
 > - It's provided as-is, without the versioned-release guarantees, SLAs, or formal support
 >   that back our core products.
-> - We welcome your issues, feedback, and PRs, and **we're happy to work with you** to make it
->   fit your use case. [Come talk to us on Discord](https://discord.gg/J2DbmjZ2nA).
+> - Issues, feedback, and PRs are welcome. [Join us on Discord](https://discord.gg/J2DbmjZ2nA).
 >
 > → **[What is Revenium Labs?](https://github.com/revenium/.github/blob/main/LABS.md)**
 
@@ -48,15 +47,15 @@ estimated economic value, which Revenium combines with metered cost to display R
 
 | | |
 |---|---|
-| **Semantic task types** | Every completion ships with `--task-type` and `--operation-type` from a controlled vocabulary, inferred by a plugin that reads the session transcript — not by asking the agent to label itself. |
+| **Semantic task types** | Every completion ships with `--task-type` and `--operation-type` from a controlled vocabulary. A plugin infers them from the session transcript instead of asking the agent to label itself. |
 | **Agentic job tracking** | Discrete task arcs become Revenium jobs with immutable, once-only outcomes, and their transactions are linked back via `--agentic-job-id`. |
-| **Tool-event metering** | Every Hermes tool call is metered — name, duration, success, error — through `revenium meter tool-event`. |
+| **Tool-event metering** | Every Hermes tool call is metered through `revenium meter tool-event`, including its name, duration, success, and error. |
 | **Structural budget guardrails** | Hermes shell hooks read a local guardrail snapshot before every LLM call and every tool call, so enforcement does not depend on the agent choosing to comply. |
-| **Job value estimation** *(experimental, opt-in, off by default)* | On a `SUCCESS` arc only, one bounded LLM call on your own provider estimates the job's economic value from two independently capped inputs. It is an **unverified model estimate**, not an observed outcome. Absent or malformed config fails closed, so an existing install meters byte-identically to before. Start with the **[practical overview](docs/value-overview.md)**; **[Job value and ROI](docs/value-and-roi.md)** is the full reference. |
+| **Job value estimation** *(experimental, opt-in, off by default)* | On a `SUCCESS` arc only, one bounded LLM call on your own provider estimates the job's economic value from two independently capped inputs. It is an unverified model estimate, not an observed outcome. Absent or malformed config fails closed, so an existing install meters byte-identically to before. Start with the [practical overview](docs/value-overview.md); [Job value and ROI](docs/value-and-roi.md) is the full reference. |
 | **Auxiliary usage metering** *(on by default)* | Hermes' own compression, title-generation, approval, vision, web-extract, and session-search LLM calls are metered as their own `--operation-type AUX` completions from a fixed `aux_*` vocabulary. A permanent step-up in reported spend against unchanged traffic, with an off switch. **[Auxiliary usage migration](docs/migration-auxiliary-usage.md)** has the measured size and the caveats. |
 
 > **Which number crosses the wire.** When value estimation is enabled, `--outcome-value`
-> ships the **low** bound of the low/base/high band — the conservative figure, not the base.
+> ships the **low** bound of the low/base/high band: the conservative figure, not the base.
 > All three bounds and their provenance ride in `--metadata`, so the full range stays
 > recoverable. The estimate understates by design rather than overstating, which means the
 > value on a Revenium dashboard is deliberately the floor of the range.
@@ -64,8 +63,7 @@ estimated economic value, which Revenium combines with metered cost to display R
 
 ## What's actually installed
 
-"Skill" is how this is packaged and installed, not what does the work. Five pieces land on
-the host, and only one of them is the skill:
+The package installs six pieces. Only one is the skill:
 
 | Piece | What Hermes calls it | Where it lives | What it does |
 |---|---|---|---|
@@ -83,7 +81,7 @@ a stale plugin copy is the most common silent failure because the skill tree is 
 the plugin is not.
 
 An assessment is never rewritten. If a value turns out to be wrong,
-`scripts/correct-assessment.sh` appends a correction — locally as a new line in the job's
+`scripts/correct-assessment.sh` appends a correction locally as a new line in the job's
 sidecar, and remotely through `revenium jobs outcome-update`, which adds a revision rather
 than replacing one. The original stays byte-identical and readable. It is operator-only and
 deliberately unreachable from cron, and `--dry-run` shows what it would do without writing
@@ -97,8 +95,8 @@ bash ~/.hermes/skills/revenium/references/bootstrap.sh
 ```
 
 The first command installs the skill through Hermes' native path; it scans `SAFE`, so no
-`--force` is needed. The second one fetches the parts that path cannot carry — `scripts/`
-and `plugins/` — and then completes setup: credentials, classifier plugin, shell hooks,
+`--force` is needed. The second fetches `scripts/` and `plugins/`, which that path cannot
+carry, and then completes setup: credentials, classifier plugin, shell hooks,
 guardrail budget rule, per-minute cron, gateway restart. It is idempotent, so re-running it
 is always safe.
 
@@ -110,14 +108,14 @@ time each one fires. Until you do, they are registered but inert.
 > home is not a superset of the others — a profile you never name gets no plugin, no hooks,
 > no cron, and meters nothing. See [Multi-profile / fleet installs](docs/fleet.md).
 
-Full instructions, the other three install paths, and what the security scanner reports:
-**[docs/installation.md](docs/installation.md)**.
+See [docs/installation.md](docs/installation.md) for full instructions, the other three
+install paths, and security-scanner output.
 
 ## Prerequisites
 
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) installed and running
 - [Revenium](https://app.revenium.ai/connections) API key, Team ID, Tenant ID, and User ID
-- [`revenium` CLI](https://github.com/revenium/revenium-cli) — `brew install revenium/tap/revenium`
+- [`revenium` CLI](https://github.com/revenium/revenium-cli): `brew install revenium/tap/revenium`
 - `sqlite3` and `python3` on `PATH`
 
 ```bash
@@ -142,7 +140,7 @@ python3 --version
 | [Migrations](docs/migration-guardrails.md) | [Guardrails](docs/migration-guardrails.md) · [AGENT dimension](docs/migration-agent-dimension.md) · [Auxiliary usage](docs/migration-auxiliary-usage.md) |
 
 Reference material that ships inside the skill bundle lives at
-[`skills/revenium/references/`](skills/revenium/references/) —
+[`skills/revenium/references/`](skills/revenium/references/):
 [setup](skills/revenium/references/setup.md),
 [troubleshooting](skills/revenium/references/troubleshooting.md),
 [task taxonomy](skills/revenium/references/task-taxonomy.md), and the
@@ -155,12 +153,12 @@ Reference material that ships inside the skill bundle lives at
   discovery path resolves it without extra configuration.
 - Mutable runtime state lives under `~/.hermes/state/revenium/`; skill content lives under
   `~/.hermes/skills/revenium/`. Don't mix the two.
-- This repo is Hermes-only by design — no legacy runtime assumptions carried over from the
+- This repo is Hermes-only by design, with no legacy runtime assumptions from the
   skill it was forked from.
 
 ## Contributing
 
-Issues and PRs are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for how the repo is
+Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for how the repo is
 laid out, the invariants the test suite enforces, and what to run before opening a PR.
 
 ## Changelog
@@ -169,7 +167,7 @@ Release history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-[MIT](LICENSE) — the same license as [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+[MIT](LICENSE), the same license as [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 itself, and the one `skills/revenium/SKILL.md` already declares in its frontmatter.
 
 ## Support

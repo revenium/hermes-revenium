@@ -6,25 +6,22 @@
 > operator writes a literal `"enabled": true` into `config.json`. An install that leaves
 > it off meters byte-identically to an install that never heard of it.
 
-This page documents the part of the skill that produces a *monetary* figure: the estimated
-economic value of a completed agentic job, the operands used to calculate that value, and
-how Revenium turns those operands into a displayed ROI.
+This page documents the estimated economic value of a completed agentic job, the operands
+used to calculate it, and how Revenium turns those operands into a displayed ROI.
 
-For a short explanation of how it works, what the number means, and an annotated
-configuration, read [Job value: a practical overview](value-overview.md) first.
+For an overview and annotated configuration, read
+[Job value: a practical overview](value-overview.md).
 
-The pages that mention this feature in passing —
+Other pages summarize the feature and link here:
 [README](../README.md), [How it works](how-it-works.md),
 [Configuration](configuration.md),
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md),
-[`references/job-declaration.md`](../skills/revenium/references/job-declaration.md) —
-keep their summaries and link here for the rest.
+and [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md).
 
-For the conceptual frame this feature sits inside — why an estimate is a hypothesis, what
-separates output from outcome from impact, and which vocabulary is allowed when describing
-these numbers — read
+For why an estimate is a hypothesis, how output differs from outcome and impact, and the
+allowed vocabulary, read
 [Claim distinctions and evidence boundaries](claim-distinctions-and-evidence-boundaries.md)
-first. This page assumes it.
+first.
 
 ---
 
@@ -54,24 +51,24 @@ first. This page assumes it.
 
 ## 1. What the feature does
 
-The rest of this skill records *what the agent did and what it cost*. This feature estimates
-*what the work was worth*.
+The skill records what the agent did and what it cost. This feature estimates the work's
+economic value.
 
 When a session's classifier infers a task arc that finished `SUCCESS`, and the feature is
-switched on, the classifier makes **one** additional bounded LLM call — on the operator's
-own configured provider, the same one Hermes already uses — asking not for a dollar figure
-but for two assumptions: how many hours of human work the arc avoided, and what a loaded
-hour of that role costs. The skill multiplies them itself.
+switched on, the classifier makes one additional bounded LLM call on the operator's
+configured provider. It asks for two assumptions rather than a dollar figure: how many hours
+of human work the arc avoided and the loaded hourly cost of that role. The skill multiplies
+them.
 
 The classifier writes the derived figure, its assumptions, operator-supplied costs, and
 provenance to a per-job sidecar record. The job's `revenium jobs outcome` call then sends
 them as `--outcome-value` and a `--metadata` payload.
 
-**The skill never emits a ratio.** It ships operands — a value, the costs it was netted
+The skill never emits a ratio. It ships operands: a value, the costs it was netted
 against, and a coverage list naming which costs were and were not included. Revenium
 already holds the metered AI cost for the same job and completes the division on its side.
-That is why there is no denominator here to divide by zero: a genuinely zero-cost job is
-represented by its operands rather than papered over with a null.
+A zero-cost job is represented by its operands rather than replacing the denominator with
+null.
 
 ## 2. What the number is, and is not
 
@@ -80,33 +77,33 @@ The naked-LLM path always produces an **unverified model estimate**, labelled
 
 | It is | It is not |
 |---|---|
-| Derived arithmetic over two capped assumptions | A figure the model was allowed to state directly — a supplied total is discarded |
+| Derived arithmetic over two capped assumptions | A figure the model was allowed to state directly; a supplied total is discarded |
 | Recorded together with the assumptions that produced it | A number whose inputs are hidden behind it |
-| An estimate of human effort avoided | An estimate of revenue, deal size, or downstream business effect — the prompt forbids all three |
+| An estimate of human effort avoided | An estimate of revenue, deal size, or downstream business effect; the prompt forbids all three |
 | One input to the ROI Revenium displays | The ROI itself; the metered cost is the other half |
-| Reasoned from the session transcript | Confirmation that the claimed outcome occurred — nothing downstream is observed |
+| Reasoned from the session transcript | Confirmation that the claimed outcome occurred; nothing downstream is observed |
 
-Four structural properties bound the claim:
+Four rules bound the claim:
 
-1. **The figure is derived, not asserted.** `estimated_value` is `hours × rate`. An
+1. The figure is derived, not asserted. `estimated_value` is `hours × rate`. An
    evaluator that returns a total has that total thrown away, because bound checks on an
    input the caller ignores would be guarding the wrong quantity.
-2. **Bounds apply to the inputs, not to the product.** An out-of-range assumption makes the
+2. Bounds apply to the inputs, not to the product. An out-of-range assumption makes the
    evaluator abstain, which is legible in the record. An out-of-range total silently
    clamped would not be.
-3. **Provenance is never self-asserted.** `evaluator`, `evaluator_version`,
+3. Provenance is never self-asserted. `evaluator`, `evaluator_version`,
    `evidence_class`, and `model` are all recorded by the caller from trusted sources. A
    model cannot name its own evidence class, and a hostile transcript cannot spoof one
    through the response.
-4. **Computing a value and reporting it are separate gates.** See
+4. Computing a value and reporting it are separate gates. See
    [§11](#11-reportability-computed-vs-reportable).
 
-**The product-truth boundary.** `revenium jobs roi <id>` surfaces no `evidence_class`, no
-`evaluator`, and no `confidence` in either its JSON or table output — an estimate is shown
-with the same visual weight a measured figure would get. Only `jobs outcome-history` echoes
+`revenium jobs roi <id>` surfaces no `evidence_class`, `evaluator`, or `confidence` in
+either its JSON or table output. An estimate is shown with the same visual weight as a
+measured figure. Only `jobs outcome-history` echoes
 the metadata blob at all. The burden of stating that a value is an estimate therefore rests
 entirely on this skill's own `--metadata` payload and on pages like this one. That boundary
-is stated at more length in
+is described in
 [Claim distinctions](claim-distinctions-and-evidence-boundaries.md#the-product-truth-boundary).
 
 ## 3. Turning it on
@@ -123,7 +120,7 @@ is stated at more length in
 
 ### The five opt-in surfaces
 
-Five surfaces control the feature. There is **no master flag**, and none will be renamed.
+Five surfaces control the feature. There is no master flag, and none will be renamed.
 Four live inside `llmOutcomeEvaluation` in
 `~/.hermes/state/revenium/config.json`; the fifth does not.
 
@@ -135,14 +132,11 @@ Four live inside `llmOutcomeEvaluation` in
 | `studyId` / `studyVersion` | inside `llmOutcomeEvaluation` | A reference to an impact study; never changes an assessment's own evidence class | absent |
 | `boundaries` | **top level**, a sibling of `llmOutcomeEvaluation` | Which registered implementation serves each pluggable contract | built-ins |
 
-> **`boundaries` is read from the top level of `config.json`, not from inside
-> `llmOutcomeEvaluation`.** The resolver reads `config["boundaries"]` directly. Nesting it
-> under `llmOutcomeEvaluation` is the expensive mistake here, because the resolution fails
-> **open**: a `boundaries` object the resolver cannot find is indistinguishable from one that
-> was never configured, so every boundary silently keeps its built-in implementation and
-> nothing is logged. Prose elsewhere describes `boundaries` as part of the
-> `llmOutcomeEvaluation` opt-in *surface*, which it is conceptually — but not structurally.
-> Place it at the top level:
+> `boundaries` is read from the top level of `config.json`, not from inside
+> `llmOutcomeEvaluation`. The resolver reads `config["boundaries"]` directly. If it is nested
+> under `llmOutcomeEvaluation`, resolution fails open: every boundary keeps its built-in
+> implementation and nothing is logged. `boundaries` is conceptually part of the
+> `llmOutcomeEvaluation` opt-in surface, but structurally it is a top-level key:
 >
 > ```json
 > {
@@ -155,9 +149,8 @@ Four live inside `llmOutcomeEvaluation` in
 > }
 > ```
 >
-> Verify a selection took effect by its behaviour, not by the config file — a name that does
-> not resolve to a registered implementation falls back to the built-in just as quietly as a
-> misplaced object does.
+> Verify a selection by its behaviour, not by the config file. An unregistered name falls
+> back to the built-in as quietly as a misplaced object.
 
 No master flag exists because a sixth gate over the billing path would provide a second way
 to disable metering and would conflate fail-open enrichment with deterministic budget
@@ -189,7 +182,7 @@ enforcement.
 |---|---|---|
 | `enabled` | `false` | Must be a **literal JSON boolean**. `"true"`, `1`, and `"yes"` all leave it off. |
 | `experimentalReportEstimates` | `false` | Same literal-boolean discipline. Independent of `enabled`. |
-| `evaluator` | `"llm"` | Name of a registered evaluator. An unknown name does not fall back — it skips, and records the skip. |
+| `evaluator` | `"llm"` | Name of a registered evaluator. An unknown name does not fall back; it skips and records the skip. |
 | `currency` | `"USD"` | ISO 4217, from `USD`, `EUR`, `GBP`, `CAD`, `AUD`, `JPY`, `CHF`. An assessment naming a different currency is rejected. |
 | `maxHoursSaved` | `40` | Ceiling on the hours assumption. |
 | `maxLoadedRate` | `500` | Ceiling on the rate assumption. |
@@ -197,17 +190,15 @@ enforcement.
 | `studyVersion` | absent | Integer ≥ 1. |
 | `costs` | `{}` | Keyed by job type. See [§8](#8-costs-and-net-value). |
 
-`boundaries` is **not** in this table because it is not a member of this object — see the
-callout above.
+`boundaries` is not in this table because it is not a member of this object. See the callout
+above.
 
-**The read fails closed.** A missing, unreadable, or malformed `config.json` resolves to
-disabled. This is the deliberate inverse of `guardrail-status.json`, which fails *open* so
-that a never-installed cron never blocks work — failing open here would estimate money by
-accident.
+The read fails closed. A missing, unreadable, or malformed `config.json` disables the
+feature. `guardrail-status.json` instead fails open so a missing cron never blocks work.
+Failing open here would estimate money by accident.
 
-Changes take effect on the next classification; the config is re-read per evaluation, not
-cached for the process lifetime. No gateway restart is needed for a config edit — only for
-a plugin change.
+Changes take effect on the next classification because the config is read for each
+evaluation. Config edits need no gateway restart; plugin changes do.
 
 ### Verifying it took
 
@@ -265,10 +256,10 @@ flowchart TB
 
 Two ordering rules preserve the record:
 
-- **Sidecar first, marker second.** A crash between the two writes leaves a harmless orphan
+- Sidecar first, marker second. A crash between the two writes leaves a harmless orphan
   sidecar record rather than losing the assessment.
-- **The reporter reads the sidecar, never the marker's summary.** An absent, unreadable,
-  oversized, or pruned sidecar record makes the outcome report **status-only**, with no
+- The reporter reads the sidecar, never the marker's summary. An absent, unreadable,
+  oversized, or pruned sidecar record makes the outcome report status-only, with no
   value flags at all. The marker's `assessment` object is a human-readable summary and
   plays no part in what ships.
 
@@ -281,13 +272,12 @@ could make a network call:
 
 1. `valid["status"] == "SUCCESS"`.
 2. `llmOutcomeEvaluation.enabled` is literally `true`.
-3. Job inference itself only runs when `root_sid == session_id` — a subagent session never
+3. Job inference itself only runs when `root_sid == session_id`, so a subagent session never
    independently produces an assessment.
 
 `FAILED` and `CANCELLED` arcs are never evaluated. They still get a sidecar record (see
-[§12](#12-the-records-on-disk)), carrying their costs and coverage with the value family
-absent — which is how a job with real cost and no value stays visible downstream without
-this skill asserting a negative number it never measured.
+[§12](#12-the-records-on-disk)) with costs and coverage but no value family. A job with real
+cost and no value remains visible without the skill asserting an unmeasured negative value.
 
 ### The call's own bounds
 
@@ -298,24 +288,23 @@ this skill asserting a negative number it never measured.
 | Transcript slice fed to the model | first 6000 chars | `_EVAL_TRANSCRIPT_LIMIT` |
 | Calls per successful arc | exactly one | — |
 
-A timeout is an outcome, not an error: it produces a record with
+A timeout produces a record with
 `abstention_reason: "timed_out"` and the job's outcome still reports, status-only.
 
 ### What the prompt asks for
 
-The prompt is built per mechanism and never carries example values — example labels were
-measured being copied verbatim onto unrelated work, and an example dollar figure would do
-the same with money. It:
+The prompt is built per mechanism and has no example values because models copied example
+labels verbatim onto unrelated work. It:
 
 - Asks the model to choose exactly one `economic_mechanism` from the three it is permitted
   to select, then supply **only** the fields listed under that mechanism's own block.
 - Asks for the human effort avoided, and explicitly forbids estimating revenue, deal size,
   or downstream business effect.
 - States plainly that any total the model outputs is discarded.
-- Offers abstention as a first-class answer: *"If the transcript does not support a
-  responsible estimate — the work is unclear, trivial, or you would be guessing — output
+- Offers abstention as an expected answer: *"If the transcript does not support a
+  responsible estimate, the work is unclear, trivial, or you would be guessing, output
   exactly: null. Abstaining is a correct and expected answer."*
-- Frames the transcript as **data, not instructions**, and says so to the model.
+- Frames the transcript as data, not instructions.
 
 That last line is the first layer of the injection defence. The structural control derives
 the value from two independently capped inputs, so no single field can inflate the result
@@ -327,13 +316,12 @@ past `maxHoursSaved × maxLoadedRate`.
 |---|---|
 | `labor_substitution` | `inferred_role`, `estimated_hours_saved`, `assumed_loaded_rate`, `currency`, `basis` |
 | `augmentation_capacity_expansion` | same as above |
-| `newly_enabled_work` | `basis` only — this mechanism has **no** counterfactual human role by definition, so the prompt does not ask for a role, hours, a rate, or a currency |
+| `newly_enabled_work` | `basis` only. This mechanism has no counterfactual human role, so the prompt does not ask for a role, hours, a rate, or a currency. |
 
 Plus `confidence` (0–1) on every branch.
 
-`newly_enabled_work` is the one mechanism that is *selected and then not priced*. Asking
-for hours saved on work nobody would ever have done by hand is exactly what produces
-invented numbers, so the record keeps the mechanism and omits the whole value family, with
+`newly_enabled_work` is selected but not priced. Hours saved does not apply to work nobody
+would have done by hand, so the record keeps the mechanism and omits the value family, with
 `abstention_reason: "mechanism_abstains_from_value"`.
 
 ### The evaluator contract
@@ -344,23 +332,23 @@ Any callable with this signature can register as an evaluator:
 evaluate(job: dict, transcript: str, config: dict) -> dict | None
 ```
 
-Returning `None` **abstains**, which is an ordinary outcome and not an error. The registry
+Returning `None` abstains. The registry
 lives in `evaluators.py`. Registration also declares the evaluator's own `version` and its
-own `evidence_class` — so a future non-LLM evaluator reports what it actually is rather
-than borrowing `MODEL_ESTIMATED_DEMO`.
+own `evidence_class`, so a future non-LLM evaluator reports its actual class rather than
+borrowing `MODEL_ESTIMATED_DEMO`.
 
 Three implementations ship today:
 
 | Name | Evidence class | Makes a model call? |
 |---|---|---|
 | `llm` (default) | `MODEL_ESTIMATED_DEMO` | yes |
-| `stub` | `MODEL_ESTIMATED_DEMO` | no — fixed 2.5 h at 150/h |
-| `system_of_record_assessment_fixture` | `OUTCOME_OBSERVED` | no — reads hours/rate from `config["systemOfRecord"]` |
+| `stub` | `MODEL_ESTIMATED_DEMO` | no; fixed 2.5 h at 150/h |
+| `system_of_record_assessment_fixture` | `OUTCOME_OBSERVED` | no; reads hours/rate from `config["systemOfRecord"]` |
 
 ## 6. Validation and abstention
 
-Every raw evaluator response runs an ordered gate chain. The order matters: a response that
-fails two gates abstains for the **first** reason, so the recorded cause is the real one.
+Every raw evaluator response runs an ordered gate chain. A response that fails two gates
+abstains for the first reason.
 
 | # | Gate | Abstains when |
 |---|---|---|
@@ -372,13 +360,11 @@ fails two gates abstains for the **first** reason, so the recorded cause is the 
 | 6 | Currency | not in the supported set, or not equal to the configured currency |
 | 7 | Valuation re-check | the resolved valuation implementation returned a non-numeric amount, a mismatched currency, a negative amount, or one above `maxHoursSaved × maxLoadedRate` |
 
-The built-in `hours_times_rate` derivation is itself a registrant, so the default path passes
-through gate 7. A **third-party valuation plugin**
-returning exactly `0.0` abstains — an implementation asserting work was worth precisely
-nothing is more likely broken than truthful. The **built-in** may return `0.0`, because a
-valid input pair can legitimately round to zero and refusing it would both break the
-feature-off byte-identical guarantee and hide zero-value work that must stay visible next
-to its cost. Negative amounts are refused from everyone.
+The built-in `hours_times_rate` derivation is a registrant, so the default path passes
+through gate 7. A third-party valuation plugin returning exactly `0.0` abstains because that
+result is treated as likely faulty. The built-in may return `0.0` because valid inputs can
+round to zero. Refusing it would break the feature-off byte-identical guarantee and hide
+zero-value work next to its cost. Negative amounts are always refused.
 
 ### The abstention-reason vocabulary
 
@@ -389,17 +375,16 @@ Every non-valued record names why, in one of eight words:
 | `unknown_evaluator` | The configured `evaluator` name resolves to nothing. No evaluator ran. |
 | `invalid` | The model's response could not be parsed into an object. |
 | `timed_out` | The evaluation call exceeded its timeout, or a registered evaluator raised one. |
-| `abstained` | The model returned the documented `null` — the intended "I cannot price this" answer. |
+| `abstained` | The model returned the documented `null`, the intended "I cannot price this" answer. |
 | `rejected` | A response was parsed, but failed one of the seven gates above. |
 | `mechanism_abstains_from_value` | `newly_enabled_work` was selected; the mechanism is recorded and the value family is not. |
 | `failed` | Anything else raised inside evaluation. |
 | `not_evaluated_non_success` | A `FAILED` / `CANCELLED` arc. No evaluator was ever called. |
 
-An abstained record is **not** an empty record. It keeps its identity, its provenance, its
+An abstained record is not empty. It keeps its identity, provenance,
 mechanism (where one was chosen), its `double_counting_group`, its supplied costs, its
-coverage list, and its `reportability_status`. Only the value family is absent — absent,
-not null. That is what makes "the evaluator declined" distinguishable on disk from "the
-sidecar write broke".
+coverage list, and its `reportability_status`. Only the value family is absent, not null.
+This distinguishes evaluator abstention from a failed sidecar write.
 
 ## 7. From assumptions to a value
 
@@ -420,19 +405,19 @@ Every valued record carries three figures and a source:
 | `value_high` | The optimistic end |
 | `bounds_source` | `derived` or `evaluator` |
 
-Today's naked-LLM path always takes the **derived** branch: the evaluator supplies no
+Today's naked-LLM path always takes the derived branch: the evaluator supplies no
 bounds, so `value_base` is the point estimate and low/high are a symmetric ±15 %
 (`DERIVED_BOUND_SPREAD = 0.15`) band around it, with the low end clamped at zero. This is a
 declared placeholder band, not a measured one, and `bounds_source: "derived"` says so on
 every record and on the wire.
 
 If an evaluator ever supplies all three, they are validated non-negative and non-strictly
-ordered (`low ≤ base ≤ high` — equal bounds are a valid point estimate, not a rejection) and
+ordered (`low ≤ base ≤ high`; equal bounds are a valid point estimate, not a rejection) and
 `bounds_source` flips to `evaluator`. A partial set is disorder, not a hint, and abstains.
 
 ### Which number crosses the wire
 
-**`--outcome-value` carries `value_low`, not `value_base`.** The estimate understates by
+`--outcome-value` carries `value_low`, not `value_base`. The estimate understates by
 design rather than overstating, which means the figure on a Revenium dashboard is
 deliberately the floor of the range. All three bounds and `bounds_source` still ride in
 `--metadata`, so the full range stays recoverable from what was actually reported.
@@ -451,15 +436,14 @@ Worked example, matching the pinned golden fixture:
 
 ## 8. Costs and net value
 
-`estimated_value` is the **gross** figure and keeps that meaning. `net_value` is a sibling
-field, not a redefinition — it subtracts every operator-supplied cost category from the
+`estimated_value` is the gross figure. `net_value` is a sibling
+field that subtracts every operator-supplied cost category from the
 gross estimate.
 
 ### The four categories
 
-Costs are read from configuration and from nowhere else. The function that resolves them
-does not even take the evaluator response as a parameter — structurally, not by convention,
-a model cannot supply a cost figure.
+Costs come only from configuration. The function that resolves them does not accept the
+evaluator response as a parameter, so a model cannot supply a cost figure.
 
 | Category | |
 |---|---|
@@ -475,7 +459,7 @@ of record, attaching evidence, updating required fields, routing it to another q
 performing a controlled handoff. Keep the acceptance decision under `human_review`, corrections
 under `rework_or_error`, and training under `training_or_change`.
 
-They are keyed by **job type**, and there is **no fleet-wide default bucket**. An absent
+They are keyed by job type, and there is no fleet-wide default bucket. An absent
 job-type key means every category is unknown for that job type, exactly as if `costs` were
 absent entirely.
 
@@ -486,12 +470,11 @@ absent entirely.
 | A non-negative number | `supplied_costs` + `cost_coverage.included` | yes |
 | Exactly `0` | `supplied_costs` + `included` + `cost_coverage.known_zero` | yes, as a known zero |
 | Absent | `cost_coverage.unknown` only | no |
-| Malformed — non-numeric, boolean, negative | `cost_coverage.unknown` only | no |
+| Malformed: non-numeric, boolean, negative | `cost_coverage.unknown` only | no |
 
-A supplied `0` is knowledge ("we reviewed this and it cost nothing"). An absent category is
-ignorance. Collapsing the two would be a silent substitution, so a malformed value fails
-closed to *unknown*, never to zero — a zero would quietly corrupt the subtraction, while a
-zero-shaped unknown stays legible.
+A supplied `0` means "we reviewed this and it cost nothing." An absent category is unknown.
+A malformed value fails closed to unknown, never to zero, so it cannot silently change the
+subtraction.
 
 An unrecognised key inside a job type's cost object is ignored entirely: absent from
 `supplied_costs`, from every coverage list, and from the subtraction.
@@ -516,14 +499,14 @@ the policy site the design keeps out of the classifier.
 
 ### net_value can go negative, and stays visible
 
-`net_value` is **not** clamped at zero. Supplied costs exceeding the gross estimate is an
-honest arithmetic result over an operator's own numbers, and clamping would hide it. A
-record whose `net_value` is at or below zero ships intact on both the sidecar and the wire.
+`net_value` is not clamped at zero. Supplied costs can exceed the gross estimate, and
+clamping would hide that result. A record whose `net_value` is at or below zero ships intact
+on both the sidecar and the wire.
 
 ## 9. The six economic mechanisms
 
-Every assessment names an `economic_mechanism` — a claim about *how* the work produced its
-value, not just how much. Six flat, unordered values exist. None ranks above another.
+Every assessment names an `economic_mechanism`, which describes how the work produced value.
+Six flat, unordered values exist. None ranks above another.
 
 | Mechanism | Who may assert it |
 |---|---|
@@ -547,19 +530,16 @@ correct-assessment.sh --job-id <id> --mechanism incremental_revenue \
 `--value` is required only when `--mechanism` is absent. A mechanism-only
 correction is legal: mechanism and value are separate claims, and "this job
 avoided a risk" is meaningful before anyone prices it. On that path the value
-family is **absent** from the correction — not null and not zero — while
+family is absent from the correction, not null or zero, while
 `prior_value_*` still records what stood before.
 
-A declared mechanism does not move `evidence_class`. Mechanism and evidence
-label are orthogonal: the mechanism says what kind of value is claimed, the
-label says what sort of evidence stands behind it, and neither implies the
-other.
+A declared mechanism does not move `evidence_class`. The mechanism says what kind of value
+is claimed; the label says what evidence supports it. Neither implies the other.
 
 ### Attribution
 
-Two separate paths can now attach an attribution fraction to a value, and they
-behave differently since Phase 54 — a reader must not have to infer which one
-a sentence below describes.
+Two paths can attach an attribution fraction to a value. They have behaved differently since
+Phase 54.
 
 #### The CLI path (`correct-assessment.sh`)
 
@@ -574,38 +554,23 @@ correct-assessment.sh --job-id <id> --value 102 --currency USD \
   --reason "confirmed booking, folio 12345"
 ```
 
-**The operator supplies the already-attributed figure.** `102` is what gets
-recorded. This skill multiplies nothing, is never given the larger number, and
-holds no rule for deriving one from the other. Keeping a full business figure
-out of an agent record is deliberate: that same figure is typically claimed by
-several other systems at once — a sales channel, a loyalty programme, a
-pricing engine, a marketing attribution model — and a copy of it sitting here
-would be summed alongside theirs.
+The operator supplies the already-attributed figure. `102` is recorded. The skill neither
+receives the larger number nor derives one from the other. Full business figures stay out of
+agent records because sales channels, loyalty programmes, pricing engines, and marketing
+attribution may already claim the same figure.
 
-**A fraction requires a value to attribute.** `--attribution-fraction` is
-refused without `--value`, the same way `--attribution-basis` is refused
-without a fraction: the attribution flags travel as a set.
+A fraction requires a value. `--attribution-fraction` is refused without `--value`, and
+`--attribution-basis` is refused without a fraction. The attribution flags travel as a set.
 
-This was left open when the flags shipped. A mechanism may be declared on a job
-carrying no value — "this job avoided a risk" is meaningful before anyone
-prices it — and once that made `--value` optional, a fraction attributing
-nothing became reachable. It is refused now, on the same reasoning that decided
-where the pair sheds under a truncated envelope: `attribution_fraction` and
-`attribution_basis` sit in the *value* family precisely so they shed together
-with the figure they describe, because a surviving value whose attribution has
-vanished is the failure worth preventing. A fraction that never had a value is
-that same failure reached from the other side, and shedding cannot catch it
-because there is nothing to shed alongside. A fraction is a modifier on a
-value's meaning; a modifier with nothing to modify is a claim about nothing.
-
-A mechanism-only correction is unaffected and stays legal — drop the
-attribution pair and file the mechanism on its own, then attribute later when
-a figure exists.
+Mechanism-only corrections remain valid because a mechanism can be meaningful before anyone
+prices it. Attribution cannot: the fraction modifies a value and must be removed with that
+value if a truncated envelope sheds the value family. File the mechanism alone, then add
+attribution when a value exists.
 
 This CLI path's behavior is unchanged by Phase 54's configured path below.
 Whether `correct-assessment.sh` should also accept a gross figure and a
 fraction and multiply, now that D-09 permits that for the configured path, was
-deliberately left undecided — the CLI path works today and changing it is a
+left undecided. The CLI path works today, and changing it is a
 separate, user-visible surface change (`54-CONTEXT.md`, Deferred Ideas).
 
 #### The configured path (`revenueCard`, D-09)
@@ -613,65 +578,39 @@ separate, user-visible surface change (`54-CONTEXT.md`, Deferred Ideas).
 An operator may instead configure a `revenueCard` entry (see
 [`skills/revenium/references/config-schema.md`](../skills/revenium/references/config-schema.md)
 for the full key shapes) carrying `grossPerJob` and, optionally,
-`attributionFraction`/`attributionBasis`. When both are present, **the skill
-multiplies them and records only the product** — `estimated_value`. The gross
+`attributionFraction`/`attributionBasis`. When both are present, the skill
+multiplies them and records only the product, `estimated_value`. The gross
 figure itself reaches no persisted record, no `meter` argv, no `--metadata`
 envelope, and no log line.
 
-**This narrowly revisits `51-CONTEXT.md` D-05's "recorded, never computed"
-rule, for the configured path only.** D-05 gave two reasons for keeping
-attribution recorded rather than computed:
+This revises `51-CONTEXT.md` D-05's "recorded, never computed" rule only for the configured
+path. The protection against cross-system double counting remains: the registrant reads,
+multiplies, and discards the gross figure without persisting, returning, or logging it.
 
-- **What survives.** D-05's first reason — the structural defence against
-  cross-system double counting — is intact: the same stay margin is already
-  claimed by the channel, the loyalty programme, the pricing engine and
-  marketing attribution, and gross still never reaches a record where any of
-  them could sum it. The gross is read, multiplied, and discarded inside the
-  revenue registrant; it is bound to no other name, returned under no key, and
-  named in no diagnostic.
-- **What is reversed, and the cost, recorded rather than minimised.** D-05's
-  second reason — keeping this skill from becoming the site where a
-  business-gross figure meets an attribution policy — is genuinely given up
-  for this path. Say so plainly: this skill now *is* that site, for the
-  configured path. **The drift the reversal prevents:** if an operator
-  pre-multiplied off-system instead, a later fraction edit would silently
-  desynchronise from an amount nobody recomputed, so the fraction sitting
-  beside the record would stop explaining the value it is supposed to
-  explain. Multiplying in-skill makes that drift impossible by construction —
-  the fraction and the amount can never disagree, because the amount is
-  derived from the fraction on every call.
+The configured path does make the skill the place where a gross figure meets an attribution
+policy. Computing the product on each call prevents a later fraction edit from drifting away
+from a precomputed amount.
 
-**What it still does not establish.** A configured fraction is an operator
-assertion, not evidence, exactly like the CLI path's fraction above. It does
-not move `evidence_class`, does not promote toward the three labels reserved
-for study-backed claims, and does not close any link in the results chain —
-the agent's *share* of an outcome sits at results-chain link 6, outside this
-product, whichever path supplied the fraction; see
-[claim distinctions](claim-distinctions-and-evidence-boundaries.md). A holdout
-comparison is still the only version that survives "how do you know?" The
-existing rule that a fraction is not meaningful to average or aggregate across
-jobs applies to configured fractions too — each one is a separate operator
-assertion resting on its own stated basis, not a sample from a common
-measurement.
+A configured fraction remains an operator assertion, not evidence. It does not change
+`evidence_class`, promote the record toward a study-backed label, or establish the agent's
+share of an outcome at results-chain link 6. See
+[claim distinctions](claim-distinctions-and-evidence-boundaries.md). Fractions should not be
+averaged or aggregated across jobs because each rests on its own stated basis rather than a
+common measurement.
 
-**It does not change the evidence label.** A declared fraction cannot promote
-a record toward any of the three labels reserved for study-backed claims,
-whichever path supplied it. Whatever the fraction says, the label continues to
-reflect the evidence that actually exists.
-
-The split is an authority split, enforced in code rather than described in prose. A
-mechanism is a claim about the work, which the transcript evidences — so the evaluator may
+The split is enforced in code. A mechanism is a claim about the work, which the transcript
+can support, so the evaluator may
 choose among the three it can actually evidence from what it observed. Revenue, risk
 avoidance, and quality or decision improvement are claims a transcript cannot support, so
 the evaluator may never assert them: an operator-only mechanism appearing in a response
 resolves to the `unknown` sentinel and abstains, rather than being clamped to a working
 default.
 
-> **Two producers now exist for the operator-only three.**
+> Two producers exist for the three operator-only mechanisms.
 > `correct-assessment.sh --mechanism` (Phase 51) files any of the six directly
 > as an operator correction. As of Phase 54, a valuation registrant may also
-> **declare** one of the three at registration — the shipped
-> `revenue_card_valuation_fixture` declares `incremental_revenue` — and have it
+> declare one of the three at registration. The shipped
+> `revenue_card_valuation_fixture` declares `incremental_revenue` and has it
 > accepted on any call whose own returned mechanism matches that declaration.
 > The evaluator still structurally cannot select any of the three:
 > `_resolve_economic_mechanism`'s membership test runs only against
@@ -687,34 +626,32 @@ default.
 `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`, `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`,
 `EXPERIMENTAL_IMPACT`.
 
-**They are not a confidence ladder.** Customer confirmation may be commercially
+They are not a confidence ladder. Customer confirmation may be commercially
 authoritative yet causally weak; observation proves that something occurred, not what
 produced it; configuration establishes an approved rate, not hours actually worked; and a
 classifier's confidence score is predictive rather than causal. Each fails in a different
 way, which is why the labels sit side by side rather than in rank order.
 
-**How one is assigned.** The class is read from the **resolved evaluator's own
-registration-time declaration** — trusted code declaring what it is — and never from
+The class is read from the resolved evaluator's registration-time declaration, not from
 evaluator output. A model cannot name its own evidence class. On the naked-LLM path that
 resolution always yields `MODEL_ESTIMATED_DEMO`.
 
 The reporter then applies its own independent allow-list immediately before the value is
 emitted. A record carrying a class outside the nine has the field dropped *and* its whole
-value family stripped — the gate a hand-edited sidecar would otherwise reach the wire
-through. A `kind: "correction"` record legitimately carries no `evidence_class` at all, and
+value family stripped. This prevents a hand-edited sidecar from reaching the wire. A
+`kind: "correction"` record legitimately carries no `evidence_class` at all, and
 absence on that kind alone is permissible; absence on a `job_assessment` is treated as
 corruption and refused.
 
-A future non-LLM evaluator must report its **own** class rather than widening this one. The
-whole point of the field is that an estimate and an observation stay distinguishable after
-the fact.
+A future non-LLM evaluator must report its own class rather than widening this one, keeping
+estimates distinguishable from observations.
 
 ## 11. Reportability: computed vs. reportable
 
 `experimentalReportEstimates` is a second, independent opt-in stacked on top of `enabled`,
 because *computing* a value and *sending* it are different questions. The decision is
-recorded on the record as `reportability_status`, resolved by the classifier — the reporter
-holds no reportability policy of its own and only reads and obeys the field.
+stored as `reportability_status` and resolved by the classifier. The reporter only reads and
+obeys the field.
 
 | `reportability_status` | When | `--outcome-value` / `--outcome-currency` | Value family in `--metadata` | Provenance in `--metadata` | Outcome reported at all? |
 |---|---|---|---|---|---|
@@ -723,20 +660,19 @@ holds no reportability policy of its own and only reads and obeys the field.
 
 Two properties enforce this separation:
 
-- **An abstained assessment is never `reportable`**, whatever the config says. The
-  abstention check runs unconditionally, *before* any registered evidence implementation is
-  consulted — a confirmation workflow may decide that a real estimate is reportable; it can
+- An abstained assessment is never `reportable`, whatever the config says. The
+  abstention check runs before any registered evidence implementation is consulted. A
+  confirmation workflow may decide that a real estimate is reportable; it can
   never decide that an absent one is.
-- **Withholding the two CLI flags does not withhold the value.** `value_low`, `value_base`,
+- Withholding the two CLI flags alone does not withhold the value. `value_low`, `value_base`,
   `value_high`, `bounds_source`, `currency`, `estimated_value`, `assumptions`, and
   `net_value` each have their own `--metadata` forwarder, and `assumptions` alone carries
-  the hours and rate whose product *is* the estimate. So a non-reportable record is
-  sanitized at the source: the whole family is deleted from the transported record by one
-  shared stripper, before any forwarder runs.
+  the hours and rate used to calculate the estimate. A non-reportable record is therefore
+  sanitized at the source: one shared stripper deletes the whole family before any
+  forwarder runs.
 
-`supplied_costs` and `cost_coverage` are deliberately **not** in that family. They are
-operator input, not model output, and withholding them is what would make a null ROI
-unreadable — so they ship regardless of reportability.
+`supplied_costs` and `cost_coverage` are not in that family. They are operator input, not
+model output, and ship regardless of reportability so a null ROI remains interpretable.
 
 An operator-filed correction always ships its value, whatever this key says: it is filed
 under explicit human authorisation, not naked-LLM estimation.
@@ -746,7 +682,7 @@ under explicit human authorisation, not naked-LLM estimation.
 ### The job marker summary — `markers/<sid>.jsonl`
 
 A `SUCCESS` job marker gains one extra key, `assessment`, and only when an evaluator
-returned an accepted assessment. **This is a frozen contract**: readers written before this
+returned an accepted assessment. This is a frozen contract: readers written before this
 feature must keep parsing, so every reader uses `.get("assessment", {})` and the key is
 simply *absent* whenever evaluation is off, the arc is not `SUCCESS`, or the evaluator
 abstained. A disabled-path marker is byte-identical to a pre-feature one.
@@ -783,37 +719,37 @@ abstained. A disabled-path marker is byte-identical to a pre-feature one.
 | `evidence_class` | From the evaluator's registration, never from its output. |
 
 Every string field has `|`, newline, and carriage return replaced with a space before
-persistence — the cron's job-outcome queue is `IFS='|'`-parsed, and one stray pipe would
+persistence. The cron's job-outcome queue is `IFS='|'`-parsed, and one stray pipe would
 shift every following field.
 
-This summary is for humans reading markers. **The reporter never reads it.**
+This summary is for humans reading markers. The reporter never reads it.
 
 ### The assessment sidecar — `job-assessments/<sanitized_job_id>.jsonl`
 
-The record of record. One JSON line per record, of two kinds: `job_assessment` (written by
+This is the authoritative record. Each JSON line is one of two kinds: `job_assessment` (written by
 the classifier) and `correction` (appended by `correct-assessment.sh`). Readers scan to the
-end with no early exit, so **the last line matching a job id wins** — which is how a
+end with no early exit, so the last line matching a job id wins. A
 correction naturally supersedes an original.
 
-Each line is capped at **8192 bytes**. An over-length line is skipped by the reader (never
-crashes it) and refused outright by the writer.
+Each line is capped at 8192 bytes. The reader skips over-length lines, and the writer refuses
+them.
 
 | Group | Fields | Present on abstention? |
 |---|---|---|
 | **Identity** | `kind`, `ts`, `assessment_id`, `sequence`, `agentic_job_id`, `assessment_schema_version` | yes |
 | **Job** | `job_type`, `taxonomy_version`, `job_started_at`, `job_ended_at` | yes |
-| **State quartet** | `execution_status`, `output_status`, `acceptance_status`, `adoption_status` | yes — the last three read `unknown`; the current evaluator has no mechanism to assess them |
+| **State quartet** | `execution_status`, `output_status`, `acceptance_status`, `adoption_status` | yes; the last three read `unknown` because the current evaluator has no mechanism to assess them |
 | **Narrative** | `candidate_downstream_outcome`, `counterfactual_assumption`, `basis` | yes (clamped to 500 bytes each) |
 | **Mechanism** | `economic_mechanism`, `double_counting_group` | yes |
-| **Costs** | `supplied_costs`, `cost_coverage` | **yes** — operator input, kept on every path |
-| **Observation window** | `observation_window_start`, `observation_window_end` | yes — defaults to the arc boundaries, a stated decision rather than an inferred fact |
+| **Costs** | `supplied_costs`, `cost_coverage` | **yes**; operator input, kept on every path |
+| **Observation window** | `observation_window_start`, `observation_window_end` | yes; defaults to the arc boundaries, a stated decision rather than an inferred fact |
 | **Evidence** | `evidence_references` (declared empty), `evidence_class`, `study_id`, `study_version` | yes |
 | **Provenance** | `evaluator`, `evaluator_version`, `model`, `inference_provider`, `inference_address_class`, `prompt_version`, `policy_version` | yes |
-| **Trust** | `confidence`, `abstention_reason`, `reportability_status` | yes — `confidence` reads `0.0`, documenting the absence of trust rather than omitting the field |
-| **Value family** | `value_low`, `value_base`, `value_high`, `bounds_source`, `currency`, `estimated_value`, `assumptions`, `net_value` | **no — absent, not null** |
+| **Trust** | `confidence`, `abstention_reason`, `reportability_status` | yes; `confidence` reads `0.0`, documenting the absence of trust rather than omitting the field |
+| **Value family** | `value_low`, `value_base`, `value_high`, `bounds_source`, `currency`, `estimated_value`, `assumptions`, `net_value` | no; absent, not null |
 
-`model` deserves a separate note. `evaluator` and `evaluator_version` identify the evaluator
-*implementation*, not the deciding model — the evaluator issues an unpinned call and the
+`evaluator` and `evaluator_version` identify the evaluator implementation, not the deciding
+model. The evaluator issues an unpinned call and the
 host routes it, so a provider failover can change the deciding model without changing either
 field. `model` closes that gap: it is read directly from the LLM response and clamped to 64
 bytes (deliberately not `evaluator_version`'s 16, so a dated snapshot identifier such as
@@ -823,12 +759,12 @@ fails.
 
 ### double_counting_group
 
-Several jobs inferred from **one** session's transcript carry the same
+Several jobs inferred from one session's transcript carry the same
 `double_counting_group` id, so a consumer can see they must not be summed naively.
 
-**Known gap:** it groups same-session, multi-job records only. It does **not** resolve
+It groups only same-session, multi-job records. It does not resolve
 cross-session or root-plus-subagent
-attribution — job inference runs only when the session is its own root, so a subagent
+attribution. Job inference runs only when the session is its own root, so a subagent
 session never independently produces a second record to relate to its root's.
 
 Deliberately absent from the record: any allocation fraction, share, or weight. An
@@ -866,9 +802,9 @@ revenium jobs outcome <job-id>
 `SUCCESS` arc maps to `CONVERTED` so Revenium does not leave the job's outcome type at its
 `PENDING` default. `FAILED` and `CANCELLED` carry no `--outcome-type`.
 
-**Capability probes.** `--outcome-value` and `--outcome-currency` are probed **together**,
-once per tick, and fail open: on a CLI that predates them, the rest of the `jobs outcome`
-call still goes out. The two flags are always added together or not at all — a non-numeric
+`--outcome-value` and `--outcome-currency` are probed together once per tick and fail open.
+On a CLI that predates them, the rest of the `jobs outcome` call still goes out. The two
+flags are always added together or not at all. A non-numeric
 value or an unsupported currency drops both, never one alone.
 
 ### The `--metadata` envelope
@@ -885,8 +821,8 @@ groups:
 The version fields (`assessment_schema_version`, `taxonomy_version`, `prompt_version`,
 `policy_version`) and `corrected` also ride in the envelope.
 
-A field absent from the sidecar record adds **no key** to the payload — the conditional-emit
-rule, applied uniformly.
+An absent sidecar field adds no key to the payload. This conditional-emit rule applies to
+every field.
 
 A fully populated payload looks like this (this is the pinned golden shape, key order
 included):
@@ -907,26 +843,26 @@ included):
 
 ### The byte ceiling and the two drop tiers
 
-A ceiling is enforced **once**, in the reporter, at emit — the one place the actual wire
-bytes exist before the payload leaves the machine. It is **4096 bytes**, and a guard test
-pins that number to the source constant so the two cannot drift.
+A 4096-byte ceiling is enforced once, in the reporter at emit time, where the actual wire
+bytes exist before the payload leaves the machine. A guard test pins the number to the source
+constant.
 
-The figure is a **defensive** choice, not a measured server bound. No observed Revenium
+The figure is a defensive choice, not a measured server bound. No observed Revenium
 `--metadata` limit exists from which to derive one. The skill's own ASCII baseline for the
 whole field set measures under 1000 bytes, below the ceiling.
 
 When a payload exceeds it:
 
-1. The **value family** is popped first.
-2. If still over, the **provenance family** is popped second.
-3. Base metering is **never** dropped. Metering never breaks; only the enrichment yields.
+1. The value family is popped first.
+2. If still over, the provenance family is popped second.
+3. Base metering is never dropped. Metering continues without the enrichment.
 
 A record whose payload was cut carries `metadata_truncated: true`, so a consumer can tell
 "this job had no value" (both value keys and the marker absent) from "the value did not
 fit" (`metadata_truncated` present). An unmarked partial record would be exactly the silent
 substitution this design exists to prevent.
 
-**This is transport, not policy.** The ceiling decides only what physically fits. The
+The ceiling is a transport limit, not a policy decision. It decides only what physically fits. The
 reportability decision is made upstream by the classifier; the reporter only reads it.
 
 ### The reporter's own read-side defences
@@ -945,7 +881,7 @@ Between the sidecar and the wire, the reporter re-checks everything it is about 
 
 ## 14. Corrections
 
-An assessment is **never rewritten**. When a value turns out to be wrong, an operator
+An assessment is never rewritten. When a value turns out to be wrong, an operator
 appends a correction.
 
 ```bash
@@ -964,20 +900,20 @@ bash ~/.hermes/skills/revenium/scripts/correct-assessment.sh \
 | `--value-high` | no | Corrected high bound; **defaults to `--value`** |
 | `--dry-run` | no | Preview; writes nothing, locally or remotely |
 
-Omitting both bound flags gives equal bounds — a point correction, which is a valid
-degenerate band rather than a rejection. All three must be finite, non-negative, and
-ordered `low ≤ base ≤ high`; anything else exits `2` before touching a file.
+Omitting both bound flags gives equal bounds, a valid point correction. All three must be
+finite, non-negative, and ordered `low ≤ base ≤ high`; anything else exits `2` before
+touching a file.
 
-The script is **operator-only and deliberately unreachable from cron** — it is named in
+The script is operator-only and unreachable from cron. It is named in
 neither `cron.sh` nor `install-cron.sh`.
 
 ### What it does, in order
 
 1. Takes an exclusive lock on the job's sidecar file and reads it to the end to find the
    current effective record and count prior corrections.
-2. **Refuses** if there is no sidecar record for that job, or if it was pruned. A correction
+2. Refuses if there is no sidecar record for that job, or if it was pruned. A correction
    can never conjure an assessment that never existed.
-3. Appends a `kind: "correction"` line — the original stays byte-unchanged.
+3. Appends a `kind: "correction"` line. The original stays byte-unchanged.
 4. Appends `JOB:<id>:correction:<seq>:<ts>` to the jobs ledger.
 5. Ships the revision through `revenium jobs outcome-update`.
 
@@ -1001,40 +937,38 @@ replacing an old one.
 `revenium jobs outcome-update <id> --reason … --outcome-value … --outcome-currency …
 --metadata … --quiet`.
 
-**`--outcome-value` here is the corrected `--value` — the base — not the low bound.** This
-is the one place the wire carries a base rather than a floor, and it is deliberate: an
-operator filing a correction is stating the number under explicit human authorisation, so
-there is no model estimate to understate on their behalf. In the common case where neither
-bound flag was given, base and low are the same figure anyway.
+Here, `--outcome-value` is the corrected `--value`, the base, rather than the low bound. An
+operator explicitly authorizes the corrected number, so there is no model estimate to
+understate. If neither bound flag was given, base and low are the same figure.
 
-The `--metadata` payload carries the same `sequence` and prior-value fields the local record
-does — that `sequence` key is how a downstream consumer tells a revision from an original,
-since an ordinary `jobs outcome` payload never carries one.
+The `--metadata` payload carries the same `sequence` and prior-value fields as the local
+record. The `sequence` key distinguishes a revision from an original because an ordinary
+`jobs outcome` payload never carries one.
 
 ### Failure posture — deliberately loud
 
-This script diverges from the repo's fail-open norm. Fail-open is right for the per-tick
-path; an operator running one command interactively can act on an error, and a
-silently-skipped correction is worse than a refused one. So:
+This script does not follow the repo's fail-open norm. The per-tick path can fail open, but an
+operator running an interactive command can act on an error. A skipped correction would be
+worse than a refused one.
 
 | Situation | Result |
 |---|---|
 | CLI lacks `jobs outcome-update` | Local correction **saved**, ledger line written, then exit **1** with an upgrade message |
 | `revenium config show` fails while resolving the team id | Local correction saved, ledger line written, exit 1 |
-| `jobs outcome-update` returns non-zero | Local record and ledger line intact, exit 1 — no automatic retry |
+| `jobs outcome-update` returns non-zero | Local record and ledger line intact, exit 1; no automatic retry |
 | Sidecar unlinked mid-write by a concurrent prune | Refused before anything is written or shipped |
 
-> **Re-running after a failed ship is not idempotent locally.** The three failure rows above
+> Re-running after a failed ship is not idempotent locally. The three failure rows above
 > all fail *after* the local append. The script writes the correction line and the ledger
-> line first, on purpose — a durable local record is the thing worth keeping when the network
-> leg fails — and `sequence` is recomputed from the file's current line count on every run. So
-> a second attempt appends a **second** correction line at the next sequence number and a
+> line first to keep a durable local record when the network leg fails. `sequence` is
+> recomputed from the file's current line count on every run, so a second attempt appends a
+> second correction line at the next sequence number and a
 > second `JOB:<id>:correction:` ledger line before it ships again.
 >
 > The effective value does not change: the reader scans to the end and the last matching line
 > wins, so two identical corrections resolve to the same figure. What changes is the audit
-> trail, which will show two revisions where an operator intended one. On the CLI-capability
-> row this compounds — every re-run against an unsupported CLI adds another pair.
+> trail, which will show two revisions where an operator intended one. For the CLI-capability
+> failure, every re-run against an unsupported CLI adds another pair.
 >
 > Before re-running, read the tail of the job's sidecar file and decide whether you want a
 > second revision recorded. `--dry-run` will not tell you this: it reports the sequence the
@@ -1043,12 +977,12 @@ silently-skipped correction is worse than a refused one. So:
 ## 15. Inference locality provenance
 
 Every job assessment records two observable facts about the configured LLM: the resolved
-`inference_provider` name, and a derived `inference_address_class` taking exactly one of
-four values — `loopback`, `private`, `public`, or `unset`. Both are read from a
+`inference_provider` name and a derived `inference_address_class` with one of four values:
+`loopback`, `private`, `public`, or `unset`. Both are read from a
 profile-scoped `config.yaml`.
 
-**The address class is derived from the configured endpoint, and the endpoint itself is then
-discarded** — never stored, never transmitted. A `base_url` can embed an internal hostname, a
+The address class is derived from the configured endpoint, which is then discarded rather
+than stored or transmitted. A `base_url` can embed an internal hostname, a
 port, a path, or credentials, so the raw endpoint never crosses the wire. What crosses is
 the derived class plus the resolved provider name.
 
@@ -1062,13 +996,12 @@ the derived class plus the resolved provider name.
 | A symbolic hostname | `public` |
 | Unparseable garbage | `public` |
 
-**No name resolution is performed.** A DNS lookup would be a blocking network call inside an
+No name resolution is performed. A DNS lookup would be a blocking network call inside an
 asyncio event loop, and even a successful one is only a snapshot rather than a guarantee
-about the connection actually used. So an unverified hostname is always recorded in the
-conservative direction — classifying an unverified host as loopback or private would itself
-be the unverified claim this field exists to avoid.
+about the connection used. An unverified hostname is therefore classified conservatively;
+classifying it as loopback or private would itself be an unverified claim.
 
-**The same limit applies here as to `model`.** The class reflects the *configured* endpoint at
+The same limit applies to `model`. The class reflects the configured endpoint at
 the moment it was read, not a verified connection. A mid-flight provider failover is not
 observed by this field, exactly as it is not observed by `evaluator`/`evaluator_version`.
 
@@ -1081,9 +1014,8 @@ facts do not establish where data went, was kept, was logged, or was retained.
 
 ### The six-word log taxonomy spans two destinations
 
-Six words are the *named* taxonomy — the vocabulary `diagnose.sh` reports against — and
-**no single file or command shows all six**. They are not, however, every line an
-evaluation attempt can emit; three more are listed below the table.
+Six words form the named taxonomy that `diagnose.sh` reports against. No single file or
+command shows all six, and evaluation attempts can emit three other lines listed below.
 
 | Word | Written by | Lands in | Exact line |
 |---|---|---|---|
@@ -1094,12 +1026,11 @@ evaluation attempt can emit; three more are listed below the table.
 | `deferred` | cron | `revenium-metering.log` | `outcome deferred: id=` (aged form: `wedged job (no create confirmed after`) |
 | `reported` | cron | `revenium-metering.log` | `Outcome reported: agentic_job_id=` |
 
-The first four are on the Python logger `revenium_classifier`, inside the Hermes process.
-They do **not** appear in `revenium-metering.log`.
+The first four are on the Python logger `revenium_classifier` inside the Hermes process.
+They do not appear in `revenium-metering.log`.
 
-**Three further in-process lines exist and are outside the named six.** They are reachable,
-they carry their own `abstention_reason` on the record, and a reader troubleshooting "why is
-there no value" will meet them:
+Three other in-process lines sit outside the named six. Each carries an `abstention_reason`
+on the record:
 
 | Line | Matching `abstention_reason` |
 |---|---|
@@ -1107,11 +1038,10 @@ there no value" will meet them:
 | `revenium-classifier: outcome evaluation rejected for job=%s` | `rejected` |
 | `revenium-classifier: outcome evaluation failed for job=%s: %r` | `failed` |
 
-Eight in-process lines, six named taxonomy words, eight record-level abstention reasons
-([§6](#6-validation-and-abstention)) — the three sets are related but none is a superset of
-the others. `not_evaluated_non_success` is the one abstention reason with no log line at all,
-because no evaluation was ever attempted. When a value is missing, **the record's
-`abstention_reason` is the authoritative answer**; the log is the convenience.
+The eight in-process lines, six taxonomy words, and eight record-level abstention reasons
+([§6](#6-validation-and-abstention)) overlap, but none contains all the others.
+`not_evaluated_non_success` has no log line because no evaluation was attempted. For a
+missing value, the record's `abstention_reason` is authoritative; the log is supplementary.
 
 ### diagnose.sh
 
@@ -1119,15 +1049,15 @@ because no evaluation was ever attempted. When a value is missing, **the record'
 bash ~/.hermes/skills/revenium/scripts/diagnose.sh
 ```
 
-Section 9 is read-only — this profile's `config.json` and its own log file, no `revenium`
-CLI call, no writes. Per profile it prints:
+Section 9 reads only the profile's `config.json` and log file. It makes no `revenium` CLI call
+and writes nothing. Per profile it prints:
 
 ```
 <profile>        enabled=true   evaluator=llm    deferred=0        wedged=0        reported=12
 ```
 
 `enabled` mirrors the runtime's own literal-boolean check exactly, so a config saying
-`"enabled": "true"` reports `false` here — because it *is* off. A non-string `evaluator`
+`"enabled": "true"` reports `false` here because it is off. A non-string `evaluator`
 renders as `INVALID(not-a-string)` rather than silently coercing to `llm`, because the
 runtime does not fall back either: it skips.
 
@@ -1137,7 +1067,7 @@ them.
 ### The metered-cost reconciliation
 
 Separately from any assessment, the reporter partitions the metered cost it observed each
-tick into three buckets and emits **one** reconciliation line per tick into
+tick into three buckets and emits one reconciliation line per tick into
 `revenium-metering.log`:
 
 | Bucket | Meaning |
@@ -1146,8 +1076,8 @@ tick into three buckets and emits **one** reconciliation line per tick into
 | `unclassified` | Metered cost on a session with no marker at all |
 | `unallocated` | Metered cost observed but not attributed this tick |
 
-The three sum back to the observed total exactly — byte-exact for token fields,
-`Decimal`-exact for cost. This is observability only: nothing in the metering decision path
+The three sum to the observed total exactly: byte-exact for token fields and
+`Decimal`-exact for cost. This is only for observability; nothing in the metering decision path
 consults it, and no ledger line, CLI argument, or reportability outcome depends on it.
 
 `unallocated` covers only rows where a real `revenium meter completion` was attempted and
@@ -1166,13 +1096,13 @@ The 90-day window is deliberately well above the marker window: assessments are 
 record a correction is filed against, and corrections arrive on a human timescale, not a
 session one.
 
-`prune-markers.sh` is **manual and never wired into cron**. Its two retention windows are
+`prune-markers.sh` is manual and never wired into cron. Its two retention windows are
 preflighted independently, so an invalid assessment window refuses only the assessment pass
 and leaves marker pruning working. Run it with `--dry-run` first. The assessment pass takes
 the same lock `correct-assessment.sh` does, so a cooperating prune can never unlink a file
 mid-correction.
 
-**Pruning an assessment before its outcome ships permanently orphans the value**: the
+Pruning an assessment before its outcome ships permanently orphans the value: the
 reporter re-reads the sidecar at outcome time and reports status-only when it finds nothing.
 
 ## 17. Troubleshooting
@@ -1180,49 +1110,49 @@ reporter re-reads the sidecar at outcome time and reports status-only when it fi
 | Symptom | Likely cause | Check |
 |---|---|---|
 | `diagnose.sh` shows `enabled=false` after you edited the config | You edited a different profile's `config.json`, or wrote `"true"` / `1` instead of a literal `true` | `python3 -c 'import json;print(json.load(open("<profile>/state/revenium/config.json"))["llmOutcomeEvaluation"])'` |
-| Jobs appear, but never any value | Every arc is `CANCELLED`, not `SUCCESS` — the job-declaration bar requires self-verification | Grep markers for `"status":"SUCCESS"` |
+| Jobs appear, but never any value | Every arc is `CANCELLED`, not `SUCCESS`; the job-declaration bar requires self-verification | Grep markers for `"status":"SUCCESS"` |
 | `evaluator=INVALID(not-a-string)` | `evaluator` is set to a non-string | Fix the config; the runtime skips rather than falling back |
-| Outcome reports with no value flags | `reportability_status: "candidate"` — `experimentalReportEstimates` is not literally `true` | Read the sidecar's `reportability_status` |
+| Outcome reports with no value flags | `reportability_status: "candidate"`; `experimentalReportEstimates` is not literally `true` | Read the sidecar's `reportability_status` |
 | Outcome reports with no value flags, and the sidecar has none either | The evaluator abstained | Read the record's `abstention_reason` ([§6](#6-validation-and-abstention)) |
-| A record has a mechanism but no value at all | `newly_enabled_work` — priced by design as no value | `abstention_reason: "mechanism_abstains_from_value"` |
+| A record has a mechanism but no value at all | `newly_enabled_work`, which is not priced by design | `abstention_reason: "mechanism_abstains_from_value"` |
 | Nothing at all in the sidecar directory | No plugin, a stale plugin, or a non-root session | `plugin-status.sh`; compare the installed plugin's sha256 with the skill tree's |
 | `outcome deferred: id=` repeating | The matching `JOB:<id>:created` line has not been confirmed yet | `grep '^JOB:<id>:' revenium-jobs.ledger` |
-| `wedged job (no create confirmed after …)` | The create never succeeded — usually a missing team id or auth | `revenium config show`; check for `teamId not configured` in the log |
+| `wedged job (no create confirmed after …)` | The create never succeeded, usually because of a missing team id or auth | `revenium config show`; check for `teamId not configured` in the log |
 | `--metadata` has `metadata_truncated: true` | The payload exceeded 4096 bytes; a family was dropped | Look for an unusually long `basis`, `double_counting_group`, or provider name |
-| Value flags dropped although the record looks valid | Currency not in the supported set, `value_low` non-numeric, or `evidence_class` outside the nine — all drop both flags | Read the sidecar line directly |
+| Value flags dropped although the record looks valid | Currency not in the supported set, `value_low` non-numeric, or `evidence_class` outside the nine; all drop both flags | Read the sidecar line directly |
 | A correction saved locally but exit code 1 | The installed CLI has no `jobs outcome-update` | `revenium jobs outcome-update --help`, upgrade, re-run the same command |
-| `revenium jobs roi <id>` shows a value with no provenance | Expected — that surface carries none. See [§2](#2-what-the-number-is-and-is-not) | `revenium jobs outcome-history <id>` |
+| `revenium jobs roi <id>` shows a value with no provenance | Expected; that surface carries none. See [§2](#2-what-the-number-is-and-is-not) | `revenium jobs outcome-history <id>` |
 | ROI reads null on a real job | The job's metered cost was genuinely `$0.00` (a free-tier model) | This is the correct answer to a value over no cost |
 
 ## 18. Limits
 
 These limits describe the current implementation, not a roadmap.
 
-- **No local classifier model ships here.** Classification and outcome evaluation both run
+- No local classifier model ships here. Classification and outcome evaluation both run
   through an LLM call on the operator's own configured provider.
-- **No system-of-record outcome adapter ships here.** Nothing observes a downstream ticketing
+- No system-of-record outcome adapter ships here. Nothing observes a downstream ticketing
   tool, incident tracker, or revenue system to confirm a claimed outcome occurred. Every
   outcome is self-reported by the classifier from the transcript alone.
-- **Nothing here produces a causal claim.** The impact-study structure is a contract only —
-  no estimator, no experiment orchestration, no identification strategy. No evaluator in this
+- Nothing here produces a causal claim. The impact-study structure is only a contract. It has
+  no estimator, experiment orchestration, or identification strategy. No evaluator in this
   tree can produce either impact-shaped evidence class, and that is enforced structurally.
-- **The link between an assessment and an impact study result is not implemented.** An
+- The link between an assessment and an impact study result is not implemented. An
   assessment carries a slot that could reference a study; nothing fills it and nothing reads
   it.
-- **A configured boundary's own declared evidence class does not reach the persisted
-  record.** Resolution runs against the evaluators registry only. The recorded class
-  therefore under-claims rather than over-claims — the safe direction. Closing it needs a
+- A configured boundary's own declared evidence class does not reach the persisted record.
+  Resolution runs against the evaluators registry only. The recorded class therefore
+  under-claims rather than over-claims. Closing it needs a
   cross-boundary precedence rule no decision covers.
-- **Three of the six economic mechanisms have no producer.** Representable and accepted; not
+- Three of the six economic mechanisms have no producer. They are representable and accepted but not
   reachable.
-- **`double_counting_group` does not span sessions.** Same-session, multi-job only.
-- **What the one live end-to-end verification did not cover.** One arc, one workstation, one
+- `double_counting_group` does not span sessions. It covers only same-session, multi-job records.
+- The one live end-to-end verification covered one arc, one workstation, one
   isolated development tenant, one evaluator model, two cron ticks. It says nothing about
   fleet or multi-profile behaviour, nothing about idempotency beyond two ticks or across
   concurrent ticks, and nothing about a different LLM provider. It also did not exercise the
   value-against-cost calculation: the verification session ran on a free-tier model, so its
-  metered cost was genuinely `$0.00` and the read-back returned a null ROI — the correct
-  answer to a value divided by no cost, but a degenerate one. The narrative of that run is in
+  metered cost was `$0.00` and the read-back returned a null ROI, the correct result for a
+  value with no cost but a degenerate test case. The narrative of that run is in
   [How it works](how-it-works.md#llm-outcome-value-evaluation-experimental).
 
 ## 19. Where each contract lives
