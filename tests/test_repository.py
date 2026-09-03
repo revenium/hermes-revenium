@@ -535,6 +535,17 @@ class RepositoryTests(unittest.TestCase):
             # not silently repeat that loss.
             ROOT / 'tests' / 'test_phase56_aux_atomicity.py',
             ROOT / 'tests' / 'mutation_verify_aux_atomicity.py',
+            # Phase 57 Plan 01 (D-04/D-06) — the OAS-provenance extract
+            # generator plus its generated output, and the two-witness
+            # membership test that depends on it. The extractor's OWN
+            # input (the vendored OAS) is gitignored, so only the
+            # committed output gives a fresh clone full test enforcement
+            # -- an unpinned artifact in this repo has already been lost
+            # twice (docs/internal/auxiliary-usage-sizing.md, the v1.3/
+            # v1.4 closeouts).
+            ROOT / 'tests' / 'extract_operation_type_enum.py',
+            ROOT / 'tests' / 'fixtures' / 'spec' / 'operation-type-enum.json',
+            ROOT / 'tests' / 'test_phase57_operationtype_spec_membership.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -2527,6 +2538,15 @@ exit 0
                 'install that never meters an auxiliary row must create no '
                 'auxiliary lock state at all',
             )
+        # Phase 57 (D-01/D-02): the spec-sourced operationType value every
+        # auxiliary-usage row ships. A value, not a path -- declared with
+        # its evidence, resolved via a single named constant rather than a
+        # call-site literal.
+        self.assertIn('AUX_OPERATION_TYPE=', text)
+        self.assertRegex(
+            text,
+            r'AUX_OPERATION_TYPE="\$\{REVENIUM_AUX_OPERATION_TYPE:-OTHER\}"',
+        )
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""
