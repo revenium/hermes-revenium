@@ -114,6 +114,34 @@ inference chain.
   live captures show `jobs create` succeeding with `--organization-name`
   present).
 
+  **Second caveat on this row — the unsent required fields.** `JobResource`'s
+  `required` list carries **eight** entries, not one:
+  `agenticJobId`, `entityVersion`, `hasOutcome`, `id`, `label`,
+  `outcomeUpdateCount`, `resourceType`, `source`. This skill sends exactly one
+  of them, `agenticJobId`. The mapping table above is accurate as far as it
+  goes — `agenticJobId` genuinely is in the `required` list — but read against
+  the schema alone, this skill's `jobs create` body omits seven required
+  fields, and a *compatible* verdict has to say why that is not a defect
+  rather than pass over it.
+
+  It is not a defect, and the reason is empirical rather than schema-derived:
+  `docs/comprehensive-roi-proof.md`'s live captures show `jobs create`
+  succeeding with only `agenticJobId` present, so the server does not enforce
+  the other seven on create. The likely explanation is that `JobResource` is
+  the platform's single job **resource** schema, reused verbatim as this
+  path's declared `requestBody` while its `required` list describes a
+  *materialised* job — `id`, `entityVersion`, `resourceType`,
+  `outcomeUpdateCount` and `hasOutcome` are all server-assigned, and cannot
+  meaningfully be required of a create request. `JobResource_Read` is the 201
+  response schema, which is consistent with that reading.
+
+  Stated plainly so the verdict rests on named evidence: this row's
+  *compatible* is **schema-cited for the four fields the skill sends, and
+  live-capture-cited for the seven it does not.** That is a weaker basis than
+  the other four compatible verdicts in this document, all of which are
+  schema-cited throughout. If the ingest service ever begins enforcing
+  `JobResource.required` literally, this is the row that breaks first.
+
 ### `jobs outcome`
 
 - **Invocation site:** `skills/revenium/scripts/hermes-report.sh:4242-4300`
