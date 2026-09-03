@@ -312,6 +312,13 @@ class RepositoryTests(unittest.TestCase):
             # unpinned copy can vanish the way the v1.3 and v1.4 closeouts
             # did.
             ROOT / 'docs' / 'comprehensive-roi-proof.md',
+            # Phase 57 Plan 02 (SSE-02) — the tracked, field-by-field audit of
+            # every request this skill emits against the 2.20.0-SNAPSHOT
+            # platform API spec. `.planning/` and `docs/internal/` are both
+            # gitignored, so a tracked docs/ file plus this pin is the only
+            # durable home; an unpinned record in this repo has already been
+            # lost twice (the v1.3/v1.4 closeouts, auxiliary-usage-sizing.md).
+            ROOT / 'docs' / 'wire-contract-audit-2.20.0.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -546,6 +553,10 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'tests' / 'extract_operation_type_enum.py',
             ROOT / 'tests' / 'fixtures' / 'spec' / 'operation-type-enum.json',
             ROOT / 'tests' / 'test_phase57_operationtype_spec_membership.py',
+            # Phase 57 Plan 02 (SSE-02) — the coverage-shape test for the
+            # wire-contract audit doc above. Same pin rationale: an unpinned
+            # test module for an unpinned doc would double the loss surface.
+            ROOT / 'tests' / 'test_phase57_wire_audit_doc.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
