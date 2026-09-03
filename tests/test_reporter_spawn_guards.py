@@ -105,10 +105,20 @@ REAL_PYTHON3 = sys.executable
 # WOULD scale is `aux_now_ts` (the `python3 -c` timestamp inside the per-row
 # `while IFS='|' read` loop in report_auxiliary_usage) — one per EMITTED aux
 # row. It is invisible here. If a future fixture seeds that table, this
-# ceiling must be expressed as `16 + rows_emitted` rather than raised
+# ceiling must be expressed as `17 + rows_emitted` rather than raised
 # blindly; a bare bump would silently license per-row spawn growth, which is
 # the exact regression this constant exists to catch.
-NO_MARKER_SPAWN_CEILING = 16
+#
+# Phase 56 (D-13) raises it once more, to 17: report_auxiliary_usage's new
+# AUX_LOCK_FILE exclusion (WINDOWS entry 5) adds a THIRD once-per-tick
+# python3 spawn -- the bounded-retry `fcntl.flock` heredoc, acquired before
+# the baseline-read heredoc counted as spawn 2 above. It runs unconditionally
+# whenever AUX_METERING_ENABLED is true, regardless of whether the table
+# exists or any row is emitted, so it lands on this table-absent fixture too.
+# It does not scale with session count or row count (measured: the disabled
+# arm, which returns before the lock is ever attempted, is unchanged at 14),
+# so quick-260814-e7c's per-session hot-path guarantee is untouched.
+NO_MARKER_SPAWN_CEILING = 17
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):
