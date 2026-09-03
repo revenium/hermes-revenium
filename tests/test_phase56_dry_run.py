@@ -43,6 +43,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -513,6 +514,148 @@ class DryRunToggleParityTests(_DryRunClassifierTestCase, _DryRunReporterMixin):
             result_enabled['jobs_invocations'], result_disabled['jobs_invocations'],
             'the jobs outcome argv must be equal, element for element, '
             'between the enabled and disabled arms',
+        )
+
+
+class DryRunEdgeArmTests(_DryRunClassifierTestCase, _DryRunReporterMixin):
+    """Task 2: the four probe edges this plan owns -- E3 (idempotency), E5
+    (adjacency), E6 first half (empty), and E7 (ordering). E6's second half
+    (the absent-table and off-switch arms) and the shipped Phase 55
+    coverage are cited, not duplicated here -- see this plan's own
+    <verify> block, which runs
+    tests.test_phase55_auxiliary_metering.OffSwitchArmTests and
+    tests.test_phase55_aux_edges directly."""
+
+    def test_e3_idempotency_second_tick_over_unchanged_counters_ships_nothing(self):
+        _mod, record = self._produce_record()
+        fixture = self._build_dry_run_tree(
+            SID, JOB_ID, record, aux_rows=[self._aux_row(SID)])
+        self._tick(fixture, 0)
+
+        ledger_path = os.path.join(fixture['state_dir'], 'revenium-aux.ledger')
+        with open(ledger_path) as f:
+            lines_before = f.readlines()
+
+        result2 = self._tick(fixture, 1)
+        aux2 = self._aux_invocations(result2['meter_invocations'])
+        self.assertEqual(
+            len(aux2), 0,
+            'a second tick over an unchanged fixture must ship zero AUX invocations')
+
+        with open(ledger_path) as f:
+            lines_after = f.readlines()
+        self.assertEqual(
+            len(lines_before), len(lines_after),
+            'a second tick over an unchanged fixture must append zero new '
+            'AUX: ledger lines')
+
+    def test_e5_adjacency_touching_case_emits_nothing_one_token_above_emits_once(self):
+        _mod, record = self._produce_record()
+        aux_row = self._aux_row(SID)
+        fixture = self._build_dry_run_tree(SID, JOB_ID, record, aux_rows=[aux_row])
+        self._tick(fixture, 0)
+
+        ledger_path = os.path.join(fixture['state_dir'], 'revenium-aux.ledger')
+        with open(ledger_path) as f:
+            lines_after_baseline = f.readlines()
+        self.assertEqual(len(lines_after_baseline), 1)
+
+        # The touching case: tick again over the SAME, unchanged state.db --
+        # the row's cumulative counters exactly equal the ledger baseline.
+        result_touch = self._tick(fixture, 1)
+        aux_touch = self._aux_invocations(result_touch['meter_invocations'])
+        self.assertEqual(
+            len(aux_touch), 0,
+            'a row whose cumulative counters exactly equal its ledger '
+            'baseline must emit nothing')
+        with open(ledger_path) as f:
+            lines_after_touch = f.readlines()
+        self.assertEqual(
+            len(lines_after_touch), 1,
+            'the touching case must append no new ledger line')
+
+        # One token -- and a matching cost delta, so --total-cost is
+        # actually emitted on this tick -- above the baseline must emit
+        # exactly once.
+        conn = sqlite3.connect(fixture['state_db'])
+        conn.execute(
+            "UPDATE session_model_usage SET input_tokens = input_tokens + 1, "
+            "estimated_cost_usd = estimated_cost_usd + 0.01 "
+            "WHERE session_id = ? AND task = ?", (SID, aux_row['task']),
+        )
+        conn.commit()
+        conn.close()
+
+        result_above = self._tick(fixture, 2)
+        aux_above = self._aux_invocations(result_above['meter_invocations'])
+        self.assertEqual(
+            len(aux_above), 1,
+            'exactly one token above the ledger baseline must emit exactly once')
+        self.assertEqual(aux_above[0].get('--input-tokens'), '1')
+        self.assertEqual(
+            aux_above[0].get('--total-cost'), '0.010000',
+            'the emitted --total-cost must equal the expected delta as a '
+            'decimal string, never a tolerance-based comparison')
+        with open(ledger_path) as f:
+            lines_after_above = f.readlines()
+        self.assertEqual(
+            len(lines_after_above), 2,
+            'exactly one new ledger line must be appended')
+
+    def test_e6_no_aux_rows_still_produces_valued_outcome(self):
+        _mod, record = self._produce_record()
+        fixture = self._build_dry_run_tree(SID, JOB_ID, record, aux_rows=None)
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, f"hermes-report.sh failed: {result['output']}")
+
+        argv = self._outcome_invocation(result['jobs_invocations'])
+        self.assertIsNotNone(argv)
+        self.assertIn(
+            '--outcome-value', argv,
+            'a revenueCard-configured session with no auxiliary row at all '
+            'must still produce its valued main-loop (outcome) row')
+
+    def test_e7_ordering_two_rows_ship_in_a_stable_order_across_ticks(self):
+        _mod, record = self._produce_record()
+        row_a = self._aux_row(SID, task='approval')
+        row_b = self._aux_row(SID, task='compression')
+
+        fixture1 = self._build_dry_run_tree(
+            SID, JOB_ID, record, aux_rows=[row_a, row_b])
+        result1 = self._tick(fixture1, 0)
+        aux1 = self._aux_invocations(result1['meter_invocations'])
+        self.assertEqual(len(aux1), 2)
+        txids1 = {a.get('--transaction-id') for a in aux1}
+        self.assertEqual(
+            len(txids1), 2, 'the two rows must ship with distinct transaction ids')
+        order1 = [a.get('--task-type') for a in aux1]
+
+        fixture2 = self._build_dry_run_tree(
+            SID, JOB_ID, record, aux_rows=[row_a, row_b])
+        result2 = self._tick(fixture2, 0)
+        aux2 = self._aux_invocations(result2['meter_invocations'])
+        order2 = [a.get('--task-type') for a in aux2]
+
+        self.assertEqual(
+            order1, order2,
+            'emission order must be identical across two independent ticks '
+            'over the same byte-identical fixture')
+
+        # Source is two adjacent Python string literals (concatenated at
+        # parse time, not joined by a space in the file itself), so the
+        # ORDER BY clause is asserted as its two contiguous source lines
+        # rather than as one long joined string.
+        self.assertIn(
+            '"ORDER BY session_id, model, billing_provider, billing_base_url, "',
+            _HERMES_REPORT_SH_TEXT,
+            'the auxiliary query ORDER BY must still name the first five of '
+            'its six primary-key columns, or emission order is no longer total',
+        )
+        self.assertIn(
+            '"billing_mode, task"',
+            _HERMES_REPORT_SH_TEXT,
+            'the auxiliary query ORDER BY must still name the sixth '
+            'primary-key column (task), or emission order is no longer total',
         )
 
 

@@ -508,6 +508,14 @@ class RepositoryTests(unittest.TestCase):
             # loss.
             ROOT / 'docs' / 'migration-auxiliary-usage.md',
             ROOT / 'tests' / 'test_phase55_aux_docs.py',
+            # Phase 56 Plan 01 (D-03, ROI-12/ROI-13) — the local dry-run
+            # that gates the live run: a revenueCard-configured install
+            # proven, through the REAL classifier valuation path and the
+            # REAL hermes-report.sh, to produce a reportable priced
+            # assessment whose value reaches the wire and whose auxiliary
+            # spend ships attributed to the same job, before a single
+            # token is spent on the tenant.
+            ROOT / 'tests' / 'test_phase56_dry_run.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
