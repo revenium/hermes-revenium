@@ -190,9 +190,65 @@ inference chain.
   by Phase 57 Plan 01's two-witness test — a corroborating, not a verifying,
   cross-check, since that schema describes the response shape, not this
   verb's request body.
-- **Live evidence (reserved for plan 57-05):** this subsection is left for
-  plan 57-05 to append the D-11 capture 2 result (the cron path shipping a
-  real `--operation-type OTHER` row) once it runs.
+- **Live evidence (D-11 capture 2, live host, 2026-09-03):** the reservation
+  above is discharged. Host: the confirmed pre-prod multiplex VM this phase
+  ran against (named by role, never by address, per this document's own
+  redaction discipline). CLI: `revenium 1.5.0 (0f5f3a7)` — the same version
+  named in `## Scope`.
+
+  **Capture 1 — isolated two-arm proof, one variable changed.** Control arm
+  (`--operation-type AUX`, the pre-fix value): exit `4`,
+  `Error: Request failed (HTTP 400): Value 'AUX' is not valid. Allowed
+  values: [CHAT, GENERATE, EMBED, CLASSIFY, SUMMARIZE, TRANSLATE, OTHER,
+  TOOL_CALL, RERANK, SEARCH, MODERATION, VISION, TRANSFORM, GUARDRAIL, AUDIO,
+  VIDEO, IMAGE]` — reproduces, live and in this session, the rejection
+  recorded at `docs/comprehensive-roi-proof.md:191`. Fix arm
+  (`--operation-type OTHER`, read live from the deployed `common.sh`
+  constant, identical to the control arm in every other flag): exit `0`, no
+  `HTTP 4`/`HTTP 5` text anywhere in the output. Tenant-side confirmation
+  (a read-only `metrics completions` query, not a second write): the fix
+  arm's row is present and queryable, carrying `operationType: OTHER`,
+  `taskType: aux_title_generation`, `agent: Hermes`; the control arm's
+  transaction id is absent from the tenant, exactly as expected of a
+  rejected call that was never ingested.
+
+  **Capture 2 — the shipped `report_auxiliary_usage` pass, through an
+  ordinary per-minute cron tick, not a hand-built call.** Auxiliary metering
+  was re-enabled through the documented `${STATE_DIR}/env` switch alone (the
+  disabling line removed, its explanatory comment left intact); no file
+  under the skill's `scripts/` directory was edited to make this succeed,
+  re-confirmed by an unchanged `sha256sum` on `common.sh` and
+  `hermes-report.sh` after the flip. The next cron-driven tick shipped
+  auxiliary rows: 130 `Aux reported:` lines, 0 `Aux failed:` lines, 0
+  `HTTP 400` occurrences anywhere in the tick — the previously measured
+  130-failed-calls/minute storm did not recur. `revenium-aux.ledger` — absent
+  on this host through every earlier capture — now carries its first `AUX:`
+  lines ever: 130 of them, 100% labelled `aux_title_generation`. Two
+  subsequent ticks over unchanged counters shipped zero new auxiliary
+  invocations and appended zero new ledger lines — the live confirmation of
+  the ledger's per-column subtraction idempotency, previously proven only in
+  fixtures.
+
+  **Predicted versus observed.** A prediction (142 invocations, 39,038
+  auxiliary tokens, $0.0064146, 100% `aux_title_generation`) was written down
+  and dated before the flip, together with a falsification band. Observed:
+  130 invocations, 35,977 tokens, $0.005923, 100% `aux_title_generation`.
+  Tokens, cost, and the per-task split all landed inside the written band.
+  Invocation count landed below the written confirms floor (130 vs. 142) —
+  stated here plainly as a partial mismatch, not rounded up to a full match,
+  per this project's own precedent for recording an unsoftened result beside
+  the passes. The shortfall was traced, not left as an open question: 12 of
+  the 142 identities belong to sessions whose own main-loop token counters
+  are zero, which structurally excludes them from the auxiliary pass's
+  session-attribution cache — a scope boundary of the existing shipped
+  code, not a behaviour this phase's fix introduced.
+
+  **Standing limitation.** This is evidence about the ingest surface's
+  *behaviour*: it accepts a spec-valid `operationType` value and rejects an
+  invalid one, live, through both a hand-built call and the shipped cron
+  path. It is not evidence about the surface's *schema* — that remains
+  unverifiable until the ingest service's own OAS is available, and nothing
+  above changes the verdict already stated for this row.
 
 ### `meter tool-event`
 
