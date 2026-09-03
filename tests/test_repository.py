@@ -516,6 +516,16 @@ class RepositoryTests(unittest.TestCase):
             # spend ships attributed to the same job, before a single
             # token is spent on the tenant.
             ROOT / 'tests' / 'test_phase56_dry_run.py',
+            # Phase 56 Plan 02 (D-13, ROI-12) — the two-racer concurrency
+            # proof that closes WINDOWS entry 5 (the auxiliary submission
+            # atomicity gap) and the fail-first mutation runner that proves
+            # the proof is real. `.planning/` is gitignored, and a
+            # concurrency test that has never been shown to go RED against
+            # the unlocked shape is not evidence -- deleting either file
+            # must turn the suite (or an operator's own verification) red,
+            # not silently repeat that loss.
+            ROOT / 'tests' / 'test_phase56_aux_atomicity.py',
+            ROOT / 'tests' / 'mutation_verify_aux_atomicity.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -2485,6 +2495,28 @@ exit 0
                 'AUX_WARN_FLAGS_DIR must NOT be in the eager mkdir -p -- an '
                 'install that never meters an auxiliary row must create no '
                 'auxiliary warn state at all',
+            )
+        # Phase 56 Plan 02 (D-13): the auxiliary submission atomicity lock
+        # (WINDOWS entry 5) and its bounded timeout, declared only in
+        # common.sh -- mirroring the OWNERS_DIR/AUX_WARN_FLAGS_DIR lazy-
+        # creation assertions above.
+        self.assertIn('AUX_LOCK_FILE=', text)
+        self.assertIn('aux.lock', text)
+        self.assertRegex(
+            text,
+            r'AUX_LOCK_FILE="\$\{REVENIUM_AUX_LOCK_FILE:-\$\{STATE_DIR\}/aux\.lock\}"',
+        )
+        self.assertIn('AUX_LOCK_TIMEOUT_SECONDS=', text)
+        self.assertRegex(
+            text,
+            r'AUX_LOCK_TIMEOUT_SECONDS="\$\{REVENIUM_AUX_LOCK_TIMEOUT_SECONDS:-30\}"',
+        )
+        for ln in mkdir_lines:
+            self.assertNotIn(
+                'AUX_LOCK_FILE', ln,
+                'AUX_LOCK_FILE must NOT be in the eager mkdir -p -- an '
+                'install that never meters an auxiliary row must create no '
+                'auxiliary lock state at all',
             )
 
     def test_taxonomy_file_schema(self):
