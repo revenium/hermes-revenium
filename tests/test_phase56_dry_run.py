@@ -375,14 +375,14 @@ class _DryRunReporterMixin:
     def _aux_invocations(meter_invocations):
         return [
             argv_to_flags(inv) for inv in meter_invocations
-            if argv_to_flags(inv).get('--operation-type') == 'AUX'
+            if argv_to_flags(inv).get('--operation-type') == 'OTHER'
         ]
 
     @staticmethod
     def _non_aux_invocations(meter_invocations):
         return [
             inv for inv in meter_invocations
-            if argv_to_flags(inv).get('--operation-type') != 'AUX'
+            if argv_to_flags(inv).get('--operation-type') != 'OTHER'
         ]
 
     @staticmethod
@@ -450,7 +450,7 @@ class DryRunReportableValuedRowTests(_DryRunClassifierTestCase, _DryRunReporterM
         aux = self._aux_invocations(result['meter_invocations'])
         self.assertEqual(
             len(aux), 1,
-            f'expected exactly 1 invocation carrying --operation-type AUX, '
+            f'expected exactly 1 invocation carrying --operation-type OTHER, '
             f'got {len(aux)}: {result["meter_invocations"]!r}',
         )
         outcome_argv = self._outcome_invocation(result['jobs_invocations'])
@@ -502,7 +502,7 @@ class DryRunToggleParityTests(_DryRunClassifierTestCase, _DryRunReporterMixin):
         aux_disabled = self._aux_invocations(result_disabled['meter_invocations'])
         self.assertEqual(
             len(aux_disabled), 0,
-            'the disabled arm must ship zero --operation-type AUX invocations')
+            'the disabled arm must ship zero --operation-type OTHER invocations')
 
         enabled_non_aux = self._non_aux_invocations(result_enabled['meter_invocations'])
         self.assertEqual(
