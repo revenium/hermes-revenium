@@ -295,6 +295,37 @@ REVENIUM_AUX_METERING="${REVENIUM_AUX_METERING:-enabled}"
 # no auxiliary warn state at all.
 AUX_WARN_FLAGS_DIR="${REVENIUM_AUX_WARN_FLAGS_DIR:-${MARKERS_DIR}/.aux-warn}"
 
+# Phase 56 (D-13): mutual exclusion for the auxiliary pass's ENTIRE
+# read-ledger-baseline -> emit -> append sequence in
+# report_auxiliary_usage() (WINDOWS entry 5, Greptile P1 on PR #119). Before
+# this lock, hermes-report.sh took none on that sequence -- only cron.sh
+# flocks LOCK_FILE (cron.lock), and this script runs AS cron.sh's child --
+# so an out-of-band invocation overlapping a cron tick could interleave with
+# it: both racers read the same AUX_LEDGER_FILE baseline, both compute the
+# same positive delta, and both emit, with the deterministic
+# --transaction-id delegating the race to Revenium's server-side dedup
+# rather than closing it locally. The main completion path was given the
+# _claim_session_owner O_EXCL primitive after the 2026-08-17 double-bill
+# (hermes-report.sh's _claim_session_owner header comment); the auxiliary
+# path had no equivalent until this lock. This was fixed twice on this same
+# billing path by narrowing the window instead of excluding it, and review
+# rejected both attempts -- see _takeover_session_owner's own comment for
+# the identical lesson; only exclusion closes it.
+#
+# Deliberately ABSENT from the eager `mkdir -p` below, same as
+# WARN_FLAGS_DIR/AUX_WARN_FLAGS_DIR above -- created lazily by `exec 8>` on
+# first acquisition, so an install that never meters auxiliary usage
+# (AUX_METERING_ENABLED=false) creates no auxiliary lock state at all.
+AUX_LOCK_FILE="${REVENIUM_AUX_LOCK_FILE:-${STATE_DIR}/aux.lock}"
+# Bounded-blocking timeout for the lock above. The auxiliary critical
+# section contains a network CLI call per row, so an unbounded LOCK_EX (the
+# _takeover_session_owner shape, correct for a two-file-operation critical
+# section) would let a wedged holder stall every later tick behind
+# cron.lock indefinitely. On timeout the acquirer fails CLOSED -- warns,
+# emits nothing, appends nothing, returns 0 -- so the cost is a one-tick
+# delay against an unchanged ledger, never a lost or duplicated bill.
+AUX_LOCK_TIMEOUT_SECONDS="${REVENIUM_AUX_LOCK_TIMEOUT_SECONDS:-30}"
+
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}" "${JOB_ASSESSMENTS_DIR}"
 
 ensure_path() {

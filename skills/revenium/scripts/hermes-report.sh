@@ -908,7 +908,67 @@ report_auxiliary_usage() {
     return 0
   fi
 
-  local aux_query_output
+  # Phase 56 (D-13): acquire the exclusion BEFORE the baseline read below --
+  # this placement is the whole fix. A lock taken after the baseline read
+  # would leave both racers holding the same positive delta, exactly the
+  # shape WINDOWS entry 5 describes. See common.sh's AUX_LOCK_FILE comment
+  # for the full rationale.
+  #
+  # Descriptor 8, not 9: cron.sh opens 9 on cron.lock and this script runs
+  # as its child, so reusing 9 would shadow an inherited descriptor for no
+  # benefit. `exec 8>` opens the descriptor in THIS shell (unconditionally,
+  # regardless of whether the flock below succeeds) so the lock survives
+  # after the python3 child below exits -- exactly cron.sh's own idiom.
+  exec 8>"${AUX_LOCK_FILE}"
+  local _aux_lock_status
+  AUX_LOCK_TIMEOUT_SECONDS="${AUX_LOCK_TIMEOUT_SECONDS}" python3 - <<'PY' 2>/dev/null
+import fcntl
+import math
+import os
+import sys
+import time
+
+# The override must be a FINITE, POSITIVE number. `float()` alone accepts
+# 'nan', 'inf' and non-positive values: an infinite or NaN deadline makes the
+# retry loop below unbounded, which is the exact failure this bounded design
+# exists to prevent -- and it would hang while holding cron.lock, stalling
+# every later stage and every subsequent tick. A non-positive value would
+# instead defer auxiliary billing on every contention. Both fall back to the
+# 30s default rather than being honoured.
+try:
+    _timeout = float(os.environ.get('AUX_LOCK_TIMEOUT_SECONDS', '30') or '30')
+except (TypeError, ValueError):
+    _timeout = 30.0
+if not math.isfinite(_timeout) or _timeout <= 0:
+    _timeout = 30.0
+
+# Bounded blocking, then fail CLOSED. Retry LOCK_EX | LOCK_NB on a short
+# sleep until the timeout elapses rather than an unbounded LOCK_EX --
+# the auxiliary critical section holds a network CLI call per row, so an
+# unbounded wait here (correct for _takeover_session_owner's two-file-op
+# critical section) would let a wedged holder stall every later tick
+# behind cron.lock indefinitely.
+_deadline = time.time() + _timeout
+while True:
+    try:
+        fcntl.flock(8, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        sys.exit(0)
+    except (OSError, BlockingIOError):
+        if time.time() >= _deadline:
+            sys.exit(11)
+        time.sleep(0.1)
+PY
+  _aux_lock_status=$?
+
+  # `-e` is not set in this file (CLAUDE.md), so the lock-acquisition
+  # failure is handled explicitly here rather than relying on it. On
+  # timeout, aux_query_output is left empty and falls through to the
+  # existing empty-output exit below, which already closes descriptor 8 --
+  # never proceeding to the query or the emit without the exclusion.
+  local aux_query_output=""
+  if [[ "${_aux_lock_status}" -ne 0 ]]; then
+    warn "auxiliary usage metering deferred this tick: could not acquire AUX_LOCK_FILE within ${AUX_LOCK_TIMEOUT_SECONDS}s (a concurrent hermes-report.sh invocation is likely holding it) -- next tick retries from an unchanged ledger"
+  else
   aux_query_output=$(
     STATE_DB="${STATE_DB}" \
     AUX_LEDGER_FILE="${AUX_LEDGER_FILE}" \
@@ -1127,13 +1187,19 @@ for row in rows:
         continue
 PY
   ) || aux_query_output=""
+  fi
 
+  # Phase 56 (D-13): release the exclusion at every exit from this function.
+  # Closing descriptor 8 is what releases the flock -- a missed close on any
+  # branch below holds it for the remainder of the process.
   if [[ -z "${aux_query_output}" ]]; then
+    exec 8>&-
     return 0
   fi
 
   if [[ "${aux_query_output}" == "AUX_TABLE_ABSENT" ]]; then
     info "auxiliary usage metering skipped this tick: session_model_usage table not present on this Hermes install (predates auxiliary usage tracking) — main-loop metering is unaffected"
+    exec 8>&-
     return 0
   fi
 
@@ -1241,6 +1307,8 @@ PY
       warn "Aux failed: session=${orig_sid} label=${label} exit=${cmd_exit} output=${cmd_output}"
     fi
   done <<< "${aux_query_output}"
+
+  exec 8>&-
 }
 
 main() {

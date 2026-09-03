@@ -303,6 +303,15 @@ class RepositoryTests(unittest.TestCase):
             # one lives in the tracked docs/ tree specifically so it can't
             # recur.
             ROOT / 'docs' / 'roi-read-surface-ask.md',
+            # Phase 56 (ROI-12/ROI-13) — the tracked comprehensive live-tenant
+            # proof that one row carries a configured revenue value,
+            # aux-inclusive cost, and a readable ROI together, with the
+            # NOT CONFIRMED LIVE aux-rejection finding recorded plainly.
+            # Pinned for the same reason as its neighbours above:
+            # `docs/internal/` and `.planning/` are both gitignored, and an
+            # unpinned copy can vanish the way the v1.3 and v1.4 closeouts
+            # did.
+            ROOT / 'docs' / 'comprehensive-roi-proof.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -508,6 +517,24 @@ class RepositoryTests(unittest.TestCase):
             # loss.
             ROOT / 'docs' / 'migration-auxiliary-usage.md',
             ROOT / 'tests' / 'test_phase55_aux_docs.py',
+            # Phase 56 Plan 01 (D-03, ROI-12/ROI-13) — the local dry-run
+            # that gates the live run: a revenueCard-configured install
+            # proven, through the REAL classifier valuation path and the
+            # REAL hermes-report.sh, to produce a reportable priced
+            # assessment whose value reaches the wire and whose auxiliary
+            # spend ships attributed to the same job, before a single
+            # token is spent on the tenant.
+            ROOT / 'tests' / 'test_phase56_dry_run.py',
+            # Phase 56 Plan 02 (D-13, ROI-12) — the two-racer concurrency
+            # proof that closes WINDOWS entry 5 (the auxiliary submission
+            # atomicity gap) and the fail-first mutation runner that proves
+            # the proof is real. `.planning/` is gitignored, and a
+            # concurrency test that has never been shown to go RED against
+            # the unlocked shape is not evidence -- deleting either file
+            # must turn the suite (or an operator's own verification) red,
+            # not silently repeat that loss.
+            ROOT / 'tests' / 'test_phase56_aux_atomicity.py',
+            ROOT / 'tests' / 'mutation_verify_aux_atomicity.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -2477,6 +2504,28 @@ exit 0
                 'AUX_WARN_FLAGS_DIR must NOT be in the eager mkdir -p -- an '
                 'install that never meters an auxiliary row must create no '
                 'auxiliary warn state at all',
+            )
+        # Phase 56 Plan 02 (D-13): the auxiliary submission atomicity lock
+        # (WINDOWS entry 5) and its bounded timeout, declared only in
+        # common.sh -- mirroring the OWNERS_DIR/AUX_WARN_FLAGS_DIR lazy-
+        # creation assertions above.
+        self.assertIn('AUX_LOCK_FILE=', text)
+        self.assertIn('aux.lock', text)
+        self.assertRegex(
+            text,
+            r'AUX_LOCK_FILE="\$\{REVENIUM_AUX_LOCK_FILE:-\$\{STATE_DIR\}/aux\.lock\}"',
+        )
+        self.assertIn('AUX_LOCK_TIMEOUT_SECONDS=', text)
+        self.assertRegex(
+            text,
+            r'AUX_LOCK_TIMEOUT_SECONDS="\$\{REVENIUM_AUX_LOCK_TIMEOUT_SECONDS:-30\}"',
+        )
+        for ln in mkdir_lines:
+            self.assertNotIn(
+                'AUX_LOCK_FILE', ln,
+                'AUX_LOCK_FILE must NOT be in the eager mkdir -p -- an '
+                'install that never meters an auxiliary row must create no '
+                'auxiliary lock state at all',
             )
 
     def test_taxonomy_file_schema(self):
