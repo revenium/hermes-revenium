@@ -263,7 +263,7 @@ inference chain.
 
 ### `guardrails enforcement-rules get`
 
-- **Invocation site:** `skills/revenium/scripts/guardrail-check.sh:120-121`.
+- **Invocation site:** `skills/revenium/scripts/guardrail-check.sh:117`.
 - **OAS path:** `GET /v2/api/ai/enforcement-rules/{teamId}`
 - **Response schema:** `EnforcementRulesPayload` — no request body to check.
 - **Path parameter:** `teamId`, matches the CLI's positional `<teamId>`
@@ -273,8 +273,8 @@ inference chain.
 
 ### `guardrails budget-rules list`
 
-- **Invocation site:** `skills/revenium/scripts/guardrail-check.sh:182-186`
-  (the `BUDGET_RULES_CMD` array).
+- **Invocation site:** `skills/revenium/scripts/guardrail-check.sh:143-147`
+  (the `BUDGET_RULES_CMD` array build and its invocation).
 - **OAS path:** **no literally-named path.** No path or schema in the 219/442
   contains the string "budget".
 - **Circumstantial candidate:** `GET /v2/api/ai/cost-controls`, response
