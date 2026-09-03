@@ -12,11 +12,11 @@ Work from top to bottom. Earlier entries are more common and cheaper to check.
 
 ## `hermes skills install` "succeeded" but `scripts/install.sh` is missing
 
-**Cause:** `hermes skills install` ships `SKILL.md` plus only the support files
+Cause: `hermes skills install` ships `SKILL.md` plus only the support files
 `SKILL.md` names as bundle-relative paths, from an allowlist of directories that
 excludes `plugins/` entirely. It never ships `scripts/` or `plugins/`.
 
-**Fix:** run the bootstrap (it clones the repo, drops the missing dirs in, and
+Fix: run the bootstrap. It clones the repo, adds the missing directories, and
 hands off to the installer):
 
 ```sh
@@ -35,11 +35,11 @@ the security scanner reports" in the README. A refusal is not expected. The scan
 reports `MEDIUM` findings for cron `persistence` and a documented `git clone`
 under `supply_chain`; those findings do not block an install on their own.
 
-**Cause:** Hermes produces the scanner verdict, not this repository, so the
+Cause: Hermes produces the scanner verdict, so the
 verdict can change independently. A `CAUTION` verdict means the scan graded
 findings more severely than the version observed above.
 
-**Fix:** confirm that the findings are the expected ones before bypassing the
+Fix: confirm that the findings are expected before bypassing the
 scanner. Treat `--force` as a considered decision, not a reflex:
 
 ```sh
@@ -53,10 +53,10 @@ verdict and findings. A change from `SAFE` is worth knowing about.
 
 ## Every `guardrails` / `jobs create` fails with `teamId is required` (HTTP 400)
 
-**Cause:** only the API key is configured. Completions meter fine, but jobs and
+Cause: only the API key is configured. Completions meter, but jobs and
 guardrails need all **four** credentials (API Key, Team ID, Tenant ID, Owner ID).
 
-**Check / fix:**
+Check and fix:
 
 ```sh
 revenium config show     # confirm all four are non-empty
@@ -69,13 +69,13 @@ bash ~/.hermes/skills/revenium/scripts/install.sh
 
 ## Jobs appear in Revenium but `jobs transactions <id>` shows "No transactions found"
 
-**Cause (BUG-1 class):** the classifier writes the `.ready` sentinel only *after*
+Cause (BUG-1 class): the classifier writes the `.ready` sentinel only after
 its slow job-inference LLM call finishes. If the reporter's age-fallback fires
 before that (window shorter than job-inference latency), it meters + ledgers the
 completions before the job marker exists and per-muid dedup permanently orphans
 them.
 
-**Fix:** ensure the settle window exceeds worst-case job-inference latency
+Fix: ensure the settle window exceeds worst-case job-inference latency
 (observed ~200s under load). The shipped default is **600s**. Do not lower it on
 installs that run the classifier plugin. Check what's baked into cron:
 
@@ -98,18 +98,18 @@ job inference to wait for.
 
 ## Hooks are registered but nothing gets captured (tool-events stay empty)
 
-**Cause:** hooks are **inert until consented**. A headless or gateway-served
+Cause: hooks are inert until consented. A headless or gateway-served
 profile never shows the interactive approval prompt. Set `hooks_auto_accept` or
 `pre_llm_call`, `pre_tool_call`, and `post_tool_call` will never fire.
 
-**Diagnose:**
+Diagnose:
 
 ```sh
 bash ~/.hermes/skills/revenium/scripts/hooks-status.sh; echo "exit=$?"
 # exit 1 = not registered; exit 2 = registered but idle (likely not approved / not auto-accepted)
 ```
 
-**Fix (gateway-served / fleet):**
+Fix (gateway-served / fleet):
 
 ```sh
 bash ~/.hermes/skills/revenium/scripts/install-hooks.sh --auto-accept                 # single host
@@ -127,16 +127,16 @@ bash ~/.hermes/skills/revenium/scripts/install-hooks.sh --metering-only --auto-a
 
 ## Only one profile is being metered on a fleet host
 
-**Cause (BUG-3 class):** an older `install-cron.sh` keyed every profile on ONE
+Cause (BUG-3 class): an older `install-cron.sh` keyed every profile on one
 fixed crontab marker, so each per-profile install overwrote the previous.
 
-**Check:** there should be one distinct marker per metered profile:
+Check: there should be one distinct marker per metered profile:
 
 ```sh
 crontab -l | grep -o '# hermes-revenium-metering[-A-Za-z0-9]*' | sort -u
 ```
 
-**Fix:** re-install the fleet — each profile now gets a unique
+Fix: re-install the fleet. Each profile now gets a unique
 `# hermes-revenium-metering-<profile>` marker and its own baked env:
 
 ```sh
@@ -147,10 +147,10 @@ bash ~/.hermes/skills/revenium/scripts/install.sh --all-profiles
 
 ## Cron spams "No such file or directory" every minute
 
-**Cause (BUG-7 class):** `~/.hermes` was wiped/reset but the metering crontab line
+Cause (BUG-7 class): `~/.hermes` was wiped or reset, but the metering crontab line
 survived, pointing at a now-missing `cron.sh` (or `cron-fleet.sh`).
 
-**Fix:** `install-cron.sh` auto-reconciles orphaned metering lines on its next
+Fix: `install-cron.sh` auto-reconciles orphaned metering lines on its next
 run; or remove them outright:
 
 ```sh
@@ -165,12 +165,12 @@ bash ~/.hermes/skills/revenium/scripts/uninstall-cron.sh
 
 ## Multiplex mode: a profile's markers/sentinels land in the wrong home
 
-**Cause (BUG-4 class):** in `gateway.multiplex_profiles: true`, one gateway serves
+Cause (BUG-4 class): in `gateway.multiplex_profiles: true`, one gateway serves
 every profile and sessions are namespaced `agent:<profile>:…`. A classifier that
 resolved paths only from the process `HERMES_HOME` would write every profile's
 markers into the default home, so the per-profile cron never sees them.
 
-**Expectation (current behavior):** the classifier resolves the owning profile's
+Expected behavior: the classifier resolves the owning profile's
 home/state.db/markers/`.ready` **per session** from the namespace. Verify markers
 are landing under the owning profile:
 
@@ -180,7 +180,7 @@ ls -1 ~/.hermes/state/revenium/markers/ | head                    # default home
 ```
 
 If markers for a namespaced session are in the default home, the plugin is stale
-— re-install it and restart the gateway:
+Re-install it and restart the gateway:
 
 ```sh
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
@@ -190,16 +190,16 @@ bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 
 ## Spend shows up entirely as `--task-type unclassified`
 
-**Causes & checks:**
+Causes and checks:
 
-- **Classifier plugin not installed / gateway not restarted** — the plugin writes
+- Classifier plugin not installed or gateway not restarted: the plugin writes
   the task markers. Re-run and restart:
   ```sh
   bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
   ```
-- **Hooks inert** (self-classification never happens) — see "Hooks are registered
+- Hooks inert (self-classification never happens): see "Hooks are registered
   but nothing gets captured" above.
-- **Reporter falling through to the zero-marker path** — inspect the cron log for
+- Reporter falling through to the zero-marker path: inspect the cron log for
   `marker-read fall-through` warnings:
   ```sh
   grep -E 'fall-through|unclassified' ~/.hermes/state/revenium/revenium-metering.log | tail
@@ -209,12 +209,12 @@ bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 
 ## Spend lands in the wrong / unexpected ORGANIZATION
 
-**Cause:** `organizationName` in `config.json` is the **ORGANIZATION** dimension
+Cause: `organizationName` in `config.json` is the `ORGANIZATION` dimension
 (a company/product). Setting it to an agent or profile name pollutes that
-dimension. Per-agent attribution is the **AGENT** dimension
+dimension. Per-agent attribution is the `AGENT` dimension
 (`REVENIUM_AGENT_NAME` / `--agent`), which fleets default to `Hermes-<profile>`.
 
-**Check / fix:**
+Check and fix:
 
 ```sh
 python3 -c "import json;print(json.load(open('$HOME/.hermes/state/revenium/config.json')).get('organizationName'))"
@@ -238,5 +238,5 @@ ls ~/.hermes/state.db                   # Hermes session DB exists?
 tail -n 40 ~/.hermes/state/revenium/revenium-metering.log   # what does the reporter say?
 ```
 
-The reporter fails **open** (logs a `warn` and exits 0) when a tool or the DB is
+The reporter fails open (logs a `warn` and exits 0) when a tool or the DB is
 missing, so the log is the source of truth for why a tick did nothing.

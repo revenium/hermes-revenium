@@ -2,10 +2,10 @@
 
 ## Overview
 
-`config.json` is the runtime configuration file for the Revenium skill. It is written
-during setup and read by the cron pipeline on every tick. Location:
+Setup writes the Revenium skill's runtime configuration to `config.json`, and the cron
+pipeline reads it on every tick. Location:
 `~/.hermes/state/revenium/config.json` (declared as `CONFIG_FILE` in `common.sh`).
-Its schema defines the interface between the setup flow and the cron pipeline.
+The schema is the interface between setup and the cron pipeline.
 
 ## Fields
 
@@ -43,7 +43,7 @@ records the breach but does not halt the agent.
 
 ## notifyChannel and notifyTarget
 
-These two fields work together and are only meaningful when `autonomousMode` is `true`.
+These fields apply only when `autonomousMode` is `true`.
 `notifyChannel` identifies the messaging platform (e.g., `slack`, `discord`);
 `notifyTarget` identifies the recipient within that platform using the channel-specific
 format (e.g., `channel:C0123456789`, `user:<id>`, `@username`).
@@ -60,7 +60,7 @@ skips the flag entirely on the `revenium meter completion` call.
 
 ## Overview
 
-`guardrail-status.json` is the runtime enforcement-status file written by `guardrail-check.sh`
+`guardrail-check.sh` writes the runtime enforcement status to `guardrail-status.json`
 on every cron tick. Location: `~/.hermes/state/revenium/guardrail-status.json` (declared as
 `GUARDRAIL_STATUS_FILE` in `common.sh`). It is the coupling point between the cron pipeline
 (writer) and the shell hooks (`pre_llm_call.sh`, `pre_tool_call.sh`) and the SKILL.md backstop
@@ -124,7 +124,7 @@ need the static rule identity and current breach values to render the halt messa
 
 ## `llmOutcomeEvaluation` (v1.5, opt-in, experimental)
 
-Opt-in LLM estimation of a job's economic outcome value. **Disabled by default.**
+Opt-in LLM estimation of a job's economic outcome value. Disabled by default.
 Absent from `config.json` is the same as disabled.
 
 ```json
@@ -171,18 +171,7 @@ Two config-driven, non-model alternatives to the `hours x rate` derivation, each
 selected through `boundaries` (documented further below). Both nest **inside**
 `llmOutcomeEvaluation` — the same place `costs` and `maxHoursSaved` already live.
 
-**The placement trap.** `rateCard`, `revenueCard`, `revenueCardKey` and
-`maxRevenueValue` all nest inside `llmOutcomeEvaluation`. `boundaries` is read
-from the **TOP LEVEL** of `config.json`, as a **sibling** of
-`llmOutcomeEvaluation`, not from inside it — a different placement rule for an
-adjacent surface. That is the exact shape that made a production host's
-`rateCard` structurally invisible: the host nested it as a top-level sibling of
-`llmOutcomeEvaluation`, following `boundaries`' placement rule instead of
-`rateCard`'s own, and 85 sessions went unpriced with no error anywhere (Phase
-53). **A wrongly-nested card is not an error** — resolution fails open, so the
-resolver simply never sees a misplaced card and the boundary silently keeps its
-built-in derivation, with no log line to say so. That silence is exactly why
-this note exists: read it before configuring either card.
+**Card placement.** `rateCard`, `revenueCard`, `revenueCardKey`, and `maxRevenueValue` belong inside `llmOutcomeEvaluation`. `boundaries` belongs at the top level of `config.json`, as a sibling of `llmOutcomeEvaluation`. A production host placed `rateCard` at the top level, leaving 85 sessions unpriced (Phase 53). Misplaced cards do not raise an error: resolution fails open, the resolver does not find the card, and the boundary uses its built-in derivation without logging the problem.
 
 #### `rateCard`
 
@@ -195,8 +184,7 @@ card, the matching amount **displaces the `hours x rate` derivation entirely**
 still rides the record as an evaluator assumption. Declares
 `CUSTOMER_CONFIGURED`.
 
-Its honest limit, in the code's own words: **configuration establishes an
-approved RATE, not actual hours worked.**
+**Configuration establishes an approved rate, not actual hours worked.**
 
 #### `revenueCard`
 
@@ -211,17 +199,14 @@ via `boundaries.valuation = "revenue_card_valuation_fixture"` together with
 | `attributionFraction` | no | A finite number from 0 through 1, both endpoints legal — but see the note on `0.0` below. |
 | `attributionBasis` | required whenever `attributionFraction` is present | The stated basis the fraction rests on, clamped to 500 serialized bytes. |
 
-`attributionFraction` and `attributionBasis` **travel as a set in both
-directions** — the same rule `correct-assessment.sh --attribution-fraction`
-already enforces on its own CLI flag pair (documented below). One present
-without the other abstains the whole entry.
+`attributionFraction` and `attributionBasis` must be present together.
+`correct-assessment.sh --attribution-fraction` enforces the same rule for its
+CLI flags. If either value is missing, the entry abstains.
 
-When both are configured, the skill **multiplies `grossPerJob` by
-`attributionFraction` and records only the product** — `estimated_value`. The
-gross figure itself reaches no persisted record, no `meter` argv, no
-`--metadata` envelope, and no log line. See `docs/value-and-roi.md`'s
-Attribution section for the full reasoning behind this narrow reversal of a
-prior decision (D-09).
+When both are configured, the skill records `grossPerJob × attributionFraction`
+as `estimated_value`. It does not persist or log the gross figure or include it
+in `meter` arguments or `--metadata`. See the Attribution section of
+`docs/value-and-roi.md` for decision D-09.
 
 **A fraction of exactly `0.0` validates but produces no record.** It is legal
 input and the multiplication yields `0.00`, but a configured valuation is held
@@ -230,9 +215,8 @@ misreported and no error is raised — the job simply reports its outcome with n
 value. If you mean "this work is attributed nothing", omitting the entry says
 so more clearly than a zero fraction does.
 
-Its honest limit, in the rate card's own sentence shape: **configuration
-establishes an approved value per completed booking, an operator policy, not
-this booking's actual revenue.**
+**Configuration establishes an operator-approved value per completed booking,
+not the booking's actual revenue.**
 
 ```json
 {
@@ -251,16 +235,12 @@ this booking's actual revenue.**
 
 #### `revenueCardKey`
 
-The non-empty string naming which `revenueCard` entry applies on this host,
-read from configuration only — never inferred. This exists rather than being
-inferred because the shipped rate card keys on the evaluator's inferred role,
-which is model output, and handing a model the selector for a revenue figure
-would create a gradient that rewards pointing agents at high-margin
-transactions. A `revenueCard` with several entries and no configured
-`revenueCardKey` (or a key naming an entry the card does not hold) selects
-nothing: the resolver does not guess or fall back to the card's sole entry —
-it delegates internally to the ordinary `hours x rate` derivation instead, so
-an ordinary, non-revenue session on the same host still gets its value.
+A non-empty configuration value that selects the applicable `revenueCard` entry
+for this host. The resolver never infers it from model output. If the card has
+multiple entries and `revenueCardKey` is missing or does not match an entry, the
+resolver selects no revenue entry and uses the standard `hours x rate`
+derivation. This allows non-revenue sessions on the same host to retain their
+normal valuation.
 
 #### `maxRevenueValue`
 
@@ -270,24 +250,18 @@ malformed, the existing `round(maxHoursSaved x maxLoadedRate, 2)` ceiling
 applies unchanged — a malformed `maxRevenueValue` never widens a bound, it
 only falls back to the ceiling every other job on the host is already held to.
 
-**Why a separate ceiling:** without one, an operator must inflate
-`maxLoadedRate` to price a booking above the labor ceiling — corrupting the
-labor bound that still guards every other, non-revenue job on the same host.
-`maxRevenueValue` lets the two ceilings be sized independently.
+`maxRevenueValue` separates the revenue ceiling from the labor ceiling. Without
+it, pricing a booking above the labor ceiling would require increasing
+`maxLoadedRate`, which would also raise the limit for non-revenue jobs on the
+host.
 
 #### The multi-profile fence
 
-On a host whose owning profile cannot be attributed with certainty — a
-multiplexed gateway serving several profiles, where per-profile config
-resolution did not visibly engage — a revenue valuation **abstains** rather
-than pricing from the root `config.json`'s card. This is the opposite polarity
-from the rest of this config surface, which fails *open* (a missing or
-malformed key degrades to the built-in derivation): on this one money path the
-skill fails *closed*, deliberately, for the same reason `guardrail-status.json`'s
-own fail-closed inversion is called out above — "keep going" and "keep going
-with the wrong operator's money" are different outcomes, and only the first is
-acceptable here. An ordinary, non-revenue session on the same host is
-unaffected by this fence.
+If the skill cannot determine which profile owns a session on a multi-profile
+host, revenue valuation abstains instead of using the root `config.json` card.
+Other configuration errors fail open to the built-in derivation, but profile
+ambiguity fails closed because the root card may belong to a different operator.
+Non-revenue sessions are unaffected.
 
 ### Economic mechanisms (EGV-05)
 
@@ -378,35 +352,21 @@ because a human explicitly authorizes it.
 
 #### The evidence-class gate on top of this flag (Phase 53, ROI-01)
 
-Turning `experimentalReportEstimates` on is **necessary but no longer
-sufficient** for a value to reach the wire. As of Phase 53, a record must
-also carry one of five permitted evidence classes: `ACTIVITY_MEASURED`,
-`OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`, `CUSTOMER_CONFIGURED`,
-`CUSTOMER_CONFIRMED`. A record whose evidence class is `MODEL_ESTIMATED_DEMO`
-— the class every naked-LLM evaluation produces — is refused, whatever this
-flag says.
+Setting `experimentalReportEstimates` to `true` is necessary but not sufficient
+to report a value. The record must also carry one of these evidence classes:
+`ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`,
+`CUSTOMER_CONFIGURED`, or `CUSTOMER_CONFIRMED`. The default naked-LLM evaluator
+(`"evaluator": "llm"`) produces `MODEL_ESTIMATED_DEMO`, which the gate refuses
+regardless of configuration.
 
-**Why:** `revenium jobs roi <id>`, the surface an operator actually reads a
-value on, carries no `evidence_class`, `evaluator`, or `confidence` — a
-model-estimated figure would render there with a measurement's visual weight.
-See [`docs/claim-distinctions-and-evidence-boundaries.md`](../../../docs/claim-distinctions-and-evidence-boundaries.md#the-product-truth-boundary)
-for the live finding, and [`docs/roi-read-surface-ask.md`](../../../docs/roi-read-surface-ask.md)
-for the standing ask this gate is a self-imposed substitute for.
-
-**The permitted set is a code constant, not a config key (D-02).** There is
-deliberately no field anywhere in `config.json` that widens it — an operator
-cannot turn `MODEL_ESTIMATED_DEMO` reportable by any combination of settings
-in this file. Widening the set requires a code change and review, not a
-configuration edit. This is intentional: a value-reporting gate an operator
-can configure away is not a gate.
-
-**If you turn `experimentalReportEstimates` on and see nothing reported,**
-this is why. The naked-LLM evaluator (`"evaluator": "llm"`, the default)
-always produces `MODEL_ESTIMATED_DEMO`, which this gate always refuses — no
-config change in this file makes that evaluator's output reportable. A value
-becomes reportable only when it is constituted by something other than a
-model — for example a `CUSTOMER_CONFIGURED` boundary — never by turning this
-flag on alone.
+The permitted set is a code constant, not a config key (D-02). Widening it
+requires a code change and review. This prevents a model estimate from appearing
+in `revenium jobs roi <id>` with the visual weight of a measurement because that
+surface does not show `evidence_class`, `evaluator`, or `confidence`. See
+[`docs/claim-distinctions-and-evidence-boundaries.md`](../../../docs/claim-distinctions-and-evidence-boundaries.md#the-product-truth-boundary)
+for the live finding and
+[`docs/roi-read-surface-ask.md`](../../../docs/roi-read-surface-ask.md) for the
+standing request that this gate substitutes for.
 
 ### Operator visibility (Phase 39, ROI-14)
 

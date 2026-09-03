@@ -2,14 +2,14 @@
 
 [← Documentation index](README.md)
 
-Re-running `install.sh` *is* the upgrade. It is idempotent: configured steps are skipped,
+Re-run `install.sh` to upgrade. It is idempotent: configured steps are skipped,
 and it creates no duplicate rules or cron lines.
 
 Every upgrade must copy the new files to the host and re-sync the plugin. Refreshing
 `~/.hermes/skills/` alone leaves the active copy at
 `~/.hermes/plugins/` stale. `install.sh` handles the second for you.
 
-> **On a multi-profile host, repeat `--profile` / `--all-profiles` on every upgrade.**
+> On a multi-profile host, repeat `--profile` / `--all-profiles` on every upgrade.
 > The skill tree at `~/.hermes/skills/revenium/` is shared, so refreshing it updates the
 > *scripts* for every profile at once. The classifier is not shared: it is copied into
 > each profile's own `plugins/` directory, and nothing copies over it unless you name that
@@ -41,8 +41,8 @@ rsync -av -e ssh skills/revenium/ <user>@<host>:~/.hermes/skills/revenium/
 ssh <user>@<host> 'bash ~/.hermes/skills/revenium/scripts/install.sh'
 ```
 
-> **Do not add `--delete`.** Operators keep host-only scripts beside the shipped ones — a
-> fleet cron wrapper, for instance — that exist in no clone. `--delete` removes them, and
+> Do not add `--delete`. Operators may keep host-only scripts beside the shipped ones, such
+> as a fleet cron wrapper. `--delete` removes them, and
 > if the crontab invokes one, metering stops silently across every profile. Sync without
 > it, or use Option D, which overlays by design.
 
@@ -89,22 +89,22 @@ curl -fsSL https://raw.githubusercontent.com/revenium/hermes-revenium/main/skill
 
 ## After any upgrade
 
-**Restart the gateway.** A refreshed plugin on disk is not a loaded plugin; the running
+Restart the gateway. A refreshed plugin on disk is not a loaded plugin; the running
 gateway keeps serving what it started with. `install.sh` restarts it unless you passed
 `--no-restart`. On a multi-profile host, confirm which process actually serves each
 profile — see [the fleet guide](fleet.md).
 
-**Sync the plugin if you copied only the skill.** Anything short of `install.sh` leaves
+Sync the plugin if you copied only the skill. Anything short of `install.sh` leaves
 `~/.hermes/plugins/revenium-classifier/` on the old version:
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 ```
 
-**Delete any `.bak` copies** of the skill under `~/.hermes/skills/`. Plugin discovery
+Delete any `.bak` copies of the skill under `~/.hermes/skills/`. Plugin discovery
 scans their bundled `plugins/` directories, and a stale duplicate can shadow the real one.
 
-**Auxiliary usage metering turns on with this upgrade.** Reported spend steps up
+Auxiliary usage metering turns on with this upgrade. Reported spend increases
 permanently against unchanged traffic — nothing about your traffic changes, but a
 category of spend that was never reported before now is. The first tick after upgrading
 additionally reports each identity's whole accumulated pre-upgrade auxiliary usage,
@@ -113,7 +113,7 @@ autonomous-mode guardrail close to its limit, read
 [Auxiliary usage migration](migration-auxiliary-usage.md) before upgrading. The off
 switch is `REVENIUM_AUX_METERING=disabled`.
 
-**Verify.** `diagnose.sh` produces one read-only report covering credentials, cron,
+Verify with `diagnose.sh`. It produces one read-only report covering credentials, cron,
 ledgers, the settle gate, plugin and hook state, and a per-profile summary:
 
 ```bash

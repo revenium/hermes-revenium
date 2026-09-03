@@ -5,9 +5,8 @@
 > **Experimental, opt-in, off by default.** An install that leaves it off meters exactly as
 > it does today.
 
-This short version helps an operator decide whether to turn the feature on. It explains
-the mechanism, defines the number's limits, and provides an annotated configuration for a
-software engineering team.
+This overview explains the mechanism, the number's limits, and an annotated configuration
+for a software engineering team.
 
 [Job value and ROI](value-and-roi.md) is the full reference for every field, failure mode,
 the wire format, and troubleshooting. Start here and use the full reference when needed.
@@ -16,8 +15,7 @@ the wire format, and troubleshooting. Start here and use the full reference when
 
 ## The problem
 
-Your agent spend shows up as tokens and dollars. That tells you what you spent. It says
-nothing about what you got.
+Agent spend shows what you spent in tokens and dollars, but not what the work produced.
 
 This feature adds an estimate of what each completed task arc was *worth* to the record that
 already carries its cost. A Revenium dashboard can then show value and cost side by side.
@@ -37,33 +35,29 @@ flowchart LR
     F --> G
 ```
 
-1. **The agent finishes a task arc.** A coherent piece of work with a goal — fix the bug,
-   review the PR — not a single turn.
-2. **The classifier labels it.** This already happens today; it is what puts `--task-type`
+1. The agent finishes a task arc: a coherent piece of work with a goal, such as fixing a bug
+   or reviewing a PR, rather than a single turn.
+2. The classifier labels it. This already happens today; it is what puts `--task-type`
    on your metered rows.
-3. **Only successful arcs are valued.** A failed or abandoned arc keeps its cost and gets no
+3. Only successful arcs are valued. A failed or abandoned arc keeps its cost and gets no
    value. Nothing infers success from a transcript that merely sounds productive.
-4. **One extra LLM call, on your own provider, estimates two assumptions** — hours of human
-   work avoided, and the loaded hourly rate of the person who would have done it. The model
+4. One extra LLM call on your provider estimates two assumptions: hours of human work
+   avoided and the loaded hourly rate of the person who would have done it. The model
    is never asked for a dollar figure; it is asked for the inputs, and the skill multiplies
    them. A total the model volunteers anyway is discarded.
-5. **Your own costs are subtracted, and the result ships** with the job's outcome on the next
+5. Your costs are subtracted, and the result ships with the job's outcome on the next
    cron tick.
 
-Two design choices explain most of the observed behaviour:
-
-**The model can decline.** Abstaining is an expected answer, not a failure. When the work is
+The model can decline. Abstaining is an expected answer, not a failure. When the work is
 trivial or unclear, the evaluator returns nothing and the job reports its outcome with no
 value attached. An evaluator that never declines would be indistinguishable from one that
 always inflates.
 
-**The skill never divides.** It sends a value, the costs it was netted against, and a list of
+The skill never divides. It sends a value, the costs it was netted against, and a list of
 which costs were and were not included. Revenium already holds the metered AI cost for that
 job and computes the ratio on its side.
 
 ## What the number means
-
-Explain this distinction to anyone who sees the dashboard.
 
 | | |
 |---|---|
@@ -78,25 +72,24 @@ estimate because the product does not provide it.
 
 ## When the estimate does not fit: a revenue-generating agent
 
-Everything above describes **one** of the six economic mechanisms this product
+Everything above describes one of the six economic mechanisms this product
 recognises: `labor_substitution`, the value of human work avoided. `hours × rate` is a
 model of that mechanism and of no other.
 
 Some agents do not substitute for labour. Consider a hospitality agent that takes a guest
-enquiry and completes a room booking. Asking how many hours of staff time it saved is close
-to meaningless — the agent produced a **revenue event**, not saved clerk time. Run the
-automated estimator against it and you get a number that answers a question nobody asked.
+enquiry and completes a room booking. Hours saved is the wrong measure because the agent
+produced a revenue event rather than saving clerk time. The automated estimator would price
+the wrong outcome.
 
-`incremental_revenue` exists in the mechanism vocabulary for exactly this case. Two things
-about it are deliberate and worth understanding before you reach for it.
+`incremental_revenue` covers this case.
 
-**The agent can never claim it.** `incremental_revenue`, `quality_decision_improvement` and
-`risk_avoidance` are operator-only, and not by convention — the evaluator's mechanism
+The agent can never claim it. `incremental_revenue`, `quality_decision_improvement` and
+`risk_avoidance` are operator-only. The evaluator's mechanism
 resolver tests against a narrower set that does not contain them, so there is no code path
 by which a model response can select one, whatever it claims. An agent asserting it earned
 revenue is precisely the self-attribution this product is built to refuse.
 
-**You declare the value; the skill computes nothing.** A revenue outcome is recorded after
+You declare the value; the skill computes nothing. A revenue outcome is recorded after
 the fact, by an operator, one job at a time:
 
 ```bash
@@ -116,19 +109,15 @@ bash ~/.hermes/skills/revenium/scripts/correct-assessment.sh \
 In the example above the stay is worth `$680` and the operator has decided 15% of it is
 attributable to the agent. **`--value` takes 102, not 680.**
 
-This is the single most important rule in this section. Putting full business revenue into
-an agent-metering record guarantees it will be summed by some downstream consumer — and it
-is the same margin the channel, the loyalty programme, the pricing engine and marketing
-attribution each already claim against the same stay. Keeping gross out of the record is the
-one structural defence against cross-system double counting available at this layer. It also
-keeps this skill from becoming the place where a business-gross figure meets an attribution
-policy, which is not a decision a metering tool should own.
+Putting full business revenue into an agent-metering record risks double counting the same
+margin already claimed by the channel, loyalty programme, pricing engine, and marketing
+attribution. Supplying only the attributed figure keeps gross revenue out of this layer and
+keeps the attribution policy outside the metering tool.
 
-`--attribution-fraction` and `--attribution-basis` **document** how you reached the figure;
-they never derive it. The fraction is validated for shape only — a finite number in `[0, 1]`
-— because there is nothing here to check it against. The basis is mandatory: a fraction
+`--attribution-fraction` and `--attribution-basis` document how you reached the figure;
+they never derive it. The fraction is validated only as a finite number in `[0, 1]`
+because there is nothing here to check it against. The basis is mandatory: a fraction
 without a stated basis is refused, and the reporter forwards the two together or not at all.
-An absent attribution is honest; a naked number is not.
 
 A declared fraction is an operator assertion, not evidence. It never moves `evidence_class`
 toward a causal label, and declaring one does not make a record `CUSTOMER_CONFIRMED`.
@@ -138,12 +127,11 @@ toward a causal label, and declaring one does not make a record `CUSTOMER_CONFIR
 | | |
 |---|---|
 | **Volume** | One job per invocation, human-invoked, deliberately unreachable from cron. There is no bulk or booking-system ingestion path. At real hospitality volume you would need one, and it is not built. |
-| **A defensible share** | The stay's margin is knowable. The agent's *share* of it is not. Any fraction assumes "no agent, no booking" — a causal claim this product places outside its own boundary. The honest version is a holdout study: route some enquiries through the agent and some not. That is a different evidence class and needs a study contract this tree only stubs. |
+| **A defensible share** | The stay's margin is knowable. The agent's *share* is not. Any fraction assumes "no agent, no booking," a causal claim outside this product's boundary. A holdout study would route some enquiries through the agent and some elsewhere. That is a different evidence class and needs a study contract this tree only stubs. |
 | **Realized value** | Credit at booking time is a forecast. A cancelled stay does not retract it. |
 
-Declaring a fraction is a way to state your assumption **separably and visibly**, so the
-caveat travels with the number instead of being lost the moment it reaches a dashboard. It is
-not a way to make the assumption true.
+Declaring a fraction records the assumption separately so it travels with the number. It
+does not validate the assumption.
 
 ## The configuration
 
@@ -183,8 +171,8 @@ JSON does not support comments, so the annotations follow the example.
 
 | Key | Value | Why |
 |---|---|---|
-| `enabled` | `true` | Turns evaluation on. Must be a **literal boolean** — `"true"` as a string, or `1`, leaves it off with no warning. Same for the key below. |
-| `experimentalReportEstimates` | `true` | Sends the number to Revenium. Set it to `false` (or omit it) to compute and store estimates locally while withholding the figure from the wire — see [Rolling it out](#rolling-it-out). |
+| `enabled` | `true` | Turns evaluation on. Must be a **literal boolean**. `"true"` as a string, or `1`, leaves it off with no warning. Same for the key below. |
+| `experimentalReportEstimates` | `true` | Sends the number to Revenium. Set it to `false` (or omit it) to compute and store estimates locally while withholding the figure from the wire. See [Rolling it out](#rolling-it-out). |
 | `evaluator` | `"llm"` | The default. Named explicitly here so the file documents itself. |
 | `currency` | `"USD"` | Must match what the evaluator returns, or the assessment is rejected. Supported: `USD`, `EUR`, `GBP`, `CAD`, `AUD`, `JPY`, `CHF`. |
 
@@ -195,8 +183,8 @@ the evaluator abstain and record the reason instead of quietly clamping the valu
 
 | Key | Value | Why this number |
 |---|---|---|
-| `maxHoursSaved` | `16` | Two working days. The shipped default is `40`, which is a full week — far more than any single agent arc plausibly replaces. A tighter ceiling means an inflated estimate abstains loudly instead of landing as a large, wrong number. Start here and only raise it if you see legitimate arcs abstaining. |
-| `maxLoadedRate` | `220` | A loaded senior-engineer hour: salary plus benefits, taxes, and overhead — not the base hourly wage, which would understate by roughly a third. Use your own finance team's loaded-cost figure if you have one. The shipped default is `500`, deliberately permissive. |
+| `maxHoursSaved` | `16` | Two working days. The shipped default is `40`, a full week and more than most single agent arcs plausibly replace. A tighter ceiling causes inflated estimates to abstain. Raise it only if legitimate arcs abstain. |
+| `maxLoadedRate` | `220` | A loaded senior-engineer hour: salary plus benefits, taxes, and overhead. Use your finance team's loaded-cost figure if available. The shipped default is `500`. |
 
 Together they cap any single arc at `16 × 220 = $3,520`. Nothing can exceed that, whatever
 the transcript says or the model returns.
@@ -224,20 +212,20 @@ case-management system, attaching evidence, updating disposition fields, and rou
 to the next queue are handoff work. Deciding whether the narrative is correct is
 `human_review`; correcting it is `rework_or_error`; teaching people a new procedure is
 `training_or_change`. It is not the cost of connecting Revenium, building an API, or setting
-up the agent — those are one-time build costs, not per-job costs, and this model does not
+up the agent. Those are one-time build costs, not per-job costs, and this model does not
 carry them.
 
 Three rules decide what actually happens:
 
-- **Keyed by job type, with no default.** A job type absent from `costs` nets nothing. There
+- Keyed by job type, with no default. A job type absent from `costs` nets nothing. There
   is no fleet-wide bucket, which is why every type your team actually produces is listed
   above.
-- **A supplied `0` and an omitted key are different, and both are deliberate.** `0` means
+- A supplied `0` and an omitted key are different. `0` means
   "we checked, this costs nothing" and participates in the arithmetic as a known zero. An
   omitted key means "we do not know", is recorded as unknown, and stays out of the
   subtraction. `bug_fix` above says handoff is genuinely free; `code_review` says nothing
   about handoff at all.
-- **Malformed values fail to unknown, never to zero.** A typo will not quietly corrupt the
+- Malformed values fail to unknown, never to zero. A typo will not quietly corrupt the
   subtraction.
 
 Reasoning behind the figures above, at a $220 loaded hour:
@@ -247,7 +235,7 @@ Reasoning behind the figures above, at a $220 loaded hour:
 | `bug_fix` | review 45, handoff **0** | ~12 min of review. A one-line fix ships on the existing pipeline, so handoff is a true zero, not an unknown. |
 | `code_review` | review 20 | The agent's review is a first pass; a person still skims it. Nothing to integrate. |
 | `feature_development` | review 90, handoff 120 | ~25 min of review, plus coordination to land the change. |
-| `refactoring` | review 60, rework 40 | Behaviour-preserving changes need careful review, and this is where "looks right, subtly isn't" lives. |
+| `refactoring` | review 60, rework 40 | Behaviour-preserving changes need careful review because subtle errors can look correct. |
 | `debugging` | review 45 | Priced like `bug_fix` review; the diagnosis still needs confirming. |
 | `testing` | review 30, handoff **0** | New tests join the existing suite for free. |
 | `devops` | review 75, rework 60 | Highest rework figure on the list. Infrastructure mistakes are expensive to discover late. |
@@ -297,18 +285,16 @@ rates, case-management work, and training expense.
 halt or a pivot. It is never `SUCCESS` and therefore never valued, so a `costs` entry would
 be dead configuration.
 
-**Use defensible estimates.** These are operator-supplied numbers; the skill invents no cost
-of its own. An approximate review-time estimate is better than an unconfigured job type that
+Use defensible estimates. These are operator-supplied numbers; the skill invents no cost of
+its own. An approximate review-time estimate is better than an unconfigured job type that
 silently nets nothing.
 
 ## What it looks like end to end
 
-One `bug_fix` arc, all the way through.
-
-**The agent** fixes a null-pointer regression in the payment flow, runs the test suite green,
+An agent fixes a null-pointer regression in the payment flow, runs the test suite green,
 and the classifier records the arc as `bug_fix`, `SUCCESS`.
 
-**The evaluator** returns assumptions, not money:
+The evaluator returns assumptions, not money:
 
 ```json
 { "economic_mechanism": "labor_substitution",
@@ -322,17 +308,17 @@ and the classifier records the arc as `bug_fix`, `SUCCESS`.
 
 Both assumptions are inside the ceilings, so the assessment is accepted.
 
-**The arithmetic:**
+The arithmetic:
 
 | | |
 |---|---|
-| Gross estimate — 1.5 × 220 | `$330.00` |
-| Range — ±15 % around it | `$280.50` … `$379.50` |
-| Your `bug_fix` costs — 45 + 0 | `−$45.00` |
+| Gross estimate: 1.5 × 220 | `$330.00` |
+| Range: ±15 % | `$280.50` … `$379.50` |
+| Your `bug_fix` costs: 45 + 0 | `−$45.00` |
 | **`net_value`** | **`$285.00`** |
-| **Ships as `--outcome-value`** | **`$280.50`** — the low bound, not the midpoint |
+| **Ships as `--outcome-value`** | **`$280.50`**, the low bound rather than the midpoint |
 
-**On the wire,** alongside the job's outcome:
+On the wire, alongside the job's outcome:
 
 ```json
 {"value_low":280.5,"value_base":330.0,"value_high":379.5,"bounds_source":"derived",
@@ -350,15 +336,15 @@ The `cost_coverage` block says that two categories were counted, one was a real 
 never configured, and metered AI cost was omitted because Revenium already has it. The block
 makes the partial subtraction explicit.
 
-**On the Revenium side,** that `$280.50` meets the job's metered AI cost — cents, for an arc
-like this — and the displayed ratio follows. It is an estimated ROI under stated assumptions,
+On the Revenium side, that `$280.50` is combined with the job's metered AI cost, typically
+cents for an arc like this, to produce the displayed ratio. It is an estimated ROI under stated assumptions,
 and the assumptions rode along in the same payload.
 
 ## Rolling it out
 
 Use all three stages in order.
 
-**1 — Local only.** Set `enabled: true` and leave `experimentalReportEstimates` off. Estimates
+1. Local only. Set `enabled: true` and leave `experimentalReportEstimates` off. Estimates
 are computed and written to disk; no figure reaches Revenium. Let it run for a week, then read
 the records:
 
@@ -378,7 +364,7 @@ and passes several documents to a parser that reads one.
 Check whether the values are plausible and whether the evaluator declines trivial work. An
 evaluator that prices *everything* is misconfigured or overestimating.
 
-**2 — Tune.** Adjust `maxLoadedRate` to your real loaded cost, tighten `maxHoursSaved` if
+2. Tune. Adjust `maxLoadedRate` to your real loaded cost, tighten `maxHoursSaved` if
 estimates run long, and fill in `costs` for the job types you actually see. Check which
 you're getting:
 
@@ -386,7 +372,7 @@ you're getting:
 cat ~/.hermes/state/revenium/job-taxonomy.json | python3 -c "import json,sys;print(*json.load(sys.stdin)['labels'],sep='\n')"
 ```
 
-**3 — Report.** Set `experimentalReportEstimates: true`. Values now reach Revenium.
+3. Report. Set `experimentalReportEstimates: true`. Values now reach Revenium.
 
 Verify the switch took at any stage:
 
@@ -395,18 +381,18 @@ bash ~/.hermes/skills/revenium/scripts/diagnose.sh
 ```
 
 Section 9 prints `enabled=` and `evaluator=` per profile. On a multi-profile host, check the
-profile you meant to configure — editing the wrong one is the most common way this silently
+profile you meant to configure. Editing the wrong one is the most common way this silently
 does nothing.
 
 ## Two things people get wrong
 
-**Nesting `boundaries` inside `llmOutcomeEvaluation`.** The advanced `boundaries` block is a
-**top-level** key of `config.json`, a sibling of `llmOutcomeEvaluation`, not a member of it.
+Nesting `boundaries` inside `llmOutcomeEvaluation`. The advanced `boundaries` block is a
+top-level key of `config.json`, a sibling of `llmOutcomeEvaluation`, not a member of it.
 Misplace it and it resolves to nothing, silently, with everything falling back to the
 built-in implementations. Most teams never need this block at all.
 
-**Assuming a stale plugin is a current one.** Value estimation runs inside the classifier
-plugin, and on a multi-profile host plugins are installed **per profile**. "Installed"
+Assuming a stale plugin is current. Value estimation runs inside the classifier
+plugin, and on a multi-profile host plugins are installed per profile. "Installed"
 does not imply "current". Run `plugin-status.sh` after any upgrade.
 
 ## Where to go next

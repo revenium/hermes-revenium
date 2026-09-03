@@ -2,10 +2,9 @@
 
 [← Back to the project README](../README.md)
 
-This page is repo-only — it is not part of the skill bundle and a tap-installed
-host never sees it. It is a standing, tracked ask addressed to the people who
-own `revenium jobs roi`'s output shape, not a note buried inside a document
-about something else.
+This repo-only page records a standing request for the owners of `revenium jobs
+roi`'s output shape. It is not part of the skill bundle and is unavailable on a
+tap-installed host.
 
 ## What is true today
 
@@ -22,14 +21,11 @@ re-verified and re-dated").** Both fields remain absent from `jobs roi`, in
 both JSON and table output, on two fresh tenant rows read that day. No change
 on Revenium's side has occurred between the two dates.
 
-`jobs roi` is not broken. It carries no provenance because none was designed
-into it — this is a gap in a display surface, not a defect in a working
-feature.
+`jobs roi` works as designed, but its display surface lacks provenance.
 
-The consequence: a model-estimated figure and a figure a customer configured
-are rendered with the exact same visual weight on that surface. A reader
-looking at `jobs roi` has no way to tell, from that screen alone, which kind
-of number they are looking at.
+The surface renders a model estimate and a customer-configured figure with the
+same visual weight. From that screen alone, a reader cannot tell which kind of
+number is shown.
 
 ## A second, distinct gap: a withheld value renders identically to a measured zero
 
@@ -58,10 +54,9 @@ withheld row (`flatten_nested_list_python_function_23b5`) rendered
 correctly returned `"outcomeValue": null` and `"roi": null` for the same
 job — the identical gap, on a different row, two days later.
 
-This compounds the first gap rather than duplicating it: even a reader who
-already knows to distrust a `jobs roi` figure with no `evidence_class` has
-no way, from the table alone, to tell "withheld by policy" apart from "priced
-at zero." Only the JSON form preserves that distinction today.
+This compounds the first gap. Even a reader who notices the missing
+`evidence_class` cannot use the table to distinguish "withheld by policy" from
+"priced at zero." Only the JSON form preserves that distinction today.
 
 ## What this skill did about it, instead of waiting
 
@@ -81,11 +76,9 @@ refuses to mark a model-estimated record `reportable` in the first place, and
 the reporter, which re-checks the class before a value family ever reaches
 `--metadata`. Neither site trusts the other; a record has to clear both.
 
-This ask is the other half of that same decision, honestly stated: the gate
-above is a limit this skill imposed on itself, not a limit Revenium imposed
-on us. If the surface below changes, our gate can widen. Nothing about that
-depends on this ask being granted, and nothing here should be read as a
-commitment on Revenium's part — it is a request, not an agreed roadmap item.
+The gate is a limit imposed by this skill, not by Revenium. If the surface
+changes, the gate can widen. This request is not a Revenium commitment or an
+agreed roadmap item.
 
 ## The concrete ask
 
@@ -103,9 +96,8 @@ And to match what `jobs outcome-history` already returns for the same job:
 - **`confidence`** — the evaluator's own stated confidence in its output,
   where one exists.
 
-Both outputs `jobs roi` currently produces — **JSON and table** — would need
-to carry these fields. A fix that lands only in JSON leaves the table view,
-which is what most people actually look at, exactly as opaque as it is today.
+Both `jobs roi` outputs, **JSON and table**, need these fields. A JSON-only
+change would leave the table view opaque.
 
 Separately from the provenance fields above: the **table** renderer should
 distinguish a withheld/`null` `outcomeValue` (and the `roi` derived from it)
@@ -116,13 +108,10 @@ does not require a new field — the JSON output already carries the correct
 
 ## What it would unlock
 
-If `jobs roi` carried `evidence_class`, the Phase 53 gate described above
-could widen without changing the reasoning behind it: an estimate could ship
-labelled as an estimate, at the place where it is read, rather than being
-withheld because the place it would be read cannot say what it is. This is
-stated as what becomes *possible*, not as a plan or a timeline — widening the
-gate would still be a separate, deliberate decision, made against a rendered
-field this skill could then verify actually appears.
+If `jobs roi` carried `evidence_class`, the Phase 53 gate could widen: an
+estimate could ship with its label visible where readers encounter it.
+Widening the gate would remain a separate decision after verifying that the
+field renders. This is a possibility, not a plan or timeline.
 
 ## What is NOT being asked
 

@@ -1,9 +1,8 @@
 # Job Declaration — Inference Criteria
 
 As of Phase 13, the `revenium-classifier` plugin writes job markers (`kind:"job"`)
-automatically at session end. It infers the job arc(s) from session data without
-agent involvement. This document describes the criteria
-the plugin's inference uses. Refer here only in the rare backstop case where
+automatically at session end. It infers job arcs from session data without
+agent involvement. This document defines its inference criteria. Refer here only when
 the SKILL.md `## FINAL ACTION — JOB DECLARATION` section applies.
 
 ## Arc definition (goal-continuity rule)
@@ -68,7 +67,7 @@ User asked you to refactor the auth module (arc in progress, not yet declared). 
 When LLM outcome evaluation is enabled and an evaluator returns an accepted
 assessment, a `SUCCESS` job marker carries one extra key: `assessment`.
 
-**This is a frozen contract.** Marker readers written before v1.5 must keep
+This contract is frozen. Marker readers written before v1.5 must keep
 parsing, so every reader uses `.get("assessment", {})`; the key is
 **absent** whenever evaluation is off, the arc is not `SUCCESS`, or the evaluator
 abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
@@ -110,8 +109,8 @@ pipe reaching that tuple shifts every following field.
 
 ### What `MODEL_ESTIMATED_DEMO` means
 
-**An unverified model estimate.** Not measured, not observed, not
-customer-confirmed, and not defensible ROI. Revenium computes a displayed ROI
+`MODEL_ESTIMATED_DEMO` is an unverified model estimate. It is not measured, observed,
+customer-confirmed, or defensible ROI. Revenium computes a displayed ROI
 from this reported value and the metered cost; the value's quality is the
 model's, and the feature is labelled experimental for that reason.
 

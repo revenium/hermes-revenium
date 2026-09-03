@@ -1,9 +1,9 @@
 # Internal milestone closeouts
 
-Engineering evidence for shipped planning milestones is tracked here because the
-planning tree (`.planning/`) and evidence tree (`docs/internal/`) are both
-gitignored. A closeout recorded only there disappears with the working tree, as
-the 2026-06-06 roadmap reconstruction showed.
+This file tracks engineering evidence for shipped planning milestones. The
+planning tree (`.planning/`) and evidence tree (`docs/internal/`) are gitignored,
+so closeouts stored only there disappear with the working tree, as the 2026-06-06
+roadmap reconstruction showed.
 
 Planning milestones and product git tags share numbers but are separate
 namespaces. Milestones from "LLM-Estimated Agentic Job Outcomes and ROI" onward
@@ -20,10 +20,9 @@ unrelated shipped product tag.
 
 ### What this milestone was for
 
-The experimental naked-LLM job-value path produced a number that looked like a
-return figure and was not one. Prediction, valuation and return were collapsed
-together, derived from a single economic mechanism, and carried a single forced
-evidence label.
+The experimental naked-LLM job-value path presented an estimate as a return
+figure. It collapsed prediction, valuation, and return into one economic
+mechanism with one forced evidence label.
 
 The work separated the claims. Each now has its own representation, evidence
 label, and gate:
@@ -37,10 +36,10 @@ label, and gate:
 | Impact | What changed *because of* agent use, against a counterfactual? |
 | Return | Incremental monetized benefit net of incremental cost, over a declared basis |
 
-**The governing rule.** The model may classify jobs, assess outputs and outcomes,
+The model may classify jobs, assess outputs and outcomes,
 identify economic mechanisms, and propose valuation assumptions. It must never be
 *able* to claim it established causation. Where a requirement could be satisfied
-by policy or by construction, construction was chosen — the previous milestone's
+by policy or by construction, construction was chosen. The previous milestone's
 `evidence_class` was safe only because a single value existed, and that safety
 disappears the moment there are nine.
 
@@ -95,9 +94,8 @@ disappears the moment there are nine.
   transcript through segmented job, structured assessment, `MODEL_ESTIMATED_DEMO`
   valuation, reportability resolution, and safe job outcome metadata.
 
-Test code outweighs shipped code roughly 2.6:1 (+17,423 test lines against
-+6,662 plugin and shell lines). The tests demonstrate the safety property with
-adversarial cases.
+Test code totals roughly 2.6 times the shipped code (+17,423 test lines against
++6,662 plugin and shell lines). Adversarial cases test the safety property.
 
 ### Known gaps
 
@@ -111,8 +109,8 @@ boundary's declared `evidence_class` does not reach the persisted record;
 evaluator's class. Found by external review on PR #100 and confirmed against
 source.
 
-The error is in the **safe** direction. `MODEL_ESTIMATED_DEMO` is the weakest
-label, so the record under-claims rather than over-claims, and the
+The error is in the safe direction. `MODEL_ESTIMATED_DEMO` is the weakest label,
+so the record under-claims rather than over-claims, and the
 promotion-blocking architecture is not breached. It was deferred rather than
 patched because closing it requires a genuinely new precedence rule (which class
 wins when evaluator, valuation and evidence each declare one), and because any

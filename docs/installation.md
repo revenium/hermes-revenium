@@ -2,14 +2,13 @@
 
 [← Documentation index](README.md)
 
-Installing has two halves: get the files onto the host, then wire them into Hermes.
+Installation has two steps: copy the files to the host, then wire them into Hermes.
 Option 1 does both. The other three do only the first, and you finish with
 [Set up guardrails, cron, and hooks](#set-up-guardrails-cron-and-hooks).
 
-The second half installs the runtime components. `hermes skills install` delivers only the
-*skill*: `SKILL.md` and the support files it names. The classifier **plugin**,
-the **shell hooks**, and the **cron** are what actually classify, enforce, and meter, and
-each is installed separately. See
+The second step installs the runtime components. `hermes skills install` delivers only the
+skill: `SKILL.md` and the support files it names. The classifier plugin,
+shell hooks, and cron classify, enforce, and meter. Each is installed separately. See
 [What's actually installed](../README.md#whats-actually-installed).
 
 ## Install paths
@@ -27,7 +26,7 @@ of them. `plugins/` is not, and cannot be: Hermes disallows a `plugins/` directo
 skill bundle outright, so the classifier can never arrive this way.
 
 The second command fetches the missing `scripts/` and `plugins/`
-into `~/.hermes/skills/revenium/`, then completes setup — credentials, plugin, hooks,
+into `~/.hermes/skills/revenium/`, then configures credentials, the plugin, hooks,
 guardrail rule, cron, gateway restart. Flags pass straight through to `install.sh`; see
 [Set up guardrails, cron, and hooks](#set-up-guardrails-cron-and-hooks) for the list.
 
@@ -44,16 +43,16 @@ whatever it downloaded the first time. See [Upgrading](upgrading.md).
 
 #### What the security scanner reports
 
-The skill receives a **`SAFE`** scan result and installs without `--force`. Hermes still shows its standard
+The skill receives a `SAFE` scan result and installs without `--force`. Hermes still shows its standard
 third-party disclaimer and asks you to confirm; that prompt applies to every external
 skill, not to this one.
 
 The scan does report two `MEDIUM` findings. Both describe behaviour the skill genuinely
 has:
 
-- **`persistence`** — the `crontab` calls in the cron scripts and setup docs. This is the
+- `persistence`: the `crontab` calls in the cron scripts and setup docs. This is the
   per-minute metering loop. Removing it would stop per-minute metering.
-- **`supply_chain`** — the `git clone` line in the documented install path above.
+- `supply_chain`: the `git clone` line in the documented install path above.
 
 An earlier `HIGH exfiltration` finding was cleared in v1.1 and no longer appears. The
 scanner had read `os.environ` in the Python heredocs as a credential dump; those heredocs
@@ -105,7 +104,7 @@ hermes skills publish skills/revenium --to github --repo revenium/hermes-reveniu
 
 ## Set up guardrails, cron, and hooks
 
-**Option 1 already did this.** Read on if you installed another way, or want to re-run a
+Option 1 already completed this setup. Continue if you used another method or want to rerun a
 single step.
 
 ```bash
@@ -130,7 +129,7 @@ customize one.
 
 ### Credentials (all four required)
 
-An API key alone is not enough. It meters completions fine, then fails every `guardrails`
+An API key alone can meter completions but fails every `guardrails`
 and `jobs create` call with `HTTP 400: teamId is required`. You need four:
 
 ```bash
@@ -141,8 +140,8 @@ revenium config set tenant-id <TENANT_ID>
 revenium config set owner-id  <OWNER_ID>
 ```
 
-On every interactive run, `install.sh` walks the whole `revenium` CLI config — API URL,
-API key, Team ID, Tenant ID, Owner ID — showing each current value in brackets as the
+On every interactive run, `install.sh` walks the full `revenium` CLI config: API URL,
+API key, Team ID, Tenant ID, and Owner ID. It shows each current value in brackets as the
 default. Enter keeps it; typing replaces it. It confirms rather than silently skipping
 because an API URL pointing at the wrong environment is otherwise invisible until it
 surfaces as an opaque `HTTP 403` on guardrail-rule creation.
@@ -173,7 +172,7 @@ itself, so this step stays manual. Skip it and the agent reports "Guardrail stat
 available" before every operation, which is the halt-check backstop correctly detecting
 that the cron never ran.
 
-For a demo or live dashboard that needs updates faster than 60 seconds, install a sub-minute interval.
+For updates faster than 60 seconds, install a sub-minute interval.
 The cron still fires once a minute; the pipeline loops inside each tick.
 
 ```bash
@@ -203,7 +202,7 @@ nothing.
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 ```
 
-Hermes loads plugins from `~/.hermes/plugins/`, a different root from the
+Hermes loads plugins from `~/.hermes/plugins/`, separate from the
 `~/.hermes/skills/` tree the skill installs into, and neither `hermes skills install` nor
 `external_dirs` relocates a bundled `plugins/` directory. This script bridges that gap: it
 copies `revenium-classifier` into `~/.hermes/plugins/`, adds it to `plugins.enabled` in
@@ -215,22 +214,22 @@ idempotent. `--dry-run` previews, `--no-restart` leaves the gateway alone.
 
 ## First-time setup
 
-`setup-guardrails.sh --interactive` drives the guided flow. You can reach it three ways:
+`setup-guardrails.sh --interactive` runs the setup flow. You can reach it three ways:
 `install.sh` runs it, you can invoke it directly, or you can type `/revenium` inside a
 Hermes session. When no `config.json` or `ruleIds` exists, the skill starts setup on its
 own; once configured, `/revenium` offers status and reconfigure instead.
 
 The flow:
 
-1. **Check credentials.** `setup-guardrails.sh` does not prompt for them — it only checks
+1. Check credentials. `setup-guardrails.sh` does not prompt for them; it only checks
    that a Team ID resolves, and exits if not, because budget-rule creation fails without
    one. Set them with `install.sh` or `revenium config set`.
-2. **Ask for an organization name**, optionally, for Revenium reporting attribution.
-3. **Ask for a hard limit, warn threshold, and period** (`DAILY`, `WEEKLY`, `MONTHLY`,
+2. Optionally ask for an organization name for Revenium reporting attribution.
+3. Ask for a hard limit, warn threshold, and period (`DAILY`, `WEEKLY`, `MONTHLY`,
    `QUARTERLY`).
-4. **Ask whether the agent runs autonomously**, and if so which Hermes messaging channel
+4. Ask whether the agent runs autonomously and which Hermes messaging channel
    should receive halt notifications.
-5. **Create the budget rule** via `revenium guardrails budget-rules create` and write
+5. Create the budget rule via `revenium guardrails budget-rules create` and write
    `ruleIds` into `~/.hermes/state/revenium/config.json`.
 
 Setup is atomic: if a step fails, no partial config is written. The step-by-step flow

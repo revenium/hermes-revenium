@@ -17,9 +17,6 @@ bash ~/.hermes/skills/revenium/scripts/diagnose.sh
 bash ~/.hermes/skills/revenium/scripts/diagnose.sh --profile ent
 ```
 
-`--tick` (which actually ships data) is now section 11, bumped down from 10 to make room
-for the read-only auxiliary usage pass section.
-
 ## Running a stage by hand
 
 `cron.sh` runs the whole pipeline once under the same lock the crontab uses. The individual
@@ -43,13 +40,13 @@ registered, `2` registered but inert.
 
 | Command | What it does |
 |---|---|
-| `clear-halt.sh` | Clear an active halt. `--rule-id <id>` clears one rule. This is the only thing that clears a halt — nothing auto-clears. |
-| `prune-markers.sh` | Remove marker files older than 30 days — and job-assessment sidecars on their own, longer clock (`REVENIUM_ASSESSMENT_RETENTION_DAYS`, 90 days by default), skipping any sidecar a correction currently holds locked — plus four of the five warn-flag sentinel directories (`.warn`, `.fallback-warn`, `.outcome-warn`, `.probe-warn`) — these accumulate one zero-byte file per suppressed condition and are never pruned automatically. `.aux-warn` is deliberately **not** in that set: unlike the others it is not keyed per session, holding only one constant `notice-step-up` file plus one per distinct unrecognised `task` value, so it is bounded by your auxiliary vocabulary rather than by traffic. `--dry-run` previews. Deliberately not wired into cron; run it periodically by hand. |
+| `clear-halt.sh` | Clear an active halt. `--rule-id <id>` clears one rule. Only this command clears a halt; nothing clears it automatically. |
+| `prune-markers.sh` | Remove marker files older than 30 days, eligible job-assessment sidecars older than `REVENIUM_ASSESSMENT_RETENTION_DAYS` (default 90 days), and the `.warn`, `.fallback-warn`, `.outcome-warn`, and `.probe-warn` sentinels. Locked assessment corrections are skipped. `.aux-warn` is not pruned because it contains only the `notice-step-up` file and one file per unrecognized `task`, so it is bounded by the auxiliary vocabulary rather than traffic. `--dry-run` previews the result. Run this command periodically; cron does not run it. |
 | `install-cron.sh` / `uninstall-cron.sh` | Manage the per-minute crontab entry |
 | `install-hooks.sh` / `uninstall-hooks.sh` | Manage the three shell hooks in `config.yaml` |
 | `install-plugin.sh` | Copy the classifier into `~/.hermes/plugins/` and restart the gateway |
 | `setup-guardrails.sh` | Create the budget rules |
-| `correct-assessment.sh` | Append a correction to a job's value assessment. Requires `--job-id`, `--value`, `--currency` and `--reason`; `--value-low` / `--value-high` are optional and default to equal bounds. The correction **appends** — locally as a new line in the job's sidecar, remotely as a new revision via `revenium jobs outcome-update` — and the original stays byte-identical and readable. `--dry-run` previews without writing anything, locally or remotely. Operator-only and deliberately not wired into cron. Exits non-zero, loudly, on a `revenium` CLI that lacks `jobs outcome-update`. |
+| `correct-assessment.sh` | Append a correction to a job's value assessment. Requires `--job-id`, `--value`, `--currency`, and `--reason`; `--value-low` and `--value-high` are optional and default to equal bounds. The command adds a line to the local sidecar and a remote revision through `revenium jobs outcome-update`; the original remains byte-identical and readable. `--dry-run` previews without writing. Cron does not run this operator-only command. It exits non-zero if the `revenium` CLI lacks `jobs outcome-update`. |
 
 A halt clear buys one tick. If the rule is still breached, the next tick re-halts.
 
@@ -61,8 +58,7 @@ cat    ~/.hermes/state/revenium/guardrail-status.json       # live guardrail sna
 crontab -l | grep hermes-revenium-metering                  # is the cron installed
 ```
 
-Four append-only ledgers hold the idempotency record. Records in these ledgers have already
-shipped:
+Four append-only ledgers provide idempotency. Their records have already shipped:
 
 ```bash
 tail -n 20 ~/.hermes/state/revenium/revenium-hermes.ledger       # completions
@@ -74,10 +70,10 @@ cat        ~/.hermes/state/revenium/tool-events/<sid>.jsonl      # captured tool
 
 ## Two failure modes worth knowing first
 
-**`guardrail-status.json` does not exist.** The cron has never run. Run `cron.sh` once by
+If `guardrail-status.json` does not exist, the cron has never run. Run `cron.sh` once by
 hand to seed it.
 
-**`tool-events/` stays empty while Hermes is clearly running tools.** Run `hooks-status.sh`.
+If `tool-events/` stays empty while Hermes runs tools, run `hooks-status.sh`.
 The usual cause is hooks that are registered but not yet approved on `hermes chat`.
 
 More failure modes are in

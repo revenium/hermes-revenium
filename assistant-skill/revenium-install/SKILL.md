@@ -2,10 +2,10 @@
 name: revenium-install
 description: >-
   Install, verify, and troubleshoot the Revenium usage-metering + budget-guardrail
-  skill for Hermes Agent — for a single host or a multi-profile fleet, including
+  skill for Hermes Agent on a single host or multi-profile fleet, including
   headless and multiplexed gateways. Use this when setting up Revenium metering on
   a machine, wiring a fleet of Hermes profiles, or diagnosing why metering / agentic
-  jobs / tool-events / budget halts are not working — symptoms like "jobs have no
+  jobs / tool-events / budget halts are not working. Symptoms include "jobs have no
   transactions", "teamId is required", hooks registered but inert (no tool-events),
   orphaned cron lines spamming errors, spend showing up as "unclassified", or one
   profile metering while others don't.
@@ -14,11 +14,9 @@ license: MIT
 
 # revenium-install
 
-This portable runbook installs and operates the **hermes-revenium** metering
+This runbook installs and operates the `hermes-revenium` metering
 skill. Every action is a POSIX shell command that runs the skill's own scripts
-under `~/.hermes/skills/revenium/scripts/`, so the runbook is **tool-agnostic**.
-Any coding assistant that can read markdown and run `bash` can follow it; the
-runbook contains no assistant-specific tool calls.
+under `~/.hermes/skills/revenium/scripts/`. It contains no assistant-specific tool calls.
 
 This skill selects the existing script to run and explains how to verify the
 result. The shell scripts perform every mutation.
@@ -48,7 +46,7 @@ will prompt for it (or take `REVENIUM_*` env vars with `--non-interactive`).
 ### 1. Bootstrap (only needed after `hermes skills install`)
 
 `hermes skills install` ships `SKILL.md` plus only the support files `SKILL.md`
-names as bundle-relative paths — **not** `scripts/`, and never `plugins/`, which
+names as bundle-relative paths, not `scripts/` and never `plugins/`, which
 Hermes disallows in a skill bundle. If `~/.hermes/skills/revenium/scripts/install.sh`
 does not exist yet, fetch the missing pieces:
 

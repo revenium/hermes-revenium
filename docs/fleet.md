@@ -16,9 +16,9 @@ bash ~/.hermes/skills/revenium/scripts/install.sh --all-profiles
 bash ~/.hermes/skills/revenium/scripts/install.sh --profile gtm --profile qa
 ```
 
-That installs plugin, hooks, and cron once per profile home, and gives each one:
+This installs the plugin, hooks, and cron in each profile home.
 
-**A distinct AGENT.** `REVENIUM_AGENT_NAME` defaults to `Hermes-<profile>`; the default
+Each profile gets a distinct AGENT. `REVENIUM_AGENT_NAME` defaults to `Hermes-<profile>`; the default
 profile stays `Hermes`. Revenium then separates spend per agent.
 
 This is the AGENT dimension, not the ORGANIZATION dimension. `organizationName` names a
@@ -28,23 +28,23 @@ agent name. Set it non-interactively with `--organization-name <name>` on `insta
 `setup-guardrails.sh`; it persists to each profile's `config.json` even under
 `--skip-guardrails`.
 
-**A unique crontab marker,** `# hermes-revenium-metering-<profile>`, so a second profile
+Each profile gets a unique crontab marker, `# hermes-revenium-metering-<profile>`, so another profile
 install never clobbers the first. `uninstall-cron.sh` removes every profile's line, and
 lines orphaned by a `~/.hermes` reset are reconciled automatically.
 
-**`hooks_auto_accept: true`.** A headless profile gateway never shows the hook-approval
+Fleet installs set `hooks_auto_accept: true`. A headless profile gateway never shows the hook-approval
 prompt, so without this the hooks stay inert forever. Fleet installs set it automatically
 via `install-hooks.sh --auto-accept`. For a shadow or metering-only profile, register just
 the observer with `install-hooks.sh --metering-only`.
 
-**Optionally, one shared SQUAD identity.** Set `REVENIUM_SQUAD_NAME` to group every
+You can also set one shared SQUAD identity. Set `REVENIUM_SQUAD_NAME` to group every
 profile's completions under a single squad name, distinct from the per-profile AGENT. See
 [`references/setup.md`](../skills/revenium/references/setup.md) → *Squad grouping across
 the fleet* for the resolution order and the recipe.
 
 ## Per-profile facts that bite
 
-Each of these caused an outage whose symptom did not identify the cause.
+These problems can make an active installation appear healthy.
 
 ### The process serving the profile must restart before its plugin loads — and it is often not the gateway
 
@@ -106,7 +106,7 @@ and last cron run, which identifies profiles that have stopped reporting.
 
 ## Deployment modes
 
-Both work. One process per profile is the straightforward case. The multiplexed single
+Both modes work. One process per profile is the simpler case. The multiplexed single
 gateway (`gateway.multiplex_profiles: true`) also works: the classifier resolves the
 owning profile's home, `state.db`, and markers per session from the `agent:<profile>:…`
 namespace.

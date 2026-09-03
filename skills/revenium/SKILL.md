@@ -26,8 +26,8 @@ metadata:
 
 Hermes shell hooks enforce guardrails. `pre_llm_call` injects the halt directive
 before the LLM generates each response, and `pre_tool_call` blocks tool calls while
-a halt is active. Use this fallback if the user has not consented to the hooks or the
-hooks are temporarily unavailable.
+a halt is active. Use this fallback when the user has not consented to the hooks or the
+hooks are unavailable.
 
 **If you read `guardrail-status.json` and `halted` is `true`:** read the `haltedRule`
 block for the offending rule's details. Your entire response must be exactly the
@@ -101,7 +101,7 @@ At the start of any operation, check: does `~/.hermes/state/revenium/config.json
 - **If YES** and the user has NOT requested reconfiguration: setup is complete. Proceed to the budget check. Do NOT re-run setup.
 - **If NO** (file missing, or file exists but `ruleIds` is absent or an empty array): you MUST run the Setup Flow below before proceeding. Do NOT execute any operations until setup is complete.
 
-Note: `config.json` may carry a legacy `alertId` field from a v1.2 install. Auto-migration deprecates and orphans that field, so ignore it for the setup-detection gate. The cron pipeline auto-migrates legacy installs on the next tick. See `docs/migration-guardrails.md` for the migration contract.
+`config.json` may carry a legacy `alertId` field from a v1.2 install. Auto-migration deprecates and orphans that field, so ignore it for the setup-detection gate. The cron pipeline auto-migrates legacy installs on the next tick. See `docs/migration-guardrails.md` for the migration contract.
 
 ### Setup Flow
 
@@ -118,7 +118,7 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    ```
    If `scripts/` is already present, the bootstrap skips the fetch. Pass `--update` to replace an existing install with the latest version; host-only scripts are preserved.
 
-   `install.sh` runs the whole setup below for you (credentials, plugin, hooks, guardrails, cron, restart). For a fleet of profiles, add `--all-profiles` (or `--profile <name>`). The manual steps below are the equivalent if you prefer to run them one at a time.
+   `install.sh` performs the setup below: credentials, plugin, hooks, guardrails, cron, and restart. For multiple profiles, add `--all-profiles` or `--profile <name>`. You can also run the steps manually.
 
 1. **Verify the Revenium CLI is configured.** Run:
    ```
@@ -126,7 +126,7 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    ```
    Check that **all four** of these are non-empty: **API Key**, **Team ID**, **Tenant ID**, **Owner ID**. If all four are set, skip to step 3. If the CLI is not on PATH, tell the user to install it (`brew install revenium/tap/revenium` on macOS) and STOP.
 
-   > Do NOT gate solely on the API Key. `revenium jobs create` requires a Team ID; a config with a key but no `team-id` meters completions fine but silently fails every agentic-job create (HTTP 400 "Missing request parameter: teamId"), stranding job outcomes in permanent deferral. All four must be present.
+   > Do NOT gate solely on the API Key. `revenium jobs create` requires a Team ID. Without `team-id`, completion metering works, but each agentic-job create returns HTTP 400 `"Missing request parameter: teamId"` and job outcomes remain deferred. All four values must be present.
 
 2. **If any of the four are missing:** collect the missing values from the user (skip any that `revenium config show` already reported as set):
    - **API Key**: "Please provide your Revenium API key."
@@ -232,7 +232,7 @@ cat ~/.hermes/state/revenium/guardrail-status.json  # expect rules[] populated
 
 ## FINAL ACTION — TASK CLASSIFICATION
 
-**MANDATORY — NON-NEGOTIABLE. Execute before EVERY yield back to the user on a substantive turn.** Skipping leaves the cron pipeline blind and pollutes attribution with `unclassified` rows.
+**MANDATORY — NON-NEGOTIABLE. Execute before EVERY yield back to the user on a substantive turn.** Skipping causes the cron pipeline to record `unclassified` attribution.
 
 Classify the turn if you called any non-read-only tool, produced > 200 words, or answered a multi-step reasoning question. Skip only when your entire response is ≤ 2 sentences AND you called zero tools.
 

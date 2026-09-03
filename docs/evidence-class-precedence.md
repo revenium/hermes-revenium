@@ -2,7 +2,7 @@
 
 [← Back to the docs index](README.md)
 
-This page owns two things Phase 48 (Reconciliation) produced: the resolved verdict on
+This page records two Phase 48 (Reconciliation) results: the verdict on
 whether a registration-time `evidence_class` declaration by trusted code is the same threat
 model as untrusted model output (RECON-03), and the single cross-boundary precedence rule for
 which `evidence_class` wins when the evaluator, valuation, and evidence boundaries each declare
@@ -10,19 +10,15 @@ one (RECON-04). It owns neither the nine evidence-class labels' own semantics no
 assessment schema — those stay owned by
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md) and
 [Claim distinctions and evidence boundaries](claim-distinctions-and-evidence-boundaries.md).
-This page implements nothing: every claim below is a citation into code that exists today, and
-the rule it states is a contract for a later phase to build, not a description of current
-behaviour.
+This page implements nothing. Its claims cite existing code, and its rule is a contract for a
+later phase rather than a description of current behaviour.
 
 ## Scope
 
-The rest of this document is organized as: **The reconciliation verdict** (RECON-03's
-re-derivation and correction), **The precedence rule** with its **Promotion safety** and
-**Boundary cases** subsections (RECON-04, this plan), then two sections a later plan in this
-phase adds — **Falsification conditions** (with `### Falsifier 1` through `### Falsifier 4`),
-**The won't-fix trigger**, and an **Appendix: restatement-site sweep**. This document is paper
-only: it changes no shipped runtime behaviour. Phase 50 is the phase that touches
-`classifier.py`, `evaluators.py`, and `evidence.py` to build what is described here.
+The document covers RECON-03's reconciliation verdict and correction, RECON-04's precedence
+rule, promotion safety, boundary cases, four falsification conditions, the won't-fix trigger,
+and a restatement-site appendix. It changes no shipped runtime behaviour. Phase 50 implements
+the design in `classifier.py`, `evaluators.py`, and `evidence.py`.
 
 ## The reconciliation verdict
 
@@ -49,7 +45,7 @@ resolution path a caller reaches today. It is a four-step chain, one citation pe
    called from `classifier.py:1218`) — the allow-list membership test: returns `declared` only
    when it is a non-empty string present in `allowed`, else `default`.
 
-**No step in this chain can raise.** `evidence.resolve_declared_class`'s entire body runs
+No step in this chain can raise. `evidence.resolve_declared_class`'s entire body runs
 inside its own `try/except Exception: return default` (`evidence.py:250-263`).
 `BoundaryRegistry.resolve_evidence_class` has no code path that raises at all — a non-string
 `name` short-circuits to `""`, a missing entry falls through a dict `.get()` to `""`. And the
@@ -61,7 +57,7 @@ function.
 
 ### The structural guarantee, stated precisely
 
-The guarantee is the **signature**, not a comment. `_forced_evidence_class()`
+The signature provides the guarantee. `_forced_evidence_class()`
 (`classifier.py:1141-1157`) takes zero parameters, so it structurally cannot read evaluator
 output no matter how the read is spelled. `_declared_evidence_class(evaluator: str)`
 (`classifier.py:1160`) takes exactly one parameter — the evaluator **name** — and no parameter
@@ -78,7 +74,7 @@ rule site inherits it verbatim.
 ### The trust boundary, named exactly
 
 Trust attaches to the registrant's own in-repo top-level `register(...)` call, made at import
-time by code the operator installed — **not** to `config.json`'s `boundaries` object.
+time by code the operator installed, not to `config.json`'s `boundaries` object.
 `_boundary_impl_name(key, default)` (`classifier.py:2860`) reads `config.json` to select
 **which** already-registered implementation is active for a boundary; it never supplies a
 class itself, and it cannot author one that was not already declared by a `register()` call in
@@ -411,12 +407,10 @@ stake.
 
 ## Falsification conditions
 
-These conditions are written down before Phase 50 or Phase 51 evaluates them — that is
-RECON-04's own requirement (ROADMAP criterion 3), not a formality: a falsification condition
-recorded after the implementation it gates has already run is not a gate, it is a
-rationalisation. Each of the four conditions below states both the observation that would
+RECON-04 (ROADMAP criterion 3) requires recording these conditions before Phase 50 or Phase 51
+evaluates them. Each condition states both the observation that would
 falsify the rule and what happens when it fires (D-11) — "the condition fired and we proceeded
-anyway" is precisely the failure a pre-committed gate exists to prevent. The four are D-12's
+anyway" is the failure a pre-committed gate prevents. The four are D-12's
 locked set. No test can prove a falsifier set exhaustive; this section states the four that were
 named, not a claim that no fifth exists.
 

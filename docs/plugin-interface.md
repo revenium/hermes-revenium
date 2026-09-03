@@ -2,15 +2,13 @@
 
 [← Documentation index](README.md)
 
-This reference records measured Hermes plugin behavior from a **v0.20.1
-(2026.8.13)** install rather than inferred from its documentation. Dated
+This reference records Hermes plugin behavior measured on a **v0.20.1
+(2026.8.13)** install. It is dated
 2026-08-13, with one correction applied 2026-08-15.
 
-This is contributor reference, not operator documentation. Nothing here is
-needed to run the skill. It is in the repository because shipped code depends on
-it. `api_event_spool.py` parses the E2 payload below, and E1 is a negative result
-that forbids a change which looks like a simplification and would silently break
-halt enforcement.
+This contributor reference is not required to run the skill. Shipped code
+depends on it: `api_event_spool.py` parses the E2 payload below, and E1 rules out
+a change that would break halt enforcement.
 
 Read the version caveat at the bottom before relying on any of it: v0.20.0 does
 not expose these surfaces.
@@ -47,14 +45,14 @@ forcing a second main-loop LLM call within the same session.
 | Main-loop call 1 system prompt | `halted=False` |
 | Main-loop call 2 system prompt (same session) | `halted=False` ← **stale** |
 
-**The section is frozen at session start, so a halt arriving mid-session never
-reaches it.**
+The section is frozen at session start, so a halt arriving mid-session never
+reaches it.
 
-Moving the `SKILL.md` halt-check backstop and its manual context-dilution runbook in
-`skills/revenium/references/halt-survivability.md` into a registered prompt
-section, because sections survive compression rebuilds and fresh-process resume
-byte-identically. Doing so would silently break enforcement for the exact case
-that matters: a halt firing during a long autonomous run.
+Although registered prompt sections survive compression rebuilds and
+fresh-process resumes byte-identically, moving the `SKILL.md` halt-check backstop
+and its manual context-dilution runbook from
+`skills/revenium/references/halt-survivability.md` into one would break
+enforcement when a halt fires during a long autonomous run.
 
 **Required division of labor:**
 
@@ -98,7 +96,7 @@ replaced with their shapes):
 }
 ```
 
-This supplies, per API call and in real time, everything `hermes-report.sh`
+For each API call, this supplies in real time everything `hermes-report.sh`
 currently reconstructs by polling `state.db` and computing scaled deltas:
 
 - **`api_request_id` is a natural idempotency key** (`<session>:<task>:<turn>:api:<n>`).
@@ -113,7 +111,7 @@ currently reconstructs by polling `state.db` and computing scaled deltas:
 - Cache and reasoning tokens break out natively.
 - `telemetry_schema_version` gives a versioned contract to pin against.
 
-**A first-party reference implementation exists.** The bundled
+The bundled
 `plugins/observability/langfuse` is a first-party analog of this repo. It registers:
 
 ```
@@ -124,7 +122,7 @@ on_session_end     → SAME handler          # both events, one handler
 subagent_start / subagent_stop
 ```
 
-This produces two requirements:
+This establishes two requirements:
 
 1. **Registering both `on_session_end` and `on_session_finalize` against one
    handler is exactly what first-party does.** That is this skill's Phase 29
@@ -135,7 +133,7 @@ This produces two requirements:
    silently drops usage and cost for **every gateway turn**. Fall back to the
    `usage` summary dict.
 
-**Gateway caveat — resolved after this document was written.** This probe never
+The gateway caveat was resolved after this document was written. This probe never
 drove the gateway surface, so as of 2026-08-13 it was unproven whether
 `post_api_request` fires on gateway turns at all. **It does.** The v1.5 shadow
 stage answered it live: a continuously-open gateway-served conversation produced
@@ -167,7 +165,7 @@ session calling `ctx.state.set()`.
 | Out-of-process read-modify-write under `fcntl` | succeeded; in-process marker preserved |
 | In-process `set()` afterwards | out-of-process writes **survived** — no clobber |
 
-So a two-halves architecture is viable on `ctx.state`, provided the cron half
+A two-part architecture is viable on `ctx.state` if the cron half
 (a) derives the namespace, (b) takes the `fcntl` lock on `.state.json.lock`, and
 (c) writes atomically.
 
@@ -269,6 +267,6 @@ exposing `register_system_prompt_section`, `state`, `get_config`/`set_config`,
 `on_unload`.
 
 Host addresses, probe file paths, service unit names, and individual session
-identifiers are deliberately omitted; identifier *shapes* are retained where a
+identifiers are omitted; identifier *shapes* are retained where a
 future implementation depends on them. A local development box on v0.20.0 does
 **not** expose these surfaces — version-check before relying on any finding here.

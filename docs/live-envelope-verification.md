@@ -1,8 +1,8 @@
 # Live envelope verification (LIVE-01)
 
-Whether the bounded `--metadata` envelope shipped in phases 42 and 46 is
-accepted by a real Revenium API, established against a live tenant on
-2026-08-29 rather than against fixtures.
+This record establishes whether a real Revenium API accepts the bounded
+`--metadata` envelope shipped in phases 42 and 46. Verification ran against a
+live tenant on 2026-08-29.
 
 **Verdict: accepted.** Five payloads were sent. All five were accepted and all
 five were echoed back byte-exact. There was no rejection, no server-side
@@ -13,12 +13,12 @@ limits recorded under "What this does not establish" below.
 
 ## How each arm was scored
 
-By read-back, never by exit status. Every arm was written with
+Each arm was scored by read-back, not exit status. Every arm was written with
 `revenium jobs outcome --metadata`, then read back with
 `revenium jobs outcome-history <job-id> --output json` and corroborated with
 `revenium jobs get`.
 
-All five writes returned exit 0. That was treated as carrying no information.
+All five writes returned exit 0, which did not affect the verdict.
 On 2026-08-19 this API accepted writes and persisted nothing for roughly seven
 hours while returning success, so a zero exit status is not evidence that a row
 exists. An arm counted as accepted only when the server returned the row and
@@ -68,14 +68,13 @@ Arm C1 was intended to exercise both shed tiers. It did not. `assumptions` at
 under the ceiling, so tier 2 never ran and `study_id` survived. C1 is a valid
 tier-1 observation and a duplicate of arm B; it is not the two-tier case.
 
-This was caught by comparing the echoed key set against the arm's design
-rather than by trusting the arm's label — `study_id` was present in the
+Comparing the echoed key set with the arm's design exposed the problem:
+`study_id` was present in the
 read-back when the design required it to be gone. The arm was re-sent as C1b
 with `study_id` at 5000 bytes, so that the provenance family alone still
 exceeds the ceiling once tier 1 has run.
 
-C1 is retained in this record rather than removed. A mis-sized arm quietly
-dropped from the table would be the more misleading artifact.
+C1 remains in this record so the table preserves the mis-sized arm.
 
 ## The 4096-byte ceiling is a client-side choice
 
@@ -84,10 +83,9 @@ Arm C2 was accepted at 4350 bytes — larger than the client's own
 no keys it was permitted to shed, so it sent an over-ceiling payload, and the
 server took it.
 
-The ceiling is therefore client-side conservatism rather than a limit the API
-imposes.
+The ceiling is a conservative client-side choice, not an API limit.
 
-The server's actual limit is **not** established by this run. 4350 bytes is a
+This run does not establish the server's actual limit. 4350 bytes is a
 lower bound on what it accepts and nothing more. It was deliberately not probed
 further: locating the true limit is work for whoever proposes changing the
 constant, and an unprobed bound recorded honestly is more useful than a guess.
@@ -117,7 +115,7 @@ constant, and an unprobed bound recorded honestly is more useful than a guess.
 - Tenant: the pre-prod API. Neither a credential value nor a tenant identifier
   appears in this document.
 
-**The instrument was verified before it was trusted.** The host was carrying a
+The host carried a
 test double at `~/.local/bin/revenium` — a script that exits 0 for the calls
 `hermes-report.sh` makes and performs no network I/O. Pointed at a live probe
 it would have returned success for every arm while contacting nothing.

@@ -6,13 +6,13 @@
 SKILL.md halt backstop block MUST re-run and re-pass the full halt-survivability matrix
 before that change can ship.**
 
-Halt enforcement is now structural: the `pre_llm_call` hook injects the halt directive
+Halt enforcement is structural: the `pre_llm_call` hook injects the halt directive
 into every turn's user message before the LLM generates a response, and the
 `pre_tool_call` hook blocks every tool call when `guardrail-status.json` shows
 `halted: true`. The prior SKILL.md file-size gate (which checked whether the file grew)
 has been retired. SKILL.md content no longer drives halt survival; the hooks do.
 
-> **Note (Phase 20, 2026-05-23):** Phase 19 D-16 already re-ran the 4-cell matrix below against the v1.3 halt string and confirmed survivability across all four cells (short context / long context, two model families). See `.planning/phases/19-guardrail-check-hook-repointing-enforcement-event-surfacing/19-12-SUMMARY.md`. Phase 20 updates only the file/command names and fixture schema in this runbook to match the v1.3 guardrails-native flow; the matrix does not need another run for the v1.3 milestone close.
+> **Note (Phase 20, 2026-05-23):** Phase 19 D-16 re-ran the 4-cell matrix below against the v1.3 halt string and confirmed survivability across all four cells (short context / long context, two model families). See `.planning/phases/19-guardrail-check-hook-repointing-enforcement-event-surfacing/19-12-SUMMARY.md`. Phase 20 updates only the file/command names and fixture schema in this runbook to match the v1.3 guardrails-native flow; the matrix does not need another run for the v1.3 milestone close.
 
 There is NO retry budget: all 4 matrix cells must PASS on the first run. A single FAIL
 blocks the release. Fix the hook scripts or the SKILL.md halt backstop (whichever is
@@ -26,9 +26,9 @@ Run this test plan before any release that modifies:
 - `skills/revenium/scripts/pre_tool_call.sh`
 - The `## HALT CHECK — DEFENSE-IN-DEPTH BACKSTOP` section in `skills/revenium/SKILL.md`
 
-The test asks: **does the `pre_llm_call` hook still inject the halt
+The test checks whether the `pre_llm_call` hook still injects the halt
 directive correctly, and does `pre_tool_call` still block all tool calls, after the
-change?** The matrix also confirms the SKILL.md backstop emits the verbatim halt string
+change. The matrix also confirms the SKILL.md backstop emits the verbatim halt string
 when the hooks are absent.
 
 ## Pre-flight checks

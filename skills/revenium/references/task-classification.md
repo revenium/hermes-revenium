@@ -19,7 +19,7 @@ There is no "borderline / when in doubt skip" path. If either side is arguable, 
 
 Before your final response yields back to the user, you **MUST** call `execute_code` with the snippet below. **DO NOT skip it. DO NOT defer it to "next turn". DO NOT respond to the user without performing it.** The success print line (`markers written: <path>`) is your confirmation that the action completed.
 
-**Step 1 — pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent; a slightly broad label can be corrected.
+**Step 1 — pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent. A slightly broad label can be corrected.
 
 The cron REJECTS markers carrying any of these `task_type` values — using them is a protocol violation:
 

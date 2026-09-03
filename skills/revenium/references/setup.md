@@ -1,6 +1,6 @@
 # Revenium Skill Setup
 
-Fresh-install and reconfigure flows are driven by `setup-guardrails.sh --interactive`. The script collects all operator input, calls `revenium guardrails budget-rules create`, and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Pass `--shadow-mode` to create rules in shadow mode (evaluate without blocking real traffic); the default is enforcing.
+Run `setup-guardrails.sh --interactive` for fresh installs and reconfiguration. The script collects all operator input, calls `revenium guardrails budget-rules create`, and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Pass `--shadow-mode` to create rules in shadow mode (evaluate without blocking real traffic); the default is enforcing.
 
 ## Initial setup
 
@@ -17,7 +17,7 @@ Fresh-install and reconfigure flows are driven by `setup-guardrails.sh --interac
    ```bash
    bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
    ```
-   The script prompts for budget hard-limit, period, organization name, autonomous mode and notification channel/target, and optionally per-task-type rules from the live `task-taxonomy.json`. On success it writes `ruleIds` into `~/.hermes/state/revenium/config.json`.
+   The script prompts for budget hard-limit, period, organization name, autonomous mode and notification channel/target, and optional per-task-type rules from the live `task-taxonomy.json`. On success it writes `ruleIds` into `~/.hermes/state/revenium/config.json`.
 
 4. **Install the metering cron AND budget-halt hooks:**
    ```bash
