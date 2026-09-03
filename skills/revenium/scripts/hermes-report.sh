@@ -923,13 +923,23 @@ report_auxiliary_usage() {
   local _aux_lock_status
   AUX_LOCK_TIMEOUT_SECONDS="${AUX_LOCK_TIMEOUT_SECONDS}" python3 - <<'PY' 2>/dev/null
 import fcntl
+import math
 import os
 import sys
 import time
 
+# The override must be a FINITE, POSITIVE number. `float()` alone accepts
+# 'nan', 'inf' and non-positive values: an infinite or NaN deadline makes the
+# retry loop below unbounded, which is the exact failure this bounded design
+# exists to prevent -- and it would hang while holding cron.lock, stalling
+# every later stage and every subsequent tick. A non-positive value would
+# instead defer auxiliary billing on every contention. Both fall back to the
+# 30s default rather than being honoured.
 try:
     _timeout = float(os.environ.get('AUX_LOCK_TIMEOUT_SECONDS', '30') or '30')
 except (TypeError, ValueError):
+    _timeout = 30.0
+if not math.isfinite(_timeout) or _timeout <= 0:
     _timeout = 30.0
 
 # Bounded blocking, then fail CLOSED. Retry LOCK_EX | LOCK_NB on a short

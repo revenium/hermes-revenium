@@ -204,8 +204,13 @@ def run_one_mutation_row(row, backups):
     target = row['file']
     tests = row['tests']
 
-    apply_mutation(target, row['search'], row['replace'])
+    # The mutation must happen INSIDE the protected block. Mutating first and
+    # then entering `try` leaves a window where an ordinary interruption
+    # (Ctrl-C, SIGTERM) bypasses restoration entirely and strands the tracked
+    # reporter with its billing lock REMOVED -- a mutated working tree that
+    # looks pristine to the next reader.
     try:
+        apply_mutation(target, row['search'], row['replace'])
         result = run_targeted_tests(tests)
         if 'hard_error' in result:
             raise MutationVerifyError(f'[{axis}] {result["hard_error"]}')
