@@ -17,6 +17,7 @@ Its schema defines the interface between the setup flow and the cron pipeline.
 | `notifyChannel` | string | Active (required when `autonomousMode` is `true`) | Messaging channel for halt notifications (e.g., `slack`, `discord`). |
 | `notifyTarget` | string | Active (required when `autonomousMode` is `true`) | Channel-specific target for halt notifications (e.g., `channel:<id>`, `user:<id>`, `@username`). |
 | `organizationName` | string | Active (optional) | Used as `--organization-name` on metered transactions for Revenium attribution. |
+| `auxMetering` | string (`enabled` \| `disabled`) | Active (optional, defaults to `enabled`) | Whether `hermes-report.sh` meters auxiliary LLM usage (compression, title generation, vision, approval and similar background calls) from `session_model_usage`. Overridden by the `REVENIUM_AUX_METERING` environment variable, which takes precedence; an unrecognised value falls back to `enabled` with one warning. Setting `disabled` restores byte-identical pre-Phase-55 metering. See [Auxiliary usage migration](../../../docs/migration-auxiliary-usage.md). |
 
 ## ruleIds
 
