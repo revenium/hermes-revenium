@@ -29,6 +29,22 @@ A valuation implementation is any callable with this signature:
                registered here never sees a key the validator did not
                already vet.
 
+               Phase 59 (SSE-04, D-01): `assumptions` MAY additionally
+               carry a sixth key, `source_figures`, present ONLY when
+               config.json's `boundaries.valuationSource` names a
+               registered source (see valuation_sources.py) AND that
+               source produced usable figures. `source_figures` is
+               caller-RESOLVED and caller-VALIDATED plain data, held to
+               the exact same already-vetted rule as the five keys
+               above — `classifier._resolve_valuation_source_figures`
+               clamps and bounds-checks every field before it ever
+               reaches this dict. Its absence is the normal case, and the
+               ONLY case on an install that configures no source. A
+               registrant READS `source_figures` when present; it never
+               fetches it. The synchronous rule and the plain-data-only
+               rule stated below are unconditional for every registrant,
+               including one that consumes this key.
+
   config       the llmOutcomeEvaluation object from config.json (the same
                object evaluators.py's own contract already threads
                through). Every key is absent-able. The shipped fixture
@@ -75,6 +91,13 @@ example). Consequently this module duplicates its own byte-clamp and
 finite-number helpers rather than importing classifier.py's or
 impact_study.py's — the duplication is deliberate and required by the
 dependency rule, not an oversight.
+
+Phase 59 (SSE-04, D-01): `valuation_sources.py` is the sibling module that
+owns the fetch a server-backed source requires. The permission to perform
+I/O on this boundary's behalf lives THERE, and nowhere else on this path —
+not in this module, and not in any registrant this module's registry
+resolves. This does not weaken the plain-data-only rule stated above; it
+is the reason that rule never has to bend.
 """
 
 from __future__ import annotations

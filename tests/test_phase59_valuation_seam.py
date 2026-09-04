@@ -518,5 +518,76 @@ class SourceFailureFallbackTests(_ValuationSeamTestCase):
             self.assertNotIn('source', key.lower())
 
 
+# ---------------------------------------------------------------------------
+# Task 3 -- SourceContractTests (dependency direction) and
+# RegistryRoundTripTests (the companion invariant the assumption-delta
+# decision adopted)
+# ---------------------------------------------------------------------------
+
+class SourceContractTests(unittest.TestCase):
+    """Behavioural proof of the dependency direction (D-01): loading each
+    module with the plugin directory explicitly ABSENT from sys.path and
+    confirming it executes to completion and its registry populates. This
+    is deliberately not a text scan of the source -- a text scan cannot
+    see a conditionally-reached import, and this repo's own
+    `from . import X` / `import X` fallback dance is exactly that kind of
+    conditional. A module that imported classifier.py could not complete
+    this load: classifier.py's own top-level `from agent.auxiliary_client
+    import call_llm` is unresolvable outside Hermes' venv, which is not
+    present in this test environment."""
+
+    def _plugin_dir_removed(self):
+        was_present = str(PLUGIN) in sys.path
+        if was_present:
+            sys.path.remove(str(PLUGIN))
+        return was_present
+
+    def _restore_plugin_dir(self, was_present):
+        if was_present and str(PLUGIN) not in sys.path:
+            sys.path.insert(0, str(PLUGIN))
+
+    def test_valuation_sources_loads_with_plugin_dir_absent_from_syspath(self):
+        was_present = self._plugin_dir_removed()
+        try:
+            vs = _load_valuation_sources()
+            self.assertEqual(['baselines_file_source'], vs.registered())
+        finally:
+            self._restore_plugin_dir(was_present)
+
+    def test_valuation_loads_with_plugin_dir_absent_from_syspath(self):
+        was_present = self._plugin_dir_removed()
+        try:
+            val = _load_valuation()
+            self.assertIn('rate_card_valuation_fixture', val.registered())
+            self.assertIn('revenue_card_valuation_fixture', val.registered())
+        finally:
+            self._restore_plugin_dir(was_present)
+
+
+class RegistryRoundTripTests(unittest.TestCase):
+    """The companion invariant the assumption-delta decision adopted
+    (59-CONTEXT.md): every registered source round-trips through the
+    primary use-path. Iterates the registry rather than naming
+    `baselines_file_source` by hand, so it constrains every FUTURE source
+    too, not only the one shipped today. This test goes red the instant a
+    source is added that only works when reached by a private path rather
+    than through the registry -- the singular assumption this phase's
+    generalisation replaced."""
+
+    def test_every_registered_source_round_trips(self):
+        vs = _load_valuation_sources()
+        names = vs.registered()
+        self.assertGreaterEqual(len(names), 1)
+        for name in names:
+            with self.subTest(name):
+                fn = vs.resolve(name)
+                self.assertTrue(callable(fn))
+                self.assertIsNone(fn({}))
+                self.assertIsNone(fn('not-a-dict'))
+                version = vs.resolve_version(name)
+                self.assertIsInstance(version, str)
+                self.assertNotEqual('', version)
+
+
 if __name__ == '__main__':
     unittest.main()
