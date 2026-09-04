@@ -185,6 +185,39 @@ class Phase28MultiplexTraceParityTests(unittest.TestCase):
         os.chmod(driver, 0o755)
         return driver
 
+    def test_row_resolved_profile_matches_across_both_implementations(self):
+        """Phase 59 (D-18, paths-for-session-regex-may-never-match):
+        extends this parity harness with the row-resolved path, in
+        addition to (not replacing) IDENTIFIER_SET above -- those ids are
+        now the fail-open arm, since resolution reads a real session ROW's
+        `profile_name` rather than parsing an `agent:<profile>:` prefix
+        off the id. Drives the classifier, the Python sidecar, AND the
+        shell wrapper over one seeded row."""
+        conn = sqlite3.connect(os.path.join(self.dh, "state.db"))
+        conn.execute("CREATE TABLE sessions (id TEXT, profile_name TEXT)")
+        conn.execute(
+            "INSERT INTO sessions (id, profile_name) VALUES (?, ?)",
+            ("api-row-resolved-trace-1", "gtm"),
+        )
+        conn.commit()
+        conn.close()
+
+        sid = "api-row-resolved-trace-1"
+        expected = str(Path(self.gtm) / "state" / "revenium" / "markers")
+
+        classifier_dir = str(self.classifier._paths_for_session(sid).markers_dir)
+        sidecar_dir = self.sidecar.resolve_markers_dir(sid)
+        self.assertEqual(classifier_dir, expected)
+        self.assertEqual(sidecar_dir, expected)
+
+        driver = self._write_driver("driver-row-resolved.sh", sid)
+        result = subprocess.run(
+            ["bash", driver], capture_output=True, text=True,
+            env=dict(os.environ), check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), expected)
+
 
 # --- Plan 28-07: end-to-end reporter harness -------------------------------
 #

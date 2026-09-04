@@ -601,6 +601,14 @@ class RepositoryTests(unittest.TestCase):
             # unwidened, that no session is shipped twice across ticks or
             # profiles, and that a residual drop is visible in the log.
             ROOT / 'tests' / 'test_phase59_aux_zero_token.py',
+            # Phase 59 Plan 04 (D-18/D-18a/D-19, folded todo
+            # paths-for-session-regex-may-never-match) — proves per-session
+            # profile resolution now reads sessions.profile_name from a
+            # real session ROW (not from parsing the session id), that
+            # classifier.py and resolve-markers-dir.py agree at every row,
+            # backward compatibility with a profile_name-less sessions
+            # table, and both sides of the revenue-attribution fence flip.
+            ROOT / 'tests' / 'test_phase59_profile_resolution.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
