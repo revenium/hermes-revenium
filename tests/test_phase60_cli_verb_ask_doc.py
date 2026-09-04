@@ -28,6 +28,14 @@ Task 3 methods assert the two-way cross-reference and the index bullet:
 test_ask_docs_cross_reference_each_other, test_readme_links_to_new_doc.
 """
 
+# Filenames (not full relative paths) used for the cross-reference
+# presence checks below -- each doc links to the other BY FILENAME, in
+# markdown link syntax, e.g. `[...](cli-verb-ask.md)` or
+# `[...](roi-read-surface-ask.md)`. Presence only; how the relationship is
+# described is not this guard's concern.
+DOC_FILENAME = 'cli-verb-ask.md'
+SIBLING_FILENAME = 'roi-read-surface-ask.md'
+
 import re
 import unittest
 from pathlib import Path
@@ -311,4 +319,25 @@ class CliVerbAskCoverageShapeTests(unittest.TestCase):
             env_hits, [],
             f'found credential-bearing environment variable name(s) in '
             f'{DOC}: {env_hits}',
+        )
+
+    def test_ask_docs_cross_reference_each_other(self):
+        self.assertIn(
+            SIBLING_FILENAME, self.text,
+            f'{DOC} does not link to {SIBLING_FILENAME} -- D-11 requires '
+            f'a reader arriving at either ask doc to find the other',
+        )
+        sibling_text = SIBLING_DOC.read_text(encoding='utf-8')
+        self.assertIn(
+            DOC_FILENAME, sibling_text,
+            f'{SIBLING_DOC} does not link to {DOC_FILENAME} -- D-11 '
+            f'requires the reciprocal link',
+        )
+
+    def test_readme_links_to_new_doc(self):
+        readme_text = DOCS_README.read_text(encoding='utf-8')
+        self.assertIn(
+            DOC_FILENAME, readme_text,
+            f'{DOCS_README} does not link to {DOC_FILENAME} -- the '
+            f'tracked-docs index must list both ask documents together',
         )
