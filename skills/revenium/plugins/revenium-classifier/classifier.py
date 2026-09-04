@@ -90,8 +90,16 @@ _Paths = namedtuple(
     "job_assessments_dir",
 )
 
-# `agent:<profile>:<rest>` namespace (multiplex). Capture the profile segment.
-_NS_RE = re.compile(r"^agent:([^:]+):")
+# Phase 59 (D-18, paths-for-session-regex-may-never-match): profile values
+# that mean "the process-level home" -- both spellings. session.py:1086
+# mints the LITERAL "main" as the gateway's static namespace for the
+# default profile's slot ("main" is not a branch name here); this
+# resolver's predecessor special-cased only "default", so `agent:main:…`
+# resolved profile "main", looked for a directory that does not exist, and
+# failed open -- correct behaviour reached by accident rather than by the
+# intended branch. Both spellings now mean the process-level home,
+# explicitly.
+DEFAULT_PROFILE_SLOTS = frozenset({"default", "main"})
 
 
 def _module_paths() -> "_Paths":
@@ -104,24 +112,132 @@ def _module_paths() -> "_Paths":
     )
 
 
+def _profile_name_for_session(session_id: str) -> "str | None":
+    """Resolve the owning profile from the session ROW's `profile_name`
+    column (D-18) -- the fix for the predecessor regex, `_NS_RE =
+    re.compile(r"^agent:([^:]+):")`, which was a session-KEY-shaped pattern
+    applied to a session ID. Across every real session id captured on the
+    diagnosis multiplex host (34 rows, three databases), no `sessions.id`
+    is `agent:`-prefixed: cli/cron/subagent ids look like
+    `20260831_162501_ccfdf5`, api_server ids like
+    `api-1b852ab4523500e5`. Neither shape could ever match, so per-profile
+    resolution was correct but INERT on that host.
+
+    Task 1 checkpoint, option-b (operator-selected): try the process-level
+    database (`${HERMES_HOME}/state.db`) first. If it has no row for this
+    session id, fall back to a BOUNDED scan of the existing profile homes
+    under `${HERMES_HOME}/profiles/` -- one read-only open per existing
+    profile home, in SORTED order, first match wins -- and only when that
+    directory exists at all. The source is `sessions.profile_name` and
+    NOTHING ELSE (option-c, directory-derived ownership on a NULL value,
+    was NOT selected): a row found with `profile_name` NULL is already the
+    answer for this session (use the process-level paths), not a signal to
+    keep scanning past it into a different database.
+
+    Returns the owning profile as a non-empty `str`, or `None` meaning "no
+    answer, use the process paths" -- for a falsy session id; when no
+    database has a row for it at all; when the found row's `profile_name`
+    is NULL, non-`str`, empty, or whitespace-only; or when it names either
+    spelling of the default slot (`DEFAULT_PROFILE_SLOTS`).
+
+    Each database is opened through `sqlite3.connect(f"file:{db}?mode=ro",
+    uri=True, timeout=2.0)`, the same read-only idiom `_walk_to_root_session`
+    already uses and for the same stated reason (no WAL lock contention with
+    the Hermes writer). The session id is always a bound parameter, never
+    interpolated into statement text. A `sessions` table with no
+    `profile_name` column -- every existing test fixture, and any Hermes
+    predating the column -- raises `sqlite3.OperationalError` on the query;
+    that exception IS the probe (one round trip, not two via a preceding
+    `PRAGMA table_info`) and is treated as "no usable row in this
+    database," so it falls through to the next source rather than raising.
+
+    Every connection this function opens is closed on every path, including
+    every exception path. Never raises: the whole body resolves to `None`
+    on any error.
+    """
+    if not session_id:
+        return None
+
+    def _row_profile_name(db_path: "Path") -> "tuple[bool, object]":
+        """(found, value) for `db_path`'s sessions row matching
+        session_id. found=False means "no usable row here, try the next
+        database" -- a missing db file, a missing table, a missing
+        `profile_name` column, a locked db, or any other error, all
+        fail open the same way. found=True means a row exists and `value`
+        (which may be None) is the answer for THIS session; the caller
+        stops looking once a row is found, even when its value is NULL."""
+        conn = None
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+            try:
+                row = conn.execute(
+                    "SELECT profile_name FROM sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return (False, None)
+            if row is None:
+                return (False, None)
+            return (True, row[0])
+        except Exception:
+            return (False, None)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    try:
+        found, value = _row_profile_name(STATE_DB)
+        if not found:
+            profiles_dir = HERMES_HOME / "profiles"
+            if profiles_dir.is_dir():
+                try:
+                    profile_dirnames = sorted(
+                        d.name for d in profiles_dir.iterdir() if d.is_dir()
+                    )
+                except Exception:
+                    profile_dirnames = []
+                for dirname in profile_dirnames:
+                    found, value = _row_profile_name(
+                        profiles_dir / dirname / "state.db"
+                    )
+                    if found:
+                        break
+        if not found:
+            return None
+        if not isinstance(value, str):
+            return None
+        if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
+            return None
+        return value
+    except Exception:
+        return None
+
+
 def _paths_for_session(session_id: str) -> "_Paths":
     """Resolve the state paths that OWN this session.
 
-    Multiplex mode: a `agent:<profile>:…` session is owned by
-    ${HERMES_HOME}/profiles/<profile>/ — but only when that profile home actually
-    exists on disk (so a namespaced session in one-process-per-profile mode, where
-    HERMES_HOME already points at the profile, correctly falls back to the module
-    paths rather than nesting profiles/<profile>/profiles/<profile>). The default
-    profile and any non-namespaced session use the module paths unchanged.
+    Resolves from the session ROW's `sessions.profile_name` (D-18), not
+    from parsing the session id: the predecessor's `agent:<profile>:`
+    regex was a session-KEY shape applied to a session ID and, per the
+    diagnosis that root-caused this fix, could never match a real session
+    id. See `_profile_name_for_session` for the row-based lookup.
+
+    Multiplex mode: a session whose row names an existing profile is owned
+    by ${HERMES_HOME}/profiles/<profile>/ — but only when that profile home
+    actually exists on disk (so a session in one-process-per-profile mode,
+    where HERMES_HOME already points at the profile, correctly falls back
+    to the module paths rather than nesting
+    profiles/<profile>/profiles/<profile>). A NULL, absent, or
+    default-slot-spelled `profile_name` (`DEFAULT_PROFILE_SLOTS`) uses the
+    module paths unchanged.
 
     Fail-open (D-04): any error returns the module paths.
     """
     try:
-        m = _NS_RE.match(session_id or "")
-        if not m:
-            return _module_paths()
-        profile = m.group(1)
-        if not profile or profile == "default":
+        profile = _profile_name_for_session(session_id)
+        if not profile:
             return _module_paths()
         profile_home = HERMES_HOME / "profiles" / profile
         if not profile_home.is_dir():
@@ -3955,15 +4071,25 @@ def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
     money" are different outcomes and only the first is acceptable.
 
     The defect this fences: `paths-for-session-regex-may-never-match`
-    (root-caused 2026-08-31, `_NS_RE` above). `_NS_RE` matches a
+    (root-caused 2026-08-31). The predecessor `_NS_RE` regex matched a
     session-KEY-shaped pattern (`agent:<profile>:...`) against a
-    session-ID, so `_paths_for_session` has been proven, on real session
+    session-ID, so `_paths_for_session` had been proven, on real session
     ids, to NEVER actually engage per-profile resolution -- every profile
-    on a multiplexed gateway reads the ROOT `config.json` today. This
-    function does not fix that; `paths` is resolved by the caller exactly
+    on a multiplexed gateway read the ROOT `config.json`. This function
+    does not fix that itself; `paths` is resolved by the caller exactly
     as it always is, using whatever `_paths_for_session` (or the caller's
     own default of `_module_paths()`) hands back, and this function only
     judges whether that resolution visibly engaged.
+
+    Phase 59 (D-18) shipped that repair: `_paths_for_session` now resolves
+    the owning profile from the session ROW's `profile_name` column
+    instead of parsing the id, so `paths.config_file` starts differing
+    from the module's on a real multiplexed session for the first time.
+    This function's own rule is UNCHANGED by that repair -- it still
+    judges the same observable signal the same way -- but its INPUT now
+    actually varies, so multiplexed hosts begin pricing from per-profile
+    revenue cards for the first time. That is the correct outcome and the
+    whole point of the D-18 repair.
 
     A host is treated as MULTIPLEXED when `HERMES_HOME / "profiles"` is a
     directory containing at least one subdirectory -- a fresh single-
@@ -3997,12 +4123,13 @@ def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
     every `except Exception: return <safe-default>` elsewhere in this
     module uses.
 
-    Deferred, not fixed here: making `_NS_RE`/`_paths_for_session`
-    actually resolve per-profile paths on a real session id is its own
-    piece of work (54-CONTEXT.md names it explicitly as out of scope for
-    this phase). This function is the fence around that gap, not a
-    repair of it -- multi-profile revenue configuration stays blocked
-    until that repair ships.
+    Historical note: making `_paths_for_session` actually resolve
+    per-profile paths on a real session id was deferred out of Phase 54
+    (54-CONTEXT.md named it explicitly as out of scope for that phase)
+    and shipped in Phase 59 (D-18) as its own piece of work. This
+    function was always the fence around that gap, never a repair of it
+    -- its own rule is unchanged by that repair; only its input now
+    varies.
     """
     try:
         profiles_dir = HERMES_HOME / "profiles"
