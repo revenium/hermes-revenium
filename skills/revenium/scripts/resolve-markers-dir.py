@@ -182,21 +182,36 @@ def _profile_name_for_session(session_id: str) -> "Optional[str]":
                         if found:
                             break
             if not found:
-                return None
+                # No row in ANY database consulted. This is the ONLY shape
+                # the id-namespace fallback below may act on.
+                return (False, None)
+            # A row WAS found. Whatever it says -- including NULL, empty, or
+            # a default slot -- is authoritative for this session, and the
+            # caller must fall open to the process-level paths rather than
+            # re-deriving an owner from the identifier's text.
             if not isinstance(value, str):
-                return None
+                return (True, None)
             if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
-                return None
-            return value
+                return (True, None)
+            return (True, value)
         except Exception:
-            return None
+            # Indistinguishable from "no row" by design (fail open), and the
+            # fallback is the safer branch here: it only ever fires on an
+            # identifier that already carries a namespace.
+            return (False, None)
 
-    profile = _row_lookup()
+    row_found, profile = _row_lookup()
     if profile:
         return profile
+    if row_found:
+        # PR #122 P1, mirrored from classifier.py: a found row is
+        # authoritative even when its value is NULL / empty / a default
+        # slot, so the identifier must not overrule it. See that module for
+        # the full rationale; the two must not diverge.
+        return None
 
-    # CR-01 fallback: the row lookup found no answer anywhere. Try the
-    # pre-Phase-59 id-namespace shape before giving up.
+    # CR-01 fallback: NO row was found in any database consulted. Only then
+    # try the pre-Phase-59 id-namespace shape before giving up.
     try:
         m = _NS_RE.match(session_id)
         if not m:

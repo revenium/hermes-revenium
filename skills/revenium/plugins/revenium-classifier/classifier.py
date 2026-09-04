@@ -217,11 +217,16 @@ def _profile_name_for_session(session_id: str) -> "str | None":
                 except Exception:
                     pass
 
-    def _row_lookup() -> "str | None":
+    def _row_lookup() -> "tuple[bool, str | None]":
         """Option-b exactly as it was before CR-01: process-level DB
         first, then the bounded sorted scan of profile homes. Unweakened,
         unreordered, unwidened -- the only change in this whole function
-        is what happens AFTER this returns `None`."""
+        is what happens AFTER it returns.
+
+        Returns `(row_found, profile)`. The two-value shape is load-bearing
+        (PR #122 P1): a bare `None` collapses "no row in any database" and
+        "a row exists and authoritatively says NULL/default" into one
+        answer, and the id-namespace fallback may act on ONLY the first."""
         try:
             found, value = _row_profile_name(STATE_DB)
             if not found:
@@ -240,22 +245,40 @@ def _profile_name_for_session(session_id: str) -> "str | None":
                         if found:
                             break
             if not found:
-                return None
+                # No row in ANY database consulted. This is the ONLY shape
+                # the id-namespace fallback below may act on.
+                return (False, None)
+            # A row WAS found. Whatever it says -- including NULL, empty, or
+            # a default slot -- is authoritative for this session, and the
+            # caller must fall open to the process-level paths rather than
+            # re-deriving an owner from the identifier's text.
             if not isinstance(value, str):
-                return None
+                return (True, None)
             if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
-                return None
-            return value
+                return (True, None)
+            return (True, value)
         except Exception:
-            return None
+            # Indistinguishable from "no row" by design (fail open), and the
+            # fallback is the safer branch here: it only ever fires on an
+            # identifier that already carries a namespace.
+            return (False, None)
 
-    profile = _row_lookup()
+    row_found, profile = _row_lookup()
     if profile:
         return profile
+    if row_found:
+        # PR #122 P1: a row exists and authoritatively says NULL / empty /
+        # a default slot. D-18 fixes `sessions.profile_name` as the ONLY
+        # source and makes a NULL keep today's process-level fail-open, so
+        # the identifier must not be consulted to overrule it. Running the
+        # fallback here would let a legacy `agent:gtm:...` id hand the
+        # session to `gtm` when its own row says otherwise -- the wrong
+        # profile would then report it, on the billing path.
+        return None
 
-    # CR-01 fallback: the row lookup found no answer anywhere. Try the
-    # pre-Phase-59 id-namespace shape before giving up -- a session that
-    # LOOKS namespaced still yields a profile name (subject to the same
+    # CR-01 fallback: NO row was found in any database consulted. Only then
+    # try the pre-Phase-59 id-namespace shape before giving up -- a session
+    # that LOOKS namespaced still yields a profile name (subject to the same
     # default-slot exclusion), rather than silently falling open to "this
     # process owns it".
     try:
