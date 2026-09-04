@@ -16,9 +16,14 @@ Task 1 (tracer) methods: test_both_tables_cover_every_evidence_class,
 test_every_row_states_exactly_one_value_token,
 test_scope_names_the_spec_build_and_the_deferred_consumer.
 
-Task 2 (this module's own follow-up commit) hardens the gate further with
-the SSE-03 edge predicates and the no-ranking rule -- see that commit's
-methods for the adjacency, encoding, and ordering proofs.
+Task 2 (gate hardening) methods mechanise the three SSE-03 edge predicates
+this plan owns (adjacency, encoding, ordering) plus the no-ranking rule
+(D-08/EGV-10) and the [ASSUMED] marker's scope:
+test_a_tenth_label_would_fail_the_gate,
+test_label_match_is_exact_not_substring,
+test_coverage_is_set_membership_not_row_order,
+test_no_table_row_ranks_one_label_against_another,
+test_assumed_marker_scopes_the_three_unevidenced_labels.
 """
 
 import importlib.util
@@ -41,6 +46,17 @@ PLUGIN = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
 TABLE_A_VOCAB = frozenset({'CUSTOMER_DECLARED', 'MEASURED', 'SIGNED_OFF'})
 TABLE_B_VOCAB = frozenset({'MEASURED', 'SELF_REPORTED', 'DERIVED', 'ATTESTED'})
 NON_VALUE_TOKENS = frozenset({'not applicable', 'unmappable'})
+
+# The three labels with zero code registrant and zero defining prose
+# anywhere in the tree (58-CONTEXT.md, 58-RESEARCH.md Q4) -- fixed by
+# decision, not derived from EVIDENCE_CLASSES, because this predicate (has
+# a registrant vs. does not) is not represented anywhere in code for the
+# test to read.
+ASSUMED_LABELS = ('OUTPUT_OBSERVED', 'ASSOCIATIONAL', 'EXPERIMENTAL_IMPACT')
+
+# D-08 / EGV-10: these nine labels are a flat, unordered set. A table row
+# must never argue its value by ranking one label against another.
+_COMPARATIVES = ('stronger', 'weaker', 'outrank', 'ranks above', 'ranks below')
 
 
 def _load_classifier():
@@ -121,6 +137,13 @@ def _row_labels(rows):
     return {row[0].strip().strip('`').strip() for row in rows}
 
 
+def _row_for_label(rows, label):
+    for row in rows:
+        if row[0].strip().strip('`').strip() == label:
+            return row
+    raise AssertionError(f'no row found for {label!r}')
+
+
 def _coverage_gap(expected_labels, rows):
     """Return (missing, unexpected) label sets: members of expected_labels
     with no row, and row keys that are not members of expected_labels.
@@ -139,13 +162,6 @@ def _tokens_in_cell(cell, vocab):
         if re.search(r'\b' + re.escape(token) + r'\b', cell):
             found.add(token)
     return found
-
-
-def _row_for_label(rows, label):
-    for row in rows:
-        if row[0].strip().strip('`').strip() == label:
-            return row
-    raise AssertionError(f'no row found for {label!r}')
 
 
 class ProvenanceMappingCoverageShapeTests(unittest.TestCase):
@@ -219,6 +235,132 @@ class ProvenanceMappingCoverageShapeTests(unittest.TestCase):
             'the Scope section must name the revenium CLI version whose '
             'absent verbs are why nothing consumes this mapping yet (D-17)',
         )
+
+    # -- Task 2: the three edge predicates, the no-ranking rule, and the
+    # [ASSUMED] marker's scope --------------------------------------------
+
+    def test_a_tenth_label_would_fail_the_gate(self):
+        """The adjacency edge (SSE-03). A future tenth member added to
+        EVIDENCE_CLASSES must fail the build until it is mapped on both
+        surfaces -- proven here without editing classifier.py, which
+        criterion 4 forbids, by feeding the coverage helper a synthetic
+        extra label alongside the real, loaded set.
+        """
+        synthetic_label = 'ZZZ_SYNTHETIC_NOT_A_REAL_LABEL'
+        synthetic_set = set(self.evidence_classes) | {synthetic_label}
+        for rows in (self.table_a_rows, self.table_b_rows):
+            missing, _ = _coverage_gap(synthetic_set, rows)
+            self.assertIn(
+                synthetic_label, missing,
+                'a synthetic tenth label must be reported missing by the '
+                'coverage helper -- the gate must be live for a future '
+                'label, not merely for the nine known today (D-15)',
+            )
+
+    def test_label_match_is_exact_not_substring(self):
+        """The encoding edge (SSE-03). EXPERIMENTAL_IMPACT is a proper
+        substring of QUASI_EXPERIMENTAL_IMPACT, so a naive `in` scan over
+        the document text would report EXPERIMENTAL_IMPACT covered by the
+        quasi row even when no EXPERIMENTAL_IMPACT row exists -- the
+        coverage gate would pass with a genuinely missing row. This test
+        drives the module's OWN _table_rows/_row_labels helpers against an
+        in-test fixture table whose only row is the longer label, proving
+        the real parser resolves this correctly rather than a second copy
+        of it that proves nothing about the parser the real assertions use.
+        """
+        fixture = (
+            '### Table X -- fixture only\n\n'
+            '| `evidence_class` | Server provenance value | '
+            'Claim-kind rationale | Lossiness / caveat |\n'
+            '|---|---|---|---|\n'
+            '| `QUASI_EXPERIMENTAL_IMPACT` | `DERIVED` | x | y |\n'
+        )
+        section = _section(fixture, 'Table X')
+        rows = _table_rows(section)
+        labels = _row_labels(rows)
+        self.assertIn(
+            'QUASI_EXPERIMENTAL_IMPACT', labels,
+            'the real label must still be found by exact match',
+        )
+        self.assertNotIn(
+            'EXPERIMENTAL_IMPACT', labels,
+            'EXPERIMENTAL_IMPACT is a proper substring of '
+            'QUASI_EXPERIMENTAL_IMPACT and must NOT register as covered by '
+            'that row -- label matching must be exact equality, never a '
+            'substring scan',
+        )
+
+    def test_coverage_is_set_membership_not_row_order(self):
+        """The ordering edge (SSE-03). D-08 forbids ranking these labels,
+        so row sequence must carry no semantic weight: the same fixture
+        rows, reversed, must produce the identical coverage verdict.
+        """
+        forward = _coverage_gap(self.evidence_classes, self.table_b_rows)
+        reversed_rows = list(reversed(self.table_b_rows))
+        backward = _coverage_gap(self.evidence_classes, reversed_rows)
+        self.assertEqual(
+            forward, backward,
+            'reversing row order must not change the coverage verdict -- '
+            'coverage is set membership, never row sequence (D-08)',
+        )
+
+    def test_no_table_row_ranks_one_label_against_another(self):
+        """The no-ranking rule (D-08/EGV-10), in prose. Scoped to
+        pipe-prefixed lines only, NOT the whole document: the surrounding
+        prose legitimately needs comparative language when it reproduces
+        D-01's own considered-and-rejected reasoning about how a server
+        value would read (e.g. "stronger" appearing in a sentence about why
+        a value was NOT chosen that way). A whole-file ban would make that
+        argument unwritable. Table rows themselves must never carry that
+        language, because a row is a verdict, not an argument.
+        """
+        pipe_lines = [
+            line for line in self.text.splitlines()
+            if line.strip().startswith('|')
+        ]
+        offenders = []
+        for line in pipe_lines:
+            lowered = line.lower()
+            for word in _COMPARATIVES:
+                if word in lowered:
+                    offenders.append((word, line))
+        self.assertFalse(
+            offenders,
+            f'ranking language found in table row(s): {offenders} -- '
+            f'EGV-10 forbids ranking these labels and a table row must '
+            f'never argue its value that way',
+        )
+
+    def test_assumed_marker_scopes_the_three_unevidenced_labels(self):
+        """The three labels with zero code registrant and zero defining
+        prose anywhere in the tree must carry the [ASSUMED] marker in their
+        rationale cell on BOTH tables. CUSTOMER_CONFIGURED is the positive
+        control that keeps this non-vacuous: it has a direct on-point
+        registrant comment (valuation.py:324-336) and must NOT carry the
+        marker.
+        """
+        rows_by_table = (
+            ('Table A', self.table_a_rows),
+            ('Table B', self.table_b_rows),
+        )
+        for label in ASSUMED_LABELS:
+            for name, rows in rows_by_table:
+                row = _row_for_label(rows, label)
+                self.assertIn(
+                    '[ASSUMED]', row[2],
+                    f'{name} row {label!r} has no code registrant and no '
+                    f'defining prose anywhere in the tree, and must carry '
+                    f'the [ASSUMED] marker in its rationale cell',
+                )
+        for name, rows in rows_by_table:
+            row = _row_for_label(rows, 'CUSTOMER_CONFIGURED')
+            self.assertNotIn(
+                '[ASSUMED]', row[2],
+                f'{name} row CUSTOMER_CONFIGURED has a direct on-point '
+                f'registrant comment and must NOT carry the [ASSUMED] '
+                f'marker -- this is the positive control keeping the '
+                f'assertion above non-vacuous',
+            )
 
 
 if __name__ == '__main__':
