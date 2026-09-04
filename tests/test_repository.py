@@ -594,6 +594,13 @@ class RepositoryTests(unittest.TestCase):
             # distinct 409 message, all three arms proven against a CLI
             # double driving the real correct-assessment.sh.
             ROOT / 'tests' / 'test_phase59_optimistic_concurrency.py',
+            # Phase 59 Plan 03 (D-17, folded todo
+            # aux-pass-silently-drops-zero-token-sessions) — proves the aux
+            # pass resolves its own session context for sessions with no
+            # main-loop tokens, that the main loop's token filter is
+            # unwidened, that no session is shipped twice across ticks or
+            # profiles, and that a residual drop is visible in the log.
+            ROOT / 'tests' / 'test_phase59_aux_zero_token.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
