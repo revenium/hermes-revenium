@@ -327,6 +327,15 @@ class RepositoryTests(unittest.TestCase):
             # this repo has already been lost twice (the v1.3/v1.4
             # closeouts, auxiliary-usage-sizing.md).
             ROOT / 'docs' / 'provenance-mapping.md',
+            # Phase 60 Plan 01 (SSE-06) — the tracked, dated ask to the
+            # Revenium CLI team for the five verbs/flags `1.5.0` doesn't
+            # expose, why the CLI-only boundary makes each blocking, and
+            # what this project does the day each ships. `.planning/` and
+            # `docs/internal/` are both gitignored, so a tracked docs/ file
+            # plus this pin is the only durable home; an unpinned record in
+            # this repo has already been lost twice (the v1.3/v1.4
+            # closeouts, auxiliary-usage-sizing.md).
+            ROOT / 'docs' / 'cli-verb-ask.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -610,6 +619,11 @@ class RepositoryTests(unittest.TestCase):
             # backward compatibility with a profile_name-less sessions
             # table, and both sides of the revenue-attribution fence flip.
             ROOT / 'tests' / 'test_phase59_profile_resolution.py',
+            # Phase 60 Plan 01 (SSE-06) — the coverage-shape test for
+            # docs/cli-verb-ask.md above. Same pin rationale: an unpinned
+            # test module for an unpinned doc would double the loss
+            # surface.
+            ROOT / 'tests' / 'test_phase60_cli_verb_ask_doc.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
