@@ -624,6 +624,13 @@ class RepositoryTests(unittest.TestCase):
             # test module for an unpinned doc would double the loss
             # surface.
             ROOT / 'tests' / 'test_phase60_cli_verb_ask_doc.py',
+            # Phase 60 Plan 02 (SSE-07) — the closing proof: the D-03
+            # byte-identity proof (with its negative control) for the one
+            # feature-off shape with no switch, the golden-fixture
+            # consumer-coverage guard closing criterion 3's vacuity hole,
+            # and the shape-only guard over docs/upgrading.md's closing
+            # section. Same pin rationale as its siblings above.
+            ROOT / 'tests' / 'test_phase60_feature_off_closeout.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
