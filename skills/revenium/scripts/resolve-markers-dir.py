@@ -36,6 +36,7 @@ implementation must land in both.
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -51,6 +52,20 @@ from typing import Optional
 # does not exist, and failed open -- correct behaviour reached by accident.
 # Both spellings now mean the process-level home, explicitly.
 DEFAULT_PROFILE_SLOTS = frozenset({"default", "main"})
+
+# Restored by the Phase 59 CR-01 fix, mirroring classifier.py's own
+# restoration byte-for-byte (see that module's comment for the full
+# rationale): `agent:<profile>:<rest>` namespace, captured for the profile
+# segment. Commit c80fe88 REPLACED this id-shape check with the row lookup
+# instead of layering the row lookup on top of it, which let every
+# profile's own cron process fall open to "I own this session" for the
+# same session id whenever no database had a usable row -- the T-55-06
+# cross-profile double-ship shape recurring on this sidecar's own callers
+# (the aux ownership gate in hermes-report.sh, the main-loop cache append,
+# the Phase 38 outcome-stage read). Divergence between this regex and
+# classifier.py's own copy IS the hazard the module docstring's parity
+# paragraph warns about -- keep both in lockstep.
+_NS_RE = re.compile(r"^agent:([^:]+):")
 
 # Phase 32 (EVT-03): map a subdirectory name to the process-level environment
 # override common.sh declares for it, so both directories derive their
@@ -108,6 +123,15 @@ def _profile_name_for_session(session_id: str) -> "Optional[str]":
     probe and is treated as "no usable row in this database," falling
     through to the next source rather than raising. Every connection this
     function opens is closed on every path. Never raises.
+
+    CR-01 fix (Phase 59 review), mirrored byte-for-byte from
+    classifier.py: when the row lookup above yields NO answer at all, this
+    function falls back to the pre-Phase-59 `_NS_RE` id-namespace shape
+    before finally giving up and returning `None`. The row lookup itself
+    is completely unchanged above this point. See classifier.py's own
+    docstring for the full rationale -- divergence between the two
+    implementations here is exactly the cross-profile double-ship hazard
+    this fix closes, so any change to this fallback must land in both.
     """
     if not session_id:
         return None
@@ -134,31 +158,52 @@ def _profile_name_for_session(session_id: str) -> "Optional[str]":
                 except Exception:
                     pass
 
+    def _row_lookup():
+        """Option-b exactly as it was before CR-01. Unweakened, unreordered,
+        unwidened -- the only change in this whole function is what
+        happens AFTER this returns `None`."""
+        try:
+            hermes_home = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
+            found, value = _row_profile_name(hermes_home / "state.db")
+            if not found:
+                profiles_dir = hermes_home / "profiles"
+                if profiles_dir.is_dir():
+                    try:
+                        profile_dirnames = sorted(
+                            d.name for d in profiles_dir.iterdir() if d.is_dir()
+                        )
+                    except Exception:
+                        profile_dirnames = []
+                    for dirname in profile_dirnames:
+                        found, value = _row_profile_name(
+                            profiles_dir / dirname / "state.db"
+                        )
+                        if found:
+                            break
+            if not found:
+                return None
+            if not isinstance(value, str):
+                return None
+            if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
+                return None
+            return value
+        except Exception:
+            return None
+
+    profile = _row_lookup()
+    if profile:
+        return profile
+
+    # CR-01 fallback: the row lookup found no answer anywhere. Try the
+    # pre-Phase-59 id-namespace shape before giving up.
     try:
-        hermes_home = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes")))
-        found, value = _row_profile_name(hermes_home / "state.db")
-        if not found:
-            profiles_dir = hermes_home / "profiles"
-            if profiles_dir.is_dir():
-                try:
-                    profile_dirnames = sorted(
-                        d.name for d in profiles_dir.iterdir() if d.is_dir()
-                    )
-                except Exception:
-                    profile_dirnames = []
-                for dirname in profile_dirnames:
-                    found, value = _row_profile_name(
-                        profiles_dir / dirname / "state.db"
-                    )
-                    if found:
-                        break
-        if not found:
+        m = _NS_RE.match(session_id)
+        if not m:
             return None
-        if not isinstance(value, str):
+        ns_profile = m.group(1)
+        if not ns_profile or ns_profile in DEFAULT_PROFILE_SLOTS:
             return None
-        if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
-            return None
-        return value
+        return ns_profile
     except Exception:
         return None
 

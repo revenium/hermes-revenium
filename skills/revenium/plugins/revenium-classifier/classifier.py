@@ -101,6 +101,21 @@ _Paths = namedtuple(
 # explicitly.
 DEFAULT_PROFILE_SLOTS = frozenset({"default", "main"})
 
+# Restored by the Phase 59 CR-01 fix: `agent:<profile>:<rest>` namespace
+# (multiplex), captured for the profile segment. Commit c80fe88 REPLACED
+# this id-shape check with the sessions.profile_name row lookup above
+# instead of layering the row lookup on top of it. On a session id that
+# looks namespaced but has no row anywhere (missing `sessions` table,
+# missing `profile_name` column, or a NULL value -- every fixture in this
+# repo predating Phase 59, and any Hermes predating the column), the row
+# lookup answers "no answer" and every profile's own process independently
+# fell open to ITS OWN paths for the same session id -- i.e. every asker
+# concluded "I own this session" simultaneously, which is the T-55-06
+# cross-profile double-ship shape recurring (see _profile_name_for_session
+# below for where this regex re-enters resolution, strictly BENEATH the
+# row lookup, never ahead of or instead of it).
+_NS_RE = re.compile(r"^agent:([^:]+):")
+
 
 def _module_paths() -> "_Paths":
     """The process-level paths (module globals). Read live so tests that reload
@@ -154,6 +169,21 @@ def _profile_name_for_session(session_id: str) -> "str | None":
     Every connection this function opens is closed on every path, including
     every exception path. Never raises: the whole body resolves to `None`
     on any error.
+
+    CR-01 fix (Phase 59 review): when the row lookup above yields NO
+    answer at all -- not "found a row that says default/main", but
+    genuinely no usable row in any database it consulted -- this function
+    now falls back to the pre-Phase-59 `_NS_RE` id-namespace shape before
+    finally giving up and returning `None`. The row lookup itself is
+    completely unchanged above this point: same primary source, same
+    process-DB-then-bounded-scan order, same "first row found wins even
+    if NULL" rule. The fallback only ever engages BENEATH it, and only on
+    the id's own text, so it can never disagree with a row that was
+    actually found -- it only answers questions the row lookup could not
+    answer at all, which is exactly the gap that let ownership gates
+    (T-55-06's aux mirror-leak guard, Phase 36's per-profile config gate,
+    Phase 59's aux zero-token recovery gate) fall open to "every profile
+    owns this session" instead of a single, asker-independent answer.
     """
     if not session_id:
         return None
@@ -187,30 +217,55 @@ def _profile_name_for_session(session_id: str) -> "str | None":
                 except Exception:
                     pass
 
+    def _row_lookup() -> "str | None":
+        """Option-b exactly as it was before CR-01: process-level DB
+        first, then the bounded sorted scan of profile homes. Unweakened,
+        unreordered, unwidened -- the only change in this whole function
+        is what happens AFTER this returns `None`."""
+        try:
+            found, value = _row_profile_name(STATE_DB)
+            if not found:
+                profiles_dir = HERMES_HOME / "profiles"
+                if profiles_dir.is_dir():
+                    try:
+                        profile_dirnames = sorted(
+                            d.name for d in profiles_dir.iterdir() if d.is_dir()
+                        )
+                    except Exception:
+                        profile_dirnames = []
+                    for dirname in profile_dirnames:
+                        found, value = _row_profile_name(
+                            profiles_dir / dirname / "state.db"
+                        )
+                        if found:
+                            break
+            if not found:
+                return None
+            if not isinstance(value, str):
+                return None
+            if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
+                return None
+            return value
+        except Exception:
+            return None
+
+    profile = _row_lookup()
+    if profile:
+        return profile
+
+    # CR-01 fallback: the row lookup found no answer anywhere. Try the
+    # pre-Phase-59 id-namespace shape before giving up -- a session that
+    # LOOKS namespaced still yields a profile name (subject to the same
+    # default-slot exclusion), rather than silently falling open to "this
+    # process owns it".
     try:
-        found, value = _row_profile_name(STATE_DB)
-        if not found:
-            profiles_dir = HERMES_HOME / "profiles"
-            if profiles_dir.is_dir():
-                try:
-                    profile_dirnames = sorted(
-                        d.name for d in profiles_dir.iterdir() if d.is_dir()
-                    )
-                except Exception:
-                    profile_dirnames = []
-                for dirname in profile_dirnames:
-                    found, value = _row_profile_name(
-                        profiles_dir / dirname / "state.db"
-                    )
-                    if found:
-                        break
-        if not found:
+        m = _NS_RE.match(session_id)
+        if not m:
             return None
-        if not isinstance(value, str):
+        ns_profile = m.group(1)
+        if not ns_profile or ns_profile in DEFAULT_PROFILE_SLOTS:
             return None
-        if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
-            return None
-        return value
+        return ns_profile
     except Exception:
         return None
 
