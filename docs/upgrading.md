@@ -87,6 +87,74 @@ curl -fsSL https://raw.githubusercontent.com/revenium/hermes-revenium/main/skill
   -o ~/.hermes/skills/revenium/references/bootstrap.sh
 ```
 
+## What this release changes on an install that adopts none of it
+
+This section states the closing scope precisely, in the terms this skill's own
+tests hold it to. This release ships new capabilities that are, deliberately,
+almost entirely inert until turned on. What is asserted here is narrow: **the
+argv crossing the wire — the metering requests this skill sends to
+Revenium — is byte-identical to the previous release.** That is not a claim
+that nothing resolves differently internally, only that nothing different
+leaves the wire. Read the distinction carefully; a later reader stretching
+this claim into a statement about internal resolution would be wrong to.
+
+Four different shapes turn a capability off:
+
+- **An explicit switch.** `REVENIUM_AUX_METERING`, readable from the
+  environment or from the `auxMetering` key in `config.json` with the
+  environment taking precedence, defaults to `enabled`. Set it to `disabled`
+  to turn auxiliary-usage metering off. An unrecognised value falls back to
+  the default *with a warning* rather than silently changing billing
+  behaviour — see [Auxiliary usage migration](migration-auxiliary-usage.md)
+  for the full shape of this switch.
+- **A capability probe that is negative on every CLI in existence today.**
+  `correct-assessment.sh` probes `jobs outcome-update --help` for
+  `--expected-entity-version` before attaching it to a correction. The whole
+  positive branch is written and tested and does not run, because no shipped
+  `revenium` CLI advertises that flag. See [the CLI-verb ask](cli-verb-ask.md)
+  for what would need to ship for that to change.
+- **A config-absent default.** The valuation seam this milestone built
+  resolves to this skill's own local (hours × rate) valuation whenever no
+  `valuationSource` is configured. There is no switch to set here; the
+  default *is* the absence of configuration.
+- **No switch at all.** The fourth shape, and the one that needs the most
+  care — see the next section.
+
+### The one change with no switch
+
+Per-session profile resolution — introduced to close a multiplexed-profile
+metering gap — now reads the session row's `profile_name` column instead of
+pattern-matching the session id. It has no off switch and engages
+unconditionally wherever that column resolves to a usable value.
+
+This is a **bug fix, not a feature**: the code it replaced applied a
+session-key-shaped pattern (`agent:<profile>:...`) to a session id and
+matched no real session id on any measured host, so it was inert rather than
+correct. An install adopting none of this release still gets this change,
+deliberately, the same way it would get any other bug fix.
+
+Its boundary is proven, not assumed. On a single-profile install — no
+`profiles/` directory on disk — resolution falls to the process-level paths
+and the reporter's argv is unchanged, proven byte-for-byte against
+`tests/fixtures/compat/meter-completion.golden.json` by
+`tests/test_phase60_feature_off_closeout.py`. On a multiplexed install,
+resolution is *deliberately different* — that difference is the defect being
+fixed, not a regression against this claim. This document does not claim
+anything about multiplexed-host behaviour beyond that it differs; the
+proof above covers the single-profile install and the reporter's argv only.
+
+### Why the golden fixtures are trustworthy evidence
+
+`tests/fixtures/compat/jobs-outcome-update.golden.json` pins the feature-off
+shape every `revenium` CLI in existence produces today; its sibling,
+`jobs-outcome-update-versioned.golden.json`, pins the positive-probe arm and
+is explicitly *not* part of this claim. Neither fixture pins what a test
+produces instead of what production sends — that recurring failure mode in
+this project's history is what `SidecarFixtureFidelityTests` in
+`tests/test_phase38_reporter_path.py` exists to catch structurally, by
+diffing the shipped script's own metadata keys against the fixture's, rather
+than trusting that a fixture and its script still agree.
+
 ## After any upgrade
 
 Restart the gateway. A refreshed plugin on disk is not a loaded plugin; the running

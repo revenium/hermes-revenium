@@ -34,6 +34,7 @@ modified anywhere in this module -- the two `git diff --quiet` checks in
 """
 import json
 import os
+import re
 import shutil
 import shlex
 import sqlite3
@@ -53,6 +54,7 @@ from tests._compat_helpers import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+DOC = ROOT / 'docs' / 'upgrading.md'
 
 # The profile name used across both arms of Task 1. Deliberately not one of
 # resolve-markers-dir.py's DEFAULT_PROFILE_SLOTS ("default" / "main"), which
@@ -60,6 +62,19 @@ ROOT = Path(__file__).resolve().parents[1]
 # whether the profile's home directory exists -- that would silently defeat
 # the negative control.
 PROFILE_NAME = 'compat-profile-acme'
+
+
+def _section(text, heading):
+    """Extract the section beginning at `heading` (a "## ..." line) through
+    the next top-level heading, exclusive. Returns '' if not found. Mirrors
+    test_phase58_provenance_mapping_doc.py's `_section()` idiom.
+    """
+    pattern = re.compile(
+        r'^' + re.escape(heading) + r'\s*$\n(.*?)(?=^## |\Z)',
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1) if m else ''
 
 
 def _build_and_run(tmpdir, create_profile_home):
@@ -327,6 +342,44 @@ class GoldenFixtureConsumerCoverageTests(unittest.TestCase):
         # the structural distinction above actually holding.
         self.assertTrue(versioned.get('__note'), 'versioned fixture missing __note')
         self.assertTrue(feature_off.get('__note'), 'feature-off fixture missing __note')
+
+
+class UpgradingDocClosureSectionTests(unittest.TestCase):
+    """Shape-only guard over docs/upgrading.md's feature-off closeout
+    section. Asserts the required elements are present and anchored INSIDE
+    the section heading, so a mention elsewhere on the page cannot satisfy
+    the check. Asserts nothing about whether the explanation is convincing.
+    """
+
+    HEADING = '## What this release changes on an install that adopts none of it'
+
+    def _closure_section(self):
+        text = DOC.read_text()
+        section = _section(text, self.HEADING)
+        self.assertTrue(section.strip(), f'{self.HEADING!r} not found in {DOC}')
+        return section
+
+    def test_section_exists(self):
+        self._closure_section()
+
+    def test_section_names_all_four_off_shapes(self):
+        section = self._closure_section()
+        self.assertIn('REVENIUM_AUX_METERING', section)
+        self.assertIn('--expected-entity-version', section)
+        self.assertIn('valuationSource', section)
+        self.assertIn('profile_name', section)
+
+    def test_section_names_carve_out_and_single_profile_boundary(self):
+        section = self._closure_section()
+        self.assertIn('bug fix', section.lower())
+        self.assertIn('profiles/', section)
+        self.assertIn('test_phase60_feature_off_closeout.py', section)
+        self.assertIn('meter-completion.golden.json', section)
+
+    def test_section_states_argv_scope_of_the_claim(self):
+        section = self._closure_section()
+        self.assertIn('argv', section.lower())
+        self.assertIn('byte-identical', section.lower())
 
 
 if __name__ == '__main__':
