@@ -41,6 +41,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 # Phase 59 (D-18, paths-for-session-regex-may-never-match): profile values
 # that mean "the process-level home" -- both spellings. Mirrors
@@ -116,7 +117,7 @@ def _profile_name_for_session(session_id: str) -> "Optional[str]":
     is NULL, non-`str`, empty, or whitespace-only; or when it names either
     spelling of the default slot (`DEFAULT_PROFILE_SLOTS`).
 
-    Each database is opened through `sqlite3.connect(f"file:{db}?mode=ro",
+    Each database is opened through `sqlite3.connect(_ro_uri(db),
     uri=True, timeout=2.0)`. The session id is always a bound parameter,
     never interpolated. A `sessions` table with no `profile_name` column
     raises `sqlite3.OperationalError` on the query; that exception IS the
@@ -139,7 +140,7 @@ def _profile_name_for_session(session_id: str) -> "Optional[str]":
     def _row_profile_name(db_path: Path):
         conn = None
         try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+            conn = sqlite3.connect(_ro_uri(db_path), uri=True, timeout=2.0)
             try:
                 row = conn.execute(
                     "SELECT profile_name FROM sessions WHERE id = ?", (session_id,)
@@ -207,6 +208,23 @@ def _profile_name_for_session(session_id: str) -> "Optional[str]":
     except Exception:
         return None
 
+
+
+def _ro_uri(db_path) -> str:
+    """Read-only sqlite URI for `db_path`, path percent-encoded.
+
+    Mirrors classifier.py's `_ro_uri` byte-for-byte in behaviour; see that
+    module for the full rationale. In short: the option-b profile-home scan
+    feeds an ENUMERATED, unvalidated directory name into this URI, and a
+    name containing '#' truncates it at the fragment -- discarding
+    '?mode=ro' and letting sqlite open the truncated path READ-WRITE,
+    creating it when absent. `safe="/"` keeps separators literal.
+
+    Divergence between this helper and classifier.py's copy is the same
+    hazard class the module docstring's parity paragraph warns about --
+    keep both in lockstep.
+    """
+    return "file:" + quote(str(db_path), safe="/") + "?mode=ro"
 
 def resolve_state_subdir(
     session_id: str,

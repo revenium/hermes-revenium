@@ -27,7 +27,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 # Lazy import — keeps the module importable in the test environment where
 # Hermes' venv is not available. Tests patch classifier.call_llm directly.
@@ -155,7 +155,7 @@ def _profile_name_for_session(session_id: str) -> "str | None":
     is NULL, non-`str`, empty, or whitespace-only; or when it names either
     spelling of the default slot (`DEFAULT_PROFILE_SLOTS`).
 
-    Each database is opened through `sqlite3.connect(f"file:{db}?mode=ro",
+    Each database is opened through `sqlite3.connect(_ro_uri(db),
     uri=True, timeout=2.0)`, the same read-only idiom `_walk_to_root_session`
     already uses and for the same stated reason (no WAL lock contention with
     the Hermes writer). The session id is always a bound parameter, never
@@ -198,7 +198,7 @@ def _profile_name_for_session(session_id: str) -> "str | None":
         stops looking once a row is found, even when its value is NULL."""
         conn = None
         try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+            conn = sqlite3.connect(_ro_uri(db_path), uri=True, timeout=2.0)
             try:
                 row = conn.execute(
                     "SELECT profile_name FROM sessions WHERE id = ?", (session_id,)
@@ -270,6 +270,29 @@ def _profile_name_for_session(session_id: str) -> "str | None":
         return None
 
 
+
+def _ro_uri(db_path) -> str:
+    """Build the read-only sqlite URI for `db_path`, path percent-encoded.
+
+    Phase 59 opened a second class of caller for these URIs: the option-b
+    profile-home scan feeds in a directory name ENUMERATED from the
+    filesystem (`profiles_dir.iterdir()`), never validated, so it can carry
+    URI-significant characters. Interpolated raw, a name containing '#'
+    truncates the URI at the fragment and takes '?mode=ro' with it --
+    sqlite then opens the truncated path READ-WRITE and CREATES it when
+    absent, violating this repo's no-writes-to-state.db invariant (and
+    touching a path nobody asked for). Measured, not theorised: urlsplit
+    on such a URI reports an empty query and the whole tail as fragment.
+
+    `safe="/"` keeps separators literal so the path still resolves; every
+    other reserved character, '%' included, is escaped. Used at EVERY
+    file: URI construction in this module -- the fixed module-level
+    STATE_DB sites too, so no future caller can reintroduce the gap by
+    routing a profile-derived path through one of them.
+    """
+    return "file:" + quote(str(db_path), safe="/") + "?mode=ro"
+
+
 def _paths_for_session(session_id: str) -> "_Paths":
     """Resolve the state paths that OWN this session.
 
@@ -321,7 +344,7 @@ def _walk_to_root_session(sid: str, max_depth: int = 10, paths: "_Paths | None" 
     Depth-capped to defeat pathological corrupted parent chains."""
     p = paths or _module_paths()
     try:
-        uri = f"file:{p.state_db}?mode=ro"
+        uri = _ro_uri(p.state_db)
         with sqlite3.connect(uri, uri=True) as conn:
             current = sid
             for _ in range(max_depth):
@@ -363,7 +386,7 @@ def _read_session_messages(sid: str, paths: "_Paths | None" = None) -> "tuple[st
     if not p.state_db.exists():
         return ("", "")
     try:
-        conn = sqlite3.connect(f"file:{p.state_db}?mode=ro", uri=True, timeout=2.0)
+        conn = sqlite3.connect(_ro_uri(p.state_db), uri=True, timeout=2.0)
         try:
             cursor = conn.execute(
                 "SELECT role, content FROM messages"
@@ -419,7 +442,7 @@ def _read_session_transcript(
     if not p.state_db.exists():
         return ""
     try:
-        conn = sqlite3.connect(f"file:{p.state_db}?mode=ro", uri=True, timeout=2.0)
+        conn = sqlite3.connect(_ro_uri(p.state_db), uri=True, timeout=2.0)
         try:
             cursor = conn.execute(
                 "SELECT role, content FROM messages"

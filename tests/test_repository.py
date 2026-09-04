@@ -588,6 +588,7 @@ class RepositoryTests(unittest.TestCase):
             # immutability contract, which stays byte-identical for the
             # negative-probe (feature-off / today's-CLI) arm.
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome-update-versioned.golden.json',
+            ROOT / 'tests' / 'test_phase59_ro_uri_encoding.py',
             # Phase 59 Plan 02 (SSE-05) — the optimistic-concurrency proof:
             # the independent --expected-entity-version probe, the guarded
             # `jobs get` read, the conditional flag append, and the
