@@ -1079,6 +1079,34 @@ fi
 cmd_output=$("${outcome_update_cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 
 if [[ "${cmd_exit}" -ne 0 ]]; then
+  # D-12/D-13/D-14/D-15: a 409 gets its own message, not the generic one
+  # below. Detection is over the already-captured cmd_output (2>&1) -- the
+  # same "captured output, grep for a known signal" idiom Phase 56 used to
+  # record an HTTP 400 verbatim. Exit-code-based detection was set aside as
+  # unverifiable: the installed CLI has no version flag today and therefore
+  # no way to produce a 409 to observe an exit code from.
+  #
+  # Two signals, either sufficient: a bare status token, bounded on both
+  # sides by a non-digit or a string boundary so a longer number (e.g.
+  # 4409999) cannot match, or a conflict phrase, matched case-insensitively.
+  # Stored in a variable rather than inlined -- this repo's bash 3.2
+  # target quotes poorly around a literal alternation/parenthesis regex in
+  # `[[ =~ ]]`. Anything unmatched falls through to the existing generic
+  # message UNCHANGED below -- the fail-open half of D-15, never
+  # conditioned on anything.
+  _conflict_status_pattern='(^|[^0-9])409($|[^0-9])'
+  if [[ "${cmd_output}" =~ ${_conflict_status_pattern} ]] || [[ "${cmd_output}" =~ [Cc]onflict ]]; then
+    # D-14: this script NEVER re-reads the version and re-files
+    # automatically. Doing so would re-file the correction on top of
+    # whatever the concurrent writer just wrote -- byte-for-byte the silent
+    # overwrite optimistic concurrency exists to prevent. There is
+    # deliberately no retry loop anywhere below this branch.
+    echo "revenium jobs outcome-update was refused: job '${JOB_ID}''s outcome was changed by someone or something else since this correction read its version, and the server refused the update rather than overwriting that change (HTTP 409)." >&2
+    echo "The local correction record and the JOB:${LEDGER_ID}:correction: ledger entry are both intact -- both were written under the lock before this network call, precisely so a failed remote leg loses nothing." >&2
+    echo "Re-read the job's current outcome, decide whether this correction still applies to it, and file a FRESH correction if it does. Do not re-run this exact command -- it carries the stale version and will fail identically." >&2
+    echo "Server response: ${cmd_output}" >&2
+    exit 1
+  fi
   echo "revenium jobs outcome-update failed (exit ${cmd_exit}): ${cmd_output}" >&2
   echo "The local correction record is intact; this command may be re-run once the underlying issue is fixed." >&2
   exit 1
