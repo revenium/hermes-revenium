@@ -320,5 +320,203 @@ class SeamTracerTests(_ValuationSeamTestCase):
         self.assertEqual(['baselines_file_source'], vs.registered())
 
 
+# ---------------------------------------------------------------------------
+# Task 2 -- SourceSwapTests (D-07, criterion 2) and
+# SourceFailureFallbackTests (D-03, all four failure shapes)
+# ---------------------------------------------------------------------------
+
+def _assert_skills_unchanged(testcase):
+    """Phase 58's own idiom (its plans used this exact `git diff --quiet`
+    assertion twelve times across three plans), lifted rather than
+    reinvented: assert nothing under skills/ moved as a byte, with a
+    failure message that runs `git status --porcelain -- skills/` so a
+    real regression is diagnosable rather than a bare non-zero exit."""
+    import subprocess
+    result = subprocess.run(
+        ['git', 'diff', '--quiet', '--', 'skills/'], cwd=str(ROOT),
+    )
+    if result.returncode != 0:
+        status = subprocess.run(
+            ['git', 'status', '--porcelain', '--', 'skills/'],
+            cwd=str(ROOT), capture_output=True, text=True,
+        )
+        testcase.fail(
+            'git diff --quiet -- skills/ was dirty after driving the '
+            'real classifier across both config arms:\n' + status.stdout
+        )
+
+
+_SOURCE_THROWAWAY_SEQ = [0]
+
+
+def _throwaway_source_name(prefix: str) -> str:
+    _SOURCE_THROWAWAY_SEQ[0] += 1
+    return f'{prefix}_{_SOURCE_THROWAWAY_SEQ[0]}'
+
+
+class SourceSwapTests(_ValuationSeamTestCase):
+    """Task 2: criterion 2, demonstrated rather than described. A
+    config-only swap of `boundaries.valuation` + `boundaries.valuationSource`
+    moves where the number comes from, the number changes with it, and
+    nothing under skills/ moved to make that happen."""
+
+    def test_config_only_swap_changes_where_the_number_comes_from(self):
+        # Arm A: neither new key configured.
+        mod_a = self._load(boundaries=None)
+        cfg_a = mod_a._llm_evaluation_config()
+        result_a = mod_a._validate_assessment(self._raw(), cfg_a, 'stub', 'v1')
+        self.assertIsNotNone(result_a)
+        self.assertEqual(375.0, result_a['estimated_value'])  # 2.5 * 150.0
+
+        # Arm B: both new keys configured, changing ONLY config.json.
+        fixture_path = self._write_fixture_document()
+        mod_b = self._load(
+            boundaries={'valuation': 'baselines_valuation_fixture',
+                        'valuationSource': 'baselines_file_source'},
+            valuation_source_fixture_path=fixture_path,
+        )
+        cfg_b = mod_b._llm_evaluation_config()
+        result_b = mod_b._validate_assessment(self._raw(), cfg_b, 'stub', 'v1')
+        self.assertIsNotNone(result_b)
+        # 30 / 60.0 * 200.0 == 100.0 -- the value the FETCHED figures
+        # produce, not the value `assumptions` alone could have produced.
+        self.assertEqual(100.0, result_b['estimated_value'])
+        self.assertNotEqual(result_a['estimated_value'], result_b['estimated_value'])
+
+        _assert_skills_unchanged(self)
+
+    def test_arm_b_value_could_not_have_come_from_assumptions(self):
+        # A comment, not just an assertion: a registrant SWAP alone
+        # re-proves Phase 45 (a throwaway registrant reading `assumptions`
+        # differently is nothing new). What makes THIS a seam
+        # demonstration is that Arm B's value comes from somewhere the
+        # CALLER resolved -- a fetched document -- not from the
+        # `assumptions` dict the caller itself built. hours * rate
+        # (2.5 * 150.0 == 375.0) and minutesPerUnit / 60.0 * hourlyRate
+        # (30 / 60.0 * 200.0 == 100.0) are chosen far enough apart that
+        # "close by rounding" cannot explain the difference.
+        fixture_path = self._write_fixture_document()
+        mod = self._load(
+            boundaries={'valuation': 'baselines_valuation_fixture',
+                        'valuationSource': 'baselines_file_source'},
+            valuation_source_fixture_path=fixture_path,
+        )
+        cfg = mod._llm_evaluation_config()
+        raw = self._raw()
+        local_product = round(raw['estimated_hours_saved'] * raw['assumed_loaded_rate'], 2)
+        result = mod._validate_assessment(raw, cfg, 'stub', 'v1')
+        self.assertIsNotNone(result)
+        self.assertEqual(100.0, result['estimated_value'])
+        self.assertGreater(abs(result['estimated_value'] - local_product), 1.0)
+
+    def test_stand_in_declares_model_estimated_demo_and_is_not_reportable(self):
+        # D-05's membership assertions -- phrased as membership only, never
+        # as one class being stronger or weaker than another (EGV-10).
+        mod = self._load(boundaries=None)
+        val_mod = mod._load_valuation_module()
+        self.assertEqual(
+            'MODEL_ESTIMATED_DEMO',
+            val_mod.resolve_evidence_class('baselines_valuation_fixture'),
+        )
+        self.assertNotIn(
+            val_mod.resolve_evidence_class('baselines_valuation_fixture'),
+            mod._REPORTABLE_EVIDENCE_CLASSES,
+        )
+
+
+class SourceFailureFallbackTests(_ValuationSeamTestCase):
+    """Task 2: D-03, all four failure shapes. Each configures
+    `boundaries.valuation = 'baselines_valuation_fixture'` and a
+    `boundaries.valuationSource` that cannot supply figures, drives the
+    REAL `_validate_assessment`, and asserts the failure lands back on the
+    built-in derivation through the EXISTING delegation-identity
+    mechanism -- never a new branch."""
+
+    def _assert_lands_on_builtin(self, mod, result):
+        raw = self._raw()
+        expected = round(raw['estimated_hours_saved'] * raw['assumed_loaded_rate'], 2)
+        self.assertIsNotNone(result)
+        self.assertEqual(expected, result['estimated_value'])
+        self.assertEqual('MODEL_ESTIMATED_DEMO', result['evidence_class'])
+        self.assertEqual(
+            'hours_times_rate',
+            mod._valuation_evidence_impl_name('baselines_valuation_fixture', False, True),
+        )
+
+    def test_source_name_unregistered(self):
+        mod = self._load(
+            boundaries={'valuation': 'baselines_valuation_fixture',
+                        'valuationSource': 'nonexistent_source'},
+        )
+        cfg = mod._llm_evaluation_config()
+        result = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self._assert_lands_on_builtin(mod, result)
+
+    def test_source_raises(self):
+        import valuation_sources as vsrc  # type: ignore -- shared, sys.path-resolved
+
+        def _raising_source(config):
+            raise RuntimeError('this source always raises')
+
+        name = _throwaway_source_name('p59_raising_source')
+        vsrc.register(name, _raising_source, '1')
+        self.addCleanup(vsrc._REGISTRY._entries.pop, name, None)
+
+        mod = self._load(
+            boundaries={'valuation': 'baselines_valuation_fixture',
+                        'valuationSource': name},
+        )
+        cfg = mod._llm_evaluation_config()
+        # The source's failure costs the call its figures, never the
+        # assessment: this call must complete rather than raise.
+        result = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self._assert_lands_on_builtin(mod, result)
+
+    def test_fixture_file_absent(self):
+        mod = self._load(
+            boundaries={'valuation': 'baselines_valuation_fixture',
+                        'valuationSource': 'baselines_file_source'},
+            valuation_source_fixture_path=str(Path(self.tmp) / 'does-not-exist.json'),
+        )
+        cfg = mod._llm_evaluation_config()
+        result = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self._assert_lands_on_builtin(mod, result)
+
+    def test_fixture_document_malformed_non_dict_top_level(self):
+        malformed_path = Path(self.tmp) / 'malformed.json'
+        malformed_path.write_text(json.dumps([1, 2, 3]))
+        mod = self._load(
+            boundaries={'valuation': 'baselines_valuation_fixture',
+                        'valuationSource': 'baselines_file_source'},
+            valuation_source_fixture_path=str(malformed_path),
+        )
+        cfg = mod._llm_evaluation_config()
+        result = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
+        self._assert_lands_on_builtin(mod, result)
+
+    def test_no_second_mechanism_introduced(self):
+        # D-02: the record produced with the stand-in configured and the
+        # source unavailable carries no key whose name mentions a source,
+        # and its key set is identical to the same assessment's key set on
+        # a default-configured host -- nothing new determines the
+        # recorded class beyond _valuation_evidence_impl_name.
+        default_mod = self._load(boundaries=None)
+        default_cfg = default_mod._llm_evaluation_config()
+        default_result = default_mod._validate_assessment(self._raw(), default_cfg, 'stub', 'v1')
+
+        failure_mod = self._load(
+            boundaries={'valuation': 'baselines_valuation_fixture',
+                        'valuationSource': 'nonexistent_source'},
+        )
+        failure_cfg = failure_mod._llm_evaluation_config()
+        failure_result = failure_mod._validate_assessment(self._raw(), failure_cfg, 'stub', 'v1')
+
+        self.assertIsNotNone(default_result)
+        self.assertIsNotNone(failure_result)
+        self.assertEqual(set(default_result.keys()), set(failure_result.keys()))
+        for key in failure_result:
+            self.assertNotIn('source', key.lower())
+
+
 if __name__ == '__main__':
     unittest.main()
