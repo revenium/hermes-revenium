@@ -582,6 +582,18 @@ class RepositoryTests(unittest.TestCase):
             # shapes all landing back on the built-in derivation and its
             # own evidence class (D-03).
             ROOT / 'tests' / 'test_phase59_valuation_seam.py',
+            # Phase 59 Plan 02 (SSE-05) — the correction path's own
+            # positive-probe `jobs outcome-update` argv-shape golden,
+            # additive to (not part of) the jobs-outcome-update.golden.json
+            # immutability contract, which stays byte-identical for the
+            # negative-probe (feature-off / today's-CLI) arm.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome-update-versioned.golden.json',
+            # Phase 59 Plan 02 (SSE-05) — the optimistic-concurrency proof:
+            # the independent --expected-entity-version probe, the guarded
+            # `jobs get` read, the conditional flag append, and the
+            # distinct 409 message, all three arms proven against a CLI
+            # double driving the real correct-assessment.sh.
+            ROOT / 'tests' / 'test_phase59_optimistic_concurrency.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

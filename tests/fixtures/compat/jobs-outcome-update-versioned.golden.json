@@ -1,0 +1,18 @@
+{
+  "__note": "ADDITIVE sibling of jobs-outcome-update.golden.json (Phase 59 Plan 02, SSE-05, D-11). Pins the POSITIVE-probe arm ONLY -- a revenium CLI whose `jobs outcome-update --help` advertises --expected-entity-version. It does NOT supersede jobs-outcome-update.golden.json, which stays byte-identical and pins the feature-off shape every CLI in existence produces today (criterion 5). The --expected-entity-version spelling is INFERRED from OAS UpdateOutcomeRequest_Read.expectedEntityVersion via a kebab-case transliteration and has never been observed on a real --help; if a real CLI ships a different spelling, this fixture and the one constant probed in correct-assessment.sh change together.",
+  "verb": ["jobs", "outcome-update"],
+  "exact_match_fields": {
+    "__verb": "jobs",
+    "__subcommand": "outcome-update",
+    "__positional_args": ["assess-59-versioned-job"],
+    "--reason": "correction-golden-reason-versioned",
+    "--outcome-value": "525.0",
+    "--outcome-currency": "USD",
+    "--expected-entity-version": "7",
+    "--quiet": true
+  },
+  "pattern_fields": {
+    "--metadata": "^\\{.*\\}$"
+  },
+  "forbidden_fields": ["--budget-id", "--alert-id"]
+}
