@@ -604,6 +604,34 @@ else
   OUTCOME_UPDATE_CLI_CAPABLE=true
 fi
 
+# D-08/D-09: a THIRD, INDEPENDENT capability probe for the server's
+# optimistic-concurrency version flag. Deliberately NOT folded into the
+# OUTCOME_UPDATE_CLI_CAPABLE conjunction above -- that conjunction gates
+# Step 7's fail-loud refusal, and a CLI lacking this version flag is not a
+# CLI that cannot serve this script at all -- it is every CLI that exists
+# today. A negative result here must never reach Step 7's refusal.
+#
+# Flag spelling is INFERRED, never observed in a real --help: the CLI's
+# own convention is a straight kebab-case transliteration of the JSON
+# field, verified in `jobs outcome-update --help` for the three pairs
+# --outcome-value/outcomeValue, --outcome-currency/outcomeCurrency, and
+# --execution-status/executionStatus. The OAS field is
+# UpdateOutcomeRequest_Read.expectedEntityVersion, so the transliteration
+# is --expected-entity-version. THIS SPELLING HAS NEVER BEEN OBSERVED ON A
+# REAL --help. If the shipped flag uses a different spelling the probe
+# simply stays negative and nothing breaks -- fixing it later is one
+# constant, not a family of candidate spellings (a guess list was
+# considered and set aside: N subprocess calls per correction, plus a list
+# that would read as arbitrary once the real name ships).
+#
+# Guard form ONLY -- never `VAR=$(supports_flag ...)`, which discards the
+# exit status the three-way SUPPORTED/NEGATIVE/INDETERMINATE resolution
+# depends on (D-08).
+EXPECTED_ENTITY_VERSION_CLI_CAPABLE=false
+if supports_flag "jobs outcome-update" "--expected-entity-version"; then
+  EXPECTED_ENTITY_VERSION_CLI_CAPABLE=true
+fi
+
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "[dry-run] Would append correction sequence ${LINE_COUNT} for job '${JOB_ID}' (component=${COMPONENT}):"
   echo "[dry-run]   prior: value_low=${CURRENT_VALUE_LOW} value_base=${CURRENT_VALUE_BASE} value_high=${CURRENT_VALUE_HIGH} currency=${CURRENT_CURRENCY}"
@@ -613,6 +641,11 @@ if [[ "${DRY_RUN}" == "true" ]]; then
     echo "[dry-run] revenium CLI supports 'jobs outcome-update' -- would ship this correction to Revenium."
   else
     echo "[dry-run] revenium CLI does NOT support 'jobs outcome-update ${OUTCOME_UPDATE_MISSING_FLAG}' -- would save the local correction only and exit non-zero (D-04)."
+  fi
+  if [[ "${EXPECTED_ENTITY_VERSION_CLI_CAPABLE}" == "true" ]]; then
+    echo "[dry-run] revenium CLI supports 'jobs outcome-update --expected-entity-version' -- would read the job's current version via a 'jobs get' call and carry it."
+  else
+    echo "[dry-run] revenium CLI does NOT support 'jobs outcome-update --expected-entity-version' -- no 'jobs get' call will be made, so the correction ships exactly as it does today."
   fi
   echo "[dry-run] No file, ledger, or CLI call was made -- --dry-run performs no writes, local or remote."
   exit 0
@@ -973,6 +1006,74 @@ if [[ "${team_id_exit}" -ne 0 ]]; then
 fi
 if [[ -n "${TEAM_ID_RESOLVED}" ]]; then
   outcome_update_cmd+=(--team-id "${TEAM_ID_RESOLVED}")
+fi
+
+# --------------------------------------------------------------------------
+# D-10/D-11: read the job's current optimistic-lock version, guarded, and
+# ONLY on a positive probe. Placed HERE -- after the TEAM_ID_RESOLVED guard
+# block above, rather than before it -- deliberately: `jobs get` plausibly
+# needs the same team id `jobs outcome-update` needs, and resolving it
+# twice would mean two `revenium config show` pipelines, two guards, and
+# two places for them to disagree. This reuses the one resolution already
+# performed above.
+# --------------------------------------------------------------------------
+ENTITY_VERSION=""
+if [[ "${EXPECTED_ENTITY_VERSION_CLI_CAPABLE}" == "true" ]]; then
+  jobs_get_cmd=(revenium jobs get "${JOB_ID}" --output json)
+  if [[ -n "${TEAM_ID_RESOLVED}" ]]; then
+    jobs_get_cmd+=(--team-id "${TEAM_ID_RESOLVED}")
+  fi
+  # resolve_team_id's own guard shape (`... && x=0 || x=$?`), copied
+  # verbatim -- this script runs set -euo pipefail, so an unguarded
+  # fallible call here would kill the script before any diagnostic reaches
+  # the operator.
+  jobs_get_output="$("${jobs_get_cmd[@]}" 2>&1)" && jobs_get_exit=0 || jobs_get_exit=$?
+  if [[ "${jobs_get_exit}" -ne 0 ]]; then
+    echo "the 'jobs get' read of job '${JOB_ID}''s current version failed (exit ${jobs_get_exit}) -- the correction will ship without an expected version." >&2
+  else
+    # D-11: on ANY parse failure -- non-JSON, no entityVersion key, a
+    # boolean, a non-integer, a negative number -- this prints nothing and
+    # ENTITY_VERSION stays empty. `|| true` on the substitution below means
+    # a parse failure is never fatal.
+    ENTITY_VERSION=$(JOBS_GET_OUTPUT_PY="${jobs_get_output}" python3 - <<'PY' || true
+import json
+import os
+
+raw = os.environ.get('JOBS_GET_OUTPUT_PY', '')
+try:
+    doc = json.loads(raw)
+except (json.JSONDecodeError, ValueError, TypeError):
+    raise SystemExit(0)
+if not isinstance(doc, dict):
+    raise SystemExit(0)
+value = doc.get('entityVersion')
+if value is None and len(doc) == 1:
+    (only_value,) = doc.values()
+    if isinstance(only_value, dict):
+        value = only_value.get('entityVersion')
+# Reject bool explicitly BEFORE the numeric check -- isinstance(True, int)
+# is True in Python, and a boolean version would otherwise print as 1.
+if isinstance(value, bool):
+    raise SystemExit(0)
+if isinstance(value, int):
+    if value >= 0:
+        print(value)
+elif isinstance(value, float):
+    if value.is_integer() and value >= 0:
+        print(int(value))
+PY
+)
+  fi
+fi
+# D-11: a supported flag and no usable version means ship WITHOUT it -- the
+# OAS itself documents the field as omittable for backward compatibility,
+# so an omitted version is a supported request rather than a malformed
+# one. Refusing the correction was considered and rejected: this script's
+# fail-loud divergence (Step 7) is right for a genuinely MISSING
+# CAPABILITY, but refusing a correction the server would accept is a
+# harder failure than the problem it guards.
+if [[ "${EXPECTED_ENTITY_VERSION_CLI_CAPABLE}" == "true" && -n "${ENTITY_VERSION}" ]]; then
+  outcome_update_cmd+=(--expected-entity-version "${ENTITY_VERSION}")
 fi
 
 cmd_output=$("${outcome_update_cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
