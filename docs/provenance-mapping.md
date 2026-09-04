@@ -134,3 +134,85 @@ model-invented), never the arithmetic that combines them. `DERIVED` is
 reserved for the causal-impact labels specifically because *their* figure
 comes from a statistical comparison across a treated and control
 population, not because a multiplication happened.
+
+## The hard case: MODEL_ESTIMATED_DEMO
+
+`MODEL_ESTIMATED_DEMO` maps to no server provenance value on either surface,
+and that is a decision, not an omission: it stays unmappable because mapping
+it anywhere would hand it exactly the legitimacy Phase 53's reportability
+gate withholds.
+
+**First, the load-bearing argument.** The two vocabularies answer different
+questions. Each of the baselines surface's three values and each of the
+facts-and-outcome-metrics surface's four values names *who* or *how* a real
+quantity was obtained — a customer declared a rate, a system measured one, a
+stakeholder signed off on one, a reporter self-reported one, a computation
+derived one, an attestation confirmed one. `MODEL_ESTIMATED_DEMO` names that
+no quantity was obtained at all: it is a hypothesis about a counterfactual, a
+number a model invented rather than a number anything observed (see
+[Why a model-estimated value is a hypothesis](claim-distinctions-and-evidence-boundaries.md#why-a-model-estimated-value-is-a-hypothesis)
+for the four properties that make this a hypothesis rather than an
+established result — they are not re-derived here). Any one of the three
+baseline values or the four facts-and-outcome-metrics values would therefore
+answer a question this local class explicitly declines to answer: each of
+them asserts that *some* rate-obtaining or quantity-obtaining process ran,
+and for this label none did.
+
+That is the sentence this section exists to state in writing: mapping
+`MODEL_ESTIMATED_DEMO` onto any server value would not merely mislabel it, it
+would widen what Phase 53's reportability gate permits. The gate withholds
+the *value* — a `MODEL_ESTIMATED_DEMO` record never becomes `reportable`, so
+its figure never reaches Revenium at all. This mapping withholds the
+*provenance claim* — even in the hypothetical world where the gate's
+allow-list changed, no cell here asserts a customer declared it, a system
+measured it, or a reporter attested to it. Both withholdings exist for the
+same underlying reason: nothing about this label's basis supports the claim
+either surface's vocabulary would attach to it.
+
+**Second, a supporting argument, independent of the first.** `provenance` is
+optional on every schema above, but omission is not neutral — the baselines
+surface defaults an omitted field to `CUSTOMER_DECLARED`, and the
+facts-and-outcome-metrics surface defaults an omitted field to
+`SELF_REPORTED`. Neither schema offers a way to spell "unknown provenance" by
+leaving the field out; silence still asserts a value. A reader who is
+unpersuaded by the semantic argument above still has this one standing on
+its own: even setting the class-mismatch reasoning aside, there is no honest
+way to *omit* the field for this label either, because omission is quietly
+read as one of the two defaults. This is recorded here as a second,
+independent reason, not a restatement of the first in other words, and it is
+explicitly supporting rather than load-bearing — the decision does not rest
+on it, and it is not why the entry exists.
+
+**Third, two alternatives were considered and set aside.**
+
+- **`DERIVED`** is true of the mechanism: the figure genuinely is
+  `estimated_hours_saved` multiplied by `assumed_loaded_rate`, the same
+  arithmetic every evidence class in this mapping uses (see the third shared
+  caveat above, "Why `DERIVED` is not the answer for the other six"). But
+  `DERIVED` on the facts-and-outcome-metrics surface names a real quantity
+  computed from real inputs — a comparison across a treated and control
+  population, in the causal-impact rows this mapping does assign it to — and
+  says nothing about the inputs here being model-invented rather than
+  observed. Choosing it would carry a claim the evidence does not support:
+  that some real process, not a model's guess, supplied the two numbers being
+  multiplied.
+- **`SELF_REPORTED`** is the facts-and-outcome-metrics surface's own schema
+  default for an omitted field, which might read as a natural fallback. But
+  "self" in that value means a real reporter stating a real number — the same
+  reading that makes `SELF_REPORTED` the correct value for
+  `CUSTOMER_CONFIGURED` in Table B, where there *is* a real reporter, an
+  operator who typed a rate into config. A model producing a number about
+  itself is not a reporter reporting; there is no "self" here in the sense
+  the value names.
+
+**Fourth, this section cites the gate rather than restating it.** Phase 53's
+reportability gate is owned by `classifier.py`: `_REPORTABLE_EVIDENCE_CLASSES`
+and its partition-not-a-ladder comment at `classifier.py:1280-1323`, and the
+reportability resolver's own comment block on the gate's load-bearing,
+fail-closed position at `classifier.py:2779-2810`. Read the gate there. A
+stronger, affirmative version of this section — asserting that a record
+carrying this class is structurally never emitted to any provenance-bearing
+surface — was considered and set aside, because a prose copy of a code rule
+is a second source of truth that drifts from the code the moment either one
+changes without the other. This page does not enumerate which labels the
+gate does admit; that membership belongs to `classifier.py` alone.
