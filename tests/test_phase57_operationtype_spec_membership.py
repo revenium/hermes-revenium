@@ -408,11 +408,17 @@ class SoleOtherEmitterTests(unittest.TestCase):
 
         # The exact enumerated set this phase confirmed, so a change in
         # WHICH lines carry the flag (not just how many) is also caught.
+        # Re-measured (Phase 59 CR-01 fix, following the 6a1ba6b
+        # convention): Plan 59-03's `_supplement_aux_session_ctx` added 215
+        # lines to hermes-report.sh ahead of every one of these sites,
+        # shifting all three of that file's emission-site line numbers
+        # (1248->1474, 3256->3490, 3422->3656); api-event-report.sh is a
+        # separate file and its own site is unmoved.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1248),
-            ('hermes-report.sh', 3256),
-            ('hermes-report.sh', 3422),
+            ('hermes-report.sh', 1474),
+            ('hermes-report.sh', 3490),
+            ('hermes-report.sh', 3656),
             ('api-event-report.sh', 1457),
         }
         self.assertEqual(
