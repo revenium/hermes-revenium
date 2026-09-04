@@ -216,3 +216,105 @@ surface — was considered and set aside, because a prose copy of a code rule
 is a second source of truth that drifts from the code the moment either one
 changes without the other. This page does not enumerate which labels the
 gate does admit; that membership belongs to `classifier.py` alone.
+
+## Falsification conditions
+
+Four events would falsify the hard case above. Each carries a disposition
+drawn from a deliberately two-member vocabulary, defined once here and
+reused verbatim in each subsection below:
+
+- `Disposition: Fatal to this entry — its premise is gone, so the row must be re-decided rather than amended.`
+- `Disposition: Revise before shipping — not fatal to the entry.`
+
+"Fatal" here means fatal to *this entry* — the `MODEL_ESTIMATED_DEMO` row and
+the argument above it — never fatal to a feature. This page has no feature to
+close, which is why, unlike the precedent this section's shape is drawn from,
+it carries no closure-mechanism section after its falsifiers: there is no
+won't-fix trigger to route to, and no disposition below points forward to
+machinery this page does not contain.
+
+### Falsifier 1 — the server grows a fit-for-purpose value
+
+**The observation.** A `provenance` enum on either surface gains a member
+shaped like an estimate, a model output, or an unverified value — anything
+that would make "no correct value exists for this label" false on its face.
+
+**What already covers it, and what does not.** The premise was checked
+directly against the vendored `2.20.0-SNAPSHOT` spec: a case-insensitive scan
+of every enum array across all 442 schemas found exactly one match —
+`ALLOW_SELF_ASSERTED_UNVERIFIED` on `AttributionIdentityPolicyResource.policy`
+— which is not a `provenance` field and sits on none of the five
+provenance-carrying schemas this mapping covers. What this does not cover:
+nothing in this repository watches for a spec bump, so this condition is
+checked when someone next re-stages the OAS, not continuously between now and
+then.
+
+Disposition: Fatal to this entry — its premise is gone, so the row must be
+re-decided rather than amended. The verdict rests specifically on the absence
+of a fit-for-purpose value; its arrival removes that absence, and there is no
+version of the current row that survives amendment once the premise it rests
+on is gone.
+
+### Falsifier 2 — provenance becomes visible on read-back
+
+**The observation.** The standing gap [`docs/roi-read-surface-ask.md`](roi-read-surface-ask.md)
+records closes, and `revenium jobs roi` begins displaying `provenance`.
+
+**What already covers it, and what does not.** Part of why Phase 53's own
+reportability gate exists is that on that surface an estimate is visually
+indistinguishable from a measurement — recorded in
+[`docs/claim-distinctions-and-evidence-boundaries.md`](claim-distinctions-and-evidence-boundaries.md#the-product-truth-boundary)
+and re-verified in `docs/roi-read-surface-ask.md`. That reason for the gate's
+existence weakens if the read surface starts rendering provenance. What this
+does not cover: the load-bearing semantic argument above — that the two
+vocabularies answer different questions — has nothing to do with what any
+read surface displays, and a change to display behavior leaves it untouched.
+
+Disposition: Revise before shipping — not fatal to the entry. One reason
+behind the gate's own existence weakens; the hard case's own reasoning does
+not fall with it, so the entry survives as written, with this falsifier
+recorded against the reason that narrowed.
+
+### Falsifier 3 — the reportability gate widens
+
+**The observation.** `_REPORTABLE_EVIDENCE_CLASSES` is widened in code to
+admit `MODEL_ESTIMATED_DEMO`.
+
+**What already covers it, and what does not.** This is a code change and a
+review by Phase 53's own design, never a configuration flip — the gate's own
+not-operator-widenable note at `classifier.py:1296-1300` states there is
+deliberately no config key that admits this label here, precisely so that
+widening it requires the same discipline a code change carries and a policy
+toggle does not.
+
+Disposition: Fatal to this entry — its premise is gone, so the row must be
+re-decided rather than amended. If the gate widens, this entry's premise is
+gone and it must be re-decided, not inherited, from whatever argument
+justified the widening.
+
+### Falsifier 4 — a non-LLM evaluator supersedes the naked-LLM path
+
+**The observation.** `MODEL_ESTIMATED_DEMO` stops being produced by a single
+known path — a second producer besides the naked-LLM evaluator starts
+emitting it.
+
+**What already covers it, and what does not.**
+[`skills/revenium/references/job-declaration.md`](../skills/revenium/references/job-declaration.md)
+already requires a future non-LLM evaluator to report its own, different
+evidence class rather than widen this one, so the mapping for whatever still
+produces `MODEL_ESTIMATED_DEMO` under that rule is unaffected. What this does
+not cover: a mixed population, where some records still carry the label from
+the original naked-LLM path and others arrive by some route this rule did not
+anticipate — that population is not named by the existing rule and is not
+checked here.
+
+Disposition: Revise before shipping — not fatal to the entry. The entry's
+scope narrows to whatever population still produces the label under the
+existing rule; its reasoning holds for that narrower population.
+
+When one of these conditions fires, revisiting this decision is a prose
+change to this page — plus, where the disposition is fatal, a fresh decision
+recorded in the same shape as this one — and never a code migration. This is
+a decision artifact with no consumer; "fatal" names what happens to the
+entry's premise, not an obligation this project cannot take from a page with
+no downstream reader.
