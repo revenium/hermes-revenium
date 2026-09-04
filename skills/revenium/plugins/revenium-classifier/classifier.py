@@ -945,6 +945,18 @@ def _register_valuation_impl() -> None:
     _val.register("hours_times_rate", _hours_times_rate, "1",
                   evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
 
+    # Phase 59 (SSE-04, D-04/D-05): the `baselines`-shaped stand-in source
+    # registrant. Registers the SAME forced literal as the built-in above,
+    # not the not-yet-defined EVIDENCE_CLASS_MODEL_ESTIMATED global -- see
+    # this function's own comment on the `hours_times_rate` registration
+    # for the identical constraint (this call runs before that global
+    # exists). D-05: MODEL_ESTIMATED_DEMO is the one class
+    # _REPORTABLE_EVIDENCE_CLASSES refuses, so this fixture can never
+    # manufacture a reportable row however it is configured.
+    _val.register("baselines_valuation_fixture", _val._baselines_valuation_fixture,
+                  _val.BASELINES_FIXTURE_VERSION,
+                  evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
 
 _register_valuation_impl()
 
@@ -1902,6 +1914,21 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "economic_mechanism": _resolve_economic_mechanism(raw),
         "inferred_role": inferred_role,
     }
+
+    # Phase 59 (SSE-04, D-01): resolve a configured valuation SOURCE, if
+    # any, and hand its (already validated and clamped)
+    # figures in as a SIXTH, CONDITIONAL key. The conditional assignment
+    # is load-bearing, never a default value: an unconditional
+    # `source_figures` key would change what every existing registrant is
+    # handed and fail criterion 1 immediately -- see
+    # tests/test_phase54_revenue_valuation_boundary.py's
+    # HostileRegistrantDistrustTests's five-key assertion, which must keep
+    # passing UNMODIFIED. The fetch itself is resolved here, in the
+    # caller, rather than inside a registrant -- see
+    # _resolve_valuation_source_figures's own docstring and D-01.
+    _source_figures = _resolve_valuation_source_figures(cfg, paths)
+    if _source_figures is not None:
+        assumptions["source_figures"] = _source_figures
 
     impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
     valuation_mod = _load_valuation_module()
@@ -3824,6 +3851,92 @@ def _boundary_impl_name(key: str, default: str, paths: "_Paths | None" = None) -
         return default
 
 
+def _resolve_valuation_source_figures(cfg: dict, paths: "_Paths | None") -> "dict | None":
+    """Phase 59 (SSE-04, D-01): resolve, fetch, and VALIDATE the figures a
+    configured valuation source supplies -- or return None when no source
+    is configured, unresolvable, or the fetch failed or produced nothing
+    usable.
+
+    This is the step D-01 means by "the caller pre-resolves the source;
+    the registrant stays pure": it sits AHEAD of the registry, decides
+    WHERE the figures come from, fetches them, and hands them in as plain
+    data -- never inside a registrant, which would require a registrant to
+    do its own I/O and would break valuation.py's own synchronous /
+    plain-data-only contract.
+
+    Reads the source name via `_boundary_impl_name("valuationSource", "",
+    paths=paths)`. The default is the EMPTY STRING, not a registrant
+    name -- unlike the valuation boundary itself, there is no built-in
+    source and no source configured is the correct default on every
+    install today. An empty name returns None immediately, with no module
+    load and no log line: this is the ordinary, default-configured case
+    and must cost nothing.
+
+    An unresolved source name logs one `logger.warning` (lazy %r, matching
+    the existing unresolved-valuation warning at this function's own call
+    site) and returns None. A raising source, or a non-dict result, is
+    treated the same way and never propagates.
+
+    Every field that crosses out of the source and into the eventual
+    `source_figures` entry on `assumptions` is validated and clamped HERE,
+    before it crosses: `hourlyRate` and `minutesPerUnit` through
+    `_finite_number`, required strictly positive; `provenance` and
+    `source` through `_clamp_assessment_text`. A missing or invalid
+    numeric field returns None outright -- the caller's existing distrust
+    posture on the money path (already-validated `assumptions`, never
+    raw evaluator output) extends to fetched data the same way.
+
+    Never raises.
+    """
+    try:
+        source_name = _boundary_impl_name("valuationSource", "", paths=paths)
+        if not source_name:
+            return None
+
+        sources_mod = _load_valuation_sources_module()
+        if sources_mod is None:
+            return None
+
+        source_fn = sources_mod.resolve(source_name)
+        if source_fn is None:
+            logger.warning(
+                "revenium-classifier: valuation source %r unresolved, "
+                "proceeding with no source figures", source_name,
+            )
+            return None
+
+        try:
+            result = source_fn(cfg)
+        except Exception:
+            logger.warning(
+                "revenium-classifier: valuation source %r raised, "
+                "proceeding with no source figures", source_name,
+            )
+            return None
+
+        if not isinstance(result, dict):
+            return None
+
+        hourly_rate = _finite_number(result.get("hourlyRate"))
+        minutes_per_unit = _finite_number(result.get("minutesPerUnit"))
+        if hourly_rate is None or hourly_rate <= 0:
+            return None
+        if minutes_per_unit is None or minutes_per_unit <= 0:
+            return None
+
+        provenance = _clamp_assessment_text(result.get("provenance"), NARRATIVE_CLAMP_BYTES)
+        source_label = _clamp_assessment_text(result.get("source"), NARRATIVE_CLAMP_BYTES)
+
+        return {
+            "hourlyRate": hourly_rate,
+            "minutesPerUnit": minutes_per_unit,
+            "provenance": provenance,
+            "source": source_label,
+        }
+    except Exception:
+        return None
+
+
 def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
     """Phase 54 (D-07): can this process be CERTAIN the `config.json` it
     just priced a revenue figure from belongs to the profile that owns
@@ -3961,6 +4074,27 @@ def _load_valuation_module():
         except Exception:
             return None
     return _val
+
+
+def _load_valuation_sources_module():
+    """Import valuation_sources.py (Phase 59, SSE-04), the SAME two-step
+    import dance _load_valuation_module uses, reused here at
+    `_resolve_valuation_source_figures`'s own resolve step, which resolves
+    a NAMED source per assessment rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    valuation-source module must still validate assessments -- the
+    resolve step treats None as "unresolved" and the assessment proceeds
+    with no `source_figures`, exactly as an unknown source NAME would.
+    """
+    try:
+        from . import valuation_sources as _vs
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import valuation_sources as _vs  # type: ignore
+        except Exception:
+            return None
+    return _vs
 
 
 def _load_evidence_module():

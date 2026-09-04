@@ -923,3 +923,88 @@ register(
     evidence_class="CUSTOMER_CONFIGURED",
     economic_mechanisms={"incremental_revenue"},
 )
+
+
+# --- _baselines_valuation_fixture ------------------------------------------
+#
+# Phase 59 (SSE-04, D-01/D-04/D-05/D-06): the stand-in for a future
+# `economics` / `baselines`-backed server source. Shaped after `baselines`
+# (D-06) because hours times rate is what local valuation already does, so
+# the swap this fixture proves is a like-for-like substitution against the
+# real successor -- criterion 2's "swap the source without modifying the
+# caller" demonstration needs a registrant that prices the SAME shape of
+# arithmetic from DIFFERENT numbers, not a differently-shaped one.
+#
+# Why it declares MODEL_ESTIMATED_DEMO rather than CUSTOMER_CONFIGURED
+# (D-05), as its own paragraph: a fixture able to produce a REPORTABLE
+# value is one misconfiguration away from shipping a fixture number as
+# customer-configured, which is the provenance lie
+# classifier._valuation_evidence_impl_name exists to stop. This is a
+# MEMBERSHIP decision -- MODEL_ESTIMATED_DEMO is the one label
+# classifier._REPORTABLE_EVIDENCE_CLASSES refuses -- not a claim that one
+# evidence-class label is stronger or weaker than another (EGV-10).
+#
+# Composition mirrors _revenue_card_valuation_fixture's own two-outcome
+# split immediately above, applied to a different pair of conditions:
+#
+#   - NOTHING TO PRICE FROM A SOURCE -- `assumptions` carries no
+#     `source_figures` key, or its value is not a dict. This is the
+#     branch a default-configured host and every fetch-failure shape both
+#     take (D-03): DELEGATES to the built-in `hours_times_rate` registrant
+#     via `_delegate_to_builtin_hours_times_rate` and returns its result
+#     VERBATIM, routing the failure into the existing
+#     `is_delegated_builtin_result` identity check rather than a new
+#     mechanism.
+#   - ASKED TO PRICE AND CANNOT -- `source_figures` is a dict but
+#     `hourlyRate` or `minutesPerUnit` is missing, non-finite, or
+#     non-positive when RE-READ through this module's own
+#     `_finite_number` (the caller already validated them; this is the
+#     same deliberate distrust the caller applies to a registrant's
+#     return value, applied in the other direction). The source said it
+#     had figures and they are unusable -- a configuration error about
+#     THIS job, not an absence of source configuration -- so this
+#     ABSTAINS (returns None).
+#
+# Declares no `economic_mechanism`: the registration below declares no
+# ceiling, so the record falls back to the evaluator's own answer,
+# unconditionally, exactly as `hours_times_rate` does (D-14's own rule,
+# applied here).
+
+BASELINES_FIXTURE_VERSION = "1"
+
+
+def _baselines_valuation_fixture(assumptions: dict, config: dict) -> "dict | None":
+    """Price from fetched `source_figures` (hourlyRate / minutesPerUnit),
+    delegating to the built-in `hours_times_rate` derivation whenever no
+    usable source figures were resolved -- see the module comment above
+    for the full two-outcome split and why D-05 forces this registrant to
+    declare MODEL_ESTIMATED_DEMO.
+    """
+    if not isinstance(assumptions, dict) or not isinstance(config, dict):
+        return None
+
+    source_figures = assumptions.get("source_figures")
+    if not isinstance(source_figures, dict):
+        # NOTHING TO PRICE FROM A SOURCE -- default-configured host or any
+        # fetch-failure shape. Delegate; never re-derive locally.
+        return _delegate_to_builtin_hours_times_rate(assumptions, config)
+
+    hourly_rate = _finite_number(source_figures.get("hourlyRate"))
+    minutes_per_unit = _finite_number(source_figures.get("minutesPerUnit"))
+    if hourly_rate is None or hourly_rate <= 0:
+        # ASKED TO PRICE AND CANNOT -- the source claimed figures and they
+        # do not hold up under re-validation. Abstain outright.
+        return None
+    if minutes_per_unit is None or minutes_per_unit <= 0:
+        return None
+
+    return {
+        "estimated_value": round(minutes_per_unit / 60.0 * hourly_rate, 2),
+        "currency": assumptions.get("currency"),
+    }
+
+
+# Registered from classifier._register_valuation_impl (not here) -- see
+# that function's own comment for why registration lives in classifier.py
+# rather than in valuation.py, and for the forced MODEL_ESTIMATED_DEMO
+# literal it declares.

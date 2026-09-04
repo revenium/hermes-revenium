@@ -418,6 +418,12 @@ class RepositoryTests(unittest.TestCase):
             # fixture that prices from an operator's approved rate card
             # instead of hours times rate.
             SKILL / 'plugins' / 'revenium-classifier' / 'valuation.py',
+            # Phase 59 Plan 01 (SSE-04, D-01) — the valuation SOURCE
+            # boundary: the fetch layer valuation.py's own contract
+            # structurally cannot host (synchronous, plain-data-only), with
+            # a shipped `baselines`-shaped file source that a stand-in
+            # valuation registrant prices from.
+            SKILL / 'plugins' / 'revenium-classifier' / 'valuation_sources.py',
             # Phase 45 Plan 06 (EGV-01) — the sixth and last boundary: evidence
             # resolution and reportability, with a shipped confirmation-workflow
             # fixture and the resolve_declared_class allow-list rule that
@@ -570,6 +576,12 @@ class RepositoryTests(unittest.TestCase):
             # unpinned test module for an unpinned doc would double the
             # loss surface.
             ROOT / 'tests' / 'test_phase58_provenance_mapping_doc.py',
+            # Phase 59 Plan 01 (SSE-04) — the config-only source-swap
+            # tracer: a fetched value prices a job end to end through the
+            # new valuation_sources.py seam, with the four fetch-failure
+            # shapes all landing back on the built-in derivation and its
+            # own evidence class (D-03).
+            ROOT / 'tests' / 'test_phase59_valuation_seam.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
