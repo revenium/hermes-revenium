@@ -318,3 +318,99 @@ recorded in the same shape as this one — and never a code migration. This is
 a decision artifact with no consumer; "fatal" names what happens to the
 entry's premise, not an obligation this project cannot take from a page with
 no downstream reader.
+
+## Boundary cases
+
+**No `evidence_class` at all.** Three record shapes resolve identically, and
+this is one entry, not three: an assessment where the evaluator abstained
+and returned no candidate; a `FAILED` or `CANCELLED` arc, which — see
+[`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)
+§ "Failed and cancelled arcs" for the shapes themselves, not restated here —
+is never evaluated at all, carrying no evaluator call, no `assessment` key,
+and no value; and a markerless session, which carries no classification of
+any kind. In every one of the three, there is no local class to map, so
+there is no provenance to map either. The consequence is the one D-11
+fixes: because omission is not neutral on either server surface — the
+facts-and-outcome-metrics surface defaults an omitted field to
+`SELF_REPORTED`, and the baselines surface defaults an omitted field to
+`CUSTOMER_DECLARED`, both established above in
+[The hard case](#the-hard-case)'s supporting argument — such a record is
+**not emitted** to a provenance-bearing surface at all, rather than emitted
+with a bare or defaulted `provenance` that neither schema lets a caller
+spell as "unknown." The two arc shapes keep their metered cost per that same
+"Failed and cancelled arcs" section: it is the record's absence from a
+provenance-bearing surface that follows from having no class to map, not the
+record — or its cost — vanishing outright.
+
+**A class that reaches one surface and not the other.** The two server
+vocabularies attach to different record types — a baseline is a per-job-*type*
+rate, while a fact or outcome metric is a per-record quantity tied to one
+job — so a label whose only local producer works per job has no
+baseline-shaped record to carry it onto that surface at all. That is the
+rule behind every *not applicable* cell on Table A, stated once here rather
+than left for a reader to infer nine times. *Not applicable* is a
+present-tense answer about the paths that exist today, not a permanent
+property of the label: two rows name, in their own lossiness cell, the
+value they would take if a future path made them reachable.
+`OUTCOME_OBSERVED` would take `MEASURED` if a baseline-setting path ever
+consumed a system-of-record assessment. `CUSTOMER_CONFIRMED` would take
+`SIGNED_OFF` if a baseline-setting path ever consumed a customer
+confirmation. Both readings are on the record rather than settled by
+silence. For `CUSTOMER_CONFIRMED` in particular, this is a surface-scoping
+question, not a strength comparison: `SIGNED_OFF` exists only on the
+baselines vocabulary and `ATTESTED` only on the facts-and-outcome-metrics
+vocabulary, so the two are not alternatives to weigh against each other —
+they are two different schemas' own words for two different acts.
+
+**The local three-way causal-impact split is not yet demonstrated in code.**
+The one concrete registrant for `QUASI_EXPERIMENTAL_IMPACT`,
+`_cohort_estimator_impact_fixture` (`cohort_impact.py:240-265`), performs a
+deterministic arithmetic comparison across a treated group and a control
+group — `effect = treated_mean - control_mean` — with no adjustment for
+confounders: no difference-in-differences, instrumental-variable,
+regression-discontinuity, or matching design, although the fixture declares
+its own `identification_method` as `"MATCHING"`. The only place in the tree
+that names identification rigor as a controlled vocabulary at all,
+`impact_study.py`'s `IDENTIFICATION_METHODS` (`impact_study.py:88-97`), lives
+on a human-authored study record with no code path into a job's own
+`evidence_class`. This observation supports the shared caveat above about
+the three causal-impact labels collapsing onto one server value, `DERIVED`:
+the server vocabulary cannot represent a distinction the codebase's own
+worked example does not yet draw either. It is recorded here and **not
+fixed** — this page changes no code, and ROADMAP criterion 4 makes that a
+boundary rather than a preference. No fix is proposed, planned, or
+attempted, and `cohort_impact.py` is not touched by this phase.
+
+## Provenance-adjacent fields: named, not mapped
+
+Every decided mapping on this page is a table row; this section carries no
+table, and that absence is deliberate — it is the structural signal that
+what follows is named, not decided. Five server fields sit beside
+`provenance` on the same records the two tables above map, and each has a
+local field that would plausibly feed it. None of these pairings has been
+decided.
+
+- `declaredBy` on `BaselineRequest` — defaults to the calling principal when
+  omitted. `evaluator` and `evaluator_version` are the plausible local
+  sources.
+- `evidenceUrl` on `BaselineRequest` — no schema default, and no obvious
+  local source today; this page says so rather than inventing one.
+- `recordedBy` on `PeriodFactEntry` and `OutcomeMetricEntry` — defaults to
+  the calling principal when omitted, the same plausible local sources as
+  `declaredBy`: `evaluator` and `evaluator_version`.
+- `source` on `PeriodFactEntry` and `OutcomeMetricEntry` — defaults to `api`
+  when omitted. `evaluator` or `model` are the plausible local sources.
+- `reason` on `PeriodFactEntry` and `OutcomeMetricEntry` — on
+  `PeriodFactEntry` it is required when the fact supersedes an active one,
+  the closest server analog to this skill's own correction path
+  (`correct-assessment.sh`); `OutcomeMetricEntry` carries the same field
+  name with no stated default.
+
+These are named rather than decided because Phase 59's valuation seam needs
+to know they exist, and deciding them here — with no consumer, and with
+`baselines` and `facts` unreachable at CLI `1.5.0` — would invent a contract
+nothing tests. The same non-neutral-omission hazard [The hard case](#the-hard-case)
+names for `provenance` itself applies to each of these defaults too: a
+caller who omits `declaredBy` or `recordedBy` is quietly attributed to the
+calling principal, and one who omits `source` is quietly recorded as `api`.
+That is why the defaults are recorded now even though the pairings are not.
