@@ -106,7 +106,8 @@ DRY_RUN_PY="${DRY_RUN}" \
 FLAG_DIRS_PY="${WARN_FLAGS_DIR}
 ${FALLBACK_WARN_FLAGS_DIR}
 ${OUTCOME_WARN_FLAGS_DIR}
-${PROBE_WARN_FLAGS_DIR}" \
+${PROBE_WARN_FLAGS_DIR}
+${AUX_WARN_FLAGS_DIR}" \
 EVENT_SPOOL_DIR_PY="${EVENT_SPOOL_DIR}" \
 TOOL_EVENTS_DIR_PY="${TOOL_EVENTS_DIR}" \
 EVENT_LEDGER_FILE_PY="${EVENT_LEDGER_FILE}" \
@@ -237,19 +238,25 @@ if marker_retention_ok:
     # ---------------------------------------------------------------------------
     # quick-260813-wnz (LOG-01/D-05): second pass -- bound the once-per-
     # (key, reason) flag directories (WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR,
-    # OUTCOME_WARN_FLAGS_DIR, and PROBE_WARN_FLAGS_DIR, passed in
-    # newline-separated via FLAG_DIRS_PY) so the fix for each re-warn spam
-    # cannot itself become a new unbounded-growth path. Filtered to files ending
-    # in '.flag'; staleness is the flag's own mtime (a flag's mtime IS the
-    # moment we last warned, so it needs no ledger correlation, unlike a
-    # marker's mtime). Gated by the SAME MARKER_RETENTION_DAYS preflight and
-    # cutoff_secs the marker pass above uses; --dry-run honored identically.
+    # OUTCOME_WARN_FLAGS_DIR, PROBE_WARN_FLAGS_DIR, and AUX_WARN_FLAGS_DIR,
+    # passed in newline-separated via FLAG_DIRS_PY) so the fix for each
+    # re-warn spam cannot itself become a new unbounded-growth path. Filtered
+    # to files ending in '.flag'; staleness is the flag's own mtime (a
+    # flag's mtime IS the moment we last warned, so it needs no ledger
+    # correlation, unlike a marker's mtime). Gated by the SAME
+    # MARKER_RETENTION_DAYS preflight and cutoff_secs the marker pass above
+    # uses; --dry-run honored identically.
     #
     # OUTCOME_WARN_FLAGS_DIR is Phase 39 D-02 (the deferred/wedged job-outcome
     # gate). PROBE_WARN_FLAGS_DIR is a pre-existing omission from this list --
     # not this phase's defect, but the identical leak, closed alongside here
     # since this pass is already generic over the directory list and needs no
-    # other change to cover it.
+    # other change to cover it. AUX_WARN_FLAGS_DIR is Phase 59 Plan 03
+    # (D-17, folded todo aux-pass-silently-drops-zero-token-sessions): the
+    # new ctx-unresolvable-<sid> per-session key introduced there makes this
+    # directory grow one file per unresolvable session, and this pass is
+    # what stops that growth from becoming a new leak the way the
+    # PROBE_WARN_FLAGS_DIR omission above already did.
     # ---------------------------------------------------------------------------
     flag_dirs = [d for d in os.environ.get('FLAG_DIRS_PY', '').split('\n') if d]
 

@@ -1047,13 +1047,21 @@ PY
       done <<< "${session_rows}"
     fi
 
-    # Step 5: a sid that survived the ownership gate but has no `sessions`
-    # row at all is counted here as unresolvable. Task 2 adds the warn;
-    # this step only counts.
+    # Step 5 (Phase 59 Plan 03 Task 2, D-17): a sid that survived the
+    # ownership gate but has no `sessions` row at all is unresolvable --
+    # this process owns it, but there is nothing to attribute its auxiliary
+    # spend to. Counted AND warned about once per session, through the
+    # existing once-per-key warn gate below: the key is a fixed reason word
+    # plus the session id, both stable across ticks (never a per-tick value
+    # -- the unknown-<epoch> defeat this repo has already paid for once).
+    # This is the residual drop the folded todo says must stop being
+    # invisible.
     while IFS= read -r sid; do
       [[ -z "${sid}" ]] && continue
       if ! grep -qxF "${sid}" <<< "${found_sids}"; then
         unresolvable=$((unresolvable + 1))
+        _aux_warn_once "ctx-unresolvable-${sid}" \
+          "auxiliary usage rows exist for session=${sid} but no sessions row could be found to attribute them to -- its auxiliary spend was not reported this tick"
       fi
     done <<< "${owned_sids}"
   fi
@@ -1176,6 +1184,17 @@ PY
       <<< "${_supplement_summary}"
   fi
   session_ctx="$(grep -v '^SUPPLEMENT_SUMMARY|' <<< "${_supplement_raw}")"
+
+  # Phase 59 Plan 03 Task 2 (D-17): one aggregate line per tick, gated on at
+  # least one non-zero count so an ordinary install's log stays byte-
+  # unchanged. This is the line the folded todo says was missing --
+  # auxiliary-only recovery was invisible to diagnose.sh and every other
+  # health signal, so it must be present when there is something to say and
+  # silent otherwise.
+  if [[ "${_aux_recovered_count}" != "0" || "${_aux_not_owned_count}" != "0" || "${_aux_unresolvable_count}" != "0" ]]; then
+    info "Aux session context supplement: recovered=${_aux_recovered_count} not_owned_by_this_profile=${_aux_not_owned_count} unresolvable=${_aux_unresolvable_count}"
+  fi
+
   aux_query_output=$(
     STATE_DB="${STATE_DB}" \
     AUX_LEDGER_FILE="${AUX_LEDGER_FILE}" \
