@@ -27,7 +27,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 # Lazy import — keeps the module importable in the test environment where
 # Hermes' venv is not available. Tests patch classifier.call_llm directly.
@@ -90,7 +90,30 @@ _Paths = namedtuple(
     "job_assessments_dir",
 )
 
-# `agent:<profile>:<rest>` namespace (multiplex). Capture the profile segment.
+# Phase 59 (D-18, paths-for-session-regex-may-never-match): profile values
+# that mean "the process-level home" -- both spellings. session.py:1086
+# mints the LITERAL "main" as the gateway's static namespace for the
+# default profile's slot ("main" is not a branch name here); this
+# resolver's predecessor special-cased only "default", so `agent:main:…`
+# resolved profile "main", looked for a directory that does not exist, and
+# failed open -- correct behaviour reached by accident rather than by the
+# intended branch. Both spellings now mean the process-level home,
+# explicitly.
+DEFAULT_PROFILE_SLOTS = frozenset({"default", "main"})
+
+# Restored by the Phase 59 CR-01 fix: `agent:<profile>:<rest>` namespace
+# (multiplex), captured for the profile segment. Commit c80fe88 REPLACED
+# this id-shape check with the sessions.profile_name row lookup above
+# instead of layering the row lookup on top of it. On a session id that
+# looks namespaced but has no row anywhere (missing `sessions` table,
+# missing `profile_name` column, or a NULL value -- every fixture in this
+# repo predating Phase 59, and any Hermes predating the column), the row
+# lookup answers "no answer" and every profile's own process independently
+# fell open to ITS OWN paths for the same session id -- i.e. every asker
+# concluded "I own this session" simultaneously, which is the T-55-06
+# cross-profile double-ship shape recurring (see _profile_name_for_session
+# below for where this regex re-enters resolution, strictly BENEATH the
+# row lookup, never ahead of or instead of it).
 _NS_RE = re.compile(r"^agent:([^:]+):")
 
 
@@ -104,24 +127,218 @@ def _module_paths() -> "_Paths":
     )
 
 
+def _profile_name_for_session(session_id: str) -> "str | None":
+    """Resolve the owning profile from the session ROW's `profile_name`
+    column (D-18) -- the fix for the predecessor regex, `_NS_RE =
+    re.compile(r"^agent:([^:]+):")`, which was a session-KEY-shaped pattern
+    applied to a session ID. Across every real session id captured on the
+    diagnosis multiplex host (34 rows, three databases), no `sessions.id`
+    is `agent:`-prefixed: cli/cron/subagent ids look like
+    `20260831_162501_ccfdf5`, api_server ids like
+    `api-1b852ab4523500e5`. Neither shape could ever match, so per-profile
+    resolution was correct but INERT on that host.
+
+    Task 1 checkpoint, option-b (operator-selected): try the process-level
+    database (`${HERMES_HOME}/state.db`) first. If it has no row for this
+    session id, fall back to a BOUNDED scan of the existing profile homes
+    under `${HERMES_HOME}/profiles/` -- one read-only open per existing
+    profile home, in SORTED order, first match wins -- and only when that
+    directory exists at all. The source is `sessions.profile_name` and
+    NOTHING ELSE (option-c, directory-derived ownership on a NULL value,
+    was NOT selected): a row found with `profile_name` NULL is already the
+    answer for this session (use the process-level paths), not a signal to
+    keep scanning past it into a different database.
+
+    Returns the owning profile as a non-empty `str`, or `None` meaning "no
+    answer, use the process paths" -- for a falsy session id; when no
+    database has a row for it at all; when the found row's `profile_name`
+    is NULL, non-`str`, empty, or whitespace-only; or when it names either
+    spelling of the default slot (`DEFAULT_PROFILE_SLOTS`).
+
+    Each database is opened through `sqlite3.connect(_ro_uri(db),
+    uri=True, timeout=2.0)`, the same read-only idiom `_walk_to_root_session`
+    already uses and for the same stated reason (no WAL lock contention with
+    the Hermes writer). The session id is always a bound parameter, never
+    interpolated into statement text. A `sessions` table with no
+    `profile_name` column -- every existing test fixture, and any Hermes
+    predating the column -- raises `sqlite3.OperationalError` on the query;
+    that exception IS the probe (one round trip, not two via a preceding
+    `PRAGMA table_info`) and is treated as "no usable row in this
+    database," so it falls through to the next source rather than raising.
+
+    Every connection this function opens is closed on every path, including
+    every exception path. Never raises: the whole body resolves to `None`
+    on any error.
+
+    CR-01 fix (Phase 59 review): when the row lookup above yields NO
+    answer at all -- not "found a row that says default/main", but
+    genuinely no usable row in any database it consulted -- this function
+    now falls back to the pre-Phase-59 `_NS_RE` id-namespace shape before
+    finally giving up and returning `None`. The row lookup itself is
+    completely unchanged above this point: same primary source, same
+    process-DB-then-bounded-scan order, same "first row found wins even
+    if NULL" rule. The fallback only ever engages BENEATH it, and only on
+    the id's own text, so it can never disagree with a row that was
+    actually found -- it only answers questions the row lookup could not
+    answer at all, which is exactly the gap that let ownership gates
+    (T-55-06's aux mirror-leak guard, Phase 36's per-profile config gate,
+    Phase 59's aux zero-token recovery gate) fall open to "every profile
+    owns this session" instead of a single, asker-independent answer.
+    """
+    if not session_id:
+        return None
+
+    def _row_profile_name(db_path: "Path") -> "tuple[bool, object]":
+        """(found, value) for `db_path`'s sessions row matching
+        session_id. found=False means "no usable row here, try the next
+        database" -- a missing db file, a missing table, a missing
+        `profile_name` column, a locked db, or any other error, all
+        fail open the same way. found=True means a row exists and `value`
+        (which may be None) is the answer for THIS session; the caller
+        stops looking once a row is found, even when its value is NULL."""
+        conn = None
+        try:
+            conn = sqlite3.connect(_ro_uri(db_path), uri=True, timeout=2.0)
+            try:
+                row = conn.execute(
+                    "SELECT profile_name FROM sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+            except sqlite3.OperationalError:
+                return (False, None)
+            if row is None:
+                return (False, None)
+            return (True, row[0])
+        except Exception:
+            return (False, None)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _row_lookup() -> "tuple[bool, str | None]":
+        """Option-b exactly as it was before CR-01: process-level DB
+        first, then the bounded sorted scan of profile homes. Unweakened,
+        unreordered, unwidened -- the only change in this whole function
+        is what happens AFTER it returns.
+
+        Returns `(row_found, profile)`. The two-value shape is load-bearing
+        (PR #122 P1): a bare `None` collapses "no row in any database" and
+        "a row exists and authoritatively says NULL/default" into one
+        answer, and the id-namespace fallback may act on ONLY the first."""
+        try:
+            found, value = _row_profile_name(STATE_DB)
+            if not found:
+                profiles_dir = HERMES_HOME / "profiles"
+                if profiles_dir.is_dir():
+                    try:
+                        profile_dirnames = sorted(
+                            d.name for d in profiles_dir.iterdir() if d.is_dir()
+                        )
+                    except Exception:
+                        profile_dirnames = []
+                    for dirname in profile_dirnames:
+                        found, value = _row_profile_name(
+                            profiles_dir / dirname / "state.db"
+                        )
+                        if found:
+                            break
+            if not found:
+                # No row in ANY database consulted. This is the ONLY shape
+                # the id-namespace fallback below may act on.
+                return (False, None)
+            # A row WAS found. Whatever it says -- including NULL, empty, or
+            # a default slot -- is authoritative for this session, and the
+            # caller must fall open to the process-level paths rather than
+            # re-deriving an owner from the identifier's text.
+            if not isinstance(value, str):
+                return (True, None)
+            if not value.strip() or value in DEFAULT_PROFILE_SLOTS:
+                return (True, None)
+            return (True, value)
+        except Exception:
+            # Indistinguishable from "no row" by design (fail open), and the
+            # fallback is the safer branch here: it only ever fires on an
+            # identifier that already carries a namespace.
+            return (False, None)
+
+    row_found, profile = _row_lookup()
+    if profile:
+        return profile
+    if row_found:
+        # PR #122 P1: a row exists and authoritatively says NULL / empty /
+        # a default slot. D-18 fixes `sessions.profile_name` as the ONLY
+        # source and makes a NULL keep today's process-level fail-open, so
+        # the identifier must not be consulted to overrule it. Running the
+        # fallback here would let a legacy `agent:gtm:...` id hand the
+        # session to `gtm` when its own row says otherwise -- the wrong
+        # profile would then report it, on the billing path.
+        return None
+
+    # CR-01 fallback: NO row was found in any database consulted. Only then
+    # try the pre-Phase-59 id-namespace shape before giving up -- a session
+    # that LOOKS namespaced still yields a profile name (subject to the same
+    # default-slot exclusion), rather than silently falling open to "this
+    # process owns it".
+    try:
+        m = _NS_RE.match(session_id)
+        if not m:
+            return None
+        ns_profile = m.group(1)
+        if not ns_profile or ns_profile in DEFAULT_PROFILE_SLOTS:
+            return None
+        return ns_profile
+    except Exception:
+        return None
+
+
+
+def _ro_uri(db_path) -> str:
+    """Build the read-only sqlite URI for `db_path`, path percent-encoded.
+
+    Phase 59 opened a second class of caller for these URIs: the option-b
+    profile-home scan feeds in a directory name ENUMERATED from the
+    filesystem (`profiles_dir.iterdir()`), never validated, so it can carry
+    URI-significant characters. Interpolated raw, a name containing '#'
+    truncates the URI at the fragment and takes '?mode=ro' with it --
+    sqlite then opens the truncated path READ-WRITE and CREATES it when
+    absent, violating this repo's no-writes-to-state.db invariant (and
+    touching a path nobody asked for). Measured, not theorised: urlsplit
+    on such a URI reports an empty query and the whole tail as fragment.
+
+    `safe="/"` keeps separators literal so the path still resolves; every
+    other reserved character, '%' included, is escaped. Used at EVERY
+    file: URI construction in this module -- the fixed module-level
+    STATE_DB sites too, so no future caller can reintroduce the gap by
+    routing a profile-derived path through one of them.
+    """
+    return "file:" + quote(str(db_path), safe="/") + "?mode=ro"
+
+
 def _paths_for_session(session_id: str) -> "_Paths":
     """Resolve the state paths that OWN this session.
 
-    Multiplex mode: a `agent:<profile>:…` session is owned by
-    ${HERMES_HOME}/profiles/<profile>/ — but only when that profile home actually
-    exists on disk (so a namespaced session in one-process-per-profile mode, where
-    HERMES_HOME already points at the profile, correctly falls back to the module
-    paths rather than nesting profiles/<profile>/profiles/<profile>). The default
-    profile and any non-namespaced session use the module paths unchanged.
+    Resolves from the session ROW's `sessions.profile_name` (D-18), not
+    from parsing the session id: the predecessor's `agent:<profile>:`
+    regex was a session-KEY shape applied to a session ID and, per the
+    diagnosis that root-caused this fix, could never match a real session
+    id. See `_profile_name_for_session` for the row-based lookup.
+
+    Multiplex mode: a session whose row names an existing profile is owned
+    by ${HERMES_HOME}/profiles/<profile>/ — but only when that profile home
+    actually exists on disk (so a session in one-process-per-profile mode,
+    where HERMES_HOME already points at the profile, correctly falls back
+    to the module paths rather than nesting
+    profiles/<profile>/profiles/<profile>). A NULL, absent, or
+    default-slot-spelled `profile_name` (`DEFAULT_PROFILE_SLOTS`) uses the
+    module paths unchanged.
 
     Fail-open (D-04): any error returns the module paths.
     """
     try:
-        m = _NS_RE.match(session_id or "")
-        if not m:
-            return _module_paths()
-        profile = m.group(1)
-        if not profile or profile == "default":
+        profile = _profile_name_for_session(session_id)
+        if not profile:
             return _module_paths()
         profile_home = HERMES_HOME / "profiles" / profile
         if not profile_home.is_dir():
@@ -150,7 +367,7 @@ def _walk_to_root_session(sid: str, max_depth: int = 10, paths: "_Paths | None" 
     Depth-capped to defeat pathological corrupted parent chains."""
     p = paths or _module_paths()
     try:
-        uri = f"file:{p.state_db}?mode=ro"
+        uri = _ro_uri(p.state_db)
         with sqlite3.connect(uri, uri=True) as conn:
             current = sid
             for _ in range(max_depth):
@@ -192,7 +409,7 @@ def _read_session_messages(sid: str, paths: "_Paths | None" = None) -> "tuple[st
     if not p.state_db.exists():
         return ("", "")
     try:
-        conn = sqlite3.connect(f"file:{p.state_db}?mode=ro", uri=True, timeout=2.0)
+        conn = sqlite3.connect(_ro_uri(p.state_db), uri=True, timeout=2.0)
         try:
             cursor = conn.execute(
                 "SELECT role, content FROM messages"
@@ -248,7 +465,7 @@ def _read_session_transcript(
     if not p.state_db.exists():
         return ""
     try:
-        conn = sqlite3.connect(f"file:{p.state_db}?mode=ro", uri=True, timeout=2.0)
+        conn = sqlite3.connect(_ro_uri(p.state_db), uri=True, timeout=2.0)
         try:
             cursor = conn.execute(
                 "SELECT role, content FROM messages"
@@ -943,6 +1160,18 @@ def _register_valuation_impl() -> None:
     # estimate whatever the arithmetic, so the honest class either way is
     # MODEL_ESTIMATED_DEMO.
     _val.register("hours_times_rate", _hours_times_rate, "1",
+                  evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
+
+    # Phase 59 (SSE-04, D-04/D-05): the `baselines`-shaped stand-in source
+    # registrant. Registers the SAME forced literal as the built-in above,
+    # not the not-yet-defined EVIDENCE_CLASS_MODEL_ESTIMATED global -- see
+    # this function's own comment on the `hours_times_rate` registration
+    # for the identical constraint (this call runs before that global
+    # exists). D-05: MODEL_ESTIMATED_DEMO is the one class
+    # _REPORTABLE_EVIDENCE_CLASSES refuses, so this fixture can never
+    # manufacture a reportable row however it is configured.
+    _val.register("baselines_valuation_fixture", _val._baselines_valuation_fixture,
+                  _val.BASELINES_FIXTURE_VERSION,
                   evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
 
 
@@ -1902,6 +2131,21 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
         "economic_mechanism": _resolve_economic_mechanism(raw),
         "inferred_role": inferred_role,
     }
+
+    # Phase 59 (SSE-04, D-01): resolve a configured valuation SOURCE, if
+    # any, and hand its (already validated and clamped)
+    # figures in as a SIXTH, CONDITIONAL key. The conditional assignment
+    # is load-bearing, never a default value: an unconditional
+    # `source_figures` key would change what every existing registrant is
+    # handed and fail criterion 1 immediately -- see
+    # tests/test_phase54_revenue_valuation_boundary.py's
+    # HostileRegistrantDistrustTests's five-key assertion, which must keep
+    # passing UNMODIFIED. The fetch itself is resolved here, in the
+    # caller, rather than inside a registrant -- see
+    # _resolve_valuation_source_figures's own docstring and D-01.
+    _source_figures = _resolve_valuation_source_figures(cfg, paths)
+    if _source_figures is not None:
+        assumptions["source_figures"] = _source_figures
 
     impl_name = _boundary_impl_name("valuation", "hours_times_rate", paths=paths)
     valuation_mod = _load_valuation_module()
@@ -3824,6 +4068,92 @@ def _boundary_impl_name(key: str, default: str, paths: "_Paths | None" = None) -
         return default
 
 
+def _resolve_valuation_source_figures(cfg: dict, paths: "_Paths | None") -> "dict | None":
+    """Phase 59 (SSE-04, D-01): resolve, fetch, and VALIDATE the figures a
+    configured valuation source supplies -- or return None when no source
+    is configured, unresolvable, or the fetch failed or produced nothing
+    usable.
+
+    This is the step D-01 means by "the caller pre-resolves the source;
+    the registrant stays pure": it sits AHEAD of the registry, decides
+    WHERE the figures come from, fetches them, and hands them in as plain
+    data -- never inside a registrant, which would require a registrant to
+    do its own I/O and would break valuation.py's own synchronous /
+    plain-data-only contract.
+
+    Reads the source name via `_boundary_impl_name("valuationSource", "",
+    paths=paths)`. The default is the EMPTY STRING, not a registrant
+    name -- unlike the valuation boundary itself, there is no built-in
+    source and no source configured is the correct default on every
+    install today. An empty name returns None immediately, with no module
+    load and no log line: this is the ordinary, default-configured case
+    and must cost nothing.
+
+    An unresolved source name logs one `logger.warning` (lazy %r, matching
+    the existing unresolved-valuation warning at this function's own call
+    site) and returns None. A raising source, or a non-dict result, is
+    treated the same way and never propagates.
+
+    Every field that crosses out of the source and into the eventual
+    `source_figures` entry on `assumptions` is validated and clamped HERE,
+    before it crosses: `hourlyRate` and `minutesPerUnit` through
+    `_finite_number`, required strictly positive; `provenance` and
+    `source` through `_clamp_assessment_text`. A missing or invalid
+    numeric field returns None outright -- the caller's existing distrust
+    posture on the money path (already-validated `assumptions`, never
+    raw evaluator output) extends to fetched data the same way.
+
+    Never raises.
+    """
+    try:
+        source_name = _boundary_impl_name("valuationSource", "", paths=paths)
+        if not source_name:
+            return None
+
+        sources_mod = _load_valuation_sources_module()
+        if sources_mod is None:
+            return None
+
+        source_fn = sources_mod.resolve(source_name)
+        if source_fn is None:
+            logger.warning(
+                "revenium-classifier: valuation source %r unresolved, "
+                "proceeding with no source figures", source_name,
+            )
+            return None
+
+        try:
+            result = source_fn(cfg)
+        except Exception:
+            logger.warning(
+                "revenium-classifier: valuation source %r raised, "
+                "proceeding with no source figures", source_name,
+            )
+            return None
+
+        if not isinstance(result, dict):
+            return None
+
+        hourly_rate = _finite_number(result.get("hourlyRate"))
+        minutes_per_unit = _finite_number(result.get("minutesPerUnit"))
+        if hourly_rate is None or hourly_rate <= 0:
+            return None
+        if minutes_per_unit is None or minutes_per_unit <= 0:
+            return None
+
+        provenance = _clamp_assessment_text(result.get("provenance"), NARRATIVE_CLAMP_BYTES)
+        source_label = _clamp_assessment_text(result.get("source"), NARRATIVE_CLAMP_BYTES)
+
+        return {
+            "hourlyRate": hourly_rate,
+            "minutesPerUnit": minutes_per_unit,
+            "provenance": provenance,
+            "source": source_label,
+        }
+    except Exception:
+        return None
+
+
 def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
     """Phase 54 (D-07): can this process be CERTAIN the `config.json` it
     just priced a revenue figure from belongs to the profile that owns
@@ -3842,15 +4172,25 @@ def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
     money" are different outcomes and only the first is acceptable.
 
     The defect this fences: `paths-for-session-regex-may-never-match`
-    (root-caused 2026-08-31, `_NS_RE` above). `_NS_RE` matches a
+    (root-caused 2026-08-31). The predecessor `_NS_RE` regex matched a
     session-KEY-shaped pattern (`agent:<profile>:...`) against a
-    session-ID, so `_paths_for_session` has been proven, on real session
+    session-ID, so `_paths_for_session` had been proven, on real session
     ids, to NEVER actually engage per-profile resolution -- every profile
-    on a multiplexed gateway reads the ROOT `config.json` today. This
-    function does not fix that; `paths` is resolved by the caller exactly
+    on a multiplexed gateway read the ROOT `config.json`. This function
+    does not fix that itself; `paths` is resolved by the caller exactly
     as it always is, using whatever `_paths_for_session` (or the caller's
     own default of `_module_paths()`) hands back, and this function only
     judges whether that resolution visibly engaged.
+
+    Phase 59 (D-18) shipped that repair: `_paths_for_session` now resolves
+    the owning profile from the session ROW's `profile_name` column
+    instead of parsing the id, so `paths.config_file` starts differing
+    from the module's on a real multiplexed session for the first time.
+    This function's own rule is UNCHANGED by that repair -- it still
+    judges the same observable signal the same way -- but its INPUT now
+    actually varies, so multiplexed hosts begin pricing from per-profile
+    revenue cards for the first time. That is the correct outcome and the
+    whole point of the D-18 repair.
 
     A host is treated as MULTIPLEXED when `HERMES_HOME / "profiles"` is a
     directory containing at least one subdirectory -- a fresh single-
@@ -3884,12 +4224,13 @@ def _revenue_profile_attribution_certain(paths: "_Paths | None") -> bool:
     every `except Exception: return <safe-default>` elsewhere in this
     module uses.
 
-    Deferred, not fixed here: making `_NS_RE`/`_paths_for_session`
-    actually resolve per-profile paths on a real session id is its own
-    piece of work (54-CONTEXT.md names it explicitly as out of scope for
-    this phase). This function is the fence around that gap, not a
-    repair of it -- multi-profile revenue configuration stays blocked
-    until that repair ships.
+    Historical note: making `_paths_for_session` actually resolve
+    per-profile paths on a real session id was deferred out of Phase 54
+    (54-CONTEXT.md named it explicitly as out of scope for that phase)
+    and shipped in Phase 59 (D-18) as its own piece of work. This
+    function was always the fence around that gap, never a repair of it
+    -- its own rule is unchanged by that repair; only its input now
+    varies.
     """
     try:
         profiles_dir = HERMES_HOME / "profiles"
@@ -3961,6 +4302,27 @@ def _load_valuation_module():
         except Exception:
             return None
     return _val
+
+
+def _load_valuation_sources_module():
+    """Import valuation_sources.py (Phase 59, SSE-04), the SAME two-step
+    import dance _load_valuation_module uses, reused here at
+    `_resolve_valuation_source_figures`'s own resolve step, which resolves
+    a NAMED source per assessment rather than registering one.
+
+    Import failure returns None; a classifier that cannot import its own
+    valuation-source module must still validate assessments -- the
+    resolve step treats None as "unresolved" and the assessment proceeds
+    with no `source_figures`, exactly as an unknown source NAME would.
+    """
+    try:
+        from . import valuation_sources as _vs
+    except Exception:  # pragma: no cover - relative import outside a package
+        try:
+            import valuation_sources as _vs  # type: ignore
+        except Exception:
+            return None
+    return _vs
 
 
 def _load_evidence_module():

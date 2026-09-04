@@ -4,7 +4,8 @@ Drives the REAL hermes-report.sh against a synthetic state.db carrying both
 a `sessions` row (the existing main-loop source) and a `session_model_usage`
 row (the new auxiliary-usage source this plan wires up for the first time).
 Proves the full slice end to end: one auxiliary row ships as its own
-`revenium meter completion --operation-type AUX`, records itself in
+`revenium meter completion --operation-type OTHER` (Phase 57 D-01/D-02;
+`AUX` was rejected server-side and is no longer sent), records itself in
 `revenium-aux.ledger`, and a second tick over the unchanged fixture is a
 no-op.
 
@@ -157,14 +158,14 @@ class _AuxMeteringTestCase(unittest.TestCase):
     def _find_aux_invocation(self, meter_invocations):
         aux = [
             argv_to_flags(inv) for inv in meter_invocations
-            if argv_to_flags(inv).get('--operation-type') == 'AUX'
+            if argv_to_flags(inv).get('--operation-type') == 'OTHER'
         ]
         return aux
 
     def _find_non_aux_invocation(self, meter_invocations):
         non_aux = [
             argv_to_flags(inv) for inv in meter_invocations
-            if argv_to_flags(inv).get('--operation-type') != 'AUX'
+            if argv_to_flags(inv).get('--operation-type') != 'OTHER'
         ]
         return non_aux
 
@@ -189,7 +190,7 @@ class TracerEndToEndTests(_AuxMeteringTestCase):
         aux_flags_list = self._find_aux_invocation(invocations)
         self.assertEqual(
             len(aux_flags_list), 1,
-            f'expected exactly 1 invocation carrying --operation-type AUX, '
+            f'expected exactly 1 invocation carrying --operation-type OTHER, '
             f'got {len(aux_flags_list)}: {invocations!r}',
         )
         aux_flags = aux_flags_list[0]
@@ -470,7 +471,7 @@ class AbsentTableArmTests(_AuxMeteringTestCase):
 
         aux_flags_list = [
             argv_to_flags(inv) for inv in meter_invocations
-            if argv_to_flags(inv).get('--operation-type') == 'AUX'
+            if argv_to_flags(inv).get('--operation-type') == 'OTHER'
         ]
         self.assertEqual(len(aux_flags_list), 0, 'an absent table must ship zero AUX invocations')
 

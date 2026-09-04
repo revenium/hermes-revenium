@@ -573,6 +573,44 @@ class SpoolDirResolutionParityTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+    def test_plugin_and_sidecar_agree_on_row_resolved_profile(self):
+        """Phase 59 (D-18, paths-for-session-regex-may-never-match):
+        extends this parity harness with the row-resolved path, in
+        addition to (not replacing) the namespaced-id cases above --
+        those now exercise the fail-open arm only, since resolution reads
+        `sessions.profile_name` from a real row rather than parsing the
+        id."""
+        import sqlite3
+
+        tmpdir = tempfile.mkdtemp(prefix='gsd-phase32-parity-row-')
+        snap, added, hh, sd, md = _setup_plugin_env(tmpdir)
+        try:
+            mod_name = 'phase32_parity_row_test'
+            _load_plugin_module(mod_name)
+            spool_sub = _api_event_spool_submodule(mod_name)
+            sidecar = self._load_sidecar()
+
+            profile_home = os.path.join(hh, 'profiles', 'coder')
+            os.makedirs(profile_home, exist_ok=True)
+
+            conn = sqlite3.connect(os.path.join(hh, 'state.db'))
+            conn.execute('CREATE TABLE sessions (id TEXT, profile_name TEXT)')
+            conn.execute(
+                'INSERT INTO sessions (id, profile_name) VALUES (?, ?)',
+                ('api-row-resolved-1', 'coder'),
+            )
+            conn.commit()
+            conn.close()
+
+            plugin_dir = str(spool_sub._spool_dir_for_session('api-row-resolved-1'))
+            sidecar_dir = sidecar.resolve_state_subdir('api-row-resolved-1', 'api-events')
+            expected = os.path.join(profile_home, 'state', 'revenium', 'api-events')
+            self.assertEqual(plugin_dir, expected)
+            self.assertEqual(sidecar_dir, expected)
+        finally:
+            _restore_plugin_env(snap, added)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()

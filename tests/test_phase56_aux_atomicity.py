@@ -7,7 +7,7 @@ concurrency -- exactly the weaker shape this repo has already rejected once
 for the sibling takeover race, see tests/test_ax14_takeover_race_window.py's
 own module docstring), these tests genuinely OPEN the window: racer A is
 BLOCKED inside report_auxiliary_usage's own critical section -- specifically
-at the `revenium meter completion --operation-type AUX` emit call, AFTER the
+at the `revenium meter completion --operation-type OTHER` emit call, AFTER the
 AUX_LOCK_FILE exclusion has already been acquired and the ledger baseline
 has already been read -- until racer B, contending for the SAME lock, has
 had a genuine chance to block on it. Only then is A released.
@@ -99,7 +99,7 @@ class _AuxAtomicityTestBase(unittest.TestCase):
     def _install_stall_wrapper(bin_dir, real_shim):
         """`revenium` wrapper that stalls if and only if AUX_STALL_GATE is
         set in its environment AND the call is the auxiliary emit
-        (`--operation-type AUX` present in argv) -- so a non-aux completion
+        (`--operation-type OTHER` present in argv) -- so a non-aux completion
         (the main loop's own row) and every other racer's call are
         untouched, and only the racer that carries AUX_STALL_GATE ever
         stalls. Delegates to the REAL shim afterward (by exec, so the same
@@ -112,7 +112,7 @@ class _AuxAtomicityTestBase(unittest.TestCase):
                 'prev=""\n'
                 'is_aux=0\n'
                 'for arg in "$@"; do\n'
-                '  if [[ "$prev" == "--operation-type" && "$arg" == "AUX" ]]; then\n'
+                '  if [[ "$prev" == "--operation-type" && "$arg" == "OTHER" ]]; then\n'
                 '    is_aux=1\n'
                 '  fi\n'
                 '  prev="$arg"\n'
@@ -233,7 +233,7 @@ class _AuxAtomicityTestBase(unittest.TestCase):
     def _find_aux_invocations(meter_invocations):
         return [
             argv_to_flags(inv) for inv in meter_invocations
-            if argv_to_flags(inv).get('--operation-type') == 'AUX'
+            if argv_to_flags(inv).get('--operation-type') == 'OTHER'
         ]
 
     def _run_race(self):
@@ -323,7 +323,7 @@ class AuxAtomicityRaceTests(_AuxAtomicityTestBase):
         b_aux = self._find_aux_invocations(result_b['meter_invocations'])
         self.assertEqual(
             len(a_aux) + len(b_aux), 1,
-            'expected exactly one --operation-type AUX invocation across '
+            'expected exactly one --operation-type OTHER invocation across '
             f'both racers\' meter logs, got A={a_aux} B={b_aux}'
         )
 

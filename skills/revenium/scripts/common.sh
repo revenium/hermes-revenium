@@ -326,6 +326,22 @@ AUX_LOCK_FILE="${REVENIUM_AUX_LOCK_FILE:-${STATE_DIR}/aux.lock}"
 # delay against an unchanged ledger, never a lost or duplicated bill.
 AUX_LOCK_TIMEOUT_SECONDS="${REVENIUM_AUX_LOCK_TIMEOUT_SECONDS:-30}"
 
+# Phase 57 (D-01/D-02): the operationType value 2.20.0 accepts for every
+# auxiliary-usage row this reporter ships. `AUX` (the value used since
+# Phase 55) is absent from the server's operationType enum in all 12
+# metric-resource schemas of the vendored 2.20.0-SNAPSHOT OAS
+# (.planning/research/revenium-oas-v2.20.0-SNAPSHOT.json) and was rejected
+# HTTP 400 on every live call (docs/comprehensive-roi-proof.md:191).
+# `OTHER` is present in that same enum and is the value the live rejection
+# message names as accepted. Deliberately uniform across all six
+# aux-taxonomy labels (not a per-label map) -- see D-01's own rationale in
+# 57-CONTEXT.md for why, and its costly-reversibility note before changing
+# this value again: a later switch would move already-ingested rows'
+# operationType in the tenant, splitting historical aux data across two
+# values with no way to restate the earlier rows. A value, not a path --
+# deliberately not added to the eager mkdir -p below.
+AUX_OPERATION_TYPE="${REVENIUM_AUX_OPERATION_TYPE:-OTHER}"
+
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}" "${JOB_ASSESSMENTS_DIR}"
 
 ensure_path() {

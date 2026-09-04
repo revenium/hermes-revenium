@@ -118,7 +118,22 @@ REAL_PYTHON3 = sys.executable
 # It does not scale with session count or row count (measured: the disabled
 # arm, which returns before the lock is ever attempted, is unchanged at 14),
 # so quick-260814-e7c's per-session hot-path guarantee is untouched.
-NO_MARKER_SPAWN_CEILING = 17
+#
+# Phase 59 (59-03) raises it to 18: _supplement_aux_session_ctx opens the
+# auxiliary pass's own candidate-sid discovery query -- a FOURTH once-per-tick
+# python3 heredoc, run before the table's existence is known, so it lands on
+# this table-absent fixture exactly like the three above it. It is the fix for
+# the aux pass silently dropping zero-token sessions (12 of 142 identities
+# measured live), which the main loop's `input_tokens > 0 OR output_tokens > 0`
+# filter had made invisible.
+#
+# It does not scale with session count: the query is a single
+# `SELECT DISTINCT session_id`, and the per-sid ownership loop that follows it
+# spawns only for sids the main loop did NOT already cache -- i.e. only the
+# genuinely zero-token ones -- and does not run at all on this fixture, where
+# the absent table yields no candidates and the function returns early.
+# quick-260814-e7c's per-session hot-path guarantee remains untouched.
+NO_MARKER_SPAWN_CEILING = 18
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):
@@ -512,7 +527,14 @@ class GuardPermanenceTests(unittest.TestCase):
         Phase 38 (ROI-10/T-38-03) legitimately adds: the post-loop outcome
         stage re-reads a session's marker for its assessment, using the same
         helper the in-loop path already uses, so a multiplexed gateway's
-        per-profile marker home is resolved consistently on both paths."""
+        per-profile marker home is resolved consistently on both paths.
+
+        Phase 59-03 legitimately adds a fourth: _supplement_aux_session_ctx
+        applies the SAME ownership rule to the auxiliary sids the main loop's
+        token filter never iterated, so a multiplexed host cannot cache -- and
+        therefore double-ship -- a session another profile owns (T-55-06).
+        Reusing this helper rather than reimplementing the rule is what keeps
+        the two paths from diverging."""
         src = HERMES_REPORT.read_text(encoding='utf-8')
         self.assertIn('root_markers_dir="${session_markers_dir}"', src)
         # Count INVOCATIONS, not bare mentions: this file's conventions
@@ -522,9 +544,10 @@ class GuardPermanenceTests(unittest.TestCase):
         # invariant this test's own docstring states, and still fails if a
         # call site is added or removed.
         self.assertEqual(
-            src.count('$(resolve_markers_dir '), 3,
-            'exactly three resolve_markers_dir call sites must remain '
-            '(T-28-34\'s original two, plus Phase 38\'s outcome-stage read)',
+            src.count('$(resolve_markers_dir '), 4,
+            'exactly four resolve_markers_dir call sites must remain '
+            '(T-28-34\'s original two, Phase 38\'s outcome-stage read, and '
+            'Phase 59-03\'s auxiliary ownership gate)',
         )
 
 

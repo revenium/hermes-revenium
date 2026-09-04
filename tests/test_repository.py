@@ -312,6 +312,30 @@ class RepositoryTests(unittest.TestCase):
             # unpinned copy can vanish the way the v1.3 and v1.4 closeouts
             # did.
             ROOT / 'docs' / 'comprehensive-roi-proof.md',
+            # Phase 57 Plan 02 (SSE-02) — the tracked, field-by-field audit of
+            # every request this skill emits against the 2.20.0-SNAPSHOT
+            # platform API spec. `.planning/` and `docs/internal/` are both
+            # gitignored, so a tracked docs/ file plus this pin is the only
+            # durable home; an unpinned record in this repo has already been
+            # lost twice (the v1.3/v1.4 closeouts, auxiliary-usage-sizing.md).
+            ROOT / 'docs' / 'wire-contract-audit-2.20.0.md',
+            # Phase 58 Plan 01 (SSE-03) — the decision mapping every local
+            # evidence_class onto the two server `provenance` vocabularies,
+            # or explicitly unmappable with the reason. `.planning/` and
+            # `docs/internal/` are both gitignored, so a tracked docs/ file
+            # plus this pin is the only durable home; an unpinned record in
+            # this repo has already been lost twice (the v1.3/v1.4
+            # closeouts, auxiliary-usage-sizing.md).
+            ROOT / 'docs' / 'provenance-mapping.md',
+            # Phase 60 Plan 01 (SSE-06) — the tracked, dated ask to the
+            # Revenium CLI team for the five verbs/flags `1.5.0` doesn't
+            # expose, why the CLI-only boundary makes each blocking, and
+            # what this project does the day each ships. `.planning/` and
+            # `docs/internal/` are both gitignored, so a tracked docs/ file
+            # plus this pin is the only durable home; an unpinned record in
+            # this repo has already been lost twice (the v1.3/v1.4
+            # closeouts, auxiliary-usage-sizing.md).
+            ROOT / 'docs' / 'cli-verb-ask.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -403,6 +427,12 @@ class RepositoryTests(unittest.TestCase):
             # fixture that prices from an operator's approved rate card
             # instead of hours times rate.
             SKILL / 'plugins' / 'revenium-classifier' / 'valuation.py',
+            # Phase 59 Plan 01 (SSE-04, D-01) — the valuation SOURCE
+            # boundary: the fetch layer valuation.py's own contract
+            # structurally cannot host (synchronous, plain-data-only), with
+            # a shipped `baselines`-shaped file source that a stand-in
+            # valuation registrant prices from.
+            SKILL / 'plugins' / 'revenium-classifier' / 'valuation_sources.py',
             # Phase 45 Plan 06 (EGV-01) — the sixth and last boundary: evidence
             # resolution and reportability, with a shipped confirmation-workflow
             # fixture and the resolve_declared_class allow-list rule that
@@ -535,6 +565,73 @@ class RepositoryTests(unittest.TestCase):
             # not silently repeat that loss.
             ROOT / 'tests' / 'test_phase56_aux_atomicity.py',
             ROOT / 'tests' / 'mutation_verify_aux_atomicity.py',
+            # Phase 57 Plan 01 (D-04/D-06) — the OAS-provenance extract
+            # generator plus its generated output, and the two-witness
+            # membership test that depends on it. The extractor's OWN
+            # input (the vendored OAS) is gitignored, so only the
+            # committed output gives a fresh clone full test enforcement
+            # -- an unpinned artifact in this repo has already been lost
+            # twice (docs/internal/auxiliary-usage-sizing.md, the v1.3/
+            # v1.4 closeouts).
+            ROOT / 'tests' / 'extract_operation_type_enum.py',
+            ROOT / 'tests' / 'fixtures' / 'spec' / 'operation-type-enum.json',
+            ROOT / 'tests' / 'test_phase57_operationtype_spec_membership.py',
+            # Phase 57 Plan 02 (SSE-02) — the coverage-shape test for the
+            # wire-contract audit doc above. Same pin rationale: an unpinned
+            # test module for an unpinned doc would double the loss surface.
+            ROOT / 'tests' / 'test_phase57_wire_audit_doc.py',
+            # Phase 58 Plan 01 (SSE-03) — the coverage-shape test for
+            # docs/provenance-mapping.md above. Same pin rationale: an
+            # unpinned test module for an unpinned doc would double the
+            # loss surface.
+            ROOT / 'tests' / 'test_phase58_provenance_mapping_doc.py',
+            # Phase 59 Plan 01 (SSE-04) — the config-only source-swap
+            # tracer: a fetched value prices a job end to end through the
+            # new valuation_sources.py seam, with the four fetch-failure
+            # shapes all landing back on the built-in derivation and its
+            # own evidence class (D-03).
+            ROOT / 'tests' / 'test_phase59_valuation_seam.py',
+            # Phase 59 Plan 02 (SSE-05) — the correction path's own
+            # positive-probe `jobs outcome-update` argv-shape golden,
+            # additive to (not part of) the jobs-outcome-update.golden.json
+            # immutability contract, which stays byte-identical for the
+            # negative-probe (feature-off / today's-CLI) arm.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome-update-versioned.golden.json',
+            ROOT / 'tests' / 'test_phase59_ro_uri_encoding.py',
+            ROOT / 'tests' / 'test_phase59_row_authority.py',
+            # Phase 59 Plan 02 (SSE-05) — the optimistic-concurrency proof:
+            # the independent --expected-entity-version probe, the guarded
+            # `jobs get` read, the conditional flag append, and the
+            # distinct 409 message, all three arms proven against a CLI
+            # double driving the real correct-assessment.sh.
+            ROOT / 'tests' / 'test_phase59_optimistic_concurrency.py',
+            # Phase 59 Plan 03 (D-17, folded todo
+            # aux-pass-silently-drops-zero-token-sessions) — proves the aux
+            # pass resolves its own session context for sessions with no
+            # main-loop tokens, that the main loop's token filter is
+            # unwidened, that no session is shipped twice across ticks or
+            # profiles, and that a residual drop is visible in the log.
+            ROOT / 'tests' / 'test_phase59_aux_zero_token.py',
+            # Phase 59 Plan 04 (D-18/D-18a/D-19, folded todo
+            # paths-for-session-regex-may-never-match) — proves per-session
+            # profile resolution now reads sessions.profile_name from a
+            # real session ROW (not from parsing the session id), that
+            # classifier.py and resolve-markers-dir.py agree at every row,
+            # backward compatibility with a profile_name-less sessions
+            # table, and both sides of the revenue-attribution fence flip.
+            ROOT / 'tests' / 'test_phase59_profile_resolution.py',
+            # Phase 60 Plan 01 (SSE-06) — the coverage-shape test for
+            # docs/cli-verb-ask.md above. Same pin rationale: an unpinned
+            # test module for an unpinned doc would double the loss
+            # surface.
+            ROOT / 'tests' / 'test_phase60_cli_verb_ask_doc.py',
+            # Phase 60 Plan 02 (SSE-07) — the closing proof: the D-03
+            # byte-identity proof (with its negative control) for the one
+            # feature-off shape with no switch, the golden-fixture
+            # consumer-coverage guard closing criterion 3's vacuity hole,
+            # and the shape-only guard over docs/upgrading.md's closing
+            # section. Same pin rationale as its siblings above.
+            ROOT / 'tests' / 'test_phase60_feature_off_closeout.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
@@ -2527,6 +2624,15 @@ exit 0
                 'install that never meters an auxiliary row must create no '
                 'auxiliary lock state at all',
             )
+        # Phase 57 (D-01/D-02): the spec-sourced operationType value every
+        # auxiliary-usage row ships. A value, not a path -- declared with
+        # its evidence, resolved via a single named constant rather than a
+        # call-site literal.
+        self.assertIn('AUX_OPERATION_TYPE=', text)
+        self.assertRegex(
+            text,
+            r'AUX_OPERATION_TYPE="\$\{REVENIUM_AUX_OPERATION_TYPE:-OTHER\}"',
+        )
 
     def test_taxonomy_file_schema(self):
         """Seed task-taxonomy.json has correct schema and all labels match the regex."""

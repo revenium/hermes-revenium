@@ -1,14 +1,16 @@
 """Phase 55 Plan 03 (D-02): argv-shape golden for the auxiliary-usage
-`revenium meter completion --operation-type AUX` call shipped by
+`revenium meter completion --operation-type OTHER` call shipped by
 `report_auxiliary_usage` in skills/revenium/scripts/hermes-report.sh.
 
 Sibling to tests/test_compat_meter_completion_event.py (COMPAT-02), in the
 same additive-not-immutable standing: a NEW golden fixture and a NEW test
 class, leaving the four v1.x fixtures and their runners byte-for-byte
 untouched. This fixture pins the auxiliary path's own deliberate
-differences from the legacy shape: `--operation-type AUX`, the `aux_`
-prefixed task type, the `aux-` transaction-id prefix, and the required
-absence of `--reasoning-tokens`.
+differences from the legacy shape: `--operation-type OTHER` (Phase 57
+D-01/D-02/D-07 -- was `AUX`, rejected server-side; see
+tests/test_phase57_operationtype_spec_membership.py for the spec-sourced
+proof), the `aux_` prefixed task type, the `aux-` transaction-id prefix,
+and the required absence of `--reasoning-tokens`.
 
 Source-of-truth for the argv shape: the `report_auxiliary_usage` function's
 `cmd=(...)` array construction in
@@ -104,7 +106,7 @@ class TestCompatMeterCompletionAux(unittest.TestCase):
 
             aux_invocations = [
                 inv for inv in meter_invocations
-                if argv_to_flags(inv).get('--operation-type') == 'AUX'
+                if argv_to_flags(inv).get('--operation-type') == 'OTHER'
             ]
             self.assertEqual(
                 len(aux_invocations), 1,

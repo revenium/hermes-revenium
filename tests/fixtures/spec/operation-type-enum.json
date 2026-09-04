@@ -1,0 +1,41 @@
+{
+  "enum": "operationType",
+  "values": [
+    "CHAT",
+    "GENERATE",
+    "EMBED",
+    "CLASSIFY",
+    "SUMMARIZE",
+    "TRANSLATE",
+    "OTHER",
+    "TOOL_CALL",
+    "RERANK",
+    "SEARCH",
+    "MODERATION",
+    "VISION",
+    "TRANSFORM",
+    "GUARDRAIL",
+    "AUDIO",
+    "VIDEO",
+    "IMAGE"
+  ],
+  "source_spec_file": "revenium-oas-v2.20.0-SNAPSHOT.json",
+  "source_spec_version": "2.20.0-SNAPSHOT",
+  "openapi": "3.1.0",
+  "primary_pointer": "#/components/schemas/AICompletionMetricResource/properties/operationType/enum",
+  "corroborating_pointers": [
+    "#/components/schemas/AIAudioMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/AIImageMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/AIMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/AIVideoMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/EntityModelAIAudioMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/EntityModelAICompletionMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/EntityModelAIImageMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/EntityModelAIMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/EntityModelAIVideoMetricResource_Read/properties/operationType/enum",
+    "#/components/schemas/OperationTypeCostBreakdown/properties/operationType/enum",
+    "#/components/schemas/SquadTimelineEvent_Read/properties/operationType/enum"
+  ],
+  "extracted_by": "tests/extract_operation_type_enum.py",
+  "extracted_at": "2026-09-03T18:58:48Z"
+}

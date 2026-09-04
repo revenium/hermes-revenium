@@ -880,6 +880,196 @@ _aux_warn_once() {
   fi
 }
 
+# Phase 59 Plan 03 (D-17, folded todo aux-pass-silently-drops-zero-token-
+# sessions): the main session loop only appends a session's context into the
+# accumulated cache while iterating `sessions WHERE (input_tokens > 0 OR
+# output_tokens > 0)` -- a session whose ONLY llm activity was an auxiliary
+# call (no billable main-loop completion) is never iterated there, never
+# gets a cache entry, and was silently skipped by report_auxiliary_usage's
+# own `if sid not in ctx: continue` backstop. Measured on the live host at
+# 12 of 142 identities (~8%). That token filter is load-bearing for the
+# delta arithmetic and the ledger's idempotency contract and is NEVER
+# widened to fix this -- instead, this function resolves session context
+# for the sids the auxiliary pass actually has session_model_usage rows for,
+# independently of which sessions the main loop happened to iterate.
+#
+# Takes the accumulated context string (the same six-field-per-line format
+# the main loop's own cache append writes) and prints an augmented version
+# of it on stdout, one additional line per recovered session, followed by a
+# trailing "SUPPLEMENT_SUMMARY|<recovered>|<not_owned>|<unresolvable>" line
+# the caller strips back out and parses into its own counters -- the only
+# way counts survive this function running inside its caller's `$(...)`
+# subshell (a subshell's variable writes never propagate back to the
+# parent shell; the printed line is the sole channel out).
+#
+# On any internal failure this prints the untouched input string (plus a
+# zero-valued summary line) — this function must never be able to cost the
+# auxiliary pass the context it already had.
+_supplement_aux_session_ctx() {
+  local existing_ctx="$1"
+  local recovered=0 not_owned=0 unresolvable=0
+
+  # Step 1: the sids that need supplementing -- session_model_usage sids
+  # with a non-empty task, minus whatever the main loop already cached. The
+  # SAME `COALESCE(task, '') != ''` filter the emit query uses keeps the
+  # empty-task mirror bucket (Phase 31: its summed tokens/cost equal the
+  # sessions table's own totals to the cent) out of this path too.
+  # Read-only URI mode (file:...?mode=ro), matching classifier.py's own
+  # idiom, so this never contends with the Hermes writer's WAL lock.
+  local candidate_sids
+  candidate_sids=$(
+    STATE_DB="${STATE_DB}" \
+    EXISTING_CTX="${existing_ctx}" \
+    python3 - <<'PY' 2>/dev/null
+import os
+import sqlite3
+
+state_db = os.environ.get('STATE_DB', '')
+existing_ctx = os.environ.get('EXISTING_CTX', '')
+
+cached_sids = set()
+for line in existing_ctx.split('\n'):
+    if not line:
+        continue
+    parts = line.split('|')
+    if parts and parts[0]:
+        cached_sids.add(parts[0])
+
+conn = None
+try:
+    conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT session_id FROM session_model_usage "
+        "WHERE COALESCE(task, '') != ''"
+    )
+    for (sid,) in cur.fetchall():
+        if sid and sid not in cached_sids:
+            print(sid)
+except Exception:
+    pass
+finally:
+    if conn is not None:
+        conn.close()
+PY
+  )
+
+  if [[ -z "${candidate_sids}" ]]; then
+    printf '%s' "${existing_ctx}"
+    printf 'SUPPLEMENT_SUMMARY|0|0|0\n'
+    return 0
+  fi
+
+  # Step 2: the ownership gate, per sid, in bash -- the SAME primitive and
+  # the SAME rule the main loop's own cache append uses (T-55-06). A
+  # multiplexed host runs one tick per profile against a shared state.db
+  # with no profile-scoping WHERE clause anywhere, and AUX_LEDGER_FILE has
+  # no cross-profile coordination of its own; caching a session another
+  # profile owns here would double-ship it. Not-owned is the CORRECT
+  # outcome for that session (the owning profile's own tick reports it),
+  # not a drop -- it is therefore counted, never warned about.
+  local owned_sids="" sid markers_dir
+  while IFS= read -r sid; do
+    [[ -z "${sid}" ]] && continue
+    markers_dir="$(resolve_markers_dir "${sid}")"
+    [[ -z "${markers_dir}" ]] && markers_dir="${MARKERS_DIR}"
+    if [[ "${markers_dir}" != "${MARKERS_DIR}" ]]; then
+      not_owned=$((not_owned + 1))
+      continue
+    fi
+    owned_sids+="${sid}"$'\n'
+  done <<< "${candidate_sids}"
+
+  local augmented="${existing_ctx}"
+
+  if [[ -n "${owned_sids}" ]]; then
+    # Step 3: look up the surviving sids' own `sessions` rows. Bound `?`
+    # parameters only -- these sids came out of the database and cross back
+    # into a query, so they travel as parameters, never interpolated into
+    # the statement text. No token filter here: the whole point is the
+    # sessions that filter excludes.
+    local session_rows
+    session_rows=$(
+      STATE_DB="${STATE_DB}" \
+      OWNED_SIDS="${owned_sids}" \
+      python3 - <<'PY' 2>/dev/null
+import os
+import sqlite3
+
+state_db = os.environ.get('STATE_DB', '')
+owned_sids = [s for s in os.environ.get('OWNED_SIDS', '').split('\n') if s]
+
+if not owned_sids:
+    raise SystemExit(0)
+
+conn = None
+try:
+    conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
+    cur = conn.cursor()
+    placeholders = ','.join('?' for _ in owned_sids)
+    cur.execute(
+        f"SELECT id, source FROM sessions WHERE id IN ({placeholders})",
+        owned_sids,
+    )
+    for row_sid, source in cur.fetchall():
+        s_source = source if isinstance(source, str) else ''
+        for bad in ('|', '\n', '\r'):
+            s_source = s_source.replace(bad, '_')
+        print(f"{row_sid}|{s_source}")
+except Exception:
+    pass
+finally:
+    if conn is not None:
+        conn.close()
+PY
+    )
+
+    # Step 4: build each supplementary cache line, SAME six-field format the
+    # main loop's own append site writes -- sid, root_sid, root_agent_name,
+    # root_trace_type, aux_job_id, source -- with the three middle fields
+    # left EMPTY. Empty is correct, not a gap: the emit site already falls
+    # back --agent to REVENIUM_AGENT_NAME, --trace-type to "uncategorized",
+    # and omits --agentic-job-id entirely when the job field is empty.
+    # Re-deriving agent name, trace type and job id here would mean
+    # duplicating ~150 lines of the main loop's own resolution for a
+    # session that has no main-loop work to attribute them from.
+    local found_sids="" row_sid row_source root_sid s_sid s_root_sid
+    if [[ -n "${session_rows}" ]]; then
+      while IFS='|' read -r row_sid row_source; do
+        [[ -z "${row_sid}" ]] && continue
+        found_sids+="${row_sid}"$'\n'
+        root_sid="$(get_root_session_id "${row_sid}")"
+        [[ -z "${root_sid}" ]] && root_sid="${row_sid}"
+        s_sid="${row_sid//[|$'\n'$'\r']/_}"
+        s_root_sid="${root_sid//[|$'\n'$'\r']/_}"
+        augmented+="${s_sid}|${s_root_sid}||||${row_source}"$'\n'
+        recovered=$((recovered + 1))
+      done <<< "${session_rows}"
+    fi
+
+    # Step 5 (Phase 59 Plan 03 Task 2, D-17): a sid that survived the
+    # ownership gate but has no `sessions` row at all is unresolvable --
+    # this process owns it, but there is nothing to attribute its auxiliary
+    # spend to. Counted AND warned about once per session, through the
+    # existing once-per-key warn gate below: the key is a fixed reason word
+    # plus the session id, both stable across ticks (never a per-tick value
+    # -- the unknown-<epoch> defeat this repo has already paid for once).
+    # This is the residual drop the folded todo says must stop being
+    # invisible.
+    while IFS= read -r sid; do
+      [[ -z "${sid}" ]] && continue
+      if ! grep -qxF "${sid}" <<< "${found_sids}"; then
+        unresolvable=$((unresolvable + 1))
+        _aux_warn_once "ctx-unresolvable-${sid}" \
+          "auxiliary usage rows exist for session=${sid} but no sessions row could be found to attribute them to -- its auxiliary spend was not reported this tick"
+      fi
+    done <<< "${owned_sids}"
+  fi
+
+  printf '%s' "${augmented}"
+  printf 'SUPPLEMENT_SUMMARY|%d|%d|%d\n' "${recovered}" "${not_owned}" "${unresolvable}"
+}
+
 # Phase 55 (D-06/D-07/D-13): the post-loop auxiliary-usage pass. Runs ONE
 # Python heredoc that reads session_model_usage (a table this file otherwise
 # never references), diffs it against AUX_LEDGER_FILE (common.sh), and prints one
@@ -903,6 +1093,10 @@ _aux_warn_once() {
 # performed once per session).
 report_auxiliary_usage() {
   local session_ctx="$1"
+  # Phase 59 Plan 03 (D-17): declared here, at the top, so `set -u` is
+  # satisfied on every path out of this function, including the disabled
+  # and lock-timeout early returns below where they are never assigned.
+  local _aux_recovered_count=0 _aux_not_owned_count=0 _aux_unresolvable_count=0
 
   if [[ "${AUX_METERING_ENABLED}" != "true" ]]; then
     return 0
@@ -969,6 +1163,38 @@ PY
   if [[ "${_aux_lock_status}" -ne 0 ]]; then
     warn "auxiliary usage metering deferred this tick: could not acquire AUX_LOCK_FILE within ${AUX_LOCK_TIMEOUT_SECONDS}s (a concurrent hermes-report.sh invocation is likely holding it) -- next tick retries from an unchanged ledger"
   else
+  # Phase 59 Plan 03 (D-17): resolve context for auxiliary-only sids
+  # (session_model_usage rows the main loop's token filter never iterated)
+  # BEFORE the emit query below consumes AUX_SESSION_CTX. Deliberately
+  # inside the lock's success branch: the supplement is read-only, but
+  # running it under the same exclusion as the emit means a concurrent
+  # invocation cannot recover the same session between this one's
+  # supplement and its ship.
+  #
+  # The summary trailer line is the only channel the three counters can
+  # cross the `$(...)` subshell boundary through -- see this function's own
+  # header comment above -- so it is parsed out here and stripped before
+  # session_ctx reaches the emit query below.
+  local _supplement_raw _supplement_summary
+  _supplement_raw="$(_supplement_aux_session_ctx "${session_ctx}")"
+  _supplement_summary="$(grep '^SUPPLEMENT_SUMMARY|' <<< "${_supplement_raw}" | tail -1)"
+  if [[ -n "${_supplement_summary}" ]]; then
+    local _supplement_label
+    IFS='|' read -r _supplement_label _aux_recovered_count _aux_not_owned_count _aux_unresolvable_count \
+      <<< "${_supplement_summary}"
+  fi
+  session_ctx="$(grep -v '^SUPPLEMENT_SUMMARY|' <<< "${_supplement_raw}")"
+
+  # Phase 59 Plan 03 Task 2 (D-17): one aggregate line per tick, gated on at
+  # least one non-zero count so an ordinary install's log stays byte-
+  # unchanged. This is the line the folded todo says was missing --
+  # auxiliary-only recovery was invisible to diagnose.sh and every other
+  # health signal, so it must be present when there is something to say and
+  # silent otherwise.
+  if [[ "${_aux_recovered_count}" != "0" || "${_aux_not_owned_count}" != "0" || "${_aux_unresolvable_count}" != "0" ]]; then
+    info "Aux session context supplement: recovered=${_aux_recovered_count} not_owned_by_this_profile=${_aux_not_owned_count} unresolvable=${_aux_unresolvable_count}"
+  fi
+
   aux_query_output=$(
     STATE_DB="${STATE_DB}" \
     AUX_LEDGER_FILE="${AUX_LEDGER_FILE}" \
@@ -1243,7 +1469,9 @@ PY
       --is-streamed
       --quiet
       --task-type "${label}"
-      --operation-type "AUX"
+      # D-01/D-02: spec-sourced constant, declared with its evidence in
+      # common.sh -- see AUX_OPERATION_TYPE there for the full rationale.
+      --operation-type "${AUX_OPERATION_TYPE}"
     )
 
     # Main path's own flag order: --model-source ships the row's RAW
@@ -1327,6 +1555,14 @@ main() {
 
   if [[ -z "${sessions}" ]]; then
     info "No sessions with token usage found."
+    # Phase 59 Plan 03 (D-17): a host where every session's main-loop tokens
+    # are zero must not also skip the auxiliary pass -- an auxiliary-only
+    # session ("sessions" empty here) is exactly the fixture Task 1's own
+    # behaviour spec describes. The accumulated cache is empty (the main
+    # loop below never ran), but report_auxiliary_usage's own supplementary
+    # resolution recovers session context independently of that cache, so
+    # this call is not a no-op even with an empty string argument.
+    report_auxiliary_usage ""
     return
   fi
 

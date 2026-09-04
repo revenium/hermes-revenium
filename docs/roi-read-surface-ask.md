@@ -4,7 +4,7 @@
 
 This repo-only page records a standing request for the owners of `revenium jobs
 roi`'s output shape. It is not part of the skill bundle and is unavailable on a
-tap-installed host.
+tap-installed host. A companion page, [`docs/cli-verb-ask.md`](cli-verb-ask.md), requests verbs and flags that do not exist at all — this page requests fields on a display verb that already does.
 
 ## What is true today
 
