@@ -319,6 +319,14 @@ class RepositoryTests(unittest.TestCase):
             # durable home; an unpinned record in this repo has already been
             # lost twice (the v1.3/v1.4 closeouts, auxiliary-usage-sizing.md).
             ROOT / 'docs' / 'wire-contract-audit-2.20.0.md',
+            # Phase 58 Plan 01 (SSE-03) — the decision mapping every local
+            # evidence_class onto the two server `provenance` vocabularies,
+            # or explicitly unmappable with the reason. `.planning/` and
+            # `docs/internal/` are both gitignored, so a tracked docs/ file
+            # plus this pin is the only durable home; an unpinned record in
+            # this repo has already been lost twice (the v1.3/v1.4
+            # closeouts, auxiliary-usage-sizing.md).
+            ROOT / 'docs' / 'provenance-mapping.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -557,6 +565,11 @@ class RepositoryTests(unittest.TestCase):
             # wire-contract audit doc above. Same pin rationale: an unpinned
             # test module for an unpinned doc would double the loss surface.
             ROOT / 'tests' / 'test_phase57_wire_audit_doc.py',
+            # Phase 58 Plan 01 (SSE-03) — the coverage-shape test for
+            # docs/provenance-mapping.md above. Same pin rationale: an
+            # unpinned test module for an unpinned doc would double the
+            # loss surface.
+            ROOT / 'tests' / 'test_phase58_provenance_mapping_doc.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
