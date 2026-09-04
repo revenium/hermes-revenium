@@ -48,6 +48,7 @@ from tests._compat_helpers import (
     build_state_db,
     load_golden,
     run_script,
+    FIXTURES_DIR,
     SCRIPTS_DIR,
 )
 
@@ -262,6 +263,70 @@ class ProfileResolutionCarveOutProofTests(unittest.TestCase):
         finally:
             shutil.rmtree(pos_tmpdir, ignore_errors=True)
             shutil.rmtree(neg_tmpdir, ignore_errors=True)
+
+
+class GoldenFixtureConsumerCoverageTests(unittest.TestCase):
+    """Criterion 3's vacuity hole: "every golden argv fixture still passes"
+    is trivially true of a fixture nothing loads. All eleven fixtures under
+    tests/fixtures/compat/ had at least one consumer when this guard was
+    written (2026-09) -- its value is for the NEXT fixture added without
+    one, not for a defect present today.
+    """
+
+    def test_every_golden_fixture_is_named_by_at_least_one_test_module(self):
+        golden_files = sorted(p.name for p in FIXTURES_DIR.glob('*.golden.json'))
+        self.assertTrue(golden_files, f'no golden fixtures found under {FIXTURES_DIR}')
+
+        test_dir = ROOT / 'tests'
+        sources = [
+            p.read_text(errors='ignore')
+            for p in test_dir.glob('test_*.py')
+        ]
+
+        orphans = [
+            name for name in golden_files
+            if not any(name in text for text in sources)
+        ]
+
+        self.assertEqual(
+            orphans, [],
+            f'orphaned golden fixture(s) named by no test module: {orphans}. '
+            '"every golden argv fixture still passes" is trivially true of a '
+            'fixture nothing loads -- an orphan quietly weakens criterion 3 '
+            'rather than breaking it.'
+        )
+
+    def test_versioned_and_feature_off_pair_distinguished_structurally(self):
+        """The feature-off golden and its positive-probe sibling are
+        distinguished by STRUCTURE (which flags are in exact_match_fields),
+        not by reading either fixture's prose note. Take the distinguishing
+        flag's spelling from the versioned fixture's own fields rather than
+        hardcoding it a third time -- it already lives in
+        correct-assessment.sh and in that fixture.
+        """
+        versioned = load_golden('jobs-outcome-update-versioned.golden.json')
+        feature_off = load_golden('jobs-outcome-update.golden.json')
+
+        distinguishing_flags = [
+            field for field in versioned['exact_match_fields']
+            if field.startswith('--') and field not in feature_off['exact_match_fields']
+        ]
+        self.assertEqual(
+            len(distinguishing_flags), 1,
+            f'expected exactly one flag present in the versioned fixture and '
+            f'absent from the feature-off one, found {distinguishing_flags}'
+        )
+        version_flag = distinguishing_flags[0]
+
+        self.assertIn(version_flag, versioned['exact_match_fields'])
+        self.assertNotIn(version_flag, feature_off['exact_match_fields'])
+
+        # Both fixtures carry a note explaining themselves -- assert
+        # existence only. Asserting anything about the note's WORDING would
+        # let a re-labelling of the prose quietly satisfy this guard without
+        # the structural distinction above actually holding.
+        self.assertTrue(versioned.get('__note'), 'versioned fixture missing __note')
+        self.assertTrue(feature_off.get('__note'), 'feature-off fixture missing __note')
 
 
 if __name__ == '__main__':
