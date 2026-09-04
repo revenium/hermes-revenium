@@ -164,6 +164,36 @@ def _tokens_in_cell(cell, vocab):
     return found
 
 
+def _bolded_entries(section_text):
+    """Return each blank-line-separated paragraph in section_text that
+    opens with a bolded lead-in phrase (`**...**`), with wrapped lines
+    joined into one string per paragraph. This is the shape
+    `## Boundary cases` and `docs/evidence-class-precedence.md`'s own
+    Boundary cases section both use: bolded lead-in followed by prose, no
+    sub-headings -- so "one entry" means "one such paragraph."
+    """
+    entries = []
+    for paragraph in section_text.split('\n\n'):
+        joined = ' '.join(line.strip() for line in paragraph.strip().splitlines())
+        if joined.startswith('**'):
+            entries.append(joined)
+    return entries
+
+
+# Plan 58-03 / D-04: the two-member disposition vocabulary `## Falsification
+# conditions`' lead-in defines and every `### Falsifier N` subsection reuses
+# verbatim. Held as constants, not re-typed per assertion, so a later reword
+# of either sentence is a deliberate edit in two places (the doc and this
+# test) rather than a silent drift between them.
+_DISPOSITION_FATAL = (
+    'Disposition: Fatal to this entry — its premise is gone, so the '
+    'row must be re-decided rather than amended.'
+)
+_DISPOSITION_REVISE = (
+    'Disposition: Revise before shipping — not fatal to the entry.'
+)
+
+
 class ProvenanceMappingCoverageShapeTests(unittest.TestCase):
     def setUp(self):
         self.text = DOC.read_text(encoding='utf-8')
@@ -361,6 +391,185 @@ class ProvenanceMappingCoverageShapeTests(unittest.TestCase):
                 f'marker -- this is the positive control keeping the '
                 f'assertion above non-vacuous',
             )
+
+    # -- Plan 58-03: the D-05 gate, the falsifier dispositions, the empty
+    # edge, and the named-not-mapped section -------------------------------
+
+    def test_hard_case_cites_the_gate_and_does_not_enumerate_it(self):
+        """The D-05 no-restatement guard. `## The hard case` must point at
+        Phase 53's reportability gate by file and line rather than copy its
+        membership into prose. The expected member set is loaded off the
+        SAME classifier module the label set already comes from -- never a
+        literal -- so this guard cannot itself drift from the code rule it
+        protects, the same D-15 discipline one level over.
+
+        The threshold is "fewer than three distinct members mentioned",
+        not zero: the hard case's own rejected-SELF_REPORTED argument
+        legitimately names CUSTOMER_CONFIGURED once, as the counter-example
+        where a real reporter exists ("the same reading that makes
+        SELF_REPORTED the correct value for CUSTOMER_CONFIGURED in Table
+        B"). One incidental mention is not a restatement; enumerating the
+        gate's membership would be. Note MODEL_ESTIMATED_DEMO is
+        deliberately NOT a member of _REPORTABLE_EVIDENCE_CLASSES -- Phase
+        53's gate refuses it -- so the section's own heading, which names
+        the label, can never itself trip this assertion.
+        """
+        hard_case = _section(self.text, 'The hard case', level='## ')
+        self.assertRegex(
+            hard_case, r'classifier\.py:\d+',
+            'the hard-case section must cite classifier.py by file and '
+            'line rather than restate the reportability gate in prose '
+            '(D-05)',
+        )
+        gate_members = self.classifier._REPORTABLE_EVIDENCE_CLASSES
+        mentioned = {
+            member for member in gate_members
+            if re.search(r'\b' + re.escape(member) + r'\b', hard_case)
+        }
+        self.assertLess(
+            len(mentioned), 3,
+            f'the hard-case section mentions {len(mentioned)} distinct '
+            f'gate member(s) ({sorted(mentioned)}) -- three or more reads '
+            f'as enumerating the gate\'s membership rather than citing it '
+            f'by file and line (D-05)',
+        )
+
+    def test_every_falsifier_states_one_disposition(self):
+        """Each `### Falsifier N` subsection under `## Falsification
+        conditions` states exactly one `Disposition:` paragraph, and that
+        paragraph opens with one of the two exact sentences the section's
+        lead-in defines -- compared against those two sentences as module
+        constants so a later reword of either is a deliberate edit made in
+        both places, never a silent drift between the doc and this test.
+        """
+        lines = self.text.splitlines()
+        starts = [
+            i for i, line in enumerate(lines)
+            if line.startswith('### Falsifier')
+        ]
+        self.assertEqual(
+            len(starts), 4,
+            f'expected exactly four ### Falsifier subsections, found '
+            f'{len(starts)}',
+        )
+        for idx, start in enumerate(starts):
+            end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+            for j in range(start + 1, end):
+                if lines[j].startswith('## '):
+                    end = j
+                    break
+            subsection = '\n'.join(lines[start:end])
+            paragraphs = [
+                ' '.join(line.strip() for line in p.strip().splitlines())
+                for p in subsection.split('\n\n')
+            ]
+            disposition_paragraphs = [
+                p for p in paragraphs if p.startswith('Disposition:')
+            ]
+            self.assertEqual(
+                len(disposition_paragraphs), 1,
+                f'{lines[start]!r} must state exactly one Disposition: '
+                f'paragraph, found {len(disposition_paragraphs)}',
+            )
+            paragraph = disposition_paragraphs[0]
+            self.assertTrue(
+                paragraph.startswith(_DISPOSITION_FATAL)
+                or paragraph.startswith(_DISPOSITION_REVISE),
+                f'{lines[start]!r} disposition paragraph does not open '
+                f'with either of the two lead-in-defined sentences: '
+                f'{paragraph!r}',
+            )
+
+    def test_absent_class_is_one_entry_covering_three_shapes(self):
+        """The `empty` edge (D-11). Exactly one `## Boundary cases` entry
+        concerns the absent-`evidence_class` case, and its body names all
+        three record shapes together -- an abstained assessment, a FAILED
+        or CANCELLED arc, and a markerless session -- and states the record
+        is not emitted. A second entry separately covering one of the same
+        three shapes is exactly what D-11 rules out: this test also asserts
+        neither of the other two entries mentions any of the three shape
+        markers.
+        """
+        boundary = _section(self.text, 'Boundary cases', level='## ')
+        entries = _bolded_entries(boundary)
+        self.assertEqual(
+            len(entries), 3,
+            f'expected exactly three bolded boundary-case entries, found '
+            f'{len(entries)}',
+        )
+        absent_class_entries = [
+            e for e in entries if 'evidence_class' in e.split('**')[1]
+        ]
+        self.assertEqual(
+            len(absent_class_entries), 1,
+            'expected exactly one boundary entry whose lead-in concerns '
+            'the absent-evidence_class case',
+        )
+        entry = absent_class_entries[0]
+        for shape_marker in ('abstain', 'FAILED', 'CANCELLED', 'markerless'):
+            self.assertIn(
+                shape_marker, entry,
+                f'the absent-class entry must name the {shape_marker!r} '
+                f'shape',
+            )
+        self.assertIn(
+            'not emitted', entry,
+            'the absent-class entry must state that such a record is not '
+            'emitted, rather than emitted with a bare or defaulted '
+            'provenance',
+        )
+        other_entries = [e for e in entries if e is not entry]
+        for other in other_entries:
+            for shape_marker in ('FAILED', 'CANCELLED', 'markerless'):
+                self.assertNotIn(
+                    shape_marker, other,
+                    f'a second boundary entry names {shape_marker!r} -- '
+                    f'D-11 requires the three absent-class shapes covered '
+                    f'by ONE entry, not scattered across several',
+                )
+
+    def test_adjacent_fields_are_named_and_not_mapped(self):
+        """D-12. `## Provenance-adjacent fields: named, not mapped` names
+        all five server fields and all three local fields, states a
+        not-yet-decided disposition, and -- the real assertion here --
+        contains zero lines beginning with a pipe character. Every decided
+        mapping on this page is a table row; the absence of a table is the
+        structural difference between naming a field and deciding it,
+        which is why this test checks for the ABSENCE of a shape rather
+        than the presence of one.
+        """
+        adjacent = _section(self.text, 'Provenance-adjacent fields', level='## ')
+        for server_field in (
+            'declaredBy', 'evidenceUrl', 'recordedBy', 'source', 'reason',
+        ):
+            self.assertIn(
+                server_field, adjacent,
+                f'the adjacent-fields section must name {server_field!r}',
+            )
+        for local_field in ('evaluator', 'evaluator_version', 'model'):
+            self.assertIn(
+                local_field, adjacent,
+                f'the adjacent-fields section must name {local_field!r} as '
+                f'a plausible local source',
+            )
+        self.assertIn(
+            'not', adjacent.lower(),
+            'the section must contain a not-yet-decided disposition',
+        )
+        self.assertIn('Phase 59', adjacent)
+        self.assertIn('1.5.0', adjacent)
+        pipe_lines = [
+            line for line in adjacent.splitlines()
+            if line.strip().startswith('|')
+        ]
+        self.assertFalse(
+            pipe_lines,
+            f'the adjacent-fields section must contain zero pipe-prefixed '
+            f'lines (no table) -- found {pipe_lines!r}. Every decided '
+            f'mapping on this page is a table row; a table here would '
+            f'read as a decision this section explicitly declines to make '
+            f'(D-12)',
+        )
 
 
 if __name__ == '__main__':

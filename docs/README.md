@@ -75,6 +75,11 @@ This Hermes skill bundle uses a plugin, three shell hooks, and a cron for runtim
   ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
   on `jobs roi`, and the Phase 53 gate this skill shipped instead of waiting
   on it.
+- [Local evidence classes and server provenance](provenance-mapping.md): the
+  decided mapping from each of the nine local `evidence_class` labels onto
+  the two server `provenance` vocabularies, the resolution of the one label
+  that maps to neither, and the fields Phase 59's valuation seam will still
+  have to decide. Implements nothing.
 
 ## Inside the skill bundle
 
