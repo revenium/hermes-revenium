@@ -983,7 +983,16 @@ fi
 outcome_update_cmd+=(
   --metadata "${OUTCOME_UPDATE_METADATA}"
   --quiet
+  --output json
 )
+# Quick task 20260911: `--output json` is the visible, documented flag for
+# structured output on this command -- NOT `--json`, which is a hidden
+# persistent flag and a weaker thing to pin a golden against. Added for
+# forward compatibility with structured parsing of the response; the
+# conflict-detection predicate above stays a substring match over the
+# combined 2>&1 capture regardless, because a CLI advisory line can
+# precede the JSON body and the combined stream is not guaranteed to
+# parse as one JSON document.
 # WR-03 (42-REVIEW.md): resolve_team_id (common.sh) is a PIPELINE
 # (`revenium config show | sed | sed | head -1 | tr -d ...`) -- a
 # DIFFERENT call from the `jobs outcome-update --help` capability probe

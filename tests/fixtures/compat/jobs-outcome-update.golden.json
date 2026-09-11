@@ -8,7 +8,8 @@
     "--reason": "correction-golden-reason",
     "--outcome-value": "525.0",
     "--outcome-currency": "USD",
-    "--quiet": true
+    "--quiet": true,
+    "--output": "json"
   },
   "pattern_fields": {
     "--metadata": "^\\{.*\\}$"

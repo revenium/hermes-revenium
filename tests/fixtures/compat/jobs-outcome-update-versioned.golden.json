@@ -9,7 +9,8 @@
     "--outcome-value": "525.0",
     "--outcome-currency": "USD",
     "--expected-entity-version": "7",
-    "--quiet": true
+    "--quiet": true,
+    "--output": "json"
   },
   "pattern_fields": {
     "--metadata": "^\\{.*\\}$"
