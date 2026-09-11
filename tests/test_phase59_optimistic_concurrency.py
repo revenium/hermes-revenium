@@ -392,15 +392,27 @@ class ConflictMessageTests(unittest.TestCase):
     number -- still takes the existing generic path."""
 
     def test_409_conflict_names_the_conflict_and_preserves_local_state(self):
-        sid, job_id = 'p59c-sid-020', 'p59c-conflict-job'
+        # Deliberately NOT named with "conflict" or "409" in it: the old
+        # job id ('p59c-conflict-job') let this test pass by accident --
+        # the matcher's [Cc]onflict arm matched the job id embedded in the
+        # double's own stderr, not the real CLI message. A neutral id
+        # forces the assertion to depend on the matcher actually
+        # recognizing the CLI's real conflict string.
+        sid, job_id = 'p59c-sid-020', 'p59c-version-clash-job'
         record = _tracer_assessment_record(job_id)
         tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger = (
             _build_versioned_correction_tree(
                 sid, job_id, sidecar_lines=[record],
                 version_flag_capable=True, entity_version_json='{"entityVersion": 3}',
                 outcome_update_result={
-                    'exit': 4,
-                    'stderr': 'revenium: HTTP 409 Conflict: stale entityVersion',
+                    'exit': 1,
+                    # The real CLI's conflict advisory (measured against the
+                    # actual binary, not invented): it contains NEITHER
+                    # `409` NOR `conflict`. The double previously emitted a
+                    # string that satisfied our own matcher without ever
+                    # proving the matcher recognizes production output --
+                    # this is the fixture-fidelity fix.
+                    'stderr': f'concurrent outcome update detected for job {job_id}; re-fetch and retry',
                 },
             )
         )
