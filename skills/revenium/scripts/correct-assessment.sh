@@ -1086,16 +1086,22 @@ if [[ "${cmd_exit}" -ne 0 ]]; then
   # unverifiable: the installed CLI has no version flag today and therefore
   # no way to produce a 409 to observe an exit code from.
   #
-  # Two signals, either sufficient: a bare status token, bounded on both
-  # sides by a non-digit or a string boundary so a longer number (e.g.
-  # 4409999) cannot match, or a conflict phrase, matched case-insensitively.
-  # Stored in a variable rather than inlined -- this repo's bash 3.2
-  # target quotes poorly around a literal alternation/parenthesis regex in
-  # `[[ =~ ]]`. Anything unmatched falls through to the existing generic
-  # message UNCHANGED below -- the fail-open half of D-15, never
-  # conditioned on anything.
-  _conflict_status_pattern='(^|[^0-9])409($|[^0-9])'
-  if [[ "${cmd_output}" =~ ${_conflict_status_pattern} ]] || [[ "${cmd_output}" =~ [Cc]onflict ]]; then
+  # Measured against the real CLI (quick task 20260911): outcome_update.go
+  # severs the *APIError before it reaches this command, so neither a bare
+  # `409` token nor the word `conflict` ever appears in its output --
+  # the previous two-token matcher was validated only against a stderr
+  # string this repo invented, never against production. A `409` or
+  # `[Cc]onflict` arm here matches nothing this command actually emits and
+  # was dropped rather than kept as a second, unreachable signal.
+  #
+  # The one string the CLI does emit on a stale expectedEntityVersion,
+  # pinned on their side by TestOutcomeUpdateConflict with a comment
+  # naming this SDK as the consumer. Literal substring match, not a
+  # regex -- there is nothing here that needs anchoring or bounding.
+  # Anything unmatched falls through to the existing generic message
+  # UNCHANGED below -- the fail-open half of D-15, never conditioned on
+  # anything.
+  if [[ "${cmd_output}" == *"concurrent outcome update detected"* ]]; then
     # D-14: this script NEVER re-reads the version and re-files
     # automatically. Doing so would re-file the correction on top of
     # whatever the concurrent writer just wrote -- byte-for-byte the silent
