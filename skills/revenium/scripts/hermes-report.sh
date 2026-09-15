@@ -110,6 +110,15 @@ if supports_flag "meter completion" "--skill-name"; then
   SKILL_CLI_CAPABLE=true
 fi
 
+# Ticket attribution (revenium CLI 1.5.0). Same posture as the skill probe above
+# and for the same reason: hosts running an older CLI are a LIVE configuration,
+# not an error, and a session metered there must produce argv byte-identical to
+# what the golden fixtures pin. Probed on its only flag.
+TICKET_CLI_CAPABLE=false
+if supports_flag "meter completion" "--ticket-id"; then
+  TICKET_CLI_CAPABLE=true
+fi
+
 # Phase 38 (CR-01): capability gate for the v1.5 `jobs outcome` value flags
 # (--outcome-value/--outcome-currency). Same supports_flag posture as the
 # squad/skill probes above, and for the same reason: a negative probe is a
@@ -227,6 +236,93 @@ marketplace = source if source and source not in ('official', 'builtin', 'local'
 if source:
     print(source + "|" + marketplace)
 PROVPY
+}
+
+# Resolve the Hermes Kanban ticket a session ran under (`--ticket-id`, CLI
+# 1.5.0). Emits the ticket id on stdout, or NOTHING when the session cannot be
+# tied to a ticket by an exact key — which is the common case today.
+#
+# ONLY exact keys are consulted, in this order:
+#   1. task_runs.metadata ->> '$.worker_session_id'  (stamped by the worker's own
+#      kanban_complete / kanban_request_review, so it is authoritative)
+#   2. tasks.session_id
+#
+# A (profile, time-window) correlation between a run and a session is ALSO
+# available and is deliberately NOT used. Measured on the fleet host the offsets
+# are tight (9-18s), which is exactly what makes it tempting: it would raise
+# coverage from ~18% to ~100% and be wrong an unknown fraction of the time. A
+# guessed ticket on a billing row is worse than an absent one -- the same
+# judgement resolve_skill_provenance already makes about an invented provenance.
+#
+# Coverage is capped upstream, not here: Hermes stamps worker_session_id on only
+# two graceful tool paths, so every dispatcher-side ending (timed_out, crashed,
+# stale, reclaimed, gave_up) records none. Measured 15 of 81 runs on the fleet.
+# Raising it is a Hermes change (stamp on first heartbeat), not ours.
+#
+# Never raises, never blocks: any failure -- no board pointer, no DB, unreadable
+# JSON, a sqlite error -- prints nothing and the caller omits the flag.
+resolve_session_ticket() {
+  local sid="$1"
+  SID="${sid}" BOARDS_DIR="${KANBAN_BOARDS_DIR}" CURRENT_FILE="${KANBAN_CURRENT_FILE}" \
+    python3 - <<'TICKETPY' 2>/dev/null || true
+import os
+import re
+import sqlite3
+
+boards = os.environ.get('BOARDS_DIR', '')
+current = os.environ.get('CURRENT_FILE', '')
+sid = os.environ.get('SID', '')
+if not (boards and current and sid and os.path.isfile(current)):
+    raise SystemExit(0)
+
+try:
+    board = open(current, encoding='utf-8').read().strip()
+except Exception:
+    raise SystemExit(0)
+
+# `current` is host-writable and we interpolate it into a path, so constrain it
+# to a bare directory name. Rejects traversal ("../../etc"), absolute paths, and
+# separators outright rather than sanitising them away.
+if not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', board or '') or board in ('.', '..'):
+    raise SystemExit(0)
+
+db = os.path.join(boards, board, 'kanban.db')
+if not os.path.isfile(db):
+    raise SystemExit(0)
+
+# mode=ro so a malformed path can never create a database, and so this stays a
+# pure reader of another plugin's state. quote() percent-encodes the path, which
+# a board name with a space or '#' would otherwise break.
+try:
+    from urllib.parse import quote
+    conn = sqlite3.connect('file:' + quote(db) + '?mode=ro', uri=True)
+except Exception:
+    raise SystemExit(0)
+
+ticket = ''
+try:
+    for sql in (
+        "SELECT task_id FROM task_runs "
+        "WHERE json_extract(metadata, '$.worker_session_id') = ? "
+        "ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM tasks WHERE session_id = ? LIMIT 1",
+    ):
+        try:
+            row = conn.execute(sql, (sid,)).fetchone()
+        except Exception:
+            continue          # older board schema: try the next exact key
+        if row and isinstance(row[0], str) and row[0].strip():
+            ticket = row[0].strip()
+            break
+finally:
+    conn.close()
+
+if ticket:
+    # Pipe and newline are the field/record separators the event path reads
+    # with; a ticket id carrying either would desync that read. 256 is the
+    # CLI's documented ceiling for --ticket-id.
+    print(ticket.replace('|', '_').replace('\n', ' ').replace('\r', ' ')[:256])
+TICKETPY
 }
 
 # quick-260605: resolve teamId once for the whole tick. jobs create/outcome require
@@ -3591,6 +3687,17 @@ PY
           fi
         fi
 
+        # Ticket attribution (CLI 1.5.0). Appended AFTER the skill family at
+        # both emit paths -- flag order is part of the argv contract the golden
+        # fixtures pin. A session with no ticket appends NOTHING, which is the
+        # common case (~18% of runs carry an exact join key), so that argv
+        # staying byte-identical is load-bearing, not a courtesy.
+        if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
+          local ticket_id
+          ticket_id="$(resolve_session_ticket "${sid}")"
+          [[ -n "${ticket_id}" ]] && cmd+=(--ticket-id "${ticket_id}")
+        fi
+
         local cmd_output cmd_exit
         cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 
@@ -3720,6 +3827,14 @@ PY
             [[ -n "${skill_marketplace}" ]] && cmd+=(--skill-marketplace-name "${skill_marketplace}")
           fi
         fi
+      fi
+
+      # Ticket attribution (CLI 1.5.0) — identical shape and position to the
+      # marker-split path above. Keep the two in step.
+      if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
+        local ticket_id
+        ticket_id="$(resolve_session_ticket "${sid}")"
+        [[ -n "${ticket_id}" ]] && cmd+=(--ticket-id "${ticket_id}")
       fi
 
       local cmd_output cmd_exit

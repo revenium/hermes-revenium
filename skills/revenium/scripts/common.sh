@@ -342,6 +342,23 @@ AUX_LOCK_TIMEOUT_SECONDS="${REVENIUM_AUX_LOCK_TIMEOUT_SECONDS:-30}"
 # deliberately not added to the eager mkdir -p below.
 AUX_OPERATION_TYPE="${REVENIUM_AUX_OPERATION_TYPE:-OTHER}"
 
+# Hermes Kanban plugin state, for ticket attribution (`--ticket-id`, CLI 1.5.0).
+# READ-ONLY and owned by the kanban plugin, not by this skill -- the same
+# posture we hold toward STATE_DB. Declared here rather than inline in the
+# caller because test_runtime_paths_are_hermes_native requires every state path
+# to live in this file.
+#
+# `<HERMES_HOME>/kanban/kanban.db` exists too but is NOT the board store: on the
+# measured fleet host it holds zero tasks while the real boards live one level
+# down, under boards/<name>/. Pointing at the root file would silently resolve
+# no ticket for every session and look like "the feature found nothing".
+#
+# Deliberately NOT added to the eager mkdir -p below: creating these would
+# fabricate an empty board tree on hosts that run no kanban, and this skill must
+# never author another plugin's state. A missing path resolves to "no ticket".
+KANBAN_BOARDS_DIR="${REVENIUM_KANBAN_BOARDS_DIR:-${HERMES_HOME}/kanban/boards}"
+KANBAN_CURRENT_FILE="${REVENIUM_KANBAN_CURRENT_FILE:-${HERMES_HOME}/kanban/current}"
+
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}" "${JOB_ASSESSMENTS_DIR}"
 
 ensure_path() {
