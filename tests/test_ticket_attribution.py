@@ -210,6 +210,45 @@ class TicketFailOpenTests(unittest.TestCase):
             # Falls through to the tasks.session_id key rather than erroring.
             self.assertEqual(_resolve(home, 'sid_ok'), 't_good')
 
+    def test_junk_row_does_not_hide_a_valid_worker_session_id(self):
+        """Regression, PR #123 P1.
+
+        sqlite's json_extract RAISES on the first unparseable row it scans,
+        aborting the WHOLE query — so one junk metadata row, written by any
+        other tool for any unrelated task, used to cost EVERY session its
+        run-based ticket. The failure was silent: the handler fell through to
+        the weaker tasks.session_id key, so a session with a perfectly good
+        worker_session_id row resolved to the wrong ticket, or to none.
+
+        The original version of this suite encoded that behaviour as correct
+        (see the test above, which is still right on its own terms: there the
+        valid row genuinely IS the tasks one). This case is the one that
+        distinguishes them — a valid run row AND a junk row together.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            home = _build_board(
+                Path(td),
+                runs=[
+                    (1, 't_from_run', json.dumps(
+                        {"worker_session_id": "sid_ok"}), 1788000000, 1788000400),
+                    # Higher id, so a DESC scan reaches it first.
+                    (2, 't_junk', 'not json at all', 1788000500, 1788000600),
+                ],
+                tasks=[('t_from_task', 'x', 'done', 'sid_ok')],
+            )
+            self.assertEqual(_resolve(home, 'sid_ok'), 't_from_run')
+
+    def test_null_metadata_rows_are_not_treated_as_malformed(self):
+        """NULL is the common case — most runs carry no metadata at all."""
+        with tempfile.TemporaryDirectory() as td:
+            home = _build_board(
+                Path(td),
+                runs=[(1, 't_from_run', json.dumps(
+                    {"worker_session_id": "sid_ok"}), 1788000000, 1788000400),
+                      (2, 't_null', None, 1788000500, 1788000600)],
+            )
+            self.assertEqual(_resolve(home, 'sid_ok'), 't_from_run')
+
     def test_older_board_schema_without_task_runs(self):
         """A board predating task_runs must fall through, not crash."""
         with tempfile.TemporaryDirectory() as td:

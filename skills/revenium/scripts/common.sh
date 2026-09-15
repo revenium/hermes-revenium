@@ -425,8 +425,16 @@ except Exception:
 ticket = ''
 try:
     for sql in (
+        # json_valid() is load-bearing, not belt-and-braces: sqlite's
+        # json_extract RAISES "malformed JSON" on the first unparseable row it
+        # scans, aborting the WHOLE query. Without this guard a single junk
+        # metadata row anywhere in task_runs -- written by any other tool, for
+        # any unrelated task -- silently costs every session its run-based
+        # ticket, because the except below then falls through to the weaker
+        # tasks.session_id key. Guarding per row skips only the junk.
         "SELECT task_id FROM task_runs "
-        "WHERE json_extract(metadata, '$.worker_session_id') = ? "
+        "WHERE metadata IS NOT NULL AND json_valid(metadata) "
+        "AND json_extract(metadata, '$.worker_session_id') = ? "
         "ORDER BY id DESC LIMIT 1",
         "SELECT id FROM tasks WHERE session_id = ? LIMIT 1",
     ):
