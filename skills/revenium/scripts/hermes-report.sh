@@ -110,6 +110,15 @@ if supports_flag "meter completion" "--skill-name"; then
   SKILL_CLI_CAPABLE=true
 fi
 
+# Ticket attribution (revenium CLI 1.5.0). Same posture as the skill probe above
+# and for the same reason: hosts running an older CLI are a LIVE configuration,
+# not an error, and a session metered there must produce argv byte-identical to
+# what the golden fixtures pin. Probed on its only flag.
+TICKET_CLI_CAPABLE=false
+if supports_flag "meter completion" "--ticket-id"; then
+  TICKET_CLI_CAPABLE=true
+fi
+
 # Phase 38 (CR-01): capability gate for the v1.5 `jobs outcome` value flags
 # (--outcome-value/--outcome-currency). Same supports_flag posture as the
 # squad/skill probes above, and for the same reason: a negative probe is a
@@ -3591,6 +3600,17 @@ PY
           fi
         fi
 
+        # Ticket attribution (CLI 1.5.0). Appended AFTER the skill family at
+        # both emit paths -- flag order is part of the argv contract the golden
+        # fixtures pin. A session with no ticket appends NOTHING, which is the
+        # common case (~18% of runs carry an exact join key), so that argv
+        # staying byte-identical is load-bearing, not a courtesy.
+        if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
+          local ticket_id
+          ticket_id="$(resolve_session_ticket "${sid}")"
+          [[ -n "${ticket_id}" ]] && cmd+=(--ticket-id "${ticket_id}")
+        fi
+
         local cmd_output cmd_exit
         cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 
@@ -3720,6 +3740,14 @@ PY
             [[ -n "${skill_marketplace}" ]] && cmd+=(--skill-marketplace-name "${skill_marketplace}")
           fi
         fi
+      fi
+
+      # Ticket attribution (CLI 1.5.0) — identical shape and position to the
+      # marker-split path above. Keep the two in step.
+      if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
+        local ticket_id
+        ticket_id="$(resolve_session_ticket "${sid}")"
+        [[ -n "${ticket_id}" ]] && cmd+=(--ticket-id "${ticket_id}")
       fi
 
       local cmd_output cmd_exit

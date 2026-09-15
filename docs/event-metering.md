@@ -261,6 +261,37 @@ still expecting the pre-this-change shape): `staleSecondsConfigured`,
   is unknown, and a guessed value poisons a dimension worse than an
   absent one leaves it. `meter tool-event` has no skill flags at all, so
   tool-event rows are unaffected.
+- Ticket attribution is resolved per **session**, not per call. Both paths
+  ship the CLI 1.5.0 `--ticket-id` dimension carrying the Hermes Kanban
+  ticket (`t_xxxxxxxx`) a session ran under. Unlike the skill dimension
+  above, there is nothing that varies across a session's calls — a kanban
+  run maps to exactly one session — so the resolver runs once and the same
+  value rides every row. `meter tool-event` has no `--ticket-id`, so
+  tool-event rows are unaffected.
+  - **Only exact join keys are used:** `task_runs.metadata ->>
+    '$.worker_session_id'`, then `tasks.session_id`. A correlation between a
+    run and a session by *(profile, time window)* is also available, and is
+    deliberately **not** used. Measured offsets on a live fleet are tight
+    (9–18s), which is exactly what makes it tempting: it would lift coverage
+    from ~18% to ~100% while being wrong an unknown fraction of the time. A
+    guessed ticket on a billing row is worse than an absent one.
+  - **Expect low coverage today, and know that the cap is upstream.** Hermes
+    stamps `worker_session_id` only from `kanban_complete` and
+    `kanban_request_review` — two graceful, worker-invoked paths. Every
+    dispatcher-side ending (`timed_out`, `stale`, `reclaimed`, `crashed`,
+    `gave_up`) records none, so runs that crash or time out carry no link at
+    all. Measured 15 of 81 runs on a live fleet board. Raising it is a Hermes
+    change (stamp on the worker's first heartbeat, where the run row is
+    already being written), not a change here.
+  - The board is read from `${HERMES_HOME}/kanban/current` and the database
+    from `${HERMES_HOME}/kanban/boards/<board>/kanban.db` — note the
+    boards subdirectory: `${HERMES_HOME}/kanban/kanban.db` also exists but is
+    not the board store and holds no tasks on a real host. Both paths are
+    read-only and owned by the kanban plugin; this skill never writes them,
+    and never creates them when absent.
+  - Every failure is silent and the flag is simply omitted: no board pointer,
+    a board name that is not a bare directory name, a missing or corrupt
+    database, unparseable run metadata, or a board predating `task_runs`.
   - *Caveat, shared by both paths:* the session DB is resolved at
     process level, so on a multiplexed gateway a session owned by a
     different profile's home resolves to no skill rows and the flags are

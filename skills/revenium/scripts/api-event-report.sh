@@ -148,6 +148,13 @@ if supports_flag "meter completion" "--skill-name"; then
   SKILL_CLI_CAPABLE=true
 fi
 
+# Ticket attribution (revenium CLI 1.5.0) — the event-path sibling of
+# hermes-report.sh's probe. Same posture, same reason.
+TICKET_CLI_CAPABLE=false
+if supports_flag "meter completion" "--ticket-id"; then
+  TICKET_CLI_CAPABLE=true
+fi
+
 ORG_NAME=""
 if [[ -f "${CONFIG_FILE}" ]]; then
   ORG_NAME=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('organizationName', ''))" 2>/dev/null || true)
@@ -485,13 +492,14 @@ for line in rows_text.splitlines():
     # never becomes a `>=`. The four skill fields are read and discarded: this
     # readout's own columns are unchanged, and the aggregate below is the
     # operator's pre-cutover evidence, not a billing surface.
-    if len(fields) != 23:
+    if len(fields) != 24:
         continue
     (_sid_f, arid_f, response_model_f, _provider_raw_f, provider_resolved_f,
      input_f, output_f, cache_read_f, cache_write_f, reasoning_f, total_f,
      _request_time_f, _response_time_f, _duration_f, _stop_reason_f,
      task_type_f, operation_type_f, _trace_id_f, _agentic_job_id_f,
-     _skill_name_f, _skill_trigger_f, _skill_source_f, _skill_marketplace_f) = fields
+     _skill_name_f, _skill_trigger_f, _skill_source_f, _skill_marketplace_f,
+     _ticket_id_f) = fields
     event_rows += 1
     event_input += _int(input_f)
     event_output += _int(output_f)
@@ -952,6 +960,15 @@ PY
     # once each, join per event, and emit one pipe-delimited row per
     # shippable event. Contract C-4/T-32-08: pipe/newline/CR stripped and
     # length-capped on every field before it crosses the row boundary.
+    # Ticket attribution (CLI 1.5.0). Resolved ONCE per session, not per event:
+    # a kanban run maps to exactly one session, so unlike _skill_for(ts) — which
+    # is genuinely per-call — there is nothing here that varies across a
+    # session's events. One lookup, stamped on every row.
+    local _ticket_id=""
+    if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
+      _ticket_id="$(resolve_session_ticket "${sid}")"
+    fi
+
     local rows
     rows=$(
       EVENT_FILE="${event_file}" \
@@ -959,6 +976,7 @@ PY
       JOIN_MODE="${join_mode}" \
       SID="${sid}" \
       SKILL_CAPABLE="${SKILL_CLI_CAPABLE}" \
+      TICKET_ID="${_ticket_id}" \
       MIN_EVENT_TS="${min_ts}" \
       MAX_EVENT_TS="${max_ts}" \
       SKILL_LOCK_FILE="${HERMES_HOME}/skills/.hub/lock.json" \
@@ -1234,6 +1252,12 @@ def _provenance(name):
     return _prov_cache[name]
 
 
+# Session-scoped, resolved in bash before this block (see TICKET_ID above).
+# _clean strips the pipe/newline separators this record format reads with, the
+# same guard every other free-text field here already passes through.
+_ticket_id = _clean(os.environ.get('TICKET_ID', ''), 256)
+
+
 def _skill_for(ts):
     # PER-EVENT, not per-session: the skill in force AT THIS CALL. The legacy
     # path picks the most recent skill at-or-before a DELTA WINDOW end because
@@ -1321,6 +1345,7 @@ try:
                 request_time, response_time, str(duration_ms), stop_reason,
                 task_type, operation_type, trace_id, agentic_job_id,
                 skill_name, skill_trigger, skill_source, skill_marketplace,
+                _ticket_id,
             ]
             print("|".join(row))
 except OSError:
@@ -1418,12 +1443,14 @@ PY
     local request_time_r response_time_r duration_r stop_reason_r
     local task_type_r operation_type_r trace_id_r agentic_job_id_r
     local skill_name_r skill_trigger_r skill_source_r skill_marketplace_r
+    local ticket_id_r
 
     while IFS='|' read -r sid_r arid_r model_r provider_raw_r provider_resolved_r \
       input_r output_r cache_read_r cache_write_r reasoning_r total_r \
       request_time_r response_time_r duration_r stop_reason_r \
       task_type_r operation_type_r trace_id_r agentic_job_id_r \
-      skill_name_r skill_trigger_r skill_source_r skill_marketplace_r; do
+      skill_name_r skill_trigger_r skill_source_r skill_marketplace_r \
+      ticket_id_r; do
       [[ -z "${sid_r}" || -z "${arid_r}" ]] && continue
 
       # Task 3a: in-memory presence check — no subprocess per record.
@@ -1505,6 +1532,13 @@ PY
         [[ -n "${skill_trigger_r}" ]] && cmd+=(--skill-invocation-trigger "${skill_trigger_r}")
         [[ -n "${skill_source_r}" ]] && cmd+=(--skill-source "${skill_source_r}")
         [[ -n "${skill_marketplace_r}" ]] && cmd+=(--skill-marketplace-name "${skill_marketplace_r}")
+      fi
+
+      # Ticket attribution (CLI 1.5.0). AFTER the skill family — flag order is
+      # the argv contract shared with hermes-report.sh. A record with no ticket
+      # appends nothing.
+      if [[ "${TICKET_CLI_CAPABLE}" == "true" && -n "${ticket_id_r}" ]]; then
+        cmd+=(--ticket-id "${ticket_id_r}")
       fi
 
       if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then

@@ -414,12 +414,22 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # shifting all three of that file's emission-site line numbers
         # (1248->1474, 3256->3490, 3422->3656); api-event-report.sh is a
         # separate file and its own site is unmoved.
+        #
+        # Re-measured again (quick-260915-1hk, same convention): ticket
+        # attribution added a capability probe near the top of BOTH scripts
+        # and an emission block ahead of the later sites, so every one of the
+        # four moved this time — hermes-report.sh 1474->1483, 3490->3499,
+        # 3656->3676, and api-event-report.sh 1457->1484. The COUNT (4) and
+        # the emitted VALUE expressions are unchanged, which is what makes
+        # this a pure line shift rather than a new emission site: the
+        # assertions above both still pass untouched. --ticket-id is its own
+        # flag and sends no --operation-type, so it adds no site here.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1474),
-            ('hermes-report.sh', 3490),
-            ('hermes-report.sh', 3656),
-            ('api-event-report.sh', 1457),
+            ('hermes-report.sh', 1483),
+            ('hermes-report.sh', 3499),
+            ('hermes-report.sh', 3676),
+            ('api-event-report.sh', 1484),
         }
         self.assertEqual(
             found_locations, expected_locations,

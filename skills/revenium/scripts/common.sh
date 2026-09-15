@@ -342,7 +342,119 @@ AUX_LOCK_TIMEOUT_SECONDS="${REVENIUM_AUX_LOCK_TIMEOUT_SECONDS:-30}"
 # deliberately not added to the eager mkdir -p below.
 AUX_OPERATION_TYPE="${REVENIUM_AUX_OPERATION_TYPE:-OTHER}"
 
+# Hermes Kanban plugin state, for ticket attribution (`--ticket-id`, CLI 1.5.0).
+# READ-ONLY and owned by the kanban plugin, not by this skill -- the same
+# posture we hold toward STATE_DB. Declared here rather than inline in the
+# caller because test_runtime_paths_are_hermes_native requires every state path
+# to live in this file.
+#
+# `<HERMES_HOME>/kanban/kanban.db` exists too but is NOT the board store: on the
+# measured fleet host it holds zero tasks while the real boards live one level
+# down, under boards/<name>/. Pointing at the root file would silently resolve
+# no ticket for every session and look like "the feature found nothing".
+#
+# Deliberately NOT added to the eager mkdir -p below: creating these would
+# fabricate an empty board tree on hosts that run no kanban, and this skill must
+# never author another plugin's state. A missing path resolves to "no ticket".
+KANBAN_BOARDS_DIR="${REVENIUM_KANBAN_BOARDS_DIR:-${HERMES_HOME}/kanban/boards}"
+KANBAN_CURRENT_FILE="${REVENIUM_KANBAN_CURRENT_FILE:-${HERMES_HOME}/kanban/current}"
+
 mkdir -p "${STATE_DIR}" "${MARKERS_DIR}" "${MARKERS_READY_DIR}" "${TOOL_EVENTS_DIR}" "${EVENT_SPOOL_DIR}" "${JOB_ASSESSMENTS_DIR}"
+
+# Resolve the Hermes Kanban ticket a session ran under (`--ticket-id`, CLI
+# 1.5.0). Emits the ticket id on stdout, or NOTHING when the session cannot be
+# tied to a ticket by an exact key — which is the common case today.
+#
+# ONLY exact keys are consulted, in this order:
+#   1. task_runs.metadata ->> '$.worker_session_id'  (stamped by the worker's own
+#      kanban_complete / kanban_request_review, so it is authoritative)
+#   2. tasks.session_id
+#
+# A (profile, time-window) correlation between a run and a session is ALSO
+# available and is deliberately NOT used. Measured on the fleet host the offsets
+# are tight (9-18s), which is exactly what makes it tempting: it would raise
+# coverage from ~18% to ~100% and be wrong an unknown fraction of the time. A
+# guessed ticket on a billing row is worse than an absent one -- the same
+# judgement resolve_skill_provenance already makes about an invented provenance.
+#
+# Coverage is capped upstream, not here: Hermes stamps worker_session_id on only
+# two graceful tool paths, so every dispatcher-side ending (timed_out, crashed,
+# stale, reclaimed, gave_up) records none. Measured 15 of 81 runs on the fleet.
+# Raising it is a Hermes change (stamp on first heartbeat), not ours.
+#
+# Never raises, never blocks: any failure -- no board pointer, no DB, unreadable
+# JSON, a sqlite error -- prints nothing and the caller omits the flag.
+resolve_session_ticket() {
+  local sid="$1"
+  SID="${sid}" BOARDS_DIR="${KANBAN_BOARDS_DIR}" CURRENT_FILE="${KANBAN_CURRENT_FILE}" \
+    python3 - <<'TICKETPY' 2>/dev/null || true
+import os
+import re
+import sqlite3
+
+boards = os.environ.get('BOARDS_DIR', '')
+current = os.environ.get('CURRENT_FILE', '')
+sid = os.environ.get('SID', '')
+if not (boards and current and sid and os.path.isfile(current)):
+    raise SystemExit(0)
+
+try:
+    board = open(current, encoding='utf-8').read().strip()
+except Exception:
+    raise SystemExit(0)
+
+# `current` is host-writable and we interpolate it into a path, so constrain it
+# to a bare directory name. Rejects traversal ("../../etc"), absolute paths, and
+# separators outright rather than sanitising them away.
+if not re.fullmatch(r'[A-Za-z0-9._-]{1,64}', board or '') or board in ('.', '..'):
+    raise SystemExit(0)
+
+db = os.path.join(boards, board, 'kanban.db')
+if not os.path.isfile(db):
+    raise SystemExit(0)
+
+# mode=ro so a malformed path can never create a database, and so this stays a
+# pure reader of another plugin's state. quote() percent-encodes the path, which
+# a board name with a space or '#' would otherwise break.
+try:
+    from urllib.parse import quote
+    conn = sqlite3.connect('file:' + quote(db) + '?mode=ro', uri=True)
+except Exception:
+    raise SystemExit(0)
+
+ticket = ''
+try:
+    for sql in (
+        # json_valid() is load-bearing, not belt-and-braces: sqlite's
+        # json_extract RAISES "malformed JSON" on the first unparseable row it
+        # scans, aborting the WHOLE query. Without this guard a single junk
+        # metadata row anywhere in task_runs -- written by any other tool, for
+        # any unrelated task -- silently costs every session its run-based
+        # ticket, because the except below then falls through to the weaker
+        # tasks.session_id key. Guarding per row skips only the junk.
+        "SELECT task_id FROM task_runs "
+        "WHERE metadata IS NOT NULL AND json_valid(metadata) "
+        "AND json_extract(metadata, '$.worker_session_id') = ? "
+        "ORDER BY id DESC LIMIT 1",
+        "SELECT id FROM tasks WHERE session_id = ? LIMIT 1",
+    ):
+        try:
+            row = conn.execute(sql, (sid,)).fetchone()
+        except Exception:
+            continue          # older board schema: try the next exact key
+        if row and isinstance(row[0], str) and row[0].strip():
+            ticket = row[0].strip()
+            break
+finally:
+    conn.close()
+
+if ticket:
+    # Pipe and newline are the field/record separators the event path reads
+    # with; a ticket id carrying either would desync that read. 256 is the
+    # CLI's documented ceiling for --ticket-id.
+    print(ticket.replace('|', '_').replace('\n', ' ').replace('\r', ' ')[:256])
+TICKETPY
+}
 
 ensure_path() {
   local brew_prefix=""
