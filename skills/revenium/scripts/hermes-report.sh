@@ -119,6 +119,19 @@ if supports_flag "meter completion" "--ticket-id"; then
   TICKET_CLI_CAPABLE=true
 fi
 
+# `--organization-name` is NOT uniform across subcommands: `meter completion`
+# accepts it, `jobs create` and `jobs outcome` do NOT (verified on CLI 1.5.0,
+# which rejects it outright: "Error: unknown flag: --organization-name", exit 1).
+# It must therefore be probed against the JOBS subcommand separately from the
+# metering one -- probing "meter completion" and reusing the answer is exactly
+# the mistake that took job creation down fleet-wide: an install that had never
+# set organizationName appended nothing and looked fine, so the unprobed flag
+# sat latent until an operator set it.
+JOBS_ORG_CLI_CAPABLE=false
+if supports_flag "jobs create" "--organization-name"; then
+  JOBS_ORG_CLI_CAPABLE=true
+fi
+
 # Phase 38 (CR-01): capability gate for the v1.5 `jobs outcome` value flags
 # (--outcome-value/--outcome-currency). Same supports_flag posture as the
 # squad/skill probes above, and for the same reason: a negative probe is a
@@ -2419,7 +2432,7 @@ PY
             # BUG-2: thread the SAME organization dimension through jobs create as
             # completions/tool-events carry, so a job and its transactions never
             # land in different orgs. Omitted when unset (preserves v1.4 wire shape).
-            if [[ -n "${ORG_NAME}" ]]; then
+            if [[ -n "${ORG_NAME}" && "${JOBS_ORG_CLI_CAPABLE}" == "true" ]]; then
               precheck_jobs_cmd+=(--organization-name "${ORG_NAME}")
             fi
 
@@ -3324,7 +3337,7 @@ PY
             # BUG-2: thread the SAME organization dimension through jobs create as
             # completions/tool-events carry, so a job and its transactions never
             # land in different orgs. Omitted when unset (preserves v1.4 wire shape).
-            if [[ -n "${ORG_NAME}" ]]; then
+            if [[ -n "${ORG_NAME}" && "${JOBS_ORG_CLI_CAPABLE}" == "true" ]]; then
               jobs_cmd+=(--organization-name "${ORG_NAME}")
             fi
 
