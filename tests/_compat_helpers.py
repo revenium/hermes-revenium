@@ -54,6 +54,44 @@ def argv_to_flags(argv):
     return d
 
 
+def jobs_create_help_lines(jobs_org_capable=False):
+    """Shim body for `revenium jobs create --help`, as bash `echo` lines.
+
+    `--organization-name` is NOT uniform across subcommands. Verified against
+    the live CLI 1.5.0 on the fleet host 2026-09-16:
+
+        meter completion --help  -> rc=0, 10379 bytes, advertises the flag
+        jobs create --help       -> rc=0,  2133 bytes, does NOT
+        jobs outcome --help      -> rc=0,  2376 bytes, does NOT
+
+    and `jobs create --organization-name X` answers
+    `Error: unknown flag: --organization-name`. Probing `meter completion`
+    and reusing the answer on the jobs path is what took job creation down
+    fleet-wide; hermes-report.sh therefore probes `jobs create` separately.
+
+    The flag list mirrors that real help output, so the probe gets the same
+    DETERMINATE NEGATIVE production gets (non-empty help, no match) rather
+    than supports_flag's INDETERMINATE branch — an empty-but-successful
+    `--help` is a different answer than "the flag is genuinely absent", and
+    modelling the wrong one would hide a real regression behind a warn.
+
+    Default False models the shipping CLI. Pass True to model a future CLI
+    that accepts the flag on the jobs path.
+    """
+    lines = (
+        '      echo "    --agentic-job-id string   User-supplied external identifier (required)"\n'
+        '      echo "    --environment string      Deployment environment (e.g. production)"\n'
+        '      echo "    --name string             Human-readable job name"\n'
+        '      echo "    --type string             Job category (e.g. loan-processing)"\n'
+        '      echo "    --version string          Job version identifier"\n'
+    )
+    if jobs_org_capable:
+        lines += (
+            '      echo "    --organization-name string   Organization name"\n'
+        )
+    return lines
+
+
 def load_golden(filename):
     """Load a golden fixture by filename from FIXTURES_DIR.
 
@@ -97,7 +135,8 @@ def assert_argv_matches_golden(test_case, argv, golden):
 
 def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None,
                 squad_capable=True, reasoning_tokens_capable=False,
-                skill_capable=False, outcome_value_capable=True):
+                skill_capable=False, outcome_value_capable=True,
+                jobs_org_capable=False):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -129,9 +168,14 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
                      --outcome-currency so the probe resolves true, matching
                      every existing test's assumption that these flags ship.
                      outcome_value_capable=False omits them -- the "older CLI"
-                     shape CR-01 exists for. Neither --help branch logs to
-                     JOBS_LOG (a --help probe is not a real invocation); every
-                     other jobs subcommand still logs there.
+                     shape CR-01 exists for. A THIRD probe, `jobs create
+                     --help` (PR #124, JOBS_ORG_CLI_CAPABLE), is answered by
+                     jobs_create_help_lines(jobs_org_capable) -- default False,
+                     matching the shipping CLI, which rejects
+                     --organization-name on the jobs path while accepting it on
+                     `meter completion`. No --help branch logs to JOBS_LOG (a
+                     --help probe is not a real invocation); every other jobs
+                     subcommand still logs there.
       *)          -> exit 0  (default catch-all)
     """
     if squad_capable:
@@ -231,6 +275,15 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         '    # caller (assuming the flags ship, as they did pre-CR-01) is unaffected.\n'
         '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
         + outcome_value_help_lines +
+        '      exit 0\n'
+        '    fi\n'
+        '    # PR #124: supports_flag "jobs create" "--organization-name" calls\n'
+        '    # `revenium jobs create --help`. Answer it here, before the generic\n'
+        '    # capture below, for the same reason the outcome probe is answered\n'
+        '    # above: the real CLI prints help and creates NOTHING, so a probe\n'
+        '    # must never land in JOBS_LOG as a real "jobs create" invocation.\n'
+        '    if [[ "$2" == "create" && "$3" == "--help" ]]; then\n'
+        + jobs_create_help_lines(jobs_org_capable) +
         '      exit 0\n'
         '    fi\n'
         '    printf "%q " "$@" >> "${JOBS_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'

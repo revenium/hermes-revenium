@@ -38,6 +38,7 @@ import unittest
 
 from tests._compat_helpers import (
     argv_to_flags,
+    jobs_create_help_lines,
     load_golden,
     run_script,
     SCRIPTS_DIR,
@@ -476,6 +477,16 @@ def _build_failing_completion_shim(shim_path):
         '    ;;\n'
         '  jobs)\n'
         '    if [[ "$2" == "--help" ]]; then exit 0; fi\n'
+        # PR #124: supports_flag "jobs create" "--organization-name" calls
+        # `revenium jobs create --help`. Answer it here, before the generic
+        # JOBS_LOG capture below, so the probe is never logged as a real
+        # "jobs create" invocation -- the real CLI prints help and creates
+        # nothing. Default (jobs_org_capable=False) models the shipping CLI,
+        # which rejects --organization-name on the jobs path.
+        '    if [[ "$2" == "create" && "$3" == "--help" ]]; then\n'
+        + jobs_create_help_lines() +
+        '      exit 0\n'
+        '    fi\n'
         '    if [[ "$2" == "outcome" && "$3" == "--help" ]]; then\n'
         '      echo "--outcome-value string     Business outcome value"\n'
         '      echo "--outcome-currency string   Business outcome currency"\n'
