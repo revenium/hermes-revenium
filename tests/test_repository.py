@@ -4,10 +4,25 @@ import subprocess
 import unittest
 from pathlib import Path
 
+from tests._compat_helpers import jobs_create_help_lines
+
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'revenium'
 PLUGIN_DIR = SKILL / 'plugins' / 'revenium-classifier'
 SIDECAR = SKILL / 'scripts' / 'get-root-session-id.py'  # Phase 21 (TRACE-01)
+
+
+def _reindent_help(lines, indent):
+    """Re-indent jobs_create_help_lines() output to `indent` spaces.
+
+    The shims in this module use the SHIFTING design (`shift` past the verb,
+    then `case "$1"`), which nests the help body two levels deeper than the
+    no-shift shims in _compat_helpers. Only the leading whitespace changes --
+    the advertised flag list stays a single source of truth, so a future CLI
+    change is made in one place rather than eight.
+    """
+    pad = ' ' * indent
+    return ''.join(pad + line.lstrip() for line in lines.splitlines(keepends=True))
 
 
 def _agent_aux_client_available() -> bool:
@@ -7698,6 +7713,15 @@ exit 0
                     '      --help) exit 0 ;;\n'
                     '      create)\n'
                     '        shift\n'
+                    # PR #124: after the `shift` above, $1 is the first arg
+                    # AFTER `create`, so the --organization-name capability
+                    # probe arrives here as `--help`. Answer it before the
+                    # capture: the real CLI prints help and creates nothing,
+                    # so a probe must never be logged as a job creation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{jobs_log}"\n'
                     f'        printf "\\n" >> "{jobs_log}"\n'
                     '        exit 0\n'
@@ -7986,6 +8010,15 @@ exit 0
                     '      --help) exit 0 ;;\n'
                     '      create)\n'
                     '        shift\n'
+                    # PR #124: after the `shift` above, $1 is the first arg
+                    # AFTER `create`, so the --organization-name capability
+                    # probe arrives here as `--help`. Answer it before the
+                    # capture: the real CLI prints help and creates nothing,
+                    # so a probe must never be logged as a job creation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{jobs_log}"\n'
                     f'        printf "\\n" >> "{jobs_log}"\n'
                     '        exit 0\n'
@@ -8187,6 +8220,15 @@ exit 0
                     '      --help) exit 0 ;;\n'
                     '      create)\n'
                     '        shift\n'
+                    # PR #124: after the `shift` above, $1 is the first arg
+                    # AFTER `create`, so the --organization-name capability
+                    # probe arrives here as `--help`. Answer it before the
+                    # capture: the real CLI prints help and creates nothing,
+                    # so a probe must never be logged as a job creation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{jobs_log}"\n'
                     f'        printf "\\n" >> "{jobs_log}"\n'
                     '        exit 0\n'
@@ -8378,6 +8420,15 @@ exit 0
                     '      --help) exit 0 ;;\n'
                     '      create)\n'
                     '        shift\n'
+                    # PR #124: after the `shift` above, $1 is the first arg
+                    # AFTER `create`, so the --organization-name capability
+                    # probe arrives here as `--help`. Answer it before the
+                    # capture: the real CLI prints help and creates nothing,
+                    # so a probe must never be logged as a job creation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{jobs_log}"\n'
                     f'        printf "\\n" >> "{jobs_log}"\n'
                     '        exit 0\n'
@@ -8594,6 +8645,15 @@ exit 0
                     '      --help) exit 0 ;;\n'
                     '      create)\n'
                     '        shift\n'
+                    # PR #124: after the `shift` above, $1 is the first arg
+                    # AFTER `create`, so the --organization-name capability
+                    # probe arrives here as `--help`. Answer it before the
+                    # capture: the real CLI prints help and creates nothing,
+                    # so a probe must never be logged as a job creation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{jobs_log}"\n'
                     f'        printf "\\n" >> "{jobs_log}"\n'
                     '        exit 0\n'
@@ -8740,6 +8800,15 @@ exit 0
                     '      --help) exit 0 ;;\n'
                     '      create)\n'
                     '        shift\n'
+                    # PR #124: after the `shift` above, $1 is the first arg
+                    # AFTER `create`, so the --organization-name capability
+                    # probe arrives here as `--help`. Answer it before the
+                    # capture: the real CLI prints help and creates nothing,
+                    # so a probe must never be logged as a job creation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{jobs_log2}"\n'
                     f'        printf "\\n" >> "{jobs_log2}"\n'
                     '        exit 0\n'
@@ -8883,6 +8952,15 @@ exit 0
                     '      --help) exit 0 ;;\n'
                     '      create)\n'
                     '        shift\n'
+                    # PR #124: after the `shift` above, $1 is the first arg
+                    # AFTER `create`, so the --organization-name capability
+                    # probe arrives here as `--help`. Answer it before the
+                    # capture: the real CLI prints help and creates nothing,
+                    # so a probe must never be logged as a job creation.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
                     f'        printf "%q " "$@" >> "{jobs_log}"\n'
                     f'        printf "\\n" >> "{jobs_log}"\n'
                     '        exit 0\n'
@@ -9113,7 +9191,16 @@ exit 0
                     '    shift\n'
                     '    case "$1" in\n'
                     '      --help) exit 0 ;;\n'
-                    '      create) exit 1 ;;\n'
+                    '      create)\n'
+                    '        shift\n'
+                    # PR #124: answer the --organization-name probe; only a
+                    # real creation takes the failing branch below.
+                    '        if [[ "$1" == "--help" ]]; then\n'
+                    + _reindent_help(jobs_create_help_lines(), 10) +
+                    '          exit 0\n'
+                    '        fi\n'
+                    '        exit 1\n'
+                    '        ;;\n'
                     '      outcome)\n'
                     '        shift\n'
                     # Phase 38 (CR-01): supports_flag "jobs outcome" "--outcome-value"

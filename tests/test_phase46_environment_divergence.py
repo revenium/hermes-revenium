@@ -36,7 +36,9 @@ import shutil
 import tempfile
 import unittest
 
-from tests._compat_helpers import build_state_db, run_script, SCRIPTS_DIR
+from tests._compat_helpers import (
+    build_state_db, jobs_create_help_lines, run_script, SCRIPTS_DIR,
+)
 
 # A plain-ASCII, pipe/newline-free source well over the 64-byte --metadata
 # clamp (103 chars == 103 serialized bytes for ASCII), so any accidental
@@ -77,6 +79,14 @@ case "$1" in
       echo "--outcome-value string     Business outcome value"
       echo "--outcome-currency string   Business outcome currency"
       exit 0
+    fi
+    # PR #124: `revenium jobs create --help` is supports_flag's
+    # --organization-name probe, not a job creation. It must be answered
+    # ABOVE the capture AND above the failure counter below -- otherwise the
+    # probe both pollutes jobs_log and burns the "first attempt fails"
+    # budget this fixture exists to exercise.
+    if [[ "$2" == "create" && "$3" == "--help" ]]; then
+{jobs_create_help_lines()}      exit 0
     fi
     # Log every real (non --help) jobs invocation -- create AND outcome.
     printf "%q " "$@" >> "{jobs_log}"

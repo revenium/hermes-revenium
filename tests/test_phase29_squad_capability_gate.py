@@ -25,6 +25,7 @@ from tests._compat_helpers import (
     assert_argv_matches_golden,
     build_shim,
     build_state_db,
+    jobs_create_help_lines,
     load_golden,
     run_script,
     SCRIPTS_DIR,
@@ -106,6 +107,12 @@ def _write_shim_with_help_lines(shim_path, help_lines, jobs_capable=True):
         '    ;;\n'
         '  jobs)\n'
         f'    if [[ "$2" == "--help" ]]; then {"exit 0" if jobs_capable else "exit 1"}; fi\n'
+        # PR #124: answer supports_flag's `jobs create --help` probe above the
+        # capture, so it is never logged as a real "jobs create" invocation.
+        '    if [[ "$2" == "create" && "$3" == "--help" ]]; then\n'
+        + jobs_create_help_lines() +
+        '      exit 0\n'
+        '    fi\n'
         '    printf "%q " "$@" >> "${JOBS_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'
         '    printf "\\n"      >> "${JOBS_LOG:-${INVOCATIONS_LOG:-/dev/null}}"\n'
         '    exit 0\n'

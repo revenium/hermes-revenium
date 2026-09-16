@@ -424,11 +424,21 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # this a pure line shift rather than a new emission site: the
         # assertions above both still pass untouched. --ticket-id is its own
         # flag and sends no --operation-type, so it adds no site here.
+        #
+        # Re-measured again (PR #124, same convention): the per-subcommand
+        # `--organization-name` capability probe added a net 13 lines near the
+        # top of hermes-report.sh ONLY, ahead of all three of its sites, so
+        # each shifted by exactly +13 (1483->1496, 3499->3512, 3676->3689)
+        # while api-event-report.sh's single site stayed at 1484. Again a pure
+        # shift: the COUNT (4) and the emitted VALUE expressions are
+        # unchanged, so both assertions above pass untouched. The probe gates
+        # `--organization-name` on `jobs create`, which sends no
+        # --operation-type, so it adds no site here either.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1483),
-            ('hermes-report.sh', 3499),
-            ('hermes-report.sh', 3676),
+            ('hermes-report.sh', 1496),
+            ('hermes-report.sh', 3512),
+            ('hermes-report.sh', 3689),
             ('api-event-report.sh', 1484),
         }
         self.assertEqual(
