@@ -975,6 +975,7 @@ PY
       MARKERS_FILE="${markers_file}" \
       JOIN_MODE="${join_mode}" \
       SID="${sid}" \
+      IS_ROOT="$([[ "${root_sid}" == "${sid}" ]] && echo 1 || echo 0)" \
       SKILL_CAPABLE="${SKILL_CLI_CAPABLE}" \
       TICKET_ID="${_ticket_id}" \
       MIN_EVENT_TS="${min_ts}" \
@@ -991,6 +992,12 @@ from datetime import datetime, timezone
 event_file = os.environ.get("EVENT_FILE", "")
 markers_file = os.environ.get("MARKERS_FILE", "")
 join_mode = os.environ.get("JOIN_MODE", "unclassified")
+# Root vs subagent as the caller loop computed it (root_sid == sid).
+# Used only as a fast negative -- see _is_confirmed_root below for why
+# it is NOT sufficient on its own.
+IS_ROOT = os.environ.get("IS_ROOT", "0") == "1"
+state_db = os.environ.get("STATE_DB", "")
+session_id = os.environ.get("SID", "")
 
 
 def _iso(ts):
@@ -1053,13 +1060,55 @@ def _stop_reason(finish_reason):
     return _STOP_REASON_MAP.get((finish_reason or "").strip().lower(), "END")
 
 
-# --- Load markers (task markers only) for the temporal join (C-5). ---
+def _is_confirmed_root(sid):
+    """POSITIVE evidence that `sid` is a root session, not merely the absence
+    of evidence that it is not.
+
+    `get_root_session_id` fails OPEN by contract: it returns the INPUT sid when
+    state.db is missing, when sqlite errors, and — the case that matters here —
+    when the sessions table simply has no row for this session. So the caller's
+    `root_sid == sid` cannot distinguish "genuinely root" from "could not
+    tell". That is harmless for --squad-role, which is a label, but not for
+    --agentic-job-id: a subagent whose ancestry failed to resolve would be
+    treated as root, and if its own marker file happens to carry a job marker
+    (a pre_tool_call CANCELLED marker, say) the resolved owner would ship —
+    referencing a job row JOB-02 never created.
+
+    So require the row to EXIST and its parent_session_id to be NULL. Every
+    other outcome — no row, no table, no column, unreadable db — returns False
+    and the flag is simply omitted, which is byte-identical to the behaviour
+    before the resolution pass existed. Omitting a dimension is recoverable;
+    asserting a wrong one is not.
+    """
+    if not sid or not state_db or not os.path.isfile(state_db):
+        return False
+    try:
+        uri = "file:%s?mode=ro" % state_db
+        with sqlite3.connect(uri, uri=True) as conn:
+            row = conn.execute(
+                "SELECT parent_session_id FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+    except Exception:
+        return False
+    return row is not None and row[0] is None
+
+
+IS_ROOT_CONFIRMED = IS_ROOT and _is_confirmed_root(session_id)
+
+
+# --- Load markers for the temporal join (C-5).
+# Task markers drive the join. Job markers are NOT part of it — they are read
+# into a SEPARATE list purely to resolve ownership below, and must never enter
+# `markers` (and so never `window_markers`), because that list is what bisects
+# the join for task_type/operation_type: a non-task record in it would move
+# attribution for every event on the session.
 markers = []
+job_positions = []
 if join_mode == "join" and markers_file and os.path.isfile(markers_file):
     REQUIRED = ("muid", "ts", "sid", "task_type", "operation_type")
     try:
         with open(markers_file, "r", encoding="utf-8") as fh:
-            for line in fh:
+            for file_pos, line in enumerate(fh):
                 line = line.rstrip("\n")
                 if not line or len(line) > 4096:
                     continue
@@ -1070,6 +1119,18 @@ if join_mode == "join" and markers_file and os.path.isfile(markers_file):
                 if not isinstance(m, dict):
                     continue
                 if m.get("kind") is not None:
+                    # A job marker. The REQUIRED task-marker key check below
+                    # must NOT be applied to it — a job marker carries no
+                    # muid/task_type/operation_type and would fail it.
+                    if m.get("kind") == "job":
+                        job_id = _clean(m.get("agentic_job_id") or "", 128)
+                        if job_id:
+                            job_positions.append((
+                                file_pos,
+                                job_id,
+                                _clean(m.get("job_name") or "", 256),
+                                _clean(m.get("job_type") or "", 128),
+                            ))
                     continue
                 if not all(k in m for k in REQUIRED):
                     continue
@@ -1077,9 +1138,46 @@ if join_mode == "join" and markers_file and os.path.isfile(markers_file):
                     m["ts"] = float(m["ts"])
                 except (TypeError, ValueError):
                     continue
+                m["_file_pos"] = file_pos
                 markers.append(m)
     except OSError:
         pass
+
+# --- Deferred owning_job_id resolution, ported VERBATIM in semantics from
+# hermes-report.sh's own pass (the "Phase 9 (D-11, D-12)" block).
+#
+# Primary rule (D-08): a task marker is owned by the FIRST job marker whose
+# FILE POSITION is greater than the task marker's — job markers are written at
+# arc end and claim the task markers above them.
+#
+# Fallback (TRACE-FIX 2026-06-25): a task marker with NO later job marker binds
+# to the NEAREST PRECEDING one instead. The classifier writes at most ONE job
+# marker per session, early, so in long-lived sessions the remaining task
+# markers accumulate BELOW it and the forward-only rule stranded them.
+#
+# FILE POSITION, not timestamp, and deliberately so: session ownership can flip
+# between the legacy and event paths mid-session, and a timestamp rule here
+# would disagree with the legacy pass on the same file — splitting one
+# session's transactions across job ids depending on which path shipped which
+# slice. The two paths must resolve ownership identically.
+#
+# This also answers the ordering hazard on its own: task markers are written
+# ~14s BEFORE job inference completes, so a job marker is routinely written
+# AFTER the task markers it owns. Resolving at report time, from file order,
+# means the job id need not have existed when the task marker was written.
+for m in markers:
+    task_pos = m.get("_file_pos", 0)
+    owner = ""
+    for job_pos, job_id, _job_name, _job_type in job_positions:
+        if job_pos > task_pos:
+            owner = job_id
+            break
+    if not owner:
+        for job_pos, job_id, _job_name, _job_type in reversed(job_positions):
+            if job_pos < task_pos:
+                owner = job_id
+                break
+    m["owning_job_id"] = owner
 markers.sort(key=lambda m: m["ts"])
 
 # Contract C-5a: GUARDRAIL records are classification bookkeeping, always
@@ -1106,7 +1204,22 @@ def _attribution_for(ts):
     task_type = _clean(m.get("task_type") or "unclassified", 128)
     operation_type = _clean(m.get("operation_type") or "CHAT", 32)
     trace_id = _clean(m.get("trace_id") or "", 256)
+    # A marker's OWN agentic_job_id is only ever populated on a subagent
+    # session, and it names the ROOT's job -- so it wins, unchanged, exactly as
+    # it did before the resolution pass existed.
+    #
+    # Otherwise fall back to the resolved owner, but ONLY on a CONFIRMED
+    # root session (see _is_confirmed_root -- the caller's root_sid == sid
+    # test alone fails OPEN and would treat an unresolvable subagent as
+    # root).
+    # hermes-report.sh is explicit that a subagent's own owning id must NEVER
+    # ship: JOB-02 suppresses the job create for subagents, so the id would
+    # orphan-reference a Revenium job row that does not exist. Mirroring that
+    # refusal here keeps the two paths' wire output identical for the same
+    # session.
     agentic_job_id = _clean(m.get("agentic_job_id") or "", 128)
+    if not agentic_job_id and IS_ROOT_CONFIRMED:
+        agentic_job_id = _clean(m.get("owning_job_id") or "", 128)
     return task_type, operation_type, trace_id, agentic_job_id
 
 

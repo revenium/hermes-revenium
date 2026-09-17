@@ -434,12 +434,22 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # unchanged, so both assertions above pass untouched. The probe gates
         # `--organization-name` on `jobs create`, which sends no
         # --operation-type, so it adds no site here either.
+        #
+        # Re-measured again (PR #125, same convention): the event path's
+        # owning_job_id resolution pass added lines to api-event-report.sh
+        # ahead of its single site (1484->1597) and touched hermes-report.sh
+        # not at all, so that file's three sites are unmoved — the mirror
+        # image of PR #124's shift, and the reason this tuple set names the
+        # FILE as well as the line. Pure shift again: the COUNT (4) and the
+        # emitted VALUE expressions are unchanged, so both assertions above
+        # pass untouched. The resolution pass feeds --agentic-job-id, which
+        # is a different flag and adds no emission site.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1496),
             ('hermes-report.sh', 3512),
             ('hermes-report.sh', 3689),
-            ('api-event-report.sh', 1484),
+            ('api-event-report.sh', 1597),
         }
         self.assertEqual(
             found_locations, expected_locations,
