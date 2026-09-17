@@ -36,6 +36,9 @@ SCRIPTS_DIR = ROOT / 'skills' / 'revenium' / 'scripts'
 
 _OLD_TS = 1715514000.0
 
+# Sentinel: default `created_jobs` to every job marker in the case.
+_ALL_JOB_MARKERS = object()
+
 
 def _write_jsonl(path, records):
     with open(path, 'w', encoding='utf-8') as f:
@@ -43,10 +46,11 @@ def _write_jsonl(path, records):
             f.write(json.dumps(r, separators=(',', ':')) + '\n')
 
 
-def _seed_sessions_db(db_path, rows):
-    """sessions table WITH parent_session_id, so get_root_session_id can
-    resolve a root distinct from the child. Same shape as
-    tests/test_phase29_agent_inheritance.py::_seed_sessions_db."""
+def _seed_sessions_db(db_path, rows, profile_name=None):
+    """sessions table WITH parent_session_id (so get_root_session_id can
+    resolve a root distinct from the child) and profile_name (the ONLY source
+    `resolve-markers-dir.py` consults for the owning profile, per Phase 59
+    D-18). Shape follows tests/test_phase29_agent_inheritance.py."""
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
@@ -57,15 +61,16 @@ def _seed_sessions_db(db_path, rows):
                 cache_read_tokens INTEGER, cache_write_tokens INTEGER,
                 reasoning_tokens INTEGER, estimated_cost_usd REAL,
                 api_call_count INTEGER, started_at REAL, ended_at REAL,
-                billing_provider TEXT, parent_session_id TEXT
+                billing_provider TEXT, parent_session_id TEXT,
+                profile_name TEXT
             )
             """
         )
         conn.executemany(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (sid, "claude-sonnet-4-6", "test", 100, 50, 0, 0, 0,
-                 0.0, 1, _OLD_TS, _OLD_TS, "anthropic", parent)
+                 0.0, 1, _OLD_TS, _OLD_TS, "anthropic", parent, profile_name)
                 for sid, parent in rows
             ],
         )
@@ -155,7 +160,15 @@ class EventPathOwningJobIdBase(unittest.TestCase):
                         invs.append(shlex.split(line))
         return [a for a in invs if len(a) >= 2 and a[0] == 'meter' and a[1] == 'completion']
 
-    def _run_case(self, sid, marker_records, events, sessions=None):
+    def _run_case(self, sid, marker_records, events, sessions=None,
+                  created_jobs=_ALL_JOB_MARKERS):
+        """created_jobs: job ids to write into revenium-jobs.ledger as created.
+
+        Defaults to every job id in `marker_records`, which is the steady state
+        -- hermes-report.sh creates the job, and only then does this path have
+        anything to attribute to. Pass [] to model the RACE: the event arriving
+        before its job exists.
+        """
         tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home = self._setup_tree()
         try:
             Path(ready_dir, sid).touch()
@@ -163,6 +176,13 @@ class EventPathOwningJobIdBase(unittest.TestCase):
             _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'), events)
             if sessions:
                 _seed_sessions_db(os.path.join(hh, 'state.db'), sessions)
+
+            if created_jobs is _ALL_JOB_MARKERS:
+                created_jobs = [r['agentic_job_id'] for r in marker_records
+                                if r.get('kind') == 'job' and r.get('agentic_job_id')]
+            with open(os.path.join(sd, 'revenium-jobs.ledger'), 'w') as f:
+                for jid in created_jobs:
+                    f.write(f'JOB:{jid}:created:1715515200.0\n')
 
             meter_log = os.path.join(tmpdir, 'meter.log')
             inv_log = os.path.join(tmpdir, 'inv.log')
@@ -308,6 +328,192 @@ class SubagentUnchangedTests(EventPathOwningJobIdBase):
         )
         self.assertEqual(len(flags), 1, out)
         self.assertEqual(flags[0].get('--agentic-job-id'), 'roots_job_d4e5')
+
+
+class JobMustExistBeforeAttributionTests(EventPathOwningJobIdBase):
+    """Production regression, 2026-09-17, one day after the resolution pass
+    shipped: job Name and Type stopped being set reliably.
+
+    `hermes-report.sh` is the ONLY creator of job rows and the only caller that
+    passes --name/--type. Once this path also began sending --agentic-job-id,
+    the two raced. When a transaction carrying an id Revenium has not seen
+    arrives FIRST, the platform auto-creates a BARE job row; hermes-report.sh's
+    later `jobs create` then gets a 409, which it treats as success by design
+    (D-09) and ledgers — so name and type are dropped silently and for good
+    (`revenium jobs update` can restore a name and has no --type at all).
+
+    Measured both directions within hours on the fleet:
+
+        table_for_one_mention_check_7488  create 07:09:02Z, event 07:13:42Z -> metadata KEPT
+        reddit_opportunity_scan_sept17_f7be  event 14:06:54Z, create 14:07:03Z -> metadata LOST
+
+    4 of the 5 jobs created that day lost it. So: never attribute to a job that
+    does not exist locally yet."""
+
+    def test_event_arriving_before_its_job_exists_omits_the_id(self):
+        """The losing side of the race. The id must NOT ship, because shipping
+        it is what auto-creates the bare row that costs the job its name."""
+        sid = 'evt-job-not-yet-created'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'not_yet_created_4f2a', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[(sid, None)],
+            created_jobs=[],  # hermes-report.sh has not created it yet
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn(
+            '--agentic-job-id', flags[0],
+            'the job does not exist yet, so shipping its id would let the '
+            'platform auto-create a BARE job row and permanently cost it the '
+            f'--name/--type that only `jobs create` supplies: {flags[0]!r}'
+        )
+
+    def test_the_event_itself_still_ships(self):
+        """The gate withholds the DIMENSION, never the event. A job that is
+        never created (a markerless session) must not strand its events —
+        deferring them would lose real metered spend."""
+        sid = 'evt-still-ships'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'never_created_8c1d', 1000014.0),
+            ],
+            [
+                _event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5),
+                _event_record(sid, f'{sid}:t2:api:2', 1000006.0, 1000006.5),
+            ],
+            sessions=[(sid, None)],
+            created_jobs=[],
+        )
+        self.assertEqual(
+            len(flags), 2,
+            f'both events must still be metered, only the job id withheld: {flags!r}\n{out}'
+        )
+        for f in flags:
+            self.assertEqual(f.get('--task-type'), 'social_mention_watch')
+            self.assertEqual(f.get('--input-tokens'), '100')
+
+    def test_once_the_job_exists_the_id_ships(self):
+        """The winning side: hermes-report.sh created the job first, so the row
+        already carries its name and type and attribution is safe."""
+        sid = 'evt-job-exists'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'already_created_9e3b', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[(sid, None)],
+            created_jobs=['already_created_9e3b'],
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertEqual(flags[0].get('--agentic-job-id'), 'already_created_9e3b')
+
+    def test_a_different_job_in_the_ledger_does_not_authorise_this_one(self):
+        """The gate matches the resolved id exactly — a populated ledger is not
+        a blanket pass."""
+        sid = 'evt-other-job-ledgered'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'this_one_5a7c', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[(sid, None)],
+            created_jobs=['some_other_job_1b2c'],
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn('--agentic-job-id', flags[0])
+
+
+class MultiplexedProfileLedgerTests(EventPathOwningJobIdBase):
+    """PR #126 review (P2). `_jobs_ledger_for_markers_dir` has a second branch
+    for a session whose markers live under a NAMED profile, and the cases above
+    only ever exercise the process-level one.
+
+    That branch is exactly where a silent regression would hide: on a
+    multiplexed host each profile keeps its own ledger, and consulting the
+    process-level one would ask the WRONG profile whether the job exists —
+    removing job attribution for every named profile while every
+    process-level test stayed green.
+
+    So both directions are asserted: the owning profile's sibling ledger
+    authorises the id, and the process-level ledger does NOT."""
+
+    def _run_multiplexed(self, profile, sid, job_id,
+                         in_profile_ledger, in_process_ledger):
+        tmpdir, hh, sd, spool_dir, _markers_dir, _ready_dir, shim_home = self._setup_tree()
+        try:
+            # The session's markers live under the NAMED profile, resolved from
+            # sessions.profile_name (Phase 59 D-18). The spool stays
+            # process-level: the multi-profile spool sweep was deliberately
+            # removed (the cross-profile double-ship fix), so this is the real
+            # multiplexed shape.
+            p_state = os.path.join(hh, 'profiles', profile, 'state', 'revenium')
+            p_markers = os.path.join(p_state, 'markers')
+            os.makedirs(os.path.join(p_markers, '.ready'), mode=0o700)
+            Path(p_markers, '.ready', sid).touch()
+
+            _write_jsonl(os.path.join(p_markers, f'{sid}.jsonl'), [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, job_id, 1000014.0),
+            ])
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)])
+
+            _seed_sessions_db(os.path.join(hh, 'state.db'), [(sid, None)],
+                              profile_name=profile)
+
+            for path, present in ((os.path.join(p_state, 'revenium-jobs.ledger'),
+                                   in_profile_ledger),
+                                  (os.path.join(sd, 'revenium-jobs.ledger'),
+                                   in_process_ledger)):
+                with open(path, 'w') as f:
+                    if present:
+                        f.write(f'JOB:{job_id}:created:1715515200.0\n')
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+            comps = self._completions(meter_log)
+            return [argv_to_flags(a) for a in comps], out
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_owning_profiles_ledger_authorises_the_id(self):
+        flags, out = self._run_multiplexed(
+            'marketing', 'evt-mux-owned', 'mux_job_7d3e',
+            in_profile_ledger=True, in_process_ledger=False,
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertEqual(
+            flags[0].get('--agentic-job-id'), 'mux_job_7d3e',
+            'the job IS created in the owning profile\'s ledger; reading only '
+            'the process-level one would silently drop attribution for every '
+            f'named profile: {flags[0]!r}\n{out}'
+        )
+
+    def test_process_level_ledger_does_not_authorise_another_profiles_job(self):
+        """The negative that proves it asks the RIGHT ledger rather than any
+        reachable one."""
+        flags, out = self._run_multiplexed(
+            'marketing', 'evt-mux-wrong', 'mux_job_9f1a',
+            in_profile_ledger=False, in_process_ledger=True,
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn(
+            '--agentic-job-id', flags[0],
+            'the owning profile has not created this job — a hit in the '
+            f'process-level ledger must not stand in for it: {flags[0]!r}'
+        )
 
 
 class UnresolvableAncestryTests(EventPathOwningJobIdBase):

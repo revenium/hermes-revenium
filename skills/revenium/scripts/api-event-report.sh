@@ -318,6 +318,19 @@ _ready_dir_for_markers_dir() {
   fi
 }
 
+# The jobs ledger that OWNS a given session, derived from its markers dir the
+# same way `.ready` is above -- on a multiplexed host each profile keeps its
+# own, and consulting the process-level one would ask the wrong profile whether
+# a job exists. MARKERS_DIR is `<state>/markers`, so the ledger is its sibling.
+_jobs_ledger_for_markers_dir() {
+  local mdir="$1"
+  if [[ "${mdir}" == "${MARKERS_DIR}" ]]; then
+    printf '%s\n' "${JOBS_LEDGER_FILE}"
+  else
+    printf '%s\n' "$(dirname "${mdir}")/revenium-jobs.ledger"
+  fi
+}
+
 # Phase 32 Plan 03 (C-10): append ONE shadow-comparison row for one session
 # to EVENT_SHADOW_REPORT_FILE (and to the run-scoped accumulator file used to
 # build the end-of-run per-platform aggregate). Called once per session, at
@@ -857,6 +870,9 @@ PY
     local ready_dir
     ready_dir="$(_ready_dir_for_markers_dir "${session_markers_dir}")"
 
+    local session_jobs_ledger
+    session_jobs_ledger="$(_jobs_ledger_for_markers_dir "${session_markers_dir}")"
+
     local has_sentinel=false
     [[ -e "${ready_dir}/${sid}" ]] && has_sentinel=true
 
@@ -976,6 +992,7 @@ PY
       JOIN_MODE="${join_mode}" \
       SID="${sid}" \
       IS_ROOT="$([[ "${root_sid}" == "${sid}" ]] && echo 1 || echo 0)" \
+      JOBS_LEDGER="${session_jobs_ledger}" \
       SKILL_CAPABLE="${SKILL_CLI_CAPABLE}" \
       TICKET_ID="${_ticket_id}" \
       MIN_EVENT_TS="${min_ts}" \
@@ -998,6 +1015,7 @@ join_mode = os.environ.get("JOIN_MODE", "unclassified")
 IS_ROOT = os.environ.get("IS_ROOT", "0") == "1"
 state_db = os.environ.get("STATE_DB", "")
 session_id = os.environ.get("SID", "")
+jobs_ledger = os.environ.get("JOBS_LEDGER", "")
 
 
 def _iso(ts):
@@ -1094,6 +1112,51 @@ def _is_confirmed_root(sid):
 
 
 IS_ROOT_CONFIRMED = IS_ROOT and _is_confirmed_root(session_id)
+
+
+def _created_job_ids(path):
+    """Job ids this host has actually CREATED, from the same ledger
+    hermes-report.sh writes (`JOB:<id>:created:<ts>`) and greps with
+    `^JOB:<id>:created:`.
+
+    Why this gate exists (regression found in production 2026-09-17, one day
+    after the owning_job_id pass shipped). `hermes-report.sh` is the ONLY
+    creator of job rows, and it is the only caller that passes --name/--type.
+    Once this path also began sending --agentic-job-id, the two became a race:
+    when a transaction carrying an id Revenium has not seen arrives FIRST, the
+    platform auto-creates a bare job row, and hermes-report.sh's later
+    `jobs create` gets a 409 -- which it treats as success by design (D-09) and
+    ledgers. The name and type are then dropped silently and permanently
+    (`revenium jobs update` can restore a name, but has no --type at all).
+
+    Observed both ways within hours: create winning by 4m40s kept the metadata;
+    an event winning by 9s lost it. 4 of the 5 jobs created that day lost it.
+
+    So: only ever attribute to a job that already EXISTS locally. An event that
+    arrives before its job is created simply ships without the id -- byte
+    identical to this path's behaviour before the pass existed, so no revenue
+    and no event is lost, only the optional dimension, and only until the job
+    lands. Never defer the EVENT itself on this: a job that is never created
+    (a markerless session) would strand its events forever.
+    """
+    ids = set()
+    if not path or not os.path.isfile(path):
+        return ids
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                # Split bounded: an id cannot contain ':' (the ledger's own
+                # delimiter), which is what makes hermes-report.sh's
+                # `^JOB:<id>:created:` grep well-defined in the first place.
+                parts = line.strip().split(":", 3)
+                if len(parts) >= 3 and parts[0] == "JOB" and parts[2] == "created":
+                    ids.add(parts[1])
+    except OSError:
+        pass
+    return ids
+
+
+CREATED_JOB_IDS = _created_job_ids(jobs_ledger)
 
 
 # --- Load markers for the temporal join (C-5).
@@ -1219,7 +1282,14 @@ def _attribution_for(ts):
     # session.
     agentic_job_id = _clean(m.get("agentic_job_id") or "", 128)
     if not agentic_job_id and IS_ROOT_CONFIRMED:
-        agentic_job_id = _clean(m.get("owning_job_id") or "", 128)
+        _owner = _clean(m.get("owning_job_id") or "", 128)
+        # Only attribute to a job hermes-report.sh has already created -- see
+        # _created_job_ids for the production race this closes. Deliberately
+        # NOT applied to the marker's own agentic_job_id above: that is this
+        # path's pre-existing subagent behaviour, it predates the resolution
+        # pass, and test_phase32_temporal_join pins it.
+        if _owner in CREATED_JOB_IDS:
+            agentic_job_id = _owner
     return task_type, operation_type, trace_id, agentic_job_id
 
 

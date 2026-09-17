@@ -435,7 +435,11 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # `--organization-name` on `jobs create`, which sends no
         # --operation-type, so it adds no site here either.
         #
-        # Re-measured again (PR #125, same convention): the event path's
+        # Re-measured again (PR #126, same convention): the job-must-exist gate
+        # added lines to api-event-report.sh ahead of its single site
+        # (1597->1667), hermes-report.sh again untouched. Same pure shift.
+        #
+        # Re-measured (PR #125, same convention): the event path's
         # owning_job_id resolution pass added lines to api-event-report.sh
         # ahead of its single site (1484->1597) and touched hermes-report.sh
         # not at all, so that file's three sites are unmoved — the mirror
@@ -449,7 +453,7 @@ class SoleOtherEmitterTests(unittest.TestCase):
             ('hermes-report.sh', 1496),
             ('hermes-report.sh', 3512),
             ('hermes-report.sh', 3689),
-            ('api-event-report.sh', 1597),
+            ('api-event-report.sh', 1667),
         }
         self.assertEqual(
             found_locations, expected_locations,
