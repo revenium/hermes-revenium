@@ -187,6 +187,7 @@ class ForwardRuleTests(EventPathOwningJobIdBase):
                 _job_marker(sid, 'tableforone_bsky_monitor_62c2', 1000014.0),
             ],
             [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[(sid, None)],
         )
         self.assertEqual(len(flags), 1, f'expected 1 completion: {flags!r}\n{out}')
         self.assertEqual(
@@ -208,6 +209,7 @@ class ForwardRuleTests(EventPathOwningJobIdBase):
                 _job_marker(sid, 'late_job_9f3a', 1000014.0),
             ],
             [_event_record(sid, f'{sid}:t1:api:1', 1000000.5, 1000001.0)],
+            sessions=[(sid, None)],
         )
         self.assertEqual(len(flags), 1, out)
         self.assertEqual(flags[0].get('--agentic-job-id'), 'late_job_9f3a')
@@ -234,6 +236,7 @@ class NearestPrecedingFallbackTests(EventPathOwningJobIdBase):
                 _event_record(sid, f'{sid}:t2:api:2', 1000150.0, 1000150.5),
                 _event_record(sid, f'{sid}:t3:api:3', 1000250.0, 1000250.5),
             ],
+            sessions=[(sid, None)],
         )
         self.assertEqual(len(flags), 3, f'expected 3 completions: {flags!r}\n{out}')
         for f in flags:
@@ -258,6 +261,7 @@ class NearestPrecedingFallbackTests(EventPathOwningJobIdBase):
                 _job_marker(sid, 'position_wins_7b2c', 1000100.0),
             ],
             [_event_record(sid, f'{sid}:t1:api:1', 1000600.0, 1000600.5)],
+            sessions=[(sid, None)],
         )
         self.assertEqual(len(flags), 1, out)
         self.assertEqual(flags[0].get('--agentic-job-id'), 'position_wins_7b2c')
@@ -306,6 +310,61 @@ class SubagentUnchangedTests(EventPathOwningJobIdBase):
         self.assertEqual(flags[0].get('--agentic-job-id'), 'roots_job_d4e5')
 
 
+class UnresolvableAncestryTests(EventPathOwningJobIdBase):
+    """PR #125 review (P1). `get_root_session_id` fails OPEN: it returns the
+    INPUT sid when state.db is missing, when sqlite errors, and when the
+    sessions table simply has no row. So `root_sid == sid` cannot tell
+    "genuinely root" from "could not tell", and a subagent whose ancestry did
+    not resolve would be treated as root — shipping a resolved owner for a job
+    row JOB-02 never created.
+
+    The resolved owner therefore requires POSITIVE evidence of rootness: the
+    row exists AND its parent_session_id is NULL. Everything else omits the
+    flag, which is byte-identical to the behaviour before the pass existed.
+
+    This costs nothing in production: on the fleet 2026-09-16 every session had
+    a row (marketing 385/385, gtm 90/90, devops 1981/1981), all root."""
+
+    def test_no_state_db_at_all_omits_the_resolved_owner(self):
+        sid = 'evt-no-statedb'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'some_work', 1000000.0),
+                _job_marker(sid, 'unprovable_owner_8a1f', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=None,
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn(
+            '--agentic-job-id', flags[0],
+            'rootness was unprovable (no state.db), so the resolved owner must '
+            f'not ship: {flags[0]!r}'
+        )
+
+    def test_session_missing_from_the_sessions_table_omits_the_resolved_owner(self):
+        """The exact review case: the db exists and is readable, but this
+        session has no row — so `get_root_session_id` hands back the input sid
+        and the naive test would call it root."""
+        sid = 'evt-row-missing'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'some_work', 1000000.0),
+                _job_marker(sid, 'unprovable_owner_3c9d', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[('some-other-session', None)],
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn(
+            '--agentic-job-id', flags[0],
+            'the session has no row, so rootness is unproven and the resolved '
+            f'owner must not ship: {flags[0]!r}'
+        )
+
+
 class NoJobMarkerUnchangedTests(EventPathOwningJobIdBase):
     """Backward compatibility: a session with no job marker meters exactly as
     it did before this change."""
@@ -337,6 +396,7 @@ class NoJobMarkerUnchangedTests(EventPathOwningJobIdBase):
                 _job_marker(sid, 'window_job_5c6d', 1000010.0),
             ],
             [_event_record(sid, f'{sid}:t1:api:1', 1000050.0, 1000050.5)],
+            sessions=[(sid, None)],
         )
         self.assertEqual(len(flags), 1, out)
         self.assertEqual(
