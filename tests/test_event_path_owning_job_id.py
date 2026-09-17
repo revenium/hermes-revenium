@@ -46,10 +46,11 @@ def _write_jsonl(path, records):
             f.write(json.dumps(r, separators=(',', ':')) + '\n')
 
 
-def _seed_sessions_db(db_path, rows):
-    """sessions table WITH parent_session_id, so get_root_session_id can
-    resolve a root distinct from the child. Same shape as
-    tests/test_phase29_agent_inheritance.py::_seed_sessions_db."""
+def _seed_sessions_db(db_path, rows, profile_name=None):
+    """sessions table WITH parent_session_id (so get_root_session_id can
+    resolve a root distinct from the child) and profile_name (the ONLY source
+    `resolve-markers-dir.py` consults for the owning profile, per Phase 59
+    D-18). Shape follows tests/test_phase29_agent_inheritance.py."""
     conn = sqlite3.connect(db_path)
     try:
         conn.execute(
@@ -60,15 +61,16 @@ def _seed_sessions_db(db_path, rows):
                 cache_read_tokens INTEGER, cache_write_tokens INTEGER,
                 reasoning_tokens INTEGER, estimated_cost_usd REAL,
                 api_call_count INTEGER, started_at REAL, ended_at REAL,
-                billing_provider TEXT, parent_session_id TEXT
+                billing_provider TEXT, parent_session_id TEXT,
+                profile_name TEXT
             )
             """
         )
         conn.executemany(
-            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (sid, "claude-sonnet-4-6", "test", 100, 50, 0, 0, 0,
-                 0.0, 1, _OLD_TS, _OLD_TS, "anthropic", parent)
+                 0.0, 1, _OLD_TS, _OLD_TS, "anthropic", parent, profile_name)
                 for sid, parent in rows
             ],
         )
@@ -429,6 +431,89 @@ class JobMustExistBeforeAttributionTests(EventPathOwningJobIdBase):
         )
         self.assertEqual(len(flags), 1, out)
         self.assertNotIn('--agentic-job-id', flags[0])
+
+
+class MultiplexedProfileLedgerTests(EventPathOwningJobIdBase):
+    """PR #126 review (P2). `_jobs_ledger_for_markers_dir` has a second branch
+    for a session whose markers live under a NAMED profile, and the cases above
+    only ever exercise the process-level one.
+
+    That branch is exactly where a silent regression would hide: on a
+    multiplexed host each profile keeps its own ledger, and consulting the
+    process-level one would ask the WRONG profile whether the job exists —
+    removing job attribution for every named profile while every
+    process-level test stayed green.
+
+    So both directions are asserted: the owning profile's sibling ledger
+    authorises the id, and the process-level ledger does NOT."""
+
+    def _run_multiplexed(self, profile, sid, job_id,
+                         in_profile_ledger, in_process_ledger):
+        tmpdir, hh, sd, spool_dir, _markers_dir, _ready_dir, shim_home = self._setup_tree()
+        try:
+            # The session's markers live under the NAMED profile, resolved from
+            # sessions.profile_name (Phase 59 D-18). The spool stays
+            # process-level: the multi-profile spool sweep was deliberately
+            # removed (the cross-profile double-ship fix), so this is the real
+            # multiplexed shape.
+            p_state = os.path.join(hh, 'profiles', profile, 'state', 'revenium')
+            p_markers = os.path.join(p_state, 'markers')
+            os.makedirs(os.path.join(p_markers, '.ready'), mode=0o700)
+            Path(p_markers, '.ready', sid).touch()
+
+            _write_jsonl(os.path.join(p_markers, f'{sid}.jsonl'), [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, job_id, 1000014.0),
+            ])
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)])
+
+            _seed_sessions_db(os.path.join(hh, 'state.db'), [(sid, None)],
+                              profile_name=profile)
+
+            for path, present in ((os.path.join(p_state, 'revenium-jobs.ledger'),
+                                   in_profile_ledger),
+                                  (os.path.join(sd, 'revenium-jobs.ledger'),
+                                   in_process_ledger)):
+                with open(path, 'w') as f:
+                    if present:
+                        f.write(f'JOB:{job_id}:created:1715515200.0\n')
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+            comps = self._completions(meter_log)
+            return [argv_to_flags(a) for a in comps], out
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_owning_profiles_ledger_authorises_the_id(self):
+        flags, out = self._run_multiplexed(
+            'marketing', 'evt-mux-owned', 'mux_job_7d3e',
+            in_profile_ledger=True, in_process_ledger=False,
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertEqual(
+            flags[0].get('--agentic-job-id'), 'mux_job_7d3e',
+            'the job IS created in the owning profile\'s ledger; reading only '
+            'the process-level one would silently drop attribution for every '
+            f'named profile: {flags[0]!r}\n{out}'
+        )
+
+    def test_process_level_ledger_does_not_authorise_another_profiles_job(self):
+        """The negative that proves it asks the RIGHT ledger rather than any
+        reachable one."""
+        flags, out = self._run_multiplexed(
+            'marketing', 'evt-mux-wrong', 'mux_job_9f1a',
+            in_profile_ledger=False, in_process_ledger=True,
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn(
+            '--agentic-job-id', flags[0],
+            'the owning profile has not created this job — a hit in the '
+            f'process-level ledger must not stand in for it: {flags[0]!r}'
+        )
 
 
 class UnresolvableAncestryTests(EventPathOwningJobIdBase):
