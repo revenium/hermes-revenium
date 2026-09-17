@@ -36,6 +36,9 @@ SCRIPTS_DIR = ROOT / 'skills' / 'revenium' / 'scripts'
 
 _OLD_TS = 1715514000.0
 
+# Sentinel: default `created_jobs` to every job marker in the case.
+_ALL_JOB_MARKERS = object()
+
 
 def _write_jsonl(path, records):
     with open(path, 'w', encoding='utf-8') as f:
@@ -155,7 +158,15 @@ class EventPathOwningJobIdBase(unittest.TestCase):
                         invs.append(shlex.split(line))
         return [a for a in invs if len(a) >= 2 and a[0] == 'meter' and a[1] == 'completion']
 
-    def _run_case(self, sid, marker_records, events, sessions=None):
+    def _run_case(self, sid, marker_records, events, sessions=None,
+                  created_jobs=_ALL_JOB_MARKERS):
+        """created_jobs: job ids to write into revenium-jobs.ledger as created.
+
+        Defaults to every job id in `marker_records`, which is the steady state
+        -- hermes-report.sh creates the job, and only then does this path have
+        anything to attribute to. Pass [] to model the RACE: the event arriving
+        before its job exists.
+        """
         tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home = self._setup_tree()
         try:
             Path(ready_dir, sid).touch()
@@ -163,6 +174,13 @@ class EventPathOwningJobIdBase(unittest.TestCase):
             _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'), events)
             if sessions:
                 _seed_sessions_db(os.path.join(hh, 'state.db'), sessions)
+
+            if created_jobs is _ALL_JOB_MARKERS:
+                created_jobs = [r['agentic_job_id'] for r in marker_records
+                                if r.get('kind') == 'job' and r.get('agentic_job_id')]
+            with open(os.path.join(sd, 'revenium-jobs.ledger'), 'w') as f:
+                for jid in created_jobs:
+                    f.write(f'JOB:{jid}:created:1715515200.0\n')
 
             meter_log = os.path.join(tmpdir, 'meter.log')
             inv_log = os.path.join(tmpdir, 'inv.log')
@@ -308,6 +326,109 @@ class SubagentUnchangedTests(EventPathOwningJobIdBase):
         )
         self.assertEqual(len(flags), 1, out)
         self.assertEqual(flags[0].get('--agentic-job-id'), 'roots_job_d4e5')
+
+
+class JobMustExistBeforeAttributionTests(EventPathOwningJobIdBase):
+    """Production regression, 2026-09-17, one day after the resolution pass
+    shipped: job Name and Type stopped being set reliably.
+
+    `hermes-report.sh` is the ONLY creator of job rows and the only caller that
+    passes --name/--type. Once this path also began sending --agentic-job-id,
+    the two raced. When a transaction carrying an id Revenium has not seen
+    arrives FIRST, the platform auto-creates a BARE job row; hermes-report.sh's
+    later `jobs create` then gets a 409, which it treats as success by design
+    (D-09) and ledgers — so name and type are dropped silently and for good
+    (`revenium jobs update` can restore a name and has no --type at all).
+
+    Measured both directions within hours on the fleet:
+
+        table_for_one_mention_check_7488  create 07:09:02Z, event 07:13:42Z -> metadata KEPT
+        reddit_opportunity_scan_sept17_f7be  event 14:06:54Z, create 14:07:03Z -> metadata LOST
+
+    4 of the 5 jobs created that day lost it. So: never attribute to a job that
+    does not exist locally yet."""
+
+    def test_event_arriving_before_its_job_exists_omits_the_id(self):
+        """The losing side of the race. The id must NOT ship, because shipping
+        it is what auto-creates the bare row that costs the job its name."""
+        sid = 'evt-job-not-yet-created'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'not_yet_created_4f2a', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[(sid, None)],
+            created_jobs=[],  # hermes-report.sh has not created it yet
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn(
+            '--agentic-job-id', flags[0],
+            'the job does not exist yet, so shipping its id would let the '
+            'platform auto-create a BARE job row and permanently cost it the '
+            f'--name/--type that only `jobs create` supplies: {flags[0]!r}'
+        )
+
+    def test_the_event_itself_still_ships(self):
+        """The gate withholds the DIMENSION, never the event. A job that is
+        never created (a markerless session) must not strand its events —
+        deferring them would lose real metered spend."""
+        sid = 'evt-still-ships'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'never_created_8c1d', 1000014.0),
+            ],
+            [
+                _event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5),
+                _event_record(sid, f'{sid}:t2:api:2', 1000006.0, 1000006.5),
+            ],
+            sessions=[(sid, None)],
+            created_jobs=[],
+        )
+        self.assertEqual(
+            len(flags), 2,
+            f'both events must still be metered, only the job id withheld: {flags!r}\n{out}'
+        )
+        for f in flags:
+            self.assertEqual(f.get('--task-type'), 'social_mention_watch')
+            self.assertEqual(f.get('--input-tokens'), '100')
+
+    def test_once_the_job_exists_the_id_ships(self):
+        """The winning side: hermes-report.sh created the job first, so the row
+        already carries its name and type and attribution is safe."""
+        sid = 'evt-job-exists'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'already_created_9e3b', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[(sid, None)],
+            created_jobs=['already_created_9e3b'],
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertEqual(flags[0].get('--agentic-job-id'), 'already_created_9e3b')
+
+    def test_a_different_job_in_the_ledger_does_not_authorise_this_one(self):
+        """The gate matches the resolved id exactly — a populated ledger is not
+        a blanket pass."""
+        sid = 'evt-other-job-ledgered'
+        flags, out = self._run_case(
+            sid,
+            [
+                _task_marker(sid, 'social_mention_watch', 1000000.0),
+                _job_marker(sid, 'this_one_5a7c', 1000014.0),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000005.0, 1000005.5)],
+            sessions=[(sid, None)],
+            created_jobs=['some_other_job_1b2c'],
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertNotIn('--agentic-job-id', flags[0])
 
 
 class UnresolvableAncestryTests(EventPathOwningJobIdBase):
