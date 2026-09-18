@@ -971,5 +971,96 @@ class PruneFlagLifetimeGuaranteeTests(unittest.TestCase):
             )
 
 
+def _non_literal_supports_flag_calls(scripts_dir):
+    """Return supports_flag call sites whose FIRST argument is not a literal.
+
+    Whitelist rather than blacklist: the rule is "the subcommand must be a
+    double-quoted string containing no expansion", so anything else -- an
+    unquoted word, a "${var}", a '$1' -- is reported. Checking only the first
+    argument keeps the rule line-local; several real call sites continue the
+    second argument onto the next line with a backslash.
+    """
+    offenders = []
+    literal_first_arg = re.compile(r'supports_flag\s+"[^"$`]+"')
+    for sh in sorted(Path(scripts_dir).glob('*.sh')):
+        for i, line in enumerate(sh.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                continue
+            # Only real invocations: skip prose mentions inside comments and
+            # the definition itself.
+            if not re.search(r'(^|[\s;(])supports_flag\s+\S', stripped):
+                continue
+            if stripped.startswith('supports_flag()'):
+                continue
+            if not literal_first_arg.search(stripped):
+                offenders.append(f'{sh.name}:{i}: {stripped}')
+    return offenders
+
+class PruneProbeWarnFlagsTests(unittest.TestCase):
+    """PROBE_WARN_FLAGS_DIR entries must survive a prune -- deliberately.
+
+    common.sh writes them as "${flag_dir}/${probe_key}" with NO '.flag'
+    suffix, so prune-markers.sh's endswith('.flag') filter skips them. That
+    reads like an oversight and is not one:
+
+      * probe_key derives from the two LITERAL arguments at each
+        supports_flag call site, so the key space is closed at the number of
+        call sites (~16). The directory is bounded by the source text and
+        cannot grow the way the session-keyed dirs do.
+      * pruning one would RE-ARM its warn, so a still-indeterminate probe
+        would re-warn once every retention period forever for a condition
+        that has not changed -- the same defect
+        PruneFlagLifetimeGuaranteeTests closes for session-keyed dirs.
+
+    This pins the behaviour so the suffix mismatch is not "fixed" into a
+    periodic re-warn.
+    """
+
+    def test_extensionless_probe_flag_survives_prune(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-probe-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            probe_dir = os.path.join(markers_dir, '.probe-warn')
+            os.makedirs(probe_dir, mode=0o700)
+
+            # Exactly the shape common.sh produces for
+            #   supports_flag "meter completion" "--ticket-id"
+            probe_flag = os.path.join(probe_dir, 'meter_completion___ticket-id')
+            Path(probe_flag).touch()
+            ancient = time.time() - 400 * 86400
+            os.utime(probe_flag, (ancient, ancient))
+
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_MARKERS_DIR': markers_dir,
+                'REVENIUM_MARKER_RETENTION_DAYS': '30',
+                'TZ': 'UTC',
+            }
+            r = subprocess.run(
+                ['bash', str(PRUNE_MARKERS)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(
+                os.path.exists(probe_flag),
+                'a probe sentinel must survive even at 400 days: pruning it '
+                're-arms a warn for a condition that has not changed, and the '
+                'directory is bounded by the number of supports_flag call sites',
+            )
+
+    def test_probe_key_space_is_closed_by_source(self):
+        """The growth bound is the source text, so assert it IS the source text.
+
+        If someone introduces a supports_flag call whose arguments are not
+        literals, the directory stops being bounded and the exemption above
+        stops being safe.
+        """
+        scripts = (ROOT / 'skills' / 'revenium' / 'scripts')
+        self.assertEqual([], _non_literal_supports_flag_calls(scripts))
+
 if __name__ == '__main__':
     unittest.main()

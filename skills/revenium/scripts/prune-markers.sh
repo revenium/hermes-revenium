@@ -279,10 +279,35 @@ if marker_retention_ok:
     # uses; --dry-run honored identically.
     #
     # OUTCOME_WARN_FLAGS_DIR is Phase 39 D-02 (the deferred/wedged job-outcome
-    # gate). PROBE_WARN_FLAGS_DIR is a pre-existing omission from this list --
-    # not this phase's defect, but the identical leak, closed alongside here
-    # since this pass is already generic over the directory list and needs no
-    # other change to cover it. AUX_WARN_FLAGS_DIR is Phase 59 Plan 03
+    # gate).
+    #
+    # PROBE_WARN_FLAGS_DIR is listed but this pass prunes NOTHING from it, and
+    # that is correct rather than an oversight. Two independent reasons, both
+    # load-bearing:
+    #
+    #   1. Its entries carry no '.flag' suffix -- common.sh writes
+    #      "${flag_dir}/${probe_key}" with probe_key built straight from
+    #      `printf '%s %s' <subcommand> <flag> | tr -c 'A-Za-z0-9._-' '_'` --
+    #      so the endswith('.flag') filter below skips every one of them.
+    #   2. It cannot grow without a code change. probe_key is derived from the
+    #      two LITERAL arguments at each supports_flag call site, so the key
+    #      space is closed at the number of those call sites (~16 across
+    #      hermes-report.sh, api-event-report.sh, correct-assessment.sh,
+    #      guardrail-check.sh and setup-guardrails.sh). A directory bounded by
+    #      the source text is not the unbounded-growth hazard the other four
+    #      dirs are.
+    #
+    # An earlier revision of this comment claimed the opposite -- that
+    # PROBE_WARN_FLAGS_DIR was "the identical leak, closed alongside here".
+    # It is neither identical nor closed, and the claim is corrected here
+    # rather than made true, because making it true would be a REGRESSION:
+    # pruning a probe sentinel re-arms its warn, so a probe that is still
+    # indeterminate would re-warn once every retention period forever, for a
+    # condition that has not changed. That is the same re-arm defect the
+    # session-keyed gate below exists to prevent, and it is pinned by
+    # PruneProbeWarnFlagsTests. Do not "fix" the suffix mismatch.
+    #
+    # AUX_WARN_FLAGS_DIR is Phase 59 Plan 03
     # (D-17, folded todo aux-pass-silently-drops-zero-token-sessions): the
     # new ctx-unresolvable-<sid> per-session key introduced there makes this
     # directory grow one file per unresolvable session, and this pass is
