@@ -7582,7 +7582,16 @@ exit 0
 
         # JOBS_CLI_CAPABLE guard must wrap the create stage.
         # The guard appears on an outer `if` block that encloses the while loop
-        # containing `revenium jobs create`, so search 100 lines before the command.
+        # containing `revenium jobs create`, so search back from the command.
+        #
+        # The distance is a PROXIMITY HEURISTIC, not an invariant -- the real
+        # property is "the create stage is enclosed by the capability guard",
+        # and nothing here can prove enclosure from text alone. The window was
+        # 100 and the true gap reached 104 when PR #127 documented, at the
+        # root_sid gate in between, why that gate deliberately differs from
+        # api-event-report.sh's. Prose legitimately widens the gap, so the
+        # window is 150: enough headroom that a comment does not read as a
+        # regression, still far too small to span to an unrelated guard.
         lines = text.splitlines()
         jobs_create_line = None
         for i, line in enumerate(lines):
@@ -7590,8 +7599,8 @@ exit 0
                 jobs_create_line = i
                 break
         self.assertIsNotNone(jobs_create_line, 'revenium jobs create not found in hermes-report.sh')
-        # Check up to 100 lines before jobs create for JOBS_CLI_CAPABLE
-        guard_window = '\n'.join(lines[max(0, jobs_create_line - 100):jobs_create_line])
+        # Check up to 150 lines before jobs create for JOBS_CLI_CAPABLE
+        guard_window = '\n'.join(lines[max(0, jobs_create_line - 150):jobs_create_line])
         self.assertIn(
             'JOBS_CLI_CAPABLE',
             guard_window,

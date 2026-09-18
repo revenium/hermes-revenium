@@ -435,6 +435,15 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # `--organization-name` on `jobs create`, which sends no
         # --operation-type, so it adds no site here either.
         #
+        # Re-measured again (PR #127, same convention): a COMMENTS-ONLY change
+        # recording why hermes-report.sh's root gate deliberately differs from
+        # the event path's moved that file's two later sites
+        # (3512->3569, 3689->3750); 1496 sits above the added block and
+        # api-event-report.sh was untouched. Pure shift, as always here -- the
+        # count (4) and the emitted VALUE expressions are unchanged. Worth
+        # noting the trigger: this pin moves for COMMENTS too, not just code,
+        # which is the cheapest way to be surprised by it.
+        #
         # Re-measured again (PR #126, same convention): the job-must-exist gate
         # added lines to api-event-report.sh ahead of its single site
         # (1597->1667), hermes-report.sh again untouched. Same pure shift.
@@ -451,8 +460,8 @@ class SoleOtherEmitterTests(unittest.TestCase):
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1496),
-            ('hermes-report.sh', 3512),
-            ('hermes-report.sh', 3689),
+            ('hermes-report.sh', 3569),
+            ('hermes-report.sh', 3750),
             ('api-event-report.sh', 1667),
         }
         self.assertEqual(
