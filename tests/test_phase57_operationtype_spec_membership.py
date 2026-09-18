@@ -438,7 +438,7 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # Re-measured again (PR #127, same convention): a COMMENTS-ONLY change
         # recording why hermes-report.sh's root gate deliberately differs from
         # the event path's moved that file's two later sites
-        # (3512->3557, 3689->3738); 1496 sits above the added block and
+        # (3512->3567, 3689->3748); 1496 sits above the added block and
         # api-event-report.sh was untouched. Pure shift, as always here -- the
         # count (4) and the emitted VALUE expressions are unchanged. Worth
         # noting the trigger: this pin moves for COMMENTS too, not just code,
@@ -460,8 +460,8 @@ class SoleOtherEmitterTests(unittest.TestCase):
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1496),
-            ('hermes-report.sh', 3557),
-            ('hermes-report.sh', 3738),
+            ('hermes-report.sh', 3567),
+            ('hermes-report.sh', 3748),
             ('api-event-report.sh', 1667),
         }
         self.assertEqual(
