@@ -435,6 +435,21 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # `--organization-name` on `jobs create`, which sends no
         # --operation-type, so it adds no site here either.
         #
+        # Re-measured again (quick-260918-lt6, same convention): batching the
+        # per-tick root-session resolution inserted a 19-line block (the map
+        # build plus its rationale) immediately above hermes-report.sh's main
+        # session loop, shifting that file's two later sites by exactly +19
+        # (3569->3588, 3750->3769). The same change also added a 7-line
+        # cleanup block AFTER the loop, which is below both sites and moves
+        # neither -- worth stating, because "the diff added 26 lines but the
+        # pin moved 19" otherwise reads as an arithmetic error rather than as
+        # the two blocks straddling the sites. 1496 sits above the inserted
+        # block and api-event-report.sh was untouched. Pure shift once more:
+        # the COUNT (4) and the emitted VALUE expressions are unchanged, so
+        # both assertions above pass untouched. The batch map feeds root_sid,
+        # which reaches --trace-id and --agentic-job-id, never
+        # --operation-type, so it adds no emission site.
+        #
         # Re-measured again (PR #127, same convention): a COMMENTS-ONLY change
         # recording why hermes-report.sh's root gate deliberately differs from
         # the event path's moved that file's two later sites
@@ -460,8 +475,8 @@ class SoleOtherEmitterTests(unittest.TestCase):
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1496),
-            ('hermes-report.sh', 3569),
-            ('hermes-report.sh', 3750),
+            ('hermes-report.sh', 3588),
+            ('hermes-report.sh', 3769),
             ('api-event-report.sh', 1667),
         }
         self.assertEqual(
