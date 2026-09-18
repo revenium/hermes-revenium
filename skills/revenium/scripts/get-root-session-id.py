@@ -131,9 +131,42 @@ def get_root_session_ids(
     if not resolvable:
         return out
 
+    parents = _load_parent_map(state_db_path)
+    if parents is None:
+        return out
+
+    for sid in resolvable:
+        out[sid] = _walk_parent_map(sid, parents, max_depth=max_depth)
+    return out
+
+
+def _load_parent_map(state_db_path: Optional[str] = None):
+    """Return {id: parent_session_id} for the whole sessions table, or None.
+
+    None means "could not read", and keeping it DISTINCT from an empty dict
+    is the whole point of this function existing separately from
+    get_root_session_ids.
+
+    That function fails open to identity, which is correct for a direct
+    caller: it mirrors the per-session form, and a caller that gets its own
+    sid back knows only that resolution did not happen. But identity is
+    POISON once written into the batch map file, because the shell side
+    treats any populated entry as authoritative and therefore never falls
+    through to the per-session resolver. A transient unreadable state.db
+    during the map build would then publish `child -> child` for every
+    session in the tick, and since `root_sid == sid` is the gate that decides
+    whether a job is CREATED, every subagent would be promoted to a
+    job-creating root -- for the entire tick, even if the database became
+    readable a second later.
+
+    So the CLI's --batch mode uses THIS function and emits nothing at all on
+    None, leaving every lookup to miss and fall through. Found in review of
+    #129; the original shape returned the pre-seeded identity map and exited
+    0, which looked like success.
+    """
     state_db = _resolve_state_db(state_db_path)
     if not state_db.exists():
-        return out
+        return None
 
     try:
         uri = f"file:{state_db}?mode=ro"
@@ -154,13 +187,11 @@ def get_root_session_ids(
                         None if row_parent is None else str(row_parent)
                     )
     except sqlite3.OperationalError:
-        return out
+        return None
     except Exception:
-        return out
+        return None
 
-    for sid in resolvable:
-        out[sid] = _walk_parent_map(sid, parents, max_depth=max_depth)
-    return out
+    return parents
 
 
 def _main(argv: list) -> int:
@@ -172,9 +203,17 @@ def _main(argv: list) -> int:
     if len(argv) >= 2 and argv[1] == "--batch":
         sids = [line.rstrip("\n") for line in sys.stdin]
         sids = [s for s in sids if s]
-        resolved = get_root_session_ids(sids)
+        # Load the map FIRST and emit nothing at all when it cannot be read.
+        # Emitting the identity fallback here would publish `child -> child`
+        # as an authoritative answer and promote every subagent to a
+        # job-creating root for the whole tick -- see _load_parent_map.
+        # Silence leaves every lookup to miss and fall through to the
+        # per-session resolver, which retries the database itself.
+        parents = _load_parent_map()
+        if parents is None:
+            return 1
         for sid in sids:
-            print(f"{sid}\t{resolved.get(sid, sid)}")
+            print(f"{sid}\t{_walk_parent_map(sid, parents)}")
         return 0
     if len(argv) < 2 or not argv[1]:
         return 0

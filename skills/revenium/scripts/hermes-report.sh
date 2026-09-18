@@ -1826,6 +1826,14 @@ PY
   # list) simply misses and takes the old path.
   local root_sid_map_file
   root_sid_map_file="$(mktemp 2>/dev/null || echo "/tmp/hermes-root-sid-map.$$")"
+  # Registered the moment the file exists, not merely after the loop: a tick
+  # on this host runs for tens of minutes, and an operator Ctrl-C or a
+  # restart part-way through the loop would otherwise strand the scratch file
+  # in /tmp, once per interrupted tick, forever. The explicit removal after
+  # the loop stays -- it frees the file at the point it stops being useful
+  # rather than at process exit, and the trap is the belt for the paths that
+  # never reach it. Both are idempotent (`rm -f`, guarded by -f).
+  trap 'rm -f "${root_sid_map_file}" 2>/dev/null' EXIT INT TERM
   printf '%s\n' "${sessions}" | cut -d'|' -f1 \
     | build_root_sid_map "${root_sid_map_file}"
   export ROOT_SID_MAP_FILE="${root_sid_map_file}"

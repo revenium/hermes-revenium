@@ -386,6 +386,144 @@ class RootSidMapBashSeamTests(unittest.TestCase):
                 'fail-open is the input sid; if this changed, the '
                 'discriminator above no longer discriminates',
             )
+class BatchFailureMustNotPublishIdentityTests(unittest.TestCase):
+    """A batch build that cannot read state.db must emit NOTHING.
+
+    Found in review of #129. The original shape pre-seeded an identity map,
+    returned it on any database error, and exited 0 -- so an unreadable
+    state.db during the map build published `child -> child` for every
+    session in the tick. The shell side treats a populated entry as
+    authoritative and never falls through, so every subagent would be
+    promoted to a root. `root_sid == sid` is the gate that decides whether a
+    job is CREATED, making this a billing-attribution change that looks
+    exactly like success: exit 0, a full map, no warning.
+
+    Identity is the correct fail-open for a DIRECT caller of
+    get_root_session_id / get_root_session_ids -- it mirrors the per-session
+    contract. It is only poison when written into a lookup table another
+    layer trusts. These tests pin that distinction, because collapsing the
+    two is how the bug arose.
+    """
+
+    def _db(self, tmp, readable=True):
+        hermes_home = os.path.join(tmp, 'hh')
+        os.makedirs(hermes_home, exist_ok=True)
+        db = os.path.join(hermes_home, 'state.db')
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                'CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)'
+            )
+            conn.executemany(
+                'INSERT INTO sessions (id, parent_session_id) VALUES (?, ?)',
+                [('root1', None), ('kid1', 'root1')],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        if not readable:
+            os.chmod(db, 0o000)
+        return hermes_home, db
+
+    def test_unreadable_db_emits_nothing_and_signals_failure(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-lt6-dbfail-') as tmp:
+            hh, db = self._db(tmp, readable=False)
+            try:
+                r = subprocess.run(
+                    [sys.executable, str(SIDECAR), '--batch'],
+                    input='kid1\n',
+                    env={**os.environ, 'HERMES_HOME': hh},
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(
+                    '', r.stdout.strip(),
+                    'a batch build that could not read state.db must emit NO '
+                    'rows; emitting kid1->kid1 publishes a subagent as a '
+                    'job-creating root for the whole tick',
+                )
+                self.assertNotEqual(
+                    0, r.returncode,
+                    'it must also signal failure, so build_root_sid_map does '
+                    'not mistake silence for an empty-but-valid map',
+                )
+            finally:
+                os.chmod(db, 0o644)
+
+    def test_missing_db_emits_nothing(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-lt6-nodb-') as tmp:
+            hh = os.path.join(tmp, 'hh')
+            os.makedirs(hh)
+            r = subprocess.run(
+                [sys.executable, str(SIDECAR), '--batch'],
+                input='kid1\n',
+                env={**os.environ, 'HERMES_HOME': hh},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual('', r.stdout.strip())
+            self.assertNotEqual(0, r.returncode)
+
+    def test_end_to_end_a_failed_build_leaves_lookups_falling_through(self):
+        """The property that matters: a failed build must not poison the tick.
+
+        Builds the map against an unreadable database, then makes the
+        database readable again -- exactly Greptile's transient case -- and
+        asserts the lookup still resolves kid1 to its real root via the
+        per-session fallback rather than returning kid1.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-lt6-transient-') as tmp:
+            hh, db = self._db(tmp, readable=False)
+            mapf = os.path.join(tmp, 'map.tsv')
+            common = SKILL / 'scripts' / 'common.sh'
+            build = '\n'.join([
+                'set -uo pipefail',
+                'source "%s"' % common,
+                'printf "%s\\n" kid1 | build_root_sid_map "' + mapf + '"',
+            ])
+            env = {**os.environ, 'HERMES_HOME': hh,
+                   'REVENIUM_STATE_DIR': os.path.join(hh, 'state', 'revenium')}
+            rb = subprocess.run(['bash', '-c', build], env=env,
+                                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, rb.returncode, rb.stderr)
+            self.assertEqual(
+                0, os.path.getsize(mapf),
+                'a failed build must leave an EMPTY map, never a map of '
+                'identity answers',
+            )
+
+            # The database recovers before the loop runs.
+            os.chmod(db, 0o644)
+            lookup = '\n'.join([
+                'set -uo pipefail',
+                'source "%s"' % common,
+                'export ROOT_SID_MAP_FILE="' + mapf + '"',
+                'echo "kid1=$(get_root_session_id kid1)"',
+            ])
+            rl = subprocess.run(['bash', '-c', lookup], env=env,
+                                capture_output=True, text=True, timeout=60)
+            self.assertEqual(0, rl.returncode, rl.stderr)
+            self.assertIn(
+                'kid1=root1', rl.stdout,
+                'after a failed build the lookup must fall through to the '
+                'per-session resolver, which retries the database itself; '
+                'kid1=kid1 here would mean the tick was poisoned',
+            )
+
+    def test_direct_callers_still_get_identity_fail_open(self):
+        """The distinction: identity is still correct for direct callers."""
+        mod = _load_sidecar()
+        missing = '/nonexistent/state.db'
+        self.assertEqual('a', mod.get_root_session_id('a', state_db_path=missing))
+        self.assertEqual(
+            {'a': 'a'}, mod.get_root_session_ids(['a'], state_db_path=missing),
+            'get_root_session_ids keeps its documented identity fail-open; '
+            'only the CLI batch EMITTER withholds, because only its output '
+            'is trusted as authoritative by another layer',
+        )
+        self.assertIsNone(
+            mod._load_parent_map(state_db_path=missing),
+            'None is the "could not read" signal and must stay distinct from '
+            'an empty dict, which means "read it, no rows"',
+        )
 
 if __name__ == '__main__':
     unittest.main()
