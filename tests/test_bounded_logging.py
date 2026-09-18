@@ -770,5 +770,297 @@ class LogRotationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, f'{result.stdout}\n{result.stderr}')
 
 
+
+class PruneFlagLifetimeGuaranteeTests(unittest.TestCase):
+    """quick-260918-igv -- a warn sentinel whose session is still live must
+    survive a prune.
+
+    The sentinel is a LIFETIME rate-limiter (hermes-report.sh: "at most 3 lines
+    for its entire life"), and its mtime never refreshes after the single warn
+    that created it. Ageing it out while its session is still in state.db
+    re-ARMS the warn: it fires again, resets mtime, and the cycle repeats every
+    retention period forever. Measured live 2026-09-18 -- one prune removed
+    1031 flags and drove trace-type fallback warns from ~1/hour to 1666.
+    """
+
+    def _seed_state_db(self, path, session_ids):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY)')
+            conn.executemany(
+                'INSERT INTO sessions (id) VALUES (?)', [(s,) for s in session_ids]
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _run_prune(self, tmp, session_ids, flags, extra_env=None):
+        """Create flags (name -> age_days) and prune. Returns (result, paths)."""
+        hermes_home = os.path.join(tmp, 'hh')
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        markers_dir = os.path.join(state_dir, 'markers')
+        warn_dir = os.path.join(markers_dir, '.warn')
+        fallback_dir = os.path.join(markers_dir, '.fallback-warn')
+        outcome_dir = os.path.join(markers_dir, '.outcome-warn')
+        for d in (warn_dir, fallback_dir, outcome_dir):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+
+        if session_ids is not None:
+            self._seed_state_db(os.path.join(hermes_home, 'state.db'), session_ids)
+
+        paths = {}
+        for (dirname, fname), age_days in flags.items():
+            d = {'warn': warn_dir, 'fallback': fallback_dir, 'outcome': outcome_dir}[dirname]
+            p = os.path.join(d, fname)
+            Path(p).touch()
+            ts = time.time() - age_days * 86400
+            os.utime(p, (ts, ts))
+            paths[(dirname, fname)] = p
+
+        env = {
+            **os.environ,
+            'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'REVENIUM_MARKERS_DIR': markers_dir,
+            'REVENIUM_MARKER_RETENTION_DAYS': '30',
+            'TZ': 'UTC',
+        }
+        env.update(extra_env or {})
+        r = subprocess.run(
+            ['bash', str(PRUNE_MARKERS)],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r, paths, state_dir
+
+    def test_stale_flag_for_live_session_is_kept(self):
+        """THE REGRESSION: old flag + session still in state.db => must survive."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-live-') as tmp:
+            _, paths, state_dir = self._run_prune(
+                tmp,
+                session_ids=['sess-live'],
+                flags={('fallback', 'sess-live__no_job_classified.flag'): 31,
+                       ('warn', 'sess-live__rule-7.flag'): 31},
+            )
+            for key, p in paths.items():
+                self.assertTrue(
+                    os.path.exists(p),
+                    f'{key} must survive: its session is still in state.db, so '
+                    f'removing the sentinel re-arms a warn that is still reachable',
+                )
+            log = Path(os.path.join(state_dir, 'revenium-metering.log')).read_text()
+            self.assertIn('kept_session_live=2', log)
+
+    def test_stale_flag_for_dead_session_is_still_pruned(self):
+        """The growth bound must survive the fix: a dead session's flag goes."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-dead-') as tmp:
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=['sess-other'],
+                flags={('fallback', 'sess-gone__no_job_classified.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('fallback', 'sess-gone__no_job_classified.flag')]),
+                'a flag whose session no longer exists can never re-warn, so the '
+                'growth bound must still collect it',
+            )
+
+    def test_fresh_flag_for_dead_session_is_kept(self):
+        """Age remains the first gate -- the session check only rescues old flags."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-fresh-') as tmp:
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=[],
+                flags={('fallback', 'sess-gone__no_job_classified.flag'): 1},
+            )
+            self.assertTrue(
+                os.path.exists(paths[('fallback', 'sess-gone__no_job_classified.flag')])
+            )
+
+    def test_unparseable_key_is_kept(self):
+        """No '__' separator => not a key this gate understands => keep."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-unparse-') as tmp:
+            _, paths, state_dir = self._run_prune(
+                tmp,
+                session_ids=['sess-live'],
+                flags={('fallback', 'no-separator-here.flag'): 31},
+            )
+            self.assertTrue(
+                os.path.exists(paths[('fallback', 'no-separator-here.flag')]),
+                'an unrecognised key is kept rather than pruned: keeping a few '
+                'cannot threaten the growth bound, pruning one re-warns',
+            )
+            log = Path(os.path.join(state_dir, 'revenium-metering.log')).read_text()
+            self.assertIn('kept_unparseable=1', log)
+
+    def test_non_session_keyed_dir_is_unaffected(self):
+        """OUTCOME_WARN is keyed by JOB id, not session -- age rule unchanged."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-outcome-') as tmp:
+            # 'sess-live' is a live SESSION id, but in the outcome dir the same
+            # string is a job id and must not be rescued by the session gate.
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=['sess-live'],
+                flags={('outcome', 'sess-live__deferred.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('outcome', 'sess-live__deferred.flag')]),
+                'OUTCOME_WARN_FLAGS_DIR is keyed by job id; gating it on the '
+                'session table would rescue flags on an id collision',
+            )
+
+    def test_session_id_containing_double_underscore_is_kept(self):
+        """A session id may itself contain '__', so the FIRST separator is not
+        necessarily the session/reason boundary.
+
+        Splitting on the first '__' would test 'sess' for a live id of
+        'sess__live', miss, and prune the sentinel -- re-warning exactly the
+        session the gate is meant to protect. safe_sid maps every character
+        outside [A-Za-z0-9_:.-] to '_', so two adjacent disallowed characters
+        in a raw id produce '__' inside the session portion, and
+        WARN_FLAGS_DIR interpolates SESSION_ID with no sanitisation at all.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-dunder-') as tmp:
+            _, paths, state_dir = self._run_prune(
+                tmp,
+                session_ids=['sess__live'],
+                flags={('fallback', 'sess__live__no_job_classified.flag'): 31},
+            )
+            self.assertTrue(
+                os.path.exists(paths[('fallback', 'sess__live__no_job_classified.flag')]),
+                "a live session id containing '__' must still be matched; "
+                'splitting on the first separator tests only its prefix',
+            )
+            log = Path(os.path.join(state_dir, 'revenium-metering.log')).read_text()
+            self.assertIn('kept_session_live=1', log)
+
+    def test_double_underscore_prefix_collision_is_not_rescued(self):
+        """The boundary walk must not rescue a flag via a non-boundary prefix.
+
+        'sess' being live must NOT keep a flag for the distinct dead session
+        'sess__gone' -- the walk tests prefixes AT separators, and 'sess' is a
+        real separator-boundary prefix here, so this pins the deliberate
+        trade-off: a live id that is a separator-prefix of a dead id keeps the
+        dead id's flag. Documented rather than silently accepted.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-collide-') as tmp:
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=['unrelated'],
+                flags={('fallback', 'sess__gone__no_job_classified.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('fallback', 'sess__gone__no_job_classified.flag')]),
+                'no live id matches any separator-boundary prefix, so the '
+                'growth bound must still collect this flag',
+            )
+
+    def test_missing_state_db_falls_back_to_age_only(self):
+        """Cannot tell => today's behaviour, not a mass-keep and not a mass-prune."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-nodb-') as tmp:
+            r, paths, _ = self._run_prune(
+                tmp,
+                session_ids=None,  # no state.db created at all
+                flags={('fallback', 'sess-live__no_job_classified.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('fallback', 'sess-live__no_job_classified.flag')]),
+                'with no state.db there is no basis for a judgement, so the pass '
+                'must degrade to the pre-existing age-only rule',
+            )
+
+
+def _non_literal_supports_flag_calls(scripts_dir):
+    """Return supports_flag call sites whose FIRST argument is not a literal.
+
+    Whitelist rather than blacklist: the rule is "the subcommand must be a
+    double-quoted string containing no expansion", so anything else -- an
+    unquoted word, a "${var}", a '$1' -- is reported. Checking only the first
+    argument keeps the rule line-local; several real call sites continue the
+    second argument onto the next line with a backslash.
+    """
+    offenders = []
+    literal_first_arg = re.compile(r'supports_flag\s+"[^"$`]+"')
+    for sh in sorted(Path(scripts_dir).glob('*.sh')):
+        for i, line in enumerate(sh.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                continue
+            # Only real invocations: skip prose mentions inside comments and
+            # the definition itself.
+            if not re.search(r'(^|[\s;(])supports_flag\s+\S', stripped):
+                continue
+            if stripped.startswith('supports_flag()'):
+                continue
+            if not literal_first_arg.search(stripped):
+                offenders.append(f'{sh.name}:{i}: {stripped}')
+    return offenders
+
+class PruneProbeWarnFlagsTests(unittest.TestCase):
+    """PROBE_WARN_FLAGS_DIR entries must survive a prune -- deliberately.
+
+    common.sh writes them as "${flag_dir}/${probe_key}" with NO '.flag'
+    suffix, so prune-markers.sh's endswith('.flag') filter skips them. That
+    reads like an oversight and is not one:
+
+      * probe_key derives from the two LITERAL arguments at each
+        supports_flag call site, so the key space is closed at the number of
+        call sites (~16). The directory is bounded by the source text and
+        cannot grow the way the session-keyed dirs do.
+      * pruning one would RE-ARM its warn, so a still-indeterminate probe
+        would re-warn once every retention period forever for a condition
+        that has not changed -- the same defect
+        PruneFlagLifetimeGuaranteeTests closes for session-keyed dirs.
+
+    This pins the behaviour so the suffix mismatch is not "fixed" into a
+    periodic re-warn.
+    """
+
+    def test_extensionless_probe_flag_survives_prune(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-probe-') as tmp:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            markers_dir = os.path.join(state_dir, 'markers')
+            probe_dir = os.path.join(markers_dir, '.probe-warn')
+            os.makedirs(probe_dir, mode=0o700)
+
+            # Exactly the shape common.sh produces for
+            #   supports_flag "meter completion" "--ticket-id"
+            probe_flag = os.path.join(probe_dir, 'meter_completion___ticket-id')
+            Path(probe_flag).touch()
+            ancient = time.time() - 400 * 86400
+            os.utime(probe_flag, (ancient, ancient))
+
+            env = {
+                **os.environ,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'REVENIUM_MARKERS_DIR': markers_dir,
+                'REVENIUM_MARKER_RETENTION_DAYS': '30',
+                'TZ': 'UTC',
+            }
+            r = subprocess.run(
+                ['bash', str(PRUNE_MARKERS)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(
+                os.path.exists(probe_flag),
+                'a probe sentinel must survive even at 400 days: pruning it '
+                're-arms a warn for a condition that has not changed, and the '
+                'directory is bounded by the number of supports_flag call sites',
+            )
+
+    def test_probe_key_space_is_closed_by_source(self):
+        """The growth bound is the source text, so assert it IS the source text.
+
+        If someone introduces a supports_flag call whose arguments are not
+        literals, the directory stops being bounded and the exemption above
+        stops being safe.
+        """
+        scripts = (ROOT / 'skills' / 'revenium' / 'scripts')
+        self.assertEqual([], _non_literal_supports_flag_calls(scripts))
+
 if __name__ == '__main__':
     unittest.main()

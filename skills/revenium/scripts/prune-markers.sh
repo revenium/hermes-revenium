@@ -108,6 +108,8 @@ ${FALLBACK_WARN_FLAGS_DIR}
 ${OUTCOME_WARN_FLAGS_DIR}
 ${PROBE_WARN_FLAGS_DIR}
 ${AUX_WARN_FLAGS_DIR}" \
+SESSION_KEYED_FLAG_DIRS_PY="${WARN_FLAGS_DIR}
+${FALLBACK_WARN_FLAGS_DIR}" \
 EVENT_SPOOL_DIR_PY="${EVENT_SPOOL_DIR}" \
 TOOL_EVENTS_DIR_PY="${TOOL_EVENTS_DIR}" \
 EVENT_LEDGER_FILE_PY="${EVENT_LEDGER_FILE}" \
@@ -173,6 +175,35 @@ def iso(ts):
     """Format a unix timestamp as ISO-8601 UTC for log lines."""
     import datetime
     return datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def live_session_ids(state_db):
+    """Return the set of session ids in state.db, or None when it cannot be read.
+
+    None is the "cannot tell" signal, and is deliberately NOT the same as an
+    empty set: an empty set means the DB was read and holds no sessions (prune
+    freely), while None means we have no basis for a judgement and the caller
+    must fall back to the age-only rule. Collapsing the two would make an
+    unreadable state.db look like "every session is gone" and mass-prune every
+    sentinel -- the exact re-warn storm this gate exists to prevent.
+
+    Mirrors prune_owners' read-only URI connection rather than sharing code
+    with it: that pass returns early and removes NOTHING on an unreadable DB,
+    because an ownership record deleted on doubt is a double-bill. Here the
+    stake is only log noise, so doubt degrades to today's behaviour instead.
+    """
+    if not state_db or not os.path.isfile(state_db):
+        return None
+    try:
+        uri = 'file:' + state_db + '?mode=ro'
+        out = set()
+        with sqlite3.connect(uri, uri=True) as conn:
+            for (sid,) in conn.execute('SELECT id FROM sessions'):
+                if sid is not None:
+                    out.add(str(sid))
+        return out
+    except Exception:
+        return None
 
 
 if marker_retention_ok:
@@ -248,10 +279,35 @@ if marker_retention_ok:
     # uses; --dry-run honored identically.
     #
     # OUTCOME_WARN_FLAGS_DIR is Phase 39 D-02 (the deferred/wedged job-outcome
-    # gate). PROBE_WARN_FLAGS_DIR is a pre-existing omission from this list --
-    # not this phase's defect, but the identical leak, closed alongside here
-    # since this pass is already generic over the directory list and needs no
-    # other change to cover it. AUX_WARN_FLAGS_DIR is Phase 59 Plan 03
+    # gate).
+    #
+    # PROBE_WARN_FLAGS_DIR is listed but this pass prunes NOTHING from it, and
+    # that is correct rather than an oversight. Two independent reasons, both
+    # load-bearing:
+    #
+    #   1. Its entries carry no '.flag' suffix -- common.sh writes
+    #      "${flag_dir}/${probe_key}" with probe_key built straight from
+    #      `printf '%s %s' <subcommand> <flag> | tr -c 'A-Za-z0-9._-' '_'` --
+    #      so the endswith('.flag') filter below skips every one of them.
+    #   2. It cannot grow without a code change. probe_key is derived from the
+    #      two LITERAL arguments at each supports_flag call site, so the key
+    #      space is closed at the number of those call sites (~16 across
+    #      hermes-report.sh, api-event-report.sh, correct-assessment.sh,
+    #      guardrail-check.sh and setup-guardrails.sh). A directory bounded by
+    #      the source text is not the unbounded-growth hazard the other four
+    #      dirs are.
+    #
+    # An earlier revision of this comment claimed the opposite -- that
+    # PROBE_WARN_FLAGS_DIR was "the identical leak, closed alongside here".
+    # It is neither identical nor closed, and the claim is corrected here
+    # rather than made true, because making it true would be a REGRESSION:
+    # pruning a probe sentinel re-arms its warn, so a probe that is still
+    # indeterminate would re-warn once every retention period forever, for a
+    # condition that has not changed. That is the same re-arm defect the
+    # session-keyed gate below exists to prevent, and it is pinned by
+    # PruneProbeWarnFlagsTests. Do not "fix" the suffix mismatch.
+    #
+    # AUX_WARN_FLAGS_DIR is Phase 59 Plan 03
     # (D-17, folded todo aux-pass-silently-drops-zero-token-sessions): the
     # new ctx-unresolvable-<sid> per-session key introduced there makes this
     # directory grow one file per unresolvable session, and this pass is
@@ -260,9 +316,46 @@ if marker_retention_ok:
     # ---------------------------------------------------------------------------
     flag_dirs = [d for d in os.environ.get('FLAG_DIRS_PY', '').split('\n') if d]
 
+    # A warn sentinel is a LIFETIME rate-limiter, not a cache: hermes-report.sh
+    # states the invariant as "a session can produce at most 3 lines for its
+    # entire life instead of one per minute forever". Its mtime is the moment
+    # we last warned and never refreshes, but the session it silences stays in
+    # state.db and is re-walked every tick -- so ageing the flag out re-ARMS a
+    # warn that is still reachable, it fires again, mtime resets, and the cycle
+    # repeats every retention period forever. Measured on a live host
+    # 2026-09-18: a prune removed 1031 flags and trace-type fallback warns went
+    # from ~1/hour to 1666 in that hour, then back to 0.
+    #
+    # The gate is restricted to the directories whose key provably BEGINS with
+    # a session id, because the five key shapes are not uniform and a blanket
+    # session lookup would be wrong for three of them:
+    #
+    #   WARN_FLAGS_DIR      <session>__<ruleId>.flag      session-keyed
+    #   FALLBACK_WARN       <session>__<reason>.flag      session-keyed
+    #   OUTCOME_WARN        <outcomeId>__<reason>.flag    keyed by JOB id
+    #   AUX_WARN            <sanitizedKey>.flag           mixed: ctx-unresolvable-<sid> OR a constant
+    #   PROBE_WARN          <subcommand>_<flag>           not session-keyed at all
+    #
+    # The two session-keyed dirs are passed in explicitly via
+    # SESSION_KEYED_FLAG_DIRS_PY rather than inferred from position in
+    # FLAG_DIRS_PY -- a positional contract between two env vars is one
+    # reordering away from silently gating the wrong directory.
+    session_keyed_dirs = set(
+        d for d in os.environ.get('SESSION_KEYED_FLAG_DIRS_PY', '').split('\n') if d
+    )
+    live_sids = live_session_ids(os.environ.get('STATE_DB_PY', ''))
+    if session_keyed_dirs and live_sids is None:
+        print(
+            'prune: flags pass -- state.db unavailable, falling back to age-only '
+            'for session-keyed flag dirs (a stale sentinel may re-warn once)',
+            flush=True,
+        )
+
     flags_scanned = 0
     flags_kept = 0
     flags_removed = 0
+    flags_kept_live = 0
+    flags_kept_unparseable = 0
 
     for flag_dir in flag_dirs:
         try:
@@ -285,6 +378,47 @@ if marker_retention_ok:
             if age_secs < cutoff_secs:
                 flags_kept += 1
                 continue
+
+            # Past the age cutoff, but a session-keyed sentinel whose session
+            # is still live must survive anyway -- see the lifetime note above.
+            # Counted rather than logged per file: a host with thousands of
+            # live sessions would otherwise trade a warn storm for a prune-log
+            # storm, which is the same unbounded-growth defect wearing a
+            # different hat.
+            if flag_dir in session_keyed_dirs and live_sids is not None:
+                stem = fname[:-len('.flag')]
+                if '__' not in stem:
+                    # Both session-keyed dirs always emit a '__' separator, so
+                    # a name without one is not a key this gate understands.
+                    # Keeping it cannot threaten the growth bound (such names
+                    # should not exist) and pruning it would re-warn.
+                    flags_kept += 1
+                    flags_kept_unparseable += 1
+                    continue
+                # EVERY '__' boundary is tried, not just the first: a session
+                # id can itself contain '__', so the first separator is not
+                # necessarily the session/reason boundary. FALLBACK_WARN keys
+                # on safe_sid, which maps each character outside
+                # [A-Za-z0-9_:.-] to '_' -- so two adjacent disallowed
+                # characters in a raw id produce '__' inside the session
+                # portion -- and WARN_FLAGS_DIR interpolates SESSION_ID with no
+                # sanitisation at all. Splitting on the first separator would
+                # test 'sess' for a live id of 'sess__live', miss the match,
+                # prune the sentinel and re-warn: precisely the defect this
+                # gate exists to close, still open for those ids. The loop is
+                # bounded by the number of separators in the name (one, in
+                # every key shape observed in practice).
+                matched_live = False
+                sep = stem.find('__')
+                while sep != -1:
+                    if stem[:sep] in live_sids:
+                        matched_live = True
+                        break
+                    sep = stem.find('__', sep + 1)
+                if matched_live:
+                    flags_kept += 1
+                    flags_kept_live += 1
+                    continue
 
             action = 'dry-run, would remove' if dry_run else 'removed'
             print(
@@ -309,7 +443,9 @@ if marker_retention_ok:
     print(
         'prune: flags summary, scanned=' + str(flags_scanned) +
         ' kept=' + str(flags_kept) +
-        ' removed=' + str(flags_removed),
+        ' removed=' + str(flags_removed) +
+        ' kept_session_live=' + str(flags_kept_live) +
+        ' kept_unparseable=' + str(flags_kept_unparseable),
         flush=True,
     )
 
