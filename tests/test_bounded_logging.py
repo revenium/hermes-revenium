@@ -772,3 +772,157 @@ class LogRotationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class PruneFlagLifetimeGuaranteeTests(unittest.TestCase):
+    """quick-260918-igv -- a warn sentinel whose session is still live must
+    survive a prune.
+
+    The sentinel is a LIFETIME rate-limiter (hermes-report.sh: "at most 3 lines
+    for its entire life"), and its mtime never refreshes after the single warn
+    that created it. Ageing it out while its session is still in state.db
+    re-ARMS the warn: it fires again, resets mtime, and the cycle repeats every
+    retention period forever. Measured live 2026-09-18 -- one prune removed
+    1031 flags and drove trace-type fallback warns from ~1/hour to 1666.
+    """
+
+    def _seed_state_db(self, path, session_ids):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY)')
+            conn.executemany(
+                'INSERT INTO sessions (id) VALUES (?)', [(s,) for s in session_ids]
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _run_prune(self, tmp, session_ids, flags, extra_env=None):
+        """Create flags (name -> age_days) and prune. Returns (result, paths)."""
+        hermes_home = os.path.join(tmp, 'hh')
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        markers_dir = os.path.join(state_dir, 'markers')
+        warn_dir = os.path.join(markers_dir, '.warn')
+        fallback_dir = os.path.join(markers_dir, '.fallback-warn')
+        outcome_dir = os.path.join(markers_dir, '.outcome-warn')
+        for d in (warn_dir, fallback_dir, outcome_dir):
+            os.makedirs(d, mode=0o700, exist_ok=True)
+
+        if session_ids is not None:
+            self._seed_state_db(os.path.join(hermes_home, 'state.db'), session_ids)
+
+        paths = {}
+        for (dirname, fname), age_days in flags.items():
+            d = {'warn': warn_dir, 'fallback': fallback_dir, 'outcome': outcome_dir}[dirname]
+            p = os.path.join(d, fname)
+            Path(p).touch()
+            ts = time.time() - age_days * 86400
+            os.utime(p, (ts, ts))
+            paths[(dirname, fname)] = p
+
+        env = {
+            **os.environ,
+            'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'REVENIUM_MARKERS_DIR': markers_dir,
+            'REVENIUM_MARKER_RETENTION_DAYS': '30',
+            'TZ': 'UTC',
+        }
+        env.update(extra_env or {})
+        r = subprocess.run(
+            ['bash', str(PRUNE_MARKERS)],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r, paths, state_dir
+
+    def test_stale_flag_for_live_session_is_kept(self):
+        """THE REGRESSION: old flag + session still in state.db => must survive."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-live-') as tmp:
+            _, paths, state_dir = self._run_prune(
+                tmp,
+                session_ids=['sess-live'],
+                flags={('fallback', 'sess-live__no_job_classified.flag'): 31,
+                       ('warn', 'sess-live__rule-7.flag'): 31},
+            )
+            for key, p in paths.items():
+                self.assertTrue(
+                    os.path.exists(p),
+                    f'{key} must survive: its session is still in state.db, so '
+                    f'removing the sentinel re-arms a warn that is still reachable',
+                )
+            log = Path(os.path.join(state_dir, 'revenium-metering.log')).read_text()
+            self.assertIn('kept_session_live=2', log)
+
+    def test_stale_flag_for_dead_session_is_still_pruned(self):
+        """The growth bound must survive the fix: a dead session's flag goes."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-dead-') as tmp:
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=['sess-other'],
+                flags={('fallback', 'sess-gone__no_job_classified.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('fallback', 'sess-gone__no_job_classified.flag')]),
+                'a flag whose session no longer exists can never re-warn, so the '
+                'growth bound must still collect it',
+            )
+
+    def test_fresh_flag_for_dead_session_is_kept(self):
+        """Age remains the first gate -- the session check only rescues old flags."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-fresh-') as tmp:
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=[],
+                flags={('fallback', 'sess-gone__no_job_classified.flag'): 1},
+            )
+            self.assertTrue(
+                os.path.exists(paths[('fallback', 'sess-gone__no_job_classified.flag')])
+            )
+
+    def test_unparseable_key_is_kept(self):
+        """No '__' separator => not a key this gate understands => keep."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-unparse-') as tmp:
+            _, paths, state_dir = self._run_prune(
+                tmp,
+                session_ids=['sess-live'],
+                flags={('fallback', 'no-separator-here.flag'): 31},
+            )
+            self.assertTrue(
+                os.path.exists(paths[('fallback', 'no-separator-here.flag')]),
+                'an unrecognised key is kept rather than pruned: keeping a few '
+                'cannot threaten the growth bound, pruning one re-warns',
+            )
+            log = Path(os.path.join(state_dir, 'revenium-metering.log')).read_text()
+            self.assertIn('kept_unparseable=1', log)
+
+    def test_non_session_keyed_dir_is_unaffected(self):
+        """OUTCOME_WARN is keyed by JOB id, not session -- age rule unchanged."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-outcome-') as tmp:
+            # 'sess-live' is a live SESSION id, but in the outcome dir the same
+            # string is a job id and must not be rescued by the session gate.
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=['sess-live'],
+                flags={('outcome', 'sess-live__deferred.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('outcome', 'sess-live__deferred.flag')]),
+                'OUTCOME_WARN_FLAGS_DIR is keyed by job id; gating it on the '
+                'session table would rescue flags on an id collision',
+            )
+
+    def test_missing_state_db_falls_back_to_age_only(self):
+        """Cannot tell => today's behaviour, not a mass-keep and not a mass-prune."""
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-nodb-') as tmp:
+            r, paths, _ = self._run_prune(
+                tmp,
+                session_ids=None,  # no state.db created at all
+                flags={('fallback', 'sess-live__no_job_classified.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('fallback', 'sess-live__no_job_classified.flag')]),
+                'with no state.db there is no basis for a judgement, so the pass '
+                'must degrade to the pre-existing age-only rule',
+            )
