@@ -524,6 +524,48 @@ class BatchFailureMustNotPublishIdentityTests(unittest.TestCase):
             'None is the "could not read" signal and must stay distinct from '
             'an empty dict, which means "read it, no rows"',
         )
+class MapCleanupTrapTests(unittest.TestCase):
+    """The EXIT trap must survive main() returning.
+
+    Registering `trap 'rm -f "${root_sid_map_file}"' EXIT` against a `local`
+    is silently broken: EXIT fires after main() has returned, the local is
+    out of scope, and `set -u` turns the trap into
+    "root_sid_map_file: unbound variable" on stderr on EVERY run -- the
+    cleanup never happens and every invocation grows a spurious error.
+
+    Caught by test_phase28_multiplex_trace, which asserts stderr carries no
+    such string. That coverage is incidental (it is a colon-sid ledger test),
+    so the two properties are pinned directly here as well.
+    """
+
+    REPORT = SKILL / 'scripts' / 'hermes-report.sh'
+
+    def test_trap_body_is_unset_safe(self):
+        text = self.REPORT.read_text(encoding='utf-8')
+        # Comment lines mention both words (the block explaining WHY the
+        # trap is unset-safe), so match actual trap statements only.
+        trap_lines = [
+            l for l in text.splitlines()
+            if l.strip().startswith('trap ') and 'root_sid_map_file' in l
+        ]
+        self.assertEqual(
+            1, len(trap_lines),
+            'expected exactly one cleanup trap for the root-sid map',
+        )
+        self.assertIn(
+            '${root_sid_map_file:-}', trap_lines[0],
+            'the trap body must tolerate the variable being unset; a bare '
+            '${root_sid_map_file} under set -u errors on every run',
+        )
+
+    def test_map_variable_is_not_function_scoped(self):
+        text = self.REPORT.read_text(encoding='utf-8')
+        self.assertNotIn(
+            'local root_sid_map_file', text,
+            'the map path must NOT be `local`: the EXIT trap fires after '
+            'main() returns, so a function-scoped variable is out of scope '
+            'exactly when the cleanup needs it',
+        )
 
 if __name__ == '__main__':
     unittest.main()

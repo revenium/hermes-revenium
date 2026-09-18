@@ -435,6 +435,11 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # `--organization-name` on `jobs create`, which sends no
         # --operation-type, so it adds no site here either.
         #
+        # Re-measured (quick-260918-lt6 review round, same convention): the
+        # review fix for the cleanup trap added a 15-line block above the
+        # loop, shifting both sites again (3588->3603, 3769->3784). Pure
+        # shift; the trap touches no emission site.
+        #
         # Re-measured again (quick-260918-lt6, same convention): batching the
         # per-tick root-session resolution inserted a 19-line block (the map
         # build plus its rationale) immediately above hermes-report.sh's main
@@ -475,8 +480,8 @@ class SoleOtherEmitterTests(unittest.TestCase):
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1496),
-            ('hermes-report.sh', 3588),
-            ('hermes-report.sh', 3769),
+            ('hermes-report.sh', 3603),
+            ('hermes-report.sh', 3784),
             ('api-event-report.sh', 1667),
         }
         self.assertEqual(
