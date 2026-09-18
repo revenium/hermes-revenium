@@ -1860,33 +1860,35 @@ PY
     # OPPOSITE choice made in api-event-report.sh (`_is_confirmed_root`), so
     # the asymmetry reads as intentional rather than as drift.
     #
-    # get-root-session-id.py's unresolved paths fall into TWO families, and
-    # only one of them can make a subagent look like a root:
-    #   (a) returns the INPUT sid, so the session looks ROOT -- no state.db,
-    #       sqlite OperationalError, any other exception, or no row for THIS
-    #       session on the first hop.
-    #   (b) returns an ANCESTOR sid, so the session looks SUBAGENT -- a missing
-    #       ancestor row part-way up the chain, or max_depth exhaustion; both
-    #       `return current`, which is no longer the input sid.
-    # Family (b) fails CLOSED (creation and attribution are both suppressed)
-    # and needs no defending. Only (a) is the ambiguity worth reasoning about,
-    # so `root_sid == sid` means "root, or (a) happened".
+    # THE LOAD-BEARING REASON, which does not depend on enumerating how the
+    # walk can be wrong: in THIS file, creation and attribution are driven by
+    # the SAME `root_sid == sid` test. So however a subagent comes to look like
+    # a root, the misidentification is SELF-CONSISTENT -- it creates the job
+    # and then points at it. The worst outcome is a spurious subagent job (a
+    # JOB-02 policy deviation), never a dangling reference.
     #
-    # On the EVENT path (a) is both reachable and harmful: it reads a spool, so
-    # a session need not be in the sessions table at all, and it ATTRIBUTES
-    # without ever CREATING -- a misidentified subagent would point at a job
-    # row JOB-02 suppressed, i.e. an orphan. Hence the positive-evidence gate
-    # there.
+    # The EVENT path has no such symmetry: it ATTRIBUTES without ever CREATING,
+    # so the same misidentification points at a row JOB-02 suppressed -- an
+    # orphan. That asymmetry, not the walk's failure modes, is why the two
+    # files gate differently.
     #
-    # Here (a) is neither:
-    #   - main()'s session list is SELECTed FROM that same sessions table, so
-    #     the FIRST hop always has a row and (a)'s no-row case cannot arise for
-    #     the session being processed. (Ancestors may still be missing -- that
-    #     is family (b), which fails closed.)
-    #   - creation and attribution are driven by the SAME test, so even a
-    #     misidentification is self-consistent: it creates the job and then
-    #     points at it. The result is a spurious subagent job (a JOB-02 policy
-    #     deviation), never a dangling reference.
+    # For completeness, `root_sid == sid` can mean "root" OR any of:
+    #   - no state.db, sqlite OperationalError, or any other exception
+    #     (`return sid`);
+    #   - no row for THIS session on the first hop (`return current` while
+    #     current is still sid);
+    #   - CYCLIC ancestry whose cycle length divides max_depth -- a self-loop,
+    #     or A->B->A -- where exhaustion lands back on the input sid
+    #     (tests/test_repository.py::test_get_root_session_id_circular_guard
+    #     exercises exactly this shape).
+    # A missing ancestor part-way up, or exhaustion on an ACYCLIC chain, instead
+    # returns an ancestor id -- `root_sid != sid`, which suppresses creation and
+    # attribution together and so needs no defending.
+    #
+    # main()'s session list is SELECTed FROM that same sessions table, so the
+    # first-hop no-row case cannot arise for the session being processed. The
+    # rest require a missing/unreadable db or corrupt cyclic ancestry, and are
+    # covered by the self-consistency argument above rather than excluded.
     #
     # DO NOT "harmonize" the two by copying `_is_confirmed_root` onto the
     # jobs-create sites below. That gate fails CLOSED, and closed at a CREATE
