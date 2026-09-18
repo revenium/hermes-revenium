@@ -750,11 +750,52 @@ get_root_session_id() {
   if [[ -z "${sid}" ]]; then
     return 0
   fi
+  # Batch fast path: when a caller has pre-resolved a whole tick's sids into a
+  # TSV map (see get-root-session-id.py --batch), read the answer from there
+  # instead of paying a python3 cold start per session. Measured 2026-09-18 on
+  # a live host: 0.189s per call x 2,995 sessions = ~9.4 min of a single tick,
+  # ~68% of it interpreter startup alone.
+  #
+  # A MISS FALLS THROUGH to the identical python3 call below rather than
+  # returning the sid. That distinction is the whole safety argument: a miss
+  # means the map did not cover this sid (built before the sid appeared, or
+  # not built at all), which is NOT evidence that the sid is its own root.
+  # Returning ${sid} on a miss would silently promote every subagent the map
+  # missed into a root, and `root_sid == sid` is the gate that decides
+  # whether a job is CREATED for a session -- so the cheap wrong answer here
+  # is a billing-attribution change, not a performance detail.
+  if [[ -n "${ROOT_SID_MAP_FILE:-}" && -f "${ROOT_SID_MAP_FILE}" ]]; then
+    local mapped
+    # -F$'\t' with an anchored, whole-field match: a plain grep would match a
+    # sid that merely CONTAINS this one as a substring.
+    mapped="$(awk -F'\t' -v want="${sid}" '$1 == want { print $2; exit }' \
+      "${ROOT_SID_MAP_FILE}" 2>/dev/null || true)"
+    if [[ -n "${mapped}" ]]; then
+      printf '%s\n' "${mapped}"
+      return 0
+    fi
+  fi
   if ! command -v python3 >/dev/null 2>&1; then
     printf '%s\n' "${sid}"
     return 0
   fi
   python3 "${SKILL_DIR}/scripts/get-root-session-id.py" "${sid}" 2>/dev/null || printf '%s\n' "${sid}"
+}
+
+# Build the batch map consumed by get_root_session_id's fast path above.
+# Takes newline-separated sids on stdin, writes the TSV to $1, and prints
+# nothing. Never fatal: on any failure the map is left absent/empty and every
+# caller falls back to the per-session path, which is exactly today's
+# behaviour -- slower, never wrong.
+build_root_sid_map() {
+  local out_file="${1:-}"
+  [[ -z "${out_file}" ]] && return 0
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+  python3 "${SKILL_DIR}/scripts/get-root-session-id.py" --batch \
+    >"${out_file}" 2>/dev/null || : >"${out_file}" 2>/dev/null || true
+  return 0
 }
 
 # Phase 28 (TRACE-03): resolve the markers directory that OWNS a given session

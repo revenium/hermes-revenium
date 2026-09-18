@@ -68,7 +68,114 @@ def get_root_session_id(
         return sid
 
 
+def _walk_parent_map(sid: str, parents: dict, max_depth: int = 10) -> str:
+    """Walk an in-memory {id: parent_session_id} map to the root delegator.
+
+    Deliberately mirrors get_root_session_id's loop STATEMENT FOR STATEMENT
+    rather than sharing code with it, because the two differ only in where a
+    parent comes from and the pair is pinned by an equivalence test. Three
+    behaviours are easy to get wrong and are load-bearing:
+
+      * a sid ABSENT from the map returns itself -- the per-session form's
+        `row is None` branch, which is how an id that is not in `sessions`
+        at all (a pseudo- or event-path id) resolves.
+      * a NULL parent returns the CURRENT node, not the input sid.
+      * DEPTH EXHAUSTION returns `current` -- the node reached after
+        max_depth hops -- NOT the input sid. Only the exception paths fail
+        open to the input, and conflating the two would silently re-parent
+        every session on a pathological chain.
+    """
+    current = sid
+    for _ in range(max_depth):
+        if current not in parents:
+            return current
+        parent = parents[current]
+        if parent is None:
+            return current
+        current = parent
+    return current
+
+
+def get_root_session_ids(
+    sids,
+    state_db_path: Optional[str] = None,
+    max_depth: int = 10,
+) -> dict:
+    """Resolve many sids in ONE process against ONE query.
+
+    Exists purely to remove a per-session python3 cold start. Measured on a
+    live host 2026-09-18: the per-session form costs 0.189s per call of which
+    0.129s is bare interpreter startup, so a 2,995-session tick spent ~565s
+    (~9.4 min) resolving roots -- roughly two thirds of it starting Python
+    over and over to ask one question of the same database.
+
+    Returns {sid: root_sid} for every input sid. Fail-open is identity, the
+    same contract the per-session form carries: a missing or unreadable
+    state.db maps every sid to ITSELF rather than raising or omitting it, so
+    a caller can always index the result.
+    """
+    out = {}
+    unique = []
+    seen = set()
+    for sid in sids:
+        if sid in seen:
+            continue
+        seen.add(sid)
+        unique.append(sid)
+
+    # An empty sid resolves to itself in the per-session form (the `if not
+    # sid` guard returns it unchanged), so it must here too.
+    resolvable = [s for s in unique if s]
+    for sid in unique:
+        out[sid] = sid
+    if not resolvable:
+        return out
+
+    state_db = _resolve_state_db(state_db_path)
+    if not state_db.exists():
+        return out
+
+    try:
+        uri = f"file:{state_db}?mode=ro"
+        parents = {}
+        with sqlite3.connect(uri, uri=True) as conn:
+            # The WHOLE table, not a WHERE id IN (...) restricted to the
+            # inputs: resolution follows parent links OUT of the input set,
+            # and a parent that was not itself requested would be missing
+            # from a restricted map and be mistaken for an absent row --
+            # terminating the walk early and returning a subagent as its own
+            # root. One full scan is also cheaper than chunking a large IN
+            # list across sqlite's variable limit.
+            for row_id, row_parent in conn.execute(
+                "SELECT id, parent_session_id FROM sessions"
+            ):
+                if row_id is not None:
+                    parents[str(row_id)] = (
+                        None if row_parent is None else str(row_parent)
+                    )
+    except sqlite3.OperationalError:
+        return out
+    except Exception:
+        return out
+
+    for sid in resolvable:
+        out[sid] = _walk_parent_map(sid, parents, max_depth=max_depth)
+    return out
+
+
 def _main(argv: list) -> int:
+    # Batch mode: sids arrive one per line on stdin, results leave as
+    # "<sid>\t<root_sid>". TSV because a session id cannot contain a tab (the
+    # producing ids are timestamp/hex or 'agent:<profile>:...' forms) while a
+    # caller splitting on whitespace would break on nothing at all -- and the
+    # bash side reads it with `cut`, which wants a single-character delimiter.
+    if len(argv) >= 2 and argv[1] == "--batch":
+        sids = [line.rstrip("\n") for line in sys.stdin]
+        sids = [s for s in sids if s]
+        resolved = get_root_session_ids(sids)
+        for sid in sids:
+            print(f"{sid}\t{resolved.get(sid, sid)}")
+        return 0
     if len(argv) < 2 or not argv[1]:
         return 0
     print(get_root_session_id(argv[1]))

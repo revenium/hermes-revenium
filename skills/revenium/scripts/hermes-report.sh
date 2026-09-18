@@ -1811,6 +1811,25 @@ PY
   # this counter survives to the per-tick summary line below.
   local claim_abstained_count=0
 
+  # Resolve every sid's root ONCE for the whole tick, before the loop, so the
+  # per-session get_root_session_id below reads a file instead of starting a
+  # python3. Measured on a live host 2026-09-18: 0.189s per call (0.129s of it
+  # bare interpreter startup) x 2,995 walked sessions = ~565s, about 9.4
+  # minutes of every tick spent re-asking one database the same question from
+  # 2,995 separate processes. That host's ticks ran 17-30+ minutes and its log
+  # carried 131,080 "prior tick still active" lines.
+  #
+  # Purely a cost change: get_root_session_id falls back to the per-session
+  # python3 path on any miss, so an absent, empty or partial map is slower and
+  # never different. The map covers the sids in THIS tick's session list; a sid
+  # that appears later (the auxiliary pass, a job precheck reaching outside the
+  # list) simply misses and takes the old path.
+  local root_sid_map_file
+  root_sid_map_file="$(mktemp 2>/dev/null || echo "/tmp/hermes-root-sid-map.$$")"
+  printf '%s\n' "${sessions}" | cut -d'|' -f1 \
+    | build_root_sid_map "${root_sid_map_file}"
+  export ROOT_SID_MAP_FILE="${root_sid_map_file}"
+
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider; do
 
     local total_tokens=$((input_tokens + output_tokens))
@@ -3851,6 +3870,13 @@ PY
     fi
     fi # LEGACY_COMPLETIONS_SKIP + session_event_owned guard (Phase 32 Plan 03 C-11/D-13; quick-260817-tfe OWN-01)
   done <<< "${sessions}"
+
+  # The map is a per-tick scratch file, not state: drop it and unexport, so the
+  # post-loop stages below (outcome reporting, the auxiliary pass) resolve any
+  # sid they touch through the unchanged per-session path rather than through a
+  # map built for a different set of sids.
+  unset ROOT_SID_MAP_FILE
+  [[ -n "${root_sid_map_file}" && -f "${root_sid_map_file}" ]] && rm -f "${root_sid_map_file}" 2>/dev/null
 
   # Phase 10: post-loop outcome stage — report each terminated arc exactly once.
   # Placement is load-bearing: every JOB:<id>:created: line that any session could
