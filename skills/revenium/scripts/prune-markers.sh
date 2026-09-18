@@ -370,7 +370,27 @@ if marker_retention_ok:
                     flags_kept += 1
                     flags_kept_unparseable += 1
                     continue
-                if stem.split('__', 1)[0] in live_sids:
+                # EVERY '__' boundary is tried, not just the first: a session
+                # id can itself contain '__', so the first separator is not
+                # necessarily the session/reason boundary. FALLBACK_WARN keys
+                # on safe_sid, which maps each character outside
+                # [A-Za-z0-9_:.-] to '_' -- so two adjacent disallowed
+                # characters in a raw id produce '__' inside the session
+                # portion -- and WARN_FLAGS_DIR interpolates SESSION_ID with no
+                # sanitisation at all. Splitting on the first separator would
+                # test 'sess' for a live id of 'sess__live', miss the match,
+                # prune the sentinel and re-warn: precisely the defect this
+                # gate exists to close, still open for those ids. The loop is
+                # bounded by the number of separators in the name (one, in
+                # every key shape observed in practice).
+                matched_live = False
+                sep = stem.find('__')
+                while sep != -1:
+                    if stem[:sep] in live_sids:
+                        matched_live = True
+                        break
+                    sep = stem.find('__', sep + 1)
+                if matched_live:
                     flags_kept += 1
                     flags_kept_live += 1
                     continue

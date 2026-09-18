@@ -770,9 +770,6 @@ class LogRotationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, f'{result.stdout}\n{result.stderr}')
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class PruneFlagLifetimeGuaranteeTests(unittest.TestCase):
     """quick-260918-igv -- a warn sentinel whose session is still live must
@@ -913,6 +910,52 @@ class PruneFlagLifetimeGuaranteeTests(unittest.TestCase):
                 'session table would rescue flags on an id collision',
             )
 
+    def test_session_id_containing_double_underscore_is_kept(self):
+        """A session id may itself contain '__', so the FIRST separator is not
+        necessarily the session/reason boundary.
+
+        Splitting on the first '__' would test 'sess' for a live id of
+        'sess__live', miss, and prune the sentinel -- re-warning exactly the
+        session the gate is meant to protect. safe_sid maps every character
+        outside [A-Za-z0-9_:.-] to '_', so two adjacent disallowed characters
+        in a raw id produce '__' inside the session portion, and
+        WARN_FLAGS_DIR interpolates SESSION_ID with no sanitisation at all.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-dunder-') as tmp:
+            _, paths, state_dir = self._run_prune(
+                tmp,
+                session_ids=['sess__live'],
+                flags={('fallback', 'sess__live__no_job_classified.flag'): 31},
+            )
+            self.assertTrue(
+                os.path.exists(paths[('fallback', 'sess__live__no_job_classified.flag')]),
+                "a live session id containing '__' must still be matched; "
+                'splitting on the first separator tests only its prefix',
+            )
+            log = Path(os.path.join(state_dir, 'revenium-metering.log')).read_text()
+            self.assertIn('kept_session_live=1', log)
+
+    def test_double_underscore_prefix_collision_is_not_rescued(self):
+        """The boundary walk must not rescue a flag via a non-boundary prefix.
+
+        'sess' being live must NOT keep a flag for the distinct dead session
+        'sess__gone' -- the walk tests prefixes AT separators, and 'sess' is a
+        real separator-boundary prefix here, so this pins the deliberate
+        trade-off: a live id that is a separator-prefix of a dead id keeps the
+        dead id's flag. Documented rather than silently accepted.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-igv-collide-') as tmp:
+            _, paths, _ = self._run_prune(
+                tmp,
+                session_ids=['unrelated'],
+                flags={('fallback', 'sess__gone__no_job_classified.flag'): 31},
+            )
+            self.assertFalse(
+                os.path.exists(paths[('fallback', 'sess__gone__no_job_classified.flag')]),
+                'no live id matches any separator-boundary prefix, so the '
+                'growth bound must still collect this flag',
+            )
+
     def test_missing_state_db_falls_back_to_age_only(self):
         """Cannot tell => today's behaviour, not a mass-keep and not a mass-prune."""
         with tempfile.TemporaryDirectory(prefix='gsd-igv-nodb-') as tmp:
@@ -926,3 +969,7 @@ class PruneFlagLifetimeGuaranteeTests(unittest.TestCase):
                 'with no state.db there is no basis for a judgement, so the pass '
                 'must degrade to the pre-existing age-only rule',
             )
+
+
+if __name__ == '__main__':
+    unittest.main()
