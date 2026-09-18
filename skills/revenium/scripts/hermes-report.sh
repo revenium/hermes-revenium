@@ -1855,6 +1855,43 @@ PY
     # never expand to empty under set -uo pipefail).
     [[ -z "${root_sid}" ]] && root_sid="${sid}"
 
+    # ROOTNESS IS FAIL-OPEN HERE, DELIBERATELY -- and this file's three
+    # job-identity sites rely on that. Recorded 2026-09-17 alongside the
+    # OPPOSITE choice made in api-event-report.sh (`_is_confirmed_root`), so
+    # the asymmetry reads as intentional rather than as drift.
+    #
+    # `get_root_session_id` returns the INPUT sid on every unresolved path:
+    # state.db missing, sqlite error, or NO ROW for this session. So
+    # `root_sid == sid` means "root, or we could not tell".
+    #
+    # On the EVENT path that ambiguity is both reachable and harmful: it reads
+    # a spool, so a session need not be in the sessions table at all, and it
+    # ATTRIBUTES without ever CREATING -- a misidentified subagent would point
+    # at a job row JOB-02 suppressed, i.e. an orphan. Hence the
+    # positive-evidence gate there.
+    #
+    # Here it is neither:
+    #   - main()'s session list is SELECTed FROM that same sessions table, so
+    #     the row exists by construction and the walk can always answer.
+    #   - creation and attribution are driven by the SAME test, so a
+    #     misidentification is self-consistent: it creates the job and then
+    #     points at it. The result is a spurious subagent job (a JOB-02 policy
+    #     deviation), never a dangling reference.
+    #
+    # DO NOT "harmonize" the two by copying `_is_confirmed_root` onto the
+    # jobs-create sites below. That gate fails CLOSED, and closed at a CREATE
+    # site means NO JOB AT ALL -- not merely a missing dimension. It needs
+    # `sessions.parent_session_id`, which is NOT universal: this repo's own
+    # default test schema (_compat_helpers.build_state_db) omits it, and
+    # get-root-session-id.py catches OperationalError for exactly that case.
+    # On such a host the change would silently stop ROI entirely -- and there
+    # subagent handling is already globally wrong (squad-role, trace rollup,
+    # markers resolution), so tightening the job sites alone would fix nothing.
+    #
+    # Measured on the fleet 2026-09-17: all 10 profiles HAVE the column and
+    # every session row resolves, so this branch only ever runs in its correct
+    # form there.
+
     # Phase 28 (TRACE-03): resolve, once per session-loop iteration, the
     # markers directory that OWNS the current session and the one that owns
     # the root session — the read-side mirror of classifier._paths_for_session
@@ -2394,6 +2431,10 @@ PY
 
       if [[ -n "${precheck_job_rows}" ]]; then
         # Phase 22 (JOB-02 + JOB-03 / D-06): subagent sessions (root_sid != sid) skip BOTH the outcome queue push and the jobs create call -- the root's ledger entry is the single create per arc; outcome ships once; top-level takes the v1.3 path.
+        # `root_sid == sid` is fail-open (root, or we could not tell) and is
+        # deliberately NOT the event path's `_is_confirmed_root` gate -- see the
+        # note at root_sid's resolution for why that is correct here, and why
+        # copying that gate onto this site would silently stop ROI on some hosts.
         if [[ "${root_sid}" == "${sid}" ]]; then
           local precheck_clean_job_id precheck_job_name precheck_job_type precheck_source precheck_status_raw precheck_marker_ts precheck_failure_reason
           while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_source precheck_status_raw precheck_marker_ts precheck_failure_reason; do
@@ -3286,6 +3327,10 @@ PY
         # pre-guard scan is token-independent (job-only marker arc-close path), the
         # in-loop stage runs alongside token-positive emission. Both feed the same
         # job_outcome_queue and both invoke revenium jobs create; both are root-only.
+        # `root_sid == sid` is fail-open (root, or we could not tell) and is
+        # deliberately NOT the event path's `_is_confirmed_root` gate -- see the
+        # note at root_sid's resolution for why that is correct here, and why
+        # copying that gate onto this site would silently stop ROI on some hosts.
         if [[ "${root_sid}" == "${sid}" ]]; then
           local clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts job_failure_reason
           while IFS='|' read -r clean_job_id job_name job_type job_env_source job_status_raw job_marker_ts job_failure_reason; do
@@ -3546,6 +3591,10 @@ PY
         #   orphan-reference a non-existent Revenium job row since JOB-02
         #   suppresses the create). Next cron tick retries idempotently.
         if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
+          # `root_sid == sid` is fail-open (root, or we could not tell) and is
+          # deliberately NOT the event path's `_is_confirmed_root` gate -- see the
+          # note at root_sid's resolution for why that is correct here, and why
+          # copying that gate onto this site would silently stop ROI on some hosts.
           if [[ "${root_sid}" == "${sid}" && -n "${m_owning_job_id}" ]]; then
             cmd+=(--agentic-job-id "${m_owning_job_id}")
             if [[ -n "${m_owning_job_name}" ]]; then
