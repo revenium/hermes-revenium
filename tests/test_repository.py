@@ -380,7 +380,8 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'install-hooks.sh',     # Phase 12 — idempotent config.yaml hook installer
             SKILL / 'scripts' / 'uninstall-hooks.sh',   # Phase 12 — hook uninstaller
             SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
-            SKILL / 'scripts' / 'tool-event-report.sh', # Phase 15 — tool-event reporter
+            SKILL / 'scripts' / 'tool-event-report.sh',
+            SKILL / 'scripts' / 'outcome-metrics-report.sh', # Phase 15 — tool-event reporter
             SKILL / 'scripts' / 'install-plugin.sh',    # Closes tap-install plugin-discovery gap
             SKILL / 'scripts' / 'install.sh',           # quick-260606 — one-command end-to-end installer
             SKILL / 'scripts' / 'hooks-status.sh',      # Diagnose hooks-registered-but-inert footgun

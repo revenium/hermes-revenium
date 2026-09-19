@@ -108,6 +108,15 @@ PY
   # a cron STAGE, not a cron REQUEST (test_cron_tick_request_bound's
   # neighbourhood pins this). Same --quiet-unchanged/|| true posture as
   # plugin-status.sh above.
+  # quick-260919: seventh stage, appends per-job outcome metrics from the ROI
+  # assessment sidecars. Placed AFTER hermes-report.sh because that stage is
+  # what WRITES those sidecars and reports the job outcome -- appending a
+  # metric to a job whose outcome has not been reported yet would race the
+  # thing it annotates. Self-disabling: on a CLI without the
+  # `jobs outcome-metrics` verb it detects that from the help TEXT (exit codes
+  # lie here) and no-ops, so installs on the public CLI meter exactly as
+  # before. Same || true isolation as every stage above.
+  bash "${SKILL_DIR}/scripts/outcome-metrics-report.sh" "$@" || true
   bash "${SKILL_DIR}/scripts/drain-status.sh" --quiet-unchanged "$@" || true
   # Sleep between iterations only; never after the last one (the next cron
   # tick lands within ~60s anyway, so a trailing sleep is wasted).

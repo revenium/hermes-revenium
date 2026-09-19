@@ -254,6 +254,20 @@ REVENIUM_DRAIN_STALE_SECONDS="${REVENIUM_DRAIN_STALE_SECONDS:-604800}"
 # HERMES: check, so this is a fully separate file rather than a shared
 # prefix inside an existing ledger.
 AUX_LEDGER_FILE="${REVENIUM_AUX_LEDGER_FILE:-${STATE_DIR}/revenium-aux.ledger}"
+
+# quick-260919: per-job outcome-metric appends (jobs outcome-metrics). Its OWN
+# key domain, deliberately not shared with any ledger above: the key is
+# (job id, metric key, recordedAt) rather than a session or a cumulative
+# counter, because an append is per-METRIC and the API neither deduplicates
+# them nor offers any read-back -- OutcomeMetricEntry_Read is declared in the
+# spec but no endpoint among its 302 operations produces it. So this ledger is
+# the ONLY record that an append happened; a line lost here is a permanent
+# double-append with no way to detect or undo it.
+OUTCOME_METRICS_LEDGER_FILE="${REVENIUM_OUTCOME_METRICS_LEDGER_FILE:-${STATE_DIR}/revenium-outcome-metrics.ledger}"
+
+# Bound per tick so a first run against a long backbook cannot blow the
+# minute. 0 disables the stage outright.
+REVENIUM_OUTCOME_METRICS_MAX_JOBS="${REVENIUM_OUTCOME_METRICS_MAX_JOBS:-25}"
 # Phase 55 (D-05/D-07): the fixed six-label auxiliary vocabulary. Resolves
 # under SKILL_DIR, NEVER STATE_DIR — unlike TAXONOMY_FILE/JOB_TAXONOMY_FILE
 # above, this is a fixed vocabulary the reporter only READS, not one the
