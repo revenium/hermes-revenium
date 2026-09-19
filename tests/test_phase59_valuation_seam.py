@@ -325,25 +325,67 @@ class SeamTracerTests(_ValuationSeamTestCase):
 # SourceFailureFallbackTests (D-03, all four failure shapes)
 # ---------------------------------------------------------------------------
 
-def _assert_skills_unchanged(testcase):
-    """Phase 58's own idiom (its plans used this exact `git diff --quiet`
-    assertion twelve times across three plans), lifted rather than
-    reinvented: assert nothing under skills/ moved as a byte, with a
-    failure message that runs `git status --porcelain -- skills/` so a
-    real regression is diagnosable rather than a bare non-zero exit."""
-    import subprocess
-    result = subprocess.run(
-        ['git', 'diff', '--quiet', '--', 'skills/'], cwd=str(ROOT),
+def _skills_tree_digest():
+    """Return {relative path: sha256} for every file under skills/.
+
+    The unit of comparison, replacing an earlier `git diff --quiet -- skills/`
+    form inherited from Phase 58. That form asked git what differs from HEAD,
+    which answers a question this test is not asking: it reports the
+    DEVELOPER'S uncommitted work, not what the classifier did. In a repo whose
+    workflow is edit -> run the suite -> commit, it therefore failed on every
+    code change to skills/ while naming the classifier as the culprit --
+    measured four times in one day across two branches, each costing a ~16
+    minute suite run to diagnose.
+
+    Hashing before and after instead makes the assertion measure the interval
+    it actually brackets: whatever the developer's tree looked like going in,
+    it must look identical coming out. An uncommitted edit is invisible; a
+    write BY the classifier is caught whether or not git is present, whether
+    or not the file is tracked, and whether or not the repo is a checkout at
+    all.
+    """
+    import hashlib
+    digest = {}
+    skills_root = ROOT / 'skills'
+    for path in sorted(skills_root.rglob('*')):
+        if not path.is_file():
+            continue
+        try:
+            digest[str(path.relative_to(ROOT))] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+        except OSError as exc:  # unreadable file: record the error, not a skip
+            digest[str(path.relative_to(ROOT))] = f'UNREADABLE:{exc}'
+    return digest
+
+
+def _assert_skills_unchanged(testcase, before):
+    """Assert the classifier wrote nothing under skills/ during the test.
+
+    `before` comes from _skills_tree_digest() captured before the run. See
+    that function for why this is not a `git diff`.
+    """
+    after = _skills_tree_digest()
+    if before == after:
+        return
+
+    added = sorted(set(after) - set(before))
+    removed = sorted(set(before) - set(after))
+    modified = sorted(
+        p for p in (set(before) & set(after)) if before[p] != after[p]
     )
-    if result.returncode != 0:
-        status = subprocess.run(
-            ['git', 'status', '--porcelain', '--', 'skills/'],
-            cwd=str(ROOT), capture_output=True, text=True,
-        )
-        testcase.fail(
-            'git diff --quiet -- skills/ was dirty after driving the '
-            'real classifier across both config arms:\n' + status.stdout
-        )
+    detail = []
+    if modified:
+        detail.append('modified: ' + ', '.join(modified))
+    if added:
+        detail.append('added: ' + ', '.join(added))
+    if removed:
+        detail.append('removed: ' + ', '.join(removed))
+    testcase.fail(
+        'driving the real classifier across both config arms wrote to '
+        'skills/, which must be read-only at runtime:\n  '
+        + '\n  '.join(detail)
+    )
 
 
 _SOURCE_THROWAWAY_SEQ = [0]
@@ -361,6 +403,11 @@ class SourceSwapTests(_ValuationSeamTestCase):
     nothing under skills/ moved to make that happen."""
 
     def test_config_only_swap_changes_where_the_number_comes_from(self):
+        # Snapshot BEFORE driving the classifier, so the assertion at the
+        # end brackets this test's own work rather than the developer's
+        # working tree.
+        skills_before = _skills_tree_digest()
+
         # Arm A: neither new key configured.
         mod_a = self._load(boundaries=None)
         cfg_a = mod_a._llm_evaluation_config()
@@ -383,7 +430,7 @@ class SourceSwapTests(_ValuationSeamTestCase):
         self.assertEqual(100.0, result_b['estimated_value'])
         self.assertNotEqual(result_a['estimated_value'], result_b['estimated_value'])
 
-        _assert_skills_unchanged(self)
+        _assert_skills_unchanged(self, skills_before)
 
     def test_arm_b_value_could_not_have_come_from_assumptions(self):
         # A comment, not just an assertion: a registrant SWAP alone
@@ -591,3 +638,63 @@ class RegistryRoundTripTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class SkillsDigestGuardTests(unittest.TestCase):
+    """The digest must still CATCH a write -- surviving a dirty tree is only
+    half the requirement.
+
+    The replaced `git diff` form failed on any uncommitted change under
+    skills/, which is why it was replaced. A digest that never fires would
+    "fix" that by asserting nothing at all, so both halves are pinned: a
+    pre-existing modification is invisible, and a modification made BETWEEN
+    the two snapshots is caught.
+    """
+
+    def test_change_between_snapshots_is_detected(self):
+        import hashlib
+        target = ROOT / 'skills' / 'revenium' / 'scripts' / 'common.sh'
+        original = target.read_bytes()
+        before = _skills_tree_digest()
+        try:
+            target.write_bytes(original + b'\n# transient digest-guard probe\n')
+            failures = []
+
+            class _Recorder:
+                def fail(self, msg):
+                    failures.append(msg)
+
+            _assert_skills_unchanged(_Recorder(), before)
+            self.assertTrue(
+                failures,
+                'a file modified between the snapshots must be reported; a '
+                'digest that never fires asserts nothing',
+            )
+            self.assertIn('common.sh', failures[0])
+            self.assertIn('modified:', failures[0])
+        finally:
+            target.write_bytes(original)
+        # And the tree is restored, so the digest matches again.
+        self.assertEqual(before, _skills_tree_digest())
+
+    def test_preexisting_dirt_is_invisible(self):
+        """The property the old form got wrong."""
+        target = ROOT / 'skills' / 'revenium' / 'scripts' / 'common.sh'
+        original = target.read_bytes()
+        try:
+            # Dirty the tree BEFORE the snapshot, as an uncommitted edit is.
+            target.write_bytes(original + b'\n# pre-existing uncommitted edit\n')
+            before = _skills_tree_digest()
+            failures = []
+
+            class _Recorder:
+                def fail(self, msg):
+                    failures.append(msg)
+
+            _assert_skills_unchanged(_Recorder(), before)
+            self.assertEqual(
+                [], failures,
+                'an edit already present before the run is the developer\'s '
+                'working tree, not something the classifier did',
+            )
+        finally:
+            target.write_bytes(original)
