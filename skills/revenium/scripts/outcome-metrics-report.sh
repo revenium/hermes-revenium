@@ -110,7 +110,20 @@ ensure_economics_contract() {
     return 2
   fi
   if [[ "$(json_field "${out}" status)" != "404" ]]; then
-    return 0   # a contract exists (or the GET failed in some other way); leave it
+    # A contract exists: adopt ITS unitMetricKey rather than assuming ours.
+    # The per-job COUNT metric must be one the contract actually declares, and
+    # an operator-tuned type may name it anything. Hardcoding our own would
+    # append an undeclared key and take a 400 on every job of that type,
+    # forever, with the failure reading like a server problem rather than our
+    # assumption.
+    local declared
+    declared="$(json_field "${out}" unitMetricKey)"
+    if [[ -n "${declared}" ]]; then
+      printf '%s\n' "${declared}"
+    else
+      printf '%s\n' "${OM_UNIT_METRIC_KEY}"
+    fi
+    return 0
   fi
 
   if [[ "${DRY_RUN}" == "true" ]]; then
@@ -160,6 +173,7 @@ PY
     return 1
   fi
   info "outcome-metrics: declared economics contract for job_type=${job_type}"
+  printf '%s\n' "${OM_UNIT_METRIC_KEY}"
   return 0
 }
 
@@ -316,22 +330,52 @@ PY
     exit 0
   fi
 
+  local econ_cache_dir
+  econ_cache_dir="$(mktemp -d 2>/dev/null || echo "/tmp/revenium-econ-cache.$$")"
+  mkdir -p "${econ_cache_dir}" 2>/dev/null
+  trap 'rm -rf "${econ_cache_dir:-}" 2>/dev/null' EXIT INT TERM
+
   local appended=0 deferred=0 failed=0
   local jid job_type recorded_at entries_json
   while IFS=$'\t' read -r jid job_type recorded_at entries_json; do
     [[ -z "${jid}" ]] && continue
 
+    # Resolve the per-job COUNT metric for this TYPE once, not once per job:
+    # resolution costs a GET, and a tick covering many jobs of one type would
+    # otherwise spend its whole rate-limit budget re-asking the same question.
+    # bash 3.2 has no associative arrays, so the cache is a file per type.
+    local unit_key="${OM_UNIT_METRIC_KEY}"
     if [[ -n "${job_type}" ]]; then
-      ensure_economics_contract "${job_type}"
-      local econ_rc=$?
-      if [[ ${econ_rc} -eq 2 ]]; then
-        ((deferred++)) || true
-        continue
+      local safe_type cache_file
+      safe_type="${job_type//[^A-Za-z0-9_.-]/_}"
+      cache_file="${econ_cache_dir}/${safe_type}"
+      if [[ -f "${cache_file}" ]]; then
+        unit_key="$(cat "${cache_file}" 2>/dev/null)"
+      else
+        local econ_out econ_rc
+        econ_out="$(ensure_economics_contract "${job_type}")"
+        econ_rc=$?
+        if [[ ${econ_rc} -eq 2 ]]; then
+          ((deferred++)) || true
+          continue
+        fi
+        if [[ ${econ_rc} -ne 0 ]]; then
+          ((failed++)) || true
+          continue
+        fi
+        econ_out="$(printf '%s' "${econ_out}" | tail -1)"
+        [[ -n "${econ_out}" ]] && unit_key="${econ_out}"
+        printf '%s' "${unit_key}" > "${cache_file}" 2>/dev/null
       fi
-      if [[ ${econ_rc} -ne 0 ]]; then
-        ((failed++)) || true
-        continue
-      fi
+    fi
+
+    # Re-key the unit metric to whatever this type declares. python3 -c, not a
+    # heredoc: a heredoc here would occupy stdin inside a command
+    # substitution, the same collision that silently broke the ledger write.
+    if [[ -n "${unit_key}" && "${unit_key}" != "${OM_UNIT_METRIC_KEY}" ]]; then
+      local rekeyed
+      rekeyed="$(OM_ENTRIES="${entries_json}" FROM="${OM_UNIT_METRIC_KEY}" TO="${unit_key}" python3 -c 'import json,os;e=json.loads(os.environ["OM_ENTRIES"]);[x.__setitem__("key",os.environ["TO"]) for x in e if x.get("key")==os.environ["FROM"]];print(json.dumps(e))' 2>/dev/null)"
+      [[ -n "${rekeyed}" ]] && entries_json="${rekeyed}"
     fi
 
     if [[ "${DRY_RUN}" == "true" ]]; then
