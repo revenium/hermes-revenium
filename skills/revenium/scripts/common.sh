@@ -265,6 +265,14 @@ AUX_LEDGER_FILE="${REVENIUM_AUX_LEDGER_FILE:-${STATE_DIR}/revenium-aux.ledger}"
 # double-append with no way to detect or undo it.
 OUTCOME_METRICS_LEDGER_FILE="${REVENIUM_OUTCOME_METRICS_LEDGER_FILE:-${STATE_DIR}/revenium-outcome-metrics.ledger}"
 
+# Serialises the outcome-metrics stage. cron.lock only serialises runs made
+# THROUGH cron.sh; an operator invoking the script directly can overlap a
+# cron tick, and both processes would read the same absent ledger keys and
+# issue the same permanent append before either records it. Appends cannot be
+# deduplicated, amended, deleted or read back, so the window is unrecoverable
+# rather than merely wasteful.
+OUTCOME_METRICS_LOCK_FILE="${REVENIUM_OUTCOME_METRICS_LOCK_FILE:-${STATE_DIR}/outcome-metrics.lock}"
+
 # Bound per tick so a first run against a long backbook cannot blow the
 # minute. 0 disables the stage outright.
 REVENIUM_OUTCOME_METRICS_MAX_JOBS="${REVENIUM_OUTCOME_METRICS_MAX_JOBS:-25}"

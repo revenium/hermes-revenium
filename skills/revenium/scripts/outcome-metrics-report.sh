@@ -116,13 +116,41 @@ ensure_economics_contract() {
     # append an undeclared key and take a 400 on every job of that type,
     # forever, with the failure reading like a server problem rather than our
     # assumption.
-    local declared
-    declared="$(json_field "${out}" unitMetricKey)"
-    if [[ -n "${declared}" ]]; then
-      printf '%s\n' "${declared}"
-    else
-      printf '%s\n' "${OM_UNIT_METRIC_KEY}"
+    # Issue 4: reading unitMetricKey alone is not enough. A valid,
+    # operator-managed contract may omit or rename any of the three metrics we
+    # send, in which case EVERY append for that type is rejected with "key
+    # 'x' is not declared for the job type" -- forever, once per job, with the
+    # failure reading like a server problem rather than a contract mismatch.
+    # Verify the whole set up front and skip the type with a diagnostic
+    # naming what is missing, which is actionable; a per-job 400 is not.
+    local verdict
+    verdict="$(JSON_BLOB="${out}" DEFAULT_UNIT="${OM_UNIT_METRIC_KEY}" python3 -c '
+import json, os, sys
+try:
+    d = json.loads(os.environ["JSON_BLOB"])
+except Exception:
+    print("SKIP	unreadable economics document"); sys.exit(0)
+metrics = {m.get("key"): m for m in (d.get("metrics") or []) if isinstance(m, dict)}
+required = ["estimated_value", "hours_saved", "assessment_confidence"]
+missing = [k for k in required if k not in metrics]
+if missing:
+    print("SKIP	contract does not declare: " + ", ".join(missing)); sys.exit(0)
+unit = d.get("unitMetricKey") or os.environ["DEFAULT_UNIT"]
+if unit not in metrics:
+    print("SKIP	unitMetricKey %r is not among the declared metrics" % unit); sys.exit(0)
+if (metrics[unit].get("type") or "") != "COUNT":
+    print("SKIP	unitMetricKey %r is declared %s, not COUNT" % (unit, metrics[unit].get("type"))); sys.exit(0)
+print("OK	" + unit)
+' 2>/dev/null)"
+    if [[ "${verdict}" == SKIP* ]]; then
+      warn "outcome-metrics: skipping job_type=${job_type} -- $(printf '%s' "${verdict}" | cut -f2-)"
+      return 3
     fi
+    if [[ -z "${verdict}" ]]; then
+      warn "outcome-metrics: skipping job_type=${job_type} -- could not validate its economics contract"
+      return 3
+    fi
+    printf '%s\n' "$(printf '%s' "${verdict}" | cut -f2-)"
     return 0
   fi
 
@@ -194,10 +222,37 @@ main() {
   fi
 
   ensure_path
+
+  # Serialise the whole read-ledger / append / write-ledger sequence. cron.lock
+  # only covers runs made THROUGH cron.sh, so an operator invoking this script
+  # directly can overlap a tick: both processes read the same absent keys and
+  # issue the same permanent append before either records it. Non-blocking --
+  # a second run simply defers to the next tick rather than queueing behind a
+  # long one. Same exec-fd + fcntl pattern as cron.sh and prune-markers.sh.
+  exec 9>"${OUTCOME_METRICS_LOCK_FILE}"
+  if ! python3 - <<'LOCKPY'
+import fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, BlockingIOError):
+    sys.exit(11)
+LOCKPY
+  then
+    info "outcome-metrics: another run holds the lock, skipping this tick"
+    exit 0
+  fi
+
   mkdir -p "$(dirname "${OUTCOME_METRICS_LEDGER_FILE}")" 2>/dev/null
   touch "${OUTCOME_METRICS_LEDGER_FILE}" 2>/dev/null
 
-  local econ_cache_dir
+  # Deliberately NOT `local`: the EXIT trap below fires after main() returns,
+  # so a function-scoped variable is already out of scope and the trap's
+  # `${econ_cache_dir:-}` expands to empty -- `rm -rf ""` is a silent no-op
+  # and every run leaks a directory. Measured: three runs on the Linux host
+  # left three dirs behind, while the identical script cleaned up correctly
+  # on macOS bash 3.2, so a developer machine will not show this. The `:-` in
+  # the trap stays as a guard for the window before this assignment, not as
+  # the scoping fix -- it is what made the leak silent rather than loud.
   econ_cache_dir="$(mktemp -d 2>/dev/null || echo "/tmp/revenium-econ-cache.$$")"
   mkdir -p "${econ_cache_dir}" 2>/dev/null
   trap 'rm -rf "${econ_cache_dir:-}" 2>/dev/null' EXIT INT TERM
@@ -376,10 +431,16 @@ for jid, r in sorted(records.items()):
     entries = []
     rejected = False
     for key, value in candidates:
-        if value is None:
-            continue
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            continue
+        # Issue 3: a missing or non-numeric field rejects the WHOLE job, the
+        # same as an out-of-range one. Silently dropping the field and
+        # appending the rest writes a PARTIAL outcome -- permanently, and
+        # looking populated -- which is the very result the range check
+        # rejects whole jobs to avoid. A legacy, truncated or hand-edited
+        # sidecar is exactly where this arises.
+        if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+            print('BADFIELD\t%s\t%s\t%r' % (jid, key, value), file=sys.stderr)
+            rejected = True
+            break
         if not in_range(declared[key], value):
             # Refuse the WHOLE job, not just the offending metric: a partial
             # append is still permanent, and shipping three of four metrics
@@ -451,6 +512,19 @@ except ValueError:
 for e in entries:
     print('OM:%s:%s:%s' % (os.environ['JID'], e['key'], os.environ['RECORDED']))
 PY
+    # Issue 1: VERIFY the ledger write. The append has already happened and
+    # cannot be undone, so if the key cannot be persisted -- full disk,
+    # read-only state dir, anything -- the next tick will read an absent key
+    # and append the same permanent metrics again. Counting this job as
+    # appended and carrying on would turn one unwritable ledger into a
+    # duplicate for every remaining job in the backlog, so this STOPS the run.
+    local ledger_lines_after
+    ledger_lines_after="$(grep -c "^OM:${jid}:" "${OUTCOME_METRICS_LEDGER_FILE}" 2>/dev/null || echo 0)"
+    if [[ "${ledger_lines_after}" -eq 0 ]]; then
+      error "outcome-metrics: APPENDED job=${jid} but could NOT persist its ledger keys to ${OUTCOME_METRICS_LEDGER_FILE}; stopping so the next tick cannot re-append. This job's metrics are already on the platform and must be added to the ledger by hand before this stage runs again."
+      ((failed++)) || true
+      break
+    fi
     info "outcome-metrics: appended job=${jid} type=${job_type}"
     ((appended++)) || true
   done <<< "${work}"

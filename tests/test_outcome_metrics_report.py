@@ -67,7 +67,7 @@ class _Base(unittest.TestCase):
             f.write(json.dumps(rec) + '\n')
 
     def _shim(self, bin_dir, *, has_verb=True, throttle=False, econ_404=True,
-              log=None, unit_key='signal_events_processed'):
+              log=None, unit_key='signal_events_processed', econ_metrics=None):
         """A stub `revenium`. `has_verb` controls whether `jobs --help` lists
         outcome-metrics; when it does NOT, the stub mimics cobra's real
         behaviour for an unknown subcommand: print the PARENT help, exit 0."""
@@ -83,7 +83,7 @@ fi
 if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "get" ]; then
   if [ "{throttle}" = "True" ]; then echo '{{"error":"x","status":429}}'; exit 1; fi
   if [ "{econ_404}" = "True" ]; then echo '{{"error":"Resource not found.","status":404}}'; exit 3; fi
-  echo '{{"jobType":"t1","metrics":[],"unitMetricKey":"{unit_key}"}}'; exit 0
+  echo '{{"jobType":"t1","unitMetricKey":"{unit_key}","metrics":[{{"key":"estimated_value","type":"MONEY"}},{{"key":"hours_saved","type":"DURATION"}},{{"key":"assessment_confidence","type":"SCORE"}},{{"key":"{unit_key}","type":"COUNT"}}]}}'; exit 0
 fi
 if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "set" ]; then
   echo "Contract"; exit 0
@@ -393,6 +393,147 @@ class LedgerKeyMatchesDeclaredKeyTests(_Base):
                 'no append may be issued at all -- a duplicate is permanent '
                 'and cannot be read back or deleted',
             )
+
+
+class CacheDirCleanupTests(_Base):
+    """The econ-cache dir must not be function-scoped.
+
+    The EXIT trap fires after main() returns, so a `local` is out of scope by
+    then and `${econ_cache_dir:-}` expands to empty -- `rm -rf ""` is a
+    silent no-op and every run leaks a directory. Measured on the Linux host:
+    three runs, three dirs left behind, while the identical script cleaned up
+    on macOS bash 3.2. A developer machine does not reproduce it, so the
+    property is pinned from the source rather than by observation.
+    """
+
+    SCRIPT_TEXT = SCRIPT.read_text(encoding='utf-8')
+
+    def test_cache_dir_is_not_local(self):
+        self.assertNotIn(
+            'local econ_cache_dir', self.SCRIPT_TEXT,
+            'econ_cache_dir must be file-scoped: the EXIT trap that removes it '
+            'runs after main() returns',
+        )
+
+    def test_trap_body_is_unset_safe(self):
+        trap_lines = [l for l in self.SCRIPT_TEXT.splitlines()
+                      if l.strip().startswith('trap ') and 'econ_cache_dir' in l]
+        self.assertEqual(1, len(trap_lines), trap_lines)
+        self.assertIn(
+            '${econ_cache_dir:-}', trap_lines[0],
+            'the trap must tolerate the variable being unset during the window '
+            'before it is assigned',
+        )
+
+    def test_no_directory_is_left_behind(self):
+        """Behavioural check, for the platforms where it does reproduce."""
+        with tempfile.TemporaryDirectory(prefix='gsd-om-leak-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True)
+            self._assessment(state_dir)
+            own_tmp = os.path.join(tmp, 'scratch')
+            os.makedirs(own_tmp)
+            env['TMPDIR'] = own_tmp
+            self._run(env)
+            leftover = os.listdir(own_tmp)
+            self.assertEqual(
+                [], leftover,
+                f'the run must leave no scratch directory behind; found {leftover}',
+            )
+
+
+class ContractCompatibilityTests(_Base):
+    """An operator contract that does not declare what we send must be SKIPPED.
+
+    Reading unitMetricKey alone is not enough: a valid, hand-managed contract
+    may omit or rename any of the three metrics we append, and then every
+    append for that type is rejected with "key 'x' is not declared for the
+    job type" -- forever, once per job, reading like a server fault rather
+    than a contract mismatch.
+    """
+
+    def _incompatible_shim(self, bin_dir, missing='hours_saved'):
+        metrics = [m for m in ('estimated_value', 'hours_saved',
+                               'assessment_confidence') if m != missing]
+        cols = ','.join('{"key":"%s","type":"MONEY"}' % m for m in metrics)
+        body = ('#!/bin/bash\n'
+                'echo "$*" >> "%s"\n' % os.path.join(bin_dir, 'calls.log') +
+                'if [ "$1" = "jobs" ] && [ "$2" = "--help" ]; then printf \'Available Commands:\\n  outcome-metrics  Append\\n\'; exit 0; fi\n'
+                'if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$4" = "get" ]; then '
+                'echo \'{"jobType":"t1","unitMetricKey":"u","metrics":[%s,{"key":"u","type":"COUNT"}]}\'; exit 0; fi\n' % cols +
+                'if [ "$1" = "jobs" ] && [ "$2" = "outcome-metrics" ]; then cat >/dev/null; echo Appended; exit 0; fi\n'
+                'exit 0\n')
+        p = os.path.join(bin_dir, 'revenium')
+        Path(p).write_text(body)
+        os.chmod(p, 0o755)
+        return os.path.join(bin_dir, 'calls.log')
+
+    def test_contract_missing_a_required_metric_skips_the_type(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-om-incompat-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            log = self._incompatible_shim(bin_dir, missing='hours_saved')
+            self._assessment(state_dir)
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual(
+                [], self._ledger(state_dir),
+                'a type whose contract omits a metric we send must be skipped, '
+                'not appended once per job into a guaranteed 400',
+            )
+            calls = Path(log).read_text() if os.path.exists(log) else ''
+            self.assertNotIn('jobs outcome-metrics', calls)
+
+
+class PartialOutcomeTests(_Base):
+    def test_missing_field_rejects_the_whole_job(self):
+        """A partial append is permanent and looks populated."""
+        with tempfile.TemporaryDirectory(prefix='gsd-om-partial-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            log = self._shim(bin_dir, has_verb=True)
+            # A truncated sidecar: reportable, but no hours.
+            rec = {
+                'kind': 'job_assessment', 'agentic_job_id': 'job-1',
+                'job_type': 't1', 'reportability_status': 'reportable',
+                'estimated_value': 70.0, 'confidence': 0.7,
+                'assumptions': {}, 'job_ended_at': 1789742045.0, 'sequence': 0,
+            }
+            Path(os.path.join(state_dir, 'job-assessments', 'job-1.jsonl')
+                 ).write_text(json.dumps(rec) + '\n')
+            self._run(env)
+            self.assertEqual(
+                [], self._ledger(state_dir),
+                'a sidecar missing a field must reject the WHOLE job: appending '
+                'the rest writes a permanent partial outcome',
+            )
+            calls = Path(log).read_text() if os.path.exists(log) else ''
+            self.assertNotIn('jobs outcome-metrics', calls)
+
+
+class LockTests(_Base):
+    def test_a_held_lock_defers_the_run(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-om-lock-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True)
+            self._assessment(state_dir)
+            lock_path = os.path.join(state_dir, 'outcome-metrics.lock')
+            holder = subprocess.Popen(
+                ['python3', '-c',
+                 'import fcntl,sys,time;f=open(sys.argv[1],"w");'
+                 'fcntl.flock(f,fcntl.LOCK_EX);print("held",flush=True);time.sleep(8)',
+                 lock_path],
+                stdout=subprocess.PIPE, text=True)
+            try:
+                holder.stdout.readline()          # wait until it truly holds
+                r = self._run(env)
+                self.assertEqual(0, r.returncode, r.stderr)
+                self.assertEqual(
+                    [], self._ledger(state_dir),
+                    'a run that cannot take the lock must append NOTHING: two '
+                    'overlapping runs would both read the same absent keys and '
+                    'issue the same permanent append',
+                )
+            finally:
+                holder.kill(); holder.wait()
 
 
 if __name__ == '__main__':
