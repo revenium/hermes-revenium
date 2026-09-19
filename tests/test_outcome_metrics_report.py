@@ -67,7 +67,7 @@ class _Base(unittest.TestCase):
             f.write(json.dumps(rec) + '\n')
 
     def _shim(self, bin_dir, *, has_verb=True, throttle=False, econ_404=True,
-              log=None):
+              log=None, unit_key='signal_events_processed'):
         """A stub `revenium`. `has_verb` controls whether `jobs --help` lists
         outcome-metrics; when it does NOT, the stub mimics cobra's real
         behaviour for an unknown subcommand: print the PARENT help, exit 0."""
@@ -83,7 +83,7 @@ fi
 if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "get" ]; then
   if [ "{throttle}" = "True" ]; then echo '{{"error":"x","status":429}}'; exit 1; fi
   if [ "{econ_404}" = "True" ]; then echo '{{"error":"Resource not found.","status":404}}'; exit 3; fi
-  echo '{{"jobType":"t1","metrics":[]}}'; exit 0
+  echo '{{"jobType":"t1","metrics":[],"unitMetricKey":"{unit_key}"}}'; exit 0
 fi
 if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "set" ]; then
   echo "Contract"; exit 0
@@ -305,6 +305,48 @@ class EconomicsTests(_Base):
                 'economics set', calls,
                 'an operator-tuned contract must never be replaced by cron',
             )
+
+
+class DeclaredUnitKeyTests(_Base):
+    """The per-job COUNT metric must be the one the contract DECLARES.
+
+    Our default is `jobs_completed`, but a contract written by an operator --
+    or by an earlier manual backfill -- may name it anything, and
+    `unitMetricKey` must reference a COUNT metric the contract declares.
+    Appending our assumed key against such a type would 400 on every job of
+    that type forever, and the failure would read as a server problem rather
+    than as our assumption.
+    """
+
+    def test_existing_contracts_declared_unit_key_is_adopted(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-om-unit-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True, econ_404=False,
+                       unit_key='signal_events_processed')
+            self._assessment(state_dir)
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            led = self._ledger(state_dir)
+            keys = {l.split(':')[2] for l in led}
+            self.assertIn(
+                'signal_events_processed', keys,
+                f'must adopt the contract\'s declared unitMetricKey; got {keys}',
+            )
+            self.assertNotIn(
+                'jobs_completed', keys,
+                'must NOT append our assumed key when the contract declares '
+                'a different one -- that is a guaranteed 400 per job',
+            )
+
+    def test_created_contract_uses_our_default_unit_key(self):
+        """On a 404 we write the contract, so our own key is the right one."""
+        with tempfile.TemporaryDirectory(prefix='gsd-om-unit2-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True, econ_404=True)
+            self._assessment(state_dir)
+            self._run(env)
+            keys = {l.split(':')[2] for l in self._ledger(state_dir)}
+            self.assertIn('jobs_completed', keys, keys)
 
 
 if __name__ == '__main__':
