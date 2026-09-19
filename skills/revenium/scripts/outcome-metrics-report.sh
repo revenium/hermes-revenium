@@ -197,6 +197,56 @@ main() {
   mkdir -p "$(dirname "${OUTCOME_METRICS_LEDGER_FILE}")" 2>/dev/null
   touch "${OUTCOME_METRICS_LEDGER_FILE}" 2>/dev/null
 
+  local econ_cache_dir
+  econ_cache_dir="$(mktemp -d 2>/dev/null || echo "/tmp/revenium-econ-cache.$$")"
+  mkdir -p "${econ_cache_dir}" 2>/dev/null
+  trap 'rm -rf "${econ_cache_dir:-}" 2>/dev/null' EXIT INT TERM
+
+  # Resolve each TYPE's unit metric key BEFORE the work list is built. This
+  # ordering is load-bearing: the ledger check keys on the metric NAME, so
+  # deciding the name after the dedup check means checking one key and
+  # appending another. On this host that shipped a duplicate
+  # `signal_events_processed` for every job a previous backfill had already
+  # covered -- permanent, undeletable, and invisible until the dry run showed
+  # "1 entries" for a job whose four metrics were all supposedly ledgered.
+  local econ_types
+  econ_types="$(
+    ASSESS_DIR="${JOB_ASSESSMENTS_DIR}" python3 -c '
+import glob, json, os, sys
+seen=set()
+for path in sorted(glob.glob(os.path.join(os.environ["ASSESS_DIR"], "*.jsonl"))):
+    try:
+        for line in open(path, encoding="utf-8"):
+            line=line.strip()
+            if not line: continue
+            try: r=json.loads(line)
+            except ValueError: continue
+            if r.get("kind")!="job_assessment": continue
+            if r.get("reportability_status")!="reportable": continue
+            t=r.get("job_type") or ""
+            if t and t not in seen:
+                seen.add(t); print(t)
+    except OSError:
+        continue' 2>/dev/null
+  )"
+  local t safe_t
+  while IFS= read -r t; do
+    [[ -z "${t}" ]] && continue
+    safe_t="${t//[^A-Za-z0-9_.-]/_}"
+    [[ -f "${econ_cache_dir}/${safe_t}" ]] && continue
+    local resolved rc
+    resolved="$(ensure_economics_contract "${t}")"
+    rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+      # Throttled or failed: leave this type unresolved so its jobs are
+      # skipped this tick rather than appended under a guessed key.
+      continue
+    fi
+    resolved="$(printf '%s' "${resolved}" | tail -1)"
+    [[ -z "${resolved}" ]] && resolved="${OM_UNIT_METRIC_KEY}"
+    printf '%s' "${resolved}" > "${econ_cache_dir}/${safe_t}" 2>/dev/null
+  done <<< "${econ_types}"
+
   # Build the work list: one line per job, TAB-separated, already
   # range-validated. Validation happens HERE rather than at the append site so
   # a bad value can never reach a permanent, unreadable, undeletable write.
@@ -206,12 +256,32 @@ main() {
     LEDGER="${OUTCOME_METRICS_LEDGER_FILE}" \
     MAX_JOBS="${REVENIUM_OUTCOME_METRICS_MAX_JOBS}" \
     UNIT_KEY="${OM_UNIT_METRIC_KEY}" \
+    ECON_CACHE="${econ_cache_dir}" \
     python3 - <<'PY' 2>/dev/null
 import datetime, glob, json, os, sys
 
 assess_dir = os.environ['ASSESS_DIR']
 ledger_path = os.environ['LEDGER']
-unit_key = os.environ['UNIT_KEY']
+default_unit_key = os.environ['UNIT_KEY']
+econ_cache = os.environ.get('ECON_CACHE', '')
+
+
+def unit_key_for(job_type):
+    """The COUNT metric THIS type declares, resolved before we got here.
+
+    Returns None when the type could not be resolved (throttled or failed),
+    which skips its jobs this tick -- appending under a guessed key would be
+    a permanent write of a metric the contract may not declare.
+    """
+    if not job_type:
+        return default_unit_key
+    safe = ''.join(c if (c.isalnum() or c in '_.-') else '_' for c in job_type)
+    try:
+        with open(os.path.join(econ_cache, safe), encoding='utf-8') as f:
+            v = f.read().strip()
+            return v or default_unit_key
+    except OSError:
+        return None
 try:
     max_jobs = int(os.environ['MAX_JOBS'])
 except ValueError:
@@ -220,11 +290,10 @@ except ValueError:
 # Declared type per metric key. This is the knowledge the CLI cannot have --
 # it would need the contract, which means a network call in a path documented
 # as request-free -- and it is why the range check lives here.
-DECLARED = {
+DECLARED_BASE = {
     'estimated_value': 'MONEY',
     'hours_saved': 'DURATION',
     'assessment_confidence': 'SCORE',
-    unit_key: 'COUNT',
 }
 
 def in_range(metric_type, value):
@@ -289,6 +358,13 @@ for jid, r in sorted(records.items()):
     except (TypeError, ValueError, OSError):
         continue
 
+    job_type = r.get('job_type') or ''
+    unit_key = unit_key_for(job_type)
+    if unit_key is None:
+        continue
+    declared = dict(DECLARED_BASE)
+    declared[unit_key] = 'COUNT'
+
     a = r.get('assumptions') or {}
     candidates = [
         ('estimated_value', r.get('estimated_value')),
@@ -304,7 +380,7 @@ for jid, r in sorted(records.items()):
             continue
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             continue
-        if not in_range(DECLARED[key], value):
+        if not in_range(declared[key], value):
             # Refuse the WHOLE job, not just the offending metric: a partial
             # append is still permanent, and shipping three of four metrics
             # would leave the job looking populated while quietly missing one.
@@ -319,7 +395,6 @@ for jid, r in sorted(records.items()):
     if rejected or not entries:
         continue
 
-    job_type = r.get('job_type') or ''
     print('%s\t%s\t%s\t%s' % (jid, job_type, recorded_at, json.dumps(entries)))
     emitted += 1
 PY
@@ -330,53 +405,14 @@ PY
     exit 0
   fi
 
-  local econ_cache_dir
-  econ_cache_dir="$(mktemp -d 2>/dev/null || echo "/tmp/revenium-econ-cache.$$")"
-  mkdir -p "${econ_cache_dir}" 2>/dev/null
-  trap 'rm -rf "${econ_cache_dir:-}" 2>/dev/null' EXIT INT TERM
-
   local appended=0 deferred=0 failed=0
   local jid job_type recorded_at entries_json
   while IFS=$'\t' read -r jid job_type recorded_at entries_json; do
     [[ -z "${jid}" ]] && continue
 
-    # Resolve the per-job COUNT metric for this TYPE once, not once per job:
-    # resolution costs a GET, and a tick covering many jobs of one type would
-    # otherwise spend its whole rate-limit budget re-asking the same question.
-    # bash 3.2 has no associative arrays, so the cache is a file per type.
-    local unit_key="${OM_UNIT_METRIC_KEY}"
-    if [[ -n "${job_type}" ]]; then
-      local safe_type cache_file
-      safe_type="${job_type//[^A-Za-z0-9_.-]/_}"
-      cache_file="${econ_cache_dir}/${safe_type}"
-      if [[ -f "${cache_file}" ]]; then
-        unit_key="$(cat "${cache_file}" 2>/dev/null)"
-      else
-        local econ_out econ_rc
-        econ_out="$(ensure_economics_contract "${job_type}")"
-        econ_rc=$?
-        if [[ ${econ_rc} -eq 2 ]]; then
-          ((deferred++)) || true
-          continue
-        fi
-        if [[ ${econ_rc} -ne 0 ]]; then
-          ((failed++)) || true
-          continue
-        fi
-        econ_out="$(printf '%s' "${econ_out}" | tail -1)"
-        [[ -n "${econ_out}" ]] && unit_key="${econ_out}"
-        printf '%s' "${unit_key}" > "${cache_file}" 2>/dev/null
-      fi
-    fi
-
-    # Re-key the unit metric to whatever this type declares. python3 -c, not a
-    # heredoc: a heredoc here would occupy stdin inside a command
-    # substitution, the same collision that silently broke the ledger write.
-    if [[ -n "${unit_key}" && "${unit_key}" != "${OM_UNIT_METRIC_KEY}" ]]; then
-      local rekeyed
-      rekeyed="$(OM_ENTRIES="${entries_json}" FROM="${OM_UNIT_METRIC_KEY}" TO="${unit_key}" python3 -c 'import json,os;e=json.loads(os.environ["OM_ENTRIES"]);[x.__setitem__("key",os.environ["TO"]) for x in e if x.get("key")==os.environ["FROM"]];print(json.dumps(e))' 2>/dev/null)"
-      [[ -n "${rekeyed}" ]] && entries_json="${rekeyed}"
-    fi
+    # Economics and the unit key were resolved per TYPE above, before the
+    # work list was built, so nothing is decided here -- a type that failed to
+    # resolve simply produced no work.
 
     if [[ "${DRY_RUN}" == "true" ]]; then
       info "outcome-metrics: dry-run, would append $(OM_ENTRIES="${entries_json}" python3 -c 'import json,os;print(len(json.loads(os.environ["OM_ENTRIES"])))' 2>/dev/null || echo '?') entries to job=${jid}"

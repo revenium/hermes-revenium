@@ -349,5 +349,51 @@ class DeclaredUnitKeyTests(_Base):
             self.assertIn('jobs_completed', keys, keys)
 
 
+class LedgerKeyMatchesDeclaredKeyTests(_Base):
+    """The dedup check must key on the metric name we will ACTUALLY send.
+
+    Caught by a dry run against the live host. The work builder checked the
+    ledger using the DEFAULT unit key while a later step re-keyed the entry
+    to the contract's declared key, so a job whose declared-key metric was
+    already appended looked un-ledgered and would have been appended a second
+    time -- permanently, undeletably, for every job a previous backfill had
+    already covered. The tell was a dry run reporting "1 entries" for a job
+    whose four metrics were all supposedly ledgered.
+
+    Resolution now happens per TYPE before the work list is built, so the
+    name used for the check is the name that gets sent.
+    """
+
+    def test_already_ledgered_declared_key_is_not_reappended(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-om-keymatch-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            log = self._shim(bin_dir, has_verb=True, econ_404=False,
+                             unit_key='signal_events_processed')
+            self._assessment(state_dir)
+
+            # Exactly what a prior backfill under the DECLARED key leaves.
+            recorded = '2026-09-18T14:34:05Z'
+            ledger = os.path.join(state_dir, 'revenium-outcome-metrics.ledger')
+            Path(ledger).write_text('\n'.join(
+                f'OM:job-1:{k}:{recorded}' for k in
+                ('estimated_value', 'hours_saved', 'assessment_confidence',
+                 'signal_events_processed')) + '\n')
+            before = len(self._ledger(state_dir))
+
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual(
+                before, len(self._ledger(state_dir)),
+                'nothing may be appended: every metric this job would send is '
+                'already ledgered under the declared key',
+            )
+            calls = Path(log).read_text() if os.path.exists(log) else ''
+            self.assertNotIn(
+                'jobs outcome-metrics job-1', calls,
+                'no append may be issued at all -- a duplicate is permanent '
+                'and cannot be read back or deleted',
+            )
+
+
 if __name__ == '__main__':
     unittest.main()
