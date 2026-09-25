@@ -1,4 +1,5 @@
 import ast
+import posixpath
 import re
 import subprocess
 import unittest
@@ -713,24 +714,44 @@ class RepositoryTests(unittest.TestCase):
         declared = []
         in_block = False
         for line in frontmatter.splitlines():
+            stripped = line.strip()
+            # Comments never declare anything. Skipping them FIRST matters in both
+            # directions: the block that explains why this key is absent quotes the old
+            # path, and a future declaration will carry `# description:` lines of its own.
+            # Without this, documentation alone could fail CI.
+            if stripped.startswith('#'):
+                continue
             if line.startswith('required_credential_files'):
                 in_block = True
                 continue
             if in_block:
-                # The block ends at the next top-level key (column 0, not a comment).
-                if line and not line[0].isspace() and not line.startswith('#'):
+                # The block ends at the next top-level key (column 0).
+                if line and not line[0].isspace():
                     break
                 match = re.search(r'\bpath:\s*(\S+)', line)
                 if match:
                     declared.append(match.group(1).strip('\'"'))
 
+        # Mirror Hermes' own rule rather than a subset of it. _contained_host_path()
+        # rejects an absolute path outright and then rejects anything that escapes
+        # HERMES_HOME after `..` normalisation, so `../.ssh/id_rsa` is refused just as
+        # firmly as `/etc/passwd` — and `~/…` fails a third way, by never being expanded.
+        # Checking only the `~` and `/` prefixes would let a traversal path through the
+        # guard while Hermes still refused it, leaving the skill unready with no test to
+        # catch it.
         for path in declared:
-            self.assertFalse(
-                path.startswith('~') or path.startswith('/'),
-                f'SKILL.md declares required_credential_files path {path!r}. '
-                'Hermes joins it onto HERMES_HOME and never expands `~`, so this '
-                'can never resolve; the skill then reports setup_needed and any '
-                'cron job attaching it is blocked silently. Declare a path '
+            reason = None
+            if path.startswith('~'):
+                reason = 'Hermes never expands `~`, so this resolves to a literal ~/ directory under HERMES_HOME'
+            elif posixpath.isabs(path):
+                reason = 'Hermes rejects absolute paths outright (they bypass the HERMES_HOME sandbox)'
+            elif '..' in posixpath.normpath(path).split('/'):
+                reason = 'this escapes HERMES_HOME after normalisation, which Hermes refuses by design'
+            self.assertIsNone(
+                reason,
+                f'SKILL.md declares required_credential_files path {path!r} — {reason}. '
+                'An unsatisfied entry sets setup_needed, and the cron preflight then refuses '
+                'any job attaching this skill as [blocked_config:silent]. Declare a path '
                 'relative to HERMES_HOME, or do not declare it at all.',
             )
 
