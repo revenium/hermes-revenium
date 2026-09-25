@@ -10,10 +10,34 @@ platforms: [macos, linux]
 # `revenium config set`), NOT in env vars. Declaring required_environment_variables
 # made Hermes prompt ("Skill Setup Required") for REVENIUM_API_KEY etc. on skill
 # load even though the scripts read them from the CLI config, which caused a redundant prompt.
-# required_credential_files below documents the credential source.
-required_credential_files:
-  - path: ~/.config/revenium/config.yaml
-    description: Revenium CLI credentials (API key, team-id, tenant-id, owner-id)
+#
+# Credential source, documented here and DELIBERATELY NOT declared:
+#   ~/.config/revenium/config.yaml   api-key, api-url, team-id, tenant-id, owner-id
+#
+# A `required_credential_files` entry for that path was removed 2026-09-25. It could
+# never be satisfied. Hermes resolves each declared path RELATIVE TO HERMES_HOME and
+# does not expand `~` (hermes-agent/tools/credential_files.py):
+#
+#     Path("~/.hermes") / "~/.config/revenium/config.yaml"
+#       -> ~/.hermes/~/.config/revenium/config.yaml        (never exists)
+#
+# `~/...` is not an absolute path, so the absolute-path guard does not fire; a
+# containment check then rejects anything outside HERMES_HOME BY DESIGN, so that a
+# skill cannot declare `../../.ssh/id_rsa` and have it mounted into a sandbox. The
+# revenium CLI config lives outside HERMES_HOME, so no form of this declaration can
+# resolve.
+#
+# The cost of leaving it in was not cosmetic. The registry exists only to mount
+# credentials into REMOTE terminal backends (Docker/Modal/SSH); on a host running
+# `terminal.backend: local` it mounts nothing. But an unsatisfied entry sets
+# `setup_needed`, and the cron preflight treats an unready attached skill as
+# `[blocked_config:silent]` -- a scheduled job attaching this skill was refused before
+# dispatch, silently, every day for 34 consecutive days before anyone noticed.
+#
+# Do not re-add it. The scripts read credentials from the `revenium` CLI config
+# themselves and never needed the mount. If a remote terminal backend is ever
+# supported, the credential file must first live inside HERMES_HOME and be declared by
+# a path relative to it.
 metadata:
   hermes:
     tags: [DevOps, FinOps, revenium, budgets, metering, observability]
