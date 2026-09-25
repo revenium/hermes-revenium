@@ -1,4 +1,5 @@
 import ast
+import posixpath
 import re
 import subprocess
 import unittest
@@ -687,6 +688,72 @@ class RepositoryTests(unittest.TestCase):
         )
         # The copyright line is the part a rename or a fork silently gets wrong.
         self.assertIn('Revenium, Inc.', license_text)
+
+    def test_skill_declares_no_unsatisfiable_credential_file(self):
+        """A declared credential file must be resolvable, or the skill is unloadable.
+
+        Hermes resolves every `required_credential_files` path RELATIVE TO
+        HERMES_HOME and does not expand `~`
+        (hermes-agent/tools/credential_files.py), then rejects anything that
+        escapes HERMES_HOME by design -- so that a skill cannot declare
+        `../../.ssh/id_rsa` and have it mounted into a sandbox. SKILL.md
+        declared `~/.config/revenium/config.yaml`, which resolves to the literal
+        `~/.hermes/~/.config/...` and can therefore never exist.
+
+        An unsatisfied entry sets `setup_needed`, and the cron preflight treats
+        an unready attached skill as `[blocked_config:silent]`. A scheduled job
+        attaching this skill was refused before dispatch, silently, for 34
+        consecutive days before anyone looked at `failure_streak`. The registry
+        only mounts credentials into REMOTE terminal backends; on
+        `terminal.backend: local` it was pure cost.
+
+        The invariant is the RULE, not a blanket ban: a declaration is fine as
+        long as every path is HERMES_HOME-relative. Today there are none.
+        """
+        frontmatter = (SKILL / 'SKILL.md').read_text().split('---')[1]
+        declared = []
+        in_block = False
+        for line in frontmatter.splitlines():
+            stripped = line.strip()
+            # Comments never declare anything. Skipping them FIRST matters in both
+            # directions: the block that explains why this key is absent quotes the old
+            # path, and a future declaration will carry `# description:` lines of its own.
+            # Without this, documentation alone could fail CI.
+            if stripped.startswith('#'):
+                continue
+            if line.startswith('required_credential_files'):
+                in_block = True
+                continue
+            if in_block:
+                # The block ends at the next top-level key (column 0).
+                if line and not line[0].isspace():
+                    break
+                match = re.search(r'\bpath:\s*(\S+)', line)
+                if match:
+                    declared.append(match.group(1).strip('\'"'))
+
+        # Mirror Hermes' own rule rather than a subset of it. _contained_host_path()
+        # rejects an absolute path outright and then rejects anything that escapes
+        # HERMES_HOME after `..` normalisation, so `../.ssh/id_rsa` is refused just as
+        # firmly as `/etc/passwd` — and `~/…` fails a third way, by never being expanded.
+        # Checking only the `~` and `/` prefixes would let a traversal path through the
+        # guard while Hermes still refused it, leaving the skill unready with no test to
+        # catch it.
+        for path in declared:
+            reason = None
+            if path.startswith('~'):
+                reason = 'Hermes never expands `~`, so this resolves to a literal ~/ directory under HERMES_HOME'
+            elif posixpath.isabs(path):
+                reason = 'Hermes rejects absolute paths outright (they bypass the HERMES_HOME sandbox)'
+            elif '..' in posixpath.normpath(path).split('/'):
+                reason = 'this escapes HERMES_HOME after normalisation, which Hermes refuses by design'
+            self.assertIsNone(
+                reason,
+                f'SKILL.md declares required_credential_files path {path!r} — {reason}. '
+                'An unsatisfied entry sets setup_needed, and the cron preflight then refuses '
+                'any job attaching this skill as [blocked_config:silent]. Declare a path '
+                'relative to HERMES_HOME, or do not declare it at all.',
+            )
 
     def test_changelog_covers_every_released_tag(self):
         """CHANGELOG.md must carry a section for each released tag.

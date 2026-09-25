@@ -264,6 +264,13 @@ in reported spend against unchanged traffic, documented in
 - `plugin-status.sh` reported a false `firing` when a grace-window session masked a stall,
   and its remediation named the gateway on hosts where a desktop-app
   `--profile <name> serve` process owns the profile. ([#79])
+- SKILL.md declared a `required_credential_files` path that could never resolve, which made
+  the skill report `setup_needed` and caused Hermes' cron preflight to refuse any job
+  attaching it as `[blocked_config:silent]` — silently, every fire. Hermes joins declared
+  paths onto HERMES_HOME and does not expand `~`, so `~/.config/revenium/config.yaml`
+  resolved to `~/.hermes/~/.config/...`; a containment guard then rejects anything outside
+  HERMES_HOME by design. The scripts read the CLI config directly and never needed the
+  mount, so the declaration is removed and a regression test pins the rule. ([#132])
 
 ## [v1.6] — 2026-08-21
 
@@ -436,3 +443,4 @@ turning spend attribution from per-session totals into per-turn activity breakdo
 [#83]: https://github.com/revenium/hermes-revenium/pull/83
 [#84]: https://github.com/revenium/hermes-revenium/pull/84
 [#85]: https://github.com/revenium/hermes-revenium/pull/85
+[#132]: https://github.com/revenium/hermes-revenium/pull/132
