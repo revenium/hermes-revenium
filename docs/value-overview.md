@@ -22,7 +22,7 @@ already carries its cost. A Revenium dashboard can then show value and cost side
 
 ## How it works
 
-The existing plugin and cron perform five steps. The feature adds no background service.
+The existing plugin and cron perform six steps. The feature adds no background service.
 
 ```mermaid
 flowchart LR
@@ -33,6 +33,7 @@ flowchart LR
     D --> E["hours × rate,<br/>minus your costs"]
     E --> G["Ships with the job's<br/>outcome, once a minute"]
     F --> G
+    G --> H["Append four entries to the<br/>job's Outcome timeline"]
 ```
 
 1. The agent finishes a task arc: a coherent piece of work with a goal, such as fixing a bug
@@ -47,6 +48,10 @@ flowchart LR
    them. A total the model volunteers anyway is discarded.
 5. Your costs are subtracted, and the result ships with the job's outcome on the next
    cron tick.
+6. A later cron stage appends the estimated value, hours saved, assessment confidence, and
+   one completed-job count to the job's Outcome timeline. It runs only for reportable
+   original assessments and keeps a separate local ledger because the remote append cannot
+   be read back, amended, deleted, or deduplicated.
 
 The model can decline. Abstaining is an expected answer, not a failure. When the work is
 trivial or unclear, the evaluator returns nothing and the job reports its outcome with no
@@ -339,6 +344,12 @@ makes the partial subtraction explicit.
 On the Revenium side, that `$280.50` is combined with the job's metered AI cost, typically
 cents for an arc like this, to produce the displayed ratio. It is an estimated ROI under stated assumptions,
 and the assumptions rode along in the same payload.
+
+The next cron stage also appends four Outcome timeline entries for this job:
+`estimated_value: 330`, `hours_saved: 1.5`, `assessment_confidence: 0.7`, and the job
+type's declared count metric with value `1`. Those entries describe the original reportable
+assessment. Filing an operator correction later updates the job outcome but does not revise
+the Outcome timeline entries.
 
 ## Rolling it out
 

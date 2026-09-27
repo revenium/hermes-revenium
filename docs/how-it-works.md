@@ -23,8 +23,9 @@ instead of blocking the agent.
 
 ## Token metering with task-type classification
 
-The cron runs six stages under one lock: `plugin-status.sh`, `hermes-report.sh`,
-`guardrail-check.sh`, `tool-event-report.sh`, `api-event-report.sh`, and `drain-status.sh`.
+The cron runs seven stages under one lock: `plugin-status.sh`, `hermes-report.sh`,
+`guardrail-check.sh`, `tool-event-report.sh`, `api-event-report.sh`,
+`outcome-metrics-report.sh`, and `drain-status.sh`.
 
 `hermes-report.sh` is the token reporter. It reads token deltas from `~/.hermes/state.db`
 and ships one `revenium meter completion` per marker. Each completion carries
@@ -98,8 +99,8 @@ compression, title generation, approval, vision, web extraction, and session sea
 None of it was reported before this feature shipped.
 
 It runs as `report_auxiliary_usage`, a post-loop pass inside `hermes-report.sh`, after the
-agentic-jobs outcome stage. It is not a seventh cron stage; the cron still runs
-six.
+agentic-jobs outcome stage. It is not a separate cron stage. The seven stages listed above
+include `outcome-metrics-report.sh`, not this internal pass.
 
 It reads `session_model_usage` in `state.db`, read-only, and considers only rows whose
 `task` column is non-empty. An empty-`task` row mirrors the `sessions` row's own totals
@@ -189,6 +190,28 @@ silent substitution this milestone exists to prevent.
 The ceiling decides only what fits on the wire. It
 does not decide what is worth reporting. The reportability decision (EGV-18) is made
 upstream, by the resolver; the reporter only reads that decision and never computes it.
+
+### Outcome timeline metrics
+
+`outcome-metrics-report.sh` runs after `hermes-report.sh` has attempted job creation and
+outcome reporting. It reads reportable assessment sidecars and builds four entries for the
+job's Outcome timeline: estimated value, hours saved, assessment confidence, and one unit of
+the job type's declared `COUNT` metric.
+
+The stage checks the job type's economics contract first. It creates a default only on a
+`404`; an existing contract must declare the three fixed metrics with the expected types and
+a valid `COUNT` `unitMetricKey`. Cron never passes `--yes` to replace an operator-managed
+contract.
+
+The remote append has no read, update, delete, or server-side deduplication operation.
+`revenium-outcome-metrics.ledger` records each successful `(job, metric, recordedAt)` append,
+and a non-blocking stage lock prevents a manual run from racing cron. The stage validates all
+four values before sending any new entries. Already-ledgered entries are omitted from a
+retry; an invalid entry never causes its valid siblings to be appended alone.
+
+An installed CLI without `jobs outcome-metrics` makes this stage a no-op. The full contract,
+including the correction limit and environment controls, is in
+[Job value and ROI](value-and-roi.md#outcome-timeline-metrics).
 
 ## LLM outcome-value evaluation (experimental)
 

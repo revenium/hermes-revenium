@@ -244,9 +244,16 @@ flowchart TB
         M --> O["ledger: JOB:id:outcome"]
     end
 
+    subgraph OM["cron, after hermes-report.sh (outcome-metrics-report.sh)"]
+        OM1["read reportable job assessments"] --> OM2["validate or create the<br/>job-type economics contract"]
+        OM2 --> OM3["revenium jobs outcome-metrics<br/>append four entries"]
+        OM3 --> OM4["ledger each<br/>job + metric + recordedAt"]
+    end
+
     SC -.->|last matching line wins| K
     JL -.->|create must be confirmed first| K
     O --> JL
+    SC -.-> OM1
 
     subgraph OP["operator, never cron"]
         P["correct-assessment.sh"] --> SC
@@ -783,6 +790,21 @@ The outcome stage refuses to fire until it sees the matching `created` line. A c
 line is neither a create nor an outcome, so it never unblocks or re-triggers the per-tick
 path.
 
+### The outcome-metrics ledger: `revenium-outcome-metrics.ledger`
+
+The outcome-metrics stage has a separate append-only ledger:
+
+```
+OM:<job-id>:<metric-key>:<recordedAt>
+```
+
+The three-part key matches the remote append. The platform does not deduplicate outcome
+metrics and offers no read, update, or delete operation for an appended entry. The local
+ledger is therefore the only durable record that an append succeeded. The stage writes a
+ledger line only after a successful append and then reads the exact lines back. If that
+verification fails, it stops the run so the next job cannot be appended without a durable
+deduplication record.
+
 ## 13. The wire
 
 ### The call
@@ -878,6 +900,72 @@ Between the sidecar and the wire, the reporter re-checks everything it is about 
 | `evidence_class` present and inside the nine (absence permitted only on a correction) | Drop the field and strip the value family |
 | `supplied_costs` / `cost_coverage` rebuilt key-by-key against the known category names | Unknown keys and non-numeric values dropped, never forwarded |
 | `economic_mechanism` and `inference_address_class` against their allow-lists | Out-of-set value dropped silently |
+
+### Outcome timeline metrics
+
+After `hermes-report.sh` attempts job creation and outcome reporting, cron runs
+`outcome-metrics-report.sh`. This stage builds four metric entries from each current,
+reportable `job_assessment` sidecar:
+
+| Metric key | Declared type | Sidecar value |
+|---|---|---|
+| `estimated_value` | `MONEY` | `estimated_value` |
+| `hours_saved` | `DURATION` | `assumptions.estimated_hours_saved` |
+| `assessment_confidence` | `SCORE` | `confidence` |
+| The job type's `unitMetricKey` | `COUNT` | `1` |
+
+`recordedAt` is the assessment's `job_ended_at`, falling back to its `ts`, rendered in UTC.
+Every entry uses the platform provenance value `DERIVED`. That value describes how the
+metric entry was produced; it does not replace or promote the assessment's
+`evidence_class`. A `MODEL_ESTIMATED_DEMO` assessment remains a model estimate.
+
+The stage processes only original records with `kind: "job_assessment"` and
+`reportability_status: "reportable"`. It does not read `candidate` assessments or operator
+`correction` records. Missing, non-numeric, or out-of-range values reject the whole job for
+that tick before any new append. Already-ledgered entries are omitted from a retry; an
+invalid entry is never silently dropped while its siblings are appended.
+
+#### Job-type economics contract
+
+Outcome metrics must match the job type's economics contract. The stage reads that contract
+before building any work:
+
+- If a contract exists, it must declare `estimated_value` as `MONEY`, `hours_saved` as
+  `DURATION`, and `assessment_confidence` as `SCORE`. Its `unitMetricKey` must name a declared
+  `COUNT` metric. The stage adopts that key rather than assuming its own.
+- If the contract returns `404`, the stage creates one with those three metrics plus
+  `jobs_completed` as the `COUNT` unit. Its monetization category is `COST_AVOIDED`, its basis
+  is `EXPECTED`, and `estimated_value` is the monetization metric.
+- The stage never passes `--yes` to `jobs types economics set`. A prompt for `--yes` means the
+  replacement would remove part of an operator-managed contract, so cron leaves it alone.
+- An unreadable, throttled, missing, or incompatible contract skips that job type for the
+  tick. The stage does not append against a guessed contract.
+
+#### Append safety and controls
+
+An outcome-metric append is permanent. The platform cannot read it back, amend it, delete
+it, or deduplicate an identical retry. The stage therefore locks the complete
+read-ledger/append/write-ledger sequence and records one local ledger line per metric only
+after the append succeeds. A `429` defers without writing the ledger, so the next tick can
+retry.
+
+The capability probe reads `revenium jobs --help` and looks for the literal
+`outcome-metrics` verb. It does not trust the child command's exit status because Cobra may
+print parent help and exit `0` for an unknown subcommand. An older CLI makes this stage a
+no-op while the rest of the outcome report continues.
+
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `REVENIUM_OUTCOME_METRICS_LEDGER_FILE` | `${STATE_DIR}/revenium-outcome-metrics.ledger` | Overrides the append ledger. |
+| `REVENIUM_OUTCOME_METRICS_LOCK_FILE` | `${STATE_DIR}/outcome-metrics.lock` | Overrides the non-blocking stage lock. |
+| `REVENIUM_OUTCOME_METRICS_MAX_JOBS` | `25` | Caps jobs per tick. `0` disables the stage. |
+
+Preview the stage without creating economics contracts, appending metrics, or recording
+ledger entries:
+
+```bash
+bash ~/.hermes/skills/revenium/scripts/outcome-metrics-report.sh --dry-run
+```
 
 ## 14. Corrections
 
@@ -1146,6 +1234,12 @@ These limits describe the current implementation, not a roadmap.
 - Three of the six economic mechanisms have no producer. They are representable and accepted but not
   reachable.
 - `double_counting_group` does not span sessions. It covers only same-session, multi-job records.
+- Outcome timeline metrics are append-only on the platform. Remote read-back, correction,
+  deletion, and server-side deduplication are unavailable, so the local outcome-metrics
+  ledger is the sole idempotency record.
+- `outcome-metrics-report.sh` reads original `job_assessment` records only. An operator
+  correction updates the job outcome through `jobs outcome-update`, but it does not revise or
+  append replacement Outcome timeline metrics.
 - The one live end-to-end verification covered one arc, one workstation, one
   isolated development tenant, one evaluator model, two cron ticks. It says nothing about
   fleet or multi-profile behaviour, nothing about idempotency beyond two ticks or across
@@ -1172,3 +1266,4 @@ the documents disagree.
 | What makes a job arc, and the `SUCCESS` bar | [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md) |
 | The exact wire shapes | `tests/fixtures/compat/*.golden.json` |
 | The prohibited claim phrases | `tests/test_repository.py::test_no_prohibited_claim_language_left` |
+| Outcome timeline metric keys, types, economics reconciliation, and append idempotency | `skills/revenium/scripts/outcome-metrics-report.sh` and `tests/test_outcome_metrics_report.py` |
