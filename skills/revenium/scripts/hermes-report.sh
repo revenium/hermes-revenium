@@ -1788,6 +1788,18 @@ PY
   # THIS shell, so a counter incremented inside it survives to the aggregate
   # line near the end-of-run summary. A pipe would silently zero it.
   local fallback_tick_count=0
+  # Phase 61 (SUB-01/SUB-03/D-10): per-tick identity-resolution aggregates,
+  # for the identical here-string reason as fallback_tick_count immediately
+  # above -- the loop body runs in THIS shell (fed by `done <<< "${sessions}"`
+  # below, not a pipe), so an increment inside it survives to the aggregate
+  # lines after the loop closes.
+  local subscriber_own_count=0
+  local subscriber_inherited_count=0
+  local subscriber_disagreement_count=0
+  local subscriber_rejected_count=0
+  # The first disagreement's detail this tick, so the once-per-tick warn
+  # (D-10) can name a concrete triple rather than just a count.
+  local subscriber_disagreement_detail=""
   # Phase 39 D-02: per-tick aggregate for the deferred/wedged job-outcome
   # backlog (OUTCOME-04 branch, post-loop stage below). Declared here for
   # the same reason as fallback_tick_count -- the post-loop stage runs in
@@ -1864,10 +1876,21 @@ PY
   # the loop stays -- it frees the file at the point it stops being useful
   # rather than at process exit, and the trap is the belt for the paths that
   # never reach it. Both are idempotent (`rm -f`, guarded by -f).
-  trap 'rm -f "${root_sid_map_file:-}" 2>/dev/null' EXIT INT TERM
+  # Phase 61 (SUB-03/D-08/D-09/T-61-04): the same per-tick scratch-file
+  # discipline as root_sid_map_file above, registered on the SAME trap
+  # (a second `trap ... EXIT` call would REPLACE the one above, not add to
+  # it, so that line is edited in place below rather than duplicated).
+  # mktemp's 0600 mode plus that trap is the whole mitigation for T-61-04;
+  # this file stays under $TMPDIR, never STATE_DIR (D-02 forbids a new
+  # state path). Deliberately NOT exported: unlike ROOT_SID_MAP_FILE (read
+  # by get_root_session_id inside common.sh from many call sites), the
+  # lookup this file feeds is inline in this loop only.
+  subscriber_map_file="$(mktemp 2>/dev/null || echo "/tmp/hermes-subscriber-map.$$")"
+  trap 'rm -f "${root_sid_map_file:-}" "${subscriber_map_file:-}" 2>/dev/null' EXIT INT TERM
   printf '%s\n' "${sessions}" | cut -d'|' -f1 \
     | build_root_sid_map "${root_sid_map_file}"
   export ROOT_SID_MAP_FILE="${root_sid_map_file}"
+  build_subscriber_map "${subscriber_map_file}"
 
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider user_id; do
 
@@ -1968,15 +1991,66 @@ PY
     # resolve_subscriber_id's own D-07 gate, so this can only skip cases the
     # helper would answer "none|" to anyway (a fork-avoidance guard, not a
     # second gate): 97% of sessions never call the helper at all.
-    # Plan 61-01 Task 2 (SUB-03/D-08..D-11) extends this exact block with
-    # root inheritance and the disagreement rule; this task resolves only
-    # the session's own identity.
     local subscriber_status="" subscriber_key=""
     if [[ -n "${user_id}" ]]; then
       local _own_sub_resolved
       _own_sub_resolved="$(resolve_subscriber_id "${source}" "${user_id}")"
       subscriber_status="${_own_sub_resolved%%|*}"
       subscriber_key="${_own_sub_resolved#*|}"
+      case "${subscriber_status}" in
+        ok) ((subscriber_own_count++)) || true ;;
+        rejected) ((subscriber_rejected_count++)) || true ;;
+      esac
+    fi
+
+    # Phase 61 (SUB-03/D-08/D-09/D-10/D-11): inherit from the root ONLY when
+    # this session is not its own root -- a session that IS its own root has
+    # nothing to inherit and nothing to disagree with, and this gate is what
+    # bounds the cost to the child population (320 of 9,637 sessions on the
+    # reference host). Reuses root_sid, already resolved once per iteration
+    # above via get_root_session_id -- no new batch map, no per-session
+    # python3 spawn (D-09; the unbatched form cost ~565s/tick before PR #129).
+    if [[ "${root_sid}" != "${sid}" ]]; then
+      local root_map_line=""
+      if [[ -n "${subscriber_map_file:-}" && -f "${subscriber_map_file}" ]]; then
+        # -F$'\t' anchored whole-field match on field 1, the identical form
+        # get_root_session_id's fast path uses (common.sh:790-793) and for
+        # the same reason a plain `grep` is wrong: it would match a sid that
+        # merely CONTAINS this one.
+        root_map_line="$(awk -F'\t' -v want="${root_sid}" '$1 == want { print $2 "\t" $3; exit }' \
+          "${subscriber_map_file}" 2>/dev/null || true)"
+      fi
+      if [[ -n "${root_map_line}" ]]; then
+        local root_source root_user_id root_sub_resolved root_subscriber_key
+        IFS=$'\t' read -r root_source root_user_id <<< "${root_map_line}"
+        # Feed the root's source/user_id pair straight into
+        # resolve_subscriber_id so the child and root keys can only ever be
+        # formatted by the same code (D-01).
+        root_sub_resolved="$(resolve_subscriber_id "${root_source}" "${root_user_id}")"
+        root_subscriber_key="${root_sub_resolved#*|}"
+        if [[ -z "${subscriber_key}" ]]; then
+          # No key of its own: adopt the root's (D-08). An empty root key
+          # means nothing is inherited -- the D-11 negative arm, satisfied
+          # by construction because the map holds only identity-bearing
+          # rows.
+          if [[ -n "${root_subscriber_key}" ]]; then
+            subscriber_key="${root_subscriber_key}"
+            ((subscriber_inherited_count++)) || true
+          fi
+        else
+          # Own identity wins (D-10) -- the root is consulted for
+          # DETECTION only, never for resolution. A persisting disagreement
+          # means the data has changed shape, so it is counted and the
+          # first triple this tick is recorded for the once-per-tick warn
+          # below.
+          if [[ -n "${root_subscriber_key}" && "${root_subscriber_key}" != "${subscriber_key}" ]]; then
+            ((subscriber_disagreement_count++)) || true
+            if [[ -z "${subscriber_disagreement_detail}" ]]; then
+              subscriber_disagreement_detail="session=${sid} own=${subscriber_key} root=${root_subscriber_key}"
+            fi
+          fi
+        fi
+      fi
     fi
 
     # Phase 61 (T-61-01): a single leading space + "subscriber=<masked key>"
@@ -3922,7 +3996,7 @@ PY
         synthetic_muid="unclassified-${now_ts//./}"
         echo "HERMES:${sid}:${total_tokens}:${now_ts}:${synthetic_muid}" >> "${LEDGER_FILE}"
         ((reported_count++)) || true
-        info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}"
+        info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}${subscriber_log_suffix}"
         # Phase 44 Plan 04 (EGV-17): unclassified bucket -- the markerless path.
         attribution_rows+="unclassified|${delta_input}|${delta_output}|${delta_cache_read}|${delta_cache_write}|${delta_total}|${delta_cost}"$'\n'
       else
@@ -5231,6 +5305,23 @@ PY
   # rather than trading the per-tick spam for total silence.
   if [[ "${fallback_tick_count}" -gt 0 ]]; then
     info "trace-type fallback: ${fallback_tick_count} session(s) resolved to the fallback this tick (per-session detail logged once per session+reason, not every tick)"
+  fi
+
+  # Phase 61 (SUB-01/SUB-03): the same per-tick-aggregate discipline as the
+  # blocks above -- ONE line when any of the four counters is non-zero,
+  # total silence when all are zero, so an install with no identity-bearing
+  # sessions gains no log volume at all.
+  if [[ "${subscriber_own_count}" -gt 0 || "${subscriber_inherited_count}" -gt 0 \
+        || "${subscriber_disagreement_count}" -gt 0 || "${subscriber_rejected_count}" -gt 0 ]]; then
+    info "subscriber attribution: own=${subscriber_own_count} inherited=${subscriber_inherited_count} disagreements=${subscriber_disagreement_count} rejected=${subscriber_rejected_count} this tick"
+  fi
+  # A persisting disagreement means the data has changed shape (D-10).
+  # CONTEXT.md's Claude's-Discretion note explicitly permits a cheaper
+  # mechanism than the sentinel-directory rate-limit pattern above for this
+  # UNOBSERVED condition (D-02 also forbids a new state path), so this is a
+  # per-tick warn rather than a per-tick-and-forever sentinel gate.
+  if [[ "${subscriber_disagreement_count}" -gt 0 ]]; then
+    warn "subscriber identity disagreement: ${subscriber_disagreement_detail} (${subscriber_disagreement_count} this tick)"
   fi
 
   # quick-260817-tfe (T-OWN-04): the same per-tick-aggregate discipline for

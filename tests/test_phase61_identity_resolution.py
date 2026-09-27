@@ -367,6 +367,266 @@ class Phase61IdentityResolutionEndToEndTestCase(unittest.TestCase):
             f"expected exactly one absent-column line; got {absent_lines!r}",
         )
 
+    # -- Task 2: inheritance, the disagreement rule, the per-tick aggregate --
+
+    def test_child_with_no_identity_inherits_root_slack_identity(self):
+        """SUB-03/D-08: a child with no user_id of its own inherits its
+        ROOT session's subscriber, resolved through the existing batched
+        root-walk.
+
+        MISSES: proves nothing about a root that is ABSENT from the
+        token-filtered session list — the subscriber map is built from its
+        own unfiltered query (build_subscriber_map selects straight from
+        `sessions`, not from `${sessions}`), so a zero-token root is
+        exactly the case PATTERNS.md's §3 proposal would have missed and
+        this fixture does not exercise.
+        """
+        root_sid = "p61-root-a"
+        child_sid = "p61-child-a"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'slack', 'user_id': 'U100'},
+            {
+                'id': child_sid, 'source': 'subagent', 'user_id': None,
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+        ])
+        _write_marker_lines(
+            self.markers_dir, child_sid, [_task_marker(child_sid, "p61-muid-a")]
+        )
+
+        self._run()
+        log_lines = self._log_lines()
+        reported = [
+            l for l in log_lines if f"Reported: session={child_sid} " in l
+        ]
+        self.assertEqual(len(reported), 1, reported)
+        self.assertIn("subscriber=slack:U100", reported[0])
+
+    def test_cron_child_with_cron_root_inherits_nothing(self):
+        """D-11 negative arm: a homogeneous automation lineage (cron child,
+        cron root, neither carrying identity) must inherit nothing —
+        inheritance is provably additive, never a leak.
+
+        MISSES: this fixture's root has NO identity at all, so it cannot
+        distinguish "inheritance correctly propagated an empty key" from
+        "inheritance was never attempted"; the aggregate assertion in
+        test_aggregate_line_absent_when_no_identity_sessions below is what
+        pins the latter.
+        """
+        root_sid = "p61-root-b"
+        child_sid = "p61-child-b"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'cron', 'user_id': None},
+            {
+                'id': child_sid, 'source': 'cron', 'user_id': None,
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+        ])
+        self._run()
+        log_lines = self._log_lines()
+        reported = [
+            l for l in log_lines if f"Reported: session={child_sid} " in l
+        ]
+        self.assertEqual(len(reported), 1, reported)
+        self.assertNotIn("subscriber=", reported[0])
+
+    def test_child_own_identity_wins_and_disagreement_logged_once(self):
+        """D-10: where a child has its own user_id differing from its
+        root's, the child's OWN identity wins, and the disagreement is
+        counted and surfaced once per tick naming the offending triple.
+
+        MISSES: proves the count and that exactly one line was emitted,
+        not that the warn's exact wording is a stable/pinned contract —
+        only the presence of the session id and both keys is asserted.
+        """
+        root_sid = "p61-root-c"
+        child_sid = "p61-child-c"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'slack', 'user_id': 'U200'},
+            {
+                'id': child_sid, 'source': 'slack', 'user_id': 'U201',
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+        ])
+        self._run()
+        log_lines = self._log_lines()
+        reported = [
+            l for l in log_lines if f"Reported: session={child_sid} " in l
+        ]
+        self.assertEqual(len(reported), 1, reported)
+        self.assertIn("subscriber=slack:U201", reported[0])
+
+        disagreement_lines = [
+            l for l in log_lines if "subscriber identity disagreement" in l
+        ]
+        self.assertEqual(len(disagreement_lines), 1, disagreement_lines)
+        self.assertIn(child_sid, disagreement_lines[0])
+        self.assertIn("slack:U201", disagreement_lines[0])
+        self.assertIn("slack:U200", disagreement_lines[0])
+
+    def test_child_own_identity_matches_root_no_disagreement(self):
+        """The observed-on-the-reference-host case (all 7 children): a
+        child's own identity equals its root's — its key is its own, and
+        no disagreement is ever logged.
+
+        MISSES: does not prove the counter distinguishes "matched" from
+        "never compared" — only that the warn line is absent either way.
+        """
+        root_sid = "p61-root-d"
+        child_sid = "p61-child-d"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'slack', 'user_id': 'U300'},
+            {
+                'id': child_sid, 'source': 'slack', 'user_id': 'U300',
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+        ])
+        self._run()
+        log_lines = self._log_lines()
+        disagreement_lines = [
+            l for l in log_lines if "subscriber identity disagreement" in l
+        ]
+        self.assertEqual(len(disagreement_lines), 0, disagreement_lines)
+
+    def test_two_disagreeing_children_one_tick_one_line_count_two(self):
+        """Two children disagreeing with the same root in one tick still
+        produce exactly ONE disagreement warn line, and the aggregate
+        reports a disagreement count of 2 — the rate-limit is per TICK,
+        not per (session, reason) like the sibling sentinel-gated warns.
+
+        MISSES: does not prove WHICH of the two disagreements is named in
+        the single warn line (only that "first this tick" is recorded,
+        per the action spec) — only the count and single-line-ness.
+        """
+        root_sid = "p61-root-e"
+        child1 = "p61-child-e1"
+        child2 = "p61-child-e2"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'slack', 'user_id': 'U400'},
+            {
+                'id': child1, 'source': 'slack', 'user_id': 'U401',
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+            {
+                'id': child2, 'source': 'slack', 'user_id': 'U402',
+                'parent_session_id': root_sid,
+                'input_tokens': 300, 'output_tokens': 150,
+            },
+        ])
+        self._run()
+        log_lines = self._log_lines()
+        disagreement_lines = [
+            l for l in log_lines if "subscriber identity disagreement" in l
+        ]
+        self.assertEqual(len(disagreement_lines), 1, disagreement_lines)
+
+        aggregate_lines = [
+            l for l in log_lines if "subscriber attribution:" in l
+        ]
+        self.assertEqual(len(aggregate_lines), 1, aggregate_lines)
+        self.assertIn("disagreements=2", aggregate_lines[0])
+
+    def test_root_session_with_own_identity_no_disagreement(self):
+        """A root session (root_sid == sid) with its own identity: no
+        disagreement line, and the own-identity path behaves exactly as
+        Task 1 (this is also the markerless-path-carries-a-key proof,
+        SUB-01 item 4, since this fixture writes no marker file).
+
+        MISSES: does not directly instrument that no map lookup was
+        PERFORMED for this session (the `root_sid != sid` gate is a code
+        read, not something this black-box test can observe); it proves
+        only the two externally-visible consequences — no disagreement
+        line, and the own key still resolves.
+        """
+        sid = "p61-root-f"
+        _seed_sessions_db(self.state_db, [
+            {'id': sid, 'source': 'slack', 'user_id': 'U500'},
+        ])
+        self._run()
+        log_lines = self._log_lines()
+        reported = [
+            l for l in log_lines if f"Reported: session={sid} " in l
+        ]
+        self.assertEqual(len(reported), 1, reported)
+        self.assertIn("subscriber=slack:U500", reported[0])
+
+        disagreement_lines = [
+            l for l in log_lines if "subscriber identity disagreement" in l
+        ]
+        self.assertEqual(len(disagreement_lines), 0, disagreement_lines)
+
+        aggregate_lines = [
+            l for l in log_lines if "subscriber attribution:" in l
+        ]
+        self.assertEqual(len(aggregate_lines), 1, aggregate_lines)
+        self.assertIn("own=1", aggregate_lines[0])
+
+    def test_aggregate_line_absent_when_no_identity_sessions(self):
+        """A tick with no resolved or rejected session emits NO aggregate
+        line at all — the identical own=0/inherited=0/etc. silence
+        discipline fallback_tick_count and its siblings already use.
+
+        MISSES: only exercises the all-cron/no-identity shape; does not
+        prove the converse threshold (exactly one non-zero counter is
+        already enough to trigger the line) beyond what the other tests
+        above already demonstrate individually.
+        """
+        sid = "p61-no-identity-g"
+        _seed_sessions_db(self.state_db, [
+            {'id': sid, 'source': 'cron', 'user_id': None},
+        ])
+        self._run()
+        log_lines = self._log_lines()
+        aggregate_lines = [
+            l for l in log_lines if "subscriber attribution:" in l
+        ]
+        self.assertEqual(len(aggregate_lines), 0, aggregate_lines)
+
+    def test_pipe_in_user_id_rejected_neighbouring_fields_intact(self):
+        """T-61-02: a session whose user_id contains a pipe is sanitized by
+        the SQL delimiter-safety CASE before it ever reaches the positional
+        `read`, so it is counted as rejected, carries no key, and its
+        neighbouring fields (billing_provider, started_at) are still read
+        correctly — proven here by the reporter completing successfully
+        and emitting exactly one completion and one rejected count.
+
+        MISSES: does not independently verify billing_provider/started_at
+        VALUES were parsed correctly (no downstream consumer of those two
+        fields is asserted here) — only that the row was not corrupted
+        badly enough to break the run, which a shifted-field row would
+        have done (either a crash or a visibly wrong completion count).
+        """
+        sid = "p61-pipe-h"
+        _seed_sessions_db(self.state_db, [
+            {
+                'id': sid, 'source': 'slack', 'user_id': 'U|600',
+                'billing_provider': 'anthropic',
+            },
+        ])
+        invocations = self._run()
+        own = _own_meter_invocations(invocations, sid)
+        self.assertEqual(
+            len(own), 1, f"expected exactly 1 completion for {sid}; got {own!r}"
+        )
+
+        log_lines = self._log_lines()
+        reported = [
+            l for l in log_lines if f"Reported: session={sid} " in l
+        ]
+        self.assertEqual(len(reported), 1, reported)
+        self.assertNotIn("subscriber=", reported[0])
+
+        aggregate_lines = [
+            l for l in log_lines if "subscriber attribution:" in l
+        ]
+        self.assertEqual(len(aggregate_lines), 1, aggregate_lines)
+        self.assertIn("rejected=1", aggregate_lines[0])
+
 
 if __name__ == '__main__':
     unittest.main()
