@@ -624,6 +624,82 @@ class NotFoundDeferralTests(_Base):
                 'the new arm is scoped to not-found only',
             )
 
+    def test_404_then_success_appends_on_the_next_tick(self):
+        """The recovery half. Deferring correctly on tick 1 is worth nothing
+        if the work builder never re-selects the job -- and "no ledger line,
+        so the next tick retries" is the ENTIRE justification for treating a
+        404 as a deferral. The first four tests prove only that tick 1 stays
+        quiet; without this one, a regression that dropped a deferred job
+        from later work would leave every one of them green.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-om-404-retry-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._assessment(state_dir)
+
+            # Tick 1: the platform does not know this job yet.
+            log = self._shim(bin_dir, has_verb=True, econ_404=False,
+                             append_status=404, append_exit=3)
+            r1 = self._run(env)
+            self.assertEqual(0, r1.returncode, r1.stderr)
+            self.assertEqual(
+                [], self._ledger(state_dir),
+                'tick 1 must leave the ledger empty, or there is nothing to retry',
+            )
+            appends_1 = Path(log).read_text().count('jobs outcome-metrics')
+            self.assertGreaterEqual(
+                appends_1, 1, 'tick 1 must actually have attempted the append')
+
+            # Tick 2: same assessment, same job id, now queryable.
+            self._shim(bin_dir, has_verb=True, econ_404=False, log=log)
+            r2 = self._run(env)
+            self.assertEqual(0, r2.returncode, r2.stderr)
+            led = self._ledger(state_dir)
+            self.assertEqual(
+                4, len(led),
+                f'tick 2 must append and ledger all four metrics, got {led}',
+            )
+            self.assertTrue(all(l.startswith('OM:job-1:') for l in led), led)
+            self.assertGreater(
+                Path(log).read_text().count('jobs outcome-metrics'), appends_1,
+                'tick 2 must issue a NEW append for the previously-deferred job',
+            )
+
+            # And the retry must not have re-armed itself: a third tick is a
+            # no-op, so recovery does not reintroduce the double-append the
+            # ledger exists to prevent.
+            self._run(env)
+            self.assertEqual(
+                led, self._ledger(state_dir),
+                'a tick after recovery must append nothing further',
+            )
+
+    def test_not_found_summary_names_the_stuck_job_ids(self):
+        """The count alone says jobs are stuck but not WHICH -- and because
+        the work list is sorted by job id and cut at MAX_JOBS, a stuck
+        low-sorting id starves newer work deterministically. Bounded: the ids
+        ride the one existing summary line, never a per-job warn.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-om-404-ids-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True, econ_404=False,
+                       append_status=404, append_exit=3)
+            self._assessment(state_dir, job='job-a')
+            self._assessment(state_dir, job='job-b')
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual([], self._ledger(state_dir))
+            log = self._log_text(state_dir)
+            self.assertIn('not_found=2', log)
+            self.assertIn(
+                'ids=job-a,job-b', log,
+                'the summary must name the not-found job ids so the condition '
+                'is actionable without a per-tick per-job warn',
+            )
+            self.assertEqual(
+                1, log.count('ids='),
+                'the ids must appear on the single per-tick summary line only',
+            )
+
     def test_new_arm_sits_before_the_generic_failure_arm(self):
         """Shape guard, per test_cache_dir_is_not_local's precedent: position
         IS the property here. An arm placed after the generic `rc -ne 0`

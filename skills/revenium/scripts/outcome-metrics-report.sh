@@ -504,7 +504,7 @@ PY
   # A `not_found` that never returns to zero across ticks is the operator's
   # signal; one pinned at REVENIUM_OUTCOME_METRICS_MAX_JOBS means the tick
   # budget is being consumed by unqueryable jobs and newer ones are starving.
-  local appended=0 deferred=0 failed=0 not_found=0
+  local appended=0 deferred=0 failed=0 not_found=0 not_found_ids=""
   local jid job_type recorded_at entries_json
   while IFS=$'\t' read -r jid job_type recorded_at entries_json; do
     [[ -z "${jid}" ]] && continue
@@ -535,6 +535,16 @@ PY
       # it would never run.
       ((deferred++)) || true
       ((not_found++)) || true
+      # Name the job, not just the count. A job that never becomes queryable
+      # defers forever, and because the work list is sorted by job id and cut
+      # at REVENIUM_OUTCOME_METRICS_MAX_JOBS, a stuck LOW-sorting id holds its
+      # slot deterministically and starves newer jobs -- so "which one" is the
+      # actionable half. Bounded by construction: the ids ride the single
+      # existing per-tick summary line, and the list can never exceed the same
+      # MAX_JOBS that capped the work list, so this is not the ungated
+      # per-tick-per-job warn the .warn/.fallback-warn sentinels exist to
+      # prevent.
+      not_found_ids="${not_found_ids:+${not_found_ids},}${jid}"
       continue
     fi
     if [[ ${rc} -ne 0 ]]; then
@@ -593,7 +603,7 @@ except Exception:
     ((appended++)) || true
   done <<< "${work}"
 
-  info "outcome-metrics: summary, appended=${appended} deferred=${deferred} (not_found=${not_found}) failed=${failed}"
+  info "outcome-metrics: summary, appended=${appended} deferred=${deferred} (not_found=${not_found}${not_found_ids:+ ids=${not_found_ids}}) failed=${failed}"
 }
 
 main "$@"
