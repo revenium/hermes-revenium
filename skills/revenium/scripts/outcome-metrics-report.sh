@@ -91,6 +91,24 @@ is_throttled() {
 }
 
 # ---------------------------------------------------------------------------
+# 404 on the APPEND path means "this job is not yet queryable", not a
+# permanent failure -- live evidence from Jupi: 11 jobs returned 404 at
+# 06:45 and all 11 appended successfully on a later tick at 07:41. Detection
+# reads the body's `status`, never the exit code, for the same reason as
+# is_throttled above: this CLI's exit code cannot distinguish a transient
+# not-found from any other failure.
+#
+# This is DELIBERATELY separate from ensure_economics_contract's own 404
+# check (line ~112 above), which means something else entirely: "no
+# economics contract is declared for this job type, create one." Folding the
+# two together would conflate a per-type setup signal with a per-job retry
+# signal; each has exactly one call site and must keep it that way.
+# ---------------------------------------------------------------------------
+is_job_not_yet_queryable() {
+  [[ "$(json_field "${1}" status)" == "404" ]]
+}
+
+# ---------------------------------------------------------------------------
 # Economics: GET first, SET only on 404.
 #
 # `economics set` is a WHOLE-DOCUMENT REPLACE. It fetches the current contract
@@ -477,7 +495,16 @@ PY
     exit 0
   fi
 
-  local appended=0 deferred=0 failed=0
+  # `not_found` is a SUB-tally of `deferred` -- both arms mean "no ledger
+  # line written, next tick retries" -- named separately in the summary so a
+  # permanently-404ing job (a job id that never landed on the platform, or a
+  # cross-tenant query) stays visible without a per-tick per-job warn, which
+  # is the pattern this codebase already learned not to add (the `.warn` /
+  # `.fallback-warn` / `.aux-warn` sentinels exist for exactly that reason).
+  # A `not_found` that never returns to zero across ticks is the operator's
+  # signal; one pinned at REVENIUM_OUTCOME_METRICS_MAX_JOBS means the tick
+  # budget is being consumed by unqueryable jobs and newer ones are starving.
+  local appended=0 deferred=0 failed=0 not_found=0
   local jid job_type recorded_at entries_json
   while IFS=$'\t' read -r jid job_type recorded_at entries_json; do
     [[ -z "${jid}" ]] && continue
@@ -498,6 +525,16 @@ PY
     if is_throttled "${out}"; then
       # Throttled is NOT a failure: no ledger line, so the next tick retries.
       ((deferred++)) || true
+      continue
+    fi
+    if is_job_not_yet_queryable "${out}"; then
+      # Not-found is NOT a failure either: the job simply is not queryable
+      # YET. No ledger line, no warn -- the next tick retries, exactly like
+      # the throttle arm above. This MUST sit before the generic rc-ne-0
+      # arm below: that arm consumes any non-zero rc, so an arm placed after
+      # it would never run.
+      ((deferred++)) || true
+      ((not_found++)) || true
       continue
     fi
     if [[ ${rc} -ne 0 ]]; then
@@ -556,7 +593,7 @@ except Exception:
     ((appended++)) || true
   done <<< "${work}"
 
-  info "outcome-metrics: summary, appended=${appended} deferred=${deferred} failed=${failed}"
+  info "outcome-metrics: summary, appended=${appended} deferred=${deferred} (not_found=${not_found}) failed=${failed}"
 }
 
 main "$@"
