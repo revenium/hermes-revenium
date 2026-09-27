@@ -48,21 +48,26 @@ test_phase61_identity_resolution.py's `test_bot_id_resolves_identically_to_human
 -- per T-61-08: no value here is copied from any reference host.
 """
 import os
+import re
 import shlex
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from tests._compat_helpers import (
+    argv_to_flags,
     assert_argv_matches_golden,
     build_shim,
     build_state_db,
     load_golden,
     run_script,
+    ROOT,
     SCRIPTS_DIR,
 )
 from tests.test_phase61_identity_resolution import (
+    COMMON_SH,
     _OLD_TS,
     _own_meter_invocations,
     _seed_sessions_db,
@@ -439,6 +444,487 @@ class GoldenCoexistenceWithResolvedSubscriberTests(unittest.TestCase):
             self.assertEqual(captured[1], 'completion')
             assert_argv_matches_golden(
                 self, captured, load_golden('meter-completion.golden.json')
+            )
+        finally:
+            tree.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Task 2: resolution / fail-closed / masking / structural invariants
+# ---------------------------------------------------------------------------
+
+class ResolutionFailClosedAndMaskingTests(unittest.TestCase):
+    """Unit-level contract of `resolve_subscriber_id` / `mask_subscriber_for_log`
+    via the `bash -c 'source common.sh; ...'` idiom (mirroring
+    tests/test_phase42_assessment_contract.py:1435-1470 and this repo's own
+    tests/test_phase61_identity_resolution.py::ResolveSubscriberIdUnitTests).
+    Every assertion is on the FULL `<status>|<key>` line, never on the key
+    alone -- a test that only checked the key could not tell `none` from
+    `rejected`, and that distinction is the entire point of D-03's sentinel.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='gsd-phase61-boundary-unit-')
+        self.hermes_home = os.path.join(self.tmp, 'hh')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _call_common(self, fn, *args):
+        quoted = ' '.join(shlex.quote(a) for a in args)
+        expr = f'{fn} {quoted}'
+        env = {**os.environ, 'HERMES_HOME': self.hermes_home}
+        return subprocess.run(
+            ['bash', '-c', f'source "{COMMON_SH}" >/dev/null 2>&1; {expr}'],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+
+    # -- No special casing (SUB-04, D-06, D-12) --
+
+    def test_bot_and_human_actor_ids_resolve_by_the_identical_rule(self):
+        """D-12: a bot/app-shaped actor id (Slack's own fixed `USLACKBOT`
+        system id) and a human-shaped one, under the SAME source, produce
+        keys built by the identical `<source>:<actor>` rule -- assert the
+        exact expected key for each.
+
+        MISSES: proves the OUTPUT is shape-agnostic for these two concrete
+        inputs; does not itself prove the FUNCTION BODY contains no shape
+        conditional (a conditional that happened to produce the same output
+        for exactly these two probes would pass here) -- that is the
+        separate structural test below, which is why both exist.
+        """
+        r_bot = self._call_common('resolve_subscriber_id', 'slack', 'USLACKBOT')
+        r_human = self._call_common('resolve_subscriber_id', 'slack', 'U02C12JG78F')
+        self.assertEqual(r_bot.returncode, 0, r_bot.stderr)
+        self.assertEqual(r_human.returncode, 0, r_human.stderr)
+        self.assertEqual(r_bot.stdout.strip(), 'ok|slack:USLACKBOT')
+        self.assertEqual(r_human.stdout.strip(), 'ok|slack:U02C12JG78F')
+
+    def test_resolve_subscriber_id_body_has_no_shape_conditional(self):
+        """WEAK STRUCTURAL GUARD (documented deliberately, per <action>):
+        read common.sh as text, slice out `resolve_subscriber_id`'s body
+        between its own `resolve_subscriber_id() {` line and its matching
+        closing `}`, DROP every comment line first (the function's own
+        comments legitimately NAME the shapes it deliberately does not
+        branch on -- "no branch anywhere on whether the actor looks like a
+        bot, an app or a person" -- so counting comments would report a
+        violation that is actually the opposite of one), and assert the
+        remaining CODE contains no case-insensitive occurrence of a
+        bot/app-shaped literal.
+
+        MISSES: this catches an added special case written the OBVIOUS way
+        (a literal `bot`/`app` substring in a conditional). It would MISS a
+        clever one -- e.g. a regex keyed on Slack's own `U0` vs `U9` id
+        prefixing convention, or a length check, neither of which contains
+        the word "bot" or "app" anywhere. The BEHAVIOURAL row directly
+        above (bot and human resolving identically) is what carries the
+        real weight; this structural grep is a cheap second line of
+        defense, not a proof.
+        """
+        text = COMMON_SH.read_text()
+        lines = text.splitlines()
+        start = end = None
+        for i, line in enumerate(lines):
+            if line.strip() == 'resolve_subscriber_id() {':
+                start = i
+            elif start is not None and line.strip() == '}':
+                end = i
+                break
+        self.assertIsNotNone(start, "resolve_subscriber_id() { not found in common.sh")
+        self.assertIsNotNone(end, "matching closing '}' not found")
+        body_lines = lines[start:end + 1]
+        code_only = '\n'.join(
+            l for l in body_lines if not l.strip().startswith('#')
+        )
+        for shape_kw in ('bot', 'app', 'BOT', 'APP', 'Bot', 'App'):
+            self.assertNotIn(
+                shape_kw, code_only,
+                f"resolve_subscriber_id's CODE (comments stripped) contains "
+                f"{shape_kw!r} -- a shape-based special case may have been added"
+            )
+
+    def test_unseen_source_namespaces_verbatim_no_allowlist(self):
+        """D-06: a source string this skill has never seen produces a key
+        namespaced under that source VERBATIM -- no allowlist gate exists
+        to reject or rewrite it.
+
+        MISSES: proves the ABSENCE of an allowlist for this one probe value;
+        it cannot prove no allowlist exists for some other value never
+        tried here (an allowlist keyed on a specific denylist of NAMED
+        sources rather than an explicit allow-set would not be caught by a
+        single novel-source probe alone -- though D-06's own measurement,
+        recorded in 61-CONTEXT.md, is the authority that no such gate is
+        intended anywhere in this function).
+        """
+        r = self._call_common(
+            'resolve_subscriber_id', 'p61-future-source-never-configured', 'U1'
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(
+            r.stdout.strip(), 'ok|p61-future-source-never-configured:U1'
+        )
+
+    def test_automation_sources_with_empty_actor_id_produce_no_key(self):
+        """D-07's NULL/empty gate is the WHOLE mechanism excluding `cli`,
+        `cron`, `tui` and `subagent` -- the four sources measured at 0
+        identity-bearing rows out of 9,355 on the reference host. There
+        must be no SOURCE allowlist doing this instead -- each of these four
+        must resolve to `none|` purely because the actor id is empty, the
+        identical path any OTHER source with an empty actor id takes.
+
+        MISSES: proves these four sources take the shared empty-gate path
+        for AN empty actor id; does not prove no source-keyed special case
+        exists for a NON-empty actor id under these same four sources (no
+        such case is expected -- D-07 measured 0 populated rows for all
+        four -- but this test's scope is the empty-actor-id row only).
+        """
+        for src in ('cli', 'cron', 'tui', 'subagent'):
+            r = self._call_common('resolve_subscriber_id', src, '')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.stdout.strip(), 'none|', f'source={src!r}')
+
+    # -- Fail closed (D-03's one-way hazard) --
+
+    def test_pipe_tab_cr_lf_and_sentinel_actor_ids_all_rejected(self):
+        """D-03: a transport-unsafe or un-namespaceable actor id resolves to
+        `rejected|` -- never to a truncated or guessed key, and never
+        silently to `none|` (which would wrongly imply "no identity" rather
+        than "identity present but unsafe"). Covers a pipe, a literal tab, a
+        literal CR, a literal LF, and the fixed unsafe sentinel.
+
+        MISSES: this is the function's OWN unit contract in isolation for
+        these five probe values; the end-to-end pipe test below is what
+        proves a rejected value never reaches the wire or corrupts a
+        neighbouring field when it originates from a REAL seeded row rather
+        than a direct function call.
+        """
+        cases = {
+            'pipe': 'U|600',
+            'tab': 'U\t600',
+            'cr': 'U\r600',
+            'lf': 'U\n600',
+            'sentinel': '__revenium_unsafe_user_id__',
+        }
+        for label, actor in cases.items():
+            r = self._call_common('resolve_subscriber_id', 'slack', actor)
+            self.assertEqual(r.returncode, 0, f'case={label!r}: {r.stderr}')
+            self.assertEqual(
+                r.stdout.strip(), 'rejected|',
+                f'case={label!r} actor={actor!r} stdout={r.stdout!r}'
+            )
+
+    def test_nonempty_actor_id_with_empty_source_rejected_not_colon_prefixed(self):
+        """A non-empty actor id with an EMPTY source resolves to `rejected|`,
+        not to a colon-prefixed key like `:U1` -- an empty namespace would
+        violate D-05's collision guarantee (two different empty-namespace
+        sources would collide on the SAME key) just as surely as a missing
+        namespace would.
+
+        MISSES: only the fully-empty-string source case; a WHITESPACE-ONLY
+        source is not separately probed here (resolve_subscriber_id trims
+        both arguments before the emptiness check, so it collapses to the
+        same code path, but this test does not independently re-derive
+        that).
+        """
+        r = self._call_common('resolve_subscriber_id', '', 'U1')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'rejected|')
+
+    def test_pipe_actor_id_end_to_end_neighbouring_fields_intact(self):
+        """End to end (stronger than the unit-level version above): a
+        SEEDED session whose `user_id` contains a pipe is sanitised by the
+        SQL delimiter-safety CASE before it ever reaches the positional
+        `read`, so it is REJECTED (no key), and -- the row was not
+        shifted -- its neighbouring fields (`billing_provider`,
+        `input_tokens`, `output_tokens`, `total_tokens`) are read and
+        forwarded CORRECTLY, verified by asserting their ACTUAL VALUES in
+        the emitted argv, not merely that the run completed without error.
+
+        MISSES: this fixture's pipe sits inside `user_id` only; it does not
+        independently probe a pipe inside `source` (the "empty source"
+        arm above and the unit-level `case "${source}"` guard in
+        resolve_subscriber_id cover the source side of D-03, but not
+        combined with a real seeded row).
+        """
+        sid = 'p61-pipe-e2e'
+        tree = _Harness(prefix='gsd-phase61-boundary-pipe-')
+        try:
+            _seed_sessions_db(tree.state_db, [{
+                'id': sid, 'source': 'slack', 'user_id': 'U|600',
+                'billing_provider': 'anthropic',
+                'input_tokens': 100, 'output_tokens': 50,
+            }])
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, sid)
+            self.assertEqual(len(own), 1, f'{own!r}')
+            flags = argv_to_flags(own[0])
+            self.assertEqual(flags.get('--model-source'), 'anthropic')
+            self.assertEqual(flags.get('--input-tokens'), '100')
+            self.assertEqual(flags.get('--output-tokens'), '50')
+            self.assertEqual(flags.get('--total-tokens'), '150')
+
+            reported = [
+                l for l in tree.log_lines() if f'Reported: session={sid} ' in l
+            ]
+            self.assertEqual(len(reported), 1, reported)
+            self.assertNotIn('subscriber=', reported[0])
+        finally:
+            tree.cleanup()
+
+    # -- Masking (T-61-01) --
+
+    def test_mask_and_resolve_differ_for_an_email(self):
+        """`mask_subscriber_for_log` masks an email local part; the RESOLVED
+        value `resolve_subscriber_id` itself produces for the identical
+        input is EXACT and unmasked -- the two must differ, or the log-side
+        mitigation has leaked into the value a future phase needs exact.
+
+        MISSES: proves the two functions differ for ONE email-shaped input;
+        does not itself prove masking is applied consistently at every
+        emission site that logs a subscriber key (the end-to-end test below
+        covers the one site this phase adds: the `Reported:` line).
+        """
+        r_resolved = self._call_common(
+            'resolve_subscriber_id', 'email', 'p61user@example.test'
+        )
+        self.assertEqual(r_resolved.returncode, 0, r_resolved.stderr)
+        self.assertEqual(
+            r_resolved.stdout.strip(), 'ok|email:p61user@example.test'
+        )
+        resolved_key = r_resolved.stdout.strip().split('|', 1)[1]
+
+        r_masked = self._call_common(
+            'mask_subscriber_for_log', 'email:p61user@example.test'
+        )
+        self.assertEqual(r_masked.returncode, 0, r_masked.stderr)
+        masked_value = r_masked.stdout.strip()
+        self.assertEqual(masked_value, 'email:p***@example.test')
+        self.assertNotEqual(
+            resolved_key, masked_value,
+            'resolve_subscriber_id and mask_subscriber_for_log must NOT agree '
+            'for an email -- if they do, masking has leaked into the resolved '
+            'value Phase 63 needs exact'
+        )
+
+    def test_email_masked_in_log_unmasked_local_part_absent(self):
+        """End to end: after a run seeding an email-source session, the
+        cron LOG FILE contains the masked form and does NOT contain the
+        unmasked local part ANYWHERE -- grepping the log file the way an
+        operator pasting it into a support ticket would see it, not the
+        source tree.
+
+        MISSES: greps ONE run's log for ONE email-shaped input; it does not
+        prove masking for a source this fixture never seeds reaching this
+        same emit path (structurally, every `Reported:` line funnels
+        through the SAME `mask_subscriber_for_log` call per
+        `subscriber_log_suffix`'s single construction site, so a second
+        email fixture would not exercise new code -- but this test alone
+        does not demonstrate that).
+        """
+        sid = 'p61-mask-e2e'
+        tree = _Harness(prefix='gsd-phase61-boundary-mask-')
+        try:
+            _seed_sessions_db(tree.state_db, [{
+                'id': sid, 'source': 'email', 'user_id': 'p61user@example.test',
+            }])
+            tree.run()
+            log_text = '\n'.join(tree.log_lines())
+            self.assertIn('subscriber=email:p***@example.test', log_text)
+            self.assertNotIn('p61user@', log_text)
+        finally:
+            tree.cleanup()
+
+
+class StructuralInvariantTests(unittest.TestCase):
+    """Task 2's positive, exhaustive structural gates. Per <action>: the
+    column-list assertion is a POSITIVE ordered equality against the
+    fourteen expected names, chosen deliberately over a NEGATIVE grep for
+    the two excluded columns (`display_name`, `origin_json`) -- a positive
+    list also pins ORDER, which is what the positional `read` contract
+    depends on (`api-event-report.sh`'s own "constant width... widen in
+    lockstep" comment is the established statement of that rule). Every
+    count-based gate here strips comment lines FIRST, per T-61-09 -- an
+    UNGATED count would find its own documentation and report a violation
+    that is actually the opposite of one.
+    """
+
+    def test_main_select_column_list_is_exact_ordered_and_positive(self):
+        """The main session query's column list is EXACTLY the fourteen
+        expected names, in order -- not a superset, not a subset, not
+        merely "does not contain the two excluded columns".
+
+        MISSES: reads the SELECT as SOURCE TEXT (a static analysis), not by
+        actually running the query against a live schema -- the end-to-end
+        differential tests above are what prove the QUERY, run for real,
+        produces argv that does not change shape.
+        """
+        text = HERMES_REPORT_SH.read_text()
+        matches = re.findall(
+            r'SELECT id, model, source,.*?FROM sessions', text, re.DOTALL
+        )
+        self.assertEqual(
+            len(matches), 1,
+            f'expected exactly one "SELECT id, model, source, ... FROM sessions" '
+            f'block in hermes-report.sh; found {len(matches)}'
+        )
+        body = matches[0][len('SELECT'):-len('FROM sessions')]
+        columns = []
+        for raw in body.split(','):
+            token = ' '.join(raw.split())
+            if token == '${user_id_select_expr}':
+                # Both capability-probe branches of this local variable end
+                # in the literal `AS user_id` alias (verified by direct read
+                # of common.sh's sessions_has_user_id-gated assignment in
+                # hermes-report.sh's main()) -- so the STATIC source text's
+                # dynamic slot maps to this name regardless of which branch
+                # runs at execution time.
+                columns.append('user_id')
+            elif re.search(r'\s+AS\s+', token, flags=re.IGNORECASE):
+                columns.append(re.split(r'\s+AS\s+', token, flags=re.IGNORECASE)[-1])
+            else:
+                columns.append(token)
+        self.assertEqual(columns, _EXPECTED_SELECT_COLUMNS)
+
+    def test_read_loop_binds_fourteen_variables_positionally(self):
+        """The read loop consuming the main SELECT's output binds EXACTLY
+        fourteen variables, and the fourteenth (last) is `user_id` -- the
+        position the fourteenth SELECT column also occupies. Position, not
+        spelling, is what the positional `read -r` contract depends on, so
+        this pins COUNT and the terminal position rather than requiring
+        every read-side name to match its select-side counterpart's
+        spelling (`cache_read` vs `cache_read_tokens`, e.g., is expected and
+        harmless).
+
+        MISSES: does not independently prove EVERY read-side variable name
+        maps to the semantically-correct select-side column in the middle
+        of the list (only the count and the final/newest position) -- the
+        pipe end-to-end test elsewhere in this module is what proves a
+        middle column (billing_provider) is not shifted.
+        """
+        text = HERMES_REPORT_SH.read_text()
+        matches = re.findall(r"while IFS='\|' read -r (.*?); do", text)
+        main_loop_vars = [m for m in matches if m.startswith('sid model source')]
+        self.assertEqual(
+            len(main_loop_vars), 1,
+            f'expected exactly one main read loop matching "sid model source ..."; '
+            f'found {len(main_loop_vars)}'
+        )
+        read_vars = main_loop_vars[0].split()
+        self.assertEqual(len(read_vars), 14, read_vars)
+        self.assertEqual(read_vars[-1], 'user_id', read_vars)
+        self.assertEqual(len(read_vars), len(_EXPECTED_SELECT_COLUMNS))
+
+    def test_delimiter_safety_case_expression_appears_in_exactly_two_sql_sites(self):
+        """The delimiter-safety `CASE WHEN user_id GLOB ...` expression
+        appears in EXACTLY two places across the two scripts that emit
+        `revenium meter completion` argv from `sessions.user_id`:
+        hermes-report.sh's main SELECT and common.sh's `build_subscriber_map`.
+        Comment lines are stripped BEFORE counting (T-61-09) -- common.sh's
+        own comment describing "the SQL delimiter-safety CASE in
+        hermes-report.sh's main SELECT" would otherwise itself be
+        mis-parsed as an occurrence, or a future comment quoting the
+        pattern for documentation could inflate the count without a second
+        REAL site existing.
+
+        MISSES: pins the NUMBER of sites, not that the two are TEXTUALLY
+        IDENTICAL to each other (a drifted-but-still-present second copy
+        would still pass this count).
+        """
+        needle = "GLOB '*[|'"
+        total = 0
+        for path in (
+            SCRIPTS_DIR / 'common.sh',
+            HERMES_REPORT_SH,
+        ):
+            text = path.read_text()
+            code_only = '\n'.join(
+                l for l in text.splitlines() if not l.strip().startswith('#')
+            )
+            total += code_only.count(needle)
+        self.assertEqual(total, 2, f'expected exactly 2 CASE sites, counted {total}')
+
+    def test_boundary_files_unmodified_relative_to_merge_base(self):
+        """`tests/fixtures/compat/`, `tests/_compat_helpers.py` and
+        `skills/revenium/scripts/api-event-report.sh` are all UNMODIFIED
+        relative to the merge base with `main` -- checked via
+        `git diff --name-only`, NOT `git status`, because `git status` sees
+        only the working tree and would silently pass on a change already
+        COMMITTED earlier in this same phase.
+
+        MISSES: is diff-based, so it detects a MODIFICATION to these three
+        paths; it says nothing about a NEW file elsewhere that duplicates
+        their role (a parallel, uncommitted-by-name golden fixture
+        directory, say) -- `test_expected_files_exist`'s own inventory is
+        the guard against an unexpected new file, not this test.
+        """
+        merge_base = subprocess.run(
+            ['git', 'merge-base', 'HEAD', 'main'],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(merge_base.returncode, 0, merge_base.stderr)
+        base_sha = merge_base.stdout.strip()
+        self.assertTrue(base_sha, 'empty merge-base sha')
+
+        diff = subprocess.run(
+            [
+                'git', 'diff', '--name-only', base_sha, 'HEAD', '--',
+                'tests/fixtures/compat/',
+                'tests/_compat_helpers.py',
+                'skills/revenium/scripts/api-event-report.sh',
+            ],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(diff.returncode, 0, diff.stderr)
+        changed = [l for l in diff.stdout.splitlines() if l.strip()]
+        self.assertEqual(
+            changed, [],
+            f'boundary file(s) changed since the merge-base with main: {changed}'
+        )
+
+    def test_run_leaves_no_new_regular_file_directly_under_state_dir(self):
+        """A completed hermes-report.sh run, given an identity-bearing
+        fixture, leaves no NEW regular file directly under `STATE_DIR`
+        beyond the files every install already expects: `revenium-metering.log`
+        and `revenium-hermes.ledger` (this run's own report output),
+        `revenium-jobs.ledger` (unconditionally `touch`ed at
+        hermes-report.sh:274, pre-existing and unrelated to Phase 61), and
+        `aux.lock` (unconditionally `exec 8>`-opened by the auxiliary-usage
+        pass's flock at hermes-report.sh:1138, also pre-existing). Proving
+        D-02 ("no new state path") held for this plan's subscriber-map
+        machinery specifically means proving NOTHING BEYOND this
+        already-established set appeared -- the subscriber map's own
+        scratch file lives under `mktemp`'s `$TMPDIR`, never `STATE_DIR`.
+
+        MISSES: checks the TOP LEVEL of STATE_DIR only (files, not
+        subdirectories like `markers/`) and only for ONE fixture shape (a
+        single identity-bearing session); it does not enumerate every state
+        path this repo's OTHER features might add under different
+        conditions (job creation, aux metering) in the same run.
+        """
+        tree = _Harness(prefix='gsd-phase61-boundary-statedir-')
+        try:
+            before = {
+                f for f in os.listdir(tree.state_dir)
+                if os.path.isfile(os.path.join(tree.state_dir, f))
+            }
+            sid = 'p61-statedir-i'
+            _seed_sessions_db(tree.state_db, [
+                {'id': sid, 'source': 'slack', 'user_id': 'p61-actor-i'},
+            ])
+            tree.run()
+            after = {
+                f for f in os.listdir(tree.state_dir)
+                if os.path.isfile(os.path.join(tree.state_dir, f))
+            }
+            new_files = after - before
+            allowed = {
+                'revenium-metering.log', 'revenium-hermes.ledger',
+                'revenium-jobs.ledger', 'aux.lock',
+            }
+            self.assertTrue(
+                new_files.issubset(allowed),
+                f'unexpected new file(s) directly under STATE_DIR: '
+                f'{new_files - allowed}'
             )
         finally:
             tree.cleanup()
