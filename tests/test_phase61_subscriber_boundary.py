@@ -882,18 +882,32 @@ class StructuralInvariantTests(unittest.TestCase):
         # untouched -- the test reported on the checkout depth rather than on
         # the property it exists to guard. A guard that cannot run must say so
         # rather than fail, and must not be the reason a suite is red.
-        merge_base = subprocess.run(
-            ['git', 'merge-base', 'HEAD', 'main'],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
-        )
-        if merge_base.returncode != 0 or not merge_base.stdout.strip():
-            self.skipTest(
-                'no merge-base against `main` in this checkout '
-                f'(shallow clone or absent ref): {merge_base.stderr.strip()!r}. '
-                'The boundary property is covered locally and by the argv '
-                'differential, which needs no git history.'
+        # Try every ref that can name the base branch before giving up.
+        # A local `main` exists in a developer clone; CI (with fetch-depth: 0)
+        # provides `origin/main` but not necessarily a local branch. Skipping
+        # is a LAST resort, not the CI path -- an earlier version skipped
+        # whenever bare `main` was unresolvable, which silently removed this
+        # guard from every CI run and let a committed change to the boundary
+        # files pass unchecked. The argv differential cannot substitute: it
+        # checks command output, not whether these files stayed untouched.
+        base_sha = ''
+        attempts = []
+        for ref in ('main', 'origin/main', 'refs/remotes/origin/main'):
+            probe = subprocess.run(
+                ['git', 'merge-base', 'HEAD', ref],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=30,
             )
-        base_sha = merge_base.stdout.strip()
+            attempts.append(f'{ref}: rc={probe.returncode}')
+            if probe.returncode == 0 and probe.stdout.strip():
+                base_sha = probe.stdout.strip()
+                break
+        if not base_sha:
+            self.skipTest(
+                'no merge-base against the base branch under any ref '
+                f'({"; ".join(attempts)}). If this is CI, fetch-depth must be '
+                '0 in .github/workflows/tests.yml -- a skip here means this '
+                'invariant is UNGUARDED for the run, not that it holds.'
+            )
 
         diff = subprocess.run(
             [

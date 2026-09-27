@@ -899,7 +899,16 @@ resolve_subscriber_id() {
       ;;
   esac
   case "${source}" in
-    *'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
+    # The SOURCE sentinel must be rejected here for the same reason the
+    # user_id sentinel is, and it was not: the SQL upstream converts a
+    # transport-unsafe source into '__revenium_unsafe_source__' BEFORE this
+    # helper sees it, so a raw-delimiter test alone never fires and the
+    # sentinel was accepted as a legitimate namespace -- yielding the
+    # fabricated key '__revenium_unsafe_source__:<id>'. That is worse than the
+    # field-shift it replaced: every distinct unsafe source collapses to ONE
+    # key, so two different actors share an identity, which is precisely the
+    # collision D-05's namespacing exists to make impossible.
+    "__revenium_unsafe_source__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
       printf 'rejected|\n'
       return 0
       ;;

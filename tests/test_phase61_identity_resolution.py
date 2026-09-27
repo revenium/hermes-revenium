@@ -580,13 +580,22 @@ class Phase61IdentityResolutionEndToEndTestCase(unittest.TestCase):
         lines = self._log_lines()
         reported = [l for l in lines if f"Reported: session={child_sid} " in l]
         self.assertEqual(len(reported), 1, reported)
+        # Assert NO subscriber of ANY shape, not merely the absence of two
+        # guessed strings. The original form of this test named only
+        # 'slack:other' and 'slack:U950' and so passed while the code emitted
+        # '__revenium_unsafe_source__:U950' -- the sentinel was converted
+        # upstream and then blessed by the resolver as a legitimate namespace.
+        # Enumerating the bad values you thought of is the weak-guard pattern;
+        # asserting the field is absent entirely is what actually holds.
         self.assertNotIn(
-            'subscriber=slack:other', reported[0],
-            'a TAB in the root source must not fabricate an inherited key',
+            'subscriber=', reported[0],
+            'an unsafe root source must yield NO subscriber at all -- not a '
+            'sentinel-namespaced key, which would additionally collapse every '
+            'distinct unsafe source onto one shared identity',
         )
         self.assertNotIn(
-            'subscriber=slack:U950', reported[0],
-            'an unsafe root source must be rejected, not silently accepted',
+            '__revenium_unsafe', reported[0],
+            'no internal sentinel may ever reach a subscriber key',
         )
 
     def test_child_own_identity_matches_root_no_disagreement(self):
