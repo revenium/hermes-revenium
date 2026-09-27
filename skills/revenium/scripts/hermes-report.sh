@@ -2046,7 +2046,13 @@ PY
           if [[ -n "${root_subscriber_key}" && "${root_subscriber_key}" != "${subscriber_key}" ]]; then
             ((subscriber_disagreement_count++)) || true
             if [[ -z "${subscriber_disagreement_detail}" ]]; then
-              subscriber_disagreement_detail="session=${sid} own=${subscriber_key} root=${root_subscriber_key}"
+              # CR-01: MASK both keys. This detail reaches LOG_FILE via the
+              # once-per-tick warn below, and an email-shaped subscriber would
+              # otherwise land in revenium-metering.log in plaintext -- the
+              # exact disclosure mask_subscriber_for_log exists to prevent.
+              # The pre-fix tests all used Slack ids, which mask to themselves,
+              # so the masking path was never exercised here.
+              subscriber_disagreement_detail="session=${sid} own=$(mask_subscriber_for_log "${subscriber_key}") root=$(mask_subscriber_for_log "${root_subscriber_key}")"
             fi
           fi
         fi

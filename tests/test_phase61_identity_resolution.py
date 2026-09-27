@@ -467,6 +467,54 @@ class Phase61IdentityResolutionEndToEndTestCase(unittest.TestCase):
         self.assertIn("slack:U201", disagreement_lines[0])
         self.assertIn("slack:U200", disagreement_lines[0])
 
+    def test_disagreement_warn_masks_email_shaped_keys(self):
+        """CR-01 regression: the disagreement warn reaches LOG_FILE, so both
+        keys in it MUST be masked. An email-shaped subscriber would otherwise
+        land in revenium-metering.log in plaintext -- the exact disclosure
+        mask_subscriber_for_log exists to prevent.
+
+        This uses EMAIL-shaped ids deliberately. Every other disagreement test
+        uses Slack ids, which mask to themselves, so they exercise the masking
+        call site without exercising masking -- which is why the raw-key bug
+        survived the original test pass. The negative grep on the full local
+        part is what actually carries this test.
+        """
+        root_sid = "p61-root-mask"
+        child_sid = "p61-child-mask"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'email',
+             'user_id': 'rootperson@acme.example'},
+            {
+                'id': child_sid, 'source': 'email',
+                'user_id': 'childperson@acme.example',
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+        ])
+        self._run()
+        log_text = "\n".join(self._log_lines())
+
+        disagreement_lines = [
+            l for l in self._log_lines()
+            if "subscriber identity disagreement" in l
+        ]
+        self.assertEqual(len(disagreement_lines), 1, disagreement_lines)
+
+        # The masked forms must be present ...
+        self.assertIn("email:c***@acme.example", disagreement_lines[0])
+        self.assertIn("email:r***@acme.example", disagreement_lines[0])
+
+        # ... and the raw local parts must appear NOWHERE in the log, on any
+        # line. A plaintext address anywhere in LOG_FILE is the defect.
+        self.assertNotIn(
+            "childperson@acme.example", log_text,
+            'CR-01: a raw email-shaped subscriber key reached the log',
+        )
+        self.assertNotIn(
+            "rootperson@acme.example", log_text,
+            'CR-01: a raw email-shaped root subscriber key reached the log',
+        )
+
     def test_child_own_identity_matches_root_no_disagreement(self):
         """The observed-on-the-reference-host case (all 7 children): a
         child's own identity equals its root's — its key is its own, and
