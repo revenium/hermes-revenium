@@ -1564,12 +1564,34 @@ PY
 main() {
   info "=== Hermes Metering Reporter starting ==="
 
+  # Phase 61 (SUB-01/D-07): resolve the identity column's capability probe
+  # ONCE per tick into the 14th SELECT expression. Both branches keep the
+  # row at a CONSTANT 14 fields (see the read loop below), which is what
+  # keeps the positional `read` from changing shape with the probe result.
+  # The CASE is the verified delimiter-safety form: a value containing a
+  # pipe, a tab, a CR or an LF is replaced with a fixed sentinel so it can
+  # never split this pipe-delimited row and leave a plausible-looking WRONG
+  # identity in an earlier field (T-61-02).
+  local user_id_select_expr
+  if sessions_has_user_id; then
+    user_id_select_expr="CASE WHEN user_id GLOB '*[|' || char(9) || char(10) || char(13) || ']*'
+                THEN '__revenium_unsafe_user_id__'
+                ELSE COALESCE(user_id, '') END AS user_id"
+  else
+    user_id_select_expr="'' AS user_id"
+    # "not supported here" must never be indistinguishable from "nothing to
+    # report" — modelled on the session_model_usage absent-table line above
+    # (AUX_TABLE_ABSENT) and for the same reason. One line per tick: the
+    # probe is resolved once here, not per session.
+    info "subscriber attribution skipped this tick: sessions.user_id column not present on this Hermes install (predates identity resolution) — main-loop metering is unaffected"
+  fi
+
   local sessions
   sessions=$(sqlite3 "${STATE_DB}" "
     SELECT id, model, source, input_tokens, output_tokens,
            cache_read_tokens, cache_write_tokens, reasoning_tokens,
            estimated_cost_usd, api_call_count, started_at, ended_at,
-           billing_provider
+           billing_provider, ${user_id_select_expr}
     FROM sessions
     WHERE (input_tokens > 0 OR output_tokens > 0)
     ORDER BY started_at DESC;
@@ -1684,7 +1706,9 @@ for raw_line in sessions_data.split('\n'):
     try:
         parts = line.split('|')
         # Columns: id|model|source|input|output|cache_read|cache_write|reasoning|
-        #          estimated_cost|api_calls|started_at|ended_at|billing_provider
+        #          estimated_cost|api_calls|started_at|ended_at|billing_provider|
+        #          user_id (Phase 61, SUB-01 — added LAST; this parse only reads
+        #          parts[0]/parts[10]/len(parts), so no code change is needed here).
         # started_at is index 10 (the 11th column).
         if len(parts) < 11:
             # Malformed row — pass through unchanged (soft-fail).
@@ -1845,7 +1869,7 @@ PY
     | build_root_sid_map "${root_sid_map_file}"
   export ROOT_SID_MAP_FILE="${root_sid_map_file}"
 
-  while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider; do
+  while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider user_id; do
 
     local total_tokens=$((input_tokens + output_tokens))
     if [[ "${total_tokens}" -eq 0 ]]; then
@@ -1937,6 +1961,32 @@ PY
     # Measured on the fleet 2026-09-17: all 10 profiles HAVE the column and
     # every session row resolves, so this branch only ever runs in its correct
     # form there.
+
+    # Phase 61 (SUB-01/SUB-02/D-03/D-05): resolve THIS session's OWN identity
+    # once, mirroring root_sid's once-per-iteration resolution immediately
+    # above. Gated on ${user_id} non-empty — a strict SUPERSET of
+    # resolve_subscriber_id's own D-07 gate, so this can only skip cases the
+    # helper would answer "none|" to anyway (a fork-avoidance guard, not a
+    # second gate): 97% of sessions never call the helper at all.
+    # Plan 61-01 Task 2 (SUB-03/D-08..D-11) extends this exact block with
+    # root inheritance and the disagreement rule; this task resolves only
+    # the session's own identity.
+    local subscriber_status="" subscriber_key=""
+    if [[ -n "${user_id}" ]]; then
+      local _own_sub_resolved
+      _own_sub_resolved="$(resolve_subscriber_id "${source}" "${user_id}")"
+      subscriber_status="${_own_sub_resolved%%|*}"
+      subscriber_key="${_own_sub_resolved#*|}"
+    fi
+
+    # Phase 61 (T-61-01): a single leading space + "subscriber=<masked key>"
+    # when a key resolved; empty otherwise, so a session with no identity
+    # produces a Reported: line byte-identical to today — itself part of
+    # this phase's feature-off proof.
+    local subscriber_log_suffix=""
+    if [[ -n "${subscriber_key}" ]]; then
+      subscriber_log_suffix=" subscriber=$(mask_subscriber_for_log "${subscriber_key}")"
+    fi
 
     # Phase 28 (TRACE-03): resolve, once per session-loop iteration, the
     # markers directory that OWNS the current session and the one that owns
@@ -3730,7 +3780,7 @@ PY
           now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
           echo "HERMES:${sid}:${total_tokens}:${now_ts}:${muid}" >> "${LEDGER_FILE}"
           ((reported_count++)) || true
-          info "Reported: session=${sid} muid=${muid} task_type=${t_type} op_type=${op_type} in=${d_in} out=${d_out}"
+          info "Reported: session=${sid} muid=${muid} task_type=${t_type} op_type=${op_type} in=${d_in} out=${d_out}${subscriber_log_suffix}"
           # Phase 44 Plan 04 (EGV-17): classified bucket -- attributed to a
           # real marker.
           attribution_rows+="classified|${d_in}|${d_out}|${d_cr}|${d_cw}|${d_tot}|${d_cost}"$'\n'

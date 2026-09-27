@@ -820,6 +820,156 @@ build_root_sid_map() {
   return 0
 }
 
+# Phase 61 (SUB-01..04/D-02): memoised schema-capability probe for the
+# identity column. common.sh is sourced by the three in-session hooks on
+# every LLM/tool call, so nothing runs at source time — only
+# hermes-report.sh's per-minute cron path can afford a `sqlite3` cost, and
+# even there a tick should pay the probe once, hence the memo.
+#
+# Fails OPEN to "absent" on any unreadable/empty capture, the same
+# resolution `supports_flag` uses for its own indeterminate case (see the
+# comment above that function): an install whose `sessions` table lacks the
+# column, and every test fixture built by tests/_compat_helpers.py's
+# `build_state_db` (which has no such column, across 139 call sites in 39
+# files), must keep metering exactly as today.
+_SESSIONS_HAS_USER_ID_MEMO=""
+sessions_has_user_id() {
+  if [[ -z "${_SESSIONS_HAS_USER_ID_MEMO}" ]]; then
+    local cols
+    # The capture happens INSIDE the command substitution so an unreadable
+    # state.db resolves to an empty string, not a hung pipeline. Anchored
+    # here-string `grep -qx`, not `| grep -q` — see the SIGPIPE note above
+    # supports_flag: a pipeline reader that exits on its first match can
+    # SIGPIPE the upstream writer, and under `pipefail` that surfaces as a
+    # nondeterministic false negative.
+    cols="$(sqlite3 "${STATE_DB}" "PRAGMA table_info(sessions);" 2>/dev/null | cut -d'|' -f2)"
+    if grep -qx 'user_id' <<< "${cols}"; then
+      _SESSIONS_HAS_USER_ID_MEMO="yes"
+    else
+      _SESSIONS_HAS_USER_ID_MEMO="no"
+    fi
+  fi
+  [[ "${_SESSIONS_HAS_USER_ID_MEMO}" == "yes" ]]
+}
+
+# Phase 61 (SUB-01/SUB-02/SUB-04/D-03/D-05/D-06/D-07): resolve a session's
+# actor into a namespaced subscriber key. Pure bash, no I/O, always exits 0.
+# Prints exactly one line on stdout: "<status>|<key>" — status one of
+# ok/none/rejected, key populated only when status is ok.
+#
+# One line rather than resolve_switch_setting's two-line "<value>\n<warned>"
+# shape (see that function above): this is called once per identity-bearing
+# session inside a per-minute cron loop, and "<status>|<key>" parses with
+# pure parameter expansion (`${out%%|*}` / `${out#*|}`) at zero extra forks,
+# where the two-line form costs two `sed` subshells per call.
+# resolve_switch_setting's shape stays correct for its own once-per-process
+# callers.
+resolve_subscriber_id() {
+  local source="$1" user_id="$2"
+  # Trim leading/trailing whitespace — bash 3.2, no extglob, no associative
+  # arrays. Mirrors correct-assessment.sh's MECHANISM trim (scripts/correct-
+  # assessment.sh:158-159).
+  # shellcheck disable=SC2295
+  source="${source#"${source%%[![:space:]]*}"}"
+  source="${source%"${source##*[![:space:]]}"}"
+  # shellcheck disable=SC2295
+  user_id="${user_id#"${user_id%%[![:space:]]*}"}"
+  user_id="${user_id%"${user_id##*[![:space:]]}"}"
+
+  if [[ -z "${user_id}" ]]; then
+    # D-07's whole gate, and 97% of sessions on every tick — this branch
+    # must NEVER log. CLAUDE.md's ungated-per-tick-warn anti-pattern is what
+    # produced 9,039,937 log lines in 27 days on this repo's own fleet host.
+    printf 'none|\n'
+    return 0
+  fi
+
+  # Fail CLOSED, never a guess (D-03): a wrong value here lands on
+  # permanently metered rows that cannot be amended, and an
+  # un-namespaceable id voids D-05's collision guarantee. Reject the fixed
+  # transport-unsafe sentinel (the SQL delimiter-safety CASE in
+  # hermes-report.sh's main SELECT writes this literal when a raw value
+  # would otherwise corrupt the pipe-delimited row) and any value in either
+  # argument that could itself corrupt that row contract or the TSV
+  # subscriber map: a pipe, a tab, a CR, or an LF.
+  case "${user_id}" in
+    "__revenium_unsafe_user_id__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
+      printf 'rejected|\n'
+      return 0
+      ;;
+  esac
+  case "${source}" in
+    *'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
+      printf 'rejected|\n'
+      return 0
+      ;;
+  esac
+  if [[ -z "${source}" ]]; then
+    printf 'rejected|\n'
+    return 0
+  fi
+
+  # The source column VERBATIM as the namespace, no allowlist (D-06), and no
+  # branch anywhere on whether the actor looks like a bot, an app or a
+  # person (D-12/SUB-04).
+  printf 'ok|%s:%s\n' "${source}" "${user_id}"
+}
+
+# Phase 61 (T-61-01): log-side masking only. The RESOLVED value handed to any
+# emission site is never masked — a future phase needs the exact address.
+# This exists because revenium-metering.log is the artifact operators paste
+# into support tickets and that diagnose.sh prints, which state.db is not.
+mask_subscriber_for_log() {
+  local key="$1"
+  local ns="${key%%:*}"
+  local rest="${key#*:}"
+  case "${rest}" in
+    *"@"*)
+      local local_part="${rest%%@*}"
+      local domain_part="${rest#*@}"
+      printf '%s:%s***@%s\n' "${ns}" "${local_part:0:1}" "${domain_part}"
+      ;;
+    *)
+      printf '%s\n' "${key}"
+      ;;
+  esac
+}
+
+# Phase 61 (SUB-03/D-08/D-09): build the batch map consumed by
+# hermes-report.sh's per-tick inheritance lookup, mirroring
+# build_root_sid_map's contract exactly: never fatal, returns 0
+# unconditionally, and on any failure leaves the file present and empty so
+# every lookup misses and nothing is inherited.
+#
+# One TAB-separated "<sid>\t<source>\t<user_id>" line per identity-bearing
+# row, restricted to rows whose user_id is neither NULL nor blank after
+# TRIM. The key itself is NOT formatted here: resolve_subscriber_id owns the
+# "<source>:<user_id>" format, and a second copy of it in SQL is exactly the
+# two-code-paths-one-wire-field divergence D-01 rejected. user_id uses the
+# SAME delimiter-safety CASE expression as the main SELECT in
+# hermes-report.sh, so a transport-unsafe value is COUNTABLE by the caller
+# instead of silently corrupting this file's row shape.
+build_subscriber_map() {
+  local out_file="${1:-}"
+  [[ -z "${out_file}" ]] && return 0
+  : > "${out_file}" 2>/dev/null || true
+  if ! sessions_has_user_id; then
+    return 0
+  fi
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    return 0
+  fi
+  sqlite3 "${STATE_DB}" "
+    SELECT id || char(9) || COALESCE(source,'') || char(9) ||
+           CASE WHEN user_id GLOB '*[|' || char(9) || char(10) || char(13) || ']*'
+                THEN '__revenium_unsafe_user_id__'
+                ELSE COALESCE(user_id, '') END
+    FROM sessions
+    WHERE user_id IS NOT NULL AND TRIM(user_id) != '';
+  " >"${out_file}" 2>/dev/null || : >"${out_file}" 2>/dev/null || true
+  return 0
+}
+
 # Phase 28 (TRACE-03): resolve the markers directory that OWNS a given session
 # identifier, mirroring classifier._paths_for_session's per-session resolution
 # for the multiplexed-profile case. Shells into the Python sidecar at
