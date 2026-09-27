@@ -538,3 +538,82 @@ class LockTests(_Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ResidualReviewFixTests(_Base):
+    """Two residuals from the second review round.
+
+    Both were 'already fixed' in the first round and both were still real:
+    the guards were present but too weak to catch the case they existed for.
+    """
+
+    def test_stale_ledger_lines_do_not_mask_a_failed_write(self):
+        """Verify THIS run's keys, not merely that the job has some line.
+
+        A job legitimately carries a partial key set from an earlier tick --
+        the work builder skips keys already ledgered -- so a check of the form
+        "does this job have any ledger line" passes on the strength of the OLD
+        lines while the current write silently failed. That is the exact case
+        the check exists for, so it must not be maskable.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-om-stale-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True, econ_404=True)
+            self._assessment(state_dir)
+
+            ledger = os.path.join(state_dir, 'revenium-outcome-metrics.ledger')
+            # Pre-existing lines for the SAME job under a DIFFERENT recordedAt,
+            # i.e. an earlier tick's partial work.
+            Path(ledger).write_text('OM:job-1:estimated_value:2020-01-01T00:00:00Z\n')
+            os.chmod(ledger, 0o444)          # writes now fail
+            try:
+                r = self._run(env)
+                self.assertEqual(0, r.returncode, r.stderr)
+                log = Path(os.path.join(state_dir, 'revenium-metering.log')).read_text()
+                self.assertIn(
+                    'could NOT persist', log,
+                    'a failed ledger write must be detected even though the job '
+                    'already has an unrelated ledger line; otherwise the next '
+                    'tick re-appends permanent metrics',
+                )
+            finally:
+                os.chmod(ledger, 0o644)
+
+    def test_contract_with_wrong_metric_type_is_skipped(self):
+        """Presence is not enough -- the declared TYPE must match.
+
+        The range check applies MONEY/DURATION/SCORE semantics by assumption,
+        so a contract declaring assessment_confidence as something else would
+        have a 0..1 bound enforced against a metric the operator meant
+        differently.
+        """
+        with tempfile.TemporaryDirectory(prefix='gsd-om-mistyped-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            log = os.path.join(bin_dir, 'calls.log')
+            body = (
+                '#!/bin/bash\n'
+                'echo "$*" >> "%s"\n' % log +
+                'if [ "$1" = "jobs" ] && [ "$2" = "--help" ]; then '
+                'printf \'Available Commands:\\n  outcome-metrics  Append\\n\'; exit 0; fi\n'
+                'if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$4" = "get" ]; then '
+                'echo \'{"jobType":"t1","unitMetricKey":"u","metrics":['
+                '{"key":"estimated_value","type":"MONEY"},'
+                '{"key":"hours_saved","type":"DURATION"},'
+                '{"key":"assessment_confidence","type":"PERCENT"},'   # wrong type
+                '{"key":"u","type":"COUNT"}]}\'; exit 0; fi\n'
+                'if [ "$1" = "jobs" ] && [ "$2" = "outcome-metrics" ]; then '
+                'cat >/dev/null; echo Appended; exit 0; fi\n'
+                'exit 0\n')
+            Path(os.path.join(bin_dir, 'revenium')).write_text(body)
+            os.chmod(os.path.join(bin_dir, 'revenium'), 0o755)
+            self._assessment(state_dir)
+
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual(
+                [], self._ledger(state_dir),
+                'a type whose contract declares an incompatible metric type '
+                'must be skipped, not appended under assumed semantics',
+            )
+            calls = Path(log).read_text() if os.path.exists(log) else ''
+            self.assertNotIn('jobs outcome-metrics', calls)

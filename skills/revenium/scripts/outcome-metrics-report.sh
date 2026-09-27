@@ -131,10 +131,21 @@ try:
 except Exception:
     print("SKIP	unreadable economics document"); sys.exit(0)
 metrics = {m.get("key"): m for m in (d.get("metrics") or []) if isinstance(m, dict)}
-required = ["estimated_value", "hours_saved", "assessment_confidence"]
+# Types matter as much as presence: the range check downstream applies
+# MONEY/DURATION/SCORE semantics by ASSUMPTION, so a contract declaring
+# assessment_confidence as anything other than SCORE would have a 0..1 bound
+# enforced against a metric the operator meant differently -- or go
+# unenforced where it should not.
+required = {"estimated_value": "MONEY", "hours_saved": "DURATION",
+            "assessment_confidence": "SCORE"}
 missing = [k for k in required if k not in metrics]
 if missing:
     print("SKIP	contract does not declare: " + ", ".join(missing)); sys.exit(0)
+mistyped = ["%s is %s, expected %s" % (k, metrics[k].get("type"), t)
+            for k, t in sorted(required.items())
+            if (metrics[k].get("type") or "") != t]
+if mistyped:
+    print("SKIP	contract declares incompatible types: " + "; ".join(mistyped)); sys.exit(0)
 unit = d.get("unitMetricKey") or os.environ["DEFAULT_UNIT"]
 if unit not in metrics:
     print("SKIP	unitMetricKey %r is not among the declared metrics" % unit); sys.exit(0)
@@ -518,9 +529,25 @@ PY
     # and append the same permanent metrics again. Counting this job as
     # appended and carrying on would turn one unwritable ledger into a
     # duplicate for every remaining job in the backlog, so this STOPS the run.
-    local ledger_lines_after
-    ledger_lines_after="$(grep -c "^OM:${jid}:" "${OUTCOME_METRICS_LEDGER_FILE}" 2>/dev/null || echo 0)"
-    if [[ "${ledger_lines_after}" -eq 0 ]]; then
+    # Verify the EXACT keys this run wrote, not merely that the job has some
+    # line. A job can legitimately carry a partial key set from an earlier
+    # tick (the work builder skips keys already ledgered), so "does this job
+    # have any line" passes on the strength of the OLD lines while this run's
+    # write silently failed -- masking the very case the check exists for.
+    local ledger_ok
+    ledger_ok="$(OM_ENTRIES="${entries_json}" JID="${jid}" RECORDED="${recorded_at}" \
+      LEDGER="${OUTCOME_METRICS_LEDGER_FILE}" python3 -c '
+import json, os
+try:
+    entries = json.loads(os.environ["OM_ENTRIES"])
+    want = {"OM:%s:%s:%s" % (os.environ["JID"], e["key"], os.environ["RECORDED"]) for e in entries}
+    with open(os.environ["LEDGER"], encoding="utf-8") as f:
+        have = {l.strip() for l in f}
+    print("ok" if want <= have else "missing")
+except Exception:
+    print("missing")
+' 2>/dev/null)"
+    if [[ "${ledger_ok}" != "ok" ]]; then
       error "outcome-metrics: APPENDED job=${jid} but could NOT persist its ledger keys to ${OUTCOME_METRICS_LEDGER_FILE}; stopping so the next tick cannot re-append. This job's metrics are already on the platform and must be added to the ledger by hand before this stage runs again."
       ((failed++)) || true
       break
