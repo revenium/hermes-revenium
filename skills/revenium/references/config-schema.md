@@ -478,10 +478,19 @@ is skipped by the reader (never crashes it) and refused outright by the writer.
 |---|---|---|
 | `REVENIUM_JOB_ASSESSMENTS_DIR` | `${STATE_DIR}/job-assessments` | Overrides the sidecar directory, following the same `REVENIUM_*` override convention as `EVENT_SPOOL_DIR`/`TOOL_EVENTS_DIR`. |
 | `REVENIUM_ASSESSMENT_RETENTION_DAYS` | `90` | Retention window for sidecar files, keyed on each file's own last write (mtime), not the owning session's ledger timestamp used to prune `markers/`. The window exceeds `MARKER_RETENTION_DAYS`' 30 because assessments are the audit record for corrections, which may arrive well after a session ends. |
+| `REVENIUM_OUTCOME_METRICS_LEDGER_FILE` | `${STATE_DIR}/revenium-outcome-metrics.ledger` | Overrides the idempotency ledger for permanent `jobs outcome-metrics` appends. Each line keys one job id, metric key, and `recordedAt`. |
+| `REVENIUM_OUTCOME_METRICS_LOCK_FILE` | `${STATE_DIR}/outcome-metrics.lock` | Overrides the non-blocking lock around the outcome-metrics read/append/ledger sequence. |
+| `REVENIUM_OUTCOME_METRICS_MAX_JOBS` | `25` | Bounds jobs processed per cron tick. `0` disables the outcome-metrics stage. |
 
-Both variables are declared only in `common.sh`, between the existing declarations and
+These variables are declared only in `common.sh`, between the existing declarations and
 the eager `mkdir -p` line, following the single-source-of-truth rule every other state
 path in this document follows.
+
+`outcome-metrics-report.sh` reads only current, reportable records whose `kind` is
+`job_assessment`. It appends `estimated_value` (`MONEY`), `hours_saved` (`DURATION`),
+`assessment_confidence` (`SCORE`), and the job type's declared `COUNT` unit metric. Operator
+`correction` lines remain authoritative for `jobs outcome-update` but are not replayed into
+the Outcome timeline.
 
 ## `correct-assessment.sh` operator flags
 

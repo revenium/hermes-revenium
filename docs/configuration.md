@@ -179,6 +179,23 @@ the counters are cumulative and the ledger starts empty. See
 [Auxiliary usage migration](migration-auxiliary-usage.md) for the measured size of the
 step-up and its caveat.
 
+### Outcome timeline metrics
+
+After the ordinary job-outcome report, cron can append the assessment's value, hours saved,
+confidence, and completed-job count to the job's Outcome timeline. The stage runs only when
+the installed CLI advertises `jobs outcome-metrics`; older CLIs leave it as a no-op.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REVENIUM_OUTCOME_METRICS_MAX_JOBS` | `25` | Maximum jobs processed per tick. `0` disables the stage. |
+| `REVENIUM_OUTCOME_METRICS_LEDGER_FILE` | `${STATE_DIR}/revenium-outcome-metrics.ledger` | Local idempotency record for permanent remote appends. |
+| `REVENIUM_OUTCOME_METRICS_LOCK_FILE` | `${STATE_DIR}/outcome-metrics.lock` | Non-blocking lock around the ledger and append sequence. |
+
+The stage validates the job type's economics contract before appending anything. It creates
+a default contract only when none exists and never replaces an operator-managed contract.
+See [Outcome timeline metrics](value-and-roi.md#outcome-timeline-metrics) for the metric keys,
+failure behavior, and append limitations.
+
 ### Housekeeping
 
 | Variable | Default | Purpose |
