@@ -826,9 +826,20 @@ class StructuralInvariantTests(unittest.TestCase):
         pattern for documentation could inflate the count without a second
         REAL site existing.
 
-        MISSES: pins the NUMBER of sites, not that the two are TEXTUALLY
-        IDENTICAL to each other (a drifted-but-still-present second copy
-        would still pass this count).
+        Count is FOUR, not two: hermes-report.sh's main SELECT guards
+        `user_id` (1), and `build_subscriber_map` guards all THREE fields it
+        writes into its TAB-separated row -- `id`, `source` and `user_id` (3).
+        Guarding only `user_id` there left the other two columns able to shift
+        every later field (a TAB) or split one row into two (a newline), which
+        let an unsafe root `source` fabricate a plausible inherited key instead
+        of being rejected. Raised from 2 to 4 when that was fixed.
+
+        MISSES: pins the NUMBER of sites, not that they are TEXTUALLY
+        IDENTICAL to each other (a drifted-but-still-present copy would still
+        pass this count), and not WHICH columns are guarded -- the behavioural
+        proof for that is
+        test_unsafe_root_source_cannot_fabricate_an_inherited_key in
+        tests/test_phase61_identity_resolution.py.
         """
         needle = "GLOB '*[|'"
         total = 0
@@ -841,7 +852,12 @@ class StructuralInvariantTests(unittest.TestCase):
                 l for l in text.splitlines() if not l.strip().startswith('#')
             )
             total += code_only.count(needle)
-        self.assertEqual(total, 2, f'expected exactly 2 CASE sites, counted {total}')
+        self.assertEqual(
+            total, 4,
+            f'expected exactly 4 delimiter-safety CASE sites '
+            f'(1 in the main SELECT + 3 in build_subscriber_map), '
+            f'counted {total}'
+        )
 
     def test_boundary_files_unmodified_relative_to_merge_base(self):
         """`tests/fixtures/compat/`, `tests/_compat_helpers.py` and
@@ -857,13 +873,27 @@ class StructuralInvariantTests(unittest.TestCase):
         directory, say) -- `test_expected_files_exist`'s own inventory is
         the guard against an unexpected new file, not this test.
         """
+        # SKIP, never fail, when the repository cannot answer the question.
+        # CI checks out with the default shallow `actions/checkout@v4`, which
+        # has no local `main` ref and no shared history, so `git merge-base
+        # HEAD main` exits 128 with "Not a valid object name main". Asserting
+        # returncode == 0 therefore turned a missing-ref ENVIRONMENT condition
+        # into a red suite on every PR, even when the boundary files were
+        # untouched -- the test reported on the checkout depth rather than on
+        # the property it exists to guard. A guard that cannot run must say so
+        # rather than fail, and must not be the reason a suite is red.
         merge_base = subprocess.run(
             ['git', 'merge-base', 'HEAD', 'main'],
             cwd=str(ROOT), capture_output=True, text=True, timeout=30,
         )
-        self.assertEqual(merge_base.returncode, 0, merge_base.stderr)
+        if merge_base.returncode != 0 or not merge_base.stdout.strip():
+            self.skipTest(
+                'no merge-base against `main` in this checkout '
+                f'(shallow clone or absent ref): {merge_base.stderr.strip()!r}. '
+                'The boundary property is covered locally and by the argv '
+                'differential, which needs no git history.'
+            )
         base_sha = merge_base.stdout.strip()
-        self.assertTrue(base_sha, 'empty merge-base sha')
 
         diff = subprocess.run(
             [

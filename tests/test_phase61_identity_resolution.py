@@ -515,6 +515,80 @@ class Phase61IdentityResolutionEndToEndTestCase(unittest.TestCase):
             'CR-01: a raw email-shaped root subscriber key reached the log',
         )
 
+    def test_rejected_own_identity_does_not_inherit_the_root(self):
+        """A child whose OWN user_id is transport-unsafe must NOT fall back to
+        its root's identity. Rejection is a positive finding about THIS
+        session; inheriting over it names a subscriber on the child's line
+        immediately after refusing that child's own value.
+
+        The pre-fix gate tested `-z "${subscriber_key}"`, which is true for
+        BOTH `none` and `rejected` -- so an emptiness test silently promoted a
+        rejection into an inherited identity. The gate now reads the STATUS.
+
+        MISSES: proves no subscriber is attributed and the block is counted;
+        does not pin the counter's exact wording in the aggregate line.
+        """
+        root_sid = "p61-root-rej"
+        child_sid = "p61-child-rej"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'slack', 'user_id': 'U900'},
+            {
+                'id': child_sid, 'source': 'slack',
+                'user_id': 'U9\t01',          # TAB -> transport-unsafe -> rejected
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+        ])
+        self._run()
+        lines = self._log_lines()
+        reported = [l for l in lines if f"Reported: session={child_sid} " in l]
+        self.assertEqual(len(reported), 1, reported)
+        self.assertNotIn(
+            'subscriber=slack:U900', reported[0],
+            'a rejected child must NOT inherit its root identity',
+        )
+        self.assertNotIn(
+            'subscriber=slack:U9', reported[0],
+            'no subscriber of any shape should be attributed to a rejected child',
+        )
+        agg = [l for l in lines if 'subscriber attribution:' in l]
+        self.assertTrue(agg, lines)
+        self.assertIn('rejected_inherit_blocked=1', agg[0])
+
+    def test_unsafe_root_source_cannot_fabricate_an_inherited_key(self):
+        """Every field written into the TAB-separated subscriber map is
+        sanitised, not only user_id. A TAB in the ROOT's `source` shifted every
+        later field, so the lookup read a truncated source plus a fragment as
+        the user id and fabricated a plausible-looking key instead of
+        rejecting an unsafe one.
+
+        MISSES: covers `source`; the session-id arm is guarded by the same SQL
+        CASE but is not separately exercised here because ids are
+        system-generated.
+        """
+        root_sid = "p61-root-unsafesrc"
+        child_sid = "p61-child-unsafesrc"
+        _seed_sessions_db(self.state_db, [
+            {'id': root_sid, 'source': 'slack\tother', 'user_id': 'U950'},
+            {
+                'id': child_sid, 'source': 'slack', 'user_id': None,
+                'parent_session_id': root_sid,
+                'input_tokens': 200, 'output_tokens': 100,
+            },
+        ])
+        self._run()
+        lines = self._log_lines()
+        reported = [l for l in lines if f"Reported: session={child_sid} " in l]
+        self.assertEqual(len(reported), 1, reported)
+        self.assertNotIn(
+            'subscriber=slack:other', reported[0],
+            'a TAB in the root source must not fabricate an inherited key',
+        )
+        self.assertNotIn(
+            'subscriber=slack:U950', reported[0],
+            'an unsafe root source must be rejected, not silently accepted',
+        )
+
     def test_child_own_identity_matches_root_no_disagreement(self):
         """The observed-on-the-reference-host case (all 7 children): a
         child's own identity equals its root's — its key is its own, and

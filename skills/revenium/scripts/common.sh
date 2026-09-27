@@ -949,6 +949,15 @@ mask_subscriber_for_log() {
 # SAME delimiter-safety CASE expression as the main SELECT in
 # hermes-report.sh, so a transport-unsafe value is COUNTABLE by the caller
 # instead of silently corrupting this file's row shape.
+#
+# ALL THREE fields are sanitised, not just user_id. This row is TAB
+# separated, so a TAB anywhere in it shifts every later field and a
+# newline splits one row into two -- guarding only user_id left the other
+# two columns able to do exactly the corruption the guard exists to stop.
+# A TAB in `source`, for instance, made the lookup read a truncated source
+# and a fragment of the source as the user id, fabricating a plausible
+# key instead of rejecting an unsafe one. Sanitising one of three fields
+# is the 'guard that exists but is too weak' pattern.
 build_subscriber_map() {
   local out_file="${1:-}"
   [[ -z "${out_file}" ]] && return 0
@@ -960,7 +969,14 @@ build_subscriber_map() {
     return 0
   fi
   sqlite3 "${STATE_DB}" "
-    SELECT id || char(9) || COALESCE(source,'') || char(9) ||
+    SELECT CASE WHEN id GLOB '*[|' || char(9) || char(10) || char(13) || ']*'
+                THEN '__revenium_unsafe_session_id__'
+                ELSE COALESCE(id, '') END
+           || char(9) ||
+           CASE WHEN source GLOB '*[|' || char(9) || char(10) || char(13) || ']*'
+                THEN '__revenium_unsafe_source__'
+                ELSE COALESCE(source,'') END
+           || char(9) ||
            CASE WHEN user_id GLOB '*[|' || char(9) || char(10) || char(13) || ']*'
                 THEN '__revenium_unsafe_user_id__'
                 ELSE COALESCE(user_id, '') END

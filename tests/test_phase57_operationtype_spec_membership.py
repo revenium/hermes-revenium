@@ -440,6 +440,16 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # loop, shifting both sites again (3588->3603, 3769->3784). Pure
         # shift; the trap touches no emission site.
         #
+        # Re-measured again (phase 61, SUB-01..SUB-04, same convention):
+        # identity resolution inserted the column probe, the per-session
+        # resolution block and the inheritance map build above this file's two
+        # later sites, shifting them by exactly +176 (3603->3779,
+        # 3784->3960). Pure shift -- the SET of emission sites is unchanged
+        # (still four: hermes-report.sh x3 plus api-event-report.sh), and
+        # phase 61 adds no flag to any of them. Verified by running this test
+        # against origin/main (OK) and against the phase branch (FAIL naming
+        # only the two moved tuples).
+        #
         # Re-measured again (quick-260918-lt6, same convention): batching the
         # per-tick root-session resolution inserted a 19-line block (the map
         # build plus its rationale) immediately above hermes-report.sh's main
@@ -480,8 +490,8 @@ class SoleOtherEmitterTests(unittest.TestCase):
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1496),
-            ('hermes-report.sh', 3603),
-            ('hermes-report.sh', 3784),
+            ('hermes-report.sh', 3779),
+            ('hermes-report.sh', 3960),
             ('api-event-report.sh', 1667),
         }
         self.assertEqual(

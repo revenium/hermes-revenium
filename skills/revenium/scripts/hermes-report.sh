@@ -1573,6 +1573,7 @@ main() {
   # never split this pipe-delimited row and leave a plausible-looking WRONG
   # identity in an earlier field (T-61-02).
   local user_id_select_expr
+  local subscriber_column_absent=false
   if sessions_has_user_id; then
     user_id_select_expr="CASE WHEN user_id GLOB '*[|' || char(9) || char(10) || char(13) || ']*'
                 THEN '__revenium_unsafe_user_id__'
@@ -1583,7 +1584,14 @@ main() {
     # report" — modelled on the session_model_usage absent-table line above
     # (AUX_TABLE_ABSENT) and for the same reason. One line per tick: the
     # probe is resolved once here, not per session.
-    info "subscriber attribution skipped this tick: sessions.user_id column not present on this Hermes install (predates identity resolution) — main-loop metering is unaffected"
+    # Deferred until we know there is work: on an older install this
+    # condition is PERMANENT and the reporter runs every minute, so logging
+    # it unconditionally writes ~1,440 identical lines a day forever and
+    # buries real diagnostics. That is the ungated-per-tick-log
+    # anti-pattern the .warn / .fallback-warn sentinels exist to prevent.
+    # Emitted below only when this tick actually had sessions to report,
+    # which is the only time the absence is decision-relevant.
+    subscriber_column_absent=true
   fi
 
   local sessions
@@ -1794,7 +1802,7 @@ PY
   # below, not a pipe), so an increment inside it survives to the aggregate
   # lines after the loop closes.
   local subscriber_own_count=0
-  local subscriber_inherited_count=0
+  local subscriber_inherited_count=0 subscriber_rejected_inherit_blocked_count=0
   local subscriber_disagreement_count=0
   local subscriber_rejected_count=0
   # The first disagreement's detail this tick, so the once-per-tick warn
@@ -1885,7 +1893,26 @@ PY
   # state path). Deliberately NOT exported: unlike ROOT_SID_MAP_FILE (read
   # by get_root_session_id inside common.sh from many call sites), the
   # lookup this file feeds is inline in this loop only.
-  subscriber_map_file="$(mktemp 2>/dev/null || echo "/tmp/hermes-subscriber-map.$$")"
+  # The fallback must be as private as mktemp's own 0600, or the claim in the
+  # comment above is false on exactly the path that needs it most: this file
+  # holds RAW subscriber identities. A fixed /tmp name is both predictable
+  # (a pre-created symlink redirects the truncating write) and subject to the
+  # ambient umask, so it is created with a restrictive umask and its mode is
+  # asserted afterwards. If neither mktemp nor the fallback yields a private
+  # regular file, the map is left empty and attribution simply degrades to
+  # "no subscriber" -- fail closed, never write identities somewhere readable.
+  subscriber_map_file="$(mktemp 2>/dev/null || true)"
+  if [[ -z "${subscriber_map_file}" ]]; then
+    subscriber_map_file="${TMPDIR:-/tmp}/hermes-subscriber-map.$$.$RANDOM"
+    rm -f "${subscriber_map_file}" 2>/dev/null || true
+    ( umask 077; : > "${subscriber_map_file}" ) 2>/dev/null || true
+  fi
+  if [[ ! -f "${subscriber_map_file}" ]] || [[ -L "${subscriber_map_file}" ]]; then
+    warn "subscriber attribution disabled this tick: could not create a private temp file for the identity map"
+    subscriber_map_file=""
+  else
+    chmod 600 "${subscriber_map_file}" 2>/dev/null || true
+  fi
   trap 'rm -f "${root_sid_map_file:-}" "${subscriber_map_file:-}" 2>/dev/null' EXIT INT TERM
   printf '%s\n' "${sessions}" | cut -d'|' -f1 \
     | build_root_sid_map "${root_sid_map_file}"
@@ -2028,15 +2055,34 @@ PY
         # formatted by the same code (D-01).
         root_sub_resolved="$(resolve_subscriber_id "${root_source}" "${root_user_id}")"
         root_subscriber_key="${root_sub_resolved#*|}"
-        if [[ -z "${subscriber_key}" ]]; then
+        if [[ "${subscriber_status}" != "rejected" && -z "${subscriber_key}" ]]; then
           # No key of its own: adopt the root's (D-08). An empty root key
           # means nothing is inherited -- the D-11 negative arm, satisfied
           # by construction because the map holds only identity-bearing
           # rows.
+          #
+          # An empty key is NOT sufficient on its own: `rejected` (a
+          # transport-unsafe own user_id) also leaves the key empty, so a bare
+          # emptiness test silently promoted a rejection into an inherited
+          # identity -- naming a subscriber on the child's Reported: line
+          # immediately after refusing that child's own value. A rejection is
+          # a positive finding about THIS session and must not be overwritten
+          # by its parent's.
+          #
+          # But the status alone is not sufficient EITHER, and testing only
+          # `== "none"` was wrong: the fork-avoidance guard above means a
+          # session with an empty user_id never calls resolve_subscriber_id at
+          # all, so its status stays "" rather than "none" -- which is 97% of
+          # sessions, i.e. the entire population inheritance exists for. Both
+          # halves are required: not rejected, AND no key of its own.
           if [[ -n "${root_subscriber_key}" ]]; then
             subscriber_key="${root_subscriber_key}"
             ((subscriber_inherited_count++)) || true
           fi
+        elif [[ "${subscriber_status}" == "rejected" ]]; then
+          # Counted so a rejection is visible rather than looking identical
+          # to the 97% no-identity case. No inheritance, no key.
+          ((subscriber_rejected_inherit_blocked_count++)) || true
         else
           # Own identity wins (D-10) -- the root is consulted for
           # DETECTION only, never for resolution. A persisting disagreement
@@ -5317,9 +5363,17 @@ PY
   # blocks above -- ONE line when any of the four counters is non-zero,
   # total silence when all are zero, so an install with no identity-bearing
   # sessions gains no log volume at all.
+  # Deferred from the probe (see subscriber_column_absent): emitted only on a
+  # tick that actually reported something, so a permanent compatibility
+  # condition on an older install cannot write a line a minute forever.
+  if [[ "${subscriber_column_absent}" == "true" && "${reported_count:-0}" -gt 0 ]]; then
+    info "subscriber attribution skipped: sessions.user_id column not present on this Hermes install (predates identity resolution) — main-loop metering is unaffected"
+  fi
+
   if [[ "${subscriber_own_count}" -gt 0 || "${subscriber_inherited_count}" -gt 0 \
-        || "${subscriber_disagreement_count}" -gt 0 || "${subscriber_rejected_count}" -gt 0 ]]; then
-    info "subscriber attribution: own=${subscriber_own_count} inherited=${subscriber_inherited_count} disagreements=${subscriber_disagreement_count} rejected=${subscriber_rejected_count} this tick"
+        || "${subscriber_disagreement_count}" -gt 0 || "${subscriber_rejected_count}" -gt 0 \
+        || "${subscriber_rejected_inherit_blocked_count}" -gt 0 ]]; then
+    info "subscriber attribution: own=${subscriber_own_count} inherited=${subscriber_inherited_count} disagreements=${subscriber_disagreement_count} rejected=${subscriber_rejected_count} rejected_inherit_blocked=${subscriber_rejected_inherit_blocked_count} this tick"
   fi
   # A persisting disagreement means the data has changed shape (D-10).
   # CONTEXT.md's Claude's-Discretion note explicitly permits a cheaper
