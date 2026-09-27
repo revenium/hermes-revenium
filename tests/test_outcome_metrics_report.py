@@ -67,13 +67,42 @@ class _Base(unittest.TestCase):
             f.write(json.dumps(rec) + '\n')
 
     def _shim(self, bin_dir, *, has_verb=True, throttle=False, econ_404=True,
-              log=None, unit_key='signal_events_processed', econ_metrics=None):
+              log=None, unit_key='signal_events_processed', econ_metrics=None,
+              append_status=None, append_exit=3):
         """A stub `revenium`. `has_verb` controls whether `jobs --help` lists
         outcome-metrics; when it does NOT, the stub mimics cobra's real
-        behaviour for an unknown subcommand: print the PARENT help, exit 0."""
+        behaviour for an unknown subcommand: print the PARENT help, exit 0.
+
+        `append_status`/`append_exit` model a non-2xx JSON body on the
+        `jobs outcome-metrics` append call itself -- e.g. a 404 for a job not
+        yet queryable, or a 500. Left at their defaults (`append_status=None`)
+        the append arm is BYTE-IDENTICAL to before these parameters existed;
+        only a caller that sets `append_status` gets the new branch.
+        """
         log = log or os.path.join(bin_dir, 'calls.log')
         verb_line = ('  outcome-metrics     Append late per-job outcome metrics\n'
                      if has_verb else '')
+        if append_status is None:
+            append_arm = (
+                'if [ "$1" = "jobs" ] && [ "$2" = "outcome-metrics" ]; then\n'
+                f'  if [ "{throttle}" = "True" ]; then echo \'{{"error":"x","status":429}}\'; exit 1; fi\n'
+                '  cat > /dev/null\n'
+                '  echo "Appended entries to job $3."; exit 0\n'
+                'fi\n'
+            )
+        else:
+            # Drain stdin before emitting the error body: a real CLI invoked
+            # as `--file -` must read the request body before it can respond
+            # with a 404. The 429 arm just above does NOT drain -- that
+            # asymmetry is pre-existing and left alone (Task 1 note), not
+            # introduced here.
+            append_arm = (
+                'if [ "$1" = "jobs" ] && [ "$2" = "outcome-metrics" ]; then\n'
+                f'  if [ "{throttle}" = "True" ]; then echo \'{{"error":"x","status":429}}\'; exit 1; fi\n'
+                '  cat > /dev/null\n'
+                f'  echo \'{{"error":"x","status":{append_status}}}\'; exit {append_exit}\n'
+                'fi\n'
+            )
         body = f'''#!/bin/bash
 echo "$*" >> "{log}"
 if [ "$1" = "jobs" ] && [ "$2" = "--help" ]; then
@@ -88,12 +117,7 @@ fi
 if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "set" ]; then
   echo "Contract"; exit 0
 fi
-if [ "$1" = "jobs" ] && [ "$2" = "outcome-metrics" ]; then
-  if [ "{throttle}" = "True" ]; then echo '{{"error":"x","status":429}}'; exit 1; fi
-  cat > /dev/null
-  echo "Appended entries to job $3."; exit 0
-fi
-# Mimic cobra: unknown subcommand prints PARENT help and exits 0.
+{append_arm}# Mimic cobra: unknown subcommand prints PARENT help and exits 0.
 echo "Manage Agentic Jobs"; exit 0
 '''
         p = os.path.join(bin_dir, 'revenium')
@@ -507,6 +531,139 @@ class PartialOutcomeTests(_Base):
             )
             calls = Path(log).read_text() if os.path.exists(log) else ''
             self.assertNotIn('jobs outcome-metrics', calls)
+
+
+class NotFoundDeferralTests(_Base):
+    """A 404 from `jobs outcome-metrics` means "not yet queryable", not a
+    permanent failure. Live evidence from Jupi: 11 jobs 404'd at 06:45 and
+    all 11 appended cleanly at 07:41. Detection must read the body, not the
+    exit code -- exactly like the existing 429 arm, and for the same
+    underlying CLI limitation (no dedicated exit code; ExitGeneral covers
+    both a throttle and a not-found alike).
+    """
+
+    def _log_text(self, state_dir):
+        p = os.path.join(state_dir, 'revenium-metering.log')
+        return Path(p).read_text() if os.path.exists(p) else ''
+
+    def test_404_on_append_defers_not_fails(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-om-404-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True, econ_404=False,
+                       append_status=404, append_exit=3)
+            self._assessment(state_dir)
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual(
+                [], self._ledger(state_dir),
+                'a not-found append must leave no ledger line, so the next '
+                'tick retries once the job becomes queryable',
+            )
+            log = self._log_text(state_dir)
+            self.assertNotIn(
+                'append failed', log,
+                'a 404 (not yet queryable) must not warn like a permanent '
+                'failure',
+            )
+            self.assertIn(
+                'deferred=1', log,
+                'the summary must count a 404 as deferred, not failed',
+            )
+            self.assertIn(
+                'failed=0', log,
+                'a 404 must not increment the failed counter',
+            )
+            self.assertIn(
+                'not_found=1', log,
+                'the summary must name how many jobs were not-found, so a '
+                'permanently-404ing job stays visible without a per-tick '
+                'per-job warn',
+            )
+
+    def test_404_defers_even_when_exit_code_is_generic_one(self):
+        """Proves detection reads the BODY, not the exit status -- the exact
+        property is_throttled's own comment block exists to protect."""
+        with tempfile.TemporaryDirectory(prefix='gsd-om-404-exit1-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True, econ_404=False,
+                       append_status=404, append_exit=1)
+            self._assessment(state_dir)
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual([], self._ledger(state_dir))
+            log = self._log_text(state_dir)
+            self.assertNotIn('append failed', log)
+            self.assertIn('deferred=1', log)
+            self.assertIn('failed=0', log)
+            self.assertIn('not_found=1', log)
+
+    def test_500_on_append_still_warns_and_counts_failed(self):
+        """The negative control: the new arm must not swallow every failure,
+        only not-found."""
+        with tempfile.TemporaryDirectory(prefix='gsd-om-500-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True, econ_404=False,
+                       append_status=500, append_exit=1)
+            self._assessment(state_dir)
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual(
+                [], self._ledger(state_dir),
+                'a genuine failure must still leave no ledger line',
+            )
+            log = self._log_text(state_dir)
+            self.assertIn(
+                'append failed', log,
+                'a 500 is a genuine failure and must still warn',
+            )
+            self.assertIn('failed=1', log)
+            self.assertIn('deferred=0', log)
+            self.assertIn(
+                'not_found=0', log,
+                'a 500 must not be counted toward the not-found tally -- '
+                'the new arm is scoped to not-found only',
+            )
+
+    def test_new_arm_sits_before_the_generic_failure_arm(self):
+        """Shape guard, per test_cache_dir_is_not_local's precedent: position
+        IS the property here. An arm placed after the generic `rc -ne 0`
+        check is dead code, because that check already consumes every
+        non-zero rc -- every behaviour test above would then pass for the
+        wrong reason."""
+        text = SCRIPT.read_text(encoding='utf-8')
+        lines = text.splitlines()
+
+        anchor = next(i for i, l in enumerate(lines)
+                      if 'jobs outcome-metrics' in l and '"${jid}"' in l)
+        after = lines[anchor:]
+
+        helper_def = [i for i, l in enumerate(lines)
+                      if l.strip().startswith('is_job_not_yet_queryable()')]
+        self.assertEqual(
+            1, len(helper_def),
+            'the detection helper must be defined exactly once',
+        )
+        helper_body = '\n'.join(lines[helper_def[0]:helper_def[0] + 6])
+        self.assertIn(
+            'json_field', helper_body,
+            'the helper must resolve its verdict through json_field, not '
+            'the exit code',
+        )
+
+        call_site = [i for i, l in enumerate(after)
+                     if 'is_job_not_yet_queryable "${out}"' in l]
+        fail_arm = [i for i, l in enumerate(after)
+                    if l.strip().startswith('if [[ ${rc} -ne 0 ]]; then')]
+        self.assertEqual(
+            1, len(call_site),
+            'the call site must appear exactly once in the append loop',
+        )
+        self.assertTrue(fail_arm, 'the generic failure arm must exist in the append loop')
+        self.assertLess(
+            call_site[0], fail_arm[0],
+            'the new arm must sit BEFORE the generic rc -ne 0 arm in the '
+            'append loop, or it is dead code',
+        )
 
 
 class LockTests(_Base):
