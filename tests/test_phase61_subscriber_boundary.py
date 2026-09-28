@@ -313,7 +313,14 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
     """
 
     def test_marker_path_value_differential_argv_identical(self):
-        """Same 15-column schema in both runs (both HAVE the user_id column);
+        """PHASE 62 (SUB-05/D-13) INVERTED: this test's ORIGINAL claim (Phase
+        61) was that runs A and B produce IDENTICAL argv, because Phase 61
+        added no wire flag. Phase 62 wires `--subscriber-id` at the
+        marker-split site too, so a session that resolves an actor now MUST
+        differ from one that does not -- by exactly the two subscriber
+        tokens.
+
+        Same 15-column schema in both runs (both HAVE the user_id column);
         only the ROW's value differs -- run A's is NULL, run B's is a real
         actor under source='slack'. This is the arm that isolates "a
         subscriber resolved from an already-present column" from any schema
@@ -339,23 +346,30 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
         )
         self.assertEqual(len(own_a), 1, f'run A: {own_a!r}')
         self.assertEqual(len(own_b), 1, f'run B: {own_b!r}')
-        _assert_argv_equal_modulo_timestamps(
-            self, own_a[0], own_b[0], 'marker path, value differential'
+        _assert_argv_equal_modulo_timestamps_plus_tail(
+            self, own_a[0], own_b[0],
+            ('--subscriber-id', 'slack:p61-actor-mv'),
+            'marker path, value differential',
         )
 
     def test_marker_path_schema_differential_argv_identical(self):
-        """Run A's `sessions` table has NO `user_id` column at all (built via
+        """PHASE 62 (SUB-05/D-13) INVERTED, same rationale as the value
+        differential above.
+
+        Run A's `sessions` table has NO `user_id` column at all (built via
         `tests._compat_helpers.build_state_db`, the exact 13-column shape
         used at 139 call sites across 39 files); run B's has the column,
         populated. This is the arm that proves the capability probe's
-        ABSENT branch changes nothing on the wire, which is what keeps all
+        ABSENT branch changes NOTHING on the wire, which is what keeps all
         139 `build_state_db` call sites honest as backward-compatibility
-        fixtures rather than silently-stale ones.
+        fixtures rather than silently-stale ones, now that a real flag
+        exists to leak.
 
-        MISSES: proves the two SELECT branches produce identical argv for
-        THIS fixture shape; it does not enumerate every possible
-        `PRAGMA table_info` result `sessions_has_user_id` could see on a
-        real, differently-migrated install.
+        MISSES: proves the two SELECT branches produce argv differing by
+        exactly the subscriber tail for THIS fixture shape; it does not
+        enumerate every possible `PRAGMA table_info` result
+        `sessions_has_user_id` could see on a real, differently-migrated
+        install.
         """
         sid = 'p61-diff-marker-schema'
         own_a, _ = _run_one(
@@ -377,8 +391,10 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
         )
         self.assertEqual(len(own_a), 1, f'run A: {own_a!r}')
         self.assertEqual(len(own_b), 1, f'run B: {own_b!r}')
-        _assert_argv_equal_modulo_timestamps(
-            self, own_a[0], own_b[0], 'marker path, schema differential'
+        _assert_argv_equal_modulo_timestamps_plus_tail(
+            self, own_a[0], own_b[0],
+            ('--subscriber-id', 'slack:p61-actor-ms'),
+            'marker path, schema differential',
         )
 
     def test_markerless_path_value_differential_argv_identical(self):

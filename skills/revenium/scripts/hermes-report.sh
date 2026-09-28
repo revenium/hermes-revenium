@@ -3909,6 +3909,24 @@ PY
           [[ -n "${ticket_id}" ]] && cmd+=(--ticket-id "${ticket_id}")
         fi
 
+        # Subscriber attribution (Phase 62, SUB-05/07/08) — identical shape
+        # and position to the markerless path below (both sites keep this
+        # family in step). Appended AFTER the ticket family — flag order is
+        # part of the argv contract the golden fixtures pin. `subscriber_key`
+        # is the per-session local already resolved at the loop head (own
+        # identity, or inherited via the root-walk); nothing is resolved
+        # here. This append sits INSIDE the per-marker loop but reads a
+        # PER-SESSION value, so every marker of one session necessarily
+        # carries the SAME key. A session with no resolved actor appends
+        # NOTHING — that is the common case (97% of sessions on the
+        # reference host) and the load-bearing one. Never logged here: the
+        # two `Reported:` lines already carry the key through
+        # mask_subscriber_for_log, and a new log line bypassing that masker
+        # was Phase 61's critical review finding.
+        if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" ]]; then
+          [[ -n "${subscriber_key}" ]] && cmd+=(--subscriber-id "${subscriber_key}")
+        fi
+
         local cmd_output cmd_exit
         cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 

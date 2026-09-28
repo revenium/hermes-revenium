@@ -496,11 +496,22 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # COUNT (4) and the emitted VALUE expressions are unchanged, so both
         # assertions above pass untouched. --subscriber-id is a different
         # flag family and adds no --operation-type emission site.
+        #
+        # Re-measured again (Phase 62 Plan 01 Task 2, SUB-05/07/08): the
+        # marker-split site's own --subscriber-id append block (18 lines,
+        # after that site's ticket block) sits BEFORE the markerless site's
+        # `--operation-type "CHAT"` line in file order, so only the
+        # markerless site's line moved (3974->3992); the marker-split site's
+        # own --operation-type "${op_type}" line sits ABOVE its ticket/
+        # subscriber blocks and is unaffected (3793 unchanged), and the aux
+        # site (1510) is unaffected. api-event-report.sh remains untouched
+        # by this plan. Pure shift once more -- the COUNT (4) and the
+        # emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1510),
             ('hermes-report.sh', 3793),
-            ('hermes-report.sh', 3974),
+            ('hermes-report.sh', 3992),
             ('api-event-report.sh', 1667),
         }
         self.assertEqual(

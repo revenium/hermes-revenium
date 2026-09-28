@@ -64,6 +64,8 @@ from tests._compat_helpers import (
 from tests.test_phase61_identity_resolution import (
     _OLD_TS,
     _own_meter_invocations,
+    _task_marker,
+    _write_marker_lines,
 )
 # Imported as a MODULE reference (not `from ... import TicketWiringTests`)
 # deliberately: importing the TestCase class by name would bind it into this
@@ -91,10 +93,11 @@ GUARD_LOOKBACK = _test_ticket_attribution.TicketWiringTests.GUARD_LOOKBACK
 # 2 in this plan"): that value is the correct FINAL state of this plan (both
 # tasks), but this test module must also pass at Task 1's own atomic commit,
 # when only the markerless site exists. Tracking the constant against the
-# ACTUAL state at each commit (1 here, 2 once Task 2 lands) is what keeps
-# every commit genuinely green, per the plan's own <the_central_property>
-# emphasis on provability -- recorded as a deviation in 62-01-SUMMARY.md.
-EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT = 1
+# ACTUAL state at each commit (1 at Task 1's commit, 2 now that Task 2 has
+# landed the marker-split site) is what keeps every commit genuinely green,
+# per the plan's own <the_central_property> emphasis on provability --
+# recorded as a deviation in 62-01-SUMMARY.md.
+EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT = 2
 
 # Scripts that declare the SUBSCRIBER_CLI_CAPABLE probe as of THIS plan.
 # api-event-report.sh joins this tuple in Plan 62-02 -- not before, per this
@@ -292,6 +295,215 @@ class MarkerlessSubscriberWiringTests(unittest.TestCase):
             self.assertEqual(len(own), 1, own)
             golden = load_golden('meter-completion-markerless.golden.json')
             assert_argv_is_golden_argv_order(self, own[0], golden)
+        finally:
+            tree.cleanup()
+
+
+class MarkerSplitSubscriberWiringTests(unittest.TestCase):
+    """Task 2: the four-run proof for the marker-split emit path.
+
+    Reuses tests.test_compat_meter_completion.py's exact fixture (sid,
+    muid, job id, model, tokens, source='test') so the values baked into
+    meter-completion.golden.json's new argv_order (this plan's own
+    addition, D-05) still hold. `source` stays 'test' for the same reason
+    as the markerless class above; only the ACTOR id is a synthetic p62-
+    value.
+    """
+
+    SID = 'compat-sid-001'
+    MUID = 'compat-muid-001'
+    ACTOR = 'p62-marker-actor'
+
+    def _seed(self, subscriber_capable, user_id_mapping=None):
+        tree = _Harness(subscriber_capable=subscriber_capable)
+        build_state_db(tree.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': 'test',
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': _OLD_TS,
+            'ended_at': _OLD_TS,
+            'billing_provider': 'anthropic',
+        }])
+        if user_id_mapping is not None:
+            seed_user_ids(tree.state_db, user_id_mapping)
+        task_marker = {
+            'muid': self.MUID,
+            'ts': 1715515000.5,
+            'sid': self.SID,
+            'task_type': 'code_review',
+            'operation_type': 'CHAT',
+        }
+        job_marker = {
+            'kind': 'job',
+            'ts': 1715515001.0,
+            'sid': self.SID,
+            'agentic_job_id': 'compat-job-001',
+            'job_name': 'COMPAT Test Job',
+            'job_type': 'code_review',
+            'status': 'IN_PROGRESS',
+        }
+        _write_marker_lines(tree.markers_dir, self.SID, [task_marker, job_marker])
+        return tree
+
+    def test_run_a_capable_no_user_id_column_matches_golden_argv_order(self):
+        """Run A: CLI advertises the flag, `sessions` has no `user_id`
+        column at all. Captured argv equals the golden's argv_order exactly
+        -- the untouched-install arm.
+
+        MISSES: proves the argv this skill CONSTRUCTS, not that Revenium
+        accepts the flag (Phase 64); pins ONE session shape (one marker,
+        one job marker) -- the multi-marker sameness proof is a separate
+        class below.
+        """
+        tree = self._seed(subscriber_capable=True)
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion.golden.json')
+            assert_argv_is_golden_argv_order(self, own[0], golden)
+        finally:
+            tree.cleanup()
+
+    def test_run_b_capable_column_present_null_matches_golden_argv_order(self):
+        """Run B: CLI advertises the flag, column present but NULL for this
+        session. Captured argv equals argv_order exactly -- proves the
+        capability probe's presence ALONE never appends the flag; only a
+        RESOLVED key does. Run B and Run C (below) share this exact
+        fixture, differing only in the identity VALUE (D-05).
+
+        MISSES: says nothing about the schema-absent case (Run A above).
+        """
+        tree = self._seed(
+            subscriber_capable=True, user_id_mapping={self.SID: None}
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion.golden.json')
+            assert_argv_is_golden_argv_order(self, own[0], golden)
+        finally:
+            tree.cleanup()
+
+    def test_run_c_capable_column_populated_matches_golden_plus_two_tokens(self):
+        """Run C: CLI advertises the flag, column present and populated.
+        Captured argv equals argv_order plus exactly the two trailing
+        tokens for the flag and the resolved key, and nothing else differs.
+        Run B (above) and this run are each other's proof (D-05).
+
+        MISSES: does not prove the resolved key names the right actor --
+        that is Phase 61's contract, not this phase's.
+        """
+        tree = self._seed(
+            subscriber_capable=True, user_id_mapping={self.SID: self.ACTOR}
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion.golden.json')
+            expected_key = f'test:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, own[0], golden,
+                extra_tail=('--subscriber-id', expected_key),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_d_incapable_column_populated_matches_golden_argv_order(self):
+        """Run D (SUB-07): CLI does NOT advertise the flag, column present
+        and populated. Captured argv equals argv_order exactly.
+
+        MISSES: this is a synthetic incapable shim, not a live older CLI;
+        Phase 64's live-host proof is the corroborating evidence for a real
+        install.
+        """
+        tree = self._seed(
+            subscriber_capable=False, user_id_mapping={self.SID: self.ACTOR}
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion.golden.json')
+            assert_argv_is_golden_argv_order(self, own[0], golden)
+        finally:
+            tree.cleanup()
+
+
+class MultiMarkerSubscriberSamenessTests(unittest.TestCase):
+    """Task 2 <behavior>: a session with THREE task markers and ONE
+    resolved actor ships three `meter completion` calls, and all three
+    carry the SAME subscriber key -- the actor is a property of the
+    SESSION, not of a marker. The negative arm (three markers, no resolved
+    actor) ships three calls carrying no subscriber token at all.
+
+    MISSES: proves the key is uniform across markers of ONE session; says
+    nothing about two SESSIONS sharing a trace (a squad/subagent scenario)
+    -- untested here.
+    """
+
+    SID = 'p62-multi-marker'
+    ACTOR = 'p62-multi-actor'
+
+    def _seed(self, with_actor):
+        tree = _Harness(subscriber_capable=True)
+        build_state_db(tree.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': 'slack',
+            'input_tokens': 300,
+            'output_tokens': 150,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': _OLD_TS,
+            'ended_at': _OLD_TS,
+            'billing_provider': 'anthropic',
+        }])
+        seed_user_ids(
+            tree.state_db,
+            {self.SID: self.ACTOR if with_actor else None},
+        )
+        _write_marker_lines(tree.markers_dir, self.SID, [
+            _task_marker(self.SID, 'p62-muid-1'),
+            _task_marker(self.SID, 'p62-muid-2'),
+            _task_marker(self.SID, 'p62-muid-3'),
+        ])
+        return tree
+
+    def test_three_markers_one_resolved_actor_all_calls_carry_same_key(self):
+        tree = self._seed(with_actor=True)
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 3, own)
+            expected_key = f'slack:{self.ACTOR}'
+            for argv in own:
+                self.assertIn('--subscriber-id', argv, argv)
+                idx = argv.index('--subscriber-id')
+                self.assertEqual(argv[idx + 1], expected_key, argv)
+        finally:
+            tree.cleanup()
+
+    def test_three_markers_no_resolved_actor_no_calls_carry_subscriber_token(self):
+        tree = self._seed(with_actor=False)
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 3, own)
+            for argv in own:
+                self.assertNotIn('--subscriber-id', argv, argv)
         finally:
             tree.cleanup()
 
