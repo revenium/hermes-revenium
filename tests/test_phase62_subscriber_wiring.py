@@ -40,17 +40,26 @@ Task 2 extends this module with the marker-split site
 adds to meter-completion.golden.json) and the multi-marker sameness proof
 (`MultiMarkerSubscriberSamenessTests`).
 
+Plan 62-02 Task 1 extends this module further with the FOURTH emission
+site -- `api-event-report.sh`'s event path (`EventSubscriberWiringTests`),
+against the new argv_order Plan 62-02 adds to
+meter-completion-event.golden.json -- plus the pipe-in-user_id and
+column-absent-environment-survives arms that site's `<behavior>` calls out
+by name. `SubscriberWiringStructuralTests` below is updated in lockstep:
+`EVENT_REPORT_SH` joins `SCRIPTS_WITH_SUBSCRIBER_PROBE` and
+`EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT` moves from 2 to 3.
+
 `SubscriberWiringStructuralTests` mirrors test_ticket_attribution.TicketWiringTests,
-scoped to what THIS PLAN actually wires -- `api-event-report.sh` gains the
-probe in Plan 62-02 and is deliberately NOT included in the "scripts with
-the probe" list here (62-01-PLAN.md's <constraints>: no event path, no
-api-event-report.sh in this plan).
+scoped to what has been wired as of THIS commit -- 62-03's aux path (inside
+hermes-report.sh, no new script) is not yet included.
 """
+import json
 import os
 import shlex
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 
 from tests._compat_helpers import (
     assert_argv_is_golden_argv_order,
@@ -75,6 +84,13 @@ from tests.test_phase61_identity_resolution import (
 import tests.test_ticket_attribution as _test_ticket_attribution
 
 HERMES_REPORT_SH = SCRIPTS_DIR / 'hermes-report.sh'
+EVENT_REPORT_SH = SCRIPTS_DIR / 'api-event-report.sh'
+
+
+def _write_jsonl(path, records):
+    with open(path, 'w', encoding='utf-8') as f:
+        for r in records:
+            f.write(json.dumps(r, separators=(',', ':')) + '\n')
 
 # How far back an emission may sit from its guard. Set EQUAL to
 # TicketWiringTests.GUARD_LOOKBACK (rather than a second literal 12) so the
@@ -83,26 +99,25 @@ GUARD_LOOKBACK = _test_ticket_attribution.TicketWiringTests.GUARD_LOOKBACK
 
 # How many `meter completion` emission SITES across skills/revenium/scripts/
 # are expected to append --subscriber-id at the end of THIS commit. Counts
-# sites, not scripts (both sites live in hermes-report.sh) -- confirmed by
-# grep in each task, never by arithmetic on the prior value. Bumped
-# deliberately by each task in this plan (1 after Task 1's markerless-only
-# commit, 2 after Task 2 adds the marker-split site) and by each later plan
-# in this phase (62-02 adds the event path and the aux path).
+# sites, not scripts (both hermes-report.sh sites plus, as of Plan 62-02
+# Task 1, api-event-report.sh's event-path site) -- confirmed by grep in
+# each task, never by arithmetic on the prior value. Bumped deliberately by
+# each task/plan in this phase (62-01: 1 then 2; 62-02 Task 1 here: 3, for
+# the event path; 62-03 adds the aux path).
 #
 # Deliberate deviation from 62-01-PLAN.md's literal step-7 wording ("set to
-# 2 in this plan"): that value is the correct FINAL state of this plan (both
-# tasks), but this test module must also pass at Task 1's own atomic commit,
-# when only the markerless site exists. Tracking the constant against the
-# ACTUAL state at each commit (1 at Task 1's commit, 2 now that Task 2 has
-# landed the marker-split site) is what keeps every commit genuinely green,
-# per the plan's own <the_central_property> emphasis on provability --
-# recorded as a deviation in 62-01-SUMMARY.md.
-EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT = 2
+# 2 in this plan"): that value was the correct FINAL state of THAT plan
+# (both its tasks), but each test module commit must also pass on its own,
+# so the constant tracks the ACTUAL state at each commit rather than a
+# plan's final-state wording -- recorded as a deviation in 62-01-SUMMARY.md
+# and continued here.
+EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT = 3
 
-# Scripts that declare the SUBSCRIBER_CLI_CAPABLE probe as of THIS plan.
-# api-event-report.sh joins this tuple in Plan 62-02 -- not before, per this
-# plan's explicit boundary.
-SCRIPTS_WITH_SUBSCRIBER_PROBE = (HERMES_REPORT_SH,)
+# Scripts that declare the SUBSCRIBER_CLI_CAPABLE probe as of THIS commit.
+# api-event-report.sh joins this tuple in Plan 62-02 Task 1 (the event
+# path); 62-03 does not add a third script -- the aux path lives inside
+# hermes-report.sh.
+SCRIPTS_WITH_SUBSCRIBER_PROBE = (HERMES_REPORT_SH, EVENT_REPORT_SH)
 
 
 class _Harness:
@@ -508,10 +523,240 @@ class MultiMarkerSubscriberSamenessTests(unittest.TestCase):
             tree.cleanup()
 
 
+class _EventHarness:
+    """One temp HERMES_HOME + PATH-shim `revenium` + one meter log for
+    api-event-report.sh, mirroring `_Harness` above but wired for the event
+    path's spool/markers/.ready layout rather than hermes-report.sh's
+    marker/state.db layout. The spool record and marker pair are FIXED --
+    byte-identical to test_compat_meter_completion_event.py's own fixture --
+    so this class's runs share meter-completion-event.golden.json's
+    argv_order with that compat test, per that golden's own 'captured'
+    provenance note (which records this exact richer-fixture shape: the
+    compat test's OWN fixture seeds no `sessions` table at all).
+    """
+
+    SID = 'compat-event-sid-001'
+    ARID = 'compat-event-arid-001'
+
+    def __init__(self, subscriber_capable=True, prefix='gsd-phase62-event-'):
+        self.tmp = tempfile.mkdtemp(prefix=prefix)
+        self.hermes_home = os.path.join(self.tmp, 'hh')
+        self.state_dir = os.path.join(self.hermes_home, 'state', 'revenium')
+        self.spool_dir = os.path.join(self.state_dir, 'api-events')
+        self.markers_dir = os.path.join(self.state_dir, 'markers')
+        self.ready_dir = os.path.join(self.markers_dir, '.ready')
+        os.makedirs(self.spool_dir, mode=0o700)
+        os.makedirs(self.markers_dir, mode=0o700)
+        os.makedirs(self.ready_dir, mode=0o700)
+        self.state_db = os.path.join(self.hermes_home, 'state.db')
+
+        self.shim_home = os.path.join(self.tmp, 'home')
+        self.bin_dir = os.path.join(self.shim_home, '.local', 'bin')
+        os.makedirs(self.bin_dir)
+        self.meter_log = os.path.join(self.tmp, 'meter.log')
+        self.inv_log = os.path.join(self.tmp, 'inv.log')
+        self.shim = os.path.join(self.bin_dir, 'revenium')
+        build_shim(self.shim, subscriber_capable=subscriber_capable)
+
+        Path(self.ready_dir, self.SID).touch()
+        _write_jsonl(os.path.join(self.spool_dir, f'{self.SID}.jsonl'), [{
+            'v': 1, 'sid': self.SID, 'api_request_id': self.ARID,
+            'ts': 1715514000.5, 'ended_at': 1715514001.0,
+            'duration_ms': 500, 'platform': 'cli',
+            'model': 'compat-session-model-should-not-ship',
+            'response_model': 'claude-sonnet-4-6',
+            'provider': 'anthropic',
+            'base_url': 'https://api.anthropic.com',
+            'api_mode': 'anthropic_messages',
+            'finish_reason': 'stop',
+            'input_tokens': 100, 'output_tokens': 50,
+            'cache_read_tokens': 10, 'cache_write_tokens': 5,
+            'reasoning_tokens': 0, 'total_tokens': 165,
+        }])
+        _write_jsonl(os.path.join(self.markers_dir, f'{self.SID}.jsonl'), [
+            {'muid': 'compat-event-muid-001', 'ts': 1715513900.0,
+             'sid': self.SID, 'task_type': 'code_review',
+             'operation_type': 'GUARDRAIL'},
+            {'muid': 'compat-event-muid-002', 'ts': 1715513900.5,
+             'sid': self.SID, 'task_type': 'code_review',
+             'operation_type': 'CHAT',
+             'agentic_job_id': 'compat-event-job-001'},
+        ])
+
+    def seed_session(self, source='test', user_id_mapping=None):
+        """Add a `sessions` row (the golden's own values, source='test') so
+        the environment dimension is present, then optionally add/set
+        `user_id` via seed_user_ids. Omitting `user_id_mapping` entirely
+        (the default) is Run A -- no ALTER TABLE at all, the column-absent
+        arm; passing `{SID: None}` is Run B; a real value is Run C/D.
+        """
+        build_state_db(self.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': source,
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_read': 10,
+            'cache_write': 5,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': 1715514000.5,
+            'ended_at': 1715514001.0,
+            'billing_provider': 'anthropic',
+        }])
+        if user_id_mapping is not None:
+            seed_user_ids(self.state_db, user_id_mapping)
+
+    def cleanup(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def base_env(self):
+        return {
+            **os.environ,
+            'HOME': self.shim_home,
+            'HERMES_HOME': self.hermes_home,
+            'REVENIUM_STATE_DIR': self.state_dir,
+            'PATH': self.bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': self.inv_log,
+            'METER_LOG': self.meter_log,
+            'TZ': 'UTC',
+            'REVENIUM_EVENT_METERING_MODE': 'live',
+        }
+
+    def run(self):
+        rc, _ignored_inv, output = run_script(
+            EVENT_REPORT_SH, self.base_env(), self.inv_log
+        )
+        meter_invocations = []
+        if os.path.exists(self.meter_log):
+            with open(self.meter_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if line:
+                        meter_invocations.append(shlex.split(line))
+        if rc != 0:
+            raise AssertionError(
+                f'api-event-report.sh failed (rc={rc}): {output}'
+            )
+        return meter_invocations
+
+
+class EventSubscriberWiringTests(unittest.TestCase):
+    """Plan 62-02 Task 1: the four-run proof for the event-path emit site
+    (api-event-report.sh), against meter-completion-event.golden.json's new
+    argv_order -- captured from the pre-emission-edit tree, with a
+    `sessions` row added so the environment dimension is a CONSTANT across
+    all four runs (that golden's own 'captured' key records this).
+
+    Plus the two additional arms this site's PLAN.md <behavior> calls out
+    by name: an unsafe (pipe-bearing) actor id ships no subscriber token
+    while leaving --environment and --total-tokens on the same row
+    untouched, and the identity-column-absent arm still carries
+    --environment -- proof the ten-column map did not come back empty
+    (T-62-08).
+    """
+
+    ACTOR = 'p62-event-actor'
+
+    def test_run_a_capable_no_user_id_column_matches_golden_argv_order(self):
+        """Run A: CLI advertises the flag, `sessions` has no `user_id`
+        column at all. Captured argv equals the golden's argv_order exactly
+        -- the untouched-install arm, and (T-62-08) --environment is still
+        present, proving the ten-column map did not come back empty.
+        """
+        tree = _EventHarness(subscriber_capable=True)
+        try:
+            tree.seed_session()
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            golden = load_golden('meter-completion-event.golden.json')
+            assert_argv_is_golden_argv_order(self, invocations[0], golden)
+            self.assertIn('--environment', invocations[0], invocations[0])
+        finally:
+            tree.cleanup()
+
+    def test_run_b_capable_column_present_null_matches_golden_argv_order(self):
+        """Run B: CLI advertises the flag, column present but NULL for this
+        session. Captured argv equals argv_order exactly -- proves the
+        capability probe's presence ALONE never appends the flag; only a
+        RESOLVED key does. Run B and Run C (below) share this exact
+        fixture, differing only in the identity VALUE.
+        """
+        tree = _EventHarness(subscriber_capable=True)
+        try:
+            tree.seed_session(user_id_mapping={_EventHarness.SID: None})
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            golden = load_golden('meter-completion-event.golden.json')
+            assert_argv_is_golden_argv_order(self, invocations[0], golden)
+        finally:
+            tree.cleanup()
+
+    def test_run_c_capable_column_populated_matches_golden_plus_two_tokens(self):
+        """Run C: CLI advertises the flag, column present and populated.
+        Captured argv equals argv_order plus exactly the two trailing
+        tokens for the flag and the resolved key, and nothing else differs.
+        """
+        tree = _EventHarness(subscriber_capable=True)
+        try:
+            tree.seed_session(
+                user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            golden = load_golden('meter-completion-event.golden.json')
+            expected_key = f'test:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, invocations[0], golden,
+                extra_tail=('--subscriber-id', expected_key),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_d_incapable_column_populated_matches_golden_argv_order(self):
+        """Run D (SUB-07): CLI does NOT advertise the flag, column present
+        and populated. Captured argv equals argv_order exactly -- the
+        probe, not the resolved value, gates emission.
+        """
+        tree = _EventHarness(subscriber_capable=False)
+        try:
+            tree.seed_session(
+                user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            golden = load_golden('meter-completion-event.golden.json')
+            assert_argv_is_golden_argv_order(self, invocations[0], golden)
+        finally:
+            tree.cleanup()
+
+    def test_pipe_in_user_id_ships_no_token_environment_and_tokens_intact(self):
+        """A session whose stored actor id contains a pipe ships NO
+        subscriber token, and the environment dimension and total-tokens
+        value on that same row are unaffected -- the unsafe value is
+        REJECTED, not sanitised into a plausible different key.
+        """
+        tree = _EventHarness(subscriber_capable=True)
+        try:
+            tree.seed_session(user_id_mapping={_EventHarness.SID: 'U|600'})
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            argv = invocations[0]
+            self.assertNotIn('--subscriber-id', argv, argv)
+            golden = load_golden('meter-completion-event.golden.json')
+            assert_argv_is_golden_argv_order(self, argv, golden)
+            idx = argv.index('--total-tokens')
+            self.assertEqual(argv[idx + 1], '165', argv)
+        finally:
+            tree.cleanup()
+
+
 class SubscriberWiringStructuralTests(unittest.TestCase):
     """Structural guards mirroring test_ticket_attribution.TicketWiringTests,
-    scoped to what THIS plan actually wires (see module docstring for why
-    api-event-report.sh is excluded)."""
+    scoped to what has been wired as of THIS commit (see module docstring):
+    both hermes-report.sh sites plus, as of Plan 62-02 Task 1,
+    api-event-report.sh's event-path site."""
 
     def test_probe_declared_with_subcommand_scoped_supports_flag(self):
         for script in SCRIPTS_WITH_SUBSCRIBER_PROBE:

@@ -155,6 +155,16 @@ if supports_flag "meter completion" "--ticket-id"; then
   TICKET_CLI_CAPABLE=true
 fi
 
+# Subscriber attribution (Phase 62, SUB-05/07/08) — the event-path sibling
+# of hermes-report.sh's probe (Plan 62-01). Same posture, same reason: a
+# negative probe is a LIVE configuration, not an error. Per-script
+# duplication of the probe (not a shared sourced one) is the established
+# pattern here — every other flag family repeats it in both scripts.
+SUBSCRIBER_CLI_CAPABLE=false
+if supports_flag "meter completion" "--subscriber-id"; then
+  SUBSCRIBER_CLI_CAPABLE=true
+fi
+
 ORG_NAME=""
 if [[ -f "${CONFIG_FILE}" ]]; then
   ORG_NAME=$(python3 -c "import json; print(json.load(open('${CONFIG_FILE}')).get('organizationName', ''))" 2>/dev/null || true)
@@ -660,26 +670,111 @@ PY
   _MAP_SEP=$'\x1f'
   local _env_map_file
   _env_map_file=$(mktemp 2>/dev/null || echo "/tmp/revenium-api-event-env-map.$$")
-  STATE_DB="${STATE_DB}" ENV_MAP_FILE="${_env_map_file}" python3 - <<'PY' 2>/dev/null || true
+  # Phase 62 (SUB-05/07/08): the identity-column schema probe is resolved
+  # HERE, in bash, into a zero-or-one local passed through the environment
+  # as a BOOLEAN — never the SQL text itself (T-62-07). Python below selects
+  # between two hard-coded SQL strings on that boolean; a query assembled
+  # from an environment variable would be an injection-shaped construct even
+  # when the value is one of two literals chosen three lines earlier.
+  local _has_user_id_col="0"
+  if sessions_has_user_id; then
+    _has_user_id_col="1"
+  fi
+  STATE_DB="${STATE_DB}" ENV_MAP_FILE="${_env_map_file}" HAS_USER_ID_COL="${_has_user_id_col}" python3 - <<'PY' 2>/dev/null || true
 import os
 import sqlite3
 
 db = os.environ.get("STATE_DB", "")
 out = os.environ.get("ENV_MAP_FILE", "")
 SEP = "\x1f"
+has_user_id_col = os.environ.get("HAS_USER_ID_COL", "0") == "1"
+
+# === SUBSCRIBER_KEY_BUILDER_START (Phase 62, D-01/D-02) ===
+# Mirrors resolve_subscriber_id in common.sh (bash) — same rejection rules,
+# same "source column verbatim, no allowlist" namespacing (D-06), collapsed
+# to two outcomes here (a resolved key, or an empty string covering both
+# bash's "none" and "rejected"). This slice is deliberately self-contained
+# (its own unsafe-character tuple, its own two sentinel literals, no
+# reference to SEP/db/out above) so
+# tests/test_phase62_subscriber_key_equivalence.py can exec it standalone
+# and prove the SHIPPED Python agrees with the bash resolver, rather than
+# testing a hand-copied stand-in — the fixture-fidelity defect class this
+# repo has hit five times (CLAUDE.md). D-01 is the precedent this
+# duplication follows: classifier.py "deliberately mirrors these paths in
+# Python rather than sharing code" with common.sh.
+def resolve_subscriber_key(source, user_id):
+    # The five characters that can corrupt a transport this key crosses: a
+    # pipe (the sessions-row contract elsewhere), tab/CR/LF (this map's own
+    # sanitising loop below), and 0x1F — this map's OWN field delimiter
+    # (_MAP_SEP above, D-12). One rejection set covers all three transports;
+    # common.sh's resolve_subscriber_id rejects the identical five.
+    unsafe_chars = ("\t", "\r", "\n", "\x1f", "|")
+    # Explicit six-character ASCII whitespace trim, matching bash's
+    # [:space:] class exactly (space, tab, LF, CR, VT, FF). Python's default
+    # str.strip() ALSO strips 0x1F and U+00A0 (NBSP) — exactly two of the
+    # characters this function must instead REJECT — so an implicit .strip()
+    # would silently accept an input the bash side rejects.
+    ws = (" ", "\t", "\n", "\r", "\x0b", "\x0c")
+
+    def _trim(value):
+        value = value if value is not None else ""
+        start, end = 0, len(value)
+        while start < end and value[start] in ws:
+            start += 1
+        while end > start and value[end - 1] in ws:
+            end -= 1
+        return value[start:end]
+
+    source = _trim(source)
+    user_id = _trim(user_id)
+
+    if not user_id or user_id == "__revenium_unsafe_user_id__":
+        return ""
+    if any(ch in user_id for ch in unsafe_chars):
+        return ""
+    if not source or source == "__revenium_unsafe_source__":
+        return ""
+    if any(ch in source for ch in unsafe_chars):
+        return ""
+    return f"{source}:{user_id}"
+# === SUBSCRIBER_KEY_BUILDER_END ===
+
 if db and out and os.path.isfile(db):
     try:
         uri = f"file:{db}?mode=ro"
         with sqlite3.connect(uri, uri=True) as conn:
-            cur = conn.execute(
-                "SELECT id, COALESCE(source, ''), COALESCE(model, ''), "
-                "COALESCE(billing_provider, ''), COALESCE(input_tokens, 0), "
-                "COALESCE(output_tokens, 0), COALESCE(cache_read_tokens, 0), "
-                "COALESCE(cache_write_tokens, 0), COALESCE(estimated_cost_usd, '') "
-                "FROM sessions"
-            )
+            if has_user_id_col:
+                # No CASE, no sentinel: the raw column value is selected
+                # as-is, and the key builder above applies the rejection
+                # rules directly to it — which is what makes this
+                # comparable to the bash resolver over the same inputs.
+                query = (
+                    "SELECT id, COALESCE(source, ''), COALESCE(model, ''), "
+                    "COALESCE(billing_provider, ''), COALESCE(input_tokens, 0), "
+                    "COALESCE(output_tokens, 0), COALESCE(cache_read_tokens, 0), "
+                    "COALESCE(cache_write_tokens, 0), COALESCE(estimated_cost_usd, ''), "
+                    "user_id "
+                    "FROM sessions"
+                )
+            else:
+                # Constant TEN fields either way (T-62-08): this map also
+                # feeds the environment dimension and two delta baselines,
+                # and a query that raises is swallowed by the surrounding
+                # except below, emptying the map and silently dropping all
+                # three. An older Hermes with no user_id column selects the
+                # literal empty string in the same tenth position instead
+                # of referencing a column that doesn't exist.
+                query = (
+                    "SELECT id, COALESCE(source, ''), COALESCE(model, ''), "
+                    "COALESCE(billing_provider, ''), COALESCE(input_tokens, 0), "
+                    "COALESCE(output_tokens, 0), COALESCE(cache_read_tokens, 0), "
+                    "COALESCE(cache_write_tokens, 0), COALESCE(estimated_cost_usd, ''), "
+                    "'' "
+                    "FROM sessions"
+                )
+            cur = conn.execute(query)
             with open(out, "w", encoding="utf-8") as f:
-                for sid, source, model, billing_provider, inp, outp, cread, cwrite, cost in cur:
+                for sid, source, model, billing_provider, inp, outp, cread, cwrite, cost, raw_user_id in cur:
                     sid = str(sid) if sid is not None else ""
                     source = str(source) if source is not None else ""
                     model = str(model) if model is not None else ""
@@ -687,6 +782,17 @@ if db and out and os.path.isfile(db):
                     cost = str(cost) if cost is not None else ""
                     if not sid:
                         continue
+                    # Resolved from the RAW source/user_id, captured BEFORE
+                    # the sanitising loop below mutates `source` — a
+                    # sanitised value could fabricate a plausible key from
+                    # what should have been refused (T-62-06, the same
+                    # collapse-to-one-identity defect Phase 61's review
+                    # found). The builder above already refuses every
+                    # unsafe character in both inputs, so a non-empty
+                    # return is already safe for this transport; it is
+                    # written verbatim below, never through the loop that
+                    # follows.
+                    subscriber_key = resolve_subscriber_key(source, raw_user_id)
                     for bad in ("\t", "\n", "\r", SEP):
                         sid = sid.replace(bad, "_")
                         source = source.replace(bad, "_")
@@ -695,7 +801,8 @@ if db and out and os.path.isfile(db):
                         cost = cost.replace(bad, "_")
                     f.write(
                         SEP.join([sid, source, model, billing_provider,
-                                  str(inp), str(outp), str(cread), str(cwrite), cost])
+                                  str(inp), str(outp), str(cread), str(cwrite), cost,
+                                  subscriber_key])
                         + "\n"
                     )
     except Exception:
@@ -968,6 +1075,16 @@ PY
     local source_env=""
     if [[ -f "${_env_map_file}" ]]; then
       source_env=$(awk -F"${_MAP_SEP}" -v s="${sid}" '$1==s{print $2; exit}' "${_env_map_file}" 2>/dev/null)
+    fi
+
+    # Subscriber attribution (Phase 62, SUB-05/07/08). Looked up ONCE PER
+    # SESSION, beside the environment lookup above, on the map's 10th
+    # column — the subscriber is a per-session property, like environment,
+    # not a per-record one. Gated on the capability probe so an older CLI
+    # does no work here at all.
+    local subscriber_key=""
+    if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" && -f "${_env_map_file}" ]]; then
+      subscriber_key=$(awk -F"${_MAP_SEP}" -v s="${sid}" '$1==s{print $10; exit}' "${_env_map_file}" 2>/dev/null)
     fi
 
     local markers_file="${session_markers_dir}/${sid}.jsonl"
@@ -1722,6 +1839,17 @@ PY
       # appends nothing.
       if [[ "${TICKET_CLI_CAPABLE}" == "true" && -n "${ticket_id_r}" ]]; then
         cmd+=(--ticket-id "${ticket_id_r}")
+      fi
+
+      # Subscriber attribution (Phase 62, SUB-05/07/08). AFTER the ticket
+      # family — flag order is the argv contract shared with
+      # hermes-report.sh. subscriber_key was resolved ONCE per session
+      # (beside source_env, above the per-record loop), so every record of
+      # this session's loop carries the SAME key — this appends nothing new
+      # per record, it only reads an already-resolved value. A record with
+      # no resolved actor appends NOTHING.
+      if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" && -n "${subscriber_key}" ]]; then
+        cmd+=(--subscriber-id "${subscriber_key}")
       fi
 
       if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then

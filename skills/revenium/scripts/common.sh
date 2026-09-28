@@ -891,9 +891,18 @@ resolve_subscriber_id() {
   # hermes-report.sh's main SELECT writes this literal when a raw value
   # would otherwise corrupt the pipe-delimited row) and any value in either
   # argument that could itself corrupt that row contract or the TSV
-  # subscriber map: a pipe, a tab, a CR, or an LF.
+  # subscriber map: a pipe, a tab, a CR, an LF, or the unit separator
+  # (0x1F). The unit separator is added here (Phase 62, D-12): this key now
+  # also crosses a THIRD transport, api-event-report.sh's per-session map,
+  # whose own field delimiter IS 0x1F -- so one rejection set has to cover
+  # the pipe-delimited session row, the tab-separated subscriber map, AND
+  # that map, or this helper and its Python mirror there cannot be
+  # equivalent over the full input space: the Python side must reject 0x1F
+  # to keep its own map parseable, and a bash side that accepted it would be
+  # a documented divergence instead of a proof
+  # (tests/test_phase62_subscriber_key_equivalence.py).
   case "${user_id}" in
-    "__revenium_unsafe_user_id__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
+    "__revenium_unsafe_user_id__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*|*$'\x1f'*)
       printf 'rejected|\n'
       return 0
       ;;
@@ -908,7 +917,7 @@ resolve_subscriber_id() {
     # field-shift it replaced: every distinct unsafe source collapses to ONE
     # key, so two different actors share an identity, which is precisely the
     # collision D-05's namespacing exists to make impossible.
-    "__revenium_unsafe_source__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
+    "__revenium_unsafe_source__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*|*$'\x1f'*)
       printf 'rejected|\n'
       return 0
       ;;

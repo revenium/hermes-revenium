@@ -507,12 +507,27 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # site (1510) is unaffected. api-event-report.sh remains untouched
         # by this plan. Pure shift once more -- the COUNT (4) and the
         # emitted VALUE expressions are unchanged.
+        #
+        # Re-measured again (Phase 62 Plan 02 Task 1, SUB-05/07/08): the
+        # event path's own SUBSCRIBER_CLI_CAPABLE probe (7 lines), its
+        # per-session map's new tenth column plus the self-contained
+        # resolve_subscriber_key builder inside the Python heredoc (~70
+        # lines), the once-per-session subscriber_key lookup beside
+        # source_env (7 lines), and the --subscriber-id emission block after
+        # the ticket family (8 lines) all sit ABOVE api-event-report.sh's
+        # single --operation-type site, shifting it by +117 (1667->1784).
+        # hermes-report.sh is untouched by this plan (its own subscriber
+        # wiring landed in Plan 62-01), so all three of its sites are
+        # unmoved. Pure shift once more -- the COUNT (4) and the emitted
+        # VALUE expressions are unchanged, so both assertions above pass
+        # untouched. --subscriber-id is a different flag family and adds no
+        # --operation-type emission site.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1510),
             ('hermes-report.sh', 3793),
             ('hermes-report.sh', 3992),
-            ('api-event-report.sh', 1667),
+            ('api-event-report.sh', 1784),
         }
         self.assertEqual(
             found_locations, expected_locations,
