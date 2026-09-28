@@ -579,10 +579,10 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # and the emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1699),
-            ('hermes-report.sh', 4033),
-            ('hermes-report.sh', 4232),
-            ('api-event-report.sh', 1795),
+            ('hermes-report.sh', 1715),
+            ('hermes-report.sh', 4049),
+            ('hermes-report.sh', 4248),
+            ('api-event-report.sh', 1816),
         }
         self.assertEqual(
             found_locations, expected_locations,

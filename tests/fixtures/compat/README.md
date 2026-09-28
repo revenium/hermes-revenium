@@ -195,11 +195,17 @@ This is a stronger guard than `exact_match_fields`/`pattern_fields`/
 names, so a NEW flag added anywhere in the emitted argv passes every one of
 them silently. An ordered-list equality catches it.
 
-Phase 62 (SUB-05/07/08, the `--subscriber-id` wiring) extends this pattern
-to `meter-completion.golden.json` (the marker-split site). The event
-(`meter-completion-event.golden.json`) and auxiliary
-(`meter-completion-aux.golden.json`) goldens are expected to gain their own
-`argv_order` in a later plan in this phase, following the same convention.
+Phase 62 (SUB-05/07/08, the `--subscriber-id` wiring) extended this pattern to
+three more goldens, and all three exact-order guards now EXIST: the
+marker-split site (`meter-completion.golden.json`, plan 62-01), the event site
+(`meter-completion-event.golden.json`, plan 62-02) and the auxiliary site
+(`meter-completion-aux.golden.json`, plan 62-03). Together with
+`meter-completion-markerless.golden.json`, which has carried an `argv_order`
+since Phase 29, **all four `meter completion` emission sites are now pinned by
+exact-order equality** — which is what makes the flag-absent case provable:
+`assert_argv_matches_golden` iterates only `exact_match_fields`,
+`pattern_fields` and `forbidden_fields`, so it asserts neither argv length nor
+the set of flags present and cannot by itself detect a newly added flag.
 
 Two of these three goldens' own `pattern_fields` name non-deterministic
 values (the three timestamp flags, captured from independent `date` calls)

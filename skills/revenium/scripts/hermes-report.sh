@@ -1607,7 +1607,7 @@ PY
   # memo's dependent, because a future edit dropping it would silently
   # degrade this from "resolve once per session" to "resolve once per row"
   # -- correct, but the exact per-record subshell cost D-08 forbids.
-  local _aux_attr_memo_sid="" _aux_attr_skill_name="" _aux_attr_skill_trigger=""
+  local _aux_attr_skill_memo_key="" _aux_attr_ticket_memo_sid="" _aux_attr_skill_name="" _aux_attr_skill_trigger=""
   local _aux_attr_skill_source="" _aux_attr_skill_marketplace="" _aux_attr_ticket_id=""
   while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified \
     d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total \
@@ -1642,12 +1642,23 @@ PY
     # orig_sid is correct -- re-resolving only on a session-id change is the
     # SAME cardinality sites 1/2 already pay (once per session), not a new
     # per-row cost.
-    if [[ "${orig_sid}" != "${_aux_attr_memo_sid}" ]]; then
+    # MEMO KEYS MUST INCLUDE EVERY INPUT THE VALUE DEPENDS ON.
+    #
+    # The skill lookup is time-WINDOWED on aux_window_end, which differs per
+    # auxiliary bucket; the ticket lookup is session-only. A single
+    # session-keyed memo therefore cached the FIRST bucket's skill and replayed
+    # it for every later bucket -- and because buckets are ordered by model
+    # rather than by time, a skill opened after the first bucket's window end
+    # but inside a later one was silently omitted from that later completion.
+    # Two memos, each keyed on exactly its own inputs: the ticket stays
+    # session-keyed (no fork per bucket), the skill is keyed on
+    # (session, window end) so buckets sharing a window still hit the memo.
+    local _aux_skill_memo_probe="${orig_sid}|${aux_window_end}"
+    if [[ "${_aux_skill_memo_probe}" != "${_aux_attr_skill_memo_key}" ]]; then
       _aux_attr_skill_name=""
       _aux_attr_skill_trigger=""
       _aux_attr_skill_source=""
       _aux_attr_skill_marketplace=""
-      _aux_attr_ticket_id=""
       if [[ "${SKILL_CLI_CAPABLE}" == "true" ]]; then
         local _aux_skill_pair _aux_prov_pair
         # resolve_session_skill's second argument is a NUMERIC epoch window
@@ -1668,10 +1679,15 @@ PY
           fi
         fi
       fi
+      _aux_attr_skill_memo_key="${_aux_skill_memo_probe}"
+    fi
+    # Ticket: session-keyed, because resolve_session_ticket takes no window.
+    if [[ "${orig_sid}" != "${_aux_attr_ticket_memo_sid}" ]]; then
+      _aux_attr_ticket_id=""
       if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
         _aux_attr_ticket_id="$(resolve_session_ticket "${orig_sid}")"
       fi
-      _aux_attr_memo_sid="${orig_sid}"
+      _aux_attr_ticket_memo_sid="${orig_sid}"
     fi
 
     local cmd=(

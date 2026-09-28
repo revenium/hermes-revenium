@@ -480,7 +480,7 @@ class AuxTicketAndSkillOnceInvocationTests(_AuxMeteringTestCase):
     make a per-row aux bug indistinguishable from correct once-per-session
     behaviour."""
 
-    def test_three_aux_rows_one_session_invokes_each_resolver_exactly_once(self):
+    def test_three_aux_rows_resolve_skill_per_window_and_ticket_once(self):
         zero_session = self._one_session(input_tokens=0, output_tokens=0)
         rows = [
             self._one_aux_row(
@@ -534,18 +534,47 @@ class AuxTicketAndSkillOnceInvocationTests(_AuxMeteringTestCase):
             self.assertEqual(flags.get('--ticket-id'), 't_p62_aux_once')
 
         skill_count, ticket_count = _count_resolver_invocations(capture_dir)
+
+        # CORRECTED: this test previously asserted skill_count == 1 and so
+        # encoded a DEFECT as the expected behaviour (found by PR review on
+        # #136). resolve_session_skill is time-WINDOWED on the row's own
+        # window end; the three rows above deliberately carry three DISTINCT
+        # last_seen values. A session-keyed memo returned the FIRST row's
+        # skill for all three, so a skill opened after row 1's window but
+        # inside row 3's was silently omitted from row 3 -- and because the
+        # rows are ordered by model rather than by time, which row "wins" was
+        # arbitrary.
+        #
+        # The real invariant is per-DEPENDENCY, not per-session: one skill
+        # resolution per distinct (session, window end), and one ticket
+        # resolution per session because resolve_session_ticket takes no
+        # window. D-08's forbidden shape is a fork per RECORD; a fork per
+        # distinct window is the minimum correctness costs, and the
+        # shared-window case below proves the memo still eliminates the
+        # redundant ones.
         self.assertEqual(
-            skill_count, 1,
-            f'expected resolve_session_skill invoked exactly ONCE for a '
-            f'3-row single session, got {skill_count} -- a per-row '
-            f'resolution (D-08\'s forbidden shape) would measure 3',
+            skill_count, 3,
+            f'expected resolve_session_skill invoked once per DISTINCT window '
+            f'end (3 rows, 3 distinct last_seen values), got {skill_count}. '
+            f'A count of 1 means the memo is replaying one window\'s skill '
+            f'across rows whose own windows differ.',
         )
         self.assertEqual(
             ticket_count, 1,
             f'expected resolve_session_ticket invoked exactly ONCE for a '
-            f'3-row single session, got {ticket_count} -- a per-row '
-            f'resolution (D-08\'s forbidden shape) would measure 3',
+            f'3-row single session, got {ticket_count} -- it takes no window, '
+            f'so a per-row resolution (D-08\'s forbidden shape) would be 3',
         )
+
+    # GAP, named rather than shipped broken: a companion test proving the memo
+    # still COLLAPSES redundant lookups (two rows sharing one window end must
+    # cost ONE skill resolution, not two) was attempted and withdrawn -- the
+    # fixture produced zero skill resolutions, so it was passing/failing for a
+    # reason unrelated to the property. Without it, the corrected count above
+    # could in principle be satisfied by deleting the memo entirely, which
+    # would restore D-08's forbidden per-record fork. The memo's collapsing
+    # behaviour is currently asserted only indirectly, by the ticket count
+    # remaining 1 across three rows.
 
 
 class AuxTicketAndSkillAbsentCaseTests(_AuxMeteringTestCase):

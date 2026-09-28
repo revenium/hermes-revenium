@@ -803,7 +803,28 @@ if db and out and os.path.isfile(db):
                     # return is already safe for this transport; it is
                     # written verbatim below, never through the loop that
                     # follows.
-                    subscriber_key = resolve_subscriber_key(source, raw_user_id)
+                    # raw_user_id is the one column NOT coerced above, and
+                    # the key builder assumes str. SQLite column affinity is
+                    # advisory: a BLOB (or any non-str) makes the builder
+                    # raise, and because the only handler is the try/except
+                    # wrapping the WHOLE loop, one bad row aborted map
+                    # writing for every REMAINING session that tick -- losing
+                    # --environment, baselines and shadow cost for all of
+                    # them, not merely subscriber attribution for the bad
+                    # row. Coerce like its siblings, and scope the failure to
+                    # ONE row so a surprising value degrades to "no
+                    # subscriber" instead of truncating the map.
+                    if isinstance(raw_user_id, (bytes, bytearray)):
+                        try:
+                            raw_user_id = raw_user_id.decode("utf-8", "replace")
+                        except Exception:
+                            raw_user_id = ""
+                    elif raw_user_id is not None and not isinstance(raw_user_id, str):
+                        raw_user_id = str(raw_user_id)
+                    try:
+                        subscriber_key = resolve_subscriber_key(source, raw_user_id)
+                    except Exception:
+                        subscriber_key = ""
                     for bad in ("\t", "\n", "\r", SEP):
                         sid = sid.replace(bad, "_")
                         source = source.replace(bad, "_")
