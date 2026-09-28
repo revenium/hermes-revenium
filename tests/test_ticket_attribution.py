@@ -25,6 +25,7 @@ production emits have been got wrong repeatedly in this repo.
 """
 
 import json
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -359,11 +360,34 @@ class TicketWiringTests(unittest.TestCase):
                         "guard within %d lines above it"
                         % (script.name, i + 1, self.GUARD_LOOKBACK))
 
-    def test_completion_path_emits_at_both_sites(self):
-        """hermes-report.sh has a marker-split and a markerless emit path; the
-        flag must ride both or a markerless session silently loses it."""
+    def test_completion_path_emits_at_all_three_of_its_sites(self):
+        """hermes-report.sh has THREE `meter completion` emit sites --
+        marker-split, markerless, and (Phase 62, SUB-11) the auxiliary
+        pass -- and the flag must ride all three or one of them silently
+        loses it.
+
+        Phase 62 Plan 03 (D-07/D-09 review lesson): this test used to count
+        the literal substring `cmd+=(--ticket-id "${ticket_id}")`, which
+        embeds ONE site's own local variable name. A third site using a
+        DIFFERENT local (the aux path's per-session memo,
+        `_aux_attr_ticket_id`, deliberately not the bare `ticket_id` name
+        sites 1/2 use, because it must survive across loop iterations and a
+        `local` re-declaration each iteration would reset it) would have
+        left this count reading 2 and silently stopped covering the new
+        site -- a guard that exists but is narrower than the thing it
+        guards, the exact shape of four of Phase 61's seven review
+        findings. Counting the GENERIC append expression (any bash
+        variable name) instead means a fourth site with yet another local
+        name is still caught.
+        """
         text = self.HERMES_REPORT.read_text()
-        self.assertEqual(text.count('cmd+=(--ticket-id "${ticket_id}")'), 2)
+        matches = re.findall(r'cmd\+=\(--ticket-id "\$\{\w+\}"\)', text)
+        self.assertEqual(
+            len(matches), 3,
+            f'expected exactly 3 --ticket-id append expressions in '
+            f'hermes-report.sh (marker-split, markerless, aux), found '
+            f'{len(matches)}: {matches!r}',
+        )
 
     def test_resolver_lives_in_common_sh_only(self):
         """One definition, shared — not duplicated per script."""

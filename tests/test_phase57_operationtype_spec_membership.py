@@ -544,11 +544,27 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # expressions are unchanged, so both assertions above pass
         # untouched. --subscriber-id is a different flag family and adds no
         # --operation-type emission site.
+        #
+        # Re-measured again (Phase 62 Plan 03 Task 2, SUB-11): the D-07
+        # finding comment plus the skill/ticket resolution memo block (both
+        # inserted directly above the aux `local cmd=(` construction, which
+        # is where this file's aux --operation-type site lives) shift that
+        # site by +71 (1579->1650). The new skill/ticket emission blocks sit
+        # AFTER that site (inside the same cmd=(...) construction, before
+        # the subscriber block), so they add no further shift to THIS site,
+        # but everything below them in file order -- the aux_window_end
+        # local/read-loop addition and the memo declarations before the
+        # while loop, all of which sit above the marker-split and
+        # markerless sites too -- shifts both by +92 (3892->3984,
+        # 4091->4183). api-event-report.sh is untouched by this task (its
+        # ticket/skill flags already existed; this task only backfills the
+        # aux path inside hermes-report.sh). Pure shift once more -- the
+        # COUNT (4) and the emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1579),
-            ('hermes-report.sh', 3892),
-            ('hermes-report.sh', 4091),
+            ('hermes-report.sh', 1650),
+            ('hermes-report.sh', 3984),
+            ('hermes-report.sh', 4183),
             ('api-event-report.sh', 1784),
         }
         self.assertEqual(

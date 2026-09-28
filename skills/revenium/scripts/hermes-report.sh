@@ -1489,6 +1489,17 @@ for row in rows:
             # this SESSION by the main loop (or, for a supplement-recovered
             # session, its own resolution -- Task 3), never re-resolved here.
             c_subscriber_key,
+            # Phase 62 (SUB-11): the auxiliary window's OWN end -- resp_ts,
+            # the same numeric epoch already resolved above for
+            # --response-time -- appended as a NEW FINAL field so every
+            # earlier field position stays fixed. resolve_session_skill
+            # needs a numeric at-or-before boundary and the bash side only
+            # has formatted (ISO string) timestamps; the auxiliary window's
+            # end is deliberately NOT the session's own ended_at (sites 1/2's
+            # boundary) -- auxiliary spend can occur after the session's
+            # last main-loop completion, so using the SESSION's end here
+            # would exclude a skill opened between the two.
+            f"{resp_ts:.3f}",
         ]))
     except Exception:
         continue
@@ -1538,10 +1549,22 @@ PY
   local d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total
   local req_time resp_time dur_ms orig_sid digest
   local ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source ctx_subscriber_key
+  local aux_window_end
+  # Phase 62 (SUB-11/D-08): the skill/ticket resolution memo, keyed on the
+  # session id -- declared OUTSIDE the loop (never re-declared with `local`
+  # inside it) so its value survives across iterations. The emit query
+  # orders by session_id first (see its ORDER BY above), so one session's
+  # rows arrive contiguously; a structural test pins that ordering as this
+  # memo's dependent, because a future edit dropping it would silently
+  # degrade this from "resolve once per session" to "resolve once per row"
+  # -- correct, but the exact per-record subshell cost D-08 forbids.
+  local _aux_attr_memo_sid="" _aux_attr_skill_name="" _aux_attr_skill_trigger=""
+  local _aux_attr_skill_source="" _aux_attr_skill_marketplace="" _aux_attr_ticket_id=""
   while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified \
     d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total \
     req_time resp_time dur_ms orig_sid digest \
-    ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source ctx_subscriber_key; do
+    ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source ctx_subscriber_key \
+    aux_window_end; do
     [[ -z "${s_sid}" ]] && continue
 
     # D-08: gate to once per distinct unrecognised task value per install
@@ -1552,6 +1575,54 @@ PY
     if [[ "${is_unclassified}" == "1" ]]; then
       _aux_warn_once "unknown-${s_task}" \
         "auxiliary task value unrecognised: '${s_task}' (session=${orig_sid}) — add it to skills/revenium/aux-taxonomy.json; spend was still reported as aux_unclassified, only the label was dropped"
+    fi
+
+    # SUB-11/D-07/D-08: skill and ticket attribution, backfilled onto the
+    # auxiliary path in the same pass as --subscriber-id. `git log -L`
+    # confirmed the omission was never a deliberate rejection -- the aux
+    # emission block landed whole in e3ab034 (Phase 55) and neither the
+    # skill-attribution commits (4c6b84a, 0fb2ea0) nor the ticket-attribution
+    # commit (59dac90) touched it; ticket attribution's own commit message
+    # enumerates only "the completion path" (marker-split + markerless) and
+    # "the event path", never the aux pass. So this is a backfill, not a
+    # reversal of an earlier decision.
+    #
+    # Resolved ONCE PER DISTINCT SESSION, not once per aux row (D-08): the
+    # emit query's ORDER BY leads with session_id (see the SELECT above), so
+    # one session's rows arrive contiguously and a single-slot memo keyed on
+    # orig_sid is correct -- re-resolving only on a session-id change is the
+    # SAME cardinality sites 1/2 already pay (once per session), not a new
+    # per-row cost.
+    if [[ "${orig_sid}" != "${_aux_attr_memo_sid}" ]]; then
+      _aux_attr_skill_name=""
+      _aux_attr_skill_trigger=""
+      _aux_attr_skill_source=""
+      _aux_attr_skill_marketplace=""
+      _aux_attr_ticket_id=""
+      if [[ "${SKILL_CLI_CAPABLE}" == "true" ]]; then
+        local _aux_skill_pair _aux_prov_pair
+        # resolve_session_skill's second argument is a NUMERIC epoch window
+        # end, not a formatted timestamp -- aux_window_end (the auxiliary
+        # row's own resp_ts, appended as a new final field on this row) is
+        # deliberately NOT ended_at (the session's own end): auxiliary spend
+        # can occur after a session's last main-loop completion, and using
+        # the session's own end here would exclude a skill opened between
+        # the two.
+        _aux_skill_pair="$(resolve_session_skill "${orig_sid}" "${aux_window_end}")"
+        if [[ -n "${_aux_skill_pair}" ]]; then
+          _aux_attr_skill_name="${_aux_skill_pair%%|*}"
+          _aux_attr_skill_trigger="${_aux_skill_pair#*|}"
+          _aux_prov_pair="$(resolve_skill_provenance "${_aux_attr_skill_name}")"
+          if [[ -n "${_aux_prov_pair}" ]]; then
+            _aux_attr_skill_source="${_aux_prov_pair%%|*}"
+            _aux_attr_skill_marketplace="${_aux_prov_pair#*|}"
+          fi
+        fi
+      fi
+      if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
+        _aux_attr_ticket_id="$(resolve_session_ticket "${orig_sid}")"
+      fi
+      _aux_attr_memo_sid="${orig_sid}"
     fi
 
     local cmd=(
@@ -1609,11 +1680,32 @@ PY
       fi
     fi
 
+    # Skill attribution (CLI 1.4.0), backfilled onto the aux path (SUB-11).
+    # Flag order (--skill-name, --skill-invocation-trigger, --skill-source,
+    # --skill-marketplace-name) is part of the argv contract the tests
+    # assert — keep it identical to sites 1/2. --skill-kind and
+    # --skill-plugin-name are deliberately NEVER emitted anywhere: a guessed
+    # value poisons a dimension worse than an absent one leaves it. A
+    # session with no skill signal appends NOTHING, matching sites 1/2.
+    if [[ "${SKILL_CLI_CAPABLE}" == "true" ]]; then
+      [[ -n "${_aux_attr_skill_name}" ]] && cmd+=(--skill-name "${_aux_attr_skill_name}")
+      [[ -n "${_aux_attr_skill_trigger}" ]] && cmd+=(--skill-invocation-trigger "${_aux_attr_skill_trigger}")
+      [[ -n "${_aux_attr_skill_source}" ]] && cmd+=(--skill-source "${_aux_attr_skill_source}")
+      [[ -n "${_aux_attr_skill_marketplace}" ]] && cmd+=(--skill-marketplace-name "${_aux_attr_skill_marketplace}")
+    fi
+
+    # Ticket attribution (CLI 1.5.0), backfilled onto the aux path (SUB-11).
+    # Appended AFTER the skill family, matching sites 1/2's flag order. A
+    # session with no ticket appends NOTHING.
+    if [[ "${TICKET_CLI_CAPABLE}" == "true" ]]; then
+      [[ -n "${_aux_attr_ticket_id}" ]] && cmd+=(--ticket-id "${_aux_attr_ticket_id}")
+    fi
+
     # Subscriber attribution (Phase 62, SUB-05/07/08) — the fourth and last
     # emission site to gain it, completing "all four, not a subset". Appended
-    # AFTER the squad block, matching the OTHER two hermes-report.sh sites'
-    # relative order (both put subscriber last, after whatever attribution
-    # families exist there). `ctx_subscriber_key` is the seventh field of the
+    # AFTER the skill and ticket families, matching the OTHER two
+    # hermes-report.sh sites' relative order (squad -> skill -> ticket ->
+    # subscriber). `ctx_subscriber_key` is the seventh field of the
     # per-session aux_session_ctx cache -- resolved ONCE by the main session
     # loop (own identity, or inherited via the root-walk) or, for a
     # supplement-recovered session, resolved once for that session alone
