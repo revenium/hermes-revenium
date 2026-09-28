@@ -814,10 +814,20 @@ if db and out and os.path.isfile(db):
                     # row. Coerce like its siblings, and scope the failure to
                     # ONE row so a surprising value degrades to "no
                     # subscriber" instead of truncating the map.
+                    # STRICT decode, and reject on failure. An earlier form of
+                    # this used errors="replace", which is the Phase 61
+                    # __revenium_unsafe_source__ defect repeating: replacement
+                    # maps every undecodable byte to U+FFFD, so two DIFFERENT
+                    # actors whose ids differ only in invalid bytes collapse to
+                    # ONE subscriber id and are metered as the same person --
+                    # permanently, on rows that cannot be amended. A sanitising
+                    # conversion must never manufacture an identity; an
+                    # undecodable value has no knowable actor, so it resolves to
+                    # none.
                     if isinstance(raw_user_id, (bytes, bytearray)):
                         try:
-                            raw_user_id = raw_user_id.decode("utf-8", "replace")
-                        except Exception:
+                            raw_user_id = raw_user_id.decode("utf-8")
+                        except (UnicodeDecodeError, Exception):
                             raw_user_id = ""
                     elif raw_user_id is not None and not isinstance(raw_user_id, str):
                         raw_user_id = str(raw_user_id)

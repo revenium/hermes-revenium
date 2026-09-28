@@ -750,10 +750,6 @@ class LiveModeUnchangedTests(ShadowReadoutTestBase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-if __name__ == '__main__':
-    unittest.main()
-
-
 class ShadowCostSurvivesAResolvedSubscriberTests(ShadowReadoutTestBase):
     """Phase 62 CR-01 regression, requested by PR review.
 
@@ -804,3 +800,7 @@ class ShadowCostSurvivesAResolvedSubscriberTests(ShadowReadoutTestBase):
             )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+if __name__ == '__main__':
+    unittest.main()
