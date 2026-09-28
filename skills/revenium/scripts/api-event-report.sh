@@ -389,8 +389,19 @@ _emit_shadow_row() {
   # its declaration in main(): unlike a tab, it is not an IFS-whitespace
   # character, so bash's `read` does not collapse an empty billing_provider
   # field into the delimiter run and shift every field after it.
+  # ARITY IS LOAD-BEARING: this read must name EVERY column the per-session
+  # map emits. bash folds all remaining fields into the LAST variable, so a
+  # missing slot does not error -- it silently appends the surplus (delimiter
+  # included) onto `cost_legacy`, `float()` then raises, the outer handler
+  # swallows it, and `cost_present_legacy` reports false for every session
+  # that resolved a subscriber even when cost is genuinely nonzero. That is
+  # exactly what Phase 62 shipped by widening the map 9->10 and updating only
+  # the awk consumers: awk is positional and did not care, this read is
+  # fixed-arity and did. If the builder gains a column, add a slot HERE in the
+  # same commit.
   IFS=$'\x1f' read -r _ _ model_legacy billing_provider_legacy \
-    db_input db_output db_cache_read db_cache_write cost_legacy <<< "${db_row}"
+    db_input db_output db_cache_read db_cache_write cost_legacy \
+    _subscriber_key_legacy <<< "${db_row}"
   db_input="${db_input:-0}"
   db_output="${db_output:-0}"
   db_cache_read="${db_cache_read:-0}"
