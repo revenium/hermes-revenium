@@ -326,13 +326,39 @@ class GoldenImmutabilityTests(unittest.TestCase):
     edited, which tests/fixtures/compat/README.md prohibits in capital
     letters -- the fix is to revert the golden, never to update the hash
     recorded below.
+
+    EXCEPTION, recorded deliberately (Phase 62 Plan 01, SUB-05/07/08, D-05
+    in 62-CONTEXT.md -- a LOCKED decision): `meter-completion.golden.json`
+    gained an ADDITIVE `argv_order` list plus an `argv_order_pattern_sentinel`
+    key. This is the one update to this hash this module's docstring has
+    ever accepted, and it is accepted only because the addition changes
+    NOTHING the immutability contract exists to protect: every pre-existing
+    key (`exact_match_fields`, `pattern_fields`, `forbidden_fields`) is
+    byte-for-byte unchanged (confirmed: `git diff` on that file shows
+    additions only), so the WIRE shape `assert_argv_matches_golden` checks
+    against is identical to before. `argv_order`/`argv_order_pattern_sentinel`
+    are consumed ONLY by this Python test suite
+    (`assert_argv_is_golden_argv_order` in tests/_compat_helpers.py) --
+    never emitted to Revenium and never read by any shipped script -- so no
+    downstream Revenium analytics consumer depending on the v1.x argv
+    contract (the harm this guard exists to prevent, per
+    tests/fixtures/compat/README.md) is affected. The precedent already
+    existed: `meter-completion-markerless.golden.json` has carried the
+    identical `argv_order` shape since Phase 29 and was deliberately left
+    OUT of this hash-pinned set for exactly this reason. Do not read this
+    exception as license to update the hash for a real wire-shape change --
+    the docstring's original rule (revert, never update) still holds for
+    any edit to `exact_match_fields`/`pattern_fields`/`forbidden_fields`.
     """
 
     # Computed once when this class was written (sha256 over the raw file
     # bytes). See tests/fixtures/compat/README.md's "Immutability contract".
+    # meter-completion.golden.json's hash was updated once, deliberately,
+    # by Phase 62 Plan 01 -- see the class docstring's "EXCEPTION" note
+    # above for why this is not a wire-shape regression.
     _EXPECTED_SHA256 = {
         'meter-completion.golden.json':
-            '52b70379be39b20c1f0142305de9cd03b4789e33fa16babcfe874ea2fcaf6f94',
+            'c436398fc8c1cc6f74dd0fc96b1fb9bd9418491f16e59334fceddc241aa3f440',
         'jobs-create.golden.json':
             '70458b2e37a7adc2952cef277bb3bb4744b179e9216aad51f9eefc1dfdca9270',
         'jobs-outcome.golden.json':
