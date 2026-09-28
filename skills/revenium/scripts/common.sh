@@ -866,6 +866,22 @@ sessions_has_user_id() {
 # callers.
 resolve_subscriber_id() {
   local source="$1" user_id="$2"
+  # WR-01: pin the collation locale for THIS FUNCTION ONLY. `[:space:]` below is
+  # locale-dependent -- measured: under a UTF-8 locale bash matches NBSP
+  # (U+00A0) as space, under C/POSIX it does not. The event path's Python
+  # builder never treats NBSP as whitespace, so an unpinned locale lets two
+  # implementations of one PERMANENTLY-metered key format disagree on exactly
+  # that character. Nothing in cron.sh, install-cron.sh or the crontab line
+  # pins a locale, so production inherits whatever cron happens to give it --
+  # which means the equivalence test's own `LC_ALL=C` pin was proving agreement
+  # under conditions production does not guarantee.
+  #
+  # Scoped with `local` rather than exported: a global LC_ALL would change
+  # sorting and date formatting for every other caller in this file. C is the
+  # right side to pin to because it is the stricter one -- it trims less, so a
+  # value containing NBSP is REJECTED as unsafe rather than silently trimmed
+  # into a different key by one implementation and not the other.
+  local LC_ALL=C LC_CTYPE=C
   # Trim leading/trailing whitespace — bash 3.2, no extglob, no associative
   # arrays. Mirrors correct-assessment.sh's MECHANISM trim (scripts/correct-
   # assessment.sh:158-159).
