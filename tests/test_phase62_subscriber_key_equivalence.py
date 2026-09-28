@@ -56,6 +56,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -303,7 +304,22 @@ class SubscriberKeyEquivalenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='gsd-phase62-sentinel-') as tmp:
             fake = Path(tmp, 'api-event-report.sh')
             fake.write_text('#!/usr/bin/env bash\necho no sentinels here\n')
-            import tests.test_phase62_subscriber_key_equivalence as _mod
+            # sys.modules[__name__], NOT `import tests.test_phase62_...` --
+            # discovered the hard way (a real full-suite-only failure,
+            # never reproducible standalone): `unittest discover -s tests`
+            # loads this file as a BARE top-level module
+            # (`test_phase62_subscriber_key_equivalence`, no `tests.`
+            # prefix), a DIFFERENT sys.modules entry than the
+            # package-qualified one a hardcoded `import tests.foo` would
+            # fetch. Patching the wrong copy leaves
+            # _load_shipped_python_builder (defined in and reading globals
+            # from THIS running module) pointed at the REAL script the
+            # whole time, so it never raises and assertRaises reports
+            # "AssertionError not raised" -- silently testing nothing.
+            # sys.modules[__name__] always resolves to the exact module
+            # object currently executing, regardless of which name
+            # discovery imported it under.
+            _mod = sys.modules[__name__]
             original = _mod.API_EVENT_REPORT_SH
             _mod.API_EVENT_REPORT_SH = fake
             try:
@@ -321,7 +337,22 @@ class SubscriberKeyEquivalenceTests(unittest.TestCase):
                 f'{_START_SENTINEL} ===\n'
                 'echo no matching end\n'
             )
-            import tests.test_phase62_subscriber_key_equivalence as _mod
+            # sys.modules[__name__], NOT `import tests.test_phase62_...` --
+            # discovered the hard way (a real full-suite-only failure,
+            # never reproducible standalone): `unittest discover -s tests`
+            # loads this file as a BARE top-level module
+            # (`test_phase62_subscriber_key_equivalence`, no `tests.`
+            # prefix), a DIFFERENT sys.modules entry than the
+            # package-qualified one a hardcoded `import tests.foo` would
+            # fetch. Patching the wrong copy leaves
+            # _load_shipped_python_builder (defined in and reading globals
+            # from THIS running module) pointed at the REAL script the
+            # whole time, so it never raises and assertRaises reports
+            # "AssertionError not raised" -- silently testing nothing.
+            # sys.modules[__name__] always resolves to the exact module
+            # object currently executing, regardless of which name
+            # discovery imported it under.
+            _mod = sys.modules[__name__]
             original = _mod.API_EVENT_REPORT_SH
             _mod.API_EVENT_REPORT_SH = fake
             try:
@@ -340,7 +371,22 @@ class SubscriberKeyEquivalenceTests(unittest.TestCase):
                 '# def resolve_subscriber_key is missing on purpose\n'
                 f'{_END_SENTINEL}\n'
             )
-            import tests.test_phase62_subscriber_key_equivalence as _mod
+            # sys.modules[__name__], NOT `import tests.test_phase62_...` --
+            # discovered the hard way (a real full-suite-only failure,
+            # never reproducible standalone): `unittest discover -s tests`
+            # loads this file as a BARE top-level module
+            # (`test_phase62_subscriber_key_equivalence`, no `tests.`
+            # prefix), a DIFFERENT sys.modules entry than the
+            # package-qualified one a hardcoded `import tests.foo` would
+            # fetch. Patching the wrong copy leaves
+            # _load_shipped_python_builder (defined in and reading globals
+            # from THIS running module) pointed at the REAL script the
+            # whole time, so it never raises and assertRaises reports
+            # "AssertionError not raised" -- silently testing nothing.
+            # sys.modules[__name__] always resolves to the exact module
+            # object currently executing, regardless of which name
+            # discovery imported it under.
+            _mod = sys.modules[__name__]
             original = _mod.API_EVENT_REPORT_SH
             _mod.API_EVENT_REPORT_SH = fake
             try:
