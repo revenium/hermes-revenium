@@ -27,5 +27,8 @@
     "--response-time": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
     "--transaction-id": "^aux-.+-\\d+-[0-9a-f]{12}$"
   },
-  "forbidden_fields": ["--budget-id", "--alert-id", "--reasoning-tokens"]
+  "forbidden_fields": ["--budget-id", "--alert-id", "--reasoning-tokens"],
+  "captured": "Phase 62 Plan 03 (SUB-05/07/08/11, D-05): argv_order captured from the working tree BEFORE ANY of this plan's edits (the pre-edit baseline) -- tests/test_phase55_auxiliary_metering.py's _AuxMeteringTestCase default fixture, _one_session() + _one_aux_row(), sid='aux-sid-001', source='test'. Every test that asserts a live run against argv_order must reproduce this exact fixture shape (same sid, model, token counts, cost) for the absent-case arm to compare byte-identically. argv_order_pattern_sentinel normalises FOUR flags here, not three: this path's --transaction-id is pattern-matched (it embeds a per-tick digest) alongside the three timestamp flags, unlike the other three sites' goldens.",
+  "argv_order_pattern_sentinel": "TIMESTAMP_SENTINEL",
+  "argv_order": ["meter", "completion", "--model", "claude-3-5-haiku", "--provider", "anthropic", "--input-tokens", "40", "--output-tokens", "10", "--cache-read-tokens", "0", "--cache-creation-tokens", "0", "--total-tokens", "50", "--stop-reason", "END", "--request-time", "TIMESTAMP_SENTINEL", "--completion-start-time", "TIMESTAMP_SENTINEL", "--response-time", "TIMESTAMP_SENTINEL", "--request-duration", "100000", "--agent", "Hermes", "--transaction-id", "TIMESTAMP_SENTINEL", "--trace-id", "aux-sid-001", "--is-streamed", "--quiet", "--task-type", "aux_approval", "--operation-type", "OTHER", "--model-source", "anthropic", "--total-cost", "0.002000", "--environment", "test", "--squad-id", "aux-sid-001", "--squad-name", "Hermes", "--squad-role", "root"]
 }

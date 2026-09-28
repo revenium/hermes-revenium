@@ -49,9 +49,24 @@ by name. `SubscriberWiringStructuralTests` below is updated in lockstep:
 `EVENT_REPORT_SH` joins `SCRIPTS_WITH_SUBSCRIBER_PROBE` and
 `EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT` moves from 2 to 3.
 
+Plan 62-03 Task 1 extends this module with the FOURTH and last site --
+hermes-report.sh's own auxiliary-usage pass (`AuxSubscriberWiringTests`,
+`_AuxHarness`), against the SAME argv_order this plan adds to
+meter-completion-aux.golden.json (captured pre-edit, before any of Plan
+62-03's edits, matching tests.test_phase55_auxiliary_metering's
+_AuxMeteringTestCase default fixture exactly: sid='aux-sid-001',
+source='test'). No new script joins SCRIPTS_WITH_SUBSCRIBER_PROBE -- the aux
+path lives inside hermes-report.sh, which already declares the probe.
+`EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT` moves from 3 to 4. The
+aux-specific behaviour this site's own `<behavior>` calls out (three-row
+sameness, idempotency, the width-mismatch-line-absent case, and the D-09
+producer/parser width proof) lives in the sibling module
+tests/test_phase62_aux_backfill.py, not here -- this module stays scoped to
+the four-run wiring proof shared by every site.
+
 `SubscriberWiringStructuralTests` mirrors test_ticket_attribution.TicketWiringTests,
-scoped to what has been wired as of THIS commit -- 62-03's aux path (inside
-hermes-report.sh, no new script) is not yet included.
+scoped to what has been wired as of THIS commit -- as of Plan 62-03 Task 1,
+all four sites.
 """
 import json
 import os
@@ -63,6 +78,7 @@ from pathlib import Path
 
 from tests._compat_helpers import (
     assert_argv_is_golden_argv_order,
+    build_session_model_usage,
     build_shim,
     build_state_db,
     load_golden,
@@ -111,7 +127,12 @@ GUARD_LOOKBACK = _test_ticket_attribution.TicketWiringTests.GUARD_LOOKBACK
 # so the constant tracks the ACTUAL state at each commit rather than a
 # plan's final-state wording -- recorded as a deviation in 62-01-SUMMARY.md
 # and continued here.
-EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT = 3
+#
+# Plan 62-03 Task 1: bumped 3 -> 4 for the auxiliary pass's own
+# --subscriber-id append (hermes-report.sh, after the squad block) --
+# confirmed by `grep -c -- '--subscriber-id "' skills/revenium/scripts/*.sh`
+# = 3 (hermes-report.sh) + 1 (api-event-report.sh) = 4.
+EXPECTED_SUBSCRIBER_EMISSION_SITE_COUNT = 4
 
 # Scripts that declare the SUBSCRIBER_CLI_CAPABLE probe as of THIS commit.
 # api-event-report.sh joins this tuple in Plan 62-02 Task 1 (the event
@@ -752,11 +773,201 @@ class EventSubscriberWiringTests(unittest.TestCase):
             tree.cleanup()
 
 
+class _AuxHarness:
+    """One temp HERMES_HOME + PATH-shim `revenium` + one meter log for
+    hermes-report.sh's auxiliary-usage pass, mirroring `_Harness` above but
+    additionally seeding `session_model_usage` (Phase 55) so a real
+    auxiliary row exists to emit.
+
+    The seeded `sessions` and `session_model_usage` rows are deliberately
+    byte-identical to tests.test_phase55_auxiliary_metering
+    ._AuxMeteringTestCase's own defaults (_one_session()/_one_aux_row(),
+    sid='aux-sid-001') -- NOT imported from that module (this plan's
+    files_modified list does not touch it), but reproduced here because
+    meter-completion-aux.golden.json's argv_order was captured against that
+    exact fixture shape (see the golden's own 'captured' provenance note);
+    a different sid/model/token shape would not compare byte-identically.
+    """
+
+    SID = 'aux-sid-001'
+
+    def __init__(self, subscriber_capable=True, prefix='gsd-phase62-aux-'):
+        self.tmp = tempfile.mkdtemp(prefix=prefix)
+        self.hermes_home = os.path.join(self.tmp, 'hh')
+        self.state_dir = os.path.join(self.hermes_home, 'state', 'revenium')
+        self.markers_dir = os.path.join(self.state_dir, 'markers')
+        os.makedirs(self.markers_dir, mode=0o700)
+        self.state_db = os.path.join(self.hermes_home, 'state.db')
+        self.log_file = os.path.join(self.state_dir, 'revenium-metering.log')
+
+        self.shim_home = os.path.join(self.tmp, 'home')
+        self.bin_dir = os.path.join(self.shim_home, '.local', 'bin')
+        os.makedirs(self.bin_dir)
+        self.meter_log = os.path.join(self.tmp, 'meter.log')
+        self.jobs_log = os.path.join(self.tmp, 'jobs.log')
+        self.inv_log = os.path.join(self.tmp, 'inv.log')
+        self.shim = os.path.join(self.bin_dir, 'revenium')
+        build_shim(
+            self.shim, squad_capable=True, subscriber_capable=subscriber_capable
+        )
+
+        build_state_db(self.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': 'test',
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': _OLD_TS,
+            'ended_at': _OLD_TS,
+            'billing_provider': 'anthropic',
+        }])
+        build_session_model_usage(self.state_db, [{
+            'session_id': self.SID,
+            'model': 'claude-3-5-haiku',
+            'billing_provider': 'anthropic',
+            'task': 'approval',
+            'api_call_count': 3,
+            'input_tokens': 40,
+            'output_tokens': 10,
+            'estimated_cost_usd': 0.002,
+            'first_seen': _OLD_TS + 500.0,
+            'last_seen': _OLD_TS + 600.0,
+        }])
+
+    def seed_user_id(self, mapping):
+        seed_user_ids(self.state_db, mapping)
+
+    def cleanup(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def base_env(self):
+        return {
+            **os.environ,
+            'HOME': self.shim_home,
+            'HERMES_HOME': self.hermes_home,
+            'REVENIUM_STATE_DIR': self.state_dir,
+            'PATH': self.bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': self.inv_log,
+            'METER_LOG': self.meter_log,
+            'JOBS_LOG': self.jobs_log,
+            'TZ': 'UTC',
+            'REVENIUM_ORGANIZATION_NAME': '',
+            'REVENIUM_AGENT_NAME': 'Hermes',
+            'REVENIUM_SQUAD_NAME': '',
+        }
+
+    def run(self):
+        rc, _ignored_inv, output = run_script(
+            HERMES_REPORT_SH, self.base_env(), self.inv_log
+        )
+        meter_invocations = []
+        if os.path.exists(self.meter_log):
+            with open(self.meter_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if line:
+                        meter_invocations.append(shlex.split(line))
+        if rc != 0:
+            raise AssertionError(f'hermes-report.sh failed (rc={rc}): {output}')
+        return meter_invocations
+
+    @staticmethod
+    def aux_invocation(invocations):
+        """Return the single invocation carrying --operation-type OTHER, or
+        raise if there isn't exactly one -- the aux row, distinguished from
+        the main-loop CHAT invocation the same tick also ships."""
+        aux = [
+            inv for inv in invocations
+            if '--operation-type' in inv
+            and inv[inv.index('--operation-type') + 1] == 'OTHER'
+        ]
+        if len(aux) != 1:
+            raise AssertionError(
+                f'expected exactly 1 aux (--operation-type OTHER) invocation, '
+                f'got {len(aux)}: {invocations!r}'
+            )
+        return aux[0]
+
+
+class AuxSubscriberWiringTests(unittest.TestCase):
+    """Plan 62-03 Task 1: the four-run proof for the FOURTH and last emission
+    site -- hermes-report.sh's auxiliary-usage pass -- against
+    meter-completion-aux.golden.json's new argv_order (captured pre-edit,
+    before any of this plan's changes existed on this site)."""
+
+    ACTOR = 'p62-aux-actor'
+
+    def test_run_a_capable_no_user_id_column_matches_golden_argv_order(self):
+        """Run A: CLI advertises the flag, `sessions` has no `user_id`
+        column at all. Captured argv equals the golden's argv_order exactly
+        -- the untouched-install arm."""
+        tree = _AuxHarness(subscriber_capable=True)
+        try:
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            golden = load_golden('meter-completion-aux.golden.json')
+            assert_argv_is_golden_argv_order(self, aux, golden)
+        finally:
+            tree.cleanup()
+
+    def test_run_b_capable_column_present_null_matches_golden_argv_order(self):
+        """Run B: CLI advertises the flag, column present but NULL for this
+        session. Captured argv equals argv_order exactly -- proves the
+        capability probe's presence ALONE never appends the flag; only a
+        RESOLVED key does."""
+        tree = _AuxHarness(subscriber_capable=True)
+        try:
+            tree.seed_user_id({_AuxHarness.SID: None})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            golden = load_golden('meter-completion-aux.golden.json')
+            assert_argv_is_golden_argv_order(self, aux, golden)
+        finally:
+            tree.cleanup()
+
+    def test_run_c_capable_column_populated_matches_golden_plus_two_tokens(self):
+        """Run C: CLI advertises the flag, column present and populated.
+        Captured argv equals argv_order plus exactly the two trailing
+        tokens for the flag and the resolved key, and nothing else
+        differs."""
+        tree = _AuxHarness(subscriber_capable=True)
+        try:
+            tree.seed_user_id({_AuxHarness.SID: self.ACTOR})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            golden = load_golden('meter-completion-aux.golden.json')
+            expected_key = f'test:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, aux, golden,
+                extra_tail=('--subscriber-id', expected_key),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_d_incapable_column_populated_matches_golden_argv_order(self):
+        """Run D (SUB-07): CLI does NOT advertise the flag, column present
+        and populated. Captured argv equals argv_order exactly -- the
+        probe, not the resolved value, gates emission."""
+        tree = _AuxHarness(subscriber_capable=False)
+        try:
+            tree.seed_user_id({_AuxHarness.SID: self.ACTOR})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            golden = load_golden('meter-completion-aux.golden.json')
+            assert_argv_is_golden_argv_order(self, aux, golden)
+        finally:
+            tree.cleanup()
+
+
 class SubscriberWiringStructuralTests(unittest.TestCase):
     """Structural guards mirroring test_ticket_attribution.TicketWiringTests,
     scoped to what has been wired as of THIS commit (see module docstring):
-    both hermes-report.sh sites plus, as of Plan 62-02 Task 1,
-    api-event-report.sh's event-path site."""
+    all four emission sites, as of Plan 62-03 Task 1."""
 
     def test_probe_declared_with_subcommand_scoped_supports_flag(self):
         for script in SCRIPTS_WITH_SUBSCRIBER_PROBE:

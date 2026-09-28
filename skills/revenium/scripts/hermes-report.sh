@@ -1060,15 +1060,25 @@ finally:
 PY
     )
 
-    # Step 4: build each supplementary cache line, SAME six-field format the
-    # main loop's own append site writes -- sid, root_sid, root_agent_name,
-    # root_trace_type, aux_job_id, source -- with the three middle fields
-    # left EMPTY. Empty is correct, not a gap: the emit site already falls
-    # back --agent to REVENIUM_AGENT_NAME, --trace-type to "uncategorized",
-    # and omits --agentic-job-id entirely when the job field is empty.
-    # Re-deriving agent name, trace type and job id here would mean
-    # duplicating ~150 lines of the main loop's own resolution for a
-    # session that has no main-loop work to attribute them from.
+    # Step 4: build each supplementary cache line, SAME seven-field format
+    # the main loop's own append site writes -- sid, root_sid,
+    # root_agent_name, root_trace_type, aux_job_id, source, subscriber_key
+    # -- with the three middle fields (root_agent_name/root_trace_type/
+    # aux_job_id) left EMPTY. Empty is correct, not a gap: the emit site
+    # already falls back --agent to REVENIUM_AGENT_NAME, --trace-type to
+    # "uncategorized", and omits --agentic-job-id entirely when the job
+    # field is empty. Re-deriving agent name, trace type and job id here
+    # would mean duplicating ~150 lines of the main loop's own resolution
+    # for a session that has no main-loop work to attribute them from.
+    #
+    # The SEVENTH field, subscriber_key, is ALSO left empty here (Phase 62
+    # Plan 03 Task 1) -- Task 3 populates it with this recovered session's
+    # OWN resolved actor (resolve_subscriber_id, once per recovered session,
+    # never inherited from a root: this population has no main-loop work to
+    # inherit from). Empty is correct here too, for now: an auxiliary-only
+    # session with no identity resolution yet simply appends no
+    # --subscriber-id token, matching every other empty-field arm in this
+    # same line.
     local found_sids="" row_sid row_source root_sid s_sid s_root_sid
     if [[ -n "${session_rows}" ]]; then
       while IFS='|' read -r row_sid row_source; do
@@ -1078,7 +1088,7 @@ PY
         [[ -z "${root_sid}" ]] && root_sid="${row_sid}"
         s_sid="${row_sid//[|$'\n'$'\r']/_}"
         s_root_sid="${root_sid//[|$'\n'$'\r']/_}"
-        augmented+="${s_sid}|${s_root_sid}||||${row_source}"$'\n'
+        augmented+="${s_sid}|${s_root_sid}||||${row_source}|"$'\n'
         recovered=$((recovered + 1))
       done <<< "${session_rows}"
     fi
@@ -1120,8 +1130,16 @@ PY
 # has already been reported by the time this function runs.
 #
 # Argument: the accumulated aux_session_ctx string from the session loop
-# (one "sid|root_sid|root_agent_name|root_trace_type|aux_job_id|source" line
-# per session, see the aux_session_ctx append site near the root_aid resolution).
+# (one "sid|root_sid|root_agent_name|root_trace_type|aux_job_id|source|
+# subscriber_key" line per session, see the aux_session_ctx append site near
+# the root_aid resolution). Widened from six fields to seven in Phase 62
+# (SUB-05/D-09) to carry the session's resolved subscriber key; the
+# _supplement_aux_session_ctx recovery append below carries the SAME seven
+# fields, the seventh deliberately empty there (see that function's own
+# comment). BOTH producers and the parser's strict field-width check must
+# move together — a widening that reaches the parser but misses either
+# producer silently drops that producer's sessions' auxiliary spend, which is
+# exactly D-09's named failure mode.
 # session_model_usage is the ONLY source for auxiliary rows, and this cache
 # is the ONLY way this post-loop pass can recover per-session attribution
 # without re-deriving it (duplicating the get-root-session-id.py sidecar
@@ -1268,18 +1286,40 @@ def _ts_or_now(value):
 
 # Phase 55 (discretionary decision item 1): the session loop's own cache,
 # one line per session: sid|root_sid|root_agent_name|root_trace_type|
-# aux_job_id|source. Only sids present here are eligible for an aux row —
-# this is what confines a multiplexed host's aux pass to sessions its OWN
-# process's G-03-filtered loop iterated (T-55-06 mitigation).
+# aux_job_id|source|subscriber_key. Only sids present here are eligible for
+# an aux row — this is what confines a multiplexed host's aux pass to
+# sessions its OWN process's G-03-filtered loop iterated (T-55-06
+# mitigation).
+#
+# Phase 62 (SUB-05/D-09): widened from six fields to seven (the trailing
+# subscriber_key). A line that does not split into exactly seven fields is a
+# producer/parser mismatch, NOT a legitimately-shaped row with different
+# content — every producer emits a fixed field count, so a wrong count here
+# means one producer was not updated in lockstep with this parser. Counted
+# rather than silently dropped: D-09 names silent loss of a session's
+# auxiliary spend as the exact failure mode a bare `continue` produces, and
+# the aggregate is surfaced once per tick (never per-line — an ungated
+# per-tick log line is the anti-pattern this repo has already paid for once)
+# through the same trailer-line channel _supplement_aux_session_ctx's own
+# three counters already cross the `$(...)` subshell boundary with.
+_ctx_width_mismatch_count = 0
 ctx = {}
 for _line in session_ctx_raw.split('\n'):
     if not _line:
         continue
     _parts = _line.split('|')
-    if len(_parts) != 6:
+    if len(_parts) != 7:
+        _ctx_width_mismatch_count += 1
         continue
-    _sid, _root_sid, _root_agent, _root_trace, _aux_job, _source = _parts
-    ctx[_sid] = (_root_sid, _root_agent, _root_trace, _aux_job, _source)
+    _sid, _root_sid, _root_agent, _root_trace, _aux_job, _source, _subscriber_key = _parts
+    ctx[_sid] = (_root_sid, _root_agent, _root_trace, _aux_job, _source, _subscriber_key)
+
+if _ctx_width_mismatch_count:
+    # Sole channel this heredoc has back to its bash caller besides the
+    # per-row emit lines below -- mirrors SUPPLEMENT_SUMMARY's own idiom
+    # (a fixed-prefix line the caller greps out and strips before the rest
+    # of this output is treated as emit rows).
+    print(f'AUX_CTX_WIDTH_MISMATCH|{_ctx_width_mismatch_count}')
 
 conn = None
 rows = []
@@ -1345,7 +1385,7 @@ for row in rows:
 
         if sid not in ctx:
             continue
-        c_root_sid, c_root_agent, c_root_trace, c_aux_job, c_source = ctx[sid]
+        c_root_sid, c_root_agent, c_root_trace, c_aux_job, c_source, c_subscriber_key = ctx[sid]
 
         # T-55-01: ONE sanitizer used for both the ledger-key construction
         # AND the write below, so a smuggled pipe/newline/CR cannot forge or
@@ -1444,11 +1484,40 @@ for row in rows:
             request_time, response_time, str(duration_ms),
             sid, digest,
             c_root_sid, c_root_agent, c_root_trace, c_aux_job, c_source,
+            # Phase 62 (SUB-05): appended LAST so every existing field
+            # position stays fixed -- the subscriber key resolved once for
+            # this SESSION by the main loop (or, for a supplement-recovered
+            # session, its own resolution -- Task 3), never re-resolved here.
+            c_subscriber_key,
         ]))
     except Exception:
         continue
 PY
   ) || aux_query_output=""
+  fi
+
+  # Phase 62 (SUB-05/D-09): pull the width-mismatch count out of the emit
+  # heredoc's stdout BEFORE any other branch below inspects it -- the SAME
+  # fixed-prefix-line-then-strip idiom the supplement's own SUPPLEMENT_SUMMARY
+  # trailer uses a few lines above this function to cross the same `$(...)`
+  # subshell boundary. Done unconditionally and first, because the mismatch
+  # marker can appear ALONGSIDE AUX_TABLE_ABSENT or alongside zero real emit
+  # rows -- the count must never depend on which of those branches is taken.
+  local _aux_ctx_mismatch_count=0
+  local _aux_ctx_mismatch_line
+  _aux_ctx_mismatch_line="$(grep '^AUX_CTX_WIDTH_MISMATCH|' <<< "${aux_query_output}" | tail -1)"
+  if [[ -n "${_aux_ctx_mismatch_line}" ]]; then
+    _aux_ctx_mismatch_count="${_aux_ctx_mismatch_line#*|}"
+    aux_query_output="$(grep -v '^AUX_CTX_WIDTH_MISMATCH|' <<< "${aux_query_output}")"
+  fi
+  if [[ "${_aux_ctx_mismatch_count}" != "0" ]]; then
+    # ONE line per tick, gated on non-zero -- an ordinary install's log stays
+    # byte-unchanged, matching the step-up notice and the supplement's own
+    # aggregate line a few lines above. A non-zero count here means a
+    # producer of aux_session_ctx does not match this parser's expected
+    # field width -- every affected session's auxiliary spend was skipped,
+    # not just mis-labelled, so this is deliberately a warn, not an info.
+    warn "auxiliary session context cache: ${_aux_ctx_mismatch_count} malformed line(s) this tick -- a producer's field count does not match the parser's expected width, so the affected session(s)' auxiliary spend was NOT reported this tick (see D-09, 62-CONTEXT.md)"
   fi
 
   # Phase 56 (D-13): release the exclusion at every exit from this function.
@@ -1468,11 +1537,11 @@ PY
   local s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified
   local d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total
   local req_time resp_time dur_ms orig_sid digest
-  local ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source
+  local ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source ctx_subscriber_key
   while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified \
     d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total \
     req_time resp_time dur_ms orig_sid digest \
-    ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source; do
+    ctx_root_sid ctx_root_agent ctx_root_trace ctx_aux_job ctx_source ctx_subscriber_key; do
     [[ -z "${s_sid}" ]] && continue
 
     # D-08: gate to once per distinct unrecognised task value per install
@@ -1538,6 +1607,26 @@ PY
       else
         cmd+=(--squad-role "subagent")
       fi
+    fi
+
+    # Subscriber attribution (Phase 62, SUB-05/07/08) — the fourth and last
+    # emission site to gain it, completing "all four, not a subset". Appended
+    # AFTER the squad block, matching the OTHER two hermes-report.sh sites'
+    # relative order (both put subscriber last, after whatever attribution
+    # families exist there). `ctx_subscriber_key` is the seventh field of the
+    # per-session aux_session_ctx cache -- resolved ONCE by the main session
+    # loop (own identity, or inherited via the root-walk) or, for a
+    # supplement-recovered session, resolved once for that session alone
+    # (Task 3); nothing is resolved here. This append sits INSIDE the
+    # per-aux-row loop but reads a PER-SESSION value, so all of one
+    # session's aux rows carry the SAME key. The key enters neither the
+    # --transaction-id nor the AUX_LEDGER_FILE line above/below this block --
+    # the auxiliary ledger's identity is its own six-column cumulative key,
+    # and adding a dimension to it would unmatch every existing line and
+    # re-ship everything. A session with no resolved actor appends NOTHING,
+    # which is the common case and the load-bearing one.
+    if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" ]]; then
+      [[ -n "${ctx_subscriber_key}" ]] && cmd+=(--subscriber-id "${ctx_subscriber_key}")
     fi
 
     local cmd_output cmd_exit
@@ -2529,6 +2618,15 @@ PY
     # earlier in this same iteration (the sessions query column), consumed
     # here as ctx_source by report_auxiliary_usage as the --environment value.
     #
+    # Phase 62 (SUB-05/D-09): a SEVENTH field, `subscriber_key`, was added
+    # here. `subscriber_key` is already resolved at this same loop
+    # iteration's head (own identity, or inherited via the root-walk) --
+    # this append costs zero new subshells. Widened in the SAME commit as
+    # the parser's expected field width and as _supplement_aux_session_ctx's
+    # own recovery append below: a widening that reaches the parser but
+    # misses either producer is exactly D-09's named failure mode (a
+    # session's auxiliary spend silently dropped by the strict-width parse).
+    #
     # Phase 55 Plan 03 (T-55-06): gated on session_markers_dir (already
     # resolved above, no re-derivation) matching THIS process's own
     # MARKERS_DIR. A multiplexed host can run one cron tick per profile, each
@@ -2552,7 +2650,8 @@ PY
       local _aux_ctx_root_agent_name="${root_agent_name//[|$'\n'$'\r']/_}"
       local _aux_ctx_aux_job_id="${aux_job_id//[|$'\n'$'\r']/_}"
       local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
-      aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}"$'\n'
+      local _aux_ctx_subscriber_key="${subscriber_key//[|$'\n'$'\r']/_}"
+      aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}|${_aux_ctx_subscriber_key}"$'\n'
     fi
 
     # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.

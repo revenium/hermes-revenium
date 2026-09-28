@@ -522,11 +522,33 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # VALUE expressions are unchanged, so both assertions above pass
         # untouched. --subscriber-id is a different flag family and adds no
         # --operation-type emission site.
+        #
+        # Re-measured again (Phase 62 Plan 03 Task 1, SUB-05/07/08/11): the
+        # aux path's widened per-session context cache (the header comment,
+        # the parser's field-width comment plus its counted-mismatch
+        # replacement for the silent `continue`, and the width-mismatch
+        # extraction block inserted before the `-z aux_query_output` check)
+        # all sit ABOVE this file's aux `--operation-type "${AUX_OPERATION_TYPE}"`
+        # site, shifting it by +69 (1510->1579); the NEW subscriber
+        # emission block this task adds sits AFTER that site (after the
+        # squad block, inside the same cmd=(...) construction), so it adds
+        # no further shift to THIS site, but every site below it in file
+        # order (both the session-loop aux_session_ctx append's own new
+        # comment/field, at the root_aid resolution site, and the
+        # subscriber emission block itself) sits ABOVE the marker-split and
+        # markerless sites, shifting both by +99 (3793->3892, 3992->4091).
+        # api-event-report.sh is untouched by this plan (its own aux/skill/
+        # ticket path is Task 2/3's job, on the same file, but this specific
+        # site is unaffected because the event path has no aux pass of its
+        # own). Pure shift once more -- the COUNT (4) and the emitted VALUE
+        # expressions are unchanged, so both assertions above pass
+        # untouched. --subscriber-id is a different flag family and adds no
+        # --operation-type emission site.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1510),
-            ('hermes-report.sh', 3793),
-            ('hermes-report.sh', 3992),
+            ('hermes-report.sh', 1579),
+            ('hermes-report.sh', 3892),
+            ('hermes-report.sh', 4091),
             ('api-event-report.sh', 1784),
         }
         self.assertEqual(
