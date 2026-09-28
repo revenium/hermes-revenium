@@ -582,7 +582,7 @@ class SoleOtherEmitterTests(unittest.TestCase):
             ('hermes-report.sh', 1715),
             ('hermes-report.sh', 4049),
             ('hermes-report.sh', 4248),
-            ('api-event-report.sh', 1816),
+            ('api-event-report.sh', 1826),
         }
         self.assertEqual(
             found_locations, expected_locations,
