@@ -56,18 +56,25 @@ already does.
 import json
 import os
 import re
+import shlex
+import shutil
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 from tests._compat_helpers import (
     assert_argv_is_golden_argv_order,
+    build_session_model_usage,
     build_shim,
     load_golden,
+    run_script,
     seed_user_ids,
+    SCRIPTS_DIR,
 )
 from tests.test_phase55_auxiliary_metering import _AuxMeteringTestCase
+from tests.test_phase61_identity_resolution import _OLD_TS, _seed_sessions_db
 from tests.test_phase62_subscriber_wiring import HERMES_REPORT_SH
 from tests.test_ticket_attribution import _build_board
 
@@ -622,6 +629,190 @@ class AuxMemoOrderingDependencyTests(unittest.TestCase):
             text,
             'the aux emit query\'s ORDER BY clause got truncated or reshaped',
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (SUB-05): the supplement path's own actor -- the auxiliary-only
+# session that the supplement exists to recover.
+# ---------------------------------------------------------------------------
+
+
+class AuxOnlySessionOwnActorTests(_AuxMeteringTestCase):
+    """A session with auxiliary spend and NO main-loop tokens -- the shape
+    the supplement exists to recover -- ships its auxiliary rows with its
+    own resolved key in the seventh cache field. Fixture shape reused from
+    tests/test_phase59_aux_zero_token.py::AuxOnlySessionRecoveryTests (per
+    62-03-PLAN.md Task 3 step 5)."""
+
+    def test_recovered_session_ships_its_own_resolved_key(self):
+        fixture = self._setup_fixture(
+            [self._one_session(input_tokens=0, output_tokens=0)],
+            aux_rows=[self._one_aux_row()],
+        )
+        build_shim(
+            os.path.join(fixture['bin_dir'], 'revenium'),
+            subscriber_capable=True, squad_capable=True,
+        )
+        seed_user_ids(fixture['state_db'], {'aux-sid-001': 'p62-recovered-actor'})
+
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+        aux_flags_list = self._find_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 1, aux_flags_list)
+        self.assertEqual(
+            aux_flags_list[0].get('--subscriber-id'), 'test:p62-recovered-actor'
+        )
+
+
+class AuxOnlySessionUnsafeActorTests(_AuxMeteringTestCase):
+    """A recovered session whose stored actor id contains a delimiter ships
+    NO subscriber token, and its environment dimension and token values on
+    that same row are unaffected -- the unsafe value is REFUSED (via the
+    supplement's own delimiter-safety CASE, T-62-15), not sanitised into a
+    plausible different key."""
+
+    def test_pipe_in_user_id_ships_no_token_environment_and_tokens_intact(self):
+        fixture = self._setup_fixture(
+            [self._one_session(input_tokens=0, output_tokens=0)],
+            aux_rows=[self._one_aux_row()],
+        )
+        build_shim(
+            os.path.join(fixture['bin_dir'], 'revenium'),
+            subscriber_capable=True, squad_capable=True,
+        )
+        seed_user_ids(fixture['state_db'], {'aux-sid-001': 'U|600'})
+
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+        aux_flags_list = self._find_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 1, aux_flags_list)
+        flags = aux_flags_list[0]
+        self.assertNotIn('--subscriber-id', flags, flags)
+        self.assertEqual(flags.get('--environment'), 'test')
+        self.assertEqual(flags.get('--total-tokens'), '50')
+
+
+class AuxOnlySessionColumnAbsentTests(_AuxMeteringTestCase):
+    """On an install with no identity column at all, the supplement still
+    recovers the session and still ships its auxiliary row -- the widened
+    recovery SELECT's schema-probe boolean handoff did not break the
+    recovery query itself (T-62-14: an unguarded column reference would
+    raise inside the surrounding swallow and silently stop recovering
+    EVERY auxiliary-only session, not just lose the subscriber
+    dimension)."""
+
+    def test_column_absent_install_still_recovers_and_ships(self):
+        fixture = self._setup_fixture(
+            [self._one_session(input_tokens=0, output_tokens=0)],
+            aux_rows=[self._one_aux_row()],
+        )
+        # Deliberately NO seed_user_ids call -- the column-absent arm.
+        build_shim(
+            os.path.join(fixture['bin_dir'], 'revenium'),
+            subscriber_capable=True, squad_capable=True,
+        )
+
+        result = self._tick(fixture, 0)
+        self.assertEqual(result['rc'], 0, result['output'])
+        aux_flags_list = self._find_aux_invocation(result['meter_invocations'])
+        self.assertEqual(len(aux_flags_list), 1, aux_flags_list)
+        flags = aux_flags_list[0]
+        self.assertNotIn('--subscriber-id', flags, flags)
+        self.assertEqual(flags.get('--environment'), 'test')
+
+
+class AuxOnlySessionNoInheritanceTests(unittest.TestCase):
+    """A recovered session does NOT inherit a root's key; it carries its
+    own or none. Inheritance lives in the main session loop and reaches
+    through the batched root map built for THAT loop's sid set (Phase 61);
+    reproducing it here would be a second inheritance implementation for
+    the one population that has no main-loop work to inherit from.
+
+    Uses tests.test_phase61_identity_resolution._seed_sessions_db (the
+    15-column schema carrying parent_session_id, which
+    tests._compat_helpers.build_state_db and _AuxMeteringTestCase's own
+    fixture builder both omit) rather than _AuxMeteringTestCase, because
+    proving no-inheritance requires an actual root/child relationship.
+    """
+
+    def test_recovered_child_does_not_inherit_its_roots_subscriber(self):
+        root_sid = 'p62-root-noinherit'
+        child_sid = 'p62-child-noinherit'
+
+        tmp = tempfile.mkdtemp(prefix='gsd-p62-noinherit-')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        hermes_home = os.path.join(tmp, 'hh')
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        markers_dir = os.path.join(state_dir, 'markers')
+        os.makedirs(markers_dir, mode=0o700)
+        state_db = os.path.join(hermes_home, 'state.db')
+        shim_home = os.path.join(tmp, 'home')
+        bin_dir = os.path.join(shim_home, '.local', 'bin')
+        os.makedirs(bin_dir)
+        meter_log = os.path.join(tmp, 'meter.log')
+        jobs_log = os.path.join(tmp, 'jobs.log')
+        inv_log = os.path.join(tmp, 'inv.log')
+        build_shim(
+            os.path.join(bin_dir, 'revenium'),
+            subscriber_capable=True, squad_capable=True,
+        )
+
+        _seed_sessions_db(state_db, [
+            {
+                'id': root_sid, 'source': 'slack', 'user_id': 'U100',
+                'input_tokens': 100, 'output_tokens': 50,
+                'started_at': _OLD_TS, 'ended_at': _OLD_TS,
+            },
+            {
+                # The would-be-inherited-from child: zero main-loop tokens
+                # (so it is recovered by the supplement, not the main
+                # loop), no user_id of its own.
+                'id': child_sid, 'source': 'subagent', 'user_id': None,
+                'parent_session_id': root_sid,
+                'input_tokens': 0, 'output_tokens': 0,
+                'started_at': _OLD_TS, 'ended_at': _OLD_TS,
+            },
+        ])
+        build_session_model_usage(state_db, [{
+            'session_id': child_sid, 'model': 'claude-3-5-haiku',
+            'billing_provider': 'anthropic', 'task': 'approval',
+            'api_call_count': 1, 'input_tokens': 10, 'output_tokens': 5,
+            'estimated_cost_usd': 0.001,
+            'first_seen': _OLD_TS + 500.0, 'last_seen': _OLD_TS + 600.0,
+        }])
+
+        env = {
+            **os.environ,
+            'HOME': shim_home, 'HERMES_HOME': hermes_home,
+            'REVENIUM_STATE_DIR': state_dir,
+            'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': inv_log, 'METER_LOG': meter_log,
+            'JOBS_LOG': jobs_log, 'TZ': 'UTC',
+        }
+        rc, _inv, output = run_script(
+            SCRIPTS_DIR / 'hermes-report.sh', env, inv_log
+        )
+        self.assertEqual(rc, 0, output)
+
+        with open(meter_log) as f:
+            invocations = [shlex.split(ln) for ln in f if ln.strip()]
+        aux = [
+            inv for inv in invocations
+            if '--operation-type' in inv
+            and inv[inv.index('--operation-type') + 1] == 'OTHER'
+        ]
+        self.assertEqual(len(aux), 1, invocations)
+        argv = aux[0]
+        self.assertNotIn(
+            '--subscriber-id', argv,
+            f'a recovered child must NOT inherit its root\'s subscriber '
+            f'key -- inheritance is a main-loop-only mechanism, and this '
+            f'child never reaches the main loop (zero tokens): {argv!r}',
+        )
+        # The root-walk (get_root_session_id) still resolves correctly --
+        # --trace-id is the ROOT's sid, proving the child's OTHER
+        # attribution is intact even though subscriber is correctly absent.
+        self.assertEqual(argv[argv.index('--trace-id') + 1], root_sid, argv)
 
 
 if __name__ == '__main__':

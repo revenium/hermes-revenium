@@ -944,6 +944,15 @@ class StructuralInvariantTests(unittest.TestCase):
         let an unsafe root `source` fabricate a plausible inherited key instead
         of being rejected. Raised from 2 to 4 when that was fixed.
 
+        Raised again, from FOUR to SIX (Phase 62 Plan 03 Task 3, SUB-05):
+        `_supplement_aux_session_ctx`'s recovery SELECT (hermes-report.sh)
+        gained the SAME CASE for the two new columns it now reads --
+        `source` (replacing that function's own prior ad hoc Python
+        `.replace()` sanitizer) and the new `user_id` -- so an
+        auxiliary-only session's own subscriber resolution refuses a
+        transport-unsafe value the same way every other site does, rather
+        than arriving pre-sanitised into a new plausible key (T-62-15).
+
         MISSES: pins the NUMBER of sites, not that they are TEXTUALLY
         IDENTICAL to each other (a drifted-but-still-present copy would still
         pass this count), and not WHICH columns are guarded -- the behavioural
@@ -963,9 +972,10 @@ class StructuralInvariantTests(unittest.TestCase):
             )
             total += code_only.count(needle)
         self.assertEqual(
-            total, 4,
-            f'expected exactly 4 delimiter-safety CASE sites '
-            f'(1 in the main SELECT + 3 in build_subscriber_map), '
+            total, 6,
+            f'expected exactly 6 delimiter-safety CASE sites '
+            f'(1 in the main SELECT + 3 in build_subscriber_map + 2 in '
+            f'the aux supplement\'s recovery SELECT), '
             f'counted {total}'
         )
 

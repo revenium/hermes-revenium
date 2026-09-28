@@ -560,11 +560,22 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # ticket/skill flags already existed; this task only backfills the
         # aux path inside hermes-report.sh). Pure shift once more -- the
         # COUNT (4) and the emitted VALUE expressions are unchanged.
+        #
+        # Re-measured again (Phase 62 Plan 03 Task 3, SUB-05): the
+        # supplement's widened recovery SELECT (the schema-probe boolean
+        # handoff and the two-hard-coded-SQL-strings Python branch, plus
+        # the subscriber resolution added to Step 4's per-recovered-session
+        # loop) all sit inside `_supplement_aux_session_ctx`, which is
+        # defined ABOVE `report_auxiliary_usage` and therefore above ALL
+        # THREE of this file's own sites -- shifting each of them by the
+        # SAME +49 (1650->1699, 3984->4033, 4183->4232). api-event-report.sh
+        # is untouched by this task. Pure shift once more -- the COUNT (4)
+        # and the emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1650),
-            ('hermes-report.sh', 3984),
-            ('hermes-report.sh', 4183),
+            ('hermes-report.sh', 1699),
+            ('hermes-report.sh', 4033),
+            ('hermes-report.sh', 4232),
             ('api-event-report.sh', 1784),
         }
         self.assertEqual(

@@ -1024,34 +1024,69 @@ PY
     # into a query, so they travel as parameters, never interpolated into
     # the statement text. No token filter here: the whole point is the
     # sessions that filter excludes.
+    #
+    # Phase 62 Plan 03 Task 3 (SUB-05): also selects `user_id`, so a
+    # recovered session can resolve its OWN subscriber key below. Probe
+    # `sessions_has_user_id` in BASH (never inside the heredoc -- an older
+    # Hermes install's absent column must not raise inside this function's
+    # own try/except, which would silently stop recovering EVERY
+    # auxiliary-only session, not just lose the subscriber dimension) and
+    # hand the result across as a boolean env var. Python then picks
+    # between TWO FIXED, hard-coded SQL strings -- never interpolates the
+    # boolean into SQL text -- so the row is a CONSTANT THREE fields either
+    # way (T-62-14). `source` and `user_id` both go through the SAME
+    # delimiter-safety CASE expression the main SELECT and
+    # build_subscriber_map already use (replacing this function's own
+    # prior ad hoc Python `.replace()` sanitizer for `source`, which is now
+    # redundant): a transport-unsafe value arrives as the FIXED SENTINEL
+    # and is REFUSED by resolve_subscriber_id below, rather than arriving
+    # silently sanitised into a new plausible-looking key (T-62-15 -- the
+    # conversion-creates-an-identity defect Phase 61's review found).
+    local _supp_has_user_id_col="0"
+    if sessions_has_user_id; then
+      _supp_has_user_id_col="1"
+    fi
     local session_rows
     session_rows=$(
       STATE_DB="${STATE_DB}" \
       OWNED_SIDS="${owned_sids}" \
+      HAS_USER_ID_COL="${_supp_has_user_id_col}" \
       python3 - <<'PY' 2>/dev/null
 import os
 import sqlite3
 
 state_db = os.environ.get('STATE_DB', '')
 owned_sids = [s for s in os.environ.get('OWNED_SIDS', '').split('\n') if s]
+has_user_id_col = os.environ.get('HAS_USER_ID_COL', '0') == '1'
 
 if not owned_sids:
     raise SystemExit(0)
+
+_SOURCE_CASE = (
+    "CASE WHEN source GLOB '*[|' || char(9) || char(10) || char(13) || ']*' "
+    "THEN '__revenium_unsafe_source__' ELSE COALESCE(source, '') END"
+)
 
 conn = None
 try:
     conn = sqlite3.connect(f"file:{state_db}?mode=ro", uri=True)
     cur = conn.cursor()
     placeholders = ','.join('?' for _ in owned_sids)
-    cur.execute(
-        f"SELECT id, source FROM sessions WHERE id IN ({placeholders})",
-        owned_sids,
-    )
-    for row_sid, source in cur.fetchall():
-        s_source = source if isinstance(source, str) else ''
-        for bad in ('|', '\n', '\r'):
-            s_source = s_source.replace(bad, '_')
-        print(f"{row_sid}|{s_source}")
+    if has_user_id_col:
+        sql = (
+            f"SELECT id, {_SOURCE_CASE}, "
+            "CASE WHEN user_id GLOB '*[|' || char(9) || char(10) || char(13) || ']*' "
+            "THEN '__revenium_unsafe_user_id__' ELSE COALESCE(user_id, '') END "
+            f"FROM sessions WHERE id IN ({placeholders})"
+        )
+    else:
+        sql = (
+            f"SELECT id, {_SOURCE_CASE}, '' "
+            f"FROM sessions WHERE id IN ({placeholders})"
+        )
+    cur.execute(sql, owned_sids)
+    for row_sid, source, user_id in cur.fetchall():
+        print(f"{row_sid}|{source}|{user_id}")
 except Exception:
     pass
 finally:
@@ -1071,24 +1106,38 @@ PY
     # would mean duplicating ~150 lines of the main loop's own resolution
     # for a session that has no main-loop work to attribute them from.
     #
-    # The SEVENTH field, subscriber_key, is ALSO left empty here (Phase 62
-    # Plan 03 Task 1) -- Task 3 populates it with this recovered session's
-    # OWN resolved actor (resolve_subscriber_id, once per recovered session,
-    # never inherited from a root: this population has no main-loop work to
-    # inherit from). Empty is correct here too, for now: an auxiliary-only
-    # session with no identity resolution yet simply appends no
-    # --subscriber-id token, matching every other empty-field arm in this
-    # same line.
-    local found_sids="" row_sid row_source root_sid s_sid s_root_sid
+    # The SEVENTH field, subscriber_key, is resolved HERE (Phase 62 Plan 03
+    # Task 3): once per recovered session, via `resolve_subscriber_id` --
+    # the SAME single implementation the main session loop and both
+    # completion sites use, never a second format. Fed this row's OWN
+    # `source`/`user_id` only -- NEVER a root's. Inheritance lives in the
+    # main session loop and reaches through the batched root map built for
+    # THAT loop's sid set (Phase 61); reproducing it here would be a second
+    # inheritance implementation for the one population that has no
+    # main-loop work to inherit from in the first place. A recovered
+    # session therefore carries its OWN identity, or none -- never an
+    # inherited one. The supplement already spends a root-walk call
+    # (`get_root_session_id`) per recovered session, so one more bash
+    # function call here is in line with its existing per-session cost and
+    # well inside D-08 (which forbids per-RECORD work, not per-session
+    # work). A transport-unsafe value arrived as the fixed sentinel above
+    # and is REFUSED here, not sanitised into a plausible key.
+    local found_sids="" row_sid row_source row_user_id root_sid s_sid s_root_sid
+    local _supp_sub_resolved _supp_subscriber_key
     if [[ -n "${session_rows}" ]]; then
-      while IFS='|' read -r row_sid row_source; do
+      while IFS='|' read -r row_sid row_source row_user_id; do
         [[ -z "${row_sid}" ]] && continue
         found_sids+="${row_sid}"$'\n'
         root_sid="$(get_root_session_id "${row_sid}")"
         [[ -z "${root_sid}" ]] && root_sid="${row_sid}"
         s_sid="${row_sid//[|$'\n'$'\r']/_}"
         s_root_sid="${root_sid//[|$'\n'$'\r']/_}"
-        augmented+="${s_sid}|${s_root_sid}||||${row_source}|"$'\n'
+        _supp_subscriber_key=""
+        if [[ -n "${row_user_id}" ]]; then
+          _supp_sub_resolved="$(resolve_subscriber_id "${row_source}" "${row_user_id}")"
+          _supp_subscriber_key="${_supp_sub_resolved#*|}"
+        fi
+        augmented+="${s_sid}|${s_root_sid}||||${row_source}|${_supp_subscriber_key}"$'\n'
         recovered=$((recovered + 1))
       done <<< "${session_rows}"
     fi
