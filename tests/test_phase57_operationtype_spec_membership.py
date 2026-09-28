@@ -487,11 +487,20 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # emitted VALUE expressions are unchanged, so both assertions above
         # pass untouched. The resolution pass feeds --agentic-job-id, which
         # is a different flag and adds no emission site.
+        # Re-measured (Phase 62 Plan 01 Task 1, SUB-05/07/08): the new
+        # SUBSCRIBER_CLI_CAPABLE probe block was inserted above the ticket
+        # probe's tail near the top of the script (14 lines), shifting every
+        # later line by +14 -- 1496->1510, 3779->3793, 3960->3974.
+        # api-event-report.sh is untouched by this plan (its subscriber
+        # wiring is Plan 62-02's job). Pure shift, as always here -- the
+        # COUNT (4) and the emitted VALUE expressions are unchanged, so both
+        # assertions above pass untouched. --subscriber-id is a different
+        # flag family and adds no --operation-type emission site.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1496),
-            ('hermes-report.sh', 3779),
-            ('hermes-report.sh', 3960),
+            ('hermes-report.sh', 1510),
+            ('hermes-report.sh', 3793),
+            ('hermes-report.sh', 3974),
             ('api-event-report.sh', 1667),
         }
         self.assertEqual(

@@ -119,6 +119,20 @@ if supports_flag "meter completion" "--ticket-id"; then
   TICKET_CLI_CAPABLE=true
 fi
 
+# Subscriber attribution (Phase 62, SUB-05/07/08). Same posture as the skill
+# and ticket probes above: an older CLI is a LIVE configuration, not an
+# error, and a session metered there must produce argv byte-identical to
+# what the golden fixtures pin. Probed on its only flag, scoped to `meter
+# completion` specifically (D-10) -- `--organization-name` below is the
+# recorded proof that a flag accepted by `meter completion` can be rejected
+# outright by the jobs subcommands, so no probe here may be assumed to
+# generalise across verbs. Resolved via `if`, never a command substitution
+# into a variable -- the latter would swallow supports_flag's exit status.
+SUBSCRIBER_CLI_CAPABLE=false
+if supports_flag "meter completion" "--subscriber-id"; then
+  SUBSCRIBER_CLI_CAPABLE=true
+fi
+
 # `--organization-name` is NOT uniform across subcommands: `meter completion`
 # accepts it, `jobs create` and `jobs outcome` do NOT (verified on CLI 1.5.0,
 # which rejects it outright: "Error: unknown flag: --organization-name", exit 1).
@@ -4032,6 +4046,21 @@ PY
         local ticket_id
         ticket_id="$(resolve_session_ticket "${sid}")"
         [[ -n "${ticket_id}" ]] && cmd+=(--ticket-id "${ticket_id}")
+      fi
+
+      # Subscriber attribution (Phase 62, SUB-05/07/08) — identical shape and
+      # position to the marker-split path above (both sites keep this family
+      # in step). Appended AFTER the ticket family — flag order is part of
+      # the argv contract the golden fixtures pin. `subscriber_key` is the
+      # per-session local already resolved at the loop head (own identity,
+      # or inherited via the root-walk); nothing is resolved here. A session
+      # with no resolved actor appends NOTHING — that is the common case
+      # (97% of sessions on the reference host) and the load-bearing one.
+      # Never logged here: the two `Reported:` lines already carry the key
+      # through mask_subscriber_for_log, and a new log line bypassing that
+      # masker was Phase 61's critical review finding.
+      if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" ]]; then
+        [[ -n "${subscriber_key}" ]] && cmd+=(--subscriber-id "${subscriber_key}")
       fi
 
       local cmd_output cmd_exit

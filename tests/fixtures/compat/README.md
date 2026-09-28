@@ -183,6 +183,45 @@ required *absence* in `forbidden_fields`: `--reasoning-tokens`, which neither
 the main-loop nor the auxiliary emit path ships — its appearance on either
 would be a silent parity break.
 
+## `argv_order` — the exact-list guard, extended to three more goldens (Phase 62)
+
+`meter-completion-markerless.golden.json` has carried an `argv_order` key
+since Phase 29: the FULL ordered token list the markerless site emits for
+its pinned fixture, asserted element-for-element by four modules
+(`tests/test_phase29_agent_inheritance.py`, `tests/test_phase32_drain_gate.py`,
+`tests/test_phase46_feature_off.py`, `tests/test_squad_name_override.py`).
+This is a stronger guard than `exact_match_fields`/`pattern_fields`/
+`forbidden_fields`: those three only check the fields a golden already
+names, so a NEW flag added anywhere in the emitted argv passes every one of
+them silently. An ordered-list equality catches it.
+
+Phase 62 (SUB-05/07/08, the `--subscriber-id` wiring) extends this pattern
+to `meter-completion.golden.json` (the marker-split site). The event
+(`meter-completion-event.golden.json`) and auxiliary
+(`meter-completion-aux.golden.json`) goldens are expected to gain their own
+`argv_order` in a later plan in this phase, following the same convention.
+
+Two of these three goldens' own `pattern_fields` name non-deterministic
+values (the three timestamp flags, captured from independent `date` calls)
+that cannot be transcribed literally into a fixed `argv_order` list. Rather
+than re-capturing a golden every time a timestamp happens to differ, a
+golden that needs this may declare an `argv_order_pattern_sentinel` key: a
+fixed string that stands in for the VALUE of every flag named in that
+golden's own `pattern_fields`, at that flag's exact position in
+`argv_order`. `tests/_compat_helpers.py::assert_argv_is_golden_argv_order`
+reads this key (if present) and performs the identical substitution on the
+captured argv before comparing — self-describing metadata on the golden
+itself, so no call site can forget to normalise a non-deterministic field.
+`meter-completion-markerless.golden.json` has no such key (its own fixture
+happens to produce fixed literal timestamps) and is compared with those
+literal values unchanged, exactly as the four pre-existing modules do.
+
+Adding a new flag to an emission site means updating THAT site's
+`argv_order` list deliberately — it is not maintained automatically, and
+`assert_argv_is_golden_argv_order`'s whole purpose is to fail loudly the
+moment a captured argv and a golden's list diverge in length, in flag
+order, or in value.
+
 ## v1.4 subagent inheritance — orthogonal to top-level compat
 
 v1.4 (Phases 21-23) adds subagent `--trace-id` + `--agentic-job-id`
