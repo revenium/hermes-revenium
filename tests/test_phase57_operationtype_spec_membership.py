@@ -440,6 +440,12 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # loop, shifting both sites again (3588->3603, 3769->3784). Pure
         # shift; the trap touches no emission site.
         #
+        # Re-measured again (phase 62 CR-01 hotfix, same convention): naming the
+        # 10th map column in _emit_shadow_row's fixed-arity read added a comment
+        # block above api-event-report.sh's emission site, shifting it 1784->1795.
+        # Pure shift; the SET of emission sites is unchanged. Measured by grep
+        # (the test's own failure output), never by arithmetic.
+        #
         # Re-measured again (phase 61, SUB-01..SUB-04, same convention):
         # identity resolution inserted the column probe, the per-session
         # resolution block and the inheritance map build above this file's two
@@ -576,7 +582,7 @@ class SoleOtherEmitterTests(unittest.TestCase):
             ('hermes-report.sh', 1699),
             ('hermes-report.sh', 4033),
             ('hermes-report.sh', 4232),
-            ('api-event-report.sh', 1784),
+            ('api-event-report.sh', 1795),
         }
         self.assertEqual(
             found_locations, expected_locations,
