@@ -46,6 +46,41 @@ Every actor id and email address seeded in this module is synthetic and
 fixed, publicly-documented system bot id, already reused from
 test_phase61_identity_resolution.py's `test_bot_id_resolves_identically_to_human`
 -- per T-61-08: no value here is copied from any reference host.
+
+PHASE 62 (SUB-05/07/08, D-13) UPDATE:
+
+Phase 61's own charter for this module was "no wire change happens in this
+phase" -- every differential above asserted `argv_a == argv_b` (run A no
+subscriber, run B one) as PROOF of that absence. Phase 62's entire purpose is
+to cross that boundary: `--subscriber-id` now ships. All four
+`SubscriberBoundaryDifferentialTests` methods are INVERTED, not deleted, into
+`_assert_argv_equal_modulo_timestamps_plus_tail`: each now asserts run B
+equals run A plus exactly the two subscriber tokens. This is what closing
+Phase 61 review item IN-01 actually looks like -- the differential remains
+the strongest argv-shape assertion in the suite, now proving the PRESENT arm
+instead of the absent one. `GoldenCoexistenceWithResolvedSubscriberTests` and
+`StructuralInvariantTests` are unaffected and stay as written.
+
+`test_boundary_files_unmodified_relative_to_merge_base` (formerly in
+`StructuralInvariantTests`) is RETIRED, not just edited. It asserted a
+Phase-61-specific claim -- that `tests/fixtures/compat/`, `tests/_compat_helpers.py`
+and `skills/revenium/scripts/api-event-report.sh` were UNMODIFIED relative to
+the merge base with `main` -- and Phase 62's entire purpose is to touch the
+first two of those three deliberately (this plan edits both; Plan 62-02 edits
+the third). A guard whose premise a later phase is chartered to violate must
+be removed with a record, not left to fail forever or silently patched to
+tolerate the exact drift it existed to catch. Its replacement proof is this
+phase's own per-site `argv_order` equality (`assert_argv_is_golden_argv_order`
+in `tests/_compat_helpers.py`, consumed by `tests/test_phase62_subscriber_wiring.py`):
+where the retired test asserted "these files never changed", the replacement
+asserts the STRONGER claim that emitted argv changed in EXACTLY the way this
+phase intends (golden argv_order plus exactly two trailing tokens when an
+actor resolves, byte-identical to it otherwise) -- a property the merge-base
+diff could never express. Separately, the retired test's own docstring
+recorded that it SKIPPED (never failed) whenever the repository could not
+resolve a merge-base against `main` -- true on every shallow CI checkout
+without `fetch-depth: 0` -- so its removal loses less real coverage than its
+name suggests: a green CI run was never proof it had executed.
 """
 import os
 import re
@@ -63,7 +98,6 @@ from tests._compat_helpers import (
     build_state_db,
     load_golden,
     run_script,
-    ROOT,
     SCRIPTS_DIR,
 )
 from tests.test_phase61_identity_resolution import (
@@ -148,6 +182,38 @@ def _assert_argv_equal_modulo_timestamps(test_case, argv_a, argv_b, label):
     )
 
 
+def _assert_argv_equal_modulo_timestamps_plus_tail(
+    test_case, argv_a, argv_b, extra_tail, label
+):
+    """Phase 62 (SUB-05/D-13): inverted sibling of
+    `_assert_argv_equal_modulo_timestamps` above. Run A resolves NO
+    subscriber; run B resolves one. Since Phase 62 wires `--subscriber-id`,
+    "identical" is no longer the correct claim -- "identical plus exactly
+    these `extra_tail` tokens" is. Same three SEPARATE assertions as the
+    un-inverted sibling (length, ordered flag-name list, normalised full
+    value list), so a failure still names exactly which kind of drift
+    occurred; only the expected shape of B changes.
+    """
+    expected_b = list(argv_a) + list(extra_tail)
+    test_case.assertEqual(
+        len(expected_b), len(argv_b),
+        f'{label}: argv LENGTH differs from A + extra_tail={list(extra_tail)} '
+        f'-- a flag was added or removed.\n'
+        f'A+tail ({len(expected_b)} tokens): {expected_b}\nB ({len(argv_b)} tokens): {argv_b}'
+    )
+    test_case.assertEqual(
+        _flag_names(expected_b), _flag_names(argv_b),
+        f'{label}: ordered flag-NAME list differs from A + extra_tail -- a '
+        f'flag moved.\nA+tail flags: {_flag_names(expected_b)}\nB flags: {_flag_names(argv_b)}'
+    )
+    test_case.assertEqual(
+        _normalize_timestamps(expected_b), _normalize_timestamps(argv_b),
+        f'{label}: normalised full argv lists differ from A + extra_tail -- a '
+        f'value changed.\nA+tail: {_normalize_timestamps(expected_b)}\n'
+        f'B: {_normalize_timestamps(argv_b)}'
+    )
+
+
 class _Harness:
     """One temp HERMES_HOME + PATH-shim `revenium` + one meter log, mirroring
     tests.test_phase61_identity_resolution.Phase61IdentityResolutionEndToEndTestCase's
@@ -175,7 +241,12 @@ class _Harness:
         self.jobs_log = os.path.join(self.tmp, 'jobs.log')
         self.inv_log = os.path.join(self.tmp, 'inv.log')
         self.shim = os.path.join(self.bin_dir, 'revenium')
-        build_shim(self.shim, squad_capable=True)
+        # subscriber_capable=True (Phase 62): the differentials below need
+        # SUBSCRIBER_CLI_CAPABLE to resolve true so a resolved actor actually
+        # reaches the wire -- an incapable shim would make every "present"
+        # arm look identical to "absent" by construction, hiding the exact
+        # regression this harness exists to catch.
+        build_shim(self.shim, squad_capable=True, subscriber_capable=True)
 
     def cleanup(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -242,7 +313,14 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
     """
 
     def test_marker_path_value_differential_argv_identical(self):
-        """Same 15-column schema in both runs (both HAVE the user_id column);
+        """PHASE 62 (SUB-05/D-13) INVERTED: this test's ORIGINAL claim (Phase
+        61) was that runs A and B produce IDENTICAL argv, because Phase 61
+        added no wire flag. Phase 62 wires `--subscriber-id` at the
+        marker-split site too, so a session that resolves an actor now MUST
+        differ from one that does not -- by exactly the two subscriber
+        tokens.
+
+        Same 15-column schema in both runs (both HAVE the user_id column);
         only the ROW's value differs -- run A's is NULL, run B's is a real
         actor under source='slack'. This is the arm that isolates "a
         subscriber resolved from an already-present column" from any schema
@@ -268,23 +346,30 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
         )
         self.assertEqual(len(own_a), 1, f'run A: {own_a!r}')
         self.assertEqual(len(own_b), 1, f'run B: {own_b!r}')
-        _assert_argv_equal_modulo_timestamps(
-            self, own_a[0], own_b[0], 'marker path, value differential'
+        _assert_argv_equal_modulo_timestamps_plus_tail(
+            self, own_a[0], own_b[0],
+            ('--subscriber-id', 'slack:p61-actor-mv'),
+            'marker path, value differential',
         )
 
     def test_marker_path_schema_differential_argv_identical(self):
-        """Run A's `sessions` table has NO `user_id` column at all (built via
+        """PHASE 62 (SUB-05/D-13) INVERTED, same rationale as the value
+        differential above.
+
+        Run A's `sessions` table has NO `user_id` column at all (built via
         `tests._compat_helpers.build_state_db`, the exact 13-column shape
         used at 139 call sites across 39 files); run B's has the column,
         populated. This is the arm that proves the capability probe's
-        ABSENT branch changes nothing on the wire, which is what keeps all
+        ABSENT branch changes NOTHING on the wire, which is what keeps all
         139 `build_state_db` call sites honest as backward-compatibility
-        fixtures rather than silently-stale ones.
+        fixtures rather than silently-stale ones, now that a real flag
+        exists to leak.
 
-        MISSES: proves the two SELECT branches produce identical argv for
-        THIS fixture shape; it does not enumerate every possible
-        `PRAGMA table_info` result `sessions_has_user_id` could see on a
-        real, differently-migrated install.
+        MISSES: proves the two SELECT branches produce argv differing by
+        exactly the subscriber tail for THIS fixture shape; it does not
+        enumerate every possible `PRAGMA table_info` result
+        `sessions_has_user_id` could see on a real, differently-migrated
+        install.
         """
         sid = 'p61-diff-marker-schema'
         own_a, _ = _run_one(
@@ -306,19 +391,34 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
         )
         self.assertEqual(len(own_a), 1, f'run A: {own_a!r}')
         self.assertEqual(len(own_b), 1, f'run B: {own_b!r}')
-        _assert_argv_equal_modulo_timestamps(
-            self, own_a[0], own_b[0], 'marker path, schema differential'
+        _assert_argv_equal_modulo_timestamps_plus_tail(
+            self, own_a[0], own_b[0],
+            ('--subscriber-id', 'slack:p61-actor-ms'),
+            'marker path, schema differential',
         )
 
     def test_markerless_path_value_differential_argv_identical(self):
-        """The value differential again, but for a session with NO marker
-        file -- the markerless emit path (`--transaction-id
+        """PHASE 62 (SUB-05/D-13) INVERTED: this test's ORIGINAL claim (Phase
+        61) was that runs A and B produce IDENTICAL argv, because Phase 61
+        added no wire flag. Phase 62 wires `--subscriber-id`, so a session
+        that resolves an actor now MUST differ from one that does not -- by
+        exactly the two subscriber tokens, in exactly this position. The
+        differential is inverted, not deleted: it remains the strongest
+        argv-shape assertion in the suite, now proving the PRESENT arm
+        (Phase 61 review item IN-01's recommendation, landed at the moment
+        it becomes the right tool) rather than the absent one.
+
+        Same 15-column schema in both runs (both HAVE the user_id column);
+        only the ROW's value differs -- run A's is NULL, run B's is a real
+        actor under source='slack'. This is the arm that isolates "a
+        subscriber resolved from an already-present column" from any schema
+        question, for the markerless emit path (`--transaction-id
         "${sid}-${total_tokens}"`, no muid suffix), which is a physically
         different `cmd=(...)` array in hermes-report.sh from the per-marker
-        one above and must be proven separately.
+        one and must be proven separately.
 
-        MISSES: says nothing about the marker path (covered above) or the
-        schema-absent case on THIS path (covered next).
+        MISSES: says nothing about the marker path (covered in Plan 62-01
+        Task 2) or the schema-absent case on THIS path (covered next).
         """
         sid = 'p61-diff-markerless-value'
         own_a, _ = _run_one(
@@ -335,18 +435,26 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
         )
         self.assertEqual(len(own_a), 1, f'run A: {own_a!r}')
         self.assertEqual(len(own_b), 1, f'run B: {own_b!r}')
-        _assert_argv_equal_modulo_timestamps(
-            self, own_a[0], own_b[0], 'markerless path, value differential'
+        _assert_argv_equal_modulo_timestamps_plus_tail(
+            self, own_a[0], own_b[0],
+            ('--subscriber-id', 'slack:p61-actor-mlv'),
+            'markerless path, value differential',
         )
 
     def test_markerless_path_schema_differential_argv_identical(self):
-        """The schema differential again, on the markerless path.
+        """PHASE 62 (SUB-05/D-13) INVERTED, same rationale as the value
+        differential above. This arm is the one that proves the capability
+        probe's ABSENT branch (run A, built via `build_state_db`, the exact
+        13-column shape used at 139 call sites across 39 files -- no
+        `user_id` column at all) still changes NOTHING on the wire, which is
+        what keeps every one of those 139 call sites honest as
+        backward-compatibility fixtures rather than silently-stale ones, now
+        that a real flag exists to leak.
 
-        MISSES: same as the marker-path schema differential above -- proves
-        this fixture shape only, not every real install's schema history.
-        Together with the three tests above, this is the FULL 2x2 (marker
-        vs markerless) x (value vs schema) matrix the plan's <behavior>
-        specifies.
+        MISSES: same as the marker-path schema differential -- proves this
+        fixture shape only, not every real install's schema history.
+        Together with Plan 62-01 Task 2's marker-path pair, this is the FULL
+        2x2 (marker vs markerless) x (value vs schema) matrix.
         """
         sid = 'p61-diff-markerless-schema'
         own_a, _ = _run_one(
@@ -368,8 +476,10 @@ class SubscriberBoundaryDifferentialTests(unittest.TestCase):
         )
         self.assertEqual(len(own_a), 1, f'run A: {own_a!r}')
         self.assertEqual(len(own_b), 1, f'run B: {own_b!r}')
-        _assert_argv_equal_modulo_timestamps(
-            self, own_a[0], own_b[0], 'markerless path, schema differential'
+        _assert_argv_equal_modulo_timestamps_plus_tail(
+            self, own_a[0], own_b[0],
+            ('--subscriber-id', 'slack:p61-actor-mls'),
+            'markerless path, schema differential',
         )
 
 
@@ -834,6 +944,15 @@ class StructuralInvariantTests(unittest.TestCase):
         let an unsafe root `source` fabricate a plausible inherited key instead
         of being rejected. Raised from 2 to 4 when that was fixed.
 
+        Raised again, from FOUR to SIX (Phase 62 Plan 03 Task 3, SUB-05):
+        `_supplement_aux_session_ctx`'s recovery SELECT (hermes-report.sh)
+        gained the SAME CASE for the two new columns it now reads --
+        `source` (replacing that function's own prior ad hoc Python
+        `.replace()` sanitizer) and the new `user_id` -- so an
+        auxiliary-only session's own subscriber resolution refuses a
+        transport-unsafe value the same way every other site does, rather
+        than arriving pre-sanitised into a new plausible key (T-62-15).
+
         MISSES: pins the NUMBER of sites, not that they are TEXTUALLY
         IDENTICAL to each other (a drifted-but-still-present copy would still
         pass this count), and not WHICH columns are guarded -- the behavioural
@@ -853,77 +972,24 @@ class StructuralInvariantTests(unittest.TestCase):
             )
             total += code_only.count(needle)
         self.assertEqual(
-            total, 4,
-            f'expected exactly 4 delimiter-safety CASE sites '
-            f'(1 in the main SELECT + 3 in build_subscriber_map), '
+            total, 6,
+            f'expected exactly 6 delimiter-safety CASE sites '
+            f'(1 in the main SELECT + 3 in build_subscriber_map + 2 in '
+            f'the aux supplement\'s recovery SELECT), '
             f'counted {total}'
         )
 
-    def test_boundary_files_unmodified_relative_to_merge_base(self):
-        """`tests/fixtures/compat/`, `tests/_compat_helpers.py` and
-        `skills/revenium/scripts/api-event-report.sh` are all UNMODIFIED
-        relative to the merge base with `main` -- checked via
-        `git diff --name-only`, NOT `git status`, because `git status` sees
-        only the working tree and would silently pass on a change already
-        COMMITTED earlier in this same phase.
-
-        MISSES: is diff-based, so it detects a MODIFICATION to these three
-        paths; it says nothing about a NEW file elsewhere that duplicates
-        their role (a parallel, uncommitted-by-name golden fixture
-        directory, say) -- `test_expected_files_exist`'s own inventory is
-        the guard against an unexpected new file, not this test.
-        """
-        # SKIP, never fail, when the repository cannot answer the question.
-        # CI checks out with the default shallow `actions/checkout@v4`, which
-        # has no local `main` ref and no shared history, so `git merge-base
-        # HEAD main` exits 128 with "Not a valid object name main". Asserting
-        # returncode == 0 therefore turned a missing-ref ENVIRONMENT condition
-        # into a red suite on every PR, even when the boundary files were
-        # untouched -- the test reported on the checkout depth rather than on
-        # the property it exists to guard. A guard that cannot run must say so
-        # rather than fail, and must not be the reason a suite is red.
-        # Try every ref that can name the base branch before giving up.
-        # A local `main` exists in a developer clone; CI (with fetch-depth: 0)
-        # provides `origin/main` but not necessarily a local branch. Skipping
-        # is a LAST resort, not the CI path -- an earlier version skipped
-        # whenever bare `main` was unresolvable, which silently removed this
-        # guard from every CI run and let a committed change to the boundary
-        # files pass unchecked. The argv differential cannot substitute: it
-        # checks command output, not whether these files stayed untouched.
-        base_sha = ''
-        attempts = []
-        for ref in ('main', 'origin/main', 'refs/remotes/origin/main'):
-            probe = subprocess.run(
-                ['git', 'merge-base', 'HEAD', ref],
-                cwd=str(ROOT), capture_output=True, text=True, timeout=30,
-            )
-            attempts.append(f'{ref}: rc={probe.returncode}')
-            if probe.returncode == 0 and probe.stdout.strip():
-                base_sha = probe.stdout.strip()
-                break
-        if not base_sha:
-            self.skipTest(
-                'no merge-base against the base branch under any ref '
-                f'({"; ".join(attempts)}). If this is CI, fetch-depth must be '
-                '0 in .github/workflows/tests.yml -- a skip here means this '
-                'invariant is UNGUARDED for the run, not that it holds.'
-            )
-
-        diff = subprocess.run(
-            [
-                'git', 'diff', '--name-only', base_sha, 'HEAD', '--',
-                'tests/fixtures/compat/',
-                'tests/_compat_helpers.py',
-                'skills/revenium/scripts/api-event-report.sh',
-            ],
-            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
-        )
-        self.assertEqual(diff.returncode, 0, diff.stderr)
-        changed = [l for l in diff.stdout.splitlines() if l.strip()]
-        self.assertEqual(
-            changed, [],
-            f'boundary file(s) changed since the merge-base with main: {changed}'
-        )
+    # `test_boundary_files_unmodified_relative_to_merge_base` -- RETIRED by
+    # Phase 62 (SUB-05/D-13). It asserted `tests/fixtures/compat/`,
+    # `tests/_compat_helpers.py` and `skills/revenium/scripts/api-event-report.sh`
+    # were unmodified relative to the merge base with `main`; Phase 62's
+    # entire purpose is to touch the first two deliberately (this plan) and
+    # the third (Plan 62-02). See the module docstring's "PHASE 62 UPDATE"
+    # section for the full record: what it proved, why it no longer can, and
+    # what replaces it (this phase's own per-site `argv_order` equality).
+    # Removed rather than edited to tolerate the drift, because a guard whose
+    # premise a later phase is chartered to violate is not a guard anymore --
+    # leaving it in place, weakened, would misrepresent what still holds.
 
     def test_run_leaves_no_new_regular_file_directly_under_state_dir(self):
         """A completed hermes-report.sh run, given an identity-bearing

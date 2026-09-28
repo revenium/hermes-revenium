@@ -21,7 +21,7 @@ import time
 import unittest
 from pathlib import Path
 
-from tests._compat_helpers import build_shim, build_state_db, run_script
+from tests._compat_helpers import build_shim, build_state_db, run_script, seed_user_ids
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / 'skills' / 'revenium' / 'scripts'
@@ -746,6 +746,58 @@ class LiveModeUnchangedTests(ShadowReadoutTestBase):
             self.assertEqual(len(self._ledger_lines(sd)), 1)
             self.assertEqual(self._shadow_rows(sd), [],
                              'live mode must never write a shadow-comparison row')
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class ShadowCostSurvivesAResolvedSubscriberTests(ShadowReadoutTestBase):
+    """Phase 62 CR-01 regression, requested by PR review.
+
+    The per-session identity map gained a 10th column (`subscriber_key`) while
+    `_emit_shadow_row`'s FIXED-ARITY `IFS=$'\\x1f' read` still named 9 slots.
+    bash folds every surplus field into the LAST named variable, so a missing
+    slot does not error: `cost_legacy` silently became
+    `"<cost><0x1f><subscriber_key>"`, `float()` raised, the outer handler
+    swallowed it, and `cost_present_legacy` went FALSE for every session that
+    resolved a subscriber -- with a genuinely nonzero cost.
+
+    It shipped invisibly because no shadow-mode test had ever seeded a
+    `user_id`: this module contained zero references to one, and shadow is the
+    DEFAULT mode, so the blind spot covered the default path. The argv-order
+    tests cannot see it -- shadow mode emits no argv at all.
+
+    MISSES: pins `cost_present_legacy` for the subscriber-resolved case. It does
+    not enumerate every shadow field, so an 11th column landing in some other
+    trailing variable needs its own row. The durable guard for that is the
+    arity comment at the `read` itself.
+    """
+
+    def test_shadow_cost_still_present_when_a_subscriber_resolves(self):
+        tmpdir, hh, sd, spool_dir, markers_dir, ready_dir, shim_home, bin_dir = self._setup_tree()
+        try:
+            self._build_default_shim(bin_dir)
+            sid = 'sess-shadow-subscriber'
+            _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'),
+                         [_event_record(sid, f'{sid}:t1:api:1', OLD_TS, OLD_TS + 1)])
+            self._write_state_db(hh, [
+                _session_row(sid, source='slack', estimated_cost='0.0012'),
+            ])
+            # THE point: a resolvable actor, which every other shadow test omits.
+            seed_user_ids(os.path.join(hh, 'state.db'), {sid: 'U62CR01'})
+
+            meter_log = os.path.join(tmpdir, 'meter.log')
+            inv_log = os.path.join(tmpdir, 'inv.log')
+            rc, _invs, out = self._run(hh, sd, shim_home, meter_log, inv_log)
+            self.assertEqual(rc, 0, out)
+
+            rows = self._shadow_rows(sd)
+            self.assertEqual(len(rows), 1, f'expected one shadow row, got {rows!r}')
+            row = rows[0]
+            self.assertTrue(
+                row.get('cost_present_legacy'),
+                'CR-01: a resolved subscriber must not corrupt cost_legacy -- '
+                f'the 10th map column folded into it. row={row!r}',
+            )
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

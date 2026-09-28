@@ -440,6 +440,12 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # loop, shifting both sites again (3588->3603, 3769->3784). Pure
         # shift; the trap touches no emission site.
         #
+        # Re-measured again (phase 62 CR-01 hotfix, same convention): naming the
+        # 10th map column in _emit_shadow_row's fixed-arity read added a comment
+        # block above api-event-report.sh's emission site, shifting it 1784->1795.
+        # Pure shift; the SET of emission sites is unchanged. Measured by grep
+        # (the test's own failure output), never by arithmetic.
+        #
         # Re-measured again (phase 61, SUB-01..SUB-04, same convention):
         # identity resolution inserted the column probe, the per-session
         # resolution block and the inheritance map build above this file's two
@@ -487,12 +493,96 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # emitted VALUE expressions are unchanged, so both assertions above
         # pass untouched. The resolution pass feeds --agentic-job-id, which
         # is a different flag and adds no emission site.
+        # Re-measured (Phase 62 Plan 01 Task 1, SUB-05/07/08): the new
+        # SUBSCRIBER_CLI_CAPABLE probe block was inserted above the ticket
+        # probe's tail near the top of the script (14 lines), shifting every
+        # later line by +14 -- 1496->1510, 3779->3793, 3960->3974.
+        # api-event-report.sh is untouched by this plan (its subscriber
+        # wiring is Plan 62-02's job). Pure shift, as always here -- the
+        # COUNT (4) and the emitted VALUE expressions are unchanged, so both
+        # assertions above pass untouched. --subscriber-id is a different
+        # flag family and adds no --operation-type emission site.
+        #
+        # Re-measured again (Phase 62 Plan 01 Task 2, SUB-05/07/08): the
+        # marker-split site's own --subscriber-id append block (18 lines,
+        # after that site's ticket block) sits BEFORE the markerless site's
+        # `--operation-type "CHAT"` line in file order, so only the
+        # markerless site's line moved (3974->3992); the marker-split site's
+        # own --operation-type "${op_type}" line sits ABOVE its ticket/
+        # subscriber blocks and is unaffected (3793 unchanged), and the aux
+        # site (1510) is unaffected. api-event-report.sh remains untouched
+        # by this plan. Pure shift once more -- the COUNT (4) and the
+        # emitted VALUE expressions are unchanged.
+        #
+        # Re-measured again (Phase 62 Plan 02 Task 1, SUB-05/07/08): the
+        # event path's own SUBSCRIBER_CLI_CAPABLE probe (7 lines), its
+        # per-session map's new tenth column plus the self-contained
+        # resolve_subscriber_key builder inside the Python heredoc (~70
+        # lines), the once-per-session subscriber_key lookup beside
+        # source_env (7 lines), and the --subscriber-id emission block after
+        # the ticket family (8 lines) all sit ABOVE api-event-report.sh's
+        # single --operation-type site, shifting it by +117 (1667->1784).
+        # hermes-report.sh is untouched by this plan (its own subscriber
+        # wiring landed in Plan 62-01), so all three of its sites are
+        # unmoved. Pure shift once more -- the COUNT (4) and the emitted
+        # VALUE expressions are unchanged, so both assertions above pass
+        # untouched. --subscriber-id is a different flag family and adds no
+        # --operation-type emission site.
+        #
+        # Re-measured again (Phase 62 Plan 03 Task 1, SUB-05/07/08/11): the
+        # aux path's widened per-session context cache (the header comment,
+        # the parser's field-width comment plus its counted-mismatch
+        # replacement for the silent `continue`, and the width-mismatch
+        # extraction block inserted before the `-z aux_query_output` check)
+        # all sit ABOVE this file's aux `--operation-type "${AUX_OPERATION_TYPE}"`
+        # site, shifting it by +69 (1510->1579); the NEW subscriber
+        # emission block this task adds sits AFTER that site (after the
+        # squad block, inside the same cmd=(...) construction), so it adds
+        # no further shift to THIS site, but every site below it in file
+        # order (both the session-loop aux_session_ctx append's own new
+        # comment/field, at the root_aid resolution site, and the
+        # subscriber emission block itself) sits ABOVE the marker-split and
+        # markerless sites, shifting both by +99 (3793->3892, 3992->4091).
+        # api-event-report.sh is untouched by this plan (its own aux/skill/
+        # ticket path is Task 2/3's job, on the same file, but this specific
+        # site is unaffected because the event path has no aux pass of its
+        # own). Pure shift once more -- the COUNT (4) and the emitted VALUE
+        # expressions are unchanged, so both assertions above pass
+        # untouched. --subscriber-id is a different flag family and adds no
+        # --operation-type emission site.
+        #
+        # Re-measured again (Phase 62 Plan 03 Task 2, SUB-11): the D-07
+        # finding comment plus the skill/ticket resolution memo block (both
+        # inserted directly above the aux `local cmd=(` construction, which
+        # is where this file's aux --operation-type site lives) shift that
+        # site by +71 (1579->1650). The new skill/ticket emission blocks sit
+        # AFTER that site (inside the same cmd=(...) construction, before
+        # the subscriber block), so they add no further shift to THIS site,
+        # but everything below them in file order -- the aux_window_end
+        # local/read-loop addition and the memo declarations before the
+        # while loop, all of which sit above the marker-split and
+        # markerless sites too -- shifts both by +92 (3892->3984,
+        # 4091->4183). api-event-report.sh is untouched by this task (its
+        # ticket/skill flags already existed; this task only backfills the
+        # aux path inside hermes-report.sh). Pure shift once more -- the
+        # COUNT (4) and the emitted VALUE expressions are unchanged.
+        #
+        # Re-measured again (Phase 62 Plan 03 Task 3, SUB-05): the
+        # supplement's widened recovery SELECT (the schema-probe boolean
+        # handoff and the two-hard-coded-SQL-strings Python branch, plus
+        # the subscriber resolution added to Step 4's per-recovered-session
+        # loop) all sit inside `_supplement_aux_session_ctx`, which is
+        # defined ABOVE `report_auxiliary_usage` and therefore above ALL
+        # THREE of this file's own sites -- shifting each of them by the
+        # SAME +49 (1650->1699, 3984->4033, 4183->4232). api-event-report.sh
+        # is untouched by this task. Pure shift once more -- the COUNT (4)
+        # and the emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1496),
-            ('hermes-report.sh', 3779),
-            ('hermes-report.sh', 3960),
-            ('api-event-report.sh', 1667),
+            ('hermes-report.sh', 1715),
+            ('hermes-report.sh', 4049),
+            ('hermes-report.sh', 4248),
+            ('api-event-report.sh', 1826),
         }
         self.assertEqual(
             found_locations, expected_locations,

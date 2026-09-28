@@ -221,6 +221,31 @@ class ResolveSubscriberIdUnitTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), 'rejected|')
 
+    def test_unit_separator_in_user_id_rejected(self):
+        """D-12: 0x1F IS api-event-report.sh's own per-session map field
+        delimiter (_MAP_SEP). Latent before Phase 62 because that map only
+        carried tab-separated fields; it goes live the instant the key
+        travels through that map's 10th column, so one rejection set must
+        cover the pipe-delimited session row, the tab-separated subscriber
+        map, AND this third transport."""
+        r = self._call(
+            'resolve_subscriber_id', 'slack', 'U9\x1f01'
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'rejected|')
+
+    def test_unit_separator_in_source_rejected(self):
+        """D-12, source arm: the same 0x1F rejection must cover BOTH
+        arguments, not just user_id -- a sanitising conversion that guards
+        one transport-crossing field and not its sibling is exactly the
+        'guard that exists but is too weak' pattern build_subscriber_map's
+        own comment warns about."""
+        r = self._call(
+            'resolve_subscriber_id', 'slack\x1fx', 'U901'
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'rejected|')
+
     def test_empty_source_rejected(self):
         r = self._call('resolve_subscriber_id', '', 'U1')
         self.assertEqual(r.returncode, 0, r.stderr)

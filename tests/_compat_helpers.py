@@ -133,10 +133,76 @@ def assert_argv_matches_golden(test_case, argv, golden):
         )
 
 
+def assert_argv_is_golden_argv_order(test_case, argv, golden, extra_tail=()):
+    """Assert captured argv equals `list(golden['argv_order']) + list(extra_tail)`.
+
+    Golden-comparison sibling of
+    `tests/test_phase61_subscriber_boundary.py::_assert_argv_equal_modulo_timestamps`
+    -- deliberately near-duplicated rather than shared, because that helper
+    compares two LIVE runs against each other while this one compares one
+    live run against a fixed golden list; the three-assertion structure
+    (length, ordered flag-name list, full ordered token list, each SEPARATE
+    so a failure names whether a flag was added/removed, moved, or had its
+    value changed) is copied from it deliberately.
+
+    Unlike `assert_argv_matches_golden` (which iterates only the field names
+    a golden already lists and so cannot see a flag nobody named),
+    `argv_order` is an ordered list of EVERY token the site emits -- this is
+    the only assertion in the suite that can catch an added flag.
+
+    If `golden` carries the key `argv_order_pattern_sentinel`, the VALUE of
+    every flag named in `golden['pattern_fields']` is first replaced by that
+    sentinel string in the captured argv before comparing -- self-describing
+    metadata on the golden, so no call site can forget to normalise a
+    non-deterministic field (the three timestamp flags, captured from two
+    independent `date` calls, are never byte-stable run to run).
+    `meter-completion-markerless.golden.json` has no such key and is
+    compared with its literal timestamps, exactly as the four pre-existing
+    `argv_order` modules do.
+    """
+    expected = list(golden['argv_order']) + list(extra_tail)
+
+    sentinel = golden.get('argv_order_pattern_sentinel')
+    if sentinel is not None:
+        pattern_flags = set(golden.get('pattern_fields', {}).keys())
+        actual = []
+        i = 0
+        while i < len(argv):
+            tok = argv[i]
+            actual.append(tok)
+            if tok in pattern_flags and i + 1 < len(argv):
+                actual.append(sentinel)
+                i += 2
+                continue
+            i += 1
+    else:
+        actual = list(argv)
+
+    test_case.assertEqual(
+        len(actual), len(expected),
+        f'argv LENGTH differs from golden argv_order (+ extra_tail='
+        f'{list(extra_tail)}) -- a flag was added or removed.\n'
+        f'Captured ({len(actual)} tokens): {actual}\n'
+        f'Expected ({len(expected)} tokens): {expected}'
+    )
+    actual_flags = [tok for tok in actual if tok.startswith('--')]
+    expected_flags = [tok for tok in expected if tok.startswith('--')]
+    test_case.assertEqual(
+        actual_flags, expected_flags,
+        f'ordered flag-NAME list differs from golden argv_order -- a flag '
+        f'moved.\nCaptured flags: {actual_flags}\nExpected flags: {expected_flags}'
+    )
+    test_case.assertEqual(
+        actual, expected,
+        f'normalised full argv lists differ from golden argv_order -- a '
+        f'value changed.\nCaptured: {actual}\nExpected: {expected}'
+    )
+
+
 def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None,
                 squad_capable=True, reasoning_tokens_capable=False,
                 skill_capable=False, outcome_value_capable=True,
-                jobs_org_capable=False):
+                jobs_org_capable=False, subscriber_capable=False):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -177,6 +243,12 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
                      --help probe is not a real invocation); every other jobs
                      subcommand still logs there.
       *)          -> exit 0  (default catch-all)
+
+    subscriber_capable=False (default) omits the --subscriber-id help line,
+    so SUBSCRIBER_CLI_CAPABLE resolves false and every existing caller keeps
+    exercising the pre-Phase-62 wire shape the goldens pin (Phase 62,
+    SUB-05/07/08). True advertises the flag, modelling a CLI that accepts
+    --subscriber-id on `meter completion`.
     """
     if squad_capable:
         squad_help_lines = (
@@ -206,6 +278,23 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         )
     else:
         skill_help_lines = ''
+    # Phase 62 (SUB-05/07/08): subscriber attribution. Default False so every
+    # existing caller keeps exercising the pre-Phase-62 wire shape the
+    # goldens pin, and the probe resolves to a DETERMINATE negative (the
+    # `meter completion --help` branch below always echoes non-empty help;
+    # this line's absence is what makes SUBSCRIBER_CLI_CAPABLE resolve
+    # false) rather than supports_flag's INDETERMINATE branch, which would
+    # warn and make a real regression look like a probe failure. Placed
+    # BEFORE the --agentic-job-id echo below -- that echo is deliberately
+    # the LAST line for the recorded SIGPIPE reason (see the comment a few
+    # lines down), and a line written after it would reopen the race the
+    # ordering closes.
+    if subscriber_capable:
+        subscriber_help_lines = (
+            '      echo "--subscriber-id string                Subscriber identifier"\n'
+        )
+    else:
+        subscriber_help_lines = ''
     # Phase 38 (CR-01/WR-03): v1.5 jobs-outcome value flags. Default True so
     # every existing caller keeps exercising the "flags ship" wire shape;
     # False models the older CLI CR-01's capability probe exists to protect.
@@ -245,7 +334,8 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         '    if [[ "$3" == "--help" ]]; then\n'
         + squad_help_lines
         + reasoning_help_lines
-        + skill_help_lines +
+        + skill_help_lines
+        + subscriber_help_lines +
         '      echo "--agentic-job-id  Agentic job instance identifier"\n'
         '      exit 0\n'
         '    fi\n'
@@ -328,6 +418,32 @@ def build_state_db(path, sessions):
         )
     conn.commit()
     conn.close()
+
+
+def seed_user_ids(db_path, mapping):
+    """Add a `user_id` column to an existing `sessions` table if absent, then
+    set it per session id from `mapping`.
+
+    Sibling of `build_session_model_usage`, deliberately NOT folded into
+    `build_state_db`: every existing `build_state_db` caller (139 call sites
+    across 39 files) is the column-ABSENT arm (Run A / D of Phase 62's
+    four-run matrix) and must stay byte-identical -- folding this in would
+    turn every one of those callers into the column-present arm instead.
+
+    A mapping value of `None` leaves that session's `user_id` NULL (Run B:
+    column present, value NULL). A non-None value sets it (Run C: column
+    present, populated).
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cols = [row[1] for row in conn.execute('PRAGMA table_info(sessions)').fetchall()]
+        if 'user_id' not in cols:
+            conn.execute('ALTER TABLE sessions ADD COLUMN user_id TEXT')
+        for sid, user_id in mapping.items():
+            conn.execute('UPDATE sessions SET user_id = ? WHERE id = ?', (user_id, sid))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def build_session_model_usage(path, rows):

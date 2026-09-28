@@ -866,6 +866,22 @@ sessions_has_user_id() {
 # callers.
 resolve_subscriber_id() {
   local source="$1" user_id="$2"
+  # WR-01: pin the collation locale for THIS FUNCTION ONLY. `[:space:]` below is
+  # locale-dependent -- measured: under a UTF-8 locale bash matches NBSP
+  # (U+00A0) as space, under C/POSIX it does not. The event path's Python
+  # builder never treats NBSP as whitespace, so an unpinned locale lets two
+  # implementations of one PERMANENTLY-metered key format disagree on exactly
+  # that character. Nothing in cron.sh, install-cron.sh or the crontab line
+  # pins a locale, so production inherits whatever cron happens to give it --
+  # which means the equivalence test's own `LC_ALL=C` pin was proving agreement
+  # under conditions production does not guarantee.
+  #
+  # Scoped with `local` rather than exported: a global LC_ALL would change
+  # sorting and date formatting for every other caller in this file. C is the
+  # right side to pin to because it is the stricter one -- it trims less, so a
+  # value containing NBSP is REJECTED as unsafe rather than silently trimmed
+  # into a different key by one implementation and not the other.
+  local LC_ALL=C LC_CTYPE=C
   # Trim leading/trailing whitespace — bash 3.2, no extglob, no associative
   # arrays. Mirrors correct-assessment.sh's MECHANISM trim (scripts/correct-
   # assessment.sh:158-159).
@@ -891,9 +907,18 @@ resolve_subscriber_id() {
   # hermes-report.sh's main SELECT writes this literal when a raw value
   # would otherwise corrupt the pipe-delimited row) and any value in either
   # argument that could itself corrupt that row contract or the TSV
-  # subscriber map: a pipe, a tab, a CR, or an LF.
+  # subscriber map: a pipe, a tab, a CR, an LF, or the unit separator
+  # (0x1F). The unit separator is added here (Phase 62, D-12): this key now
+  # also crosses a THIRD transport, api-event-report.sh's per-session map,
+  # whose own field delimiter IS 0x1F -- so one rejection set has to cover
+  # the pipe-delimited session row, the tab-separated subscriber map, AND
+  # that map, or this helper and its Python mirror there cannot be
+  # equivalent over the full input space: the Python side must reject 0x1F
+  # to keep its own map parseable, and a bash side that accepted it would be
+  # a documented divergence instead of a proof
+  # (tests/test_phase62_subscriber_key_equivalence.py).
   case "${user_id}" in
-    "__revenium_unsafe_user_id__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
+    "__revenium_unsafe_user_id__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*|*$'\x1f'*)
       printf 'rejected|\n'
       return 0
       ;;
@@ -908,7 +933,7 @@ resolve_subscriber_id() {
     # field-shift it replaced: every distinct unsafe source collapses to ONE
     # key, so two different actors share an identity, which is precisely the
     # collision D-05's namespacing exists to make impossible.
-    "__revenium_unsafe_source__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*)
+    "__revenium_unsafe_source__"|*'|'*|*$'\t'*|*$'\r'*|*$'\n'*|*$'\x1f'*)
       printf 'rejected|\n'
       return 0
       ;;
