@@ -949,11 +949,30 @@ resolve_subscriber_id() {
   printf 'ok|%s:%s\n' "${source}" "${user_id}"
 }
 
-# Phase 61 (T-61-01): log-side masking only. The RESOLVED value handed to any
-# emission site is never masked — a future phase needs the exact address.
-# This exists because revenium-metering.log is the artifact operators paste
-# into support tickets and that diagnose.sh prints, which state.db is not.
-mask_subscriber_for_log() {
+# Phase 61 (T-61-01), renamed and recommented Phase 63 (WR-02/D-13): masks
+# ONLY an email-shaped subscriber value -- the part after the first ":"
+# containing an "@" -- to "<ns>:<first-char>***@<domain>". Every other
+# shape, including a raw Slack member id (e.g. slack:U02C12JG78F) or a
+# webhook token, passes through UNCHANGED, by design: neither is
+# human-readable without separate access to the Slack workspace or the
+# webhook's own system, and masking it would make revenium-metering.log --
+# the artifact operators paste into support tickets and that diagnose.sh
+# prints -- uncorrelatable with state.db for the 99% case operators
+# actually triage. WR-02 found an earlier version of this comment claiming
+# broader protection than the code delivers; D-13 is the correction, made
+# on the merits, not a behavior change.
+#
+# Despite that narrow scope, this is still the SINGLE CHOKEPOINT every
+# subscriber value must cross before it can reach the log (D-14) -- that
+# invariant is exactly what made CR-01 findable, when one of three call
+# sites had forgotten it. A hashed key under subscriberEmailMode=obfuscated
+# (Phase 63) has no "@", so it falls to the pass-through branch below and
+# logs verbatim -- which is correct, since a 64-hex digest is already
+# opaque, and is why no caller branches on the mode.
+#
+# The RESOLVED value handed to any emission site is never masked -- only
+# this log-facing copy is.
+mask_subscriber_email_for_log() {
   local key="$1"
   local ns="${key%%:*}"
   local rest="${key#*:}"

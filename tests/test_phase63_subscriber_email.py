@@ -49,7 +49,7 @@ Unit coverage (`ResolveSubscriberEmailModeUnitTests`,
 `ResolveSubscriberWirePairUnitTests`) exercises both new common.sh
 functions in isolation, sourcing common.sh in a bash subshell exactly as
 `tests.test_phase61_identity_resolution.ResolveSubscriberIdUnitTests` does
-for `resolve_subscriber_id` / `mask_subscriber_for_log`.
+for `resolve_subscriber_id` / `mask_subscriber_email_for_log`.
 
 End-to-end coverage (`MarkerlessSubscriberEmailWiringTests`) reuses
 `tests.test_phase62_subscriber_wiring.MarkerlessSubscriberWiringTests`'
@@ -82,6 +82,7 @@ the `.example` TLD; no value is copied from any reference host.
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -98,6 +99,7 @@ from tests._compat_helpers import (
     seed_user_ids,
     ROOT,
     SCRIPTS_DIR,
+    SKILL,
 )
 from tests.test_phase61_identity_resolution import (
     _OLD_TS,
@@ -268,6 +270,132 @@ class ResolveSubscriberWirePairUnitTests(_CommonShUnitHarness, unittest.TestCase
             self.assertEqual(r.returncode, 0, r.stderr)
             obfuscated_keys.add(r.stdout.strip().split('|', 1)[0])
         self.assertEqual(len(obfuscated_keys), 3, obfuscated_keys)
+
+
+class MaskSubscriberEmailForLogRenameAndScopeTests(_CommonShUnitHarness, unittest.TestCase):
+    """WR-02/D-13/D-14: the rename from `mask_subscriber_for_log` to
+    `mask_subscriber_email_for_log` is behavior-preserving (proven by a
+    byte-for-byte body comparison against the baseline commit, apart from
+    the parameter-free rename itself), the previous identifier is gone
+    from every shipped and test file, the corrected comment states its
+    real scope in its own words, and the D-14 pass-through branch is
+    proven directly against an already-hashed obfuscated-mode key."""
+
+    BASELINE_COMMIT = '8246499'
+
+    @staticmethod
+    def _extract_function_block(text, fn_name):
+        lines = text.splitlines()
+        start = next(
+            i for i, l in enumerate(lines) if l.startswith(f'{fn_name}() {{')
+        )
+        end = next(
+            i for i in range(start, len(lines)) if lines[i] == '}'
+        )
+        return lines[start:end + 1]
+
+    def test_function_body_byte_identical_to_baseline_apart_from_rename(self):
+        current_body = self._extract_function_block(
+            COMMON_SH.read_text(), 'mask_subscriber_email_for_log'
+        )
+        # Normalise ONLY the function-name declaration line before
+        # comparing, per the plan's own acceptance criterion -- every
+        # other line must be untouched.
+        current_body[0] = current_body[0].replace(
+            'mask_subscriber_email_for_log', 'mask_subscriber_for_log'
+        )
+
+        baseline = subprocess.run(
+            ['git', 'show',
+             f'{self.BASELINE_COMMIT}:skills/revenium/scripts/common.sh'],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        baseline_body = self._extract_function_block(
+            baseline.stdout, 'mask_subscriber_for_log'
+        )
+
+        self.assertEqual(
+            current_body, baseline_body,
+            'mask_subscriber_email_for_log has diverged from the baseline '
+            'commit beyond the parameter-free rename -- D-13 requires '
+            'byte-identical behavior, only the name and comment change',
+        )
+
+    def test_previous_identifier_appears_in_no_shipped_or_test_file(self):
+        # THIS file is deliberately excluded from the scan: it is the one
+        # place the old literal string MUST appear, as the baseline-name
+        # argument to _extract_function_block's git-show comparison a few
+        # methods above. Excluding it here does not weaken the guard --
+        # every OTHER file that could carry a stray reference is still
+        # scanned, including the shipped scripts and the other two test
+        # modules this task edits.
+        self_path = ROOT / 'tests' / 'test_phase63_subscriber_email.py'
+        hits = []
+        for base in (SKILL, ROOT / 'tests'):
+            for path in base.rglob('*'):
+                if not path.is_file() or path.suffix not in ('.sh', '.py', '.md'):
+                    continue
+                if path.resolve() == self_path.resolve():
+                    continue
+                try:
+                    text = path.read_text()
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if 'mask_subscriber_for_log' in text:
+                    hits.append(str(path.relative_to(ROOT)))
+        self.assertEqual(
+            hits, [],
+            f'previous identifier mask_subscriber_for_log still present '
+            f'in: {hits} -- there is no deprecation shim and no alias',
+        )
+
+    def test_comment_states_email_only_scope_pass_through_chokepoint_and_hash(self):
+        text = COMMON_SH.read_text()
+        idx = text.index('mask_subscriber_email_for_log() {')
+        preceding_lines = text[:idx].splitlines()
+        comment_lines = []
+        for line in reversed(preceding_lines):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                comment_lines.insert(0, stripped)
+                continue
+            break
+        comment = '\n'.join(comment_lines)
+        self.assertIn(
+            'ONLY', comment,
+            'comment must state that only an email-shaped value is masked',
+        )
+        self.assertIn('email-shaped', comment)
+        self.assertIn(
+            'UNCHANGED', comment,
+            'comment must state a non-email key passes through unchanged',
+        )
+        self.assertIn(
+            'CHOKEPOINT', comment,
+            'comment must name the single-chokepoint invariant CR-01 relies on',
+        )
+        self.assertIn('CR-01', comment)
+        self.assertIn('WR-02', comment)
+        self.assertIn('D-13', comment)
+        self.assertIn('D-14', comment)
+        self.assertIn(
+            'obfuscated', comment,
+            'comment must name the obfuscated-mode hash and why it needs '
+            'no caller branch',
+        )
+        self.assertIn('no caller branches on the mode', comment)
+
+    def test_hashed_email_key_under_obfuscation_passes_through_unchanged(self):
+        """D-14's pass-through branch: a 64-hex `email:` key -- the wire
+        form an emission site already produced under
+        subscriberEmailMode=obfuscated -- has no '@', so the masker's
+        default case fires and returns it verbatim."""
+        digest = hashlib.sha256(b'p63-masker@example.test').hexdigest()
+        wire_key = f'email:{digest}'
+        r = self._call('mask_subscriber_email_for_log', wire_key)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), wire_key)
 
 
 class _Harness:
@@ -1678,6 +1806,114 @@ class SubscriberEmailWiringStructuralTests(unittest.TestCase):
                         f'--subscriber-id ({id_i + 1}) and --subscriber-email '
                         f'({email_i + 1}): {between}',
                     )
+
+
+class SubscriberLogChokepointStructuralTests(unittest.TestCase):
+    """D-14: every subscriber value reaching revenium-metering.log crosses
+    mask_subscriber_email_for_log, unconditionally -- the invariant that
+    made CR-01 findable. Anchored on the log-helper token (log/info/warn/
+    error as a line's leading token), not on a whole-file substring
+    search, so a comment mentioning a variable name can never fail this
+    guard and no author is pressured to delete a good comment to make it
+    pass. Checked in BOTH directions: no log-helper line -- directly, or
+    one assignment hop back through a suffix variable such as
+    subscriber_log_suffix -- interpolates a bare RAW_SUBSCRIBER_VARS token
+    without a mask_subscriber_email_for_log call guarding it; and at least
+    one log-helper line in hermes-report.sh genuinely does route a
+    subscriber value through the masker, so the guard cannot pass
+    vacuously if the variables were ever renamed out from under it."""
+
+    LOG_HELPERS = ('log', 'info', 'warn', 'error')
+    # The four subscriber-bearing raw variables named in 63-03-PLAN.md's
+    # Task 1 action: the per-session key, the inherited root key, the aux
+    # context key, and the new email local.
+    RAW_SUBSCRIBER_VARS = (
+        'subscriber_key', 'root_subscriber_key', 'ctx_subscriber_key',
+        'subscriber_email',
+    )
+    VAR_TOKEN_RE = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)')
+
+    @classmethod
+    def _log_helper_line_indices(cls, lines):
+        indices = []
+        for i, l in enumerate(lines):
+            stripped = l.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            first_token = stripped.split()[0]
+            # Neither script DEFINES log/info/warn/error -- only
+            # common.sh does -- so every match here is a call site.
+            if first_token in cls.LOG_HELPERS:
+                indices.append(i)
+        return indices
+
+    @classmethod
+    def _nearest_preceding_assignment(cls, lines, varname, before_index):
+        pattern = re.compile(rf'^\s*(local\s+)?{re.escape(varname)}\+?=')
+        best = None
+        for i in range(0, before_index):
+            if pattern.match(lines[i]):
+                best = i
+        return best
+
+    def _assert_no_bare_leak_and_count_masked(self, script_path):
+        lines = script_path.read_text().splitlines()
+        masked_count = 0
+        for log_i in self._log_helper_line_indices(lines):
+            line = lines[log_i]
+            for var in set(self.VAR_TOKEN_RE.findall(line)):
+                if var in self.RAW_SUBSCRIBER_VARS:
+                    self.fail(
+                        f'{script_path.name}:{log_i + 1} interpolates the '
+                        f'bare subscriber variable ${{{var}}} directly -- '
+                        f'must go through mask_subscriber_email_for_log: '
+                        f'{line.strip()}'
+                    )
+                assign_i = self._nearest_preceding_assignment(
+                    lines, var, log_i
+                )
+                if assign_i is None:
+                    continue
+                assign_line = lines[assign_i]
+                raw_hits = [
+                    raw for raw in self.RAW_SUBSCRIBER_VARS
+                    if f'${{{raw}}}' in assign_line
+                ]
+                if not raw_hits:
+                    continue
+                for raw in raw_hits:
+                    guarded = re.search(
+                        r'mask_subscriber_email_for_log\s+"\$\{'
+                        + re.escape(raw) + r'\}"',
+                        assign_line,
+                    )
+                    self.assertIsNotNone(
+                        guarded,
+                        f'{script_path.name}:{assign_i + 1} builds {var} '
+                        f'from ${{{raw}}} without routing it through '
+                        f'mask_subscriber_email_for_log, and '
+                        f'{script_path.name}:{log_i + 1} logs {var} -- '
+                        f'{assign_line.strip()}',
+                    )
+                masked_count += 1
+        return masked_count
+
+    def test_no_log_helper_line_leaks_a_bare_subscriber_variable(self):
+        for script in (HERMES_REPORT_SH, EVENT_REPORT_SH):
+            with self.subTest(script=script.name):
+                self._assert_no_bare_leak_and_count_masked(script)
+
+    def test_at_least_one_log_line_routes_a_subscriber_value_through_the_masker(self):
+        masked_count = self._assert_no_bare_leak_and_count_masked(
+            HERMES_REPORT_SH
+        )
+        self.assertGreater(
+            masked_count, 0,
+            'no log-helper line in hermes-report.sh was found routing a '
+            'subscriber value through mask_subscriber_email_for_log -- '
+            'this guard would pass vacuously if the variables were ever '
+            'renamed out from under it',
+        )
 
 
 if __name__ == '__main__':

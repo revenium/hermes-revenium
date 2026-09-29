@@ -1,7 +1,7 @@
 """Phase 61 Plan 01 (SUB-01..04): the identity-resolution seam.
 
 Task 1 covers the unit-level contract of `resolve_subscriber_id` /
-`mask_subscriber_for_log` in common.sh, and the end-to-end proof that a
+`mask_subscriber_email_for_log` in common.sh, and the end-to-end proof that a
 session's OWN identity (source + user_id) reaches the `Reported:` log line
 via the new 14th SELECT column — plus the backward-compatibility proof that
 an install whose `sessions` table lacks the column (every fixture built by
@@ -139,7 +139,7 @@ def _own_meter_invocations(invocations, sid):
 
 
 class ResolveSubscriberIdUnitTests(unittest.TestCase):
-    """Unit-level contract of resolve_subscriber_id / mask_subscriber_for_log,
+    """Unit-level contract of resolve_subscriber_id / mask_subscriber_email_for_log,
     exercised by sourcing common.sh in a bash subshell (the idiom at
     tests/test_phase42_assessment_contract.py:1443-1449) rather than through
     the full reporter. HERMES_HOME is redirected to a scratch tmpdir so
@@ -252,12 +252,12 @@ class ResolveSubscriberIdUnitTests(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), 'rejected|')
 
     def test_mask_non_email_key_unchanged(self):
-        r = self._call('mask_subscriber_for_log', 'slack:U02C12JG78F')
+        r = self._call('mask_subscriber_email_for_log', 'slack:U02C12JG78F')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), 'slack:U02C12JG78F')
 
     def test_mask_email_key_masks_local_part(self):
-        r = self._call('mask_subscriber_for_log', 'email:jane@acme.example')
+        r = self._call('mask_subscriber_email_for_log', 'email:jane@acme.example')
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), 'email:j***@acme.example')
 
@@ -496,7 +496,7 @@ class Phase61IdentityResolutionEndToEndTestCase(unittest.TestCase):
         """CR-01 regression: the disagreement warn reaches LOG_FILE, so both
         keys in it MUST be masked. An email-shaped subscriber would otherwise
         land in revenium-metering.log in plaintext -- the exact disclosure
-        mask_subscriber_for_log exists to prevent.
+        mask_subscriber_email_for_log exists to prevent.
 
         This uses EMAIL-shaped ids deliberately. Every other disagreement test
         uses Slack ids, which mask to themselves, so they exercise the masking

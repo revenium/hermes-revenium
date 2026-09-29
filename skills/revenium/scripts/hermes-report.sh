@@ -2421,10 +2421,10 @@ PY
               # CR-01: MASK both keys. This detail reaches LOG_FILE via the
               # once-per-tick warn below, and an email-shaped subscriber would
               # otherwise land in revenium-metering.log in plaintext -- the
-              # exact disclosure mask_subscriber_for_log exists to prevent.
+              # exact disclosure mask_subscriber_email_for_log exists to prevent.
               # The pre-fix tests all used Slack ids, which mask to themselves,
               # so the masking path was never exercised here.
-              subscriber_disagreement_detail="session=${sid} own=$(mask_subscriber_for_log "${subscriber_key}") root=$(mask_subscriber_for_log "${root_subscriber_key}")"
+              subscriber_disagreement_detail="session=${sid} own=$(mask_subscriber_email_for_log "${subscriber_key}") root=$(mask_subscriber_email_for_log "${root_subscriber_key}")"
             fi
           fi
         fi
@@ -2445,7 +2445,7 @@ PY
     # Deliberately placed ABOVE subscriber_log_suffix's own resolution
     # immediately below: that means the log sees the WIRE value, which is
     # D-14's unconditional-masking invariant -- a hash has no "@", so it
-    # falls to mask_subscriber_for_log's pass-through branch and logs
+    # falls to mask_subscriber_email_for_log's pass-through branch and logs
     # verbatim, which is already correct and requires no caller to branch on
     # the mode.
     if [[ -n "${subscriber_key}" ]]; then
@@ -2461,7 +2461,7 @@ PY
     # this phase's feature-off proof.
     local subscriber_log_suffix=""
     if [[ -n "${subscriber_key}" ]]; then
-      subscriber_log_suffix=" subscriber=$(mask_subscriber_for_log "${subscriber_key}")"
+      subscriber_log_suffix=" subscriber=$(mask_subscriber_email_for_log "${subscriber_key}")"
     fi
 
     # Phase 28 (TRACE-03): resolve, once per session-loop iteration, the
@@ -4267,7 +4267,7 @@ PY
         # NOTHING — that is the common case (97% of sessions on the
         # reference host) and the load-bearing one. Never logged here: the
         # two `Reported:` lines already carry the key through
-        # mask_subscriber_for_log, and a new log line bypassing that masker
+        # mask_subscriber_email_for_log, and a new log line bypassing that masker
         # was Phase 61's critical review finding.
         if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" ]]; then
           [[ -n "${subscriber_key}" ]] && cmd+=(--subscriber-id "${subscriber_key}")
@@ -4441,7 +4441,7 @@ PY
       # with no resolved actor appends NOTHING — that is the common case
       # (97% of sessions on the reference host) and the load-bearing one.
       # Never logged here: the two `Reported:` lines already carry the key
-      # through mask_subscriber_for_log, and a new log line bypassing that
+      # through mask_subscriber_email_for_log, and a new log line bypassing that
       # masker was Phase 61's critical review finding.
       if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" ]]; then
         [[ -n "${subscriber_key}" ]] && cmd+=(--subscriber-id "${subscriber_key}")
