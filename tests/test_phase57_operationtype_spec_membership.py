@@ -613,11 +613,28 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # untouched by this task. Pure shift once more -- the COUNT (4) and
         # the emitted VALUE expressions are unchanged. Verified against the
         # diff hunks themselves (`git diff -U0`), not by arithmetic.
+
+        # Re-measured again (Phase 63 Plan 02 Task 1, SUB-06): the auxiliary
+        # site's own --subscriber-id/--subscriber-email block, inside
+        # report_auxiliary_usage, grew by a net +34 (36 lines added
+        # re-deriving the wire pair via resolve_subscriber_wire_pair and
+        # adding the --subscriber-email append; 2 removed -- the old
+        # single-line --subscriber-id append replaced). This block sits
+        # BELOW the aux site's own --operation-type "${AUX_OPERATION_TYPE}"
+        # line (1747, inside the `cmd=(...)` array literal itself,
+        # unaffected) but ABOVE both the marker-split and markerless sites
+        # defined later in the file (inside main()), shifting each of
+        # THOSE by the full +34 (4105->4139, 4324->4358).
+        # api-event-report.sh is untouched by this task (its own
+        # --subscriber-email wiring is Task 2's job). Pure shift once more
+        # -- the COUNT (4) and the emitted VALUE expressions are unchanged.
+        # Verified against the diff hunks themselves (`git diff -U0`), not
+        # by arithmetic.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1747),
-            ('hermes-report.sh', 4105),
-            ('hermes-report.sh', 4324),
+            ('hermes-report.sh', 4139),
+            ('hermes-report.sh', 4358),
             ('api-event-report.sh', 1826),
         }
         self.assertEqual(

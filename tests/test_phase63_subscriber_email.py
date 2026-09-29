@@ -8,6 +8,25 @@ the MARKER-SPLIT site (`MarkerSplitSubscriberEmailWiringTests`), the
 multi-marker sameness proof (`MultiMarkerSubscriberEmailSamenessTests`),
 and the structural guard (`SubscriberEmailWiringStructuralTests`).
 
+Phase 63 Plan 02 Task 1 (SUB-06, the THIRD site -- hermes-report.sh's
+auxiliary-usage pass) extends this module further with
+`AuxSubscriberEmailWiringTests` (Run E/F/G/H against
+`meter-completion-aux.golden.json`, mirroring the markerless/marker-split
+Run E/F/G/H above), `AuxCrossPathSubscriberEmailSamenessTests` (the
+load-bearing new proof: one email-source session's main-loop completion
+and its auxiliary completion carry the byte-identical `--subscriber-id`
+value under obfuscation -- the arm that fails if the auxiliary path
+re-hashes the already-wire-transformed `aux_session_ctx` cache value
+instead of passing it through `resolve_subscriber_wire_pair`'s idempotent
+branch), and `AuxCacheWidthMismatchTests` (a six-field and an eight-field
+`aux_session_ctx` row are both still skipped, never mis-parsed, while the
+neighbouring seven-field row still ships -- driven against the REAL,
+unmodified `report_auxiliary_usage` function with `main()`'s trailing
+invocation stripped, because every real producer always emits exactly
+seven fields by construction and no DB-driven scenario through the normal
+session loop can manufacture a width mismatch). `SubscriberEmailWiringStructuralTests`'
+`EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT` moves from 2 to 3.
+
 Unit coverage (`ResolveSubscriberEmailModeUnitTests`,
 `ResolveSubscriberWirePairUnitTests`) exercises both new common.sh
 functions in isolation, sourcing common.sh in a bash subshell exactly as
@@ -53,6 +72,7 @@ import unittest
 
 from tests._compat_helpers import (
     assert_argv_is_golden_argv_order,
+    build_session_model_usage,
     build_shim,
     build_state_db,
     load_golden,
@@ -76,7 +96,6 @@ import tests.test_ticket_attribution as _test_ticket_attribution
 
 HERMES_REPORT_SH = SCRIPTS_DIR / 'hermes-report.sh'
 COMMON_SH = SCRIPTS_DIR / 'common.sh'
-
 
 class _CommonShUnitHarness:
     """bash-subshell caller for common.sh functions, mirroring
@@ -653,6 +672,477 @@ class MarkerSplitSubscriberEmailWiringTests(unittest.TestCase):
         )
 
 
+class _AuxEmailHarness:
+    """Plan 02 Task 1: hermes-report.sh's auxiliary-usage pass,
+    reproducing tests.test_phase62_subscriber_wiring._AuxHarness's own
+    fixture shape (SID='aux-sid-001', the _one_session()/_one_aux_row()
+    default fixture meter-completion-aux.golden.json's argv_order was
+    captured against -- see that golden's own 'captured' provenance note)
+    but parameterised additionally on `source` (default 'email',
+    overriding _AuxHarness's own 'test'), `subscriber_email_capable` and
+    `email_mode` -- the three axes SUB-06 needs that _AuxHarness has no
+    reason to carry (a later plan's job per that class's own module
+    docstring). Reproduced locally rather than imported: this plan's
+    files_modified list does not touch
+    tests/test_phase62_subscriber_wiring.py.
+    """
+
+    SID = 'aux-sid-001'
+
+    def __init__(self, source='email', subscriber_capable=True,
+                 subscriber_email_capable=True, email_mode=None,
+                 prefix='gsd-phase63-aux-'):
+        self.tmp = tempfile.mkdtemp(prefix=prefix)
+        self.hermes_home = os.path.join(self.tmp, 'hh')
+        self.state_dir = os.path.join(self.hermes_home, 'state', 'revenium')
+        self.markers_dir = os.path.join(self.state_dir, 'markers')
+        os.makedirs(self.markers_dir, mode=0o700)
+        self.state_db = os.path.join(self.hermes_home, 'state.db')
+        self.log_file = os.path.join(self.state_dir, 'revenium-metering.log')
+
+        self.shim_home = os.path.join(self.tmp, 'home')
+        self.bin_dir = os.path.join(self.shim_home, '.local', 'bin')
+        os.makedirs(self.bin_dir)
+        self.meter_log = os.path.join(self.tmp, 'meter.log')
+        self.jobs_log = os.path.join(self.tmp, 'jobs.log')
+        self.inv_log = os.path.join(self.tmp, 'inv.log')
+        self.shim = os.path.join(self.bin_dir, 'revenium')
+        build_shim(
+            self.shim, squad_capable=True, subscriber_capable=subscriber_capable,
+            subscriber_email_capable=subscriber_email_capable,
+        )
+        self.email_mode = email_mode
+
+        build_state_db(self.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': source,
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': _OLD_TS,
+            'ended_at': _OLD_TS,
+            'billing_provider': 'anthropic',
+        }])
+        build_session_model_usage(self.state_db, [{
+            'session_id': self.SID,
+            'model': 'claude-3-5-haiku',
+            'billing_provider': 'anthropic',
+            'task': 'approval',
+            'api_call_count': 3,
+            'input_tokens': 40,
+            'output_tokens': 10,
+            'estimated_cost_usd': 0.002,
+            'first_seen': _OLD_TS + 500.0,
+            'last_seen': _OLD_TS + 600.0,
+        }])
+
+    def seed_user_id(self, mapping):
+        seed_user_ids(self.state_db, mapping)
+
+    def cleanup(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def base_env(self):
+        env = {
+            **os.environ,
+            'HOME': self.shim_home,
+            'HERMES_HOME': self.hermes_home,
+            'REVENIUM_STATE_DIR': self.state_dir,
+            'PATH': self.bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': self.inv_log,
+            'METER_LOG': self.meter_log,
+            'JOBS_LOG': self.jobs_log,
+            'TZ': 'UTC',
+            'REVENIUM_ORGANIZATION_NAME': '',
+            'REVENIUM_AGENT_NAME': 'Hermes',
+            'REVENIUM_SQUAD_NAME': '',
+        }
+        env.pop('REVENIUM_SUBSCRIBER_EMAIL_MODE', None)
+        if self.email_mode is not None:
+            env['REVENIUM_SUBSCRIBER_EMAIL_MODE'] = self.email_mode
+        return env
+
+    def run(self):
+        rc, _ignored_inv, output = run_script(
+            HERMES_REPORT_SH, self.base_env(), self.inv_log
+        )
+        meter_invocations = []
+        if os.path.exists(self.meter_log):
+            with open(self.meter_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if line:
+                        meter_invocations.append(shlex.split(line))
+        if rc != 0:
+            raise AssertionError(f'hermes-report.sh failed (rc={rc}): {output}')
+        return meter_invocations
+
+    @staticmethod
+    def aux_invocation(invocations):
+        """Return the single invocation carrying --operation-type OTHER, or
+        raise if there isn't exactly one -- the aux row, distinguished from
+        the main-loop CHAT invocation the same tick also ships."""
+        aux = [
+            inv for inv in invocations
+            if '--operation-type' in inv
+            and inv[inv.index('--operation-type') + 1] == 'OTHER'
+        ]
+        if len(aux) != 1:
+            raise AssertionError(
+                f'expected exactly 1 aux (--operation-type OTHER) invocation, '
+                f'got {len(aux)}: {invocations!r}'
+            )
+        return aux[0]
+
+    @staticmethod
+    def main_loop_invocation(invocations):
+        """The non-aux `meter completion` call the SAME tick's main session
+        loop ships for this harness's own session (the markerless site,
+        since no markers are seeded here) -- the cross-path sameness
+        arm's other half."""
+        main = [
+            inv for inv in invocations
+            if not ('--operation-type' in inv
+                    and inv[inv.index('--operation-type') + 1] == 'OTHER')
+        ]
+        if len(main) != 1:
+            raise AssertionError(
+                f'expected exactly 1 main-loop invocation, got {len(main)}: '
+                f'{invocations!r}'
+            )
+        return main[0]
+
+
+class AuxSubscriberEmailWiringTests(unittest.TestCase):
+    """Plan 02 Task 1: the four-run proof for the THIRD emission site --
+    hermes-report.sh's auxiliary-usage pass -- against
+    meter-completion-aux.golden.json's argv_order, mirroring
+    MarkerlessSubscriberEmailWiringTests' / MarkerSplitSubscriberEmailWiringTests'
+    own Run E/F/G/H above. `--environment` is overridden to 'email' the
+    same way, since the aux golden's own fixture is captured with
+    source='test'."""
+
+    ACTOR = 'p63-aux-actor@acme.example'
+
+    def test_run_e_plaintext_both_capable_four_trailing_tokens(self):
+        tree = _AuxEmailHarness(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='plaintext',
+        )
+        try:
+            tree.seed_user_id({_AuxEmailHarness.SID: self.ACTOR})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            golden = load_golden('meter-completion-aux.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, aux, golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=(
+                    '--subscriber-id', expected_key,
+                    '--subscriber-email', self.ACTOR,
+                ),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_f_obfuscated_both_capable_two_trailing_tokens_no_email_flag(self):
+        tree = _AuxEmailHarness(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='obfuscated',
+        )
+        try:
+            tree.seed_user_id({_AuxEmailHarness.SID: self.ACTOR})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            self.assertNotIn('--subscriber-email', aux, aux)
+            self.assertIn('--subscriber-id', aux, aux)
+            idx = aux.index('--subscriber-id')
+            wire_id = aux[idx + 1]
+            self.assertRegex(wire_id, r'^email:[0-9a-f]{64}$')
+            golden = load_golden('meter-completion-aux.golden.json')
+            assert_argv_is_golden_argv_order(
+                self, aux, golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', wire_id),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_g_id_capable_email_not_capable_meter_call_succeeds(self):
+        """SUB-07: a CLI advertising --subscriber-id but NOT
+        --subscriber-email emits --subscriber-id and omits
+        --subscriber-email, and the meter call still succeeds."""
+        tree = _AuxEmailHarness(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=False, email_mode='plaintext',
+        )
+        try:
+            tree.seed_user_id({_AuxEmailHarness.SID: self.ACTOR})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            golden = load_golden('meter-completion-aux.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, aux, golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', expected_key),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_h_slack_source_argv_byte_identical_both_modes(self):
+        actor = 'p63-aux-slack-actor'
+
+        def _run(mode):
+            tree = _AuxEmailHarness(
+                source='slack', subscriber_capable=True,
+                subscriber_email_capable=True, email_mode=mode,
+            )
+            try:
+                tree.seed_user_id({_AuxEmailHarness.SID: actor})
+                invocations = tree.run()
+                return tree.aux_invocation(invocations)
+            finally:
+                tree.cleanup()
+
+        argv_plain = _run('plaintext')
+        argv_obf = _run('obfuscated')
+        self.assertNotIn('--subscriber-email', argv_plain, argv_plain)
+        self.assertNotIn('--subscriber-email', argv_obf, argv_obf)
+        self.assertIn('--subscriber-id', argv_plain, argv_plain)
+        self.assertIn('--subscriber-id', argv_obf, argv_obf)
+        _assert_argv_equal_modulo_timestamps(
+            self, argv_plain, argv_obf, 'slack-source aux'
+        )
+
+    def test_absent_arm_obfuscated_no_user_id_column_matches_golden(self):
+        """Turning the switch on must not perturb the 97% no-actor case:
+        the golden's own untouched fixture (source='test', no `user_id`
+        column at all), mode obfuscated, still equals argv_order exactly."""
+        tree = _AuxEmailHarness(
+            source='test', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='obfuscated',
+        )
+        try:
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            golden = load_golden('meter-completion-aux.golden.json')
+            assert_argv_is_golden_argv_order(self, aux, golden)
+        finally:
+            tree.cleanup()
+
+
+class AuxCrossPathSubscriberEmailSamenessTests(unittest.TestCase):
+    """Plan 02 Task 1 <behavior>, the load-bearing arm: one email-source
+    session's markerless main-loop completion and its auxiliary completion
+    carry the BYTE-IDENTICAL --subscriber-id value under obfuscation. This
+    is the arm that fails if the auxiliary path re-hashes the already-
+    wire-transformed aux_session_ctx cache value instead of passing it
+    through resolve_subscriber_wire_pair's idempotent branch -- every
+    single-path arm above (Run F, Run G) still passes even if the digest
+    were computed twice, because each only inspects ONE emission site in
+    isolation."""
+
+    ACTOR = 'p63-aux-crosspath-actor@acme.example'
+
+    def test_main_loop_and_aux_share_one_obfuscated_key(self):
+        tree = _AuxEmailHarness(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='obfuscated',
+        )
+        try:
+            tree.seed_user_id({_AuxEmailHarness.SID: self.ACTOR})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            main_loop = tree.main_loop_invocation(invocations)
+            self.assertIn('--subscriber-id', aux, aux)
+            self.assertIn('--subscriber-id', main_loop, main_loop)
+            aux_id = aux[aux.index('--subscriber-id') + 1]
+            main_id = main_loop[main_loop.index('--subscriber-id') + 1]
+            self.assertRegex(aux_id, r'^email:[0-9a-f]{64}$')
+            self.assertEqual(aux_id, main_id)
+        finally:
+            tree.cleanup()
+
+    def test_main_loop_and_aux_share_one_plaintext_email(self):
+        tree = _AuxEmailHarness(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='plaintext',
+        )
+        try:
+            tree.seed_user_id({_AuxEmailHarness.SID: self.ACTOR})
+            invocations = tree.run()
+            aux = tree.aux_invocation(invocations)
+            main_loop = tree.main_loop_invocation(invocations)
+            self.assertIn('--subscriber-email', aux, aux)
+            self.assertIn('--subscriber-email', main_loop, main_loop)
+            aux_email = aux[aux.index('--subscriber-email') + 1]
+            main_email = main_loop[main_loop.index('--subscriber-email') + 1]
+            self.assertEqual(aux_email, self.ACTOR)
+            self.assertEqual(aux_email, main_email)
+        finally:
+            tree.cleanup()
+
+
+def _hermes_report_body_without_main_invocation():
+    """hermes-report.sh's full source with its trailing `main "$@"`
+    invocation stripped, so its real function definitions -- including
+    report_auxiliary_usage, completely unmodified -- can be sourced and
+    called directly without running the whole session-loop pipeline.
+    Fails loudly (an assertion, never a silent stale-body match) if the
+    trailing invocation has moved, mirroring
+    tests.test_phase55_aux_edges._extract_infer_provider_function's own
+    fail-loud discipline for a live-extracted function body."""
+    text = HERMES_REPORT_SH.read_text()
+    anchor = '\nmain "$@"\n'
+    assert text.endswith(anchor), (
+        'hermes-report.sh no longer ends with the expected `main "$@"` '
+        'trailing invocation -- update this extraction before trusting '
+        'anything that depends on it'
+    )
+    return text[:-len(anchor)]
+
+
+def _run_report_auxiliary_usage_directly(ctx_string, env):
+    """Source the REAL hermes-report.sh definitions (main() invocation
+    stripped, see above) and call report_auxiliary_usage with a
+    hand-crafted `ctx_string` -- the ONLY way to drive a malformed
+    aux_session_ctx row through the real parser: every real producer
+    always emits exactly seven pipe-delimited fields by construction (the
+    session loop's own cache append, and _supplement_aux_session_ctx's
+    recovery append), so no DB-driven scenario through the normal session
+    loop can manufacture a width mismatch.
+
+    The temp script is written INSIDE skills/revenium/scripts/ (not a
+    system tmpdir) so hermes-report.sh's own `SCRIPT_DIR="$(cd "$(dirname
+    "${BASH_SOURCE[0]}")" && pwd)"` still resolves to the real scripts
+    directory and its `source "${SCRIPT_DIR}/common.sh"` line keeps
+    working -- a tmpdir copy would source nothing and every function below
+    that line would be undefined.
+    """
+    body = _hermes_report_body_without_main_invocation()
+    tmp_script_path = os.path.join(str(SCRIPTS_DIR), '.tmp-p63-ctxwidth.sh')
+    with open(tmp_script_path, 'w') as f:
+        f.write(body)
+    os.chmod(tmp_script_path, 0o755)
+    try:
+        script = f'source {shlex.quote(tmp_script_path)}; report_auxiliary_usage "$1"'
+        return subprocess.run(
+            ['bash', '-c', script, '_', ctx_string],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        os.unlink(tmp_script_path)
+
+
+class AuxCacheWidthMismatchTests(unittest.TestCase):
+    """Plan 02 Task 1 <behavior>: a six-field and an eight-field
+    aux_session_ctx row are both still skipped rather than mis-parsed
+    (Phase 62 D-09's existing counted-mismatch behaviour, unchanged by
+    this plan), and the neighbouring seven-field row still ships.
+
+    Driven against the REAL, unmodified report_auxiliary_usage function
+    (see _run_report_auxiliary_usage_directly) rather than through the
+    full harness: every real producer always emits exactly seven fields
+    by construction, so no DB-driven scenario through the normal session
+    loop can manufacture a width mismatch to assert against."""
+
+    SID_SIX = 'p63-ctxwidth-six'
+    SID_EIGHT = 'p63-ctxwidth-eight'
+    SID_GOOD = 'p63-ctxwidth-good'
+
+    def test_six_and_eight_field_rows_skipped_seven_field_row_ships(self):
+        tmp = tempfile.mkdtemp(prefix='gsd-phase63-ctxwidth-')
+        try:
+            hermes_home = os.path.join(tmp, 'hh')
+            state_dir = os.path.join(hermes_home, 'state', 'revenium')
+            os.makedirs(state_dir, mode=0o700)
+            state_db = os.path.join(hermes_home, 'state.db')
+
+            shim_home = os.path.join(tmp, 'home')
+            bin_dir = os.path.join(shim_home, '.local', 'bin')
+            os.makedirs(bin_dir)
+            meter_log = os.path.join(tmp, 'meter.log')
+            shim = os.path.join(bin_dir, 'revenium')
+            build_shim(
+                shim, squad_capable=True, subscriber_capable=True,
+                subscriber_email_capable=True,
+            )
+
+            common_row = {
+                'model': 'claude-3-5-haiku', 'billing_provider': 'anthropic',
+                'task': 'approval', 'api_call_count': 1,
+                'input_tokens': 10, 'output_tokens': 5,
+                'estimated_cost_usd': 0.001,
+                'first_seen': _OLD_TS, 'last_seen': _OLD_TS + 10.0,
+            }
+            build_session_model_usage(state_db, [
+                {**common_row, 'session_id': self.SID_SIX},
+                {**common_row, 'session_id': self.SID_EIGHT},
+                {**common_row, 'session_id': self.SID_GOOD},
+            ])
+
+            ctx_lines = [
+                # SIX fields -- missing the trailing subscriber_key field.
+                f'{self.SID_SIX}|{self.SID_SIX}|Hermes|CHAT|_none_|test',
+                # EIGHT fields -- one field too many.
+                f'{self.SID_EIGHT}|{self.SID_EIGHT}|Hermes|CHAT|_none_|test|subkey8|extra8',
+                # SEVEN fields -- the well-formed neighbour.
+                f'{self.SID_GOOD}|{self.SID_GOOD}|Hermes|CHAT|_none_|test|',
+            ]
+            ctx_string = '\n'.join(ctx_lines) + '\n'
+
+            env = {
+                **os.environ,
+                'HOME': shim_home,
+                'HERMES_HOME': hermes_home,
+                'REVENIUM_STATE_DIR': state_dir,
+                'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+                'METER_LOG': meter_log,
+                'TZ': 'UTC',
+                'REVENIUM_ORGANIZATION_NAME': '',
+                'REVENIUM_AGENT_NAME': 'Hermes',
+                'REVENIUM_SQUAD_NAME': '',
+            }
+            env.pop('REVENIUM_SUBSCRIBER_EMAIL_MODE', None)
+
+            result = _run_report_auxiliary_usage_directly(ctx_string, env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+            log_file = os.path.join(state_dir, 'revenium-metering.log')
+            log_text = ''
+            if os.path.exists(log_file):
+                log_text = open(log_file).read()
+            self.assertIn(
+                'auxiliary session context cache: 2 malformed line(s)',
+                log_text, log_text,
+            )
+
+            meter_invocations = []
+            if os.path.exists(meter_log):
+                with open(meter_log) as f:
+                    for line in f:
+                        line = line.rstrip('\n')
+                        if line:
+                            meter_invocations.append(shlex.split(line))
+
+            shipped_sids = set()
+            for inv in meter_invocations:
+                if '--trace-id' in inv:
+                    shipped_sids.add(inv[inv.index('--trace-id') + 1])
+            self.assertIn(self.SID_GOOD, shipped_sids, meter_invocations)
+            self.assertNotIn(self.SID_SIX, shipped_sids, meter_invocations)
+            self.assertNotIn(self.SID_EIGHT, shipped_sids, meter_invocations)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class MultiMarkerSubscriberEmailSamenessTests(unittest.TestCase):
     """Task 3 <behavior>: a session with THREE task markers and ONE
     resolved email actor ships three `meter completion` calls. Under
@@ -735,12 +1225,15 @@ class MultiMarkerSubscriberEmailSamenessTests(unittest.TestCase):
 
 
 # How many `meter completion` emission SITES in hermes-report.sh are
-# expected to append --subscriber-email at the end of THIS commit (Task 3):
-# the markerless site (Task 2) and the marker-split site (Task 3). The aux
-# site is a later plan's job. Confirmed by grep, never by arithmetic:
+# expected to append --subscriber-email at the end of THIS commit (Plan 02
+# Task 1): the markerless site (Plan 01 Task 2), the marker-split site
+# (Plan 01 Task 3), and the auxiliary site (Plan 02 Task 1). The event site
+# in api-event-report.sh is Plan 02 Task 2's job -- SCRIPTS_WITH_SUBSCRIBER_
+# EMAIL_PROBE stays hermes-report.sh-only until that task joins it.
+# Confirmed by grep, never by arithmetic:
 # `grep -v '^[[:space:]]*#' skills/revenium/scripts/hermes-report.sh |
-#  grep -c -- '--subscriber-email "'` = 2.
-EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT = 2
+#  grep -c -- '--subscriber-email "'` = 3.
+EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT = 3
 SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE = (HERMES_REPORT_SH,)
 
 

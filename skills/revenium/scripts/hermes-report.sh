@@ -1814,8 +1814,42 @@ PY
     # and adding a dimension to it would unmatch every existing line and
     # re-ship everything. A session with no resolved actor appends NOTHING,
     # which is the common case and the load-bearing one.
+    #
+    # Subscriber-email attribution (Phase 63, SUB-06/D-01/D-02/D-06): the
+    # seventh aux_session_ctx field already carries the WIRE-transformed key
+    # -- sites 1/2's own chokepoint call (see the `_subscriber_wire_pair`
+    # call site above the aux_session_ctx+= append) rewrote subscriber_key
+    # IN PLACE before that append, so this call is a RE-DERIVATION, not a
+    # first resolution. Calling resolve_subscriber_wire_pair a second time
+    # here is deliberately relied on for its idempotency guarantee
+    # (documented on the function itself in common.sh): in obfuscated mode
+    # the cached value already matches ^[0-9a-f]{64}$, so this call passes
+    # it through unchanged and computes no second digest, rather than
+    # hashing an already-hashed value and publishing a second, different
+    # permanent key for the same actor (which would silently fragment one
+    # actor's spend across two subscriber rows). This is exactly why
+    # aux_session_ctx was NOT widened by an eighth field to carry a
+    # pre-split id/email pair -- one helper call re-derives both wire values
+    # from the one field that already exists, so the seven-field parser
+    # (Phase 62 D-09) and its three producers stay untouched. Do NOT
+    # "simplify" this back into reading ctx_subscriber_key directly for
+    # --subscriber-id -- that would silently drop the obfuscation transform
+    # for aux rows only, while sites 1/2 kept it.
+    local _aux_subscriber_wire_pair _aux_subscriber_id _aux_subscriber_email
+    _aux_subscriber_wire_pair="$(resolve_subscriber_wire_pair "${ctx_subscriber_key}" "${SUBSCRIBER_EMAIL_MODE}")"
+    _aux_subscriber_id="${_aux_subscriber_wire_pair%%|*}"
+    _aux_subscriber_email="${_aux_subscriber_wire_pair#*|}"
     if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" ]]; then
-      [[ -n "${ctx_subscriber_key}" ]] && cmd+=(--subscriber-id "${ctx_subscriber_key}")
+      [[ -n "${_aux_subscriber_id}" ]] && cmd+=(--subscriber-id "${_aux_subscriber_id}")
+    fi
+
+    # Appended DIRECTLY after --subscriber-id — flag order is part of the
+    # argv contract shared across all four sites. In obfuscated mode
+    # _aux_subscriber_email is always empty (D-06), so this line appends
+    # NOTHING for an obfuscated actor even when SUBSCRIBER_EMAIL_CLI_CAPABLE
+    # is true -- the omission IS the mitigation, not a gap.
+    if [[ "${SUBSCRIBER_EMAIL_CLI_CAPABLE}" == "true" ]]; then
+      [[ -n "${_aux_subscriber_email}" ]] && cmd+=(--subscriber-email "${_aux_subscriber_email}")
     fi
 
     local cmd_output cmd_exit
