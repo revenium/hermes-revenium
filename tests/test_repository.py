@@ -352,6 +352,15 @@ class RepositoryTests(unittest.TestCase):
             # this repo has already been lost twice (the v1.3/v1.4
             # closeouts, auxiliary-usage-sizing.md).
             ROOT / 'docs' / 'cli-verb-ask.md',
+            # Phase 63 (SUB-06/SUB-09) — the tracked subscriber-attribution
+            # record: the dimension, the subscriberEmailMode switch and its
+            # accepted limits (unsalted hash, mid-life-flip fragmentation),
+            # the subscriber-names.sh mapping procedure, and the corrected
+            # D-09 finding (subscribers lookup is a 404, not a 403, and the
+            # real provisioning block is the missing email for Slack
+            # actors). `.planning/` and `docs/internal/` are both gitignored,
+            # so a tracked docs/ file plus this pin is the only durable home.
+            ROOT / 'docs' / 'subscriber-attribution.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
