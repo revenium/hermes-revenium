@@ -406,6 +406,11 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 Plan 03 — drain-completion gate (C-11/D-13, EVT-12)
             SKILL / 'scripts' / 'drain-status.sh',
             SKILL / 'scripts' / 'costs-status.sh',
+            # Phase 63 (SUB-09) — the read-only subscriber-id-to-name mapping
+            # procedure; this pin is what delivers it to every install,
+            # including a tap-installed host, per D-10's rejection of a
+            # repo-only doc as the vehicle.
+            SKILL / 'scripts' / 'subscriber-names.sh',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
             SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
             SKILL / 'plugins' / 'revenium-classifier' / '__init__.py',

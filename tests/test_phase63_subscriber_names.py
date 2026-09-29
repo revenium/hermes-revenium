@@ -622,5 +622,30 @@ class MalformedOriginJsonTests(SubscriberNamesScriptTestCase):
         self.assertIn('2', row.split('\t')[-1])
 
 
+# ---------------------------------------------------------------------------
+# Task 3: the four D-10 shipped-surface properties, asserted independently
+# so a future edit that breaks one names exactly which property broke.
+# Each is parsed/measured directly rather than by importing and running
+# tests.test_repository, per the plan's own instruction.
+# ---------------------------------------------------------------------------
+
+class ShippedSurfaceConformanceTests(unittest.TestCase):
+    def test_pinned_in_test_repository_expected_files_list(self):
+        text = (ROOT / 'tests' / 'test_repository.py').read_text()
+        self.assertIn("SKILL / 'scripts' / 'subscriber-names.sh'", text)
+
+    def test_owner_execute_bit_set(self):
+        mode = SCRIPT.stat().st_mode
+        self.assertTrue(mode & 0o100, 'owner-execute bit not set on subscriber-names.sh')
+
+    def test_sources_common_sh(self):
+        text = SCRIPT.read_text()
+        self.assertIn('source "${SCRIPT_DIR}/common.sh"', text)
+
+    def test_bash_syntax_check_passes(self):
+        result = subprocess.run(['bash', '-n', str(SCRIPT)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 if __name__ == '__main__':
     unittest.main()
