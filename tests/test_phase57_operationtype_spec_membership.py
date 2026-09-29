@@ -626,16 +626,32 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # defined later in the file (inside main()), shifting each of
         # THOSE by the full +34 (4105->4139, 4324->4358).
         # api-event-report.sh is untouched by this task (its own
-        # --subscriber-email wiring is Task 2's job). Pure shift once more
-        # -- the COUNT (4) and the emitted VALUE expressions are unchanged.
-        # Verified against the diff hunks themselves (`git diff -U0`), not
-        # by arithmetic.
+        # --subscriber-email wiring is Task 2's job, re-measured
+        # separately below). Pure shift once more -- the COUNT (4) and the
+        # emitted VALUE expressions are unchanged. Verified against the
+        # diff hunks themselves (`git diff -U0`), not by arithmetic.
+        #
+        # Re-measured again (Phase 63 Plan 02 Task 2, SUB-06): three blocks
+        # in api-event-report.sh sit ABOVE the event site's own
+        # --operation-type line -- the SUBSCRIBER_EMAIL_MODE resolution
+        # (22 lines, beside the existing EVENT_METERING_MODE info line),
+        # the SUBSCRIBER_EMAIL_CLI_CAPABLE probe (15 lines, beside the
+        # existing SUBSCRIBER_CLI_CAPABLE probe), and the wire-pair
+        # transform bash block (25 lines, above the per-record loop) --
+        # shifting it by +62 total (1826->1888). A fourth block, the
+        # --subscriber-email emission append itself (17 lines), sits AFTER
+        # the operation-type line in file order, so it shifts nothing
+        # further. hermes-report.sh's three sites are unaffected by this
+        # task (already re-measured by Task 1 above). Pure shift once more
+        # -- the COUNT (4) and the emitted VALUE expressions are
+        # unchanged. Verified against the diff hunks themselves
+        # (`git diff -U0`), not by arithmetic.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1747),
             ('hermes-report.sh', 4139),
             ('hermes-report.sh', 4358),
-            ('api-event-report.sh', 1826),
+            ('api-event-report.sh', 1888),
         }
         self.assertEqual(
             found_locations, expected_locations,

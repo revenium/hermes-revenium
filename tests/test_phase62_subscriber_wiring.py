@@ -559,7 +559,9 @@ class _EventHarness:
     SID = 'compat-event-sid-001'
     ARID = 'compat-event-arid-001'
 
-    def __init__(self, subscriber_capable=True, prefix='gsd-phase62-event-'):
+    def __init__(self, subscriber_capable=True, subscriber_email_capable=False,
+                 email_mode=None, event_metering_mode='live',
+                 prefix='gsd-phase62-event-'):
         self.tmp = tempfile.mkdtemp(prefix=prefix)
         self.hermes_home = os.path.join(self.tmp, 'hh')
         self.state_dir = os.path.join(self.hermes_home, 'state', 'revenium')
@@ -577,7 +579,16 @@ class _EventHarness:
         self.meter_log = os.path.join(self.tmp, 'meter.log')
         self.inv_log = os.path.join(self.tmp, 'inv.log')
         self.shim = os.path.join(self.bin_dir, 'revenium')
-        build_shim(self.shim, subscriber_capable=subscriber_capable)
+        # subscriber_email_capable/email_mode (Phase 63, SUB-06): default
+        # False/None so every existing caller of this harness (Phase 62's
+        # own EventSubscriberWiringTests) keeps exercising the pre-Phase-63
+        # shim/env shape byte-for-byte -- only a Phase 63 caller opts in.
+        build_shim(
+            self.shim, subscriber_capable=subscriber_capable,
+            subscriber_email_capable=subscriber_email_capable,
+        )
+        self.email_mode = email_mode
+        self.event_metering_mode = event_metering_mode
 
         Path(self.ready_dir, self.SID).touch()
         _write_jsonl(os.path.join(self.spool_dir, f'{self.SID}.jsonl'), [{
@@ -633,7 +644,7 @@ class _EventHarness:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def base_env(self):
-        return {
+        env = {
             **os.environ,
             'HOME': self.shim_home,
             'HERMES_HOME': self.hermes_home,
@@ -642,8 +653,12 @@ class _EventHarness:
             'INVOCATIONS_LOG': self.inv_log,
             'METER_LOG': self.meter_log,
             'TZ': 'UTC',
-            'REVENIUM_EVENT_METERING_MODE': 'live',
+            'REVENIUM_EVENT_METERING_MODE': self.event_metering_mode,
         }
+        env.pop('REVENIUM_SUBSCRIBER_EMAIL_MODE', None)
+        if self.email_mode is not None:
+            env['REVENIUM_SUBSCRIBER_EMAIL_MODE'] = self.email_mode
+        return env
 
     def run(self):
         rc, _ignored_inv, output = run_script(

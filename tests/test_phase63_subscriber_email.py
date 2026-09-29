@@ -27,6 +27,24 @@ seven fields by construction and no DB-driven scenario through the normal
 session loop can manufacture a width mismatch). `SubscriberEmailWiringStructuralTests`'
 `EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT` moves from 2 to 3.
 
+Phase 63 Plan 02 Task 2 (SUB-06, the FOURTH and last site --
+api-event-report.sh's event path) extends this module once more with
+`EventSubscriberEmailWiringTests` (Run E/F/G/H against
+`meter-completion-event.golden.json`, plus the absent-arm and
+pipe-in-`user_id` regression arms, reusing
+`tests.test_phase62_subscriber_wiring._EventHarness`),
+`EventThreeRecordSubscriberEmailSamenessTests` (a session with THREE
+event records ships three `meter completion` calls all carrying the
+identical `--subscriber-id`/`--subscriber-email` values -- the wire pair
+is resolved ONCE per session, above the per-record loop, like
+`source_env` and `subscriber_key` already are), and
+`EventShadowModeSubscriberEmailTests` (under `EVENT_METERING_MODE=shadow`
+the constructed argv still carries the pair -- proven structurally,
+since shadow mode never logs anything to inspect at runtime -- and the
+run still ships nothing). `EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT`
+moves from 3 to 4 and `SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE` gains
+`api-event-report.sh`.
+
 Unit coverage (`ResolveSubscriberEmailModeUnitTests`,
 `ResolveSubscriberWirePairUnitTests`) exercises both new common.sh
 functions in isolation, sourcing common.sh in a bash subshell exactly as
@@ -78,6 +96,7 @@ from tests._compat_helpers import (
     load_golden,
     run_script,
     seed_user_ids,
+    ROOT,
     SCRIPTS_DIR,
 )
 from tests.test_phase61_identity_resolution import (
@@ -87,6 +106,16 @@ from tests.test_phase61_identity_resolution import (
     _write_marker_lines,
 )
 from tests.test_phase61_subscriber_boundary import _assert_argv_equal_modulo_timestamps
+# _EventHarness / _write_jsonl / EVENT_REPORT_SH are plain helpers (no
+# test_* methods), imported by NAME exactly like _own_meter_invocations /
+# _task_marker / _write_marker_lines above -- safe from unittest discovery's
+# re-collection trap, which only bites a TestCase subclass imported by name
+# (see the _test_ticket_attribution module-reference comment just below).
+from tests.test_phase62_subscriber_wiring import (
+    _EventHarness,
+    _write_jsonl,
+    EVENT_REPORT_SH,
+)
 # Imported as a MODULE reference (not `from ... import TicketWiringTests`)
 # deliberately, mirroring tests.test_phase62_subscriber_wiring's own
 # comment on this: importing the TestCase class by name would bind it into
@@ -96,6 +125,7 @@ import tests.test_ticket_attribution as _test_ticket_attribution
 
 HERMES_REPORT_SH = SCRIPTS_DIR / 'hermes-report.sh'
 COMMON_SH = SCRIPTS_DIR / 'common.sh'
+
 
 class _CommonShUnitHarness:
     """bash-subshell caller for common.sh functions, mirroring
@@ -1224,25 +1254,350 @@ class MultiMarkerSubscriberEmailSamenessTests(unittest.TestCase):
             tree.cleanup()
 
 
-# How many `meter completion` emission SITES in hermes-report.sh are
-# expected to append --subscriber-email at the end of THIS commit (Plan 02
-# Task 1): the markerless site (Plan 01 Task 2), the marker-split site
-# (Plan 01 Task 3), and the auxiliary site (Plan 02 Task 1). The event site
-# in api-event-report.sh is Plan 02 Task 2's job -- SCRIPTS_WITH_SUBSCRIBER_
-# EMAIL_PROBE stays hermes-report.sh-only until that task joins it.
-# Confirmed by grep, never by arithmetic:
-# `grep -v '^[[:space:]]*#' skills/revenium/scripts/hermes-report.sh |
-#  grep -c -- '--subscriber-email "'` = 3.
-EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT = 3
-SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE = (HERMES_REPORT_SH,)
+class EventSubscriberEmailWiringTests(unittest.TestCase):
+    """Plan 02 Task 2: the four-run proof for the FOURTH and last emission
+    site -- api-event-report.sh's event path -- against
+    meter-completion-event.golden.json's argv_order, mirroring the three
+    hermes-report.sh sites' own Run E/F/G/H, plus the absent-arm and
+    pipe-in-user_id regression arms this site's own Phase 62 coverage
+    already carries (EventSubscriberWiringTests in
+    tests.test_phase62_subscriber_wiring), re-run here under the email
+    dimension. Reuses _EventHarness (imported, not duplicated)."""
+
+    ACTOR = 'p63-event-actor@acme.example'
+
+    def test_run_e_plaintext_both_capable_four_trailing_tokens(self):
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='plaintext',
+        )
+        try:
+            tree.seed_session(
+                source='email', user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            golden = load_golden('meter-completion-event.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, invocations[0], golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=(
+                    '--subscriber-id', expected_key,
+                    '--subscriber-email', self.ACTOR,
+                ),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_f_obfuscated_both_capable_two_trailing_tokens_no_email_flag(self):
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='obfuscated',
+        )
+        try:
+            tree.seed_session(
+                source='email', user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            argv = invocations[0]
+            self.assertNotIn('--subscriber-email', argv, argv)
+            self.assertIn('--subscriber-id', argv, argv)
+            wire_id = argv[argv.index('--subscriber-id') + 1]
+            self.assertRegex(wire_id, r'^email:[0-9a-f]{64}$')
+            golden = load_golden('meter-completion-event.golden.json')
+            assert_argv_is_golden_argv_order(
+                self, argv, golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', wire_id),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_g_id_capable_email_not_capable_meter_call_succeeds(self):
+        """SUB-07: a CLI advertising --subscriber-id but NOT
+        --subscriber-email emits --subscriber-id and omits
+        --subscriber-email, and the meter call still succeeds."""
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=False,
+            email_mode='plaintext',
+        )
+        try:
+            tree.seed_session(
+                source='email', user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            golden = load_golden('meter-completion-event.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, invocations[0], golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', expected_key),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_h_slack_source_argv_byte_identical_both_modes(self):
+        actor = 'p63-event-slack-actor'
+
+        def _run(mode):
+            tree = _EventHarness(
+                subscriber_capable=True, subscriber_email_capable=True,
+                email_mode=mode,
+            )
+            try:
+                tree.seed_session(
+                    source='slack', user_id_mapping={_EventHarness.SID: actor}
+                )
+                invocations = tree.run()
+                self.assertEqual(len(invocations), 1, invocations)
+                return invocations[0]
+            finally:
+                tree.cleanup()
+
+        argv_plain = _run('plaintext')
+        argv_obf = _run('obfuscated')
+        self.assertNotIn('--subscriber-email', argv_plain, argv_plain)
+        self.assertNotIn('--subscriber-email', argv_obf, argv_obf)
+        self.assertIn('--subscriber-id', argv_plain, argv_plain)
+        self.assertIn('--subscriber-id', argv_obf, argv_obf)
+        _assert_argv_equal_modulo_timestamps(
+            self, argv_plain, argv_obf, 'slack-source event'
+        )
+
+    def test_absent_arm_obfuscated_no_user_id_column_matches_golden(self):
+        """Turning the switch on must not perturb the 97% no-actor case:
+        the golden's own untouched fixture (source='test', no `user_id`
+        column at all), mode obfuscated, still equals argv_order exactly."""
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='obfuscated',
+        )
+        try:
+            tree.seed_session()
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            golden = load_golden('meter-completion-event.golden.json')
+            assert_argv_is_golden_argv_order(self, invocations[0], golden)
+        finally:
+            tree.cleanup()
+
+    def test_pipe_in_user_id_obfuscated_ships_no_subscriber_token_environment_and_tokens_intact(self):
+        """T-63-12: a transport-unsafe (pipe-bearing) actor id resolves to
+        no key at all -- neither subscriber flag appears, --environment
+        and --total-tokens on the same row are unaffected, and no digest
+        is computed for a rejected actor."""
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='obfuscated',
+        )
+        try:
+            tree.seed_session(user_id_mapping={_EventHarness.SID: 'U|600'})
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 1, invocations)
+            argv = invocations[0]
+            self.assertNotIn('--subscriber-id', argv, argv)
+            self.assertNotIn('--subscriber-email', argv, argv)
+            golden = load_golden('meter-completion-event.golden.json')
+            assert_argv_is_golden_argv_order(self, argv, golden)
+            idx = argv.index('--total-tokens')
+            self.assertEqual(argv[idx + 1], '165', argv)
+        finally:
+            tree.cleanup()
+
+
+def _three_event_records(sid):
+    """Three spool records sharing the default _EventHarness fixture's
+    CHAT marker window (the marker pair's second entry, ts=1715513900.5,
+    is the last marker in the file -- an open-ended window with no
+    successor to bound it), differing only in api_request_id and
+    timestamp, so all three ship as separate, unledgered `meter
+    completion` calls."""
+    base_ts = 1715514000.5
+    return [
+        {
+            'v': 1, 'sid': sid, 'api_request_id': f'p63-event-3rec-arid-{i}',
+            'ts': base_ts + i, 'ended_at': base_ts + i + 0.5,
+            'duration_ms': 500, 'platform': 'cli',
+            'model': 'compat-session-model-should-not-ship',
+            'response_model': 'claude-sonnet-4-6',
+            'provider': 'anthropic',
+            'base_url': 'https://api.anthropic.com',
+            'api_mode': 'anthropic_messages',
+            'finish_reason': 'stop',
+            'input_tokens': 100, 'output_tokens': 50,
+            'cache_read_tokens': 10, 'cache_write_tokens': 5,
+            'reasoning_tokens': 0, 'total_tokens': 165,
+        }
+        for i in range(3)
+    ]
+
+
+class EventThreeRecordSubscriberEmailSamenessTests(unittest.TestCase):
+    """Plan 02 Task 2 <behavior>: a session with THREE event records ships
+    three `meter completion` calls, all carrying the IDENTICAL
+    --subscriber-id and --subscriber-email values -- the wire pair is
+    resolved ONCE per session, above the per-record loop, exactly like
+    source_env and subscriber_key already are."""
+
+    ACTOR = 'p63-event-3record-actor@acme.example'
+
+    def test_three_records_obfuscated_all_calls_share_one_digest(self):
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='obfuscated',
+        )
+        try:
+            _write_jsonl(
+                os.path.join(tree.spool_dir, f'{_EventHarness.SID}.jsonl'),
+                _three_event_records(_EventHarness.SID),
+            )
+            tree.seed_session(
+                source='email', user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 3, invocations)
+            wire_ids = set()
+            for argv in invocations:
+                self.assertNotIn('--subscriber-email', argv, argv)
+                self.assertIn('--subscriber-id', argv, argv)
+                wire_ids.add(argv[argv.index('--subscriber-id') + 1])
+            self.assertEqual(len(wire_ids), 1, wire_ids)
+            expected_digest = 'email:' + hashlib.sha256(
+                self.ACTOR.encode('utf-8')
+            ).hexdigest()
+            self.assertEqual(wire_ids, {expected_digest})
+        finally:
+            tree.cleanup()
+
+    def test_three_records_plaintext_all_calls_share_one_email(self):
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='plaintext',
+        )
+        try:
+            _write_jsonl(
+                os.path.join(tree.spool_dir, f'{_EventHarness.SID}.jsonl'),
+                _three_event_records(_EventHarness.SID),
+            )
+            tree.seed_session(
+                source='email', user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(len(invocations), 3, invocations)
+            emails = set()
+            for argv in invocations:
+                self.assertIn('--subscriber-email', argv, argv)
+                emails.add(argv[argv.index('--subscriber-email') + 1])
+            self.assertEqual(emails, {self.ACTOR})
+        finally:
+            tree.cleanup()
+
+
+class EventShadowModeSubscriberEmailTests(unittest.TestCase):
+    """Plan 02 Task 2 <behavior>: under EVENT_METERING_MODE=shadow the
+    constructed argv still carries the subscriber-id/subscriber-email pair
+    (source order: both appends sit BEFORE the shadow branch's own
+    `continue` -- api-event-report.sh's own comment on the append records
+    this) and the run still ships nothing at all -- C-10's existing
+    shadow-mode contract, unperturbed by this plan."""
+
+    ACTOR = 'p63-event-shadow-actor@acme.example'
+
+    def test_shadow_mode_ships_nothing(self):
+        tree = _EventHarness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='plaintext', event_metering_mode='shadow',
+        )
+        try:
+            tree.seed_session(
+                source='email', user_id_mapping={_EventHarness.SID: self.ACTOR}
+            )
+            invocations = tree.run()
+            self.assertEqual(invocations, [], invocations)
+        finally:
+            tree.cleanup()
+
+    def test_subscriber_email_append_precedes_shadow_branch_in_source(self):
+        """Structural companion to the runtime arm above: proves argv
+        construction order directly from source, since a shadow-mode run
+        never logs anything to inspect at runtime."""
+        text = EVENT_REPORT_SH.read_text()
+        email_idx = text.index('--subscriber-email "')
+        shadow_idx = text.index(
+            '"${EVENT_METERING_MODE}" == "shadow"', email_idx
+        )
+        self.assertGreater(
+            shadow_idx, email_idx,
+            'the --subscriber-email append must sit BEFORE the per-record '
+            'shadow-mode branch check in source order',
+        )
+
+
+class PythonSubscriberKeyMirrorUnperturbedTests(unittest.TestCase):
+    """Plan 02 Task 2 acceptance criterion: `git diff 8246499 --
+    skills/revenium/scripts/api-event-report.sh` must show no line added
+    inside the `def resolve_subscriber_key` body in the Python heredoc --
+    the whole reason the wire-pair transform was done on the bash side,
+    once, rather than adding hashing to this mirror (Phase 62 D-01/D-02's
+    equivalence proof, tests/test_phase62_subscriber_key_equivalence.py,
+    stays valid only if this body never changes). Extracts the
+    SUBSCRIBER_KEY_BUILDER_START/END-delimited block -- the function's own
+    self-describing anchors -- from the current tree and from the
+    baseline commit, and asserts they are byte-identical."""
+
+    START_MARKER = '# === SUBSCRIBER_KEY_BUILDER_START'
+    END_MARKER = '# === SUBSCRIBER_KEY_BUILDER_END ==='
+    BASELINE_COMMIT = '8246499'
+
+    @classmethod
+    def _extract_block(cls, text):
+        start = text.index(cls.START_MARKER)
+        end = text.index(cls.END_MARKER, start) + len(cls.END_MARKER)
+        return text[start:end]
+
+    def test_resolve_subscriber_key_body_byte_identical_to_baseline(self):
+        current_block = self._extract_block(EVENT_REPORT_SH.read_text())
+
+        baseline = subprocess.run(
+            ['git', 'show',
+             f'{self.BASELINE_COMMIT}:skills/revenium/scripts/api-event-report.sh'],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        baseline_block = self._extract_block(baseline.stdout)
+
+        self.assertEqual(
+            current_block, baseline_block,
+            'the resolve_subscriber_key Python mirror body has changed '
+            'since the baseline commit -- the wire-pair transform must '
+            'live on the bash side only, never inside this heredoc',
+        )
+
+
+# How many `meter completion` emission SITES across hermes-report.sh and
+# api-event-report.sh are expected to append --subscriber-email at the end
+# of THIS commit (Plan 02 Task 2): the markerless site (Plan 01 Task 2),
+# the marker-split site (Plan 01 Task 3), the auxiliary site (Plan 02 Task
+# 1), and the event site (Plan 02 Task 2, this task) -- all four sites, at
+# last. Confirmed by grep, never by arithmetic:
+# `grep -v '^[[:space:]]*#' skills/revenium/scripts/hermes-report.sh
+#  skills/revenium/scripts/api-event-report.sh | grep -c -- '--subscriber-email "'` = 4.
+EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT = 4
+SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE = (HERMES_REPORT_SH, EVENT_REPORT_SH)
 
 
 class SubscriberEmailWiringStructuralTests(unittest.TestCase):
     """Structural guards mirroring
     tests.test_phase62_subscriber_wiring.SubscriberWiringStructuralTests,
-    scoped to --subscriber-email as of THIS commit (Task 3): both
-    hermes-report.sh sites (markerless, marker-split). The aux site and
-    api-event-report.sh are out of scope for this plan."""
+    scoped to --subscriber-email. As of Plan 02 Task 2 (this commit) all
+    FOUR sites are covered: hermes-report.sh's markerless, marker-split
+    and auxiliary sites, plus api-event-report.sh's event site --
+    SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE and
+    EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT both reflect the final
+    state."""
 
     GUARD_LOOKBACK = _test_ticket_attribution.TicketWiringTests.GUARD_LOOKBACK
 
@@ -1285,31 +1640,44 @@ class SubscriberEmailWiringStructuralTests(unittest.TestCase):
         self.assertEqual(total, EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT)
 
     def test_email_append_immediately_follows_id_append_at_each_site(self):
-        """At each site the --subscriber-email append immediately follows
-        the --subscriber-id append with no other cmd+= line between them.
-        Pairs each --subscriber-email line with the NEAREST preceding
-        --subscriber-id line (rather than zipping the two lists
-        positionally) because hermes-report.sh has a THIRD --subscriber-id
-        site (the aux path) with no --subscriber-email counterpart yet --
-        positional zipping would silently mispair against it."""
-        lines = HERMES_REPORT_SH.read_text().splitlines()
-        id_lines = [i for i, l in enumerate(lines) if '--subscriber-id "' in l]
-        email_lines = [i for i, l in enumerate(lines) if '--subscriber-email "' in l]
-        self.assertTrue(email_lines, 'no --subscriber-email emission lines found')
-        for email_i in email_lines:
-            preceding_id_lines = [i for i in id_lines if i < email_i]
-            self.assertTrue(
-                preceding_id_lines,
-                f'--subscriber-email at line {email_i + 1} has no preceding '
-                f'--subscriber-id emission line in this file',
-            )
-            id_i = max(preceding_id_lines)
-            between = lines[id_i + 1:email_i]
-            self.assertFalse(
-                any('cmd+=' in l for l in between),
-                f'a cmd+= line sits between --subscriber-id ({id_i + 1}) and '
-                f'--subscriber-email ({email_i + 1}): {between}',
-            )
+        """At each site, in each script, the --subscriber-email append
+        immediately follows the --subscriber-id append with no other
+        cmd+= line between them. Pairs each --subscriber-email line with
+        the NEAREST preceding --subscriber-id line (rather than zipping
+        the two lists positionally) because hermes-report.sh has a THIRD
+        --subscriber-id site (the aux path) that now HAS a
+        --subscriber-email counterpart as of Plan 02 Task 1, so the
+        nearest-preceding pairing is what generalises correctly to all
+        three of that file's sites without positional drift."""
+        for script in SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE:
+            with self.subTest(script=script.name):
+                lines = script.read_text().splitlines()
+                id_lines = [
+                    i for i, l in enumerate(lines) if '--subscriber-id "' in l
+                ]
+                email_lines = [
+                    i for i, l in enumerate(lines) if '--subscriber-email "' in l
+                ]
+                self.assertTrue(
+                    email_lines,
+                    f'{script.name}: no --subscriber-email emission lines found',
+                )
+                for email_i in email_lines:
+                    preceding_id_lines = [i for i in id_lines if i < email_i]
+                    self.assertTrue(
+                        preceding_id_lines,
+                        f'{script.name}: --subscriber-email at line '
+                        f'{email_i + 1} has no preceding --subscriber-id '
+                        f'emission line in this file',
+                    )
+                    id_i = max(preceding_id_lines)
+                    between = lines[id_i + 1:email_i]
+                    self.assertFalse(
+                        any('cmd+=' in l for l in between),
+                        f'{script.name}: a cmd+= line sits between '
+                        f'--subscriber-id ({id_i + 1}) and --subscriber-email '
+                        f'({email_i + 1}): {between}',
+                    )
 
 
 if __name__ == '__main__':
