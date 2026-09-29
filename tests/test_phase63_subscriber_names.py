@@ -10,9 +10,11 @@ own test module in the same wave.
 Every actor id and name used below is synthetic and `p63-`-prefixed;
 nothing is copied from any reference host.
 
-63-REVIEW.md gap closure (WR-02) adds a test class at the end of this
-module: `PerHomeSubscriberEmailModeTests` (each profile home's own
-subscriberEmailMode governs that home's own rows, not the
+63-REVIEW.md gap closure (WR-01, WR-02) adds two more test classes at the
+end of this module: `SubscriberIdCapabilityNoticeTests` (an old CLI with
+no --subscriber-id must not let this script imply the ID column reflects
+what actually ships) and `PerHomeSubscriberEmailModeTests` (each profile
+home's own subscriberEmailMode governs that home's own rows, not the
 process-wide/default-profile setting).
 """
 
@@ -25,6 +27,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from tests._compat_helpers import build_shim
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'revenium'
@@ -655,6 +659,55 @@ class ShippedSurfaceConformanceTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # 63-REVIEW.md gap closure.
 # ---------------------------------------------------------------------------
+
+class SubscriberIdCapabilityNoticeTests(SubscriberNamesScriptTestCase):
+    """WR-01: subscriber-names.sh never probed --subscriber-id capability,
+    so on a host whose CLI predates the flag it printed ids as though they
+    shipped when NOTHING ships (SUB-07's fail-open contract on all four
+    production emission sites). It must now probe, matching the reporters'
+    own idiom, and say so on stderr when the probe is negative -- without
+    dropping any actor row.
+
+    ensure_path (common.sh:495-510) prepends candidate PATH directories in
+    an order that puts "${HOME}/.local/bin" FIRST in the final PATH ahead
+    of any real system revenium (e.g. a homebrew install) -- so the shim
+    must live there, with HOME redirected to a throwaway directory, exactly
+    like tests.test_phase63_subscriber_email._Harness.base_env() does for
+    hermes-report.sh's own equivalent probe.
+    """
+
+    def setUp(self):
+        super().setUp()
+        _build_sessions_db(self.db_path, rows=[
+            {'id': 'p63-s1', 'source': 'slack', 'user_id': 'p63-Ucap',
+             'user_name': 'Capability Actor'},
+        ])
+        self.fake_home = self.tmp_path / 'fakehome'
+        self.local_bin = self.fake_home / '.local' / 'bin'
+        self.local_bin.mkdir(parents=True)
+
+    def _shim_env(self, subscriber_capable):
+        shim = self.local_bin / 'revenium'
+        build_shim(str(shim), subscriber_capable=subscriber_capable)
+        return {
+            'HOME': str(self.fake_home),
+            'PATH': f'{self.local_bin}{os.pathsep}{os.environ.get("PATH", "")}',
+        }
+
+    def test_incapable_cli_prints_stderr_notice_and_still_lists_actor(self):
+        result = self.run_script(extra_env=self._shim_env(subscriber_capable=False))
+        self.assertIn('does not advertise --subscriber-id', result.stderr)
+        self.assertIn('Capability Actor', result.stdout)
+        self.assertIn('slack:p63-Ucap', result.stdout)
+        # The notice is informational only -- exit code semantics are
+        # unchanged (every actor here has a resolved name).
+        self.assertEqual(result.returncode, 0)
+
+    def test_capable_cli_prints_no_notice(self):
+        result = self.run_script(extra_env=self._shim_env(subscriber_capable=True))
+        self.assertNotIn('does not advertise', result.stderr)
+        self.assertIn('Capability Actor', result.stdout)
+
 
 class PerHomeSubscriberEmailModeTests(FleetWalkTestCase):
     """WR-02: subscriberEmailMode was resolved ONCE, from the process/

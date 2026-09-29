@@ -94,6 +94,23 @@ USAGE
   esac
 done
 
+# Review WR-01: probe --subscriber-id capability, matching the reporters'
+# own idiom (hermes-report.sh:131, api-event-report.sh:193) --
+# `if supports_flag ...; then VAR=true; fi`, never a command substitution,
+# which would swallow supports_flag's exit status. On an older CLI, ALL
+# FOUR production emission sites ship NO subscriber attribution for ANY
+# actor that tick (SUB-07's fail-open contract) -- this script's own ID
+# column must not imply otherwise on a host in that state.
+SUBSCRIBER_CLI_CAPABLE=false
+if supports_flag "meter completion" "--subscriber-id"; then
+  SUBSCRIBER_CLI_CAPABLE=true
+fi
+if [[ "${SUBSCRIBER_CLI_CAPABLE}" != "true" ]]; then
+  echo "NOTE: this host's revenium CLI does not advertise --subscriber-id --" \
+       "no subscriber attribution actually ships from here; the table below" \
+       "shows what WOULD ship on a CLI new enough to carry the flag." >&2
+fi
+
 # --- resolve which home(s) to walk ------------------------------------------
 # Mirrors diagnose.sh's own --profile redirect: "default" is the label this
 # script's own PROFILE column and hermes_profile_homes both use for the base
