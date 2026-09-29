@@ -4239,6 +4239,26 @@ PY
           [[ -n "${subscriber_key}" ]] && cmd+=(--subscriber-id "${subscriber_key}")
         fi
 
+        # Subscriber-email attribution (Phase 63, SUB-06/D-01/D-02/D-06) —
+        # identical shape and position to the markerless path below (both
+        # sites keep this family in step). Appended DIRECTLY after
+        # --subscriber-id — flag order is part of the argv contract shared
+        # across all four sites. No new resolution, no new query and no new
+        # per-session local here: `subscriber_key` and `subscriber_email`
+        # were both resolved ONCE per session by the chokepoint above the
+        # per-marker loop (including, for an email actor, the wire
+        # transform for the operator's mode); the per-marker loop only
+        # READS them, so every marker of one session necessarily carries
+        # the SAME value — computing the digest inside this loop would be
+        # the per-record fork Phase 62's aux memo defect took three review
+        # rounds to remove. In obfuscated mode subscriber_email is always
+        # empty (D-06), so this line appends NOTHING for an obfuscated
+        # actor even when SUBSCRIBER_EMAIL_CLI_CAPABLE is true — the
+        # omission IS the mitigation, not a gap.
+        if [[ "${SUBSCRIBER_EMAIL_CLI_CAPABLE}" == "true" ]]; then
+          [[ -n "${subscriber_email}" ]] && cmd+=(--subscriber-email "${subscriber_email}")
+        fi
+
         local cmd_output cmd_exit
         cmd_output=$("${cmd[@]}" 2>&1) && cmd_exit=0 || cmd_exit=$?
 

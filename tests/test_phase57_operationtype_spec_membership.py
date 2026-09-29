@@ -600,11 +600,24 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # emitted VALUE expressions are unchanged, so both assertions above
         # pass untouched. Verified against the diff hunks themselves
         # (`git diff -U0`), not by arithmetic on a prior value.
+        #
+        # Re-measured again (Phase 63 Plan 01 Task 3, SUB-06): the
+        # marker-split site's own --subscriber-email append block (20
+        # lines, mirroring the markerless block Task 2 added, after that
+        # site's --subscriber-id block) sits BEFORE the markerless site's
+        # own --operation-type "CHAT" line in file order, so only the
+        # markerless site's line moved (4304->4324); the marker-split
+        # site's own --operation-type "${op_type}" line sits ABOVE its
+        # ticket/subscriber blocks and is unaffected (4105 unchanged), and
+        # the aux site (1747) is unaffected. api-event-report.sh remains
+        # untouched by this task. Pure shift once more -- the COUNT (4) and
+        # the emitted VALUE expressions are unchanged. Verified against the
+        # diff hunks themselves (`git diff -U0`), not by arithmetic.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1747),
             ('hermes-report.sh', 4105),
-            ('hermes-report.sh', 4304),
+            ('hermes-report.sh', 4324),
             ('api-event-report.sh', 1826),
         }
         self.assertEqual(

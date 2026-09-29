@@ -1,10 +1,12 @@
 """Phase 63 Plan 01 (SUB-06): the wire-pair chokepoint proof.
 
 Wires `resolve_subscriber_email_mode` and `resolve_subscriber_wire_pair`
-(both new in `common.sh`) end-to-end through hermes-report.sh's MARKERLESS
-`meter completion` emission site only -- the marker-split site is
-Task 3's job (`tests/test_phase63_subscriber_email.py`'s own follow-up
-classes, appended there).
+(both new in `common.sh`) end-to-end through hermes-report.sh's two
+`meter completion` emission sites: Task 2 covers the MARKERLESS site
+(`MarkerlessSubscriberEmailWiringTests`); Task 3 extends this module with
+the MARKER-SPLIT site (`MarkerSplitSubscriberEmailWiringTests`), the
+multi-marker sameness proof (`MultiMarkerSubscriberEmailSamenessTests`),
+and the structural guard (`SubscriberEmailWiringStructuralTests`).
 
 Unit coverage (`ResolveSubscriberEmailModeUnitTests`,
 `ResolveSubscriberWirePairUnitTests`) exercises both new common.sh
@@ -58,8 +60,19 @@ from tests._compat_helpers import (
     seed_user_ids,
     SCRIPTS_DIR,
 )
-from tests.test_phase61_identity_resolution import _OLD_TS, _own_meter_invocations
+from tests.test_phase61_identity_resolution import (
+    _OLD_TS,
+    _own_meter_invocations,
+    _task_marker,
+    _write_marker_lines,
+)
 from tests.test_phase61_subscriber_boundary import _assert_argv_equal_modulo_timestamps
+# Imported as a MODULE reference (not `from ... import TicketWiringTests`)
+# deliberately, mirroring tests.test_phase62_subscriber_wiring's own
+# comment on this: importing the TestCase class by name would bind it into
+# THIS module's globals, and unittest's discovery/loadTestsFromModule would
+# then re-collect and re-run it a second time here.
+import tests.test_ticket_attribution as _test_ticket_attribution
 
 HERMES_REPORT_SH = SCRIPTS_DIR / 'hermes-report.sh'
 COMMON_SH = SCRIPTS_DIR / 'common.sh'
@@ -460,6 +473,350 @@ class MarkerlessSubscriberEmailWiringTests(unittest.TestCase):
             assert_argv_is_golden_argv_order(self, own[0], golden)
         finally:
             tree.cleanup()
+
+
+class MarkerSplitSubscriberEmailWiringTests(unittest.TestCase):
+    """Task 3: marker-split-site end-to-end proof for --subscriber-email,
+    mirroring MarkerlessSubscriberEmailWiringTests' four runs but against
+    `meter-completion.golden.json` (which carries `argv_order_pattern_
+    sentinel`, so `assert_argv_is_golden_argv_order` normalises the three
+    timestamp values before comparing -- unlike the markerless golden,
+    which has no sentinel and compares literal timestamps).
+
+    Reuses tests.test_phase62_subscriber_wiring.MarkerSplitSubscriberWiringTests'
+    exact fixture (sid, muid, job id, model, tokens) so the deterministic
+    values baked into meter-completion.golden.json's argv_order still
+    hold; only sessions.source (to 'email') and the actor id (a synthetic
+    p63- address) differ.
+    """
+
+    SID = 'compat-sid-001'
+    MUID = 'compat-muid-001'
+    ACTOR = 'p63-marker-actor@acme.example'
+
+    def _seed(self, source, subscriber_capable, subscriber_email_capable,
+              email_mode, user_id_mapping=None):
+        tree = _Harness(
+            subscriber_capable=subscriber_capable,
+            subscriber_email_capable=subscriber_email_capable,
+            email_mode=email_mode,
+        )
+        build_state_db(tree.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': source,
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': _OLD_TS,
+            'ended_at': _OLD_TS,
+            'billing_provider': 'anthropic',
+        }])
+        if user_id_mapping is not None:
+            seed_user_ids(tree.state_db, user_id_mapping)
+        task_marker = {
+            'muid': self.MUID,
+            'ts': 1715515000.5,
+            'sid': self.SID,
+            'task_type': 'code_review',
+            'operation_type': 'CHAT',
+        }
+        job_marker = {
+            'kind': 'job',
+            'ts': 1715515001.0,
+            'sid': self.SID,
+            'agentic_job_id': 'compat-job-001',
+            'job_name': 'COMPAT Test Job',
+            'job_type': 'code_review',
+            'status': 'IN_PROGRESS',
+        }
+        _write_marker_lines(tree.markers_dir, self.SID, [task_marker, job_marker])
+        return tree
+
+    def test_run_e_plaintext_both_capable_four_trailing_tokens(self):
+        tree = self._seed(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='plaintext',
+            user_id_mapping={self.SID: self.ACTOR},
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, own[0], golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=(
+                    '--subscriber-id', expected_key,
+                    '--subscriber-email', self.ACTOR,
+                ),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_f_obfuscated_both_capable_two_trailing_tokens_no_email_flag(self):
+        tree = self._seed(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='obfuscated',
+            user_id_mapping={self.SID: self.ACTOR},
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            argv = own[0]
+            self.assertNotIn('--subscriber-email', argv, argv)
+            self.assertIn('--subscriber-id', argv, argv)
+            idx = argv.index('--subscriber-id')
+            wire_id = argv[idx + 1]
+            self.assertRegex(wire_id, r'^email:[0-9a-f]{64}$')
+            golden = load_golden('meter-completion.golden.json')
+            assert_argv_is_golden_argv_order(
+                self, argv, golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', wire_id),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_g_id_capable_email_not_capable_meter_call_succeeds(self):
+        tree = self._seed(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=False, email_mode='plaintext',
+            user_id_mapping={self.SID: self.ACTOR},
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, own[0], golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', expected_key),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_h_slack_source_argv_byte_identical_both_modes(self):
+        sid = 'p63-sid-slack-marker'
+        muid = 'p63-muid-slack-marker'
+        actor = 'p63-slack-marker-actor'
+
+        def _run(mode):
+            tree = _Harness(
+                subscriber_capable=True, subscriber_email_capable=True,
+                email_mode=mode,
+            )
+            try:
+                build_state_db(tree.state_db, [{
+                    'id': sid,
+                    'model': 'claude-sonnet-4-6',
+                    'source': 'slack',
+                    'input_tokens': 100,
+                    'output_tokens': 50,
+                    'cache_read': 0,
+                    'cache_write': 0,
+                    'reasoning': 0,
+                    'estimated_cost': '0',
+                    'api_calls': 1,
+                    'started_at': _OLD_TS,
+                    'ended_at': _OLD_TS,
+                    'billing_provider': 'anthropic',
+                }])
+                seed_user_ids(tree.state_db, {sid: actor})
+                _write_marker_lines(
+                    tree.markers_dir, sid, [_task_marker(sid, muid)]
+                )
+                invocations = tree.run()
+                own = _own_meter_invocations(invocations, sid)
+                self.assertEqual(len(own), 1, own)
+                return own[0]
+            finally:
+                tree.cleanup()
+
+        argv_plain = _run('plaintext')
+        argv_obf = _run('obfuscated')
+        self.assertNotIn('--subscriber-email', argv_plain, argv_plain)
+        self.assertNotIn('--subscriber-email', argv_obf, argv_obf)
+        self.assertIn('--subscriber-id', argv_plain, argv_plain)
+        self.assertIn('--subscriber-id', argv_obf, argv_obf)
+        _assert_argv_equal_modulo_timestamps(
+            self, argv_plain, argv_obf, 'slack-source marker-split'
+        )
+
+
+class MultiMarkerSubscriberEmailSamenessTests(unittest.TestCase):
+    """Task 3 <behavior>: a session with THREE task markers and ONE
+    resolved email actor ships three `meter completion` calls. Under
+    obfuscation all three carry the IDENTICAL email:<64hex> value -- the
+    digest is computed ONCE per session, at the chokepoint above the
+    per-marker loop, never once per marker, so three markers cannot
+    produce three spellings of one actor (the load-bearing new proof: a
+    per-marker digest would still pass every single-marker Run F/G arm
+    above). The plaintext arm proves the identical sameness property for
+    --subscriber-email's own value.
+    """
+
+    SID = 'p63-multi-marker-email'
+    ACTOR = 'p63-multi-actor@acme.example'
+
+    def _seed(self, email_mode):
+        tree = _Harness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode=email_mode,
+        )
+        build_state_db(tree.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': 'email',
+            'input_tokens': 300,
+            'output_tokens': 150,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': _OLD_TS,
+            'ended_at': _OLD_TS,
+            'billing_provider': 'anthropic',
+        }])
+        seed_user_ids(tree.state_db, {self.SID: self.ACTOR})
+        _write_marker_lines(tree.markers_dir, self.SID, [
+            _task_marker(self.SID, 'p63-muid-1'),
+            _task_marker(self.SID, 'p63-muid-2'),
+            _task_marker(self.SID, 'p63-muid-3'),
+        ])
+        return tree
+
+    def test_three_markers_obfuscated_all_calls_carry_same_digest(self):
+        tree = self._seed(email_mode='obfuscated')
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 3, own)
+            wire_ids = set()
+            for argv in own:
+                self.assertNotIn('--subscriber-email', argv, argv)
+                self.assertIn('--subscriber-id', argv, argv)
+                idx = argv.index('--subscriber-id')
+                wire_id = argv[idx + 1]
+                self.assertRegex(wire_id, r'^email:[0-9a-f]{64}$')
+                wire_ids.add(wire_id)
+            self.assertEqual(len(wire_ids), 1, wire_ids)
+            expected_digest = 'email:' + hashlib.sha256(
+                self.ACTOR.encode('utf-8')
+            ).hexdigest()
+            self.assertEqual(wire_ids, {expected_digest})
+        finally:
+            tree.cleanup()
+
+    def test_three_markers_plaintext_all_calls_carry_same_email_value(self):
+        tree = self._seed(email_mode='plaintext')
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 3, own)
+            emails = set()
+            for argv in own:
+                self.assertIn('--subscriber-email', argv, argv)
+                idx = argv.index('--subscriber-email')
+                emails.add(argv[idx + 1])
+            self.assertEqual(emails, {self.ACTOR})
+        finally:
+            tree.cleanup()
+
+
+# How many `meter completion` emission SITES in hermes-report.sh are
+# expected to append --subscriber-email at the end of THIS commit (Task 3):
+# the markerless site (Task 2) and the marker-split site (Task 3). The aux
+# site is a later plan's job. Confirmed by grep, never by arithmetic:
+# `grep -v '^[[:space:]]*#' skills/revenium/scripts/hermes-report.sh |
+#  grep -c -- '--subscriber-email "'` = 2.
+EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT = 2
+SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE = (HERMES_REPORT_SH,)
+
+
+class SubscriberEmailWiringStructuralTests(unittest.TestCase):
+    """Structural guards mirroring
+    tests.test_phase62_subscriber_wiring.SubscriberWiringStructuralTests,
+    scoped to --subscriber-email as of THIS commit (Task 3): both
+    hermes-report.sh sites (markerless, marker-split). The aux site and
+    api-event-report.sh are out of scope for this plan."""
+
+    GUARD_LOOKBACK = _test_ticket_attribution.TicketWiringTests.GUARD_LOOKBACK
+
+    def test_probe_declared_with_subcommand_scoped_supports_flag(self):
+        for script in SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE:
+            with self.subTest(script=script.name):
+                text = script.read_text()
+                self.assertIn('SUBSCRIBER_EMAIL_CLI_CAPABLE=false', text)
+                self.assertIn(
+                    'supports_flag "meter completion" "--subscriber-email"',
+                    text,
+                )
+
+    def test_each_emission_guarded_within_lookback_and_count_matches_constant(self):
+        """Mirrors SubscriberWiringStructuralTests' own method of the same
+        name: walks BACKWARDS from each --subscriber-email emission line to
+        confirm a SUBSCRIBER_EMAIL_CLI_CAPABLE guard sits within
+        GUARD_LOOKBACK lines above it (never on the emitting line itself),
+        and asserts the total emission count against the module constant."""
+        total = 0
+        for script in SCRIPTS_WITH_SUBSCRIBER_EMAIL_PROBE:
+            lines = script.read_text().splitlines()
+            emissions = [
+                i for i, l in enumerate(lines) if '--subscriber-email "' in l
+            ]
+            with self.subTest(script=script.name):
+                self.assertTrue(
+                    emissions,
+                    f'{script.name} emits --subscriber-email nowhere',
+                )
+                for i in emissions:
+                    window = lines[max(0, i - self.GUARD_LOOKBACK):i]
+                    self.assertTrue(
+                        any('SUBSCRIBER_EMAIL_CLI_CAPABLE' in w for w in window),
+                        f'{script.name}:{i + 1} emits --subscriber-email with '
+                        f'no SUBSCRIBER_EMAIL_CLI_CAPABLE guard within '
+                        f'{self.GUARD_LOOKBACK} lines above it',
+                    )
+            total += len(emissions)
+        self.assertEqual(total, EXPECTED_SUBSCRIBER_EMAIL_EMISSION_SITE_COUNT)
+
+    def test_email_append_immediately_follows_id_append_at_each_site(self):
+        """At each site the --subscriber-email append immediately follows
+        the --subscriber-id append with no other cmd+= line between them.
+        Pairs each --subscriber-email line with the NEAREST preceding
+        --subscriber-id line (rather than zipping the two lists
+        positionally) because hermes-report.sh has a THIRD --subscriber-id
+        site (the aux path) with no --subscriber-email counterpart yet --
+        positional zipping would silently mispair against it."""
+        lines = HERMES_REPORT_SH.read_text().splitlines()
+        id_lines = [i for i, l in enumerate(lines) if '--subscriber-id "' in l]
+        email_lines = [i for i, l in enumerate(lines) if '--subscriber-email "' in l]
+        self.assertTrue(email_lines, 'no --subscriber-email emission lines found')
+        for email_i in email_lines:
+            preceding_id_lines = [i for i in id_lines if i < email_i]
+            self.assertTrue(
+                preceding_id_lines,
+                f'--subscriber-email at line {email_i + 1} has no preceding '
+                f'--subscriber-id emission line in this file',
+            )
+            id_i = max(preceding_id_lines)
+            between = lines[id_i + 1:email_i]
+            self.assertFalse(
+                any('cmd+=' in l for l in between),
+                f'a cmd+= line sits between --subscriber-id ({id_i + 1}) and '
+                f'--subscriber-email ({email_i + 1}): {between}',
+            )
 
 
 if __name__ == '__main__':
