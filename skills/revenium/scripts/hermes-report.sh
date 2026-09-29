@@ -360,6 +360,12 @@ if [[ "${_subscriber_email_mode_invalid}" == "true" ]]; then
   warn "REVENIUM_SUBSCRIBER_EMAIL_MODE/subscriberEmailMode had an unrecognised value — falling back to 'plaintext' (the address ships verbatim)."
 fi
 info "hermes-report.sh running in SUBSCRIBER_EMAIL_MODE=${SUBSCRIBER_EMAIL_MODE}"
+# Phase 63 Plan 03 (D-07): disclose a mid-life flip of the mode just
+# resolved above, before any session is processed. Rate-limited to at
+# most one warn per flip per install by the sentinel directory inside the
+# helper itself -- see warn_subscriber_mode_flip_once's own comment
+# (common.sh) for the full ordering argument.
+warn_subscriber_mode_flip_once "${SUBSCRIBER_EMAIL_MODE}"
 
 DRAIN_GATE_DRAINED="false"
 DRAIN_GATE_PENDING_COUNT=""

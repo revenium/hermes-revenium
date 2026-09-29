@@ -646,12 +646,34 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # -- the COUNT (4) and the emitted VALUE expressions are
         # unchanged. Verified against the diff hunks themselves
         # (`git diff -U0`), not by arithmetic.
+        # Re-measured again (Phase 63 Plan 03 Task 2, D-07): BOTH files
+        # gained one new block, each sitting ABOVE every site this test
+        # pins in that file, so this is the one task in the phase that
+        # shifts hermes-report.sh's three sites AND api-event-report.sh's
+        # one site in the SAME commit.
+        #
+        # hermes-report.sh: the warn_subscriber_mode_flip_once call plus
+        # its five-line comment (6 lines total) was inserted immediately
+        # after the SUBSCRIBER_EMAIL_MODE resolution's own `info` line, at
+        # the top of the file -- above all three of this file's sites (the
+        # aux site inside report_auxiliary_usage, and the marker-split and
+        # markerless sites inside main()). All three shift by the same +6:
+        # 1747->1753, 4139->4145, 4358->4364.
+        #
+        # api-event-report.sh: the same call plus its seven-line comment
+        # (8 lines total) was inserted immediately after that file's own
+        # SUBSCRIBER_EMAIL_MODE resolution block, above the event site's
+        # --operation-type line, shifting it by +8: 1888->1896.
+        #
+        # Pure shift in both files -- the COUNT (4) and the emitted VALUE
+        # expressions are unchanged. Verified against the diff hunks
+        # themselves (`git diff -U0`), not by arithmetic on a prior value.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1747),
-            ('hermes-report.sh', 4139),
-            ('hermes-report.sh', 4358),
-            ('api-event-report.sh', 1888),
+            ('hermes-report.sh', 1753),
+            ('hermes-report.sh', 4145),
+            ('hermes-report.sh', 4364),
+            ('api-event-report.sh', 1896),
         }
         self.assertEqual(
             found_locations, expected_locations,

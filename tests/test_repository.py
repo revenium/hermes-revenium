@@ -2690,6 +2690,25 @@ exit 0
                 'install that never meters an auxiliary row must create no '
                 'auxiliary warn state at all',
             )
+        # Phase 63 Plan 03 (D-07): SUBSCRIBER_MODE_FLAGS_DIR, the sixth
+        # sentinel directory in the WARN_FLAGS_DIR family. Created lazily
+        # by its writer (warn_subscriber_mode_flip_once) -- deliberately
+        # absent from the eager mkdir -p, reusing the SAME mkdir_lines
+        # list computed above, matching every other lazily-created
+        # sentinel directory's own assertion shape in this method.
+        self.assertIn('SUBSCRIBER_MODE_FLAGS_DIR=', text)
+        self.assertIn('markers/.subscriber-mode', text)
+        self.assertRegex(
+            text,
+            r'SUBSCRIBER_MODE_FLAGS_DIR="\$\{REVENIUM_SUBSCRIBER_MODE_FLAGS_DIR:-\$\{MARKERS_DIR\}/\.subscriber-mode\}"',
+        )
+        for ln in mkdir_lines:
+            self.assertNotIn(
+                'SUBSCRIBER_MODE_FLAGS_DIR', ln,
+                'SUBSCRIBER_MODE_FLAGS_DIR must NOT be in the eager mkdir -p '
+                '-- an install that never resolves subscriberEmailMode must '
+                'create no subscriber-mode state at all',
+            )
         # Phase 56 Plan 02 (D-13): the auxiliary submission atomicity lock
         # (WINDOWS entry 5) and its bounded timeout, declared only in
         # common.sh -- mirroring the OWNERS_DIR/AUX_WARN_FLAGS_DIR lazy-

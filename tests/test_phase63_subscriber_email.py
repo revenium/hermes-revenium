@@ -1664,6 +1664,251 @@ class EventShadowModeSubscriberEmailTests(unittest.TestCase):
         )
 
 
+class _FlipWarnHarness:
+    """One temp HERMES_HOME + PATH-shim `revenium` + one meter log, minimal
+    enough to exercise ONLY warn_subscriber_mode_flip_once: a zero-session
+    state.db so hermes-report.sh's early state.db-existence gate does not
+    short-circuit before SUBSCRIBER_EMAIL_MODE resolves (D-07's call sits
+    well after that gate), and no api-events spool records for
+    api-event-report.sh's equivalent early gates. Both reporters point at
+    the SAME state_dir and the SAME SUBSCRIBER_MODE_FLAGS_DIR override, so
+    a cross-script run pair shares the sentinel directory exactly as
+    production does within one cron tick."""
+
+    # The warn's own distinguishing substring -- deliberately NOT a
+    # presence-only check (other warns are legitimate in these fixtures,
+    # e.g. "teamId not configured"), and specific enough that no other
+    # log line in this harness could ever contain it by coincidence.
+    WARN_MARKER = 'TWO permanent subscriber keys'
+
+    def __init__(self, prefix='gsd-phase63-flipwarn-'):
+        self.tmp = tempfile.mkdtemp(prefix=prefix)
+        self.hermes_home = os.path.join(self.tmp, 'hh')
+        self.state_dir = os.path.join(self.hermes_home, 'state', 'revenium')
+        self.markers_dir = os.path.join(self.state_dir, 'markers')
+        os.makedirs(self.markers_dir, mode=0o700)
+        self.state_db = os.path.join(self.hermes_home, 'state.db')
+        build_state_db(self.state_db, [])
+        self.log_file = os.path.join(self.state_dir, 'revenium-metering.log')
+        self.ledger_file = os.path.join(self.state_dir, 'revenium-hermes.ledger')
+        self.sentinel_dir = os.path.join(self.markers_dir, '.subscriber-mode')
+
+        self.shim_home = os.path.join(self.tmp, 'home')
+        self.bin_dir = os.path.join(self.shim_home, '.local', 'bin')
+        os.makedirs(self.bin_dir)
+        self.meter_log = os.path.join(self.tmp, 'meter.log')
+        self.inv_log = os.path.join(self.tmp, 'inv.log')
+        self.shim = os.path.join(self.bin_dir, 'revenium')
+        build_shim(
+            self.shim, squad_capable=True,
+            subscriber_capable=True, subscriber_email_capable=True,
+        )
+        self._log_offset = 0
+
+    def cleanup(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def seed_ledger(self, populated):
+        content = (
+            'HERMES:p63-flip-sid:100:1700000000:p63-flip-muid\n'
+            if populated else ''
+        )
+        with open(self.ledger_file, 'w') as f:
+            f.write(content)
+
+    def _env(self, mode, sentinel_dir=None):
+        return {
+            **os.environ,
+            'HOME': self.shim_home,
+            'HERMES_HOME': self.hermes_home,
+            'REVENIUM_STATE_DIR': self.state_dir,
+            'PATH': self.bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': self.inv_log,
+            'METER_LOG': self.meter_log,
+            'TZ': 'UTC',
+            'REVENIUM_ORGANIZATION_NAME': '',
+            'REVENIUM_AGENT_NAME': 'Hermes',
+            'REVENIUM_SQUAD_NAME': '',
+            'REVENIUM_SUBSCRIBER_EMAIL_MODE': mode,
+            'REVENIUM_SUBSCRIBER_MODE_FLAGS_DIR': sentinel_dir or self.sentinel_dir,
+        }
+
+    def _run(self, script, mode, sentinel_dir=None):
+        rc, _inv, output = run_script(
+            script, self._env(mode, sentinel_dir), self.inv_log
+        )
+        if rc != 0:
+            raise AssertionError(f'{script.name} failed (rc={rc}): {output}')
+
+    def run_hermes_report(self, mode, sentinel_dir=None):
+        """Returns the count of NEW flip-warn lines produced by this one
+        run (never cumulative), by tracking a byte offset into the shared
+        log file across calls on the same harness instance."""
+        self._run(HERMES_REPORT_SH, mode, sentinel_dir)
+        return self._new_warn_count()
+
+    def run_event_report(self, mode, sentinel_dir=None):
+        self._run(EVENT_REPORT_SH, mode, sentinel_dir)
+        return self._new_warn_count()
+
+    def _new_warn_count(self):
+        if not os.path.exists(self.log_file):
+            return 0
+        with open(self.log_file, 'rb') as f:
+            f.seek(self._log_offset)
+            new_bytes = f.read()
+        self._log_offset += len(new_bytes)
+        return new_bytes.decode('utf-8', errors='replace').count(self.WARN_MARKER)
+
+    def sentinel_file_count(self):
+        if not os.path.isdir(self.sentinel_dir):
+            return 0
+        return len([
+            n for n in os.listdir(self.sentinel_dir)
+            if os.path.isfile(os.path.join(self.sentinel_dir, n))
+        ])
+
+
+class SubscriberModeFlipDisclosureTests(unittest.TestCase):
+    """D-07/T-63-15/T-63-16: warn_subscriber_mode_flip_once, driven
+    end-to-end against the REAL hermes-report.sh and api-event-report.sh
+    subprocesses -- every arm named in 63-03-PLAN.md's <behavior> block."""
+
+    def test_ten_ticks_steady_state_plaintext_zero_warns(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=False)
+            total = 0
+            for _ in range(10):
+                total += h.run_hermes_report('plaintext')
+            self.assertEqual(total, 0, 'steady plaintext state must warn zero times')
+        finally:
+            h.cleanup()
+
+    def test_ten_ticks_steady_state_obfuscated_after_the_first_zero_further_warns(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=False)
+            first = h.run_hermes_report('obfuscated')
+            self.assertEqual(first, 0, 'fresh install, empty ledger: no flip to disclose')
+            total = 0
+            for _ in range(10):
+                total += h.run_hermes_report('obfuscated')
+            self.assertEqual(total, 0, 'steady obfuscated state must warn zero times')
+        finally:
+            h.cleanup()
+
+    def test_plaintext_then_obfuscated_exactly_one_warn_then_none(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=False)
+            first = h.run_hermes_report('plaintext')
+            self.assertEqual(first, 0, 'first-ever plaintext run must not warn')
+            second = h.run_hermes_report('obfuscated')
+            self.assertEqual(second, 1, 'the genuine flip must warn exactly once')
+            third = h.run_hermes_report('obfuscated')
+            self.assertEqual(third, 0, 'the SAME mode again must not re-warn')
+        finally:
+            h.cleanup()
+
+    def test_obfuscated_then_plaintext_exactly_one_warn(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=False)
+            first = h.run_hermes_report('obfuscated')
+            self.assertEqual(first, 0, 'first-ever obfuscated run, empty ledger: no warn')
+            second = h.run_hermes_report('plaintext')
+            self.assertEqual(second, 1, 'the reverse flip must also warn exactly once')
+        finally:
+            h.cleanup()
+
+    def test_populated_ledger_upgrade_straight_into_obfuscated_warns_once(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=True)
+            first = h.run_hermes_report('obfuscated')
+            self.assertEqual(
+                first, 1,
+                'an install with metered history and no sentinel yet, '
+                'upgrading straight into obfuscated, must disclose once'
+            )
+            second = h.run_hermes_report('obfuscated')
+            self.assertEqual(second, 0, 'must not re-warn on the next tick')
+        finally:
+            h.cleanup()
+
+    def test_empty_ledger_fresh_install_obfuscated_warns_zero(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=False)
+            first = h.run_hermes_report('obfuscated')
+            self.assertEqual(
+                first, 0,
+                'nothing has been metered under the other spelling -- '
+                'there is nothing to fragment, so no disclosure fires'
+            )
+        finally:
+            h.cleanup()
+
+    def test_absent_ledger_fresh_install_obfuscated_warns_zero(self):
+        h = _FlipWarnHarness()
+        try:
+            # Deliberately do NOT call seed_ledger at all -- LEDGER_FILE
+            # does not exist, the strictest form of "nothing metered yet".
+            first = h.run_hermes_report('obfuscated')
+            self.assertEqual(first, 0)
+        finally:
+            h.cleanup()
+
+    def test_cross_script_one_disclosure_per_flip_per_install_not_per_script(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=False)
+            h.run_hermes_report('plaintext')
+            hermes_count = h.run_hermes_report('obfuscated')
+            event_count = h.run_event_report('obfuscated')
+            self.assertEqual(
+                hermes_count + event_count, 1,
+                'hermes-report.sh warning on a flip must mean '
+                'api-event-report.sh in the same tick does not warn again'
+            )
+        finally:
+            h.cleanup()
+
+    def test_at_most_two_sentinel_files_after_any_sequence(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=False)
+            h.run_hermes_report('plaintext')
+            h.run_hermes_report('obfuscated')
+            h.run_hermes_report('plaintext')
+            h.run_hermes_report('obfuscated')
+            h.run_event_report('plaintext')
+            h.run_event_report('obfuscated')
+            self.assertLessEqual(h.sentinel_file_count(), 2)
+        finally:
+            h.cleanup()
+
+    def test_unwritable_sentinel_directory_never_fails_either_reporter(self):
+        h = _FlipWarnHarness()
+        try:
+            h.seed_ledger(populated=True)
+            # A plain FILE occupying the sentinel directory's own path
+            # makes `mkdir -p` on it fail (ENOTDIR) -- the harshest form
+            # of "unwritable" this helper can hit, since it also makes
+            # every `-e`/`> file` check underneath it fail identically.
+            blocked = os.path.join(h.tmp, 'blocked-sentinel-path')
+            with open(blocked, 'w') as f:
+                f.write('not a directory')
+            # Both calls must still return rc=0 -- _run() itself raises
+            # AssertionError on a non-zero exit, so simply not raising IS
+            # the assertion that metering proceeded.
+            h.run_hermes_report('obfuscated', sentinel_dir=blocked)
+            h.run_event_report('obfuscated', sentinel_dir=blocked)
+        finally:
+            h.cleanup()
+
+
 class PythonSubscriberKeyMirrorUnperturbedTests(unittest.TestCase):
     """Plan 02 Task 2 acceptance criterion: `git diff 8246499 --
     skills/revenium/scripts/api-event-report.sh` must show no line added

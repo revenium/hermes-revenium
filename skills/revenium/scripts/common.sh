@@ -317,6 +317,20 @@ REVENIUM_AUX_METERING="${REVENIUM_AUX_METERING:-enabled}"
 # no auxiliary warn state at all.
 AUX_WARN_FLAGS_DIR="${REVENIUM_AUX_WARN_FLAGS_DIR:-${MARKERS_DIR}/.aux-warn}"
 
+# Phase 63 Plan 03 (D-07): sixth sentinel directory, markers/.subscriber-mode,
+# in the same family as WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR,
+# PROBE_WARN_FLAGS_DIR, OUTCOME_WARN_FLAGS_DIR, and AUX_WARN_FLAGS_DIR
+# above -- one zero-byte flag file per resolved subscriberEmailMode value
+# ("plaintext" or "obfuscated"), written by warn_subscriber_mode_flip_once
+# (below) so a mid-life flip of that switch is disclosed exactly ONCE per
+# install, never once per tick. At most two files ever accumulate under
+# this directory, because there are only two possible mode values.
+# Created lazily by its writer, deliberately absent from the eager
+# mkdir -p below -- an install that never resolves subscriberEmailMode
+# (i.e. never runs a reporter that calls resolve_subscriber_email_mode)
+# creates no subscriber-mode state at all.
+SUBSCRIBER_MODE_FLAGS_DIR="${REVENIUM_SUBSCRIBER_MODE_FLAGS_DIR:-${MARKERS_DIR}/.subscriber-mode}"
+
 # Phase 56 (D-13): mutual exclusion for the auxiliary pass's ENTIRE
 # read-ledger-baseline -> emit -> append sequence in
 # report_auxiliary_usage() (WINDOWS entry 5, Greptile P1 on PR #119). Before
@@ -1103,6 +1117,72 @@ print(hashlib.sha256(os.environ['SUBSCRIBER_EMAIL'].encode('utf-8')).hexdigest()
 PY
 )
   printf 'email:%s|\n' "${digest}"
+}
+
+# Phase 63 Plan 03 (D-07): discloses a MID-LIFE flip of subscriberEmailMode
+# exactly once per install, rate-limited through SUBSCRIBER_MODE_FLAGS_DIR
+# (common.sh, above) rather than firing every tick -- CLAUDE.md's own
+# measured cost of an ungated per-tick warn (9,039,937 log lines in 27 days
+# on this repo's own fleet host) is why this cannot be a bare `warn` inside
+# resolve_subscriber_email_mode itself.
+#
+# Takes the ALREADY-RESOLVED mode as its only argument (never re-resolves
+# it) and returns 0 unconditionally, like every other best-effort helper
+# in this file -- a failed mkdir/touch (e.g. a read-only state dir)
+# degrades to metering proceeding with no disclosure this run, never to a
+# failed reporter.
+#
+# The should-warn decision is made BEFORE the current mode's own sentinel
+# is written, and the sentinel is written BEFORE the warn is attempted --
+# in that order, deliberately -- so a `warn` that fails, or a run that
+# dies mid-tick right after the sentinel lands, can never produce a
+# SECOND disclosure on the next run. The cost of that ordering is a
+# theoretical missed disclosure on a crash in the narrow window between
+# the sentinel write and the warn call; the alternative (warn-then-write)
+# risks the unbounded-repeat failure mode this whole mechanism exists to
+# prevent, which is strictly worse for a log that is truncated in place.
+#
+# Warns in exactly two cases:
+#   1. A sentinel for the OTHER mode already exists and this mode's own
+#      sentinel does not -- a genuine mid-life flip, in either direction.
+#   2. This mode is "obfuscated", NEITHER mode's sentinel exists yet, and
+#      LEDGER_FILE is non-empty -- this install metered under the
+#      plaintext spelling before SUBSCRIBER_MODE_FLAGS_DIR existed, so the
+#      upgrade itself IS the flip (there is no earlier sentinel to prove
+#      it against).
+# A fresh install with an empty or absent ledger, or ten further ticks in
+# an already-disclosed mode, hits neither case: the outer
+# `[[ ! -e "${current_sentinel}" ]]` guard alone makes every one of those
+# runs, after the first, a no-op -- including a SECOND script (e.g.
+# api-event-report.sh right after hermes-report.sh in the same flipped
+# tick) that resolves the identical mode: the first caller's sentinel
+# write is what the second caller's own check sees, so at most one of the
+# two disclosures per tick per install, never two.
+warn_subscriber_mode_flip_once() {
+  local mode="$1"
+  local other_mode="obfuscated"
+  [[ "${mode}" == "obfuscated" ]] && other_mode="plaintext"
+
+  mkdir -p "${SUBSCRIBER_MODE_FLAGS_DIR}" 2>/dev/null
+
+  local current_sentinel="${SUBSCRIBER_MODE_FLAGS_DIR}/${mode}"
+  local other_sentinel="${SUBSCRIBER_MODE_FLAGS_DIR}/${other_mode}"
+  local should_warn=false
+
+  if [[ ! -e "${current_sentinel}" ]]; then
+    if [[ -e "${other_sentinel}" ]]; then
+      should_warn=true
+    elif [[ "${mode}" == "obfuscated" && -s "${LEDGER_FILE}" ]]; then
+      should_warn=true
+    fi
+  fi
+
+  : > "${current_sentinel}" 2>/dev/null || true
+
+  if [[ "${should_warn}" == "true" ]]; then
+    warn "subscriberEmailMode/REVENIUM_SUBSCRIBER_EMAIL_MODE resolved to '${mode}', different from this install's previously observed setting: every email-source actor now has TWO permanent subscriber keys, one on rows already metered and a differently-spelled one on rows metered from now on -- neither set can be amended or deleted, and both keys are the SAME person."
+  fi
+  return 0
 }
 
 # Phase 61 (SUB-03/D-08/D-09): build the batch map consumed by

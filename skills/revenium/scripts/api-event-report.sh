@@ -115,6 +115,14 @@ if [[ "${_subscriber_email_mode_invalid}" == "true" ]]; then
   warn "REVENIUM_SUBSCRIBER_EMAIL_MODE/subscriberEmailMode had an unrecognised value — falling back to 'plaintext' (the address ships verbatim)."
 fi
 info "api-event-report.sh running in SUBSCRIBER_EMAIL_MODE=${SUBSCRIBER_EMAIL_MODE}"
+# Phase 63 Plan 03 (D-07): disclose a mid-life flip of the mode just
+# resolved above, before any session is processed. Shares
+# SUBSCRIBER_MODE_FLAGS_DIR with hermes-report.sh's own call, so within
+# one flipped tick whichever reporter runs first writes the sentinel and
+# the other's call is a no-op -- one disclosure per flip per install, not
+# per script. See warn_subscriber_mode_flip_once's own comment
+# (common.sh) for the full ordering argument.
+warn_subscriber_mode_flip_once "${SUBSCRIBER_EMAIL_MODE}"
 
 if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
   # T-32-18: bound the shadow report the same way the metering log is
