@@ -969,6 +969,123 @@ mask_subscriber_for_log() {
   esac
 }
 
+# Phase 63 (SUB-06/D-01/D-02/D-04/D-05/D-06): resolve the subscriber-email
+# obfuscation switch. Same two-value, env > config.json > default shape as
+# every other closed-two-literal switch in this file (resolve_switch_setting,
+# above): "plaintext" | "obfuscated", default "plaintext" (SUB-06 requires
+# it, and plaintext is what an install metered before this switch existed).
+#
+# Deliberately NOT declared with a `:-` default anywhere in this file
+# (search this file for REVENIUM_SUBSCRIBER_EMAIL_MODE -- there is exactly
+# one occurrence, the argument below): that declaration is the SOLE reason
+# the event/aux switches (REVENIUM_EVENT_METERING_MODE, REVENIUM_AUX_METERING)
+# need a pre-`source common.sh` raw-env capture in their calling script --
+# without it, common.sh's own default would destroy the
+# unset-versus-explicit distinction resolve_switch_setting needs to reach
+# config.json. Omitting the declaration here means no caller of THIS
+# function needs that dance: "${REVENIUM_SUBSCRIBER_EMAIL_MODE:-}" below
+# reads the real, still-unset-if-unset process environment.
+#
+# Does NOT call warn() itself -- warning on an unrecognised value is the
+# caller's job, exactly as api-event-report.sh warns for eventMeteringMode.
+# common.sh is also sourced by the three in-session hooks (pre_llm_call.sh,
+# pre_tool_call.sh, post_tool_call.sh), and a source-time warn here would
+# write to the cron log on every single LLM call.
+resolve_subscriber_email_mode() {
+  resolve_switch_setting "${REVENIUM_SUBSCRIBER_EMAIL_MODE:-}" "subscriberEmailMode" "plaintext" "plaintext" "obfuscated"
+}
+
+# Phase 63 (SUB-06/D-01/D-02/D-04/D-05/D-06): the ONE chokepoint that turns a
+# resolved subscriber key into the two wire values a `meter completion` call
+# emits. Takes the already-resolved key (resolve_subscriber_id's own
+# "<source>:<user_id>" format, D-05 of Phase 61) and the resolved mode
+# (resolve_subscriber_email_mode's line one), and prints exactly ONE line,
+# "<wire_id>|<wire_email>" -- mirroring resolve_subscriber_id's own
+# single-line pipe-delimited shape, for the identical reason recorded above
+# that function: a per-session cron loop cannot afford two `sed` subshells
+# per call. `|` is a safe delimiter here because resolve_subscriber_id
+# already rejects a pipe, tab, CR, LF and 0x1F in both of its own arguments,
+# so neither half of this function's input can itself contain one.
+#
+# Applying this ONCE, here, rather than at each of the four `meter
+# completion` call sites, is deliberate (DD-2 in 63-01-PLAN.md): four sites
+# independently producing one permanent wire format is the exact divergence
+# class Phase 62 D-01/D-02 needed an equivalence test for.
+#
+# D-02: only the "email" namespace is touched by the mode. Every OTHER
+# source (slack, etc.) ships its key verbatim in BOTH modes and never gets a
+# populated wire_email -- this switch is scoped to the email source, not to
+# "every subscriber id".
+#
+# D-06: under obfuscation, wire_email is ALWAYS empty -- never populated
+# with the digest. A hash is not a reachable email address; putting one in
+# the email field would be the same class of fabrication this repo already
+# refuses for --skill-kind/--skill-plugin-name (Phase 62 D-06): a guessed
+# value poisons the dimension.
+#
+# Idempotent in "obfuscated" mode -- load-bearing, not defensive: when the
+# part after "email:" already matches ^[0-9a-f]{64}$ it is passed through
+# UNCHANGED and no second digest is computed. The auxiliary path
+# (63-02-PLAN.md) reads an already-wire-transformed key back out of the
+# seven-field aux_session_ctx cache and calls this helper on it a second
+# time; without idempotency that call would hash the hash and publish a
+# second, different permanent key for the same actor (Phase 62 D-09 records
+# aux_session_ctx's parse as a strict seven-field check with three
+# producers and one consumer -- widening it to an eighth field is
+# explicitly NOT the fix here). The hex test is safe because a real email
+# address always contains an "@", and ^[0-9a-f]{64}$ contains no "@", so no
+# legitimate address can ever collide with an already-hashed value.
+resolve_subscriber_wire_pair() {
+  local key="$1" mode="$2"
+  if [[ -z "${key}" ]]; then
+    printf '|\n'
+    return 0
+  fi
+  local ns="${key%%:*}" rest="${key#*:}"
+  if [[ "${ns}" != "email" ]]; then
+    # D-02: every non-email source ships verbatim, in both modes, with no
+    # wire_email -- the switch's scope stops at this branch.
+    printf '%s|\n' "${key}"
+    return 0
+  fi
+  if [[ "${mode}" != "obfuscated" ]]; then
+    # Plaintext, or any caller that never resolved the mode: meters exactly
+    # as it did before this switch existed.
+    printf '%s|%s\n' "${key}" "${rest}"
+    return 0
+  fi
+  if [[ "${rest}" =~ ^[0-9a-f]{64}$ ]]; then
+    # Idempotency guard (see function comment above): already a 64-hex
+    # digest -- pass through unchanged rather than hashing a hash.
+    printf 'email:%s|\n' "${rest}"
+    return 0
+  fi
+  # D-04/D-05: SHA-256, the full untruncated 64 hex chars, UNSALTED, no
+  # case-fold, no Unicode normalisation. Three properties of the expression
+  # below are part of the PERMANENT wire format D-04 locks in:
+  #   - not sliced: both existing hashlib.sha256 heredocs in this repo
+  #     (hermes-report.sh ~1522, setup-guardrails.sh ~627) take a prefix; a
+  #     sliced digest here would be a DIFFERENT, permanently-embedded
+  #     format.
+  #   - utf-8 over the address exactly as stored, with no casefold() and no
+  #     unicodedata.normalize(): folding or normalising would let two
+  #     byte-distinct addresses collapse into one subscriber row -- the
+  #     collision D-04 rejected masking for.
+  #   - no salt (D-05): deterministic across hosts, fleet profiles and
+  #     reinstalls, at the documented, accepted cost of
+  #     dictionary-reversibility for a guessable address.
+  # Forked only when mode=obfuscated AND namespace=email (both already true
+  # by this point), so the 97% no-actor path and the 99% slack-source path
+  # pay nothing (T-63-06).
+  local digest
+  digest=$(SUBSCRIBER_EMAIL="${rest}" python3 - <<'PY'
+import hashlib, os
+print(hashlib.sha256(os.environ['SUBSCRIBER_EMAIL'].encode('utf-8')).hexdigest())
+PY
+)
+  printf 'email:%s|\n' "${digest}"
+}
+
 # Phase 61 (SUB-03/D-08/D-09): build the batch map consumed by
 # hermes-report.sh's per-tick inheritance lookup, mirroring
 # build_root_sid_map's contract exactly: never fatal, returns 0

@@ -133,6 +133,22 @@ if supports_flag "meter completion" "--subscriber-id"; then
   SUBSCRIBER_CLI_CAPABLE=true
 fi
 
+# Subscriber-email attribution (Phase 63, SUB-06, DD-3). Its OWN probe,
+# never a ride on SUBSCRIBER_CLI_CAPABLE above: Phase 62 D-10's
+# one-probe-per-family precedent covers flags that shipped atomically (all
+# six --skill-* flags landed in one CLI release); --subscriber-id and
+# --subscriber-email were added to the CLI independently, and
+# supports_flag's own header records the consequence of wrongly assuming
+# "supported" -- the CLI rejects the unknown flag and the WHOLE meter call
+# fails, not just this one dimension. That would fail CLOSED on exactly the
+# sessions this phase exists to attribute, so the extra
+# `revenium meter completion --help` fork (once per script run, not per
+# session) is worth paying.
+SUBSCRIBER_EMAIL_CLI_CAPABLE=false
+if supports_flag "meter completion" "--subscriber-email"; then
+  SUBSCRIBER_EMAIL_CLI_CAPABLE=true
+fi
+
 # `--organization-name` is NOT uniform across subcommands: `meter completion`
 # accepts it, `jobs create` and `jobs outcome` do NOT (verified on CLI 1.5.0,
 # which rejects it outright: "Error: unknown flag: --organization-name", exit 1).
@@ -328,6 +344,22 @@ AUX_METERING_ENABLED="false"
 if [[ "${REVENIUM_AUX_METERING_RESOLVED}" == "enabled" ]]; then
   AUX_METERING_ENABLED="true"
 fi
+
+# Phase 63 (SUB-06, DD-1): resolve the subscriber-email obfuscation switch
+# once per run, via the dedicated common.sh helper (resolve_subscriber_email_mode)
+# rather than an inline resolve_switch_setting call -- see that helper's own
+# comment for why it needs no pre-`source` raw-env capture the way
+# eventMeteringMode/auxMetering above do. A typo must never silently change
+# whether a plaintext address reaches Revenium, so an unrecognised value
+# warns and falls back to "plaintext" (the address ships verbatim) rather
+# than failing closed or open silently.
+_subscriber_email_mode_resolution=$(resolve_subscriber_email_mode)
+SUBSCRIBER_EMAIL_MODE=$(printf '%s' "${_subscriber_email_mode_resolution}" | sed -n '1p')
+_subscriber_email_mode_invalid=$(printf '%s' "${_subscriber_email_mode_resolution}" | sed -n '2p')
+if [[ "${_subscriber_email_mode_invalid}" == "true" ]]; then
+  warn "REVENIUM_SUBSCRIBER_EMAIL_MODE/subscriberEmailMode had an unrecognised value — falling back to 'plaintext' (the address ships verbatim)."
+fi
+info "hermes-report.sh running in SUBSCRIBER_EMAIL_MODE=${SUBSCRIBER_EMAIL_MODE}"
 
 DRAIN_GATE_DRAINED="false"
 DRAIN_GATE_PENDING_COUNT=""
@@ -2278,7 +2310,7 @@ PY
     # resolve_subscriber_id's own D-07 gate, so this can only skip cases the
     # helper would answer "none|" to anyway (a fork-avoidance guard, not a
     # second gate): 97% of sessions never call the helper at all.
-    local subscriber_status="" subscriber_key=""
+    local subscriber_status="" subscriber_key="" subscriber_email=""
     if [[ -n "${user_id}" ]]; then
       local _own_sub_resolved
       _own_sub_resolved="$(resolve_subscriber_id "${source}" "${user_id}")"
@@ -2363,6 +2395,30 @@ PY
           fi
         fi
       fi
+    fi
+
+    # Phase 63 (SUB-06, DD-2): turn the resolved key into its two wire
+    # values ONCE, here -- the sole chokepoint every downstream consumer
+    # (both `meter completion` sites below, plus the aux context cache's
+    # seventh field) inherits from, so four call sites can never each invent
+    # their own wire format (the divergence class Phase 62 D-01/D-02 needed
+    # an equivalence test for). `subscriber_key` is rewritten IN PLACE with
+    # the wire id (verbatim in plaintext mode / non-email sources; the
+    # obfuscated hash for an email-source key in obfuscated mode), so every
+    # line below this point that reads subscriber_key already sees the wire
+    # value and needs no branching on mode.
+    #
+    # Deliberately placed ABOVE subscriber_log_suffix's own resolution
+    # immediately below: that means the log sees the WIRE value, which is
+    # D-14's unconditional-masking invariant -- a hash has no "@", so it
+    # falls to mask_subscriber_for_log's pass-through branch and logs
+    # verbatim, which is already correct and requires no caller to branch on
+    # the mode.
+    if [[ -n "${subscriber_key}" ]]; then
+      local _subscriber_wire_pair
+      _subscriber_wire_pair="$(resolve_subscriber_wire_pair "${subscriber_key}" "${SUBSCRIBER_EMAIL_MODE}")"
+      subscriber_key="${_subscriber_wire_pair%%|*}"
+      subscriber_email="${_subscriber_wire_pair#*|}"
     fi
 
     # Phase 61 (T-61-01): a single leading space + "subscriber=<masked key>"
@@ -4335,6 +4391,20 @@ PY
       # masker was Phase 61's critical review finding.
       if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" ]]; then
         [[ -n "${subscriber_key}" ]] && cmd+=(--subscriber-id "${subscriber_key}")
+      fi
+
+      # Subscriber-email attribution (Phase 63, SUB-06/D-01/D-02/D-06).
+      # Appended DIRECTLY after --subscriber-id — flag order is part of the
+      # argv contract shared across all four sites. `subscriber_key` and
+      # `subscriber_email` are both already resolved (and, for an email
+      # actor, already wire-transformed per the operator's mode) at the
+      # per-session chokepoint above the loop; nothing is resolved here. In
+      # obfuscated mode subscriber_email is always empty (D-06), so this
+      # line appends NOTHING for an obfuscated actor even when
+      # SUBSCRIBER_EMAIL_CLI_CAPABLE is true — the omission IS the
+      # mitigation, not a gap.
+      if [[ "${SUBSCRIBER_EMAIL_CLI_CAPABLE}" == "true" ]]; then
+        [[ -n "${subscriber_email}" ]] && cmd+=(--subscriber-email "${subscriber_email}")
       fi
 
       local cmd_output cmd_exit

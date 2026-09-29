@@ -577,11 +577,34 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # SAME +49 (1650->1699, 3984->4033, 4183->4232). api-event-report.sh
         # is untouched by this task. Pure shift once more -- the COUNT (4)
         # and the emitted VALUE expressions are unchanged.
+        #
+        # Re-measured again (Phase 63 Plan 01 Task 2, SUB-06): two blocks
+        # near the top of hermes-report.sh -- the new
+        # SUBSCRIBER_EMAIL_CLI_CAPABLE probe (16 lines, beside the existing
+        # SUBSCRIBER_CLI_CAPABLE probe) and the new SUBSCRIBER_EMAIL_MODE
+        # resolution (16 lines, beside the auxMetering resolution) -- sit
+        # ABOVE all four emission sites in this file, shifting every one of
+        # them by +32 (1715->1747, 4049->4081, 4248->4280). A third block,
+        # the resolve_subscriber_wire_pair chokepoint call (24 lines,
+        # inserted above `subscriber_log_suffix`'s own resolution inside
+        # the main per-session loop), sits BELOW the aux site (which lives
+        # in a separate function, `report_auxiliary_usage`, defined earlier
+        # in the file) but ABOVE both the marker-split and markerless
+        # sites, shifting those two further by +24 each (4081->4105,
+        # 4280->4304); the aux site stays at the +32-only value (1747). A
+        # fourth block, the markerless --subscriber-email emission itself
+        # (14 lines), sits AFTER the markerless file's own --operation-type
+        # site, so it shifts nothing here. api-event-report.sh is untouched
+        # by this task (its own --subscriber-email wiring, if any, is a
+        # later plan's job). Pure shift once more -- the COUNT (4) and the
+        # emitted VALUE expressions are unchanged, so both assertions above
+        # pass untouched. Verified against the diff hunks themselves
+        # (`git diff -U0`), not by arithmetic on a prior value.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1715),
-            ('hermes-report.sh', 4049),
-            ('hermes-report.sh', 4248),
+            ('hermes-report.sh', 1747),
+            ('hermes-report.sh', 4105),
+            ('hermes-report.sh', 4304),
             ('api-event-report.sh', 1826),
         }
         self.assertEqual(

@@ -1,0 +1,466 @@
+"""Phase 63 Plan 01 (SUB-06): the wire-pair chokepoint proof.
+
+Wires `resolve_subscriber_email_mode` and `resolve_subscriber_wire_pair`
+(both new in `common.sh`) end-to-end through hermes-report.sh's MARKERLESS
+`meter completion` emission site only -- the marker-split site is
+Task 3's job (`tests/test_phase63_subscriber_email.py`'s own follow-up
+classes, appended there).
+
+Unit coverage (`ResolveSubscriberEmailModeUnitTests`,
+`ResolveSubscriberWirePairUnitTests`) exercises both new common.sh
+functions in isolation, sourcing common.sh in a bash subshell exactly as
+`tests.test_phase61_identity_resolution.ResolveSubscriberIdUnitTests` does
+for `resolve_subscriber_id` / `mask_subscriber_for_log`.
+
+End-to-end coverage (`MarkerlessSubscriberEmailWiringTests`) reuses
+`tests.test_phase62_subscriber_wiring.MarkerlessSubscriberWiringTests`'
+exact `test_phase29_agent_inheritance` fixture (same sid, model, tokens,
+timestamps) so the deterministic values baked into
+`meter-completion-markerless.golden.json`'s `argv_order` still hold,
+changing only `sessions.source` (to `email`) and the actor id (a synthetic
+`p63-`-prefixed address on the `.example` TLD):
+
+    - Run E -- plaintext, both flags CLI-capable: argv equals the golden
+      plus exactly FOUR trailing tokens (`--subscriber-id`, `email:<addr>`,
+      `--subscriber-email`, `<addr>`).
+    - Run F -- obfuscated, both flags CLI-capable: argv equals the golden
+      plus exactly TWO trailing tokens (`--subscriber-id`, `email:<64hex>`),
+      and `--subscriber-email` is absent from the WHOLE captured argv (D-06).
+    - Run G (SUB-07) -- plaintext, `--subscriber-id` capable but
+      `--subscriber-email` NOT advertised: argv equals the golden plus
+      exactly the `--subscriber-id` pair, and the meter call still
+      succeeds.
+    - Run H -- either mode, a `slack`-source session: argv is byte-identical
+      between plaintext and obfuscated (D-02 -- the switch never touches a
+      non-email source).
+    - Absent-arm regression -- the golden's own untouched fixture (no
+      `user_id` column at all), mode `obfuscated`: argv equals `argv_order`
+      exactly, proving the switch is a no-op for the 97% no-actor case.
+
+Every actor id/address in this module is synthetic and `p63-`-prefixed on
+the `.example` TLD; no value is copied from any reference host.
+"""
+import hashlib
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+from tests._compat_helpers import (
+    assert_argv_is_golden_argv_order,
+    build_shim,
+    build_state_db,
+    load_golden,
+    run_script,
+    seed_user_ids,
+    SCRIPTS_DIR,
+)
+from tests.test_phase61_identity_resolution import _OLD_TS, _own_meter_invocations
+from tests.test_phase61_subscriber_boundary import _assert_argv_equal_modulo_timestamps
+
+HERMES_REPORT_SH = SCRIPTS_DIR / 'hermes-report.sh'
+COMMON_SH = SCRIPTS_DIR / 'common.sh'
+
+
+class _CommonShUnitHarness:
+    """bash-subshell caller for common.sh functions, mirroring
+    tests.test_phase61_identity_resolution.ResolveSubscriberIdUnitTests'
+    `_call` idiom: HERMES_HOME redirected to a scratch tmpdir so common.sh's
+    top-level `mkdir -p "${STATE_DIR}" ...` never touches the real $HOME.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='gsd-phase63-unit-')
+        self.hermes_home = os.path.join(self.tmp, 'hh')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_config(self, config):
+        state_dir = os.path.join(self.hermes_home, 'state', 'revenium')
+        os.makedirs(state_dir, exist_ok=True)
+        with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+            json.dump(config, f)
+
+    def _call(self, fn, *args, env_extra=None, config=None):
+        if config is not None:
+            self._write_config(config)
+        quoted = ' '.join(shlex.quote(a) for a in args)
+        expr = f'{fn} {quoted}'
+        env = {**os.environ, 'HERMES_HOME': self.hermes_home}
+        # Absent-by-default: a caller that wants the "operator left it
+        # unset" arm must not inherit whatever the outer test-runner
+        # process happens to have exported.
+        env.pop('REVENIUM_SUBSCRIBER_EMAIL_MODE', None)
+        if env_extra:
+            env.update(env_extra)
+        return subprocess.run(
+            ['bash', '-c', f'source "{COMMON_SH}" >/dev/null 2>&1; {expr}'],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+
+
+class ResolveSubscriberEmailModeUnitTests(_CommonShUnitHarness, unittest.TestCase):
+    """DD-1: env > config.json > "plaintext" default, one warn on a typo."""
+
+    def test_env_wins_over_config(self):
+        r = self._call(
+            'resolve_subscriber_email_mode',
+            env_extra={'REVENIUM_SUBSCRIBER_EMAIL_MODE': 'obfuscated'},
+            config={'subscriberEmailMode': 'plaintext'},
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'obfuscated\nfalse')
+
+    def test_config_alone_honoured_when_env_unset(self):
+        r = self._call(
+            'resolve_subscriber_email_mode',
+            config={'subscriberEmailMode': 'obfuscated'},
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'obfuscated\nfalse')
+
+    def test_unrecognised_env_value_falls_back_to_plaintext_and_warns(self):
+        r = self._call(
+            'resolve_subscriber_email_mode',
+            env_extra={'REVENIUM_SUBSCRIBER_EMAIL_MODE': 'garbage'},
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'plaintext\ntrue')
+
+    def test_absent_env_and_config_resolves_plaintext_no_warn(self):
+        r = self._call('resolve_subscriber_email_mode')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), 'plaintext\nfalse')
+
+
+class ResolveSubscriberWirePairUnitTests(_CommonShUnitHarness, unittest.TestCase):
+    """D-01/D-02/D-04/D-05/D-06 and the idempotency/injectivity proofs
+    DD-2's chokepoint depends on."""
+
+    @staticmethod
+    def _digest(addr):
+        return hashlib.sha256(addr.encode('utf-8')).hexdigest()
+
+    def test_email_plaintext_verbatim_pair(self):
+        r = self._call(
+            'resolve_subscriber_wire_pair', 'email:jane@acme.example', 'plaintext'
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(
+            r.stdout.strip(), 'email:jane@acme.example|jane@acme.example'
+        )
+
+    def test_email_obfuscated_hashes_to_64_hex_no_email_field(self):
+        r = self._call(
+            'resolve_subscriber_wire_pair', 'email:jane@acme.example', 'obfuscated'
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        expected_digest = self._digest('jane@acme.example')
+        self.assertRegex(expected_digest, r'^[0-9a-f]{64}$')
+        self.assertEqual(r.stdout.strip(), f'email:{expected_digest}|')
+
+    def test_non_email_namespace_verbatim_in_both_modes(self):
+        for mode in ('plaintext', 'obfuscated'):
+            with self.subTest(mode=mode):
+                r = self._call(
+                    'resolve_subscriber_wire_pair', 'slack:U02C12JG78F', mode
+                )
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(r.stdout.strip(), 'slack:U02C12JG78F|')
+
+    def test_empty_key_prints_bare_pipe(self):
+        r = self._call('resolve_subscriber_wire_pair', '', 'obfuscated')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), '|')
+
+    def test_idempotent_second_obfuscated_pass_over_own_output(self):
+        """The property the auxiliary path (63-02-PLAN.md) depends on: it
+        re-derives an already wire-transformed key from aux_session_ctx and
+        calls this helper on it a second time. A second pass must not
+        double-hash."""
+        r1 = self._call(
+            'resolve_subscriber_wire_pair', 'email:jane@acme.example', 'obfuscated'
+        )
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        wire_id = r1.stdout.strip().split('|', 1)[0]
+        self.assertRegex(wire_id, r'^email:[0-9a-f]{64}$')
+        r2 = self._call('resolve_subscriber_wire_pair', wire_id, 'obfuscated')
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(r2.stdout.strip(), f'{wire_id}|')
+
+    def test_three_case_variant_addresses_yield_three_distinct_keys(self):
+        """No case-fold, no Unicode normalisation (D-04/D-05): the plaintext
+        key count must equal the obfuscated key count."""
+        addrs = ['Jane@acme.example', 'jane@acme.example', 'JANE@acme.example']
+        plaintext_keys = {f'email:{a}' for a in addrs}
+        self.assertEqual(len(plaintext_keys), 3, plaintext_keys)
+        obfuscated_keys = set()
+        for addr in addrs:
+            r = self._call(
+                'resolve_subscriber_wire_pair', f'email:{addr}', 'obfuscated'
+            )
+            self.assertEqual(r.returncode, 0, r.stderr)
+            obfuscated_keys.add(r.stdout.strip().split('|', 1)[0])
+        self.assertEqual(len(obfuscated_keys), 3, obfuscated_keys)
+
+
+class _Harness:
+    """One temp HERMES_HOME + PATH-shim `revenium` + one meter log,
+    mirroring tests.test_phase62_subscriber_wiring._Harness but
+    parameterised additionally on `subscriber_email_capable` (the shim's
+    --subscriber-email --help advertisement) and `email_mode` (threaded as
+    REVENIUM_SUBSCRIBER_EMAIL_MODE, absent by default so the harness proves
+    nothing about the switch unless a test explicitly asks it to).
+    """
+
+    def __init__(self, subscriber_capable=True, subscriber_email_capable=True,
+                 email_mode=None, prefix='gsd-phase63-wiring-'):
+        self.tmp = tempfile.mkdtemp(prefix=prefix)
+        self.hermes_home = os.path.join(self.tmp, 'hh')
+        self.state_dir = os.path.join(self.hermes_home, 'state', 'revenium')
+        self.markers_dir = os.path.join(self.state_dir, 'markers')
+        os.makedirs(self.markers_dir, mode=0o700)
+        self.state_db = os.path.join(self.hermes_home, 'state.db')
+        self.log_file = os.path.join(self.state_dir, 'revenium-metering.log')
+
+        self.shim_home = os.path.join(self.tmp, 'home')
+        self.bin_dir = os.path.join(self.shim_home, '.local', 'bin')
+        os.makedirs(self.bin_dir)
+        self.meter_log = os.path.join(self.tmp, 'meter.log')
+        self.jobs_log = os.path.join(self.tmp, 'jobs.log')
+        self.inv_log = os.path.join(self.tmp, 'inv.log')
+        self.shim = os.path.join(self.bin_dir, 'revenium')
+        build_shim(
+            self.shim, squad_capable=True,
+            subscriber_capable=subscriber_capable,
+            subscriber_email_capable=subscriber_email_capable,
+        )
+        self.email_mode = email_mode
+
+    def cleanup(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def base_env(self):
+        env = {
+            **os.environ,
+            'HOME': self.shim_home,
+            'HERMES_HOME': self.hermes_home,
+            'REVENIUM_STATE_DIR': self.state_dir,
+            'PATH': self.bin_dir + os.pathsep + os.environ.get('PATH', ''),
+            'INVOCATIONS_LOG': self.inv_log,
+            'METER_LOG': self.meter_log,
+            'JOBS_LOG': self.jobs_log,
+            'TZ': 'UTC',
+            'REVENIUM_ORGANIZATION_NAME': '',
+            'REVENIUM_AGENT_NAME': 'Hermes',
+            'REVENIUM_SQUAD_NAME': '',
+        }
+        env.pop('REVENIUM_SUBSCRIBER_EMAIL_MODE', None)
+        if self.email_mode is not None:
+            env['REVENIUM_SUBSCRIBER_EMAIL_MODE'] = self.email_mode
+        return env
+
+    def run(self):
+        rc, _ignored_inv, output = run_script(
+            HERMES_REPORT_SH, self.base_env(), self.inv_log
+        )
+        meter_invocations = []
+        if os.path.exists(self.meter_log):
+            with open(self.meter_log) as f:
+                for line in f:
+                    line = line.rstrip('\n')
+                    if line:
+                        meter_invocations.append(shlex.split(line))
+        if rc != 0:
+            raise AssertionError(f'hermes-report.sh failed (rc={rc}): {output}')
+        return meter_invocations
+
+
+class MarkerlessSubscriberEmailWiringTests(unittest.TestCase):
+    """Task 2: markerless-site end-to-end proof for --subscriber-email."""
+
+    SID = 'compat-sid-markerless-001'
+    ACTOR = 'p63-markerless-actor@acme.example'
+
+    def _seed(self, source, subscriber_capable, subscriber_email_capable,
+              email_mode, user_id_mapping=None):
+        tree = _Harness(
+            subscriber_capable=subscriber_capable,
+            subscriber_email_capable=subscriber_email_capable,
+            email_mode=email_mode,
+        )
+        build_state_db(tree.state_db, [{
+            'id': self.SID,
+            'model': 'claude-sonnet-4-6',
+            'source': source,
+            'input_tokens': 100,
+            'output_tokens': 50,
+            'cache_read': 0,
+            'cache_write': 0,
+            'reasoning': 0,
+            'estimated_cost': '0',
+            'api_calls': 1,
+            'started_at': _OLD_TS,
+            'ended_at': _OLD_TS,
+            'billing_provider': 'anthropic',
+        }])
+        if user_id_mapping is not None:
+            seed_user_ids(tree.state_db, user_id_mapping)
+        return tree
+
+    def test_run_e_plaintext_both_capable_four_trailing_tokens(self):
+        tree = self._seed(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='plaintext',
+            user_id_mapping={self.SID: self.ACTOR},
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion-markerless.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, own[0], golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=(
+                    '--subscriber-id', expected_key,
+                    '--subscriber-email', self.ACTOR,
+                ),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_f_obfuscated_both_capable_two_trailing_tokens_no_email_flag(self):
+        tree = self._seed(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=True, email_mode='obfuscated',
+            user_id_mapping={self.SID: self.ACTOR},
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            argv = own[0]
+            self.assertNotIn('--subscriber-email', argv, argv)
+            self.assertIn('--subscriber-id', argv, argv)
+            idx = argv.index('--subscriber-id')
+            wire_id = argv[idx + 1]
+            self.assertRegex(wire_id, r'^email:[0-9a-f]{64}$')
+            golden = load_golden('meter-completion-markerless.golden.json')
+            assert_argv_is_golden_argv_order(
+                self, argv, golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', wire_id),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_g_id_capable_email_not_capable_meter_call_succeeds(self):
+        """SUB-07: a CLI advertising --subscriber-id but NOT
+        --subscriber-email emits --subscriber-id and omits
+        --subscriber-email, and the meter call still succeeds (hermes-
+        report.sh's own rc==0 assertion inside `_Harness.run` is itself
+        that proof -- a non-zero rc raises before this method ever
+        inspects argv)."""
+        tree = self._seed(
+            source='email', subscriber_capable=True,
+            subscriber_email_capable=False, email_mode='plaintext',
+            user_id_mapping={self.SID: self.ACTOR},
+        )
+        try:
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion-markerless.golden.json')
+            expected_key = f'email:{self.ACTOR}'
+            assert_argv_is_golden_argv_order(
+                self, own[0], golden,
+                value_overrides={'--environment': 'email'},
+                extra_tail=('--subscriber-id', expected_key),
+            )
+        finally:
+            tree.cleanup()
+
+    def test_run_h_slack_source_argv_byte_identical_both_modes(self):
+        sid = 'p63-sid-slack-markerless'
+        actor = 'p63-slack-actor'
+
+        def _run(mode):
+            tree = _Harness(
+                subscriber_capable=True, subscriber_email_capable=True,
+                email_mode=mode,
+            )
+            try:
+                build_state_db(tree.state_db, [{
+                    'id': sid,
+                    'model': 'claude-sonnet-4-6',
+                    'source': 'slack',
+                    'input_tokens': 100,
+                    'output_tokens': 50,
+                    'cache_read': 0,
+                    'cache_write': 0,
+                    'reasoning': 0,
+                    'estimated_cost': '0',
+                    'api_calls': 1,
+                    'started_at': _OLD_TS,
+                    'ended_at': _OLD_TS,
+                    'billing_provider': 'anthropic',
+                }])
+                seed_user_ids(tree.state_db, {sid: actor})
+                invocations = tree.run()
+                own = _own_meter_invocations(invocations, sid)
+                self.assertEqual(len(own), 1, own)
+                return own[0]
+            finally:
+                tree.cleanup()
+
+        argv_plain = _run('plaintext')
+        argv_obf = _run('obfuscated')
+        self.assertNotIn('--subscriber-email', argv_plain, argv_plain)
+        self.assertNotIn('--subscriber-email', argv_obf, argv_obf)
+        self.assertIn('--subscriber-id', argv_plain, argv_plain)
+        self.assertIn('--subscriber-id', argv_obf, argv_obf)
+        _assert_argv_equal_modulo_timestamps(
+            self, argv_plain, argv_obf, 'slack-source markerless'
+        )
+
+    def test_absent_arm_obfuscated_no_user_id_column_matches_golden(self):
+        """Turning the switch on must not perturb the 97% no-actor case:
+        the golden's own untouched fixture (source='test', no `user_id`
+        column at all), mode obfuscated, still equals argv_order exactly."""
+        tree = _Harness(
+            subscriber_capable=True, subscriber_email_capable=True,
+            email_mode='obfuscated',
+        )
+        try:
+            build_state_db(tree.state_db, [{
+                'id': self.SID,
+                'model': 'claude-sonnet-4-6',
+                'source': 'test',
+                'input_tokens': 100,
+                'output_tokens': 50,
+                'cache_read': 0,
+                'cache_write': 0,
+                'reasoning': 0,
+                'estimated_cost': '0',
+                'api_calls': 1,
+                'started_at': _OLD_TS,
+                'ended_at': _OLD_TS,
+                'billing_provider': 'anthropic',
+            }])
+            invocations = tree.run()
+            own = _own_meter_invocations(invocations, self.SID)
+            self.assertEqual(len(own), 1, own)
+            golden = load_golden('meter-completion-markerless.golden.json')
+            assert_argv_is_golden_argv_order(self, own[0], golden)
+        finally:
+            tree.cleanup()
+
+
+if __name__ == '__main__':
+    unittest.main()
