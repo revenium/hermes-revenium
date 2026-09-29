@@ -213,6 +213,32 @@ An installed CLI without `jobs outcome-metrics` makes this stage a no-op. The fu
 including the correction limit and environment controls, is in
 [Job value and ROI](value-and-roi.md#outcome-timeline-metrics).
 
+## Subscriber attribution
+
+A metered completion can also carry `--subscriber-id`, naming the actor who drove it.
+The actor is resolved from `sessions.user_id` — never from `display_name`, which on the
+reference host holds the *channel* id in 146 of 275 Slack rows and is empty in 98 more.
+The resolved value is namespaced `<source>:<id>` (`slack:U02C12JG78F`,
+`email:jane@acme.com`, `webhook:spike-test`) so two platforms never collide. A subagent
+session inherits its root session's actor through the same root-walk that already
+resolves `--agentic-job-id` and the squad dimensions, and bot/app actors are attributed
+identically to humans, with no special casing.
+
+There are **four** `meter completion` emission sites carrying this dimension — the
+markerless and marker-split sites and the auxiliary-usage pass in `hermes-report.sh`,
+plus `api-event-report.sh`'s event path — each capability-probed and fail-open, so an
+older `revenium` CLI meters exactly as it did before either flag existed. A session with
+no resolvable actor ships no subscriber flags at all and meters byte-identically to
+before this dimension shipped.
+
+The `email` source additionally ships `--subscriber-email`, plaintext by default, with an
+operator switch (`subscriberEmailMode` / `REVENIUM_SUBSCRIBER_EMAIL_MODE`) that replaces
+it with an unsalted SHA-256 digest — covering the `email` source only, never Slack or
+webhook ids. See [Subscriber attribution](subscriber-attribution.md) for the full record:
+the switch, what the digest does and does not defend against, the mid-life-flip
+fragmentation it accepts rather than prevents, and `subscriber-names.sh`, the read-only
+script that turns a shipped id back into a human name.
+
 ## LLM outcome-value evaluation (experimental)
 
 > This section is the summary. **[Job value and ROI](value-and-roi.md)** is the complete
