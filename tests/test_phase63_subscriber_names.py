@@ -9,6 +9,11 @@ own test module in the same wave.
 
 Every actor id and name used below is synthetic and `p63-`-prefixed;
 nothing is copied from any reference host.
+
+63-REVIEW.md gap closure (WR-02) adds a test class at the end of this
+module: `PerHomeSubscriberEmailModeTests` (each profile home's own
+subscriberEmailMode governs that home's own rows, not the
+process-wide/default-profile setting).
 """
 
 import hashlib
@@ -645,6 +650,95 @@ class ShippedSurfaceConformanceTests(unittest.TestCase):
     def test_bash_syntax_check_passes(self):
         result = subprocess.run(['bash', '-n', str(SCRIPT)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+# ---------------------------------------------------------------------------
+# 63-REVIEW.md gap closure.
+# ---------------------------------------------------------------------------
+
+class PerHomeSubscriberEmailModeTests(FleetWalkTestCase):
+    """WR-02: subscriberEmailMode was resolved ONCE, from the process/
+    default-profile config, then applied to every profile home walked --
+    showing the wrong wire form for any profile whose own config.json
+    disagrees. Each profile home must resolve its OWN mode from its OWN
+    config.json, mirroring db_path's own per-home derivation."""
+
+    def setUp(self):
+        super().setUp()
+        _build_sessions_db(self.db_path, rows=[
+            {'id': 'p63-d1', 'source': 'email', 'user_id': 'p63-default@example.com',
+             'user_name': 'Default Actor'},
+        ])
+        _build_sessions_db(self._profile_db_path('obfus'), rows=[
+            {'id': 'p63-o1', 'source': 'email', 'user_id': 'p63-profileb@example.com',
+             'user_name': 'Profile B Actor'},
+        ])
+        # Default profile's own config.json is left absent (plaintext by
+        # default); the 'obfus' profile sets its OWN config.json to
+        # obfuscated -- entirely independent of the default profile.
+        profile_config_dir = self.home / 'profiles' / 'obfus' / 'state' / 'revenium'
+        profile_config_dir.mkdir(parents=True, exist_ok=True)
+        (profile_config_dir / 'config.json').write_text(
+            json.dumps({'subscriberEmailMode': 'obfuscated'})
+        )
+
+    @staticmethod
+    def _digest(addr):
+        return hashlib.sha256(addr.encode('utf-8')).hexdigest()
+
+    def test_fleet_wide_run_shows_each_profiles_own_mode(self):
+        digest = self._digest('p63-profileb@example.com')
+        result = self.run_script()
+        # Default profile has no config.json of its own -- plaintext.
+        self.assertIn('email:p63-default@example.com', result.stdout)
+        # 'obfus' profile's OWN config.json says obfuscated -- its actor's
+        # plaintext address must never appear on stdout.
+        self.assertIn(f'email:{digest}', result.stdout)
+        self.assertNotIn('p63-profileb@example.com', result.stdout)
+
+    def test_profile_flag_resolves_that_profiles_own_mode_too(self):
+        # Finding item 2: even a targeted --profile run must redirect the
+        # MODE resolution, not just the db_path.
+        digest = self._digest('p63-profileb@example.com')
+        result = self.run_script(args=['--profile', 'obfus'])
+        self.assertIn(f'email:{digest}', result.stdout)
+        self.assertNotIn('p63-profileb@example.com', result.stdout)
+
+    def test_default_profile_still_honours_env_var_override(self):
+        # The env var must keep winning over every home's own config.json,
+        # including the profile that has its own obfuscated setting --
+        # here forced to plaintext via the env var, which must apply
+        # process-wide exactly as it did before this fix.
+        result = self.run_script(extra_env={'REVENIUM_SUBSCRIBER_EMAIL_MODE': 'plaintext'})
+        self.assertIn('email:p63-default@example.com', result.stdout)
+        self.assertIn('email:p63-profileb@example.com', result.stdout)
+
+
+class InvalidPerHomeSubscriberEmailModeTests(FleetWalkTestCase):
+    """An unrecognised subscriberEmailMode value in one profile's own
+    config.json must not spam a warning per actor -- one legible note per
+    affected home, falling back to plaintext for that home only."""
+
+    def setUp(self):
+        super().setUp()
+        _build_sessions_db(self._profile_db_path('bad'), rows=[
+            {'id': 'p63-b1', 'source': 'email', 'user_id': 'p63-bad@example.com',
+             'user_name': 'Bad Config Actor'},
+        ])
+        profile_config_dir = self.home / 'profiles' / 'bad' / 'state' / 'revenium'
+        profile_config_dir.mkdir(parents=True, exist_ok=True)
+        (profile_config_dir / 'config.json').write_text(
+            json.dumps({'subscriberEmailMode': 'not-a-real-mode'})
+        )
+
+    def test_falls_back_to_plaintext_with_one_note(self):
+        result = self.run_script()
+        self.assertIn('email:p63-bad@example.com', result.stdout)
+        self.assertEqual(
+            result.stdout.count('subscriberEmailMode') +
+            result.stderr.count('subscriberEmailMode'),
+            1,
+        )
 
 
 if __name__ == '__main__':

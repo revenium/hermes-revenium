@@ -122,11 +122,14 @@ else
   HOMES_TSV="$(hermes_profile_homes)"
 fi
 
-# DD-8: the ID column must show what actually SHIPS, so resolve the mode
-# once up front and pass every actor's key through the same chokepoint
-# (resolve_subscriber_wire_pair) the emission sites use.
-_subscriber_email_mode_resolution=$(resolve_subscriber_email_mode)
-SUBSCRIBER_EMAIL_MODE=$(printf '%s' "${_subscriber_email_mode_resolution}" | sed -n '1p')
+# Review WR-02: the ID column must show what actually SHIPS from EACH
+# profile's own reporter, so the mode is resolved PER HOME below (inside
+# the loop, mirroring db_path's own per-home derivation two lines down),
+# never once up front. A fleet host lets each profile set its own
+# subscriberEmailMode independently -- resolving it once at process start
+# from the default profile's config.json would show every OTHER profile's
+# email-source actors in the wrong wire form (plaintext when that
+# profile's own reporter ships obfuscated, or vice versa).
 
 DATA_LINES=""
 NOTE_LINES=""
@@ -285,6 +288,41 @@ PY
   esac
 
   READABLE_HOMES=$((READABLE_HOMES + 1))
+
+  # WR-02 fix: resolve THIS home's own subscriberEmailMode, not the
+  # process-wide one. The "default" profile is the one entry whose config
+  # path can legitimately diverge from the standard ${home}/state/revenium
+  # layout -- an operator (or install-cron.sh's own single-home target,
+  # install-cron.sh:170) may point REVENIUM_STATE_DIR somewhere else for
+  # the process this script itself is running as, and CONFIG_FILE (set at
+  # common.sh source time) already reflects that. Every OTHER profile home
+  # is provisioned exclusively by install.sh/install-hooks.sh, always at
+  # ${phome}/state/revenium -- there is no override mechanism for a named
+  # profile's config path, so deriving it from `home` here mirrors db_path's
+  # own per-home derivation exactly.
+  #
+  # REVENIUM_SUBSCRIBER_EMAIL_MODE keeps winning regardless of which path is
+  # used below: resolve_subscriber_email_mode checks the env var FIRST and
+  # only falls through to CONFIG_FILE when it is unset, so an operator who
+  # exports the env var still overrides every home in one pass, exactly as
+  # before this fix.
+  if [[ "${profile}" == "default" ]]; then
+    home_config_file="${CONFIG_FILE}"
+  else
+    home_config_file="${home}/state/revenium/config.json"
+  fi
+  _saved_config_file="${CONFIG_FILE}"
+  CONFIG_FILE="${home_config_file}"
+  _subscriber_email_mode_resolution=$(resolve_subscriber_email_mode)
+  CONFIG_FILE="${_saved_config_file}"
+  SUBSCRIBER_EMAIL_MODE=$(printf '%s' "${_subscriber_email_mode_resolution}" | sed -n '1p')
+  # One NOTE per home (never per actor -- this is a one-shot script, not a
+  # per-tick cron loop, but the sentinel-directory discipline the rest of
+  # this repo uses for repeating warnings is the right instinct even here:
+  # N homes with a typo produce N single lines, not N-times-the-actor-count).
+  if [[ "$(printf '%s' "${_subscriber_email_mode_resolution}" | sed -n '2p')" == "true" ]]; then
+    NOTE_LINES+="${profile}: subscriberEmailMode in ${home_config_file} is unrecognised -- treating as 'plaintext' for this home"$'\n'
+  fi
 
   while IFS=$'\x1f' read -r kind a b c d; do
     [[ -z "${kind}" ]] && continue

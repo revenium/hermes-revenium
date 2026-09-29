@@ -134,9 +134,15 @@ look empty on a fleet host even when every profile has actors to name.
 `--profile <name>` restricts it to one home. It opens each home's `state.db`
 `mode=ro`, resolves each actor's id through the same `resolve_subscriber_wire_pair`
 chokepoint every emission site uses (so the **ID column shows exactly the form
-that ships** — plaintext or `email:<64-hex>`, matching this host's own
-`subscriberEmailMode`), and pairs it with the name recorded at
-`json_extract(origin_json, '$.user_name')`.
+that ships** — plaintext or `email:<64-hex>`), and pairs it with the name
+recorded at `json_extract(origin_json, '$.user_name')`. The mode is resolved
+**per profile**, not once for the whole host: each profile home's own
+`config.json` (or, for the default profile, the process's own environment)
+governs the form shown for that profile's actors, exactly as each profile's
+own `hermes-report.sh`/`api-event-report.sh` reporter does — a fleet-wide run
+can legitimately show one profile's email-source actors in plaintext and
+another's in `email:<64-hex>` in the same table, because that is what each
+profile's own reporter actually ships.
 
 **Exit codes are stable for scripting:**
 
