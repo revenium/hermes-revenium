@@ -1155,9 +1155,24 @@ PY
 # `[[ ! -e "${current_sentinel}" ]]` guard alone makes every one of those
 # runs, after the first, a no-op -- including a SECOND script (e.g.
 # api-event-report.sh right after hermes-report.sh in the same flipped
-# tick) that resolves the identical mode: the first caller's sentinel
-# write is what the second caller's own check sees, so at most one of the
-# two disclosures per tick per install, never two.
+# tick) that resolves the identical mode, PROVIDED the two run
+# sequentially, as they do inside one cron.sh invocation's six stages: the
+# first caller's sentinel write is what the second caller's own check
+# sees, so at most one of the two disclosures per tick per install, never
+# two.
+#
+# THAT GUARANTEE IS SEQUENTIAL-ONLY (review WR-03), not a lock -- narrowing
+# a TOCTOU window is not the same as closing it (this project's own
+# recorded lesson). Neither hermes-report.sh nor api-event-report.sh takes
+# cron.lock on its own; only cron.sh does, and both scripts are documented
+# as independently invocable (CLAUDE.md). If an operator runs one reporter
+# by hand while the other is mid-run with the same newly-flipped mode --
+# or two cron ticks overlap because the first ran long -- both processes
+# can read `[[ ! -e "${current_sentinel}" ]]` as true before either has
+# written its own sentinel, and both will warn. The cost of that race is
+# bounded to a duplicate `warn()` log line, never a double-billed
+# completion or a lost disclosure, and it is NOT closed here -- only the
+# ordinary sequential-cron case is.
 warn_subscriber_mode_flip_once() {
   local mode="$1"
   local other_mode="obfuscated"
