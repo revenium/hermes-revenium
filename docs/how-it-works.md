@@ -219,7 +219,7 @@ A metered completion can also carry `--subscriber-id`, naming the actor who drov
 The actor is resolved from `sessions.user_id` — never from `display_name`, which on the
 reference host holds the *channel* id in 146 of 275 Slack rows and is empty in 98 more.
 The resolved value is namespaced `<source>:<id>` (`slack:U02C12JG78F`,
-`email:jane@acme.com`, `webhook:spike-test`) so two platforms never collide. A subagent
+`email:jane@corp.example`, `webhook:spike-test`) so two platforms never collide. A subagent
 session inherits its root session's actor through the same root-walk that already
 resolves `--agentic-job-id` and the squad dimensions, and bot/app actors are attributed
 identically to humans, with no special casing.

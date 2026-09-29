@@ -21,7 +21,7 @@ separately (see "Mapping an id back to a human" below) — it is never used to
 resolve the wire id itself.
 
 The resolved value is namespaced `<source>:<id>` — `slack:U02C12JG78F`,
-`email:jane@acme.com`, `webhook:spike-test` — so two platforms can never collide
+`email:jane@corp.example`, `webhook:spike-test` — so two platforms can never collide
 and the source stays legible without a join. A subagent session inherits its
 root session's actor through the same root-walk that already resolves
 `--agentic-job-id` and the squad dimensions, so subagent spend is never
