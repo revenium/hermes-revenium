@@ -23,6 +23,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history so tests that compare against the base branch can
+          # actually run. The default shallow checkout has no local `main`
+          # ref, which made the Phase 61 boundary guard skip in CI -- turning
+          # a real invariant (the compat fixtures, the shared test helper and
+          # the event reporter are UNMODIFIED) into no coverage at all, where
+          # a committed change to any of them would pass unchecked.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
