@@ -6,6 +6,11 @@ arms: a `cli` session shipping no subscriber at all, a Slack session attributing
 human who drove it, and a subagent session inheriting its root's actor. Verification ran on
 2026-09-30. This phase observes shipped behaviour and builds no new capability.
 
+This page covers evidence only - the live verdict for each arm, and how it was scored. For
+the dimension's own design (the `<source>:<id>` key, the `subscriberEmailMode` switch and its
+accepted limits, and the `subscriber-names.sh` mapping procedure), see
+`docs/subscriber-attribution.md`; this record does not restate that content.
+
 ## Results
 
 | Arm | What it tests | Induced session | Transaction id | `subscriberId` on tenant row | Verdict |
@@ -217,6 +222,42 @@ test suite and established by measurement on that host (D-15).
 
 **Inheritance verdict: CONFIRMED**
 
+## What this does not establish
+
+1. **One host, one tenant, one cron pass.** Nothing here establishes behaviour on a
+   multi-profile host, across tenants, or across repeated cron passes. Every arm was read
+   back from the same single pass, against the same single tenant.
+2. **One induced arc per arm.** The attribution and inheritance arms come from a single
+   Slack-driven arc - one root session and three subagent children; the omission arm from a
+   single `cli` session. These are existence proofs, not measurements of a rate.
+3. **CLI read-back only.** No dashboard or UI observation contributed to any verdict, per
+   D-01. The record therefore establishes what the API returns, not what an operator sees
+   rendered in the product.
+4. **Host-side wire evidence is corroboration only.** That the skill sent the argv carrying
+   `--subscriber-id` and wrote the ledger line establishes that the skill did its job; it does
+   not establish that the platform ingested or attributed the value. Only the tenant read
+   scores an arm, per D-03.
+5. **Omission covers `cli` only, not `cron`.** `cron` is the larger unattributed population on
+   this host but arrives on its own schedule and was neither induced nor read back here; SUB-10
+   asks for `cli`, per D-14.
+6. **Positive inheritance only.** Phase 61's D-11 negative-inheritance arm - a `cron` child
+   inheriting nothing - is not re-proven live here; it is already pinned in the test suite, and
+   Phase 61 established by measurement that inheritance is additive on this host, per D-15.
+7. **The Slack-triggers-subagents pattern's reproducibility, and how it was induced.** It took
+   exactly one induction attempt on this host (`64-02-SUMMARY.md`, Task 1: "Attempts: 1."),
+   answering research Open Question 1 affirmatively for this host. But the induction message
+   explicitly named the delegation toolset and asked for three parallel subagents by name,
+   rather than relying on organic fan-out - unlike the two historical precedents research
+   observed (2026-09-20, 2026-09-02), which were organic. The actor requirement (D-07: a real
+   human over Slack) holds regardless of how the fan-out was requested; what is not
+   established is that this exact fan-out pattern recurs unprompted, only that it can be
+   produced on request. This is the phase's one medium-confidence assumption.
+8. **Nothing about spend accuracy or cost attribution.** These arms establish that an identity
+   dimension is carried on the wire and read back correctly; they say nothing about whether the
+   token or cost figures on those same rows are themselves correct.
+9. **No arm in this record scored NOT CONFIRMED.** All three arms - omission, attribution, and
+   inheritance - scored CONFIRMED. None remains open, and none required a fallback read.
+
 ## The environment
 
 - **Deployed commit:** `5e200d67d8f7f6cf04de8de1cee3b1e5fc6c9fe2`, deployed to the reference
@@ -225,6 +266,10 @@ test suite and established by measurement on that host (D-15).
 - **Host:** the reference host used throughout the Subscriber Attribution milestone's
   measurements. Named by role only - no address, no hostname, no ssh key name.
 - **CLI:** `revenium v1.7-5-g8d46ad4 (8d46ad4)`, confirmed on the reference host.
+- **Run date:** 2026-09-30.
+- **Measured cron pass duration:** 17m22s for the completion-metering stage that shipped all
+  five induced sessions and whose resulting tenant rows this record scores (22:30:06 UTC to
+  22:47:28 UTC), per the `revenium-metering.log` bracket `64-02-SUMMARY.md` captured.
 - Neither a credential value nor a tenant identifier appears anywhere in this file.
 
 ---
