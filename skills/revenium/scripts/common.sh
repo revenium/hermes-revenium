@@ -317,6 +317,20 @@ REVENIUM_AUX_METERING="${REVENIUM_AUX_METERING:-enabled}"
 # no auxiliary warn state at all.
 AUX_WARN_FLAGS_DIR="${REVENIUM_AUX_WARN_FLAGS_DIR:-${MARKERS_DIR}/.aux-warn}"
 
+# Phase 63 Plan 03 (D-07): sixth sentinel directory, markers/.subscriber-mode,
+# in the same family as WARN_FLAGS_DIR, FALLBACK_WARN_FLAGS_DIR,
+# PROBE_WARN_FLAGS_DIR, OUTCOME_WARN_FLAGS_DIR, and AUX_WARN_FLAGS_DIR
+# above -- one zero-byte flag file per resolved subscriberEmailMode value
+# ("plaintext" or "obfuscated"), written by warn_subscriber_mode_flip_once
+# (below) so a mid-life flip of that switch is disclosed exactly ONCE per
+# install, never once per tick. At most two files ever accumulate under
+# this directory, because there are only two possible mode values.
+# Created lazily by its writer, deliberately absent from the eager
+# mkdir -p below -- an install that never resolves subscriberEmailMode
+# (i.e. never runs a reporter that calls resolve_subscriber_email_mode)
+# creates no subscriber-mode state at all.
+SUBSCRIBER_MODE_FLAGS_DIR="${REVENIUM_SUBSCRIBER_MODE_FLAGS_DIR:-${MARKERS_DIR}/.subscriber-mode}"
+
 # Phase 56 (D-13): mutual exclusion for the auxiliary pass's ENTIRE
 # read-ledger-baseline -> emit -> append sequence in
 # report_auxiliary_usage() (WINDOWS entry 5, Greptile P1 on PR #119). Before
@@ -677,14 +691,37 @@ supports_flag() {
   # sentinel-directory pattern the warn band uses, because this runs in a
   # per-minute cron and an ungated warn here is how the log grew to millions
   # of lines before.
+  #
+  # SUPPORTS_FLAG_QUIET is an INTERNAL call-site switch (default false), not an
+  # operator tunable and deliberately not in config-schema.md. It suppresses the
+  # sentinel write and the warn above — and NOTHING else: the three-outcome
+  # resolution, and the fail-open `return 1`, are identical either way, so a
+  # quiet caller reaches exactly the same verdict as a loud one.
+  #
+  # It exists for read-only reporting scripts that promise not to touch
+  # ${STATE_DIR}. subscriber-names.sh is the one such caller today: its D-11
+  # guarantee is that revenium-metering.log is byte-identical before and after
+  # every run, and it must write no file anywhere, because it prints unmasked
+  # identity data about named individuals to an operator's own terminal and
+  # nowhere else. Routing an indeterminate probe through warn() violated both
+  # (a WARN line plus a .probe-warn sentinel) — which is what broke
+  # test_phase63_subscriber_names.LogUntouchedTests on any host with no
+  # `revenium` on PATH, CI included.
+  #
+  # No signal is lost when a caller goes quiet: suppressing the log line is only
+  # legitimate BECAUSE that caller surfaces the same indeterminate result on its
+  # own stderr, in the one place its contract designates. A quiet caller that
+  # reported nothing at all would be hiding a real finding — do not add one.
   if [[ ${probe_rc} -ne 0 || -z "${help_text}" ]]; then
-    local probe_key flag_dir
-    probe_key="$(printf '%s %s' "${1}" "${2}" | tr -c 'A-Za-z0-9._-' '_')"
-    flag_dir="${PROBE_WARN_FLAGS_DIR}"
-    if mkdir -p "${flag_dir}" 2>/dev/null \
-       && [[ ! -e "${flag_dir}/${probe_key}" ]]; then
-      : > "${flag_dir}/${probe_key}" 2>/dev/null || true
-      warn "capability probe for '${2}' on 'revenium ${1}' was INDETERMINATE (exit ${probe_rc}, ${#help_text} bytes of help) — treating the flag as unsupported, so rows from this run omit it. This is not a confirmed absence."
+    if [[ "${SUPPORTS_FLAG_QUIET:-false}" != "true" ]]; then
+      local probe_key flag_dir
+      probe_key="$(printf '%s %s' "${1}" "${2}" | tr -c 'A-Za-z0-9._-' '_')"
+      flag_dir="${PROBE_WARN_FLAGS_DIR}"
+      if mkdir -p "${flag_dir}" 2>/dev/null \
+         && [[ ! -e "${flag_dir}/${probe_key}" ]]; then
+        : > "${flag_dir}/${probe_key}" 2>/dev/null || true
+        warn "capability probe for '${2}' on 'revenium ${1}' was INDETERMINATE (exit ${probe_rc}, ${#help_text} bytes of help) — treating the flag as unsupported, so rows from this run omit it. This is not a confirmed absence."
+      fi
     fi
     return 1
   fi
@@ -949,11 +986,30 @@ resolve_subscriber_id() {
   printf 'ok|%s:%s\n' "${source}" "${user_id}"
 }
 
-# Phase 61 (T-61-01): log-side masking only. The RESOLVED value handed to any
-# emission site is never masked — a future phase needs the exact address.
-# This exists because revenium-metering.log is the artifact operators paste
-# into support tickets and that diagnose.sh prints, which state.db is not.
-mask_subscriber_for_log() {
+# Phase 61 (T-61-01), renamed and recommented Phase 63 (WR-02/D-13): masks
+# ONLY an email-shaped subscriber value -- the part after the first ":"
+# containing an "@" -- to "<ns>:<first-char>***@<domain>". Every other
+# shape, including a raw Slack member id (e.g. slack:U02C12JG78F) or a
+# webhook token, passes through UNCHANGED, by design: neither is
+# human-readable without separate access to the Slack workspace or the
+# webhook's own system, and masking it would make revenium-metering.log --
+# the artifact operators paste into support tickets and that diagnose.sh
+# prints -- uncorrelatable with state.db for the 99% case operators
+# actually triage. WR-02 found an earlier version of this comment claiming
+# broader protection than the code delivers; D-13 is the correction, made
+# on the merits, not a behavior change.
+#
+# Despite that narrow scope, this is still the SINGLE CHOKEPOINT every
+# subscriber value must cross before it can reach the log (D-14) -- that
+# invariant is exactly what made CR-01 findable, when one of three call
+# sites had forgotten it. A hashed key under subscriberEmailMode=obfuscated
+# (Phase 63) has no "@", so it falls to the pass-through branch below and
+# logs verbatim -- which is correct, since a 64-hex digest is already
+# opaque, and is why no caller branches on the mode.
+#
+# The RESOLVED value handed to any emission site is never masked -- only
+# this log-facing copy is.
+mask_subscriber_email_for_log() {
   local key="$1"
   local ns="${key%%:*}"
   local rest="${key#*:}"
@@ -967,6 +1023,204 @@ mask_subscriber_for_log() {
       printf '%s\n' "${key}"
       ;;
   esac
+}
+
+# Phase 63 (SUB-06/D-01/D-02/D-04/D-05/D-06): resolve the subscriber-email
+# obfuscation switch. Same two-value, env > config.json > default shape as
+# every other closed-two-literal switch in this file (resolve_switch_setting,
+# above): "plaintext" | "obfuscated", default "plaintext" (SUB-06 requires
+# it, and plaintext is what an install metered before this switch existed).
+#
+# Deliberately NOT declared with a `:-` default anywhere in this file
+# (search this file for REVENIUM_SUBSCRIBER_EMAIL_MODE -- there is exactly
+# one occurrence, the argument below): that declaration is the SOLE reason
+# the event/aux switches (REVENIUM_EVENT_METERING_MODE, REVENIUM_AUX_METERING)
+# need a pre-`source common.sh` raw-env capture in their calling script --
+# without it, common.sh's own default would destroy the
+# unset-versus-explicit distinction resolve_switch_setting needs to reach
+# config.json. Omitting the declaration here means no caller of THIS
+# function needs that dance: "${REVENIUM_SUBSCRIBER_EMAIL_MODE:-}" below
+# reads the real, still-unset-if-unset process environment.
+#
+# Does NOT call warn() itself -- warning on an unrecognised value is the
+# caller's job, exactly as api-event-report.sh warns for eventMeteringMode.
+# common.sh is also sourced by the three in-session hooks (pre_llm_call.sh,
+# pre_tool_call.sh, post_tool_call.sh), and a source-time warn here would
+# write to the cron log on every single LLM call.
+resolve_subscriber_email_mode() {
+  resolve_switch_setting "${REVENIUM_SUBSCRIBER_EMAIL_MODE:-}" "subscriberEmailMode" "plaintext" "plaintext" "obfuscated"
+}
+
+# Phase 63 (SUB-06/D-01/D-02/D-04/D-05/D-06): the ONE chokepoint that turns a
+# resolved subscriber key into the two wire values a `meter completion` call
+# emits. Takes the already-resolved key (resolve_subscriber_id's own
+# "<source>:<user_id>" format, D-05 of Phase 61) and the resolved mode
+# (resolve_subscriber_email_mode's line one), and prints exactly ONE line,
+# "<wire_id>|<wire_email>" -- mirroring resolve_subscriber_id's own
+# single-line pipe-delimited shape, for the identical reason recorded above
+# that function: a per-session cron loop cannot afford two `sed` subshells
+# per call. `|` is a safe delimiter here because resolve_subscriber_id
+# already rejects a pipe, tab, CR, LF and 0x1F in both of its own arguments,
+# so neither half of this function's input can itself contain one.
+#
+# Applying this ONCE, here, rather than at each of the four `meter
+# completion` call sites, is deliberate (DD-2 in 63-01-PLAN.md): four sites
+# independently producing one permanent wire format is the exact divergence
+# class Phase 62 D-01/D-02 needed an equivalence test for.
+#
+# D-02: only the "email" namespace is touched by the mode. Every OTHER
+# source (slack, etc.) ships its key verbatim in BOTH modes and never gets a
+# populated wire_email -- this switch is scoped to the email source, not to
+# "every subscriber id".
+#
+# D-06: under obfuscation, wire_email is ALWAYS empty -- never populated
+# with the digest. A hash is not a reachable email address; putting one in
+# the email field would be the same class of fabrication this repo already
+# refuses for --skill-kind/--skill-plugin-name (Phase 62 D-06): a guessed
+# value poisons the dimension.
+#
+# Idempotent in "obfuscated" mode -- load-bearing, not defensive: when the
+# part after "email:" already matches ^[0-9a-f]{64}$ it is passed through
+# UNCHANGED and no second digest is computed. The auxiliary path
+# (63-02-PLAN.md) reads an already-wire-transformed key back out of the
+# seven-field aux_session_ctx cache and calls this helper on it a second
+# time; without idempotency that call would hash the hash and publish a
+# second, different permanent key for the same actor (Phase 62 D-09 records
+# aux_session_ctx's parse as a strict seven-field check with three
+# producers and one consumer -- widening it to an eighth field is
+# explicitly NOT the fix here). The hex test is safe because a real email
+# address always contains an "@", and ^[0-9a-f]{64}$ contains no "@", so no
+# legitimate address can ever collide with an already-hashed value.
+resolve_subscriber_wire_pair() {
+  local key="$1" mode="$2"
+  if [[ -z "${key}" ]]; then
+    printf '|\n'
+    return 0
+  fi
+  local ns="${key%%:*}" rest="${key#*:}"
+  if [[ "${ns}" != "email" ]]; then
+    # D-02: every non-email source ships verbatim, in both modes, with no
+    # wire_email -- the switch's scope stops at this branch.
+    printf '%s|\n' "${key}"
+    return 0
+  fi
+  if [[ "${mode}" != "obfuscated" ]]; then
+    # Plaintext, or any caller that never resolved the mode: meters exactly
+    # as it did before this switch existed.
+    printf '%s|%s\n' "${key}" "${rest}"
+    return 0
+  fi
+  if [[ "${rest}" =~ ^[0-9a-f]{64}$ ]]; then
+    # Idempotency guard (see function comment above): already a 64-hex
+    # digest -- pass through unchanged rather than hashing a hash.
+    printf 'email:%s|\n' "${rest}"
+    return 0
+  fi
+  # D-04/D-05: SHA-256, the full untruncated 64 hex chars, UNSALTED, no
+  # case-fold, no Unicode normalisation. Three properties of the expression
+  # below are part of the PERMANENT wire format D-04 locks in:
+  #   - not sliced: both existing hashlib.sha256 heredocs in this repo
+  #     (hermes-report.sh ~1522, setup-guardrails.sh ~627) take a prefix; a
+  #     sliced digest here would be a DIFFERENT, permanently-embedded
+  #     format.
+  #   - utf-8 over the address exactly as stored, with no casefold() and no
+  #     unicodedata.normalize(): folding or normalising would let two
+  #     byte-distinct addresses collapse into one subscriber row -- the
+  #     collision D-04 rejected masking for.
+  #   - no salt (D-05): deterministic across hosts, fleet profiles and
+  #     reinstalls, at the documented, accepted cost of
+  #     dictionary-reversibility for a guessable address.
+  # Forked only when mode=obfuscated AND namespace=email (both already true
+  # by this point), so the 97% no-actor path and the 99% slack-source path
+  # pay nothing (T-63-06).
+  local digest
+  digest=$(SUBSCRIBER_EMAIL="${rest}" python3 - <<'PY'
+import hashlib, os
+print(hashlib.sha256(os.environ['SUBSCRIBER_EMAIL'].encode('utf-8')).hexdigest())
+PY
+)
+  printf 'email:%s|\n' "${digest}"
+}
+
+# Phase 63 Plan 03 (D-07): discloses a MID-LIFE flip of subscriberEmailMode
+# exactly once per install, rate-limited through SUBSCRIBER_MODE_FLAGS_DIR
+# (common.sh, above) rather than firing every tick -- CLAUDE.md's own
+# measured cost of an ungated per-tick warn (9,039,937 log lines in 27 days
+# on this repo's own fleet host) is why this cannot be a bare `warn` inside
+# resolve_subscriber_email_mode itself.
+#
+# Takes the ALREADY-RESOLVED mode as its only argument (never re-resolves
+# it) and returns 0 unconditionally, like every other best-effort helper
+# in this file -- a failed mkdir/touch (e.g. a read-only state dir)
+# degrades to metering proceeding with no disclosure this run, never to a
+# failed reporter.
+#
+# The should-warn decision is made BEFORE the current mode's own sentinel
+# is written, and the sentinel is written BEFORE the warn is attempted --
+# in that order, deliberately -- so a `warn` that fails, or a run that
+# dies mid-tick right after the sentinel lands, can never produce a
+# SECOND disclosure on the next run. The cost of that ordering is a
+# theoretical missed disclosure on a crash in the narrow window between
+# the sentinel write and the warn call; the alternative (warn-then-write)
+# risks the unbounded-repeat failure mode this whole mechanism exists to
+# prevent, which is strictly worse for a log that is truncated in place.
+#
+# Warns in exactly two cases:
+#   1. A sentinel for the OTHER mode already exists and this mode's own
+#      sentinel does not -- a genuine mid-life flip, in either direction.
+#   2. This mode is "obfuscated", NEITHER mode's sentinel exists yet, and
+#      LEDGER_FILE is non-empty -- this install metered under the
+#      plaintext spelling before SUBSCRIBER_MODE_FLAGS_DIR existed, so the
+#      upgrade itself IS the flip (there is no earlier sentinel to prove
+#      it against).
+# A fresh install with an empty or absent ledger, or ten further ticks in
+# an already-disclosed mode, hits neither case: the outer
+# `[[ ! -e "${current_sentinel}" ]]` guard alone makes every one of those
+# runs, after the first, a no-op -- including a SECOND script (e.g.
+# api-event-report.sh right after hermes-report.sh in the same flipped
+# tick) that resolves the identical mode, PROVIDED the two run
+# sequentially, as they do inside one cron.sh invocation's six stages: the
+# first caller's sentinel write is what the second caller's own check
+# sees, so at most one of the two disclosures per tick per install, never
+# two.
+#
+# THAT GUARANTEE IS SEQUENTIAL-ONLY (review WR-03), not a lock -- narrowing
+# a TOCTOU window is not the same as closing it (this project's own
+# recorded lesson). Neither hermes-report.sh nor api-event-report.sh takes
+# cron.lock on its own; only cron.sh does, and both scripts are documented
+# as independently invocable (CLAUDE.md). If an operator runs one reporter
+# by hand while the other is mid-run with the same newly-flipped mode --
+# or two cron ticks overlap because the first ran long -- both processes
+# can read `[[ ! -e "${current_sentinel}" ]]` as true before either has
+# written its own sentinel, and both will warn. The cost of that race is
+# bounded to a duplicate `warn()` log line, never a double-billed
+# completion or a lost disclosure, and it is NOT closed here -- only the
+# ordinary sequential-cron case is.
+warn_subscriber_mode_flip_once() {
+  local mode="$1"
+  local other_mode="obfuscated"
+  [[ "${mode}" == "obfuscated" ]] && other_mode="plaintext"
+
+  mkdir -p "${SUBSCRIBER_MODE_FLAGS_DIR}" 2>/dev/null
+
+  local current_sentinel="${SUBSCRIBER_MODE_FLAGS_DIR}/${mode}"
+  local other_sentinel="${SUBSCRIBER_MODE_FLAGS_DIR}/${other_mode}"
+  local should_warn=false
+
+  if [[ ! -e "${current_sentinel}" ]]; then
+    if [[ -e "${other_sentinel}" ]]; then
+      should_warn=true
+    elif [[ "${mode}" == "obfuscated" && -s "${LEDGER_FILE}" ]]; then
+      should_warn=true
+    fi
+  fi
+
+  : > "${current_sentinel}" 2>/dev/null || true
+
+  if [[ "${should_warn}" == "true" ]]; then
+    warn "subscriberEmailMode/REVENIUM_SUBSCRIBER_EMAIL_MODE resolved to '${mode}', different from this install's previously observed setting: every email-source actor now has TWO permanent subscriber keys, one on rows already metered and a differently-spelled one on rows metered from now on -- neither set can be amended or deleted, and both keys are the SAME person."
+  fi
+  return 0
 }
 
 # Phase 61 (SUB-03/D-08/D-09): build the batch map consumed by

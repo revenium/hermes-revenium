@@ -577,12 +577,103 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # SAME +49 (1650->1699, 3984->4033, 4183->4232). api-event-report.sh
         # is untouched by this task. Pure shift once more -- the COUNT (4)
         # and the emitted VALUE expressions are unchanged.
+        #
+        # Re-measured again (Phase 63 Plan 01 Task 2, SUB-06): two blocks
+        # near the top of hermes-report.sh -- the new
+        # SUBSCRIBER_EMAIL_CLI_CAPABLE probe (16 lines, beside the existing
+        # SUBSCRIBER_CLI_CAPABLE probe) and the new SUBSCRIBER_EMAIL_MODE
+        # resolution (16 lines, beside the auxMetering resolution) -- sit
+        # ABOVE all four emission sites in this file, shifting every one of
+        # them by +32 (1715->1747, 4049->4081, 4248->4280). A third block,
+        # the resolve_subscriber_wire_pair chokepoint call (24 lines,
+        # inserted above `subscriber_log_suffix`'s own resolution inside
+        # the main per-session loop), sits BELOW the aux site (which lives
+        # in a separate function, `report_auxiliary_usage`, defined earlier
+        # in the file) but ABOVE both the marker-split and markerless
+        # sites, shifting those two further by +24 each (4081->4105,
+        # 4280->4304); the aux site stays at the +32-only value (1747). A
+        # fourth block, the markerless --subscriber-email emission itself
+        # (14 lines), sits AFTER the markerless file's own --operation-type
+        # site, so it shifts nothing here. api-event-report.sh is untouched
+        # by this task (its own --subscriber-email wiring, if any, is a
+        # later plan's job). Pure shift once more -- the COUNT (4) and the
+        # emitted VALUE expressions are unchanged, so both assertions above
+        # pass untouched. Verified against the diff hunks themselves
+        # (`git diff -U0`), not by arithmetic on a prior value.
+        #
+        # Re-measured again (Phase 63 Plan 01 Task 3, SUB-06): the
+        # marker-split site's own --subscriber-email append block (20
+        # lines, mirroring the markerless block Task 2 added, after that
+        # site's --subscriber-id block) sits BEFORE the markerless site's
+        # own --operation-type "CHAT" line in file order, so only the
+        # markerless site's line moved (4304->4324); the marker-split
+        # site's own --operation-type "${op_type}" line sits ABOVE its
+        # ticket/subscriber blocks and is unaffected (4105 unchanged), and
+        # the aux site (1747) is unaffected. api-event-report.sh remains
+        # untouched by this task. Pure shift once more -- the COUNT (4) and
+        # the emitted VALUE expressions are unchanged. Verified against the
+        # diff hunks themselves (`git diff -U0`), not by arithmetic.
+
+        # Re-measured again (Phase 63 Plan 02 Task 1, SUB-06): the auxiliary
+        # site's own --subscriber-id/--subscriber-email block, inside
+        # report_auxiliary_usage, grew by a net +34 (36 lines added
+        # re-deriving the wire pair via resolve_subscriber_wire_pair and
+        # adding the --subscriber-email append; 2 removed -- the old
+        # single-line --subscriber-id append replaced). This block sits
+        # BELOW the aux site's own --operation-type "${AUX_OPERATION_TYPE}"
+        # line (1747, inside the `cmd=(...)` array literal itself,
+        # unaffected) but ABOVE both the marker-split and markerless sites
+        # defined later in the file (inside main()), shifting each of
+        # THOSE by the full +34 (4105->4139, 4324->4358).
+        # api-event-report.sh is untouched by this task (its own
+        # --subscriber-email wiring is Task 2's job, re-measured
+        # separately below). Pure shift once more -- the COUNT (4) and the
+        # emitted VALUE expressions are unchanged. Verified against the
+        # diff hunks themselves (`git diff -U0`), not by arithmetic.
+        #
+        # Re-measured again (Phase 63 Plan 02 Task 2, SUB-06): three blocks
+        # in api-event-report.sh sit ABOVE the event site's own
+        # --operation-type line -- the SUBSCRIBER_EMAIL_MODE resolution
+        # (22 lines, beside the existing EVENT_METERING_MODE info line),
+        # the SUBSCRIBER_EMAIL_CLI_CAPABLE probe (15 lines, beside the
+        # existing SUBSCRIBER_CLI_CAPABLE probe), and the wire-pair
+        # transform bash block (25 lines, above the per-record loop) --
+        # shifting it by +62 total (1826->1888). A fourth block, the
+        # --subscriber-email emission append itself (17 lines), sits AFTER
+        # the operation-type line in file order, so it shifts nothing
+        # further. hermes-report.sh's three sites are unaffected by this
+        # task (already re-measured by Task 1 above). Pure shift once more
+        # -- the COUNT (4) and the emitted VALUE expressions are
+        # unchanged. Verified against the diff hunks themselves
+        # (`git diff -U0`), not by arithmetic.
+        # Re-measured again (Phase 63 Plan 03 Task 2, D-07): BOTH files
+        # gained one new block, each sitting ABOVE every site this test
+        # pins in that file, so this is the one task in the phase that
+        # shifts hermes-report.sh's three sites AND api-event-report.sh's
+        # one site in the SAME commit.
+        #
+        # hermes-report.sh: the warn_subscriber_mode_flip_once call plus
+        # its five-line comment (6 lines total) was inserted immediately
+        # after the SUBSCRIBER_EMAIL_MODE resolution's own `info` line, at
+        # the top of the file -- above all three of this file's sites (the
+        # aux site inside report_auxiliary_usage, and the marker-split and
+        # markerless sites inside main()). All three shift by the same +6:
+        # 1747->1753, 4139->4145, 4358->4364.
+        #
+        # api-event-report.sh: the same call plus its seven-line comment
+        # (8 lines total) was inserted immediately after that file's own
+        # SUBSCRIBER_EMAIL_MODE resolution block, above the event site's
+        # --operation-type line, shifting it by +8: 1888->1896.
+        #
+        # Pure shift in both files -- the COUNT (4) and the emitted VALUE
+        # expressions are unchanged. Verified against the diff hunks
+        # themselves (`git diff -U0`), not by arithmetic on a prior value.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1715),
-            ('hermes-report.sh', 4049),
-            ('hermes-report.sh', 4248),
-            ('api-event-report.sh', 1826),
+            ('hermes-report.sh', 1753),
+            ('hermes-report.sh', 4145),
+            ('hermes-report.sh', 4364),
+            ('api-event-report.sh', 1896),
         }
         self.assertEqual(
             found_locations, expected_locations,

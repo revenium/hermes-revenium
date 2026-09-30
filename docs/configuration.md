@@ -179,6 +179,21 @@ the counters are cumulative and the ledger starts empty. See
 [Auxiliary usage migration](migration-auxiliary-usage.md) for the measured size of the
 step-up and its caveat.
 
+### Subscriber attribution
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REVENIUM_SUBSCRIBER_EMAIL_MODE` | `plaintext` | `plaintext` ships an `email`-source actor's real address on `--subscriber-id`/`--subscriber-email`; `obfuscated` replaces it with an unsalted SHA-256 digest and omits `--subscriber-email` entirely. |
+
+This covers the `email` source only — a Slack member id or a webhook token ships
+verbatim in both modes, since obfuscating those would fight the separate procedure
+for mapping a shipped id back to a human. Flipping this setting on an install that
+has already metered fragments every email-source actor into two permanent,
+unamendable subscriber keys (the plaintext one on rows already sent, the hash on
+rows sent afterward); this is disclosed by a one-shot warning per install, not
+prevented. See [Subscriber attribution](subscriber-attribution.md) for the full
+record, including what the unsalted hash does and does not defend against.
+
 ### Outcome timeline metrics
 
 After the ordinary job-outcome report, cron can append the assessment's value, hours saved,

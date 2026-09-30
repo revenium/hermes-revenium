@@ -133,8 +133,21 @@ def assert_argv_matches_golden(test_case, argv, golden):
         )
 
 
-def assert_argv_is_golden_argv_order(test_case, argv, golden, extra_tail=()):
-    """Assert captured argv equals `list(golden['argv_order']) + list(extra_tail)`.
+def assert_argv_is_golden_argv_order(test_case, argv, golden, extra_tail=(), value_overrides=None):
+    """Assert captured argv equals `list(golden['argv_order']) + list(extra_tail)`,
+    with `value_overrides` applied to the base `argv_order` list first.
+
+    `value_overrides` (Phase 63, DD-4) is an optional `{flag_name: replacement_value}`
+    mapping. For each entry, the token immediately following that flag name in
+    the EXPECTED list (built from `golden['argv_order']`, BEFORE `extra_tail` is
+    appended) is replaced with `replacement_value`. This exists because an
+    `email`-source fixture changes `--environment` from `test` to `email`
+    (`--environment` is `sessions.source` verbatim), and D-04 forbids adding a
+    new golden file or key just to change ONE value already present in the
+    existing `argv_order` -- the absent-case golden must stay byte-identical
+    and unedited. Raises an explicit AssertionError when a named flag is absent
+    from `argv_order`, so a typo can never silently no-op the override and make
+    a moved/renamed flag look like it passed.
 
     Golden-comparison sibling of
     `tests/test_phase61_subscriber_boundary.py::_assert_argv_equal_modulo_timestamps`
@@ -160,7 +173,19 @@ def assert_argv_is_golden_argv_order(test_case, argv, golden, extra_tail=()):
     compared with its literal timestamps, exactly as the four pre-existing
     `argv_order` modules do.
     """
-    expected = list(golden['argv_order']) + list(extra_tail)
+    base = list(golden['argv_order'])
+    if value_overrides:
+        for flag_name, replacement_value in value_overrides.items():
+            test_case.assertIn(
+                flag_name, base,
+                f'value_overrides names {flag_name!r}, which is not present '
+                f'in golden argv_order -- a typo here would silently no-op '
+                f'the override and let a moved/renamed flag look correct.\n'
+                f'argv_order: {base}'
+            )
+            idx = base.index(flag_name)
+            base[idx + 1] = replacement_value
+    expected = base + list(extra_tail)
 
     sentinel = golden.get('argv_order_pattern_sentinel')
     if sentinel is not None:
@@ -202,7 +227,8 @@ def assert_argv_is_golden_argv_order(test_case, argv, golden, extra_tail=()):
 def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, tool_log=None,
                 squad_capable=True, reasoning_tokens_capable=False,
                 skill_capable=False, outcome_value_capable=True,
-                jobs_org_capable=False, subscriber_capable=False):
+                jobs_org_capable=False, subscriber_capable=False,
+                subscriber_email_capable=False):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -249,6 +275,14 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
     exercising the pre-Phase-62 wire shape the goldens pin (Phase 62,
     SUB-05/07/08). True advertises the flag, modelling a CLI that accepts
     --subscriber-id on `meter completion`.
+
+    subscriber_email_capable=False (default) omits the --subscriber-email
+    help line, so SUBSCRIBER_EMAIL_CLI_CAPABLE resolves false and every
+    existing caller keeps exercising the pre-Phase-63 wire shape the goldens
+    pin (Phase 63, SUB-06). True advertises the flag, modelling a CLI that
+    accepts --subscriber-email on `meter completion` -- independent of
+    subscriber_capable, so a shim can model a CLI advertising
+    --subscriber-id but NOT --subscriber-email (Run G, SUB-07).
     """
     if squad_capable:
         squad_help_lines = (
@@ -295,6 +329,20 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         )
     else:
         subscriber_help_lines = ''
+    # Phase 63 (SUB-06): subscriber-email attribution. Default False so
+    # every existing caller keeps exercising the pre-Phase-63 wire shape the
+    # goldens pin. Independent of subscriber_capable above -- the two flags
+    # were added to the real CLI independently (DD-3), so this shim can
+    # model either combination, including --subscriber-id advertised but
+    # --subscriber-email NOT (SUB-07's Run G). Placed alongside
+    # subscriber_help_lines, still BEFORE the --agentic-job-id echo below
+    # for the identical SIGPIPE-ordering reason recorded above.
+    if subscriber_email_capable:
+        subscriber_email_help_lines = (
+            '      echo "--subscriber-email string             Subscriber email"\n'
+        )
+    else:
+        subscriber_email_help_lines = ''
     # Phase 38 (CR-01/WR-03): v1.5 jobs-outcome value flags. Default True so
     # every existing caller keeps exercising the "flags ship" wire shape;
     # False models the older CLI CR-01's capability probe exists to protect.
@@ -335,7 +383,8 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         + squad_help_lines
         + reasoning_help_lines
         + skill_help_lines
-        + subscriber_help_lines +
+        + subscriber_help_lines
+        + subscriber_email_help_lines +
         '      echo "--agentic-job-id  Agentic job instance identifier"\n'
         '      exit 0\n'
         '    fi\n'

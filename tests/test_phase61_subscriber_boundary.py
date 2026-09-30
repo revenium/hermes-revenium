@@ -564,7 +564,7 @@ class GoldenCoexistenceWithResolvedSubscriberTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class ResolutionFailClosedAndMaskingTests(unittest.TestCase):
-    """Unit-level contract of `resolve_subscriber_id` / `mask_subscriber_for_log`
+    """Unit-level contract of `resolve_subscriber_id` / `mask_subscriber_email_for_log`
     via the `bash -c 'source common.sh; ...'` idiom (mirroring
     tests/test_phase42_assessment_contract.py:1435-1470 and this repo's own
     tests/test_phase61_identity_resolution.py::ResolveSubscriberIdUnitTests).
@@ -784,7 +784,7 @@ class ResolutionFailClosedAndMaskingTests(unittest.TestCase):
     # -- Masking (T-61-01) --
 
     def test_mask_and_resolve_differ_for_an_email(self):
-        """`mask_subscriber_for_log` masks an email local part; the RESOLVED
+        """`mask_subscriber_email_for_log` masks an email local part; the RESOLVED
         value `resolve_subscriber_id` itself produces for the identical
         input is EXACT and unmasked -- the two must differ, or the log-side
         mitigation has leaked into the value a future phase needs exact.
@@ -804,14 +804,14 @@ class ResolutionFailClosedAndMaskingTests(unittest.TestCase):
         resolved_key = r_resolved.stdout.strip().split('|', 1)[1]
 
         r_masked = self._call_common(
-            'mask_subscriber_for_log', 'email:p61user@example.test'
+            'mask_subscriber_email_for_log', 'email:p61user@example.test'
         )
         self.assertEqual(r_masked.returncode, 0, r_masked.stderr)
         masked_value = r_masked.stdout.strip()
         self.assertEqual(masked_value, 'email:p***@example.test')
         self.assertNotEqual(
             resolved_key, masked_value,
-            'resolve_subscriber_id and mask_subscriber_for_log must NOT agree '
+            'resolve_subscriber_id and mask_subscriber_email_for_log must NOT agree '
             'for an email -- if they do, masking has leaked into the resolved '
             'value Phase 63 needs exact'
         )
@@ -826,7 +826,7 @@ class ResolutionFailClosedAndMaskingTests(unittest.TestCase):
         MISSES: greps ONE run's log for ONE email-shaped input; it does not
         prove masking for a source this fixture never seeds reaching this
         same emit path (structurally, every `Reported:` line funnels
-        through the SAME `mask_subscriber_for_log` call per
+        through the SAME `mask_subscriber_email_for_log` call per
         `subscriber_log_suffix`'s single construction site, so a second
         email fixture would not exercise new code -- but this test alone
         does not demonstrate that).

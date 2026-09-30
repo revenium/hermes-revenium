@@ -352,6 +352,15 @@ class RepositoryTests(unittest.TestCase):
             # this repo has already been lost twice (the v1.3/v1.4
             # closeouts, auxiliary-usage-sizing.md).
             ROOT / 'docs' / 'cli-verb-ask.md',
+            # Phase 63 (SUB-06/SUB-09) — the tracked subscriber-attribution
+            # record: the dimension, the subscriberEmailMode switch and its
+            # accepted limits (unsalted hash, mid-life-flip fragmentation),
+            # the subscriber-names.sh mapping procedure, and the corrected
+            # D-09 finding (subscribers lookup is a 404, not a 403, and the
+            # real provisioning block is the missing email for Slack
+            # actors). `.planning/` and `docs/internal/` are both gitignored,
+            # so a tracked docs/ file plus this pin is the only durable home.
+            ROOT / 'docs' / 'subscriber-attribution.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -406,6 +415,11 @@ class RepositoryTests(unittest.TestCase):
             # Phase 32 Plan 03 — drain-completion gate (C-11/D-13, EVT-12)
             SKILL / 'scripts' / 'drain-status.sh',
             SKILL / 'scripts' / 'costs-status.sh',
+            # Phase 63 (SUB-09) — the read-only subscriber-id-to-name mapping
+            # procedure; this pin is what delivers it to every install,
+            # including a tap-installed host, per D-10's rejection of a
+            # repo-only doc as the vehicle.
+            SKILL / 'scripts' / 'subscriber-names.sh',
             # Phase 6 — on_session_end classifier plugin (HOOK-01, HOOK-11)
             SKILL / 'plugins' / 'revenium-classifier' / 'plugin.yaml',
             SKILL / 'plugins' / 'revenium-classifier' / '__init__.py',
@@ -2684,6 +2698,25 @@ exit 0
                 'AUX_WARN_FLAGS_DIR must NOT be in the eager mkdir -p -- an '
                 'install that never meters an auxiliary row must create no '
                 'auxiliary warn state at all',
+            )
+        # Phase 63 Plan 03 (D-07): SUBSCRIBER_MODE_FLAGS_DIR, the sixth
+        # sentinel directory in the WARN_FLAGS_DIR family. Created lazily
+        # by its writer (warn_subscriber_mode_flip_once) -- deliberately
+        # absent from the eager mkdir -p, reusing the SAME mkdir_lines
+        # list computed above, matching every other lazily-created
+        # sentinel directory's own assertion shape in this method.
+        self.assertIn('SUBSCRIBER_MODE_FLAGS_DIR=', text)
+        self.assertIn('markers/.subscriber-mode', text)
+        self.assertRegex(
+            text,
+            r'SUBSCRIBER_MODE_FLAGS_DIR="\$\{REVENIUM_SUBSCRIBER_MODE_FLAGS_DIR:-\$\{MARKERS_DIR\}/\.subscriber-mode\}"',
+        )
+        for ln in mkdir_lines:
+            self.assertNotIn(
+                'SUBSCRIBER_MODE_FLAGS_DIR', ln,
+                'SUBSCRIBER_MODE_FLAGS_DIR must NOT be in the eager mkdir -p '
+                '-- an install that never resolves subscriberEmailMode must '
+                'create no subscriber-mode state at all',
             )
         # Phase 56 Plan 02 (D-13): the auxiliary submission atomicity lock
         # (WINDOWS entry 5) and its bounded timeout, declared only in

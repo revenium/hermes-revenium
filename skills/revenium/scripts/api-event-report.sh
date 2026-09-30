@@ -94,6 +94,36 @@ if [[ "${_event_metering_mode_invalid}" == "true" ]]; then
 fi
 info "api-event-report.sh running in EVENT_METERING_MODE=${EVENT_METERING_MODE}"
 
+# Phase 63 (SUB-06, DD-1): resolve the subscriber-email obfuscation switch
+# once per run, via the dedicated common.sh helper
+# (resolve_subscriber_email_mode) rather than an inline resolve_switch_setting
+# call. Unlike EVENT_METERING_MODE above, this needs NO pre-`source`
+# _SUBSCRIBER_EMAIL_MODE_ENV_RAW capture: common.sh deliberately declares no
+# `:-` default for REVENIUM_SUBSCRIBER_EMAIL_MODE (see
+# resolve_subscriber_email_mode's own comment in common.sh), so sourcing
+# common.sh above never overwrote the "operator left it unset" signal the
+# way its own "${REVENIUM_EVENT_METERING_MODE:-shadow}" declaration would
+# have -- this script's env-capture-before-source dance one line above this
+# block is a pattern this switch simply does not need. A typo must never
+# silently change whether a plaintext address reaches Revenium, so an
+# unrecognised value warns and falls back to "plaintext" (the address ships
+# verbatim) rather than failing closed or open silently.
+_subscriber_email_mode_resolution=$(resolve_subscriber_email_mode)
+SUBSCRIBER_EMAIL_MODE=$(printf '%s' "${_subscriber_email_mode_resolution}" | sed -n '1p')
+_subscriber_email_mode_invalid=$(printf '%s' "${_subscriber_email_mode_resolution}" | sed -n '2p')
+if [[ "${_subscriber_email_mode_invalid}" == "true" ]]; then
+  warn "REVENIUM_SUBSCRIBER_EMAIL_MODE/subscriberEmailMode had an unrecognised value — falling back to 'plaintext' (the address ships verbatim)."
+fi
+info "api-event-report.sh running in SUBSCRIBER_EMAIL_MODE=${SUBSCRIBER_EMAIL_MODE}"
+# Phase 63 Plan 03 (D-07): disclose a mid-life flip of the mode just
+# resolved above, before any session is processed. Shares
+# SUBSCRIBER_MODE_FLAGS_DIR with hermes-report.sh's own call, so within
+# one flipped tick whichever reporter runs first writes the sentinel and
+# the other's call is a no-op -- one disclosure per flip per install, not
+# per script. See warn_subscriber_mode_flip_once's own comment
+# (common.sh) for the full ordering argument.
+warn_subscriber_mode_flip_once "${SUBSCRIBER_EMAIL_MODE}"
+
 if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
   # T-32-18: bound the shadow report the same way the metering log is
   # bounded, at the same thresholds — a fleet-wide shadow window must not
@@ -163,6 +193,21 @@ fi
 SUBSCRIBER_CLI_CAPABLE=false
 if supports_flag "meter completion" "--subscriber-id"; then
   SUBSCRIBER_CLI_CAPABLE=true
+fi
+
+# Subscriber-email attribution (Phase 63, SUB-06, DD-3) — the event-path
+# sibling of hermes-report.sh's own SUBSCRIBER_EMAIL_CLI_CAPABLE probe
+# (Plan 63-01). Its OWN probe, never a ride on SUBSCRIBER_CLI_CAPABLE
+# above, for the identical reason hermes-report.sh's own comment records:
+# --subscriber-id and --subscriber-email were added to the CLI
+# independently, and supports_flag's own header documents the consequence
+# of wrongly assuming "supported" — the CLI rejects the unknown flag and
+# the WHOLE meter call fails, not just this one dimension. Per-script
+# duplication (not a shared sourced probe) matches every other flag family
+# here.
+SUBSCRIBER_EMAIL_CLI_CAPABLE=false
+if supports_flag "meter completion" "--subscriber-email"; then
+  SUBSCRIBER_EMAIL_CLI_CAPABLE=true
 fi
 
 ORG_NAME=""
@@ -1129,6 +1174,31 @@ PY
       subscriber_key=$(awk -F"${_MAP_SEP}" -v s="${sid}" '$1==s{print $10; exit}' "${_env_map_file}" 2>/dev/null)
     fi
 
+    # Subscriber-email attribution (Phase 63, SUB-06/D-01/D-02/D-04/D-06):
+    # the wire-pair transform, on the BASH side, immediately after the
+    # lookup above and BEFORE any per-record use of subscriber_key below.
+    # Calls the SAME common.sh chokepoint hermes-report.sh's own
+    # per-session call site uses (resolve_subscriber_wire_pair) -- one
+    # helper owns the permanent wire format for all four emission sites,
+    # which is exactly the divergence class Phase 62 D-01/D-02 needed an
+    # equivalence test for. subscriber_key is rewritten IN PLACE with the
+    # wire id (verbatim for a non-email key or in plaintext mode; the
+    # obfuscated hash for an email-source key under obfuscation), so every
+    # line below this point that reads subscriber_key already sees the
+    # wire value. Deliberately NOT touching the Python resolve_subscriber_key
+    # mirror inside the heredoc further down this file, and NOT adding
+    # hashing there: doing the transform here, once, on the bash side is
+    # the whole reason tests/test_phase62_subscriber_key_equivalence.py's
+    # proof that the bash and Python key builders agree over the full
+    # input space stays valid untouched by this plan.
+    local subscriber_email=""
+    if [[ -n "${subscriber_key}" ]]; then
+      local _subscriber_wire_pair
+      _subscriber_wire_pair="$(resolve_subscriber_wire_pair "${subscriber_key}" "${SUBSCRIBER_EMAIL_MODE}")"
+      subscriber_key="${_subscriber_wire_pair%%|*}"
+      subscriber_email="${_subscriber_wire_pair#*|}"
+    fi
+
     local markers_file="${session_markers_dir}/${sid}.jsonl"
 
     # --- Enrich: read the event file (and, in join mode, the markers file)
@@ -1892,6 +1962,23 @@ PY
       # no resolved actor appends NOTHING.
       if [[ "${SUBSCRIBER_CLI_CAPABLE}" == "true" && -n "${subscriber_key}" ]]; then
         cmd+=(--subscriber-id "${subscriber_key}")
+      fi
+
+      # Subscriber-email attribution (Phase 63, SUB-06/D-01/D-02/D-06).
+      # Appended DIRECTLY after --subscriber-id — flag order is the argv
+      # contract shared with hermes-report.sh. subscriber_key and
+      # subscriber_email were both resolved ONCE per session (the
+      # resolve_subscriber_wire_pair call above the per-record loop), so
+      # every record of this session's loop carries the SAME value — this
+      # appends nothing new per record, it only reads an already-resolved
+      # value. In obfuscated mode subscriber_email is always empty (D-06),
+      # so this line appends NOTHING for an obfuscated actor even when
+      # SUBSCRIBER_EMAIL_CLI_CAPABLE is true — the omission IS the
+      # mitigation, not a gap. Matches this site's existing combined
+      # single-line `if` style (both conditions on one line, unlike
+      # hermes-report.sh's own two-line split at its own sites).
+      if [[ "${SUBSCRIBER_EMAIL_CLI_CAPABLE}" == "true" && -n "${subscriber_email}" ]]; then
+        cmd+=(--subscriber-email "${subscriber_email}")
       fi
 
       if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then

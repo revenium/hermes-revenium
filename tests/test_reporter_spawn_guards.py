@@ -133,7 +133,21 @@ REAL_PYTHON3 = sys.executable
 # genuinely zero-token ones -- and does not run at all on this fixture, where
 # the absent table yields no candidates and the function returns early.
 # quick-260814-e7c's per-session hot-path guarantee remains untouched.
-NO_MARKER_SPAWN_CEILING = 18
+#
+# Phase 63 Plan 01 (SUB-06) raises it once more, to 19:
+# resolve_subscriber_email_mode (common.sh) calls resolve_switch_setting for
+# the new subscriberEmailMode switch, which reads config.json's key via ONE
+# python3 spawn at STARTUP -- once per run, not once per session -- exactly
+# the same shape as the Phase 32 Plan 03 (legacyCompletions) and Phase 55
+# (auxMetering) exemptions above, and for the identical reason: it fires
+# only when REVENIUM_SUBSCRIBER_EMAIL_MODE is UNSET AND config.json exists
+# (this fixture's config.json always exists, for organizationName). It does
+# not scale with session count: the per-session wire-pair chokepoint
+# (resolve_subscriber_wire_pair) is gated on a non-empty subscriber_key,
+# and this fixture's no-marker session resolves none, so it forks nothing
+# beyond this one startup spawn. quick-260814-e7c's per-session hot-path
+# guarantee remains untouched.
+NO_MARKER_SPAWN_CEILING = 19
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):
