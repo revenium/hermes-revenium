@@ -245,11 +245,53 @@ class ErrPathNoSessionsTableTests(SubscriberNamesScriptTestCase):
 
 
 class LogUntouchedTests(SubscriberNamesScriptTestCase):
-    def _assert_log_untouched(self, args=()):
+    """D-11: revenium-metering.log is byte-identical before and after every
+    run, and no file is written anywhere, whether the run succeeds, finds
+    nothing, or fails.
+
+    These three cases were ENVIRONMENT-DEPENDENT until the WR-01 regression
+    exposed it, and that is the durable lesson worth keeping. WR-01 added a
+    `supports_flag "meter completion" "--subscriber-id"` probe, and an
+    INDETERMINATE probe (common.sh) appends a WARN line and drops a
+    .probe-warn sentinel -- both forbidden here. A probe is indeterminate
+    only when `revenium` cannot answer at all, so on any workstation with a
+    real CLI on PATH these tests stayed green while CI, which has no
+    `revenium` anywhere, went red on all three.
+
+    `_unusable_cli_env` therefore reproduces CI's condition deterministically
+    rather than inheriting the host's: a stub that exits non-zero with no
+    output, placed in "${HOME}/.local/bin" with HOME redirected, because
+    ensure_path (common.sh:495-510) prepends that directory FIRST and would
+    otherwise let a homebrew revenium shadow the stub. Note the contrast with
+    SubscriberIdCapabilityNoticeTests below: its build_shim shims ANSWER the
+    probe, so they exercise a determinate NEGATIVE and by construction cannot
+    catch this class of defect.
+    """
+
+    def _unusable_cli_env(self):
+        """A `revenium` that fails silently -- the indeterminate-probe path."""
+        fake_home = self.tmp_path / 'logfakehome'
+        local_bin = fake_home / '.local' / 'bin'
+        local_bin.mkdir(parents=True, exist_ok=True)
+        stub = local_bin / 'revenium'
+        stub.write_text('#!/bin/sh\nexit 127\n')
+        stub.chmod(0o755)
+        return {
+            'HOME': str(fake_home),
+            'PATH': f'{local_bin}{os.pathsep}{os.environ.get("PATH", "")}',
+        }
+
+    def _assert_log_untouched(self, args=(), extra_env=None):
         before = _log_bytes(self.state_dir)
-        result = self.run_script(args=args)
+        result = self.run_script(args=args, extra_env=extra_env)
         after = _log_bytes(self.state_dir)
         self.assertEqual(before, after, f'revenium-metering.log changed (exit={result.returncode})')
+        # The sentinel is the second write the WARN path makes. Asserting only
+        # the log would let a caller keep writing into STATE_DIR unnoticed.
+        self.assertFalse(
+            (Path(self.state_dir) / 'markers' / '.probe-warn').exists(),
+            f'.probe-warn sentinel written (exit={result.returncode})',
+        )
         return result
 
     def test_log_untouched_on_success(self):
@@ -272,6 +314,20 @@ class LogUntouchedTests(SubscriberNamesScriptTestCase):
         conn.close()
         result = self._assert_log_untouched()
         self.assertEqual(result.returncode, 1)
+
+    def test_log_untouched_when_capability_probe_is_indeterminate(self):
+        """The WR-01 regression itself, pinned. Fails on any host, not just
+        one that happens to lack a revenium CLI."""
+        _build_sessions_db(self.db_path, rows=[
+            {'id': 'p63-s1', 'source': 'slack', 'user_id': 'p63-U001',
+             'user_name': 'Jane Doe'},
+        ])
+        result = self._assert_log_untouched(extra_env=self._unusable_cli_env())
+        # The finding is not swallowed -- suppressing the log line is only
+        # legitimate because the same result reaches the operator on stderr.
+        self.assertIn('does not advertise --subscriber-id', result.stderr)
+        self.assertIn('Jane Doe', result.stdout)
+        self.assertEqual(result.returncode, 0)
 
 
 class SubscriberIdShippedFormTests(SubscriberNamesScriptTestCase):

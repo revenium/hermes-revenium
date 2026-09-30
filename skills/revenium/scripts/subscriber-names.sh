@@ -101,8 +101,18 @@ done
 # FOUR production emission sites ship NO subscriber attribution for ANY
 # actor that tick (SUB-07's fail-open contract) -- this script's own ID
 # column must not imply otherwise on a host in that state.
+#
+# SUPPORTS_FLAG_QUIET (common.sh) is what keeps this probe compatible with D-11.
+# An INDETERMINATE probe -- which is every probe on a host with no `revenium` on
+# PATH, CI included -- otherwise appends a WARN line to revenium-metering.log and
+# drops a .probe-warn sentinel under MARKERS_DIR. Both are writes this script
+# promises never to make, and the log line breaks the byte-identical guarantee
+# outright. Nothing is suppressed but those two writes: the verdict below is
+# identical either way, and the indeterminate result still reaches the operator
+# through the NOTE on stderr immediately after -- which is the only reason
+# silencing the log line here is honest rather than a swallowed finding.
 SUBSCRIBER_CLI_CAPABLE=false
-if supports_flag "meter completion" "--subscriber-id"; then
+if SUPPORTS_FLAG_QUIET=true supports_flag "meter completion" "--subscriber-id"; then
   SUBSCRIBER_CLI_CAPABLE=true
 fi
 if [[ "${SUBSCRIBER_CLI_CAPABLE}" != "true" ]]; then

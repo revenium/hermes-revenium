@@ -691,14 +691,37 @@ supports_flag() {
   # sentinel-directory pattern the warn band uses, because this runs in a
   # per-minute cron and an ungated warn here is how the log grew to millions
   # of lines before.
+  #
+  # SUPPORTS_FLAG_QUIET is an INTERNAL call-site switch (default false), not an
+  # operator tunable and deliberately not in config-schema.md. It suppresses the
+  # sentinel write and the warn above — and NOTHING else: the three-outcome
+  # resolution, and the fail-open `return 1`, are identical either way, so a
+  # quiet caller reaches exactly the same verdict as a loud one.
+  #
+  # It exists for read-only reporting scripts that promise not to touch
+  # ${STATE_DIR}. subscriber-names.sh is the one such caller today: its D-11
+  # guarantee is that revenium-metering.log is byte-identical before and after
+  # every run, and it must write no file anywhere, because it prints unmasked
+  # identity data about named individuals to an operator's own terminal and
+  # nowhere else. Routing an indeterminate probe through warn() violated both
+  # (a WARN line plus a .probe-warn sentinel) — which is what broke
+  # test_phase63_subscriber_names.LogUntouchedTests on any host with no
+  # `revenium` on PATH, CI included.
+  #
+  # No signal is lost when a caller goes quiet: suppressing the log line is only
+  # legitimate BECAUSE that caller surfaces the same indeterminate result on its
+  # own stderr, in the one place its contract designates. A quiet caller that
+  # reported nothing at all would be hiding a real finding — do not add one.
   if [[ ${probe_rc} -ne 0 || -z "${help_text}" ]]; then
-    local probe_key flag_dir
-    probe_key="$(printf '%s %s' "${1}" "${2}" | tr -c 'A-Za-z0-9._-' '_')"
-    flag_dir="${PROBE_WARN_FLAGS_DIR}"
-    if mkdir -p "${flag_dir}" 2>/dev/null \
-       && [[ ! -e "${flag_dir}/${probe_key}" ]]; then
-      : > "${flag_dir}/${probe_key}" 2>/dev/null || true
-      warn "capability probe for '${2}' on 'revenium ${1}' was INDETERMINATE (exit ${probe_rc}, ${#help_text} bytes of help) — treating the flag as unsupported, so rows from this run omit it. This is not a confirmed absence."
+    if [[ "${SUPPORTS_FLAG_QUIET:-false}" != "true" ]]; then
+      local probe_key flag_dir
+      probe_key="$(printf '%s %s' "${1}" "${2}" | tr -c 'A-Za-z0-9._-' '_')"
+      flag_dir="${PROBE_WARN_FLAGS_DIR}"
+      if mkdir -p "${flag_dir}" 2>/dev/null \
+         && [[ ! -e "${flag_dir}/${probe_key}" ]]; then
+        : > "${flag_dir}/${probe_key}" 2>/dev/null || true
+        warn "capability probe for '${2}' on 'revenium ${1}' was INDETERMINATE (exit ${probe_rc}, ${#help_text} bytes of help) — treating the flag as unsupported, so rows from this run omit it. This is not a confirmed absence."
+      fi
     fi
     return 1
   fi
