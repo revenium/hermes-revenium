@@ -71,6 +71,10 @@ This Hermes skill bundle uses a plugin, three shell hooks, and a cron for runtim
   a live tenant: LIVE-02 through LIVE-06 plus two arms added in the open, with
   one criterion recorded NOT CONFIRMED live and its finding stated with its
   limit.
+- [Subscriber live proof](subscriber-live-proof.md): SUB-10's three arms -
+  omission, attribution, and inheritance - measured against the reference host
+  and a real tenant, all three scored CONFIRMED by CLI read-back only, with the
+  single-host, single-arc, and directed-fan-out limits stated plainly.
 - [ROI read-surface ask](roi-read-surface-ask.md): the tracked, standing
   ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
   on `jobs roi`, and the Phase 53 gate this skill shipped instead of waiting

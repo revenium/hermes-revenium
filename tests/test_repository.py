@@ -361,6 +361,15 @@ class RepositoryTests(unittest.TestCase):
             # actors). `.planning/` and `docs/internal/` are both gitignored,
             # so a tracked docs/ file plus this pin is the only durable home.
             ROOT / 'docs' / 'subscriber-attribution.md',
+            # Phase 64 (SUB-10) — the tracked live-tenant proof of the
+            # subscriber-attribution wire dimension against the reference
+            # host and a real tenant: the omission arm (a cli session ships
+            # no subscriber), the attribution arm (spend attributes to the
+            # human who drove it), and the inheritance arm (a subagent
+            # session inherits its root's actor). `.planning/` and
+            # `docs/internal/` are both gitignored, so a tracked docs/ file
+            # plus this pin is the only durable home.
+            ROOT / 'docs' / 'subscriber-live-proof.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
