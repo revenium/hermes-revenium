@@ -464,3 +464,119 @@ class ReadySentinelPreflightTests(ReadySentinelTestBase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReadySentinelReviewHardeningTests(ReadySentinelTestBase):
+    """ARMs 9-11: the three defects external review found on PR #139.
+
+    Each of these survived the original 8-arm matrix, which is the point of
+    recording them here: the matrix proved the PREDICATE, and all three of
+    these are failures of the pass's ENVELOPE -- what happens when a tunable
+    is hostile, when the directory cannot be read, and when two independent
+    tunables are configured into an order the design argued could not occur.
+    """
+
+    def test_settle_window_longer_than_retention_keeps_the_sentinel(self):
+        """ARM 9 (clause (a) is config-dependent, not absolute).
+
+        The original docstring argued clause (a) was airtight from a '4,320x
+        margin -- 30 days against the 600-second default'. That margin is a
+        DEFAULT, not an invariant: REVENIUM_MARKER_RETENTION_DAYS and
+        REVENIUM_CRON_SETTLE_SECONDS are independent operator tunables. With
+        retention=1d and settle=2d the implication inverts, and a sentinel
+        past the cutoff still belongs to a session the reporter considers
+        young -- deleting it DEFERS a session the sentinel would have
+        released, which is the exact BUG-1 job-orphaning hazard this pass
+        exists not to cause.
+
+        Catches: the pre-fix pass, which compared against cutoff_secs alone.
+        """
+        env, p = self._setup()
+        try:
+            sid = 'sess-settle-inversion'
+            # 1-day retention, 2-day settle: the inversion.
+            env['REVENIUM_MARKER_RETENTION_DAYS'] = '1'
+            env['REVENIUM_CRON_SETTLE_SECONDS'] = str(2 * 86400)
+            # Sentinel is 1.5 days old: past retention, inside settle.
+            sentinel = self._touch_sentinel(p['ready_dir'], sid, 1.5)
+            r = _run(env, '--dry-run')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(
+                os.path.exists(sentinel),
+                'a sentinel inside the settle window must be KEPT even when it '
+                'is past marker retention -- the reporter can still consult it',
+            )
+            log = self._log_text(p)
+            self.assertNotIn(
+                sid, log.split('ready summary')[0].split('dir=ready')[-1]
+                if 'dir=ready' in log else '',
+                'the sentinel must not be named as a removal candidate',
+            )
+        finally:
+            shutil.rmtree(p['tmpdir'], ignore_errors=True)
+
+    def test_infinite_settle_override_does_not_kill_the_run(self):
+        """ARM 10 (a hostile tunable must fail open, not abort).
+
+        int(float('inf')) raises OverflowError, which is NOT a ValueError.
+        Before the fix, REVENIUM_CRON_SETTLE_SECONDS=inf aborted the whole
+        interpreter before ANY retention pass ran -- marker, flags, ready,
+        spool, ledger and owners alike -- over a tunable this script only
+        reads as a safety belt. The code's own comment already promised a
+        garbage override would 'fail open to that default rather than crash
+        the whole prune run'; this arm is what makes that true.
+
+        Catches: an except tuple of (TypeError, ValueError) only.
+        """
+        env, p = self._setup()
+        try:
+            sid = 'sess-inf-settle'
+            self._touch_sentinel(p['ready_dir'], sid, OLD_DAYS)
+            env['REVENIUM_CRON_SETTLE_SECONDS'] = 'inf'
+            r = _run(env, '--dry-run')
+            self.assertEqual(
+                r.returncode, 0,
+                'an invalid settle override must fail open to the 600s '
+                f'default, not abort the prune run. stderr={r.stderr}',
+            )
+            self.assertIn(
+                'prune: summary', self._log_text(p),
+                'the marker pass must still have run and summarised',
+            )
+        finally:
+            shutil.rmtree(p['tmpdir'], ignore_errors=True)
+
+    def test_unreadable_ready_dir_skips_only_this_pass(self):
+        """ARM 11 (one unreadable dir must not cancel every later pass).
+
+        prune_spool_dir, prune_event_ledger and the owners pass all run
+        LATER in the same interpreter. os.listdir on an existing-but-
+        unreadable .ready raises PermissionError -- an OSError sibling that
+        a bare `except FileNotFoundError` does not catch -- so before the fix
+        a single chmod 000 cancelled the spool, ledger and owners cleanup
+        too. Mirrors the owners pass's own 'dir unreadable' skip precedent.
+
+        Catches: `except FileNotFoundError` alone on the listdir.
+        """
+        env, p = self._setup()
+        try:
+            self._touch_sentinel(p['ready_dir'], 'sess-unreadable', OLD_DAYS)
+            os.chmod(p['ready_dir'], 0o000)
+            try:
+                if os.access(p['ready_dir'], os.R_OK):
+                    self.skipTest('running as root: chmod 000 is not enforced')
+                r = _run(env, '--dry-run')
+                self.assertEqual(
+                    r.returncode, 0,
+                    f'an unreadable .ready must skip this pass only. stderr={r.stderr}',
+                )
+                log = self._log_text(p)
+                self.assertIn('ready pass skipped', log)
+                self.assertIn(
+                    'prune: summary', log,
+                    'the marker pass summary must still be present',
+                )
+            finally:
+                os.chmod(p['ready_dir'], 0o700)
+        finally:
+            shutil.rmtree(p['tmpdir'], ignore_errors=True)

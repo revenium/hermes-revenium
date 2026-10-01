@@ -141,7 +141,13 @@ dry_run        = os.environ['DRY_RUN_PY'] == "true"
 # than crash the whole prune run over an unrelated tunable.
 try:
     settle_seconds = int(float(os.environ.get('SETTLE_SECONDS_PY', '600')))
-except (TypeError, ValueError):
+except (TypeError, ValueError, OverflowError):
+    # OverflowError is NOT redundant and NOT covered by ValueError:
+    # int(float('inf')) and int(float('1e400')) both raise OverflowError,
+    # while float('nan') raises ValueError. Without it,
+    # REVENIUM_CRON_SETTLE_SECONDS=inf kills this whole interpreter -- every
+    # later pass included -- which is exactly what the comment above says must
+    # not happen. Found in review on PR #139.
     settle_seconds = 600
 
 # Only parsed when the bash-side preflight found MARKER_RETENTION_DAYS valid
@@ -338,10 +344,44 @@ def prune_ready_sentinels(ready_dir, markers_dir, pruned_sids, started_ats, sett
     r_kept_marker_present = 0
     r_kept_session_pending = 0
 
+    # A never-classified install has no .ready dir, which is not an error.
+    # Catch OSError, not just FileNotFoundError: an existing-but-unreadable dir
+    # (PermissionError, ENOTDIR) raises a sibling this pass must not die on,
+    # because prune_spool_dir, prune_event_ledger and the owners pass all run
+    # LATER in this same interpreter -- one unreadable directory must not
+    # cancel every remaining pass. Mirrors the owners pass's own
+    # 'owners pass skipped -- owners dir unreadable' precedent below.
     try:
         entries = sorted(os.listdir(ready_dir))
     except FileNotFoundError:
         entries = []
+    except OSError as exc:
+        print(
+            'prune: ready pass skipped -- .ready dir unreadable: ' + str(exc),
+            flush=True,
+        )
+        return
+
+    # Clause (a) is only a proof while the retention cutoff actually clears the
+    # reporter's settle window. Both are INDEPENDENT operator tunables
+    # (REVENIUM_MARKER_RETENTION_DAYS, REVENIUM_CRON_SETTLE_SECONDS), so the
+    # comfortable 30-days-against-600-seconds default margin is a DEFAULT, not
+    # an invariant: retention=1d with settle=2d inverts it, and a sentinel past
+    # the cutoff would then still belong to a session the reporter considers
+    # young -- deleting it DEFERS a session the sentinel would have released,
+    # the exact BUG-1 job-orphaning hazard this pass exists not to cause.
+    # Taking the max restores the implication by construction for every
+    # configuration, and is a no-op on a default install. Found in review on
+    # PR #139; the original docstring argued from the defaults alone.
+    effective_cutoff = cutoff_secs
+    if settle_seconds is not None and settle_seconds > effective_cutoff:
+        effective_cutoff = settle_seconds
+        print(
+            'prune: ready pass -- settle window (' + str(settle_seconds) +
+            's) exceeds marker retention (' + str(int(cutoff_secs)) +
+            's); using the settle window as the .ready cutoff',
+            flush=True,
+        )
 
     if started_ats is None:
         print(
@@ -360,8 +400,9 @@ def prune_ready_sentinels(ready_dir, markers_dir, pruned_sids, started_ats, sett
         age_secs = time.time() - mtime
         age_days = age_secs / 86400
 
-        # Clause (a) -- AGE.
-        if age_secs < cutoff_secs:
+        # Clause (a) -- AGE. effective_cutoff, not cutoff_secs: see the
+        # settle-window note above.
+        if age_secs < effective_cutoff:
             r_kept += 1
             continue
 
