@@ -99,9 +99,11 @@ prune_out="$(mktemp)"
 # set +e so set -euo pipefail does not abort before prune_rc=$? is captured.
 set +e
 MARKERS_DIR_PY="${MARKERS_DIR}" \
+MARKERS_READY_DIR_PY="${MARKERS_READY_DIR}" \
 LEDGER_FILE_PY="${LEDGER_FILE}" \
 MARKER_RETENTION_DAYS_PY="${MARKER_RETENTION_DAYS}" \
 MARKER_RETENTION_OK_PY="${MARKER_RETENTION_OK}" \
+SETTLE_SECONDS_PY="${REVENIUM_CRON_SETTLE_SECONDS}" \
 DRY_RUN_PY="${DRY_RUN}" \
 FLAG_DIRS_PY="${WARN_FLAGS_DIR}
 ${FALLBACK_WARN_FLAGS_DIR}
@@ -128,9 +130,25 @@ import sys
 import time
 
 markers_dir    = os.environ['MARKERS_DIR_PY']
+markers_ready_dir = os.environ['MARKERS_READY_DIR_PY']
 ledger_file    = os.environ['LEDGER_FILE_PY']
 marker_retention_ok = os.environ.get('MARKER_RETENTION_OK_PY') == 'true'
 dry_run        = os.environ['DRY_RUN_PY'] == "true"
+
+# REVENIUM_CRON_SETTLE_SECONDS always carries a default ("600") from
+# common.sh, but it is not validated by the MARKER_RETENTION_DAYS preflight
+# above, so a garbage override must still fail open to that default rather
+# than crash the whole prune run over an unrelated tunable.
+try:
+    settle_seconds = int(float(os.environ.get('SETTLE_SECONDS_PY', '600')))
+except (TypeError, ValueError, OverflowError):
+    # OverflowError is NOT redundant and NOT covered by ValueError:
+    # int(float('inf')) and int(float('1e400')) both raise OverflowError,
+    # while float('nan') raises ValueError. Without it,
+    # REVENIUM_CRON_SETTLE_SECONDS=inf kills this whole interpreter -- every
+    # later pass included -- which is exactly what the comment above says must
+    # not happen. Found in review on PR #139.
+    settle_seconds = 600
 
 # Only parsed when the bash-side preflight found MARKER_RETENTION_DAYS valid
 # (Phase 42 D-13/T-42-07-02) -- an invalid value's raw string (e.g.
@@ -206,10 +224,254 @@ def live_session_ids(state_db):
         return None
 
 
+def session_started_ats(state_db):
+    """Return {sid: started_at_or_None} read from state.db's sessions table,
+    or None (top-level) when the DB/table/column cannot be read at all.
+
+    This is the belt for prune_ready_sentinels' clause (c) -- see that
+    function's docstring for the full predicate and why clause (a) alone is
+    already the proof. None mirrors live_session_ids' None-means-doubt
+    contract verbatim: a caller that gets None has no basis for a liveness
+    judgement and must degrade, never assume "every session is gone".
+
+    Deliberately a SEPARATE helper, not a widening of live_session_ids
+    above. The flags pass depends on live_session_ids' set-shaped return,
+    and changing a flow's entry while missing one of its exits is this
+    repo's own recurring defect -- see CLAUDE.md's "Shared-checkout
+    concurrency" / "narrowing a race window" lessons for the general shape
+    of that mistake. The one extra read of state.db this costs per run is
+    acceptable because prune-markers.sh is operator-invoked (D-28), not
+    run every minute the way hermes-report.sh is.
+
+    A per-sid value of None (sid present, started_at column NULL) is
+    distinct from the sid being absent from the dict entirely (no row) --
+    prune_ready_sentinels treats both the same way (not pending), but the
+    distinction is preserved here so a future caller with a different need
+    does not have to re-derive it.
+    """
+    if not state_db or not os.path.isfile(state_db):
+        return None
+    try:
+        uri = 'file:' + state_db + '?mode=ro'
+        out = {}
+        with sqlite3.connect(uri, uri=True) as conn:
+            for sid, started_at in conn.execute('SELECT id, started_at FROM sessions'):
+                if sid is None:
+                    continue
+                try:
+                    out[str(sid)] = float(started_at) if started_at is not None else None
+                except (TypeError, ValueError):
+                    out[str(sid)] = None
+        return out
+    except Exception:
+        return None
+
+
+def prune_ready_sentinels(ready_dir, markers_dir, pruned_sids, started_ats, settle_seconds):
+    """Sixth pass: remove spent markers/.ready/<sid> sentinels.
+
+    MOTIVATION (measured, reference host Jupi, 2026-10-01): 2843 sentinels
+    against 1112 marker files -- 1733 orphans, every one of them past the
+    30-day retention window. The marker pass earlier in this file has pruned
+    markers for years; nothing has ever pruned .ready. Reading that imbalance
+    cold produced a confident, wrong report of a systemic 70%
+    classification-failure in one session. Zero sessions on the same host
+    show .ready-without-markers INSIDE the window -- that absence is what the
+    honest signal looks like, and it is the shape this pass restores.
+
+    THE PREDICATE -- remove MARKERS_READY_DIR/<sid> when ALL THREE hold:
+
+      (a) AGE -- now - mtime(sentinel) >= cutoff_secs, the SAME
+          MARKER_RETENTION_DAYS cutoff every other pass in this file uses.
+      (b) LIFETIME COUPLING -- the marker half is gone: markers_dir/<sid>.jsonl
+          does not exist on disk, OR sid is in pruned_sids (the set the
+          marker pass above removed, or WOULD remove under --dry-run).
+      (c) BELT -- only evaluated when started_ats is not None: sid has no
+          row in state.db at all (the reporter only ever walks state.db
+          rows, so a row-less session can never be metered again), or
+          now - started_at >= settle_seconds. When started_ats IS None
+          (state.db missing, unreadable, or schema-older), clause (c) is
+          skipped entirely and one line says so -- this pass degrades to
+          (a)+(b), never to "prune freely".
+
+    (a) IS THE PROOF, and it is airtight without the DB. The sentinel's only
+    writer (the classifier plugin) touches it during the session it names,
+    so mtime(sentinel) >= started_at(session) ALWAYS holds in production.
+    Clause (a) therefore implies the session's own age also clears
+    REVENIUM_CRON_SETTLE_SECONDS -- hermes-report.sh's
+    `has_sentinel or age >= settle_seconds` gate -- by a 4,320x margin (30
+    days against the 600-second default). A sentinel past (a) cannot change
+    any metering decision, because the reporter's gate no longer consults it
+    either way.
+
+    (c) is a belt, not the proof, and is honestly labelled as one: state.db
+    may be missing or unreadable, and on a multiplexed host the state.db at
+    this HERMES_HOME is not necessarily the one that owns a sentinel sitting
+    in this home's .ready. (a) does not depend on any of that.
+
+    REJECTED: prune_owners' posture of removing NOTHING on doubt about
+    state.db. Correct there -- an ownership record deleted on doubt is a
+    double-bill. Wrong here -- doubt about state.db only risks leaving
+    today's (broken) behaviour in place, while (a)'s proof stands without
+    the DB at all, so a no-op here would forfeit the fix on exactly the
+    measured host for no safety gain.
+
+    THE ASYMMETRY WITH THE WARN FLAGS -- do not copy that rule here. Pruning
+    a WARN sentinel RE-ARMS a warn that is still reachable (measured
+    2026-09-18: one prune removed 1031 flags and drove trace-type fallback
+    warns from ~1/hour to 1666 in that hour), which is why the flags pass
+    above keeps a flag alive for as long as its session is live. A .ready
+    sentinel is NOT re-armable -- nothing ever re-touches it once written --
+    and its hazard runs the OTHER way: deleting one EARLY pushes a
+    still-young session onto the settle-window fallback, which is how a
+    completion gets metered before its job marker lands and orphans from its
+    job permanently (BUG-1). Same family of hazard, opposite mechanism: this
+    pass therefore gates on the sentinel being PROVABLY PAST the window in
+    which the reporter's gate can even consult it (age), never on session
+    liveness. Clause (c)'s liveness-shaped check is only the belt. A future
+    reader "restoring consistency" by keying this pass on liveness instead
+    of age would reintroduce exactly the early-delete hazard this paragraph
+    exists to prevent.
+
+    No suffix filter is available here -- unlike every sibling pass, a
+    sentinel's whole filename IS the raw session id, with no .jsonl/.flag
+    marker to distinguish a real entry from noise. The three-clause
+    predicate above therefore carries the ENTIRE safety burden alone.
+    """
+    r_scanned = 0
+    r_kept = 0
+    r_removed = 0
+    r_kept_marker_present = 0
+    r_kept_session_pending = 0
+
+    # A never-classified install has no .ready dir, which is not an error.
+    # Catch OSError, not just FileNotFoundError: an existing-but-unreadable dir
+    # (PermissionError, ENOTDIR) raises a sibling this pass must not die on,
+    # because prune_spool_dir, prune_event_ledger and the owners pass all run
+    # LATER in this same interpreter -- one unreadable directory must not
+    # cancel every remaining pass. Mirrors the owners pass's own
+    # 'owners pass skipped -- owners dir unreadable' precedent below.
+    try:
+        entries = sorted(os.listdir(ready_dir))
+    except FileNotFoundError:
+        entries = []
+    except OSError as exc:
+        print(
+            'prune: ready pass skipped -- .ready dir unreadable: ' + str(exc),
+            flush=True,
+        )
+        return
+
+    # Clause (a) is only a proof while the retention cutoff actually clears the
+    # reporter's settle window. Both are INDEPENDENT operator tunables
+    # (REVENIUM_MARKER_RETENTION_DAYS, REVENIUM_CRON_SETTLE_SECONDS), so the
+    # comfortable 30-days-against-600-seconds default margin is a DEFAULT, not
+    # an invariant: retention=1d with settle=2d inverts it, and a sentinel past
+    # the cutoff would then still belong to a session the reporter considers
+    # young -- deleting it DEFERS a session the sentinel would have released,
+    # the exact BUG-1 job-orphaning hazard this pass exists not to cause.
+    # Taking the max restores the implication by construction for every
+    # configuration, and is a no-op on a default install. Found in review on
+    # PR #139; the original docstring argued from the defaults alone.
+    effective_cutoff = cutoff_secs
+    if settle_seconds is not None and settle_seconds > effective_cutoff:
+        effective_cutoff = settle_seconds
+        print(
+            'prune: ready pass -- settle window (' + str(settle_seconds) +
+            's) exceeds marker retention (' + str(int(cutoff_secs)) +
+            's); using the settle window as the .ready cutoff',
+            flush=True,
+        )
+
+    if started_ats is None:
+        print(
+            'prune: ready pass -- state.db unavailable, falling back to '
+            'age+marker-coupling only for .ready sentinels (clause (c) skipped)',
+            flush=True,
+        )
+
+    for sid in entries:
+        fpath = os.path.join(ready_dir, sid)
+        if not os.path.isfile(fpath):
+            continue
+
+        r_scanned += 1
+        mtime = os.path.getmtime(fpath)
+        age_secs = time.time() - mtime
+        age_days = age_secs / 86400
+
+        # Clause (a) -- AGE. effective_cutoff, not cutoff_secs: see the
+        # settle-window note above.
+        if age_secs < effective_cutoff:
+            r_kept += 1
+            continue
+
+        # Clause (b) -- LIFETIME COUPLING. pruned_sids (not a bare
+        # os.path.exists) is what makes --dry-run predict a live run: a dry
+        # run leaves the marker file in place, so an existence test alone
+        # would preview "kept" for a sentinel a live run actually removes.
+        marker_path = os.path.join(markers_dir, sid + '.jsonl')
+        marker_gone = (sid in pruned_sids) or not os.path.isfile(marker_path)
+        if not marker_gone:
+            r_kept += 1
+            r_kept_marker_present += 1
+            continue
+
+        # Clause (c) -- BELT, only when state.db was readable. A sid with no
+        # row at all, or a row whose started_at could not be parsed, is
+        # treated as not-pending (nothing here blocks removal on doubt) --
+        # the row-less case is the documented "can never be metered again"
+        # shape, and an unparseable started_at carries no information (a).
+        if started_ats is not None:
+            started_at = started_ats.get(sid, None)
+            if sid in started_ats and started_at is not None:
+                pending_age = time.time() - started_at
+                if pending_age < settle_seconds:
+                    r_kept += 1
+                    r_kept_session_pending += 1
+                    continue
+
+        action = 'dry-run, would remove' if dry_run else 'removed'
+        print(
+            'prune: ' + action +
+            ' dir=ready' +
+            ' sid=' + sid +
+            ' mtime=' + iso(mtime) +
+            ' age_days=' + str(round(age_days, 1)),
+            flush=True,
+        )
+
+        if not dry_run:
+            try:
+                os.unlink(fpath)
+                r_removed += 1
+            except OSError as exc:
+                print('prune: ERROR removing ' + sid + ': ' + str(exc), flush=True)
+                sys.exit(1)
+        else:
+            r_removed += 1  # count for dry-run summary
+
+    print(
+        'prune: ready summary, scanned=' + str(r_scanned) +
+        ' kept=' + str(r_kept) +
+        ' removed=' + str(r_removed) +
+        ' kept_marker_present=' + str(r_kept_marker_present) +
+        ' kept_session_pending=' + str(r_kept_session_pending),
+        flush=True,
+    )
+    return r_scanned, r_kept, r_removed
+
+
 if marker_retention_ok:
     scanned = 0
     kept = 0
     removed = 0
+    # Records which sids THIS run decided to remove from markers_dir, in
+    # BOTH the live and the dry-run branches below. prune_ready_sentinels'
+    # clause (b) reads this set rather than re-checking os.path.exists, so
+    # that --dry-run predicts a live run exactly (a dry run leaves the
+    # marker file on disk, so an existence check alone would diverge).
+    marker_pruned_sids = set()
 
     try:
         entries = sorted(os.listdir(markers_dir))
@@ -260,11 +522,19 @@ if marker_retention_ok:
             try:
                 os.unlink(fpath)
                 removed += 1
+                marker_pruned_sids.add(sid)
             except OSError as exc:
                 print('prune: ERROR removing ' + fname + ': ' + str(exc), flush=True)
                 sys.exit(1)
         else:
             removed += 1  # count for dry-run summary
+            # Deliberately recorded even though nothing is deleted on this
+            # branch: marker_pruned_sids is what lets prune_ready_sentinels
+            # (and --dry-run's own preview) predict what a live run would do
+            # to a sentinel whose marker a dry run leaves on disk. An
+            # os.path.exists check alone would say "kept" here and diverge
+            # from the live run's actual removal.
+            marker_pruned_sids.add(sid)
 
     # ---------------------------------------------------------------------------
     # quick-260813-wnz (LOG-01/D-05): second pass -- bound the once-per-
@@ -454,6 +724,20 @@ if marker_retention_ok:
         ' kept=' + str(kept) +
         ' removed=' + str(removed),
         flush=True,
+    )
+
+    # quick-261001-h5e: sixth pass -- the markers/.ready/<sid> sentinels.
+    # Placed at the END of this block, AFTER the two summary prints above, so
+    # the marker and flags passes' existing log order is unchanged (tests
+    # assert on log text). See prune_ready_sentinels' docstring for the full
+    # predicate.
+    marker_started_ats = session_started_ats(os.environ.get('STATE_DB_PY', ''))
+    prune_ready_sentinels(
+        markers_ready_dir,
+        markers_dir,
+        marker_pruned_sids,
+        marker_started_ats,
+        settle_seconds,
     )
 
 # ---------------------------------------------------------------------------
