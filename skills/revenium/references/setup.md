@@ -266,9 +266,11 @@ _Migration note (from earlier 06-01 implementation):_ if you previously installe
 
 ## Marker file pruning
 
-The skill accumulates one JSONL marker file per Hermes session under `~/.hermes/state/revenium/markers/`. On long-running hosts these files grow without bound. `prune-markers.sh` removes stale marker files using the ledger as the authoritative staleness source (D-26): the script reads the latest `HERMES:<sid>:…:<unix_ts>:…` ledger row per session and removes the marker file if that timestamp is older than the retention threshold. For orphan markers with no ledger entry, file modification time is used instead.
+The skill accumulates one JSONL marker file per Hermes session under `~/.hermes/state/revenium/markers/`. On long-running hosts these files grow without bound. `prune-markers.sh` removes stale marker files using the ledger as the authoritative staleness source (D-26): the script reads the latest `HERMES:<sid>:…:<unix_ts>:…` ledger row per session and removes the marker file if that timestamp is older than the retention threshold. For orphan markers with no ledger entry, file modification time is used instead. The same pass also removes a session's `markers/.ready/<sid>` sentinel once its marker half is gone and the sentinel itself is past the retention window.
 
 Default retention is 30 days, configurable via `REVENIUM_MARKER_RETENTION_DAYS` (declared in `common.sh`, D-27). The script is **not** wired into the per-minute cron — it is an operator-invoked maintenance action (D-28). Every deletion (and dry-run candidate) is logged via `info` to `${LOG_FILE}` so the operator can audit (D-29).
+
+An orphan `.ready` sentinel — one with no corresponding marker file — is indistinguishable on disk from a real classifier drop: the sentinel is the only signal that the classifier plugin ever ran for that session. Left unpruned alongside years of marker pruning, that imbalance grows without bound and turns normal retention into a false defect signal (a host with thousands of orphans past the window can read as a systemic classification failure when it is really just accumulated, already-metered history). Pruning the sentinel once its marker is gone and it is itself past the window keeps the on-disk shape honest: a `.ready`-without-marker sentinel inside the retention window stays visible as the genuine defect signal it is.
 
 ### How to run
 
