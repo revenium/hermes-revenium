@@ -71,13 +71,25 @@ sequence below is a recorded procedure, reproducible by a future reader, not shi
    filter on this endpoint; all slicing is client-side, which is why the window is pulled once
    and matched afterward rather than filtered server-side.
 
-3. **Match client-side on `transactionId`:**
+3. **Match client-side on `transactionId`**, trying *both* candidates from step 1 - the
+   marker-split form first, then the markerless form. A session reported through the
+   markerless path has no `<muid>` suffix on its row, so a lookup that only ever appends
+   `<muid>` returns no match even though the tenant row exists:
    ```python
    import json
    rows = json.load(open("/tmp/window.json"))
-   target = "<sid>-<total_tokens>-<muid>"   # from step 1
-   match = [r for r in rows if r.get("transactionId") == target]
+   sid, total_tokens, muid = "<sid>", "<total_tokens>", "<muid>"   # from step 1
+   candidates = [f"{sid}-{total_tokens}-{muid}", f"{sid}-{total_tokens}"]
+   match = next(
+       (r for c in candidates for r in rows if r.get("transactionId") == c),
+       None,
+   )
    ```
+   Every arm in this record was scored with both candidates in hand; each one matched on the
+   marker-split form, because all five induced sessions carried a `.ready` sentinel. The
+   markerless candidate is kept in the procedure because it is the supported path for a
+   session with no marker, not because any arm here needed it.
+
    The matched row's `subscriberId`, `subscriberEmail`, `source` and `taskType` are then read
    directly from the returned JSON - never inferred, never re-derived locally.
 
@@ -203,8 +215,31 @@ Reported: session=20260930_215830_b26423 ... subscriber=slack:<redacted-actor-id
 **The claim this arm establishes is a comparison, not a value.** The child row's
 `subscriberId` was compared byte-for-byte against the root row's `subscriberId` (scored in the
 Attribution section above): both read `slack:<redacted-actor-id>`, and the comparison returned
-equal. The child inherited its root's actor exactly, through the existing root-walk
-(`skills/revenium/scripts/get-root-session-id.py`), with no divergence.
+equal.
+
+**Equality alone would not establish inheritance** - a child that resolved its *own* identity
+to the same actor would produce the identical row. Two further read-only observations against
+the reference host rule that out, and are what make this verdict auditable:
+
+1. **The child has no identity of its own.** A direct `state.db` read of the child's own
+   session row returns a null `user_id`, so there was nothing for `resolve_subscriber_id` to
+   resolve independently:
+   ```
+   20260930_215808_13016a29|slack|<redacted-actor-id>   <- root
+   20260930_215830_b26423  |subagent|<NULL>             <- child, no user_id of its own
+   ```
+2. **The parent link is resolved by the root-walk itself**, not asserted:
+   ```bash
+   python3 ~/.hermes/skills/revenium/scripts/get-root-session-id.py 20260930_215830_b26423
+   # -> 20260930_215808_13016a29
+   ```
+   This is the same `get-root-session-id.py` the reporter calls, returning the same root whose
+   row was scored in the Attribution section - so the child's key demonstrably came from that
+   root and not from somewhere else.
+
+Together: the child had nothing of its own, the root-walk links it to this specific root, and
+its shipped key is byte-identical to that root's. The child inherited its root's actor exactly,
+through the existing root-walk, with no divergence.
 
 `revenium squads get` was **not** used to score this arm. Research (`64-RESEARCH.md` RQ-4)
 probed both the root session id and a subagent child id on this host and both returned
