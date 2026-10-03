@@ -616,6 +616,24 @@ _EVAL_TIMEOUT_SECONDS = 15.0
 # number, not two, so they cannot drift apart.
 _EVAL_TRANSCRIPT_LIMIT = 6000
 
+# quick-261003-ksu: the inferred_role clamp bound, hoisted to one constant so
+# the eligibility filter below (_rate_card_role_vocabulary) and
+# _validate_assessment's existing _clamp_assessment_text(raw.get(
+# "inferred_role"), ...) call site can never drift apart. Follows
+# FAILURE_REASON_CLAMP_BYTES's existing convention for a named clamp bound.
+_INFERRED_ROLE_CLAMP = 60
+
+# quick-261003-ksu (DD-7): the rate-card role vocabulary's own prompt budget,
+# in characters, re-measured against the reference card (tenant 3By1Ra6,
+# 2026-10-03): 3313 chars rendered one key per line, ~3484 joined with
+# ", ", ~1.4KB after the case-fold collapse (DD-2). 4096 fits the live card
+# under BOTH rules -- un-collapsed and collapsed -- so the budget does not
+# depend on the collapse to avoid truncating a real operator's card; DD-2 is
+# an efficiency improvement, not the thing holding this number together.
+# 1024 (the figure _build_job_inference_prompt uses for labels_block) would
+# have truncated the live card roughly 60% away.
+_ROLE_VOCABULARY_BUDGET_CHARS = 4096
+
 
 # Phase 39 (ROI-14): two module-private sentinels distinguishing a BROKEN
 # evaluator response from a DELIBERATE abstention (the documented `null`
@@ -644,8 +662,176 @@ _EVAL_INVALID = _EvalOutcomeSentinel("invalid")
 _EVAL_TIMED_OUT = _EvalOutcomeSentinel("timed-out")
 
 
+def _rate_card_role_vocabulary(config: dict) -> str:
+    """Return the operator's configured `rateCard` keys as a verbatim-pick
+    vocabulary for the outcome-evaluation prompt, or "" when there is none
+    to show (quick-261003-ksu).
+
+    Why a closed vocabulary PRESERVES, rather than erodes, the operator-bound
+    invariant `_rate_card_valuation_fixture` states (valuation.py:365) and
+    Phase 45 (EGV-02, D-05) / Phase 54 (D-06) established: "An approved rate
+    card that has nothing to say about this role is a reason to abstain, not
+    to guess." The operator still owns which roles exist and what each is
+    worth; this function only lets the model SELECT from the operator's own
+    list, verbatim, so a selection is reachable by exact-match lookup
+    instead of lost to free-form phrasing. Fuzzy matching, case-insensitive
+    or normalised matching, and a fallback/default rate were each considered
+    and rejected for breaching that invariant; none of them is implemented
+    here or anywhere else in this change. The valuation boundary
+    (`valuation.py`) and `_validate_assessment` are both deliberately
+    unchanged.
+
+    Measured evidence motivating this (reference host, tenant 3By1Ra6,
+    2026-10-03): `_rate_card_valuation_fixture` abstained 50 times with
+    `no configured rate for role`, and every miss was a UNIQUE free-form
+    phrasing (16 distinct, each occurring once) while every HIT was a clean,
+    pre-existing card key. The card already held 173 entries for 57 distinct
+    case-folded roles -- the operator had already done the configuration
+    work; the model just never reproduced a key verbatim.
+
+    The role strings returned here are a config-gated exception to the
+    no-example-values rule the neighbouring prompt-builder comments cite
+    (quick-260815-r39, asserted by
+    tests/test_phase37_llm_evaluator.py::PromptTests::
+    test_prompt_carries_no_example_values): they are the operator's own
+    SELECTION VOCABULARY, exactly as `_build_job_inference_prompt`'s
+    existing `labels_block` is, not illustrative example values the model
+    might copy onto unrelated work.
+
+    Reads `config["rateCard"]` only when `config` and the card are both
+    dicts (DD-1): no key, a non-dict card, `{}`, or a card whose every key
+    is filtered out all resolve to "", which is also what keeps this whole
+    change default-off and byte-identical to the pre-change prompt for any
+    install with no card configured.
+
+    A role qualifies (DD-6) only when it is a non-empty `str` and
+    `_clamp_assessment_text(key, _INFERRED_ROLE_CLAMP) == key` -- the SAME
+    clamp `_validate_assessment` applies to the model's answer, so a role
+    shown here always round-trips back unchanged, and a key carrying a
+    pipe, newline, or carriage return (which the clamp rewrites) is never
+    offered, which doubles this filter as the prompt-injection control.
+
+    DD-2: eligible keys are grouped by case-folded form, preserving card
+    order; a group collapses to its first member ONLY when every member's
+    amount is usable (`_finite_number`), positive, and all EQUAL -- a
+    provably price-neutral collapse, since the full uncollapsed card stays
+    the exact-match lookup target (valuation.py:409) regardless of what is
+    displayed. Any disagreement, or any unusable/non-comparable amount,
+    emits the whole group instead: uncertainty always resolves to showing
+    MORE roles, never to hiding a priced one. An entry with a broken amount
+    is still DISPLAYED (never filtered out for that reason) because the
+    fixture's own `rejected non-positive or non-finite amount for role`
+    warning is the better operator signal for a typo than silent omission.
+
+    DD-7: entries are joined with ", ", accumulating while the running
+    length stays within `_ROLE_VOCABULARY_BUDGET_CHARS`, stopping at the
+    first entry that would overflow -- truncation lands on an ENTRY
+    boundary, never mid-role-name, and preserves card order, so an operator
+    who orders their card best-first controls which roles survive a long
+    card. A truncation logs exactly one `logger.warning` carrying the
+    offered/omitted COUNTS ONLY, never a role name: a silently shortened
+    vocabulary is a silently omitted role, the same invisible-gap failure
+    class this repo has already paid for in the auxiliary zero-token drop
+    and the markerless long-lived session.
+
+    The whole body runs inside one try/except returning "" -- this module's
+    fail-open posture; `run_classification_async` must never raise.
+    """
+    try:
+        cfg = config if isinstance(config, dict) else {}
+        rate_card = cfg.get("rateCard")
+        if not isinstance(rate_card, dict):
+            return ""
+
+        eligible = [
+            key for key in rate_card.keys()
+            if isinstance(key, str) and key
+            and _clamp_assessment_text(key, _INFERRED_ROLE_CLAMP) == key
+        ]
+        if not eligible:
+            return ""
+
+        # Group by case-folded form, preserving card order (DD-2).
+        groups: "dict[str, list]" = {}
+        group_order = []
+        for key in eligible:
+            folded = key.casefold()
+            if folded not in groups:
+                groups[folded] = []
+                group_order.append(folded)
+            groups[folded].append(key)
+
+        # Which folded groups may collapse to a single spelling (DD-2).
+        collapsible = set()
+        for folded, members in groups.items():
+            if len(members) == 1:
+                continue
+            amounts = [_finite_number(rate_card.get(m)) for m in members]
+            if (all(a is not None and a > 0 for a in amounts)
+                    and len(set(amounts)) == 1):
+                collapsible.add(folded)
+
+        # Emit in STRICT CARD ORDER. Found in review on PR #140: extending a
+        # whole group at its first member's position reorders the card --
+        # given `Role A`, `Role B`, `ROLE A` with disagreeing amounts it
+        # emitted `Role A, ROLE A, Role B`, moving a later variant ahead of an
+        # earlier DISTINCT role. Under truncation that drops `Role B` while
+        # keeping `ROLE A`, so work matching B abstains even though the
+        # operator priced it -- the same silently-unreachable-role failure
+        # this whole change exists to close, reintroduced by the display rule.
+        # Iterating `eligible` instead keeps every emitted key at its own card
+        # position; a collapsible group is emitted only at its first member.
+        roles = []
+        seen_collapsed = set()
+        for key in eligible:
+            folded = key.casefold()
+            if folded in collapsible:
+                if folded in seen_collapsed:
+                    continue
+                seen_collapsed.add(folded)
+            roles.append(key)
+
+        if not roles:
+            return ""
+
+        # DD-7: accumulate within budget, truncating on an entry boundary.
+        # Entries are QUOTED. Found in review on PR #140: the eligibility
+        # filter permits a comma in a key (_clamp_assessment_text strips only
+        # the pipe, CR and LF), so joining unquoted on ", " made a legitimate
+        # key such as `Analyst, Sales Operations` indistinguishable from two
+        # roles -- and a model that copies half of it produces a string the
+        # card does not contain, abstaining on a role the operator priced.
+        # Quoting is preferred over excluding comma-bearing keys, which would
+        # silently drop an operator's valid role: the failure class this
+        # change exists to remove.
+        sep = ", "
+        kept = []
+        length = 0
+        for role in roles:
+            quoted = '"' + role + '"'
+            addition = len(quoted) if not kept else len(sep) + len(quoted)
+            if length + addition > _ROLE_VOCABULARY_BUDGET_CHARS:
+                break
+            kept.append(quoted)
+            length += addition
+
+        omitted = len(roles) - len(kept)
+        joined = sep.join(kept)
+        if omitted > 0:
+            joined += " ... [truncated]"
+            logger.warning(
+                "revenium-classifier: rate-card role vocabulary truncated "
+                "for prompt budget: offered=%d omitted=%d",
+                len(kept), omitted,
+            )
+        return joined
+    except Exception:
+        return ""
+
+
 def _mechanism_instruction_block(
     mechanism: str, max_hours: float, max_rate: float, currency: str,
+    role_vocabulary_constrained: bool = False,
 ) -> str:
     """Return the per-mechanism output-shape fragment for one member of
     EVALUATOR_MECHANISMS (D-02), or the empty string for anything else.
@@ -663,17 +849,42 @@ def _mechanism_instruction_block(
     hand. This arc's value is not priced on this path (D-04); only a
     narrative basis is solicited.
 
-    Never raises: a pure function over four already-bounded/validated
+    `role_vocabulary_constrained` (quick-261003-ksu, keyword-with-default so
+    the four-positional-argument callers in
+    tests/test_phase44_economic_mechanisms.py and the no-card path are
+    untouched): when True, the two counterfactual branches replace the
+    free-form "(short noun phrase)" tail with an instruction to choose
+    exactly one role, copied verbatim, from the approved role list
+    `_build_outcome_evaluation_prompt` inserts separately (DD-5), or to omit
+    the field when none fits -- naming adaptation, abbreviation, and
+    invention as the things not to do. The role LIST itself is never
+    embedded here; DD-5 emits it once, in the shared region, so the
+    `newly_enabled_work` branch below (which this flag does not touch at
+    all) never sees it either.
+
+    Never raises: a pure function over five already-bounded/validated
     arguments.
     """
     if mechanism in (
         ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
         ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
     ):
+        if role_vocabulary_constrained:
+            role_line = (
+                "  - inferred_role: choose exactly one role, copied "
+                "verbatim, from the approved role list below -- do not "
+                "adapt, abbreviate, or invent a role. Omit this field "
+                "entirely if none of them describes the human who would "
+                "otherwise have done this work\n"
+            )
+        else:
+            role_line = (
+                "  - inferred_role: the human role that would otherwise "
+                "have done this work (short noun phrase)\n"
+            )
         return (
             f"If economic_mechanism is \"{mechanism}\", also supply:\n"
-            "  - inferred_role: the human role that would otherwise have "
-            "done this work (short noun phrase)\n"
+            + role_line +
             "  - estimated_hours_saved: a number, greater than 0 and at "
             f"most {max_hours}\n"
             "  - assumed_loaded_rate: the fully-loaded hourly cost for "
@@ -731,6 +942,17 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     trailer, present exactly once regardless of which branch the model
     follows -- the abstention offer in particular must survive in every
     branch.
+
+    quick-261003-ksu (DD-1/DD-5/DD-8): a fourth, config-gated difference --
+    when `config["rateCard"]` resolves a non-empty vocabulary
+    (`_rate_card_role_vocabulary`), the two counterfactual mechanism blocks
+    switch to a verbatim-pick-or-omit instruction and a single approved-role
+    list is inserted once, between the mechanism blocks and the trailer. An
+    absent or empty card (no `rateCard` key, `{}`, a non-dict, or a card
+    every key of which is filtered out) leaves this function's output
+    BYTE-IDENTICAL to the pre-change prompt -- gated on `rateCard`'s
+    presence, not on the active valuation boundary (DD-8), since
+    `boundaries.valuation` is not plumbed into this config object.
     """
     cfg = config if isinstance(config, dict) else {}
     currency = cfg.get("currency", "USD")
@@ -739,6 +961,7 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     transcript_preview = (transcript or "")[:_EVAL_TRANSCRIPT_LIMIT]
     job_type = (job or {}).get("job_type", "")
     job_name = (job or {}).get("job_name", "")
+    role_vocabulary = _rate_card_role_vocabulary(cfg)
 
     preamble = (
         "You are estimating the economic value of one completed task arc performed "
@@ -758,13 +981,31 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     # D-02: fixed order, not a frozenset iteration -- EVALUATOR_MECHANISMS'
     # own iteration order is not a stable contract.
     mechanism_blocks = "".join(
-        _mechanism_instruction_block(mechanism, max_hours, max_rate, currency)
+        _mechanism_instruction_block(
+            mechanism, max_hours, max_rate, currency,
+            role_vocabulary_constrained=bool(role_vocabulary),
+        )
         for mechanism in (
             ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
             ECONOMIC_MECHANISM_AUGMENTATION_CAPACITY_EXPANSION,
             ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
         )
     )
+
+    # DD-5: emitted ONCE, in plain language that never names the
+    # `inferred_role` field token -- the same anchoring concern
+    # `_mechanism_instruction_block`'s newly_enabled_work branch already
+    # avoids by describing what to withhold instead of naming it.
+    role_vocabulary_block = ""
+    if role_vocabulary:
+        role_vocabulary_block = (
+            "For the two mechanisms above that ask for a human role, choose "
+            "exactly one from this approved list, or omit the field. Each "
+            "entry is wrapped in double quotes that mark where it begins and "
+            "ends; copy the text INSIDE the quotes verbatim, without the "
+            "quotes themselves, and never treat a comma inside an entry as a "
+            "separator between two entries: " + role_vocabulary + "\n\n"
+        )
 
     trailer = (
         "  - confidence: a number from 0 to 1 reflecting how well the transcript "
@@ -785,7 +1026,7 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
         "JSON object or null:"
     )
 
-    return preamble + mechanism_blocks + trailer
+    return preamble + mechanism_blocks + role_vocabulary_block + trailer
 
 
 def _parse_job_array(raw: str) -> list:
@@ -2123,7 +2364,7 @@ def _validate_assessment(raw: dict, config: "dict | None" = None,
     # currency check all already ran, before any of this). This is what
     # keeps a registered valuation implementation from ever seeing a key
     # the validator did not vet (PA-15).
-    inferred_role = _clamp_assessment_text(raw.get("inferred_role"), 60)
+    inferred_role = _clamp_assessment_text(raw.get("inferred_role"), _INFERRED_ROLE_CLAMP)
     assumptions = {
         "estimated_hours_saved": hours,
         "assumed_loaded_rate": rate,
