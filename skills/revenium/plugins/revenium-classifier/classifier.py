@@ -761,34 +761,58 @@ def _rate_card_role_vocabulary(config: dict) -> str:
                 group_order.append(folded)
             groups[folded].append(key)
 
-        roles = []
-        for folded in group_order:
-            members = groups[folded]
+        # Which folded groups may collapse to a single spelling (DD-2).
+        collapsible = set()
+        for folded, members in groups.items():
             if len(members) == 1:
-                roles.append(members[0])
                 continue
             amounts = [_finite_number(rate_card.get(m)) for m in members]
-            price_neutral = (
-                all(a is not None and a > 0 for a in amounts)
-                and len(set(amounts)) == 1
-            )
-            if price_neutral:
-                roles.append(members[0])
-            else:
-                roles.extend(members)
+            if (all(a is not None and a > 0 for a in amounts)
+                    and len(set(amounts)) == 1):
+                collapsible.add(folded)
+
+        # Emit in STRICT CARD ORDER. Found in review on PR #140: extending a
+        # whole group at its first member's position reorders the card --
+        # given `Role A`, `Role B`, `ROLE A` with disagreeing amounts it
+        # emitted `Role A, ROLE A, Role B`, moving a later variant ahead of an
+        # earlier DISTINCT role. Under truncation that drops `Role B` while
+        # keeping `ROLE A`, so work matching B abstains even though the
+        # operator priced it -- the same silently-unreachable-role failure
+        # this whole change exists to close, reintroduced by the display rule.
+        # Iterating `eligible` instead keeps every emitted key at its own card
+        # position; a collapsible group is emitted only at its first member.
+        roles = []
+        seen_collapsed = set()
+        for key in eligible:
+            folded = key.casefold()
+            if folded in collapsible:
+                if folded in seen_collapsed:
+                    continue
+                seen_collapsed.add(folded)
+            roles.append(key)
 
         if not roles:
             return ""
 
         # DD-7: accumulate within budget, truncating on an entry boundary.
+        # Entries are QUOTED. Found in review on PR #140: the eligibility
+        # filter permits a comma in a key (_clamp_assessment_text strips only
+        # the pipe, CR and LF), so joining unquoted on ", " made a legitimate
+        # key such as `Analyst, Sales Operations` indistinguishable from two
+        # roles -- and a model that copies half of it produces a string the
+        # card does not contain, abstaining on a role the operator priced.
+        # Quoting is preferred over excluding comma-bearing keys, which would
+        # silently drop an operator's valid role: the failure class this
+        # change exists to remove.
         sep = ", "
         kept = []
         length = 0
         for role in roles:
-            addition = len(role) if not kept else len(sep) + len(role)
+            quoted = '"' + role + '"'
+            addition = len(quoted) if not kept else len(sep) + len(quoted)
             if length + addition > _ROLE_VOCABULARY_BUDGET_CHARS:
                 break
-            kept.append(role)
+            kept.append(quoted)
             length += addition
 
         omitted = len(roles) - len(kept)
@@ -976,8 +1000,11 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     if role_vocabulary:
         role_vocabulary_block = (
             "For the two mechanisms above that ask for a human role, choose "
-            "exactly one from this approved list, copied verbatim, or omit "
-            "the field: " + role_vocabulary + "\n\n"
+            "exactly one from this approved list, or omit the field. Each "
+            "entry is wrapped in double quotes that mark where it begins and "
+            "ends; copy the text INSIDE the quotes verbatim, without the "
+            "quotes themselves, and never treat a comma inside an entry as a "
+            "separator between two entries: " + role_vocabulary + "\n\n"
         )
 
     trailer = (

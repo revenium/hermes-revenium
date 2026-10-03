@@ -72,6 +72,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import re
 import subprocess
 import sys
 import unittest
@@ -109,22 +110,33 @@ def _load_valuation():
 _BASELINE_CACHE = {}
 
 
+# The commit this quick task branched from -- classifier.py as it was
+# before the role vocabulary existed. Immutable by construction; see
+# _baseline_classifier's docstring for why this is NOT merge-base.
+_PRE_CHANGE_SHA = '205d5739a55ea5abe1a1eff1319523d67209843a'
+
+
 def _baseline_classifier():
     """Load classifier.py AS IT WAS at the commit this quick task branched
     from -- the real pre-change module, not a hand-written reimplementation
     of its output (the task's own hard requirement: "do not hand-write the
-    expected string"). Resolved via `git merge-base HEAD origin/main`
-    rather than a hardcoded sha, so this baseline stays correct even if
-    origin/main advances, as long as this branch was forked from it and not
-    rebased. Memoized per test process -- the git calls are the only
+    expected string"). Pinned to an IMMUTABLE sha, NOT `git merge-base HEAD
+    origin/main`. Found in review on PR #140: merge-base is correct only
+    while this work is unmerged. The moment it lands on main,
+    merge-base(HEAD, origin/main) IS HEAD, so the baseline would load the
+    POST-change module and this test would compare the prompt builder
+    against itself -- passing even if the no-card prompt had regressed. A
+    guard that cannot fail is not a guard, and this one would have rotted
+    silently on the merge commit rather than failing loudly. The baseline
+    is a fixed historical artifact ("classifier.py before the role
+    vocabulary existed"), so a fixed sha names it honestly; it is not a
+    moving target and must not be resolved as one.
+    Memoized per test process -- the git calls are the only
     subprocess work in this module and need run once.
     """
     if 'mod' in _BASELINE_CACHE:
         return _BASELINE_CACHE['mod']
-    base_sha = subprocess.run(
-        ['git', 'merge-base', 'HEAD', 'origin/main'],
-        cwd=str(ROOT), capture_output=True, text=True, check=True,
-    ).stdout.strip()
+    base_sha = _PRE_CHANGE_SHA
     source = subprocess.run(
         ['git', 'show', f'{base_sha}:skills/revenium/plugins/revenium-classifier/classifier.py'],
         cwd=str(ROOT), capture_output=True, text=True, check=True,
@@ -172,8 +184,11 @@ class _CapturingHandler(logging.Handler):
 
 _VOCAB_LEAD_IN = (
     "For the two mechanisms above that ask for a human role, choose "
-    "exactly one from this approved list, copied verbatim, or omit "
-    "the field: "
+    "exactly one from this approved list, or omit the field. Each "
+    "entry is wrapped in double quotes that mark where it begins and "
+    "ends; copy the text INSIDE the quotes verbatim, without the "
+    "quotes themselves, and never treat a comma inside an entry as a "
+    "separator between two entries: "
 )
 _TRUNCATION_MARKER = " ... [truncated]"
 
@@ -198,7 +213,14 @@ def _extract_vocabulary_roles(prompt):
         return None
     if raw.endswith(_TRUNCATION_MARKER):
         raw = raw[: -len(_TRUNCATION_MARKER)]
-    return raw.split(', ') if raw else []
+    if not raw:
+        return []
+    # Entries are QUOTED (PR #140 review): splitting on ', ' would tear a key
+    # that legitimately contains a comma into two, which is precisely the
+    # ambiguity the quoting removed. Parse the quotes production actually
+    # emits, so this helper models the real wire shape rather than a
+    # convenient approximation of it.
+    return re.findall(r'"([^"]*)"', raw)
 
 
 def _build_realistic_rate_card():
@@ -615,3 +637,66 @@ class RoundTripClampTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReviewHardeningTests(unittest.TestCase):
+    """The three defects external review found on PR #140. Each is a way an
+    operator's PRICED role becomes unreachable to the model -- the same
+    failure class this change exists to close, reintroduced by the display
+    rule, the delimiter, or a rotted guard."""
+
+    def setUp(self):
+        self.c = _load_classifier()
+
+    def _prompt(self, card):
+        return self.c._build_outcome_evaluation_prompt(
+            {'job_type': 'x', 'job_name': 'y'}, 'transcript', {'rateCard': card})
+
+    def test_card_order_is_preserved_when_a_group_disagrees(self):
+        """F1: grouping must not move a later variant ahead of an earlier
+        DISTINCT role. Card order `Role A`, `Role B`, `ROLE A` with
+        disagreeing amounts previously emitted `Role A, ROLE A, Role B`;
+        under truncation that drops `Role B` while keeping `ROLE A`, so
+        work matching B abstains though the operator priced it.
+
+        Catches: emitting a whole group at its first member's position.
+        """
+        card = {'Role A': 50.0, 'Role B': 60.0, 'ROLE A': 75.0}
+        listed = _extract_vocabulary_roles(self._prompt(card))
+        self.assertEqual(['Role A', 'Role B', 'ROLE A'], listed,
+                         'emitted order must match card order exactly')
+
+    def test_a_comma_bearing_key_stays_one_entry(self):
+        """F2: _clamp_assessment_text strips only pipe/CR/LF, so a comma is
+        a legal card key character. Joined unquoted on ', ' it read as two
+        roles, and a model copying half produces a string the card does not
+        contain -- an abstention on a role the operator priced.
+
+        Catches: unquoted entries joined on a comma.
+        """
+        card = {'Analyst, Sales Operations': 70.0, 'Other Role': 60.0}
+        listed = _extract_vocabulary_roles(self._prompt(card))
+        self.assertIn('Analyst, Sales Operations', listed)
+        self.assertEqual(2, len(listed), 'the comma key must not split in two')
+        for role in listed:
+            self.assertIn(role, card)
+
+    def test_baseline_is_a_genuine_pre_change_module(self):
+        """F3: the byte-identity baseline resolved via `git merge-base HEAD
+        origin/main` becomes HEAD itself once this lands on main, so the
+        prompt builder would be compared against ITSELF and pass even if the
+        no-card path regressed. A guard that cannot fail is not a guard.
+
+        This asserts the property that matters rather than the sha: the
+        baseline module must NOT contain the vocabulary builder this change
+        introduced. If it does, the baseline is post-change and every
+        byte-identity arm in this module is vacuous.
+        """
+        baseline = _baseline_classifier()
+        self.assertFalse(
+            hasattr(baseline, '_rate_card_role_vocabulary'),
+            'baseline resolved to a POST-change classifier -- the '
+            'byte-identity arms are comparing the builder with itself',
+        )
+        self.assertTrue(hasattr(baseline, '_build_outcome_evaluation_prompt'),
+                        'baseline must still be a real classifier module')
