@@ -157,7 +157,7 @@ Absent from `config.json` is the same as disabled.
 | `currency` | `"USD"` | ISO 4217. An assessment naming a different currency is rejected. |
 | `maxHoursSaved` | `40` | Upper bound on the estimated hours saved. |
 | `maxLoadedRate` | `500` | Upper bound on the assumed loaded hourly rate. |
-| `rateCard` | absent | Object keyed by the evaluator's inferred role; a matching role's amount replaces the `hours x rate` derivation. Selected via `boundaries.valuation = "rate_card_valuation_fixture"`. Nests **inside** `llmOutcomeEvaluation` — see "The placement trap" below. |
+| `rateCard` | absent | Object keyed by the evaluator's inferred role; a matching role's amount replaces the `hours x rate` derivation. Selected via `boundaries.valuation = "rate_card_valuation_fixture"`. Nests **inside** `llmOutcomeEvaluation` — see "The placement trap" below. Its keys also steer the evaluator's role selection — see "`rateCard`" below. |
 | `revenueCard` | absent | Object keyed by an operator-bound identity; each entry prices a completed booking. Selected via `boundaries.valuation = "revenue_card_valuation_fixture"` together with `revenueCardKey`. Nests **inside** `llmOutcomeEvaluation` — see "The placement trap" and "`revenueCard`" below. |
 | `revenueCardKey` | `""` | The non-empty string naming which `revenueCard` entry applies on this host, read from configuration only. |
 | `maxRevenueValue` | absent | Optional ceiling on a configured revenue amount, consulted only when the producing registrant declared and had accepted an operator-only mechanism for the call. See "`maxRevenueValue`" below. |
@@ -186,6 +186,22 @@ still rides the record as an evaluator assumption. Declares
 `CUSTOMER_CONFIGURED`.
 
 **Configuration establishes an approved rate, not actual hours worked.**
+
+**A configured card has a second effect: its key spellings steer the
+evaluator.** A key is now both a price and a label — when `rateCard` is
+present, the model is shown the card's own role spellings and told to pick
+one verbatim or omit the field, rather than inventing free-form phrasing an
+exact-match lookup would then miss. With no card configured, the evaluator's
+role stays free-form exactly as before. Case variants of one role (`"Backend
+Engineer"` vs `"BACKEND ENGINEER"`) are shown to the model **once** when they
+carry the same amount, and **in full** when they do not — either way, every
+variant stays priceable, because the lookup above is unchanged. The list
+shown to the model is bounded and truncates on a whole-entry boundary, in
+**card order**, with a logged warning naming how many roles were omitted —
+which makes the card's own ordering the operator's lever over which roles
+survive a long card. A key the validator's own clamp would alter — over the
+length bound, or carrying a pipe or newline — is never offered to the model,
+because the model could not return it successfully anyway.
 
 #### `revenueCard`
 
