@@ -380,12 +380,18 @@ excerpt above is elided at exactly the fields this turns on (see
 `## Limits`) — and whether it generalizes, or how much of the measured
 96.8% non-attributed population it covers, is not established here.
 `_attribution_for` (`api-event-report.sh:1489-1522`) is the consumer, not
-the resolver: it only reads the already-resolved `m["owning_job_id"]`,
-under two further conditions this citation should not drop — the session
-must be a CONFIRMED root (`IS_ROOT_CONFIRMED`) and the owner must be a job
-`api-event-report.sh` has already created
-(`_owner in CREATED_JOB_IDS`), both at
-`api-event-report.sh:1514-1520`. It is not measured or sized here, and no
+the resolver, and reads two distinct branches in the order the code itself
+evaluates them. It takes the marker's OWN `agentic_job_id`
+(`api-event-report.sh:1512`) first, ungated — populated only on a subagent
+session, naming the root's job. Only when that is absent does it fall back
+to the already-resolved `m["owning_job_id"]` (`api-event-report.sh:1514`),
+and that fallback branch alone carries two further conditions: the session
+must be a CONFIRMED root (`IS_ROOT_CONFIRMED`, gated at
+`api-event-report.sh:1513`) and the owner must be a job
+`api-event-report.sh` has already created (`_owner in CREATED_JOB_IDS`,
+gated at `api-event-report.sh:1520`). The code's own comment states the
+asymmetry directly: those two gates are "Deliberately NOT applied to the
+marker's own agentic_job_id above." It is not measured or sized here, and no
 fix is proposed; it is recorded as a finding this diagnosis surfaced, for
 whichever phase picks up TRU-05.
 
