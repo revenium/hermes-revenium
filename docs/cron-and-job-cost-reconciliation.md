@@ -314,4 +314,159 @@ diagnosis surfaced, for whichever phase picks up TRU-05.
 
 ## TRU-02 — why `hermes cron run` sessions classify as unclassified
 
-NOT YET ANSWERED — filled by plan 02 of this phase.
+### The three candidates
+
+Verbatim from
+`.planning/todos/pending/2026-10-01-classify-cron-sessions-so-they-stop-metering-as-unclassified.md`:
+
+1. **The plugin never runs for cron-shaped sessions.** The classifier
+   registers `on_session_end` / `on_session_finalize` / `post_llm_call` /
+   `post_api_request`. If a cron session's lifecycle fires none of them (or
+   ends by a path that skips them), no classification is ever attempted and
+   no sentinel is written.
+2. **Classification is attempted and refused.** `LABEL_RE` validation or
+   `TRIVIAL_BLOCKLIST` may reject the label for short, repetitive cron
+   transcripts.
+3. **It is intentional and simply undocumented** — cron work may have been
+   judged not worth an auxiliary-LLM call per tick.
+
+### The probe
+
+Every command below is a read verb. None writes under `~/.hermes`, calls
+`revenium meter`, runs `cron.sh` / `hermes-report.sh` / `prune-markers.sh` /
+`clear-halt.sh` by hand, or deploys/rsyncs the skill tree.
+
+- `revenium config show` — tenant/agent re-confirmation, same as plan 01.
+- `ls -la "${STATE_DIR}"` (resolved: `ls -la ~/.hermes/state/revenium/`) —
+  state-dir inventory.
+- `wc -l`, `grep -oE '^HERMES:cron_[^:]+:'`, `sort -u` on `LEDGER_FILE`
+  (`${STATE_DIR}/revenium-hermes.ledger`) — enumerate every distinct
+  `cron_*` session id this host's own ledger has ever shipped (102 ids).
+- For each id: `[ -f "${MARKERS_DIR}/<sid>.jsonl" ]` and
+  `[ -e "${MARKERS_READY_DIR}/<sid>" ]` — existence checks only, partitioning
+  into markers-present / sentinel-only / neither.
+- `grep "^HERMES:<sid>:" "${LEDGER_FILE}" | tail -1 | cut -d: -f4` per id —
+  read the session's own last-ledger-line timestamp (read-only; this is the
+  skill's own append-only idempotency ledger, never written to).
+- `python3 -c "... json.loads(...) ..."` over each markers-present
+  `<sid>.jsonl` — read the literal `task_type` values out of the marker
+  records (file read only).
+- `grep -i "prune" "${LOG_FILE}"` (resolved:
+  `~/.hermes/state/revenium/revenium-metering.log`) — read the skill's own
+  cron log for the most recent `prune-markers.sh` run's output (log read
+  only; this plan did not invoke `prune-markers.sh`).
+- `export PATH=...`; `hermes cron --help`; `hermes cron list`; `hermes cron
+  status`; `hermes cron runs --limit 50` — Hermes' own native cron-listing
+  and execution-history verbs (`~/.local/bin/hermes`, not on the bare
+  non-login `PATH`), to confirm what actually produces `cron_<job>_<ts>`
+  session ids.
+- `sqlite3 "${STATE_DB}" "SELECT id, source, started_at, ended_at,
+  end_reason, message_count, tool_call_count, input_tokens, output_tokens,
+  handoff_state, archived FROM sessions WHERE id = '<sid>'"` — read-only
+  `SELECT` against Hermes' own session table, for the specific session this
+  section names below and one comparison sibling.
+- `systemctl status hermes-gateway --no-pager` — confirm this host's gateway
+  is a **system-level** unit (not `--user`), per the reference-host note.
+- `bash ${SKILL_DIR}/scripts/plugin-status.sh` and
+  `bash ${SKILL_DIR}/scripts/hooks-status.sh` — the skill's own shipped,
+  read-only diagnostics, confirming the plugin is registered and the hooks
+  are wired before trusting any log-absence finding.
+- `journalctl -u hermes-gateway --no-pager --since <ts> --until <ts>` (and
+  unbounded, for `--disk-usage` and oldest-entry checks) — read the system
+  unit's own log, established below as the classifier's real log channel.
+
+### The evidence — host state
+
+**Partition, measured 2026-10-04, this host's own agent, all 102 distinct
+`cron_*` ids ever present in `revenium-hermes.ledger`:**
+
+| State | Count (2026-10-04) | Count in the pending todo (2026-10-01, pre-prune) |
+|---|---|---|
+| Markers present | 11 | 10 |
+| No markers, sentinel present | 0 | 58 (flagged in the todo itself as "all outside the 30d window — pruned") |
+| Neither | 91 | 31 |
+
+**This is itself a finding, not a restatement.** Between the todo's
+measurement (2026-10-01T14:46:41Z) and this one, the host's own
+`revenium-metering.log` shows a `prune-markers.sh` run at
+**2026-10-01T19:00:39-44Z** — about four hours later, same day — whose output
+includes `prune: ready summary, scanned=2843 kept=916 removed=1927
+kept_marker_present=2 kept_session_pending=0` and dozens of individual
+`prune: removed dir=ready sid=cron_...` lines for sessions 40-80+ days old.
+This is PR #139 ("Prune the `.ready` sentinel dir alongside marker files"),
+already merged into the commit plan 01 confirmed this host's tree matches
+(`ed1fa952c4e7d87dbc63e647ae0a1c81519ae900`) — **before** PR #139, only
+markers were pruned by age, so a sentinel, once written, persisted
+indefinitely; after it, stale sentinels are pruned too. The todo's 58
+"no-marker/has-sentinel" sessions were old sentinel orphans from markers
+pruned under the pre-#139 behavior; that same-day prune run pruned their
+sentinels too, moving all 58 into the "neither" bucket here. **This matches
+this project's own standing finding that a sentinel with no marker is
+usually a pruning artifact, not a silent drop** — and it means the "31"
+figure, not "31 or 89", is the one comparable across both measurements,
+because those 31 already had no sentinel *before* that prune run touched
+anything, when no mechanism existed yet that could have removed one.
+
+**Nearly the entire "neither" population is explained by age, not by a live
+defect.** `REVENIUM_MARKER_RETENTION_DAYS` defaults to 30
+(`common.sh` line 60); the 30-day cutoff from this measurement's run time is
+**2026-09-04**. Of the 91 "neither" ids, **90 have a last-ledger timestamp
+older than that cutoff** (oldest: 2026-07-13; newest of the 90:
+2026-08-21) — every one of them is explained by the same pruning mechanism,
+not a live classification failure, because the ledger-timestamp age at scan
+time already exceeds the retention window that governs both marker and (now)
+sentinel pruning.
+
+**Exactly one "neither" id is NOT explained by age:
+`cron_138a635e0812_20260926_070034`** (last-ledger ts `1790408524.383` =
+2026-09-26T07:42:04Z by that ledger line, session-start per `state.db`
+`1790406034.307` = 2026-09-26T07:00:34Z — 12 days old at measurement time,
+well inside the 30-day retention window). This is the single live,
+unpruned, unexplained-by-retention defect this partition surfaces, and it is
+the session the rest of this section investigates.
+
+**Open Question 1 — do markers that exist carry real labels, or
+`unclassified`?** Read directly from each of the 11 markers-present
+`<sid>.jsonl` files:
+
+| Session id | `task_type` |
+|---|---|
+| `cron_138a635e0812_20260925_034013` | `jupiter_signalraven_queue_delivery` |
+| `cron_138a635e0812_20260925_070019` | `jupiter_single_event_pipeline_run` |
+| `cron_138a635e0812_20260927_070049` | `jupiter_single_event_pipeline_run` |
+| `cron_138a635e0812_20260928_070008` | `jupiter_daily_pipeline_run` |
+| `cron_138a635e0812_20260929_070024` | `jupiter_daily_pipeline_run` |
+| `cron_138a635e0812_20260930_070034` | `jupiter_daily_pipeline_run` |
+| `cron_138a635e0812_20261001_070058` | `jupiter_daily_pipeline_empty_queue` |
+| `cron_138a635e0812_20261002_070002` | `jupiter_single_event_queue_delivery` |
+| `cron_138a635e0812_20261003_070011` | `jupiter_daily_pipeline_run` |
+| `cron_138a635e0812_20261004_070016` | `jupiter_daily_pipeline_empty_queue` |
+| `cron_23f4c476fc5c_20260928_130044` | `competitive_intelligence_digest_compile` |
+
+**Every single one carries a real, specific label — none is
+`unclassified`.** This directly settles Open Question 1 in the direction the
+plan's own objective flagged as possible: classification is **not** refused
+for cron sessions that reach a classifying hook. Candidate 2
+(`LABEL_RE`/`TRIVIAL_BLOCKLIST` refusal) is ruled out as an explanation for
+every recent cron session this host has a marker for — the marker-present
+population's problem, if any, is not label rejection.
+
+**Open Question 2 / assumption A1 — what actually produces `cron_<job>_<ts>`
+ids?** `hermes cron list` (via `~/.local/bin/hermes`, exported onto `PATH`
+alongside the linuxbrew prefix) shows an **active** scheduled job:
+
+```
+138a635e0812 [active]
+  Name:      jupiter-pipeline
+  Schedule:  0 7 * * *
+  ...
+  Last run:  2026-10-04T07:02:14.749565+00:00  ok
+```
+
+The job id (`138a635e0812`) matches the first path segment of every
+`cron_138a635e0812_<ts>` session id in the ledger, and `hermes cron status`
+confirms "Gateway is running — cron jobs will fire automatically." This
+confirms assumption A1 directly: these session ids are produced by Hermes'
+own native `hermes cron` scheduler, not an operator `at`/systemd-timer
+wrapper around a `hermes chat -Q` call. The hook-firing analysis below
+targets the correct code path.
