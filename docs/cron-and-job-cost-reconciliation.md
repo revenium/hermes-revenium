@@ -829,19 +829,40 @@ section exists so the next reader does not repeat that mistake.
   assigns to the same transcript (read-correctness); its cost per tick,
   since each otherwise-unclassified cron session would need its own
   auxiliary-LLM classification call on a path that runs every minute —
-  that call count is the same for either reader, but this reader's own
-  profile is to scan every message row for the session and carry up to
-  8,000 characters under a 500-character per-message cap, falling back
-  to a head-plus-tail sample joined by an explicit elision marker above
-  that budget. This is not unconditionally the larger prompt: the
-  narrower two-message reader task-type classification already uses
-  today (`_read_session_messages`, `classifier.py:387-434`) applies no
-  per-message cap at all, so a session with two very large messages can
-  produce a bigger prompt through that reader instead; and whether it is
-  compatible with the settle-window contract
-  (`REVENIUM_CRON_SETTLE_SECONDS`) — metering a session before its
-  marker lands orphans the completion from its job permanently. No fix
-  is designed here.
+  that call count is the same for either reader. The two prompts those
+  calls build are not the same size, and the ordering IS establishable:
+  the job-inference prompt a transcript-based path would build is the
+  LARGER one, up to 6,000 characters of transcript content against
+  ~1,600 characters of message content (800 chars each for the latest
+  user message and the latest assistant message) in the task-
+  classification prompt already shipped today. Both are hard caps applied
+  where each prompt is BUILT, not where its input is read —
+  `_build_job_inference_prompt` (`classifier.py:514-557`) truncates its
+  `transcript_preview` to `[:6000]`; `_build_classification_prompt`
+  (`classifier.py:4626-4661`) truncates `user_preview` and `asst_preview`
+  to `[:800]` each, deliberately, per its own comment: "Bound the previews
+  to ~800 chars each so the whole prompt fits ~2 KB per D-06." However
+  large the underlying messages are, the task-classification prompt
+  cannot exceed that ~2 KB cap, because the cap binds at prompt-build
+  time, not at read time. An earlier round of this bullet reasoned the
+  other way — from `_read_session_messages`'s (`classifier.py:387-434`)
+  own read-time behavior to a conclusion about prompt size — which is
+  exactly backwards: read-time behavior does not determine build-time
+  size once a prompt builder truncates its input. This reader's OWN
+  budget is a separate matter again — `_read_session_transcript`'s
+  `max_chars` (8,000) and `per_msg_cap` (500) parameter defaults describe
+  what IT carries before `_build_job_inference_prompt` then truncates
+  that output down to its own 6,000-character cap; neither 8,000 nor 500
+  is itself a prompt size. Phase 69 should size a transcript-based
+  cron-side fallback against the 6,000-character job-inference prompt
+  budget, not the task-classification prompt's ~2 KB — but that 6,000
+  figure is a per-call prompt bound, not a per-tick cost: per-tick cost
+  additionally depends on how many otherwise-unclassified sessions a
+  given tick processes, which this record does not measure. Also left
+  unestablished: whether a cron-side transcript read is compatible with
+  the settle-window contract (`REVENIUM_CRON_SETTLE_SECONDS`) — metering
+  a session before its marker lands orphans the completion from its job
+  permanently. No fix is designed here.
 - **Single host, single tenant, single probe pass.** Every finding in this
   record — TRU-01 and TRU-02 alike — was measured once, on this host (agent
   `Jupiter`), on 2026-10-04. Nothing here establishes the same relationship
