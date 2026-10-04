@@ -77,10 +77,16 @@ matters.
   transcript or an explicit cron-side declaration from the scheduled job
   itself. One of those two demonstrably exists: the classifier reads a
   session's own transcript from `state.db` by session id, over a
-  read-only connection (`classifier.py:412-418`, via `_ro_uri`),
-  independent of whether any hook ever fired — the named defect session
-  has 17 messages (already stated above), so a hook that never ran says
-  nothing about whether those messages can be read. That does not restore
+  read-only connection — `_read_session_transcript`
+  (`classifier.py:441-511`, via `_ro_uri`) — independent of whether any
+  hook ever fired — the named defect session has 17 messages (already
+  stated above), so a hook that never ran says nothing about whether
+  those messages can be read. This is a different input from the one
+  task-type classification consumes today: that path reads only the
+  latest user message and the latest assistant message
+  (`_read_session_messages`, `classifier.py:387-434`), not the
+  transcript — Phase 69 must not inherit a citation to that narrower
+  reader. That does not restore
   `TRU-06 is a FIXABLE DEFECT`: the session-id-shape mechanism stays
   refuted by the five-label table above regardless of transcript
   availability, and nothing here establishes that a cron-side transcript
@@ -816,14 +822,23 @@ section exists so the next reader does not repeat that mistake.
   payload for this session, which was not captured here.
 - **A cron-side transcript read is not yet established to work.** GR-06
   shows the run's own transcript persists in `state.db` and is readable
-  by session id independent of hook dispatch (`classifier.py:412-418`)
-  — but a readable transcript is not the same as a working fix. Left
-  unestablished: whether a cron-side read of that transcript would
-  reproduce the same label the in-session classifier assigns to the
-  same transcript (read-correctness); its cost per tick, since each
-  otherwise-unclassified cron session would need its own
-  auxiliary-LLM classification call on a path that runs every minute;
-  and whether it is compatible with the settle-window contract
+  by session id independent of hook dispatch — `_read_session_transcript`
+  (`classifier.py:441-511`) — but a readable transcript is not the same
+  as a working fix. Left unestablished: whether a cron-side read of that
+  transcript would reproduce the same label the in-session classifier
+  assigns to the same transcript (read-correctness); its cost per tick,
+  since each otherwise-unclassified cron session would need its own
+  auxiliary-LLM classification call on a path that runs every minute —
+  that call count is the same for either reader, but this reader's own
+  profile is to scan every message row for the session and carry up to
+  8,000 characters under a 500-character per-message cap, falling back
+  to a head-plus-tail sample joined by an explicit elision marker above
+  that budget. This is not unconditionally the larger prompt: the
+  narrower two-message reader task-type classification already uses
+  today (`_read_session_messages`, `classifier.py:387-434`) applies no
+  per-message cap at all, so a session with two very large messages can
+  produce a bigger prompt through that reader instead; and whether it is
+  compatible with the settle-window contract
   (`REVENIUM_CRON_SETTLE_SECONDS`) — metering a session before its
   marker lands orphans the completion from its job permanently. No fix
   is designed here.
