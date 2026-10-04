@@ -470,3 +470,139 @@ confirms assumption A1 directly: these session ids are produced by Hermes'
 own native `hermes cron` scheduler, not an operator `at`/systemd-timer
 wrapper around a `hermes chat -Q` call. The hook-firing analysis below
 targets the correct code path.
+
+### The verdict
+
+**Candidate 1 holds, in a narrower and different shape than either the
+pending todo or this plan's own objective anticipated — confirmed live, not
+assumed.**
+
+**Locating the right instrument first.** The classifier's own outcomes never
+reach `revenium-metering.log` — `scripts/diagnose.sh:346-350` says so
+explicitly in the shipped product ("written IN-PROCESS by the classifier
+plugin on the Python logger 'revenium_classifier', not into
+revenium-metering.log, so they land wherever Hermes' own logging is
+configured"), and this record would be answering from the wrong instrument
+if it stopped there. This host runs hermes-gateway as a **system-level**
+`systemd` unit (confirmed: `systemctl status hermes-gateway` shows
+`Loaded: .../etc/systemd/system/hermes-gateway.service`, not a `--user`
+unit), so its Python process's stdout/stderr — and with it every
+`logging.getLogger("revenium_classifier")` line — lands in
+**`journalctl -u hermes-gateway`**, which retains history back to this
+host's last `hermes-gateway` package reinstall (oldest entry: 2026-06-09).
+This was confirmed as the *correct* channel, not merely *a* channel, by
+reading a **working** cron session's log window
+(`cron_138a635e0812_20260927_070049`, 2026-09-27 07:04:39Z) and finding
+three real `revenium_classifier` lines there, including the exact
+`_validate_label`-adjacent valuation warnings this skill's own code emits.
+
+**Reading that channel for the one live defect session named above.**
+`cron_138a635e0812_20260926_070034` has neither a marker nor a sentinel, and
+its `state.db` row shows it was not a zero-turn, never-completed session —
+quite the opposite: `message_count=17`, `tool_call_count=12`,
+`input_tokens=102404`, `output_tokens=3569`, `end_reason='cron_complete'`.
+`journalctl -u hermes-gateway --since "2026-09-26 06:55:00" --until
+"2026-09-26 07:10:00"` and a same-day full-log grep for the literal session
+id both return **zero** lines containing `revenium` or
+`revenium_classifier`, in either direction. The same window **does** show
+the actual cause, from Hermes' own scheduler and conversation loop, not this
+skill:
+
+```
+07:00:34 WARNING agent.conversation_loop: API call failed (attempt 1/3) ... HTTP 402 ...
+07:01:13 WARNING agent.conversation_loop: API call failed (attempt 1/3) ... HTTP 402 ...
+07:01:14 ERROR   agent.conversation_loop: Non-retryable client error: Error code: 402 - ...
+07:01:14 ERROR   cron.scheduler: Job 'jupiter-pipeline' failed: RuntimeError: HTTP 402: ...
+07:01:14            Traceback (most recent call last):
+07:01:14              File ".../hermes-agent/cron/scheduler.py", line 5751, in run_job
+07:01:14                raise RuntimeError(_err_text)
+07:01:14            RuntimeError: HTTP 402: This request requires more credits, ...
+```
+
+The run exhausted its provider credits mid-conversation (OpenRouter 402, a
+real billing event, not a skill defect) and `cron/scheduler.py`'s own
+`run_job` (line 5751 in this host's installed Hermes build) raised a
+`RuntimeError` that `cron.scheduler` logged as a job failure. **Zero
+classifier log lines, from a channel independently confirmed correct on a
+sibling session minutes away in the same ledger, is the positive evidence
+for candidate 1**: `_on_session_end` (`__init__.py:86-133`) and
+`_on_session_finalize` (`__init__.py:136-200`) were never invoked for this
+session at all. The structural argument this phase's `must_haves.key_links`
+names applies here precisely: every code path through those two callbacks —
+including each one's own `except Exception` handler — calls
+`_write_sentinel` (`__init__.py:52-82`) before returning, and
+`_write_sentinel` itself swallows every `IOError`/`OSError`/
+`PermissionError` with a `logger.warning` (PA-9's fourth candidate). A
+sentinel-write failure would still log something; a `LABEL_RE`/
+`TRIVIAL_BLOCKLIST` rejection (`classifier.py:58`, `classifier.py:67`,
+validated at `_validate_label`, `classifier.py:4713-4737`) would also still
+log something (`classifier.py`'s rejection warning fires from inside
+`_validate_label`, which only runs once a hook has already dispatched into
+`run_classification_async`, `classifier.py:5176-5186`). **No line at all, in
+either direction, from an instrument proven to carry this exact logger's
+output minutes earlier, rules out every code path that requires the hook to
+have started running** — leaving "the hook was never invoked" as the only
+candidate the evidence supports.
+
+**The specific shape differs from what the todo and this plan's own
+objective guessed.** The todo's candidate 1 reads "the plugin never runs for
+cron-shaped sessions" and this plan's objective speculated a narrower form —
+"a cron session that never completes a turn and never hits a session
+boundary reaches none of the three hooks." **That narrower hypothesis is
+wrong, confirmed by this session's own evidence**: 17 messages and 12 tool
+calls is not a zero-turn session, and `state.db` records a real, terminal
+`end_reason` (`cron_complete`), not an interrupted or still-open one. The
+actual mechanism, confirmed by the traceback above: when
+`cron/scheduler.py`'s `run_job` raises an uncaught exception after the
+conversation itself has already produced real turns — here, because the
+underlying provider call's final retry exhausted and raised past Hermes' own
+agent-loop retry logic — that exception propagates out of `run_job` and is
+caught and logged by `cron.scheduler` itself, a code path distinct from, and
+evidently upstream of, whatever normally triggers `on_session_end` /
+`on_session_finalize` for a cron run. The 2026-08-13 claim at
+`docs/plugin-interface.md:73` ("Cron (`hermes cron run`) — **identical full
+lifecycle**, including `on_session_end`") should be read as "identical
+dispatch mechanism when the scheduler's own `run_job` returns normally," not
+as "cron sessions always complete a turn and hit a boundary" — that probe
+used one successful completed exchange and never exercised an error-raising
+run.
+
+**Corroborating pattern, not independently re-measured.** The same
+`cron.scheduler: Job '...' failed` error signature appears 20 times in this
+host's full `journalctl -u hermes-gateway` history back to 2026-06-09,
+clustered around provider-credit exhaustion events (several in a row,
+2026-08-04 through 2026-08-11) and isolated incidents elsewhere (2026-06-16,
+06-17, 06-20, 06-21, 06-24, 07-07, 07-18, 07-19, 07-27, 07-28, 08-11(x2),
+2026-09-26). All but the 2026-09-26 occurrence are now outside the 30-day
+retention window and cannot be independently re-verified against their own
+marker/sentinel state the way the named session was — they are named here as
+a consistent pattern across four months, not as an additional measurement.
+
+### What this does not establish
+
+- **Single session, single host, single probe pass.** The verdict rests on
+  one named defect session (`cron_138a635e0812_20260926_070034`), read once,
+  on this date. The 20-occurrence historical pattern is corroboration by
+  error-message shape, not 20 independently re-confirmed marker/sentinel
+  absences — those sessions' marker and sentinel state cannot be
+  re-established now that they are past the retention window.
+- **This does not establish Hermes' native cron scheduling semantics beyond
+  what this session's own `state.db` row and the system log show.** Exactly
+  why `cron/scheduler.py`'s exception-handling path (upstream of `run_job`'s
+  `raise`) does not also invoke `on_session_end` / `on_session_finalize` the
+  way a normal-return path does is not established from this repository's
+  own code — Hermes' `cron/scheduler.py` is not part of this skill and was
+  not read beyond the one traceback frame the log itself printed
+  (`cron/scheduler.py:5751`).
+- **The deployed-tree currency caveat from `## The environment` applies to
+  every `__init__.py` / `classifier.py` citation above.** `git diff --stat
+  ed1fa95..HEAD -- skills/` is empty, so every line number cited is read
+  against both this repository's HEAD and the tree plan 01 confirmed
+  byte-identical to `ed1fa95` on this host, by sha256, in both
+  plugin-discovery locations — not against a possibly-stale assumption.
+- **A non-error-path trigger for the same "neither" shape is not ruled
+  out.** This record found exactly one live example, and its cause was a
+  scheduler-level exception. A different cron run that reaches "neither" by
+  some other upstream path (unrelated to a `run_job` exception) is not
+  demonstrated to be impossible — only unobserved in the one unpruned
+  instance this host currently has.
