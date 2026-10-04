@@ -18,17 +18,20 @@ nor the classifier's hook mechanics beyond what this diagnosis needed to read
 shipped behaviour against a real reference host and tenant and changes none
 of it — no file under `skills/` was touched to produce this record.
 
-One correction while we're here: `ROADMAP.md` names "the way Phase 41's
-reconciliation record did" as this record's survival precedent. That citation
-is inaccurate — Phase 41's deliverables live entirely in gitignored
-`.planning/` and do not survive in git. The actual precedents for a tracked,
-pinned, surviving diagnosis record are
+A note on this record's own survival precedent, corrected here per the
+planner note at `.planning/ROADMAP.md:271-279` (`.planning/` is gitignored,
+so that note does not itself survive the milestone — this paragraph is the
+durable copy): `.planning/ROADMAP.md`'s Phase 65 success criteria originally
+named "the way Phase 41's reconciliation record did" as this record's
+survival precedent. That citation was inaccurate — Phase 41's deliverables
+live entirely in gitignored `.planning/` and do not survive in git. The
+actual precedent is
 [Evidence-class precedence and declaration authority](evidence-class-precedence.md)
-(Phase 48) and `docs/auxiliary-usage-sizing.md` (Phase 31) — the latter is
-itself a cautionary tale, not a surviving example: an earlier record of its
-own existence was never added to `test_expected_files_exist`, and the file is
-untracked and gone today. That history is exactly why this page's own pin,
-added in this same change, matters.
+(Phase 48); `docs/auxiliary-usage-sizing.md` (Phase 31) is the
+counter-example named alongside it — a record written and never pinned in
+`test_expected_files_exist`, and consequently untracked and gone today.
+That history is exactly why this page's own pin, added in this same change,
+matters.
 
 ## Verdict, up front — every criterion, in one table
 
@@ -42,11 +45,17 @@ added in this same change, matters.
 
 - **TRU-05 / Phase 68:** `TRU-05 is LIVE` — per-job Total Cost is built from
   this skill's `--agentic-job-id` attribution, confirmed two ways (the
-  two-job `transactionCount` comparison, and a direct assumption-A2 test
-  ruling out a time-window/session-based join), so the measured 3.2%
-  attribution rate (78 of 2,424 markers, per `.planning/REQUIREMENTS.md`) is
-  the actual denominator and Phase 68 runs on it. See "### The verdict" under
-  TRU-01 below for the evidence.
+  two-job `transactionCount` comparison, ruling out a session-based join
+  directly, and a direct assumption-A2 test further narrowing a time-window
+  join to the extent evidenced — see `## Limits`). The measured 3.2%
+  attribution rate (78 of 2,424 markers carry `agentic_job_id`, per
+  `.planning/REQUIREMENTS.md`'s starting position) is a **per-marker** rate,
+  not a per-dollar one — `Total Cost` is a dollar quantity, and this
+  record's own A2 evidence shows the two can diverge sharply (one job
+  absorbed a whole session's $4.03 while a sibling job in the same session
+  got $0). The cost-weighted attribution rate is a different number and was
+  not measured here; Phase 68 should establish it before sizing the gap.
+  See "### The verdict" under TRU-01 below for the evidence.
 - **TRU-06 / Phase 69:** `TRU-06 is a FIXABLE DEFECT` — the cause is one
   this skill can act on without touching Hermes' own `cron/scheduler.py`.
   `.planning/REQUIREMENTS.md`'s TRU-06 wording prefers "a deterministic
@@ -54,21 +63,28 @@ added in this same change, matters.
   and that is exactly what the confirmed cause invites: the session id shape
   itself (`cron_<job>_<ts>`) is sufficient to assign a real label even when
   the classifier hook never ran at all, independent of whatever upstream
-  Hermes bug skips hook dispatch on a scheduler exception. The settle-window
-  fallback (`REVENIUM_CRON_SETTLE_SECONDS`, `hermes-report.sh`) must keep
-  working exactly as it does today for installs with no plugin — this
-  disposition does not touch it, and no fix is designed here; Phase 69 does
-  that design.
+  Hermes bug skips hook dispatch on a scheduler exception. **Any such label
+  must be assigned cron-side** — the markerless fallback in
+  `hermes-report.sh`, where `--task-type unclassified` is chosen today —
+  since by construction no in-session component (the plugin, the hooks)
+  runs in this failure mode; the plugin is precisely the component this
+  verdict shows did not run. The settle-window fallback
+  (`REVENIUM_CRON_SETTLE_SECONDS`, `hermes-report.sh`) must keep working
+  exactly as it does today for installs with no plugin — this disposition
+  does not touch it, and no fix is designed here; Phase 69 designs it.
 
 ## The environment
 
 - **Host:** the reference host used throughout this milestone's measurements
   ("Jupi" by role, per `.planning/REQUIREMENTS.md`). Named by role only — no
   address, hostname, or SSH key name appears in this file.
-- **Agent:** `Jupiter` — confirmed on every transaction row read for this
-  record's probes (`"agent": "Jupiter"`), so every figure below is this
-  host's own agent, not the tenant's other agent (out of scope per
-  `.planning/REQUIREMENTS.md` § Out of Scope).
+- **Agent:** `Jupiter` — confirmed (`"agent": "Jupiter"`) on every
+  transaction row that returned any rows across this record's probes (the
+  zero-attribution job's `jobs transactions` call returned no rows at all,
+  and the `metrics completions` excerpt below carries no `agent` field of
+  its own — see the note above that excerpt), so every figure below that has
+  a transaction row to check is this host's own agent, not the tenant's
+  other agent (out of scope per `.planning/REQUIREMENTS.md` § Out of Scope).
 - **Tenant:** confirmed via `revenium config show`'s `Tenant ID` field,
   matching the reference tenant id recorded in `.planning/REQUIREMENTS.md` §
   "The measured starting position." `revenium tenants get` itself takes a
@@ -151,7 +167,13 @@ transactions behind it, one with real transactions behind it.
 
 > **One id is redacted here, against this record's own keep-ids-raw rule.** Every
 > other job, session and transaction id in this file is printed raw, because an
-> opaque id is what makes a finding reproducible. This job's id is the exception:
+> opaque id is what makes a finding reproducible — this is this record's whole
+> redaction convention, stated once here: ids, session shapes, and timestamps
+> stay raw because they are opaque and reproducibility-bearing, while anything
+> that identifies a person, a customer, a tenant, or a host (a name, a tenant
+> id, a host address or hostname) is placeholdered or left out of this file
+> entirely, with a `.planning/`-side pointer in its place. This job's id is
+> the exception to the raw-id half of that rule:
 > it embeds a real person's name, so it is not opaque and the carve-out does not
 > reach it. The opaque `_d671` discriminator is kept so the two commands below are
 > visibly the same job; the raw id is recoverable from the reference host's
@@ -231,7 +253,18 @@ secondary, session-based signal.
 A single root cron session on this host, `cron_138a635e0812_20260929_070024`,
 settles this directly. Its own marker file carries **two** job-kind records,
 written seconds apart — this one session created two separate jobs in
-sequence:
+sequence.
+
+> **Note on what's shown.** Only this session's two **job**-kind marker
+> records are pasted below, each with its own internal fields elided after
+> the first few (timestamps, `muid`, and similar). This session's **task**-
+> kind marker records — including whether each carries its own
+> `agentic_job_id`, and where each sits in file order relative to these two
+> job records — are not pasted at all. That is exactly the data the
+> marker-ordering hypothesis in "### The verdict" below depends on;
+> re-pasting it unelided requires a fresh host read this record did not
+> perform, which is why that explanation is labeled a hypothesis, not a
+> measurement.
 
 ```
 {"kind":"job", ..., "sid":"cron_138a635e0812_20260929_070024", "agentic_job_id":"jupiter_open_web_signal_capture_992f", ...}
@@ -271,14 +304,21 @@ depend on and this phase's redaction convention keeps out of this file.)
 Both completions carry the **first** job's id (`jupiter_open_web_...`), and
 `revenium jobs roi jupiter_open_web_signal_capture_992f` independently shows
 `totalCost: 4.029912, totalTokens: 35563, transactionCount: 2` — exactly this
-session's whole spend. The second job, same session, same time window, same
-two completions, shows **zero**. If `transactionCount` were satisfied by a
-time-window or session-based join rather than the specific `--agentic-job-id`
-value on each completion, both jobs would show the spend; only one does.
-**Assumption A2 is CONFIRMED**: `jobs roi`'s `transactionCount` counts only
-transactions carrying that specific job's own `--agentic-job-id`, not a
-broader session- or window-based match — tested directly from this host's own
-evidence, not assumed from the two historical cross-host observations alone.
+session's whole spend. The second job, same session, same two completions,
+shows **zero**. This rules out a **session-based** join outright: both jobs
+share the identical session id and the identical two completions, yet only
+one shows the spend. It narrows, but does not fully rule out, a
+**time-window** join: that alternative is excluded only to the extent the
+two jobs' server-side windows overlap for these two transactions'
+timestamps, and neither job's own start/end window nor the transactions'
+timestamps were read back here — "written seconds apart" above describes
+when the two marker *records* were written, not the server-side job windows
+(see `## Limits`). **Assumption A2 is CONFIRMED for the session-based
+alternative, and narrowed for the time-window alternative**: `jobs roi`'s
+`transactionCount` tracks that specific job's own `--agentic-job-id` and is
+not satisfied merely by sharing a session with the paying job — tested
+directly from this host's own evidence, not assumed from the two historical
+cross-host observations alone.
 
 ### The verdict
 
@@ -291,13 +331,16 @@ record):
    `totalCount: 0`, and non-zero exactly when it returns real rows.
 2. **The assumption-A2 test** (above): a single session's two completions tag
    one specific job's `--agentic-job-id` and nothing else — a sibling job
-   from the identical session and time window gets nothing, ruling out a
-   time-window or session-based join as an alternative explanation.
+   from the identical session gets nothing, ruling out a session-based join
+   as an alternative explanation, and narrowing a time-window join to the
+   extent the two jobs' windows overlap (not independently confirmed; see
+   `## Limits`).
 
 Per-job `Total Cost` is built from the completions this skill tags with that
-job's own `--agentic-job-id`, full stop — not from a time-window join, not
-from a session-level aggregate, and not from an independent server-side
-signal.
+job's own `--agentic-job-id`, and not from an independent server-side
+signal: a session-level aggregate is ruled out directly, and a time-window
+join is ruled out to the extent the A2 test's two jobs' windows overlap for
+these transactions (see `## Limits` for what that test did not read back).
 
 **A byproduct worth naming plainly, because it is directly visible in the
 evidence above and bears on TRU-05's own denominator:** a session that
@@ -434,8 +477,11 @@ Every command below is a read verb. None writes under `~/.hermes`, calls
 | No markers, sentinel present | 0 | 58 (flagged in the todo itself as "all outside the 30d window — pruned") |
 | Neither | 91 | 31 |
 
-**This is itself a finding, not a restatement.** Between the todo's
-measurement (2026-10-01T14:46:41Z) and this one, the host's own
+**This is itself a finding, not a restatement.** The two measurements count
+different populations, not the same one measured twice: the todo's total is
+99 (10 + 58 + 31); this one is 102 (11 + 0 + 91) — three new `cron_*`
+sessions landed on 10-02/10-03/10-04 between the two measurements. Between
+the todo's measurement (2026-10-01T14:46:41Z) and this one, the host's own
 `revenium-metering.log` shows a `prune-markers.sh` run at
 **2026-10-01T19:00:39-44Z** — about four hours later, same day — whose output
 includes `prune: ready summary, scanned=2843 kept=916 removed=1927
@@ -447,23 +493,39 @@ already merged into the commit plan 01 confirmed this host's tree matches
 markers were pruned by age, so a sentinel, once written, persisted
 indefinitely; after it, stale sentinels are pruned too. The todo's 58
 "no-marker/has-sentinel" sessions were old sentinel orphans from markers
-pruned under the pre-#139 behavior; that same-day prune run pruned their
-sentinels too, moving all 58 into the "neither" bucket here. **This matches
-this project's own standing finding that a sentinel with no marker is
-usually a pruning artifact, not a silent drop** — and it means the "31"
-figure, not "31 or 89", is the one comparable across both measurements,
-because those 31 already had no sentinel *before* that prune run touched
-anything, when no mechanism existed yet that could have removed one.
+pruned under the pre-#139 behavior, and that same-day prune run is the
+documented mechanism that would move them into the "neither" bucket here.
+**This matches this project's own standing finding that a sentinel with no
+marker is usually a pruning artifact, not a silent drop.** The arithmetic
+does not fully close, though: 31 (the todo's sentinel-less "neither") + 58
+(the migrated sentinel orphans) = 89, two short of the measured 91. The most
+likely explanation, given "markers present" grew by only 1 (10 → 11) despite
+3 new marker-bearing sessions landing in the same window, is that two
+sessions which had markers at the todo's own measurement had those markers
+removed by the same age-based prune run and moved into "neither" instead of
+staying in "markers present" — but this record's host access does not
+extend to re-reading that prune run's session-by-session output to confirm
+it, so the +2 is recorded as unexplained rather than asserted as confirmed.
+It also means the "31" figure, not "31 or 89", is the one comparable across
+both measurements, because those 31 already had no sentinel *before* that
+prune run touched anything, when no mechanism existed yet that could have
+removed one.
 
-**Nearly the entire "neither" population is explained by age, not by a live
-defect.** `REVENIUM_MARKER_RETENTION_DAYS` defaults to 30
-(`common.sh` line 60); the 30-day cutoff from this measurement's run time is
-**2026-09-04**. Of the 91 "neither" ids, **90 have a last-ledger timestamp
-older than that cutoff** (oldest: 2026-07-13; newest of the 90:
-2026-08-21) — every one of them is explained by the same pruning mechanism,
-not a live classification failure, because the ledger-timestamp age at scan
-time already exceeds the retention window that governs both marker and (now)
-sentinel pruning.
+**Nearly the entire "neither" population is consistent with age-based
+pruning, not demonstrated to be a live defect.**
+`REVENIUM_MARKER_RETENTION_DAYS` defaults to 30 (`common.sh` line 60); the
+30-day cutoff from this measurement's run time is **2026-09-04**. Of the 91
+"neither" ids, **90 have a last-ledger timestamp older than that cutoff**
+(oldest: 2026-07-13; newest of the 90: 2026-08-21) — consistent with the
+same pruning mechanism, but not separable from a genuine classification
+failure once a session is past the retention window, because the absence of
+a marker or sentinel there is indistinguishable between "pruned" and "never
+written." The 20-occurrence `cron.scheduler: Job '...' failed` error
+pattern (see "### The verdict" below) indicates some of these 90 are likely
+the latter — a real hook-dispatch failure that left no marker to prune —
+rather than all 90 being pruning artifacts. Either way, none of the 90 is
+usable as live-defect evidence: their marker/sentinel state cannot be
+re-established now that they are past the retention window.
 
 **Exactly one "neither" id is NOT explained by age:
 `cron_138a635e0812_20260926_070034`** (last-ledger ts `1790408524.383` =
@@ -501,7 +563,9 @@ plan's own objective flagged as possible: classification is **not** refused
 for cron sessions that reach a classifying hook. Candidate 2
 (`LABEL_RE`/`TRIVIAL_BLOCKLIST` refusal) is ruled out as an explanation for
 every recent cron session this host has a marker for — the marker-present
-population's problem, if any, is not label rejection.
+population's problem, if any, is not label rejection. Candidate 3 is ruled
+out by the same table: classification is plainly attempted and succeeds for
+cron-shaped sessions, so no deliberate exclusion exists.
 
 **Open Question 2 / assumption A1 — what actually produces `cron_<job>_<ts>`
 ids?** `hermes cron list` (via `~/.local/bin/hermes`, exported onto `PATH`
@@ -529,13 +593,17 @@ targets the correct code path.
 pending todo or this plan's own objective anticipated — confirmed live, not
 assumed.**
 
-**Locating the right instrument first.** The classifier's own outcomes never
-reach `revenium-metering.log` — `scripts/diagnose.sh:346-350` says so
-explicitly in the shipped product ("written IN-PROCESS by the classifier
-plugin on the Python logger 'revenium_classifier', not into
-revenium-metering.log, so they land wherever Hermes' own logging is
-configured"), and this record would be answering from the wrong instrument
-if it stopped there. This host runs hermes-gateway as a **system-level**
+**Locating the right instrument first.** `scripts/diagnose.sh:346-350`
+documents that the classifier's *valuation* outcomes — "the other four
+outcomes -- evaluated, abstained, invalid, timed-out" — are "written
+IN-PROCESS by the classifier plugin on the Python logger
+'revenium_classifier', not into revenium-metering.log, so they land
+wherever Hermes' own logging is configured"; this record would be
+answering from the wrong instrument if it stopped there. The sibling-session
+read below confirms the general case — that this logger's output lands in
+`journalctl -u hermes-gateway` on this host — which is the stronger,
+independently-verified evidence this record relies on. This host runs
+hermes-gateway as a **system-level**
 `systemd` unit (confirmed: `systemctl status hermes-gateway` shows
 `Loaded: .../etc/systemd/system/hermes-gateway.service`, not a `--user`
 unit), so its Python process's stdout/stderr — and with it every
@@ -579,12 +647,13 @@ classifier log lines, from a channel independently confirmed correct on a
 sibling session minutes away in the same ledger, is the positive evidence
 for candidate 1**: `_on_session_end` (`__init__.py:86-133`) and
 `_on_session_finalize` (`__init__.py:136-200`) were never invoked for this
-session at all. The structural argument this phase's `must_haves.key_links`
-names applies here precisely: every code path through those two callbacks —
-including each one's own `except Exception` handler — calls
-`_write_sentinel` (`__init__.py:52-82`) before returning, and
-`_write_sentinel` itself swallows every `IOError`/`OSError`/
-`PermissionError` with a `logger.warning` (PA-9's fourth candidate). A
+session at all. The structural argument applies here precisely: every code
+path through those two callbacks — including each one's own
+`except Exception` handler — calls `_write_sentinel` (`__init__.py:52-82`)
+before returning, and `_write_sentinel` itself swallows every
+`IOError`/`OSError`/`PermissionError` with a `logger.warning` (a fourth
+candidate beyond the pending todo's three: a sentinel-write failure after
+the hook did run). A
 sentinel-write failure would still log something; a `LABEL_RE`/
 `TRIVIAL_BLOCKLIST` rejection (`classifier.py:58`, `classifier.py:67`,
 validated at `_validate_label`, `classifier.py:4713-4737`) would also still
@@ -725,6 +794,15 @@ section exists so the next reader does not repeat that mistake.
   Revenium platform does with what it received. TRU-01's own evidence
   (`jobs roi` / `jobs transactions`) is the exception — that comparison reads
   the server's own response directly.
+- **TRU-02's premise was not independently read back.** The named defect
+  session (`cron_138a635e0812_20260926_070034`) has no marker and no
+  sentinel, which would have shipped its completions under the markerless
+  `--task-type unclassified` fallback — but this record did not pull those
+  completion rows back by transaction id and read their actual `taskType`,
+  the admissible tenant-side evidence class this record's own
+  `## How each answer was scored` rule sets. The verdict instead rests on
+  host-side evidence (the absence of a marker and sentinel, and the absence
+  of classifier log lines) that rule classes as corroboration only.
 - **TRU-02's verdict rests on one named defect session.** The 20-occurrence
   historical pattern of `cron.scheduler: Job '...' failed` lines is named as
   a four-month corroborating pattern by error-message shape, not as 20
@@ -739,9 +817,29 @@ section exists so the next reader does not repeat that mistake.
   Hermes' code, not this skill's, and was read only as far as the log
   itself showed.
 - **TRU-01's own byproduct finding (the multi-job-per-session attribution
-  collision in `api-event-report.sh`'s `_attribution_for`) is named, not
-  measured or sized.** How much of the 96.8% non-attributed population it
-  explains is unknown and out of this phase's scope.
+  mechanism in `hermes-report.sh`'s owning-job-id resolver, mirrored in
+  `api-event-report.sh`) is a hypothesis about marker ordering, not a
+  measurement.** The marker excerpt it is based on is elided at exactly the
+  fields the hypothesis turns on (see the note above that excerpt, under
+  TRU-01's "Assumption A2" section) — each task marker's own
+  `agentic_job_id` and its file position relative to the two job markers.
+  How much of the 96.8% non-attributed population this mechanism explains,
+  or whether it generalizes beyond this one session, is unknown and out of
+  this phase's scope.
+- **The "Agent: Jupiter" confirmation covers only transaction rows that
+  returned rows.** The zero-attribution job's `jobs transactions` call
+  returned no rows, and the pasted `metrics completions` rows carry no
+  `agent` field of their own, so the agent-slice claim throughout this
+  record rests on the two `jobs transactions` rows for the attributed job,
+  not on every probe this record ran.
+- **Assumption A2's time-window rule-out is partial.** The session-based
+  join is ruled out directly (both jobs share the identical session; only
+  one shows the spend). The time-window join is ruled out only to the
+  extent the two jobs' server-side windows overlap for the two evidenced
+  transactions — neither job's own start/end window nor the transactions'
+  timestamps were read back; "written seconds apart" in that section
+  describes when the two marker *records* were written, not the server-side
+  job windows.
 - **This phase diagnoses and repairs nothing.** No file under `skills/` was
   created, modified, or deleted to produce either finding; both TRU-06's
   fixable-defect disposition and TRU-05's live-attribution-rate finding are
