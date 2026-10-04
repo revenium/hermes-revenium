@@ -74,14 +74,23 @@ matters.
   the run, a coarser deterministic fallback than today's `unclassified`,
   but it cannot reproduce the per-run label; that needs a signal describing
   what the run actually did, which on this host means either the run's own
-  transcript (the input the classifier already uses, and the thing
-  unavailable in this failure mode) or an explicit cron-side declaration
-  from the scheduled job itself. This record does not establish that either
-  input exists today. **Phase 69 should not be planned against the
-  session-id-shape mechanism** until one of those inputs is established to
-  exist; planning against it as originally written would plan against a
-  mechanism this record's own data refutes. If a deterministic cron-side
-  label is pursued once that input exists, any fix would need to land in
+  transcript or an explicit cron-side declaration from the scheduled job
+  itself. One of those two demonstrably exists: the classifier reads a
+  session's own transcript from `state.db` by session id, over a
+  read-only connection (`classifier.py:412-418`, via `_ro_uri`),
+  independent of whether any hook ever fired — the named defect session
+  has 17 messages (already stated above), so a hook that never ran says
+  nothing about whether those messages can be read. That does not restore
+  `TRU-06 is a FIXABLE DEFECT`: the session-id-shape mechanism stays
+  refuted by the five-label table above regardless of transcript
+  availability, and nothing here establishes that a cron-side transcript
+  read would be correct, affordable per tick, or compatible with the
+  settle-window contract (see the new `## Limits` bullet below).
+  **Phase 69 should not be planned against the session-id-shape
+  mechanism** — that mechanism is refuted above — but its viability
+  should be re-evaluated against a cron-side transcript read, not
+  treated as foreclosed for want of an input. If a cron-side transcript
+  read is pursued, any fix would need to land in
   BOTH of this skill's markerless emission paths, not one:
   `hermes-report.sh`'s own markerless fallback, where `--task-type
   unclassified` is chosen today, and `api-event-report.sh`'s separate
@@ -805,6 +814,19 @@ section exists so the next reader does not repeat that mistake.
   that path is indistinguishable on this record's own evidence from never
   being dispatched. Separating the two needs the hook callback's own
   payload for this session, which was not captured here.
+- **A cron-side transcript read is not yet established to work.** GR-06
+  shows the run's own transcript persists in `state.db` and is readable
+  by session id independent of hook dispatch (`classifier.py:412-418`)
+  — but a readable transcript is not the same as a working fix. Left
+  unestablished: whether a cron-side read of that transcript would
+  reproduce the same label the in-session classifier assigns to the
+  same transcript (read-correctness); its cost per tick, since each
+  otherwise-unclassified cron session would need its own
+  auxiliary-LLM classification call on a path that runs every minute;
+  and whether it is compatible with the settle-window contract
+  (`REVENIUM_CRON_SETTLE_SECONDS`) — metering a session before its
+  marker lands orphans the completion from its job permanently. No fix
+  is designed here.
 - **Single host, single tenant, single probe pass.** Every finding in this
   record — TRU-01 and TRU-02 alike — was measured once, on this host (agent
   `Jupiter`), on 2026-10-04. Nothing here establishes the same relationship
@@ -886,7 +908,8 @@ section exists so the next reader does not repeat that mistake.
   describes when the two marker *records* were written, not the server-side
   job windows.
 - **This phase diagnoses and repairs nothing.** No file under `skills/` was
-  created, modified, or deleted to produce either finding; both TRU-06's
-  fixable-defect disposition and TRU-05's live-attribution-rate finding are
-  handed to later phases (69 and 68 respectively) to act on, not acted on
-  here.
+  created, modified, or deleted to produce either finding; TRU-06's
+  disposition stays WITHDRAWN here, not re-established and not newly
+  fixed, and TRU-05's live-attribution-rate finding is handed, alongside
+  it, to later phases (69 and 68 respectively) for further work, not
+  acted on here.
