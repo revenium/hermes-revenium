@@ -145,6 +145,15 @@ transactions behind it, one with real transactions behind it.
 }
 ```
 
+> **One id is redacted here, against this record's own keep-ids-raw rule.** Every
+> other job, session and transaction id in this file is printed raw, because an
+> opaque id is what makes a finding reproducible. This job's id is the exception:
+> it embeds a real person's name, so it is not opaque and the carve-out does not
+> reach it. The opaque `_d671` discriminator is kept so the two commands below are
+> visibly the same job; the raw id is recoverable from the reference host's
+> `revenium-jobs.ledger`, which is not published. `<redacted-actor>` in the
+> `agenticJobName` below is the same name.
+
 **Attributed job — `revenium jobs roi <redacted-actor-job-id>_d671 --output json`:**
 ```json
 {
