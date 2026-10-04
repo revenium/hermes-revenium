@@ -302,15 +302,29 @@ signal.
 **A byproduct worth naming plainly, because it is directly visible in the
 evidence above and bears on TRU-05's own denominator:** a session that
 creates more than one job in sequence ships its completions to only one of
-them. This traces to `api-event-report.sh`'s `_attribution_for`
-(`skills/revenium/scripts/api-event-report.sh:1489-1521`), which resolves a
-single `owning_job_id` per session-window lookup and falls back to it only
-when a marker carries no `agentic_job_id` of its own — a second job created
-later in the same session never displaces the first. This is a plausible,
-concrete contributor to part of the measured 96.8% non-attributed
-population, distinct from "never attributed at all." It is not measured or
-sized here, and no fix is proposed; it is recorded as a finding this
-diagnosis surfaced, for whichever phase picks up TRU-05.
+them. Ownership is resolved per task marker by *file position* — the first
+job marker whose file position is greater than the task marker's claims it,
+falling back to the nearest *preceding* job marker when no later one exists
+(`hermes-report.sh:3716-3758`, the resolver, mirrored verbatim at
+`api-event-report.sh:1438-1476`). A later job created in the same session
+does claim markers under this rule — a second job never displacing the
+first is not what the code does. What the evidence above actually shows:
+in this session, both task markers preceded the *first* job marker in file
+order, so both bound to it; the second job, written later in the file, had
+no task markers between it and the first to claim. **This is a hypothesis
+about marker ordering, not a measurement** — the record's own marker
+excerpt above is elided at exactly the fields this turns on (see
+`## Limits`) — and whether it generalizes, or how much of the measured
+96.8% non-attributed population it covers, is not established here.
+`_attribution_for` (`api-event-report.sh:1489-1522`) is the consumer, not
+the resolver: it only reads the already-resolved `m["owning_job_id"]`,
+under two further conditions this citation should not drop — the session
+must be a CONFIRMED root (`IS_ROOT_CONFIRMED`) and the owner must be a job
+`api-event-report.sh` has already created
+(`_owner in CREATED_JOB_IDS`), both at
+`api-event-report.sh:1514-1520`. It is not measured or sized here, and no
+fix is proposed; it is recorded as a finding this diagnosis surfaced, for
+whichever phase picks up TRU-05.
 
 ### What this does not establish
 
@@ -322,15 +336,25 @@ diagnosis surfaced, for whichever phase picks up TRU-05.
 - **This is a read-side observation of how `Total Cost` is composed, not a
   measurement of whether `--agentic-job-id` persists correctly server-side
   for every emission path.** Both evidenced sessions (the sample job and the
-  A2 test session) were event-path sessions (`environment: "cron"`,
-  `api-event-report.sh`'s own `_attribution_for`); the delta-reporter path
-  (`hermes-report.sh`'s own `meter completion` call) was not separately
-  re-tested here, though it ships the identical `--agentic-job-id` flag
-  under the same contract.
+  A2 test session) shipped on the **delta-reporter** path
+  (`hermes-report.sh`'s own `meter completion` call), not the event path —
+  shown by their own pasted evidence above: every transaction id here has
+  the `${sid}-${total_tokens}-${muid}` shape (`hermes-report.sh:4140`), and
+  the A2 session's two completions are evidenced by `HERMES:` lines from
+  `revenium-hermes.ledger`, a ledger domain `api-event-report.sh` explicitly
+  skips for any session the legacy ledger already owns
+  (`api-event-report.sh:1055`, the D-09 partition). The **event** path
+  (`api-event-report.sh`, `event:<arid>` transaction ids at
+  `api-event-report.sh:1891`, the `revenium-api-events.ledger` domain) is
+  the one not separately re-tested here, though it ships the identical
+  `--agentic-job-id` flag under the same contract.
 - **The deployed-tree currency caveat from `## The environment` applies
-  here too.** This finding describes the behaviour of the code confirmed
-  byte-identical to this repository's `ed1fa95` on this host, on this date
-  — not a timeless property of the wire protocol.
+  here too, for the files that were actually hashed.** `classifier.py` and
+  `__init__.py` (both plugin-discovery locations) and
+  `scripts/hermes-report.sh` are confirmed byte-identical to this
+  repository's `ed1fa95` on this host, on this date. `api-event-report.sh`
+  was **NOT hashed** on the host; its citations above are read against this
+  repository's `ed1fa95` only, and its deployed currency is unverified.
 - **The multi-job-per-session attribution byproduct named above is a
   finding, not a measurement.** How many of the 96.8% non-attributed jobs
   are explained by this mechanism, versus some other cause, is not
@@ -680,12 +704,17 @@ section exists so the next reader does not repeat that mistake.
   files); no tenant-level aggregate was read or would be valid evidence
   here.
 - **Deployed-tree currency is a point-in-time fact, not a timeless
-  property.** Plan 01 established this host's skill tree as byte-identical
-  to this repository's `ed1fa952c4e7d87dbc63e647ae0a1c81519ae900` by sha256,
-  on 2026-10-04. Every `file:line` citation in both TRU-01 and TRU-02 is
-  read against that commit, confirmed unchanged through this plan's own
-  final commit (`git diff --stat ed1fa95..HEAD -- skills/` empty) — not
-  against an assumption that the host stays in sync going forward.
+  property, and it covers only the three files actually hashed.** Plan 01
+  established byte-identical sha256 matches to this repository's
+  `ed1fa952c4e7d87dbc63e647ae0a1c81519ae900` for `classifier.py` and
+  `__init__.py` (both plugin-discovery locations) and
+  `scripts/hermes-report.sh` only — 0 mismatches across those five
+  comparisons, on 2026-10-04. `api-event-report.sh`, `diagnose.sh` and
+  `common.sh` were **NOT hashed** on the host; every citation to them above
+  is read against this repository's `ed1fa95` only, confirmed unchanged
+  through this plan's own final commit (`git diff --stat ed1fa95..HEAD --
+  skills/` empty), and their deployed currency on the host is unverified.
+  The comparison count stays at five; it is not raised here.
 - **CLI/log read-back only; no UI or dashboard observation contributed to
   any verdict.** Matches the bar every prior live-proof record in this repo
   already set (`docs/live-tenant-proof.md`, `docs/comprehensive-roi-proof.md`,
