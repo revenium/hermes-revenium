@@ -31,7 +31,7 @@ added in this same change, matters.
 | # | Criterion | Source | Verdict |
 |---|---|---|---|
 | 1 | Whether `jobs roi`'s per-job `Total Cost` is derived from this skill's `--agentic-job-id` attribution, or from a server-side signal | TRU-01 | **CONFIRMED** — Total Cost is derived from attributed completions; see below |
-| 2 | Why `hermes cron run` sessions classify as `unclassified` | TRU-02 | **NOT YET ANSWERED** — filled by plan 02 of this phase |
+| 2 | Why `hermes cron run` sessions classify as `unclassified` | TRU-02 | **CONFIRMED, narrower than hypothesized** — candidate 1 holds: a scheduler-level exception in `cron/scheduler.py`'s `run_job` bypasses the plugin's hook dispatch entirely, even after real turns completed; see below |
 | 3 | The record survives the milestone: tracked under `docs/`, pinned in `test_expected_files_exist`, indexed in `docs/README.md` | ROADMAP criterion 3 | **CONFIRMED** — this file, this pin, this index entry |
 
 ## What this record decides for later phases
@@ -43,7 +43,18 @@ added in this same change, matters.
   attribution rate (78 of 2,424 markers, per `.planning/REQUIREMENTS.md`) is
   the actual denominator and Phase 68 runs on it. See "### The verdict" under
   TRU-01 below for the evidence.
-- **TRU-06 / Phase 69:** pending plan 02 of this phase.
+- **TRU-06 / Phase 69:** `TRU-06 is a FIXABLE DEFECT` — the cause is one
+  this skill can act on without touching Hermes' own `cron/scheduler.py`.
+  `.planning/REQUIREMENTS.md`'s TRU-06 wording prefers "a deterministic
+  label derived from session shape over an auxiliary LLM call per tick,"
+  and that is exactly what the confirmed cause invites: the session id shape
+  itself (`cron_<job>_<ts>`) is sufficient to assign a real label even when
+  the classifier hook never ran at all, independent of whatever upstream
+  Hermes bug skips hook dispatch on a scheduler exception. The settle-window
+  fallback (`REVENIUM_CRON_SETTLE_SECONDS`, `hermes-report.sh`) must keep
+  working exactly as it does today for installs with no plugin — this
+  disposition does not touch it, and no fix is designed here; Phase 69 does
+  that design.
 
 ## The environment
 
@@ -606,3 +617,87 @@ a consistent pattern across four months, not as an additional measurement.
   some other upstream path (unrelated to a `run_job` exception) is not
   demonstrated to be impossible — only unobserved in the one unpruned
   instance this host currently has.
+
+## Two different things in this repo are called "cron"
+
+This record uses the word "cron" for two unrelated mechanisms, and a reader
+grepping the test suite for corroboration can easily conflate them.
+
+1. **This skill's own per-minute `cron.sh` metering pipeline** —
+   `skills/revenium/scripts/cron.sh`, installed by `install-cron.sh` into the
+   host's `crontab`, firing every minute to run completion metering,
+   guardrail evaluation, tool-event metering, api-event metering, and drain
+   status. This is this skill's own orchestration; it has nothing to do with
+   session classification and is not what TRU-02 is about.
+2. **Hermes' native `hermes cron run` scheduled-task sessions** — the
+   subject of this entire TRU-02 section, whose session ids are shaped
+   `cron_<job>_<ts>` (confirmed above: `138a635e0812` is a real `hermes cron
+   list` job id, `jupiter-pipeline`). These sessions run inside Hermes' own
+   agent loop, driven by Hermes' own scheduler, and are what this record's
+   classifier-hook investigation is about.
+
+The repo's own
+`tests.test_repository.RepositoryTests.test_revenium_classifier_cron_filter_end_to_end_ships_marker_task_type`
+is about mechanism 1, not mechanism 2 — despite the word "cron" in its name
+and docstring, it seeds a synthetic `state.db` session row literally named
+`cli-sid` (not a `cron_<job>_<ts>`-shaped id at all) to guard against this
+skill's own `cron.sh` racing the classifier plugin for a CLI session. A
+reader investigating mechanism 2 who greps the test suite for "cron" and
+finds this test passing could easily — and wrongly — treat it as existing
+corroboration that cron-shaped sessions classify correctly. It is not that;
+it never asserts anything about a `cron_<job>_<ts>`-shaped session id. This
+section exists so the next reader does not repeat that mistake.
+
+## Limits
+
+- **Single host, single tenant, single probe pass.** Every finding in this
+  record — TRU-01 and TRU-02 alike — was measured once, on this host (agent
+  `Jupiter`), on 2026-10-04. Nothing here establishes the same relationship
+  holds on a different host, a different tenant, or across repeated passes.
+- **Shared-tenant agent slice.** The reference tenant (id recorded in
+  `.planning/REQUIREMENTS.md`, not transcribed into this file per this
+  phase's own redaction convention) is shared with a second, out-of-scope
+  agent (`Hermes-ent`) that outspends this host. Every figure
+  in this record is sliced to this host's own agent by construction (session
+  ids, ledger lines, and `state.db` rows are all local to this host's own
+  files); no tenant-level aggregate was read or would be valid evidence
+  here.
+- **Deployed-tree currency is a point-in-time fact, not a timeless
+  property.** Plan 01 established this host's skill tree as byte-identical
+  to this repository's `ed1fa952c4e7d87dbc63e647ae0a1c81519ae900` by sha256,
+  on 2026-10-04. Every `file:line` citation in both TRU-01 and TRU-02 is
+  read against that commit, confirmed unchanged through this plan's own
+  final commit (`git diff --stat ed1fa95..HEAD -- skills/` empty) — not
+  against an assumption that the host stays in sync going forward.
+- **CLI/log read-back only; no UI or dashboard observation contributed to
+  any verdict.** Matches the bar every prior live-proof record in this repo
+  already set (`docs/live-tenant-proof.md`, `docs/comprehensive-roi-proof.md`,
+  `docs/subscriber-live-proof.md`).
+- **Host-side wire evidence is corroboration, never proof of server-side
+  behavior.** A ledger line or a marker file establishes that the skill did
+  its job (or, for TRU-02, did not); it does not establish what the
+  Revenium platform does with what it received. TRU-01's own evidence
+  (`jobs roi` / `jobs transactions`) is the exception — that comparison reads
+  the server's own response directly.
+- **TRU-02's verdict rests on one named defect session.** The 20-occurrence
+  historical pattern of `cron.scheduler: Job '...' failed` lines is named as
+  a four-month corroborating pattern by error-message shape, not as 20
+  independently re-confirmed marker/sentinel absences — those older
+  sessions are past the 30-day retention window and cannot be re-checked
+  against their own marker/sentinel state today.
+- **TRU-02 does not establish Hermes' own `cron/scheduler.py` internals
+  beyond the one traceback frame its own log printed.** Exactly why the
+  scheduler's exception-handling path does not also invoke
+  `on_session_end` / `on_session_finalize` the way a normal return does is
+  not established from this repository's own code — `cron/scheduler.py` is
+  Hermes' code, not this skill's, and was read only as far as the log
+  itself showed.
+- **TRU-01's own byproduct finding (the multi-job-per-session attribution
+  collision in `api-event-report.sh`'s `_attribution_for`) is named, not
+  measured or sized.** How much of the 96.8% non-attributed population it
+  explains is unknown and out of this phase's scope.
+- **This phase diagnoses and repairs nothing.** No file under `skills/` was
+  created, modified, or deleted to produce either finding; both TRU-06's
+  fixable-defect disposition and TRU-05's live-attribution-rate finding are
+  handed to later phases (69 and 68 respectively) to act on, not acted on
+  here.
