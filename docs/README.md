@@ -76,10 +76,11 @@ This Hermes skill bundle uses a plugin, three shell hooks, and a cron for runtim
   and a real tenant, all three scored CONFIRMED by CLI read-back only, with the
   single-host, single-arc, and directed-fan-out limits stated plainly.
 - [Cron and job cost reconciliation](cron-and-job-cost-reconciliation.md):
-  the Phase 65 reconciliation verdict on whether `jobs roi`'s per-job Total
-  Cost derives from this skill's own `--agentic-job-id` attribution or a
-  server-side signal, and why `hermes cron run` sessions classify as
-  `unclassified`, with each finding's own limits stated.
+  Total Cost derives from this skill's own `--agentic-job-id` attribution
+  (CONFIRMED two ways); the cron classification gap traces to a session that
+  reached neither a marker nor a sentinel — the hook-dispatch leg CONFIRMED,
+  the scheduler-exception mechanism recorded as INFERRED — with each
+  finding's own limits stated.
 - [ROI read-surface ask](roi-read-surface-ask.md): the tracked, standing
   ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
   on `jobs roi`, and the Phase 53 gate this skill shipped instead of waiting

@@ -373,9 +373,10 @@ class RepositoryTests(unittest.TestCase):
             # Phase 65 (TRU-01/TRU-02) — the tracked cron-and-job-cost
             # reconciliation record: whether `jobs roi`'s per-job Total Cost
             # is derived from this skill's `--agentic-job-id` attribution or a
-            # server-side signal (TRU-01), and why `hermes cron run` sessions
-            # classify as `unclassified` (TRU-02). Phases 68, 69 and 70 are
-            # gated on this record's findings. `.planning/` and
+            # server-side signal (TRU-01), and why a `hermes cron run`
+            # session can land with neither a marker nor a sentinel, metering
+            # under the markerless fallback label (TRU-02). Phases 68 and 69
+            # are gated on this record's findings. `.planning/` and
             # `docs/internal/` are both gitignored, so a tracked docs/ file
             # plus this pin is the only durable home.
             ROOT / 'docs' / 'cron-and-job-cost-reconciliation.md',

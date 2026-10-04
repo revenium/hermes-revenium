@@ -5,8 +5,12 @@
 This page records two Phase 65 (Reconciliation) findings for the Trustworthy
 ROI Numbers milestone: TRU-01, whether the ROI view's per-job `Total Cost` is
 derived from this skill's own `--agentic-job-id` attribution or from a
-different, server-side signal; and TRU-02, why `hermes cron run` sessions
-meter as `unclassified`. It owns neither the attribution dimension's own
+different, server-side signal; and TRU-02, why a `hermes cron run` session
+can land with neither a marker nor a `.ready` sentinel, which would then
+meter under the markerless `--task-type unclassified` fallback — a label
+this record infers from that fallback's documented behavior rather than
+reads back from the tenant (see TRU-02's verdict and `## Limits`). It owns
+neither the attribution dimension's own
 design (see [Job value and ROI](value-and-roi.md) and
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md))
 nor the classifier's hook mechanics beyond what this diagnosis needed to read
@@ -30,8 +34,8 @@ added in this same change, matters.
 
 | # | Criterion | Source | Verdict |
 |---|---|---|---|
-| 1 | Whether `jobs roi`'s per-job `Total Cost` is derived from this skill's `--agentic-job-id` attribution, or from a server-side signal | TRU-01 | **CONFIRMED** — Total Cost is derived from attributed completions; see below |
-| 2 | Why `hermes cron run` sessions classify as `unclassified` | TRU-02 | **CONFIRMED, narrower than hypothesized** — candidate 1 holds: a scheduler-level exception in `cron/scheduler.py`'s `run_job` bypasses the plugin's hook dispatch entirely, even after real turns completed; see below |
+| 1 | TRU-01: whether `jobs roi`'s per-job `Total Cost` is derived from this skill's `--agentic-job-id` attribution, or from a server-side signal | ROADMAP criterion 1 | **CONFIRMED** — Total Cost is derived from attributed completions; see below |
+| 2 | TRU-02: why a `hermes cron run` session can land with neither a marker nor a `.ready` sentinel, which would then meter under the markerless fallback label | ROADMAP criterion 2 | **CONFIRMED for the hook-dispatch leg; mechanism INFERRED** — for the one live defect session, no classifier hook ran at all (zero lines from a channel independently proven to carry that logger minutes earlier, no marker, no sentinel inside retention), ruling out candidates 2 and 3 for it. A `cron/scheduler.py` `run_job` exception (provider 402) co-occurred and is the most probable trigger, but the dispatch-skip mechanism itself is not established, and `end_reason='cron_complete'` is unexplained under it. Normal cron runs DO classify (11/11 labelled) — "narrower" means narrower than "the plugin never runs for cron-shaped sessions," the todo's own candidate 1 wording. The probe that would separate the surviving explanations: reproduce a forced non-2xx cron run and check whether a sentinel is written. See below |
 | 3 | The record survives the milestone: tracked under `docs/`, pinned in `test_expected_files_exist`, indexed in `docs/README.md` | ROADMAP criterion 3 | **CONFIRMED** — this file, this pin, this index entry |
 
 ## What this record decides for later phases
@@ -332,7 +336,7 @@ diagnosis surfaced, for whichever phase picks up TRU-05.
   are explained by this mechanism, versus some other cause, is not
   established here and is out of this plan's scope.
 
-## TRU-02 — why `hermes cron run` sessions classify as unclassified
+## TRU-02 — why a `hermes cron run` session can land with neither a marker nor a sentinel
 
 ### The three candidates
 
@@ -443,7 +447,11 @@ sentinel pruning.
 `1790406034.307` = 2026-09-26T07:00:34Z — 12 days old at measurement time,
 well inside the 30-day retention window). This is the single live,
 unpruned, unexplained-by-retention defect this partition surfaces, and it is
-the session the rest of this section investigates.
+the session the rest of this section investigates. With no marker and no
+sentinel, this session's completions would have shipped under the
+markerless `--task-type unclassified` fallback — but that shipped label was
+not independently read back from the tenant by transaction id here; see
+`## Limits`.
 
 **Open Question 1 — do markers that exist carry real labels, or
 `unclassified`?** Read directly from each of the 11 markers-present
