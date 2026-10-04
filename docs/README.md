@@ -78,7 +78,7 @@ This Hermes skill bundle uses a plugin, three shell hooks, and a cron for runtim
 - [Cron and job cost reconciliation](cron-and-job-cost-reconciliation.md):
   Total Cost derives from this skill's own `--agentic-job-id` attribution
   (CONFIRMED two ways); the cron classification gap traces to a session that
-  reached neither a marker nor a sentinel — the hook-dispatch leg CONFIRMED,
+  reached neither a marker nor a sentinel — both the hook-dispatch leg and
   the scheduler-exception mechanism recorded as INFERRED — with each
   finding's own limits stated.
 - [ROI read-surface ask](roi-read-surface-ask.md): the tracked, standing

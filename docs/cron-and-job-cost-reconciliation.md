@@ -38,7 +38,7 @@ matters.
 | # | Criterion | Source | Verdict |
 |---|---|---|---|
 | 1 | TRU-01: whether `jobs roi`'s per-job `Total Cost` is derived from this skill's `--agentic-job-id` attribution, or from a server-side signal | ROADMAP criterion 1 | **CONFIRMED** — Total Cost is derived from attributed completions; see below |
-| 2 | TRU-02: why a `hermes cron run` session can land with neither a marker nor a `.ready` sentinel, which would then meter under the markerless fallback label | ROADMAP criterion 2 | **CONFIRMED for the hook-dispatch leg; mechanism INFERRED** — for the one live defect session, no classifier hook ran at all (zero lines from a channel independently proven to carry that logger minutes earlier, no marker, no sentinel inside retention), ruling out candidates 2 and 3 for it. A `cron/scheduler.py` `run_job` exception (provider 402) co-occurred and is the most probable trigger, but the dispatch-skip mechanism itself is not established, and `end_reason='cron_complete'` is unexplained under it. Normal cron runs DO classify (11/11 labelled) — "narrower" means narrower than "the plugin never runs for cron-shaped sessions," the todo's own candidate 1 wording. The probe that would separate the surviving explanations: reproduce a forced non-2xx cron run and check whether a sentinel is written. See below |
+| 2 | TRU-02: why a `hermes cron run` session can land with neither a marker nor a `.ready` sentinel, which would then meter under the markerless fallback label | ROADMAP criterion 2 | **INFERRED for both the hook-dispatch leg and the mechanism** — for the one live defect session, this record measures: no marker and no sentinel inside retention, and zero classifier log lines from a channel independently proven to carry that logger minutes earlier on a sibling session. That absence is consistent with the hook never starting to run, but does not by itself distinguish "never dispatched" from "dispatched with a falsy session id" (see "### The verdict" below and `## Limits`), so the hook-dispatch leg itself is inferred, not confirmed. A `cron/scheduler.py` `run_job` exception (provider 402) co-occurred and is the most probable trigger, but the dispatch-skip mechanism itself is not established, and `end_reason='cron_complete'` is unexplained under it. Normal cron runs DO classify (11/11 labelled) — "narrower" means narrower than "the plugin never runs for cron-shaped sessions," the todo's own candidate 1 wording; candidates 2 and 3 remain ruled out for this session. The probe that would separate the surviving explanations: reproduce a forced non-2xx cron run and check whether a sentinel is written. See below |
 | 3 | The record survives the milestone: tracked under `docs/`, pinned in `test_expected_files_exist`, indexed in `docs/README.md` | ROADMAP criterion 3 | **CONFIRMED** — this file, this pin, this index entry |
 
 ## What this record decides for later phases
@@ -61,14 +61,15 @@ matters.
   `.planning/REQUIREMENTS.md`'s TRU-06 wording prefers "a deterministic
   label derived from session shape over an auxiliary LLM call per tick,"
   and that is exactly what the confirmed cause invites: the session id shape
-  itself (`cron_<job>_<ts>`) is sufficient to assign a real label even when
-  the classifier hook never ran at all, independent of whatever upstream
-  Hermes bug skips hook dispatch on a scheduler exception. **Any such label
+  itself (`cron_<job>_<ts>`) is sufficient to assign a real label even in
+  the failure mode this record infers — not confirms — as the classifier
+  hook never starting to run, independent of whatever upstream Hermes bug
+  skips hook dispatch on a scheduler exception. **Any such label
   must be assigned cron-side** — the markerless fallback in
   `hermes-report.sh`, where `--task-type unclassified` is chosen today —
   since by construction no in-session component (the plugin, the hooks)
   runs in this failure mode; the plugin is precisely the component this
-  verdict shows did not run. The settle-window fallback
+  verdict infers, rather than confirms, did not run. The settle-window fallback
   (`REVENIUM_CRON_SETTLE_SECONDS`, `hermes-report.sh`) must keep working
   exactly as it does today for installs with no plugin — this disposition
   does not touch it, and no fix is designed here; Phase 69 designs it.
@@ -646,24 +647,33 @@ real billing event, not a skill defect) and `cron/scheduler.py`'s own
 classifier log lines, from a channel independently confirmed correct on a
 sibling session minutes away in the same ledger, is the positive evidence
 for candidate 1**: `_on_session_end` (`__init__.py:86-133`) and
-`_on_session_finalize` (`__init__.py:136-200`) were never invoked for this
-session at all. The structural argument applies here precisely: every code
-path through those two callbacks — including each one's own
-`except Exception` handler — calls `_write_sentinel` (`__init__.py:52-82`)
-before returning, and `_write_sentinel` itself swallows every
-`IOError`/`OSError`/`PermissionError` with a `logger.warning` (a fourth
-candidate beyond the pending todo's three: a sentinel-write failure after
-the hook did run). A
+`_on_session_finalize` (`__init__.py:136-200`) produced no observable
+classifier log line for this session. The structural argument applies here
+precisely: every code path through those two callbacks — including each
+one's own `except Exception` handler — calls `_write_sentinel`
+(`__init__.py:52-82`) before returning, and `_write_sentinel` itself
+swallows every `IOError`/`OSError`/`PermissionError` with a
+`logger.warning` (a fourth candidate beyond the pending todo's three: a
+sentinel-write failure after the hook did run). A
 sentinel-write failure would still log something; a `LABEL_RE`/
 `TRIVIAL_BLOCKLIST` rejection (`classifier.py:58`, `classifier.py:67`,
 validated at `_validate_label`, `classifier.py:4713-4737`) would also still
 log something (`classifier.py`'s rejection warning fires from inside
 `_validate_label`, which only runs once a hook has already dispatched into
-`run_classification_async`, `classifier.py:5176-5186`). **No line at all, in
-either direction, from an instrument proven to carry this exact logger's
-output minutes earlier, rules out every code path that requires the hook to
-have started running** — leaving "the hook was never invoked" as the only
-candidate the evidence supports.
+`run_classification_async`, `classifier.py:5176-5186`). There is a fifth
+candidate neither of those rules out: a hook that WAS dispatched with a
+falsy `session_id` returns at `__init__.py:115` (`_on_session_end`) or
+`__init__.py:181` (`_on_session_finalize`) before reaching either
+`run_classification` or `_write_sentinel`, and `_write_sentinel` itself
+guards identically at `__init__.py:71` — so a hook dispatched with a falsy
+session id writes no marker, no sentinel, and emits no log line, the exact
+same observed signature as never being dispatched at all. **No line at all,
+in either direction, from an instrument proven to carry this exact logger's
+output minutes earlier, narrows the survivors to those that produce no log
+line at all — at least two: the hook was never dispatched, or the hook was
+dispatched with a falsy session id** — and separating those two requires
+reading the hook callback's own payload for this session, which was not
+captured here.
 
 **The specific shape differs from what the todo and this plan's own
 objective guessed.** The todo's candidate 1 reads "the plugin never runs for
@@ -760,6 +770,16 @@ section exists so the next reader does not repeat that mistake.
 
 ## Limits
 
+- **The hook-dispatch leg cannot be separated from a dispatched-but-falsy
+  id.** The named defect session's zero classifier log lines are consistent
+  with the classifier hook never being dispatched at all, but equally
+  consistent with the hook being dispatched with a falsy `session_id` —
+  `_on_session_end` (`__init__.py:115`), `_on_session_finalize`
+  (`__init__.py:181`), and `_write_sentinel` (`__init__.py:71`) all guard on
+  a falsy session id before writing a marker, a sentinel, or a log line, so
+  that path is indistinguishable on this record's own evidence from never
+  being dispatched. Separating the two needs the hook callback's own
+  payload for this session, which was not captured here.
 - **Single host, single tenant, single probe pass.** Every finding in this
   record — TRU-01 and TRU-02 alike — was measured once, on this host (agent
   `Jupiter`), on 2026-10-04. Nothing here establishes the same relationship
