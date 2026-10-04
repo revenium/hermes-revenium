@@ -37,7 +37,9 @@ added in this same change, matters.
 ## What this record decides for later phases
 
 - **TRU-05 / Phase 68:** `TRU-05 is LIVE` — per-job Total Cost is built from
-  this skill's `--agentic-job-id` attribution, so the measured 3.2%
+  this skill's `--agentic-job-id` attribution, confirmed two ways (the
+  two-job `transactionCount` comparison, and a direct assumption-A2 test
+  ruling out a time-window/session-based join), so the measured 3.2%
   attribution rate (78 of 2,424 markers, per `.planning/REQUIREMENTS.md`) is
   the actual denominator and Phase 68 runs on it. See "### The verdict" under
   TRU-01 below for the evidence.
@@ -193,32 +195,122 @@ transactions` returns `totalCount: 0`, and non-zero (2 transactions,
 decisive comparison this phase's own research named as the test, now
 confirmed on this host, this tenant, today.
 
+### Assumption A2, tested: does a session-level or time-window join also contribute?
+
+`65-RESEARCH.md`'s Assumptions Log (A2) flags the one gap the two-job
+comparison above cannot close on its own: `jobs transactions`'s
+`transactionCount` might count every transaction in the job's time window
+*for that session*, not only the ones carrying that job's own
+`--agentic-job-id`. If true, TRU-01's answer would need a caveat about a
+secondary, session-based signal.
+
+A single root cron session on this host, `cron_138a635e0812_20260929_070024`,
+settles this directly. Its own marker file carries **two** job-kind records,
+written seconds apart — this one session created two separate jobs in
+sequence:
+
+```
+{"kind":"job", ..., "sid":"cron_138a635e0812_20260929_070024", "agentic_job_id":"jupiter_open_web_signal_capture_992f", ...}
+{"kind":"job", ..., "sid":"cron_138a635e0812_20260929_070024", "agentic_job_id":"signalraven_drain_eligibility_check_7f5b", ...}
+```
+
+The second of those two job ids is `signalraven_drain_eligibility_check_7f5b`
+— a zero-attribution job in its own right (`transactionCount: 0`, confirmed
+the same way as the sample job above). The session itself shipped exactly two
+completions, read from its own `revenium-hermes.ledger` line:
+
+```
+HERMES:cron_138a635e0812_20260929_070024:35563:1790666592.335:001a0ebfa8d449183a960e5897d1018c3
+HERMES:cron_138a635e0812_20260929_070024:35563:1790666592.613:001a0ebfa8d4419ee4547706cddcd0bb0
+```
+
+Pulling those exact two transactions back from the tenant
+(`revenium metrics completions`, matched by `transactionId` against the
+ledger tuple above) shows both carry a real, populated `agenticJobId` key —
+**not null, and not absent** — but pointing at the *other* job:
+
+```
+transactionId: cron_138a635e0812_20260929_070024-35563-001a0ebfa8d449183a960e5897d1018c3
+agenticJobId: jupiter_open_web_signal_capture_992f
+totalCost: 2.014956 | totalTokenCount: 17781 | environment: cron | squadId: cron_138a635e0812_20260929_070024
+
+transactionId: cron_138a635e0812_20260929_070024-35563-001a0ebfa8d4419ee4547706cddcd0bb0
+agenticJobId: jupiter_open_web_signal_capture_992f
+totalCost: 2.014956 | totalTokenCount: 17782 | environment: cron | squadId: cron_138a635e0812_20260929_070024
+```
+
+(The `organization`/`team`/`product`/`source`/`subscriberCredential` nested
+objects and the `_links` block that `metrics completions` also returns are
+omitted here — they carry internal tenant ids this comparison does not
+depend on and this phase's redaction convention keeps out of this file.)
+
+Both completions carry the **first** job's id (`jupiter_open_web_...`), and
+`revenium jobs roi jupiter_open_web_signal_capture_992f` independently shows
+`totalCost: 4.029912, totalTokens: 35563, transactionCount: 2` — exactly this
+session's whole spend. The second job, same session, same time window, same
+two completions, shows **zero**. If `transactionCount` were satisfied by a
+time-window or session-based join rather than the specific `--agentic-job-id`
+value on each completion, both jobs would show the spend; only one does.
+**Assumption A2 is CONFIRMED**: `jobs roi`'s `transactionCount` counts only
+transactions carrying that specific job's own `--agentic-job-id`, not a
+broader session- or window-based match — tested directly from this host's own
+evidence, not assumed from the two historical cross-host observations alone.
+
 ### The verdict
 
-**CONFIRMED.** `jobs roi`'s `totalCost` and `transactionCount` track exactly
-what `jobs transactions` reports for the same job id — zero when zero,
-non-zero when non-zero — on this host, on this tenant, today. Per-job `Total
-Cost` is derived from the completions this skill ships with
-`--agentic-job-id <id>`, not from an independent server-side signal. This
-confirms, on Jupi specifically, the same relationship two independent prior
-observations found on two different hosts (`docs/comprehensive-roi-proof.md`;
-a prior untracked investigation cited in `65-RESEARCH.md`).
+**CONFIRMED.** Two independent legs of evidence agree, both from this host's
+own agent slice (`"agent": "Jupiter"` on every transaction row read in this
+record):
 
-Assumption A2 (`65-RESEARCH.md` § Assumptions Log) — whether `transactionCount`
-could also be satisfied by some other time-window or session-based join
-rather than the `--agentic-job-id` flag specifically — is tested directly in
-Task 3 of this plan, not assumed here.
+1. **The two-job comparison** (above): `jobs roi`'s `totalCost`/
+   `transactionCount` are zero exactly when `jobs transactions` returns
+   `totalCount: 0`, and non-zero exactly when it returns real rows.
+2. **The assumption-A2 test** (above): a single session's two completions tag
+   one specific job's `--agentic-job-id` and nothing else — a sibling job
+   from the identical session and time window gets nothing, ruling out a
+   time-window or session-based join as an alternative explanation.
+
+Per-job `Total Cost` is built from the completions this skill tags with that
+job's own `--agentic-job-id`, full stop — not from a time-window join, not
+from a session-level aggregate, and not from an independent server-side
+signal.
+
+**A byproduct worth naming plainly, because it is directly visible in the
+evidence above and bears on TRU-05's own denominator:** a session that
+creates more than one job in sequence ships its completions to only one of
+them. This traces to `api-event-report.sh`'s `_attribution_for`
+(`skills/revenium/scripts/api-event-report.sh:1489-1521`), which resolves a
+single `owning_job_id` per session-window lookup and falls back to it only
+when a marker carries no `agentic_job_id` of its own — a second job created
+later in the same session never displaces the first. This is a plausible,
+concrete contributor to part of the measured 96.8% non-attributed
+population, distinct from "never attributed at all." It is not measured or
+sized here, and no fix is proposed; it is recorded as a finding this
+diagnosis surfaced, for whichever phase picks up TRU-05.
 
 ### What this does not establish
 
-- **One host, one tenant, one probe pass.** Nothing here establishes
-  behaviour on a different tenant, a different host, or across repeated
-  passes.
-- **This compares two single jobs**, not a sampled rate. The measured 3.2%
-  attribution rate (`.planning/REQUIREMENTS.md`) is not re-derived here.
-- **Assumption A2 is not yet tested** as of this section — see Task 3 of
-  this plan for whether `transactionCount` could be satisfied by a signal
-  other than this skill's own `--agentic-job-id` flag.
+- **Single-host, single-tenant, single probe pass.** Both the two-job
+  comparison and the A2 test ran once, on this host (agent `Jupiter`,
+  reference tenant), on 2026-10-04. Nothing here establishes the
+  relationship holds on a different host, a different tenant, or across
+  repeated passes.
+- **This is a read-side observation of how `Total Cost` is composed, not a
+  measurement of whether `--agentic-job-id` persists correctly server-side
+  for every emission path.** Both evidenced sessions (the sample job and the
+  A2 test session) were event-path sessions (`environment: "cron"`,
+  `api-event-report.sh`'s own `_attribution_for`); the delta-reporter path
+  (`hermes-report.sh`'s own `meter completion` call) was not separately
+  re-tested here, though it ships the identical `--agentic-job-id` flag
+  under the same contract.
+- **The deployed-tree currency caveat from `## The environment` applies
+  here too.** This finding describes the behaviour of the code confirmed
+  byte-identical to this repository's `ed1fa95` on this host, on this date
+  — not a timeless property of the wire protocol.
+- **The multi-job-per-session attribution byproduct named above is a
+  finding, not a measurement.** How many of the 96.8% non-attributed jobs
+  are explained by this mechanism, versus some other cause, is not
+  established here and is out of this plan's scope.
 
 ## TRU-02 — why `hermes cron run` sessions classify as unclassified
 
