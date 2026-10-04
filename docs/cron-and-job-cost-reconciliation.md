@@ -56,23 +56,42 @@ matters.
   got $0). The cost-weighted attribution rate is a different number and was
   not measured here; Phase 68 should establish it before sizing the gap.
   See "### The verdict" under TRU-01 below for the evidence.
-- **TRU-06 / Phase 69:** `TRU-06 is a FIXABLE DEFECT` — the cause is one
-  this skill can act on without touching Hermes' own `cron/scheduler.py`.
-  `.planning/REQUIREMENTS.md`'s TRU-06 wording prefers "a deterministic
-  label derived from session shape over an auxiliary LLM call per tick,"
-  and that is exactly what the confirmed cause invites: the session id shape
-  itself (`cron_<job>_<ts>`) is sufficient to assign a real label even in
-  the failure mode this record infers — not confirms — as the classifier
-  hook never starting to run, independent of whatever upstream Hermes bug
-  skips hook dispatch on a scheduler exception. **Any such label
-  must be assigned cron-side** — the markerless fallback in
-  `hermes-report.sh`, where `--task-type unclassified` is chosen today —
-  since by construction no in-session component (the plugin, the hooks)
-  runs in this failure mode; the plugin is precisely the component this
-  verdict infers, rather than confirms, did not run. The settle-window fallback
+- **TRU-06 / Phase 69:** `TRU-06 is a FIXABLE DEFECT` is WITHDRAWN here, not
+  restated more softly. Round 1 reasoned that the session id shape itself
+  (`cron_<job>_<ts>`) could stand in for a real label whenever the
+  classifier hook did not run, because that hook-dispatch leg was then
+  graded CONFIRMED. Two independent corrections remove both legs of that
+  reasoning. First, criterion 2 above now grades the hook-dispatch leg
+  INFERRED, not CONFIRMED — the premise "the classifier hook never ran" is
+  itself not established (see `## Limits`). Second, and separately from the
+  first, the proposed mechanism is refuted outright by this record's own
+  table (see "Open Question 1" above): job `138a635e0812` produced five
+  distinct task types across its own runs —
+  `jupiter_signalraven_queue_delivery`, `jupiter_single_event_pipeline_run`,
+  `jupiter_daily_pipeline_run`, `jupiter_daily_pipeline_empty_queue`,
+  `jupiter_single_event_queue_delivery` — while only the timestamp varies in
+  the session id. An id-derived label can identify the scheduled job and
+  the run, a coarser deterministic fallback than today's `unclassified`,
+  but it cannot reproduce the per-run label; that needs a signal describing
+  what the run actually did, which on this host means either the run's own
+  transcript (the input the classifier already uses, and the thing
+  unavailable in this failure mode) or an explicit cron-side declaration
+  from the scheduled job itself. This record does not establish that either
+  input exists today. **Phase 69 should not be planned against the
+  session-id-shape mechanism** until one of those inputs is established to
+  exist; planning against it as originally written would plan against a
+  mechanism this record's own data refutes. If a deterministic cron-side
+  label is pursued once that input exists, any fix would need to land in
+  BOTH of this skill's markerless emission paths, not one:
+  `hermes-report.sh`'s own markerless fallback, where `--task-type
+  unclassified` is chosen today, and `api-event-report.sh`'s separate
+  aged-out-with-no-sentinel fallback (`join_mode="unclassified"` at
+  `api-event-report.sh:1106`, shipped at `:1745`) — most job sessions on
+  this host are event-path-only, so a fix confined to `hermes-report.sh`
+  would leave them unchanged. The settle-window fallback
   (`REVENIUM_CRON_SETTLE_SECONDS`, `hermes-report.sh`) must keep working
   exactly as it does today for installs with no plugin — this disposition
-  does not touch it, and no fix is designed here; Phase 69 designs it.
+  does not touch it, and no fix is designed here.
 
 ## The environment
 
