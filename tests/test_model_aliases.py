@@ -109,6 +109,19 @@ class HermesReportAliasTests(unittest.TestCase):
         self.assertEqual(self._clean('model-default', junk), 'model-default')
         self.assertEqual(self._infer('model-default', 'custom', junk), 'custom')
 
+    def test_target_with_an_empty_side_is_ignored(self):
+        # `anthropic/` would ship an empty --model, `/claude-...` an empty
+        # --provider: both are typos, left as recorded rather than applied.
+        for target in ('anthropic/', '/claude-sonnet-5-5', ' / '):
+            aliases = 'model-default=' + target
+            self.assertEqual(self._clean('model-default', aliases), 'model-default')
+            self.assertEqual(self._infer('model-default', 'custom', aliases), 'custom')
+
+    def test_malformed_pair_does_not_shadow_a_later_valid_one(self):
+        aliases = 'model-default=anthropic/,model-default=anthropic/claude-sonnet-5-5'
+        self.assertEqual(self._clean('model-default', aliases), 'claude-sonnet-5-5')
+        self.assertEqual(self._infer('model-default', 'custom', aliases), 'anthropic')
+
 
 class ApiEventReportAliasTests(unittest.TestCase):
 
@@ -143,6 +156,41 @@ class ApiEventReportAliasTests(unittest.TestCase):
         self.assertIsNone(self._alias('gpt-5.4', ALIASES))
         self.assertIsNone(self._alias('model-default', None))
         self.assertIsNone(self._alias('model-default', 'model-default='))
+        self.assertIsNone(self._alias('model-default', 'model-default=anthropic/'))
+        self.assertIsNone(self._alias('model-default', 'model-default=/claude-sonnet-5-5'))
+
+    def test_model_prefix_stripped_like_clean_model_name(self):
+        self.assertEqual(
+            self._alias('model-default', 'model-default=global.claude-sonnet-5-5'),
+            ('', 'claude-sonnet-5-5'),
+        )
+        self.assertEqual(
+            self._alias('model-default', 'model-default=bedrock/anthropic.claude-sonnet-5-5'),
+            ('bedrock', 'claude-sonnet-5-5'),
+        )
+
+
+class ReporterAgreementTests(unittest.TestCase):
+    """One mapping must ship one --model from both reporters."""
+
+    def test_both_reporters_emit_the_same_model(self):
+        hermes = HermesReportAliasTests()
+        hermes.setUpClass()
+        event = ApiEventReportAliasTests()
+        event.setUpClass()
+        for target in (
+            'anthropic/claude-sonnet-5-5',
+            'claude-sonnet-5-5',
+            'global.claude-sonnet-5-5',
+            'bedrock/anthropic.claude-sonnet-5-5',
+            'fireworks_ai/accounts/fireworks/models/glm-5p2',
+        ):
+            aliases = 'model-default=' + target
+            with self.subTest(target=target):
+                self.assertEqual(
+                    hermes._clean('model-default', aliases),
+                    event._alias('model-default', aliases)[1],
+                )
 
     def test_model_source_keeps_the_recorded_provider(self):
         # Only --provider follows the alias; provider_raw (--model-source)

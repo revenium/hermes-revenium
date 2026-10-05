@@ -852,11 +852,17 @@ import os
 model = os.environ.get('MODEL', '')
 # REVENIUM_MODEL_ALIASES: comma-separated alias=provider/model pairs for hosts
 # whose Hermes names a gateway alias (e.g. LiteLLM's model-default) rather than
-# the model that serves it.
+# the model that serves it. A target with an empty side of its `/`
+# (`anthropic/`, `/claude-...`) is malformed and ignored, so a typo can never
+# ship an empty --model or --provider.
 for pair in os.environ.get('REVENIUM_MODEL_ALIASES', '').split(','):
     alias, sep, target = pair.partition('=')
-    if sep and alias.strip() and alias.strip().lower() == model.strip().lower() and target.strip():
-        model = target.strip()
+    target = target.strip()
+    prov, slash, bare = target.partition('/')
+    if not (sep and alias.strip() and target) or (slash and not (prov.strip() and bare.strip())):
+        continue
+    if alias.strip().lower() == model.strip().lower():
+        model = target
         break
 if '/' in model:
     model = model.split('/', 1)[1]
@@ -894,11 +900,15 @@ billing = os.environ.get('BILLING', '').lower()
 # billing column names the gateway, not the provider, so it is ignored.
 for pair in os.environ.get('REVENIUM_MODEL_ALIASES', '').split(','):
     alias, sep, target = pair.partition('=')
-    if sep and alias.strip() and alias.strip().lower() == model.strip() and target.strip():
-        model = target.strip().lower()
+    target = target.strip().lower()
+    prov, slash, bare = target.partition('/')
+    if not (sep and alias.strip() and target) or (slash and not (prov.strip() and bare.strip())):
+        continue
+    if alias.strip().lower() == model.strip():
+        model = target
         billing = ''
-        if '/' in model:
-            print(model.split('/', 1)[0])
+        if slash:
+            print(prov.strip())
             raise SystemExit(0)
         break
 if billing and billing not in ('', 'none', 'unknown', 'auto'):

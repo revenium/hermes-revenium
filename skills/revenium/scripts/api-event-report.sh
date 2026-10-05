@@ -1284,14 +1284,24 @@ def _model_alias(model):
     # REVENIUM_MODEL_ALIASES: comma-separated alias=provider/model pairs, the
     # same contract hermes-report.sh's _clean_model_name honours. Returns
     # (provider, model) for a matched alias, provider "" when the target names
-    # none; None when the model is not an alias.
+    # none; None when the model is not an alias. A target with an empty side
+    # of its `/` is malformed and skipped. The model gets _clean_model_name's
+    # prefix strip, so one mapping ships one --model from both reporters.
     m_lc = (model or "").strip().lower()
     for pair in os.environ.get("REVENIUM_MODEL_ALIASES", "").split(","):
         alias, sep, target = pair.partition("=")
         target = target.strip()
-        if sep and alias.strip() and alias.strip().lower() == m_lc and target:
-            prov, slash, bare = target.partition("/")
-            return (prov, bare) if slash else ("", target)
+        prov, slash, bare = target.partition("/")
+        prov, bare = prov.strip(), bare.strip()
+        if not (sep and alias.strip() and target) or (slash and not (prov and bare)):
+            continue
+        if alias.strip().lower() != m_lc:
+            continue
+        name = bare if slash else target
+        for prefix in ("global.", "anthropic.", "openai.", "google.", "x-ai."):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        return (prov, name) if slash else ("", name)
     return None
 
 
