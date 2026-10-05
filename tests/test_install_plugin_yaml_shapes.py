@@ -192,6 +192,29 @@ class InstallPluginYamlShapeTests(unittest.TestCase):
         )
         self.assertIn('    max_web_searches: 200', out)
 
+    def test_unindented_block_sequence_after_a_comment(self):
+        """Blank and comment-only lines between `enabled:` and the first item
+        must not hide that item's indentation."""
+        result, out = self._run_with_config(
+            'plugins:\n'
+            '  enabled:\n'
+            '\n'
+            '  # observability first\n'
+            '  - hermes_otel\n'
+            '  - tool_call_audit\n'
+            'other: 1\n'
+        )
+        self.assertEqual(result.returncode, 0,
+                         f'exit {result.returncode}: {result.stdout}\n{result.stderr}')
+        block = out[out.index('  enabled:\n') + len('  enabled:\n'):out.index('other: 1')]
+        items = [line for line in block.splitlines() if line.lstrip().startswith('- ')]
+        self.assertIn('  - revenium-classifier', items, f'new item misindented:\n{out}')
+        self.assertEqual(
+            {line[:len(line) - len(line.lstrip())] for line in items}, {'  '},
+            f'every plugins.enabled item must share one indentation:\n{out}',
+        )
+        self.assertIn('  # observability first', out)
+
     def test_rerun_on_converted_config_is_idempotent(self):
         """After conversion the file is block form, so a second run takes the
         ordinary append path and must not duplicate the entry."""

@@ -188,8 +188,9 @@ if enabled_value and not enabled_value.startswith("#"):
 # PyYAML's default dump style and what a config rewritten by yaml.safe_dump
 # carries; appending at `indent + "  "` beneath such a list mixes two
 # indentations and the file no longer parses -- Hermes then refuses to start
-# on it. Fall back to `indent + "  "` only when the list has no items yet.
-item_match = re.match(r"\n(?:[ \t]*\n)*([ \t]*)- ", content[enabled_line_end_abs:])
+# on it. Blank and comment-only lines before the first item are skipped.
+# Fall back to `indent + "  "` only when the list has no items yet.
+item_match = re.match(r"\n(?:[ \t]*(?:#[^\n]*)?\n)*([ \t]*)- ", content[enabled_line_end_abs:])
 if item_match:
     list_item_indent = item_match.group(1)
 new_content = (
