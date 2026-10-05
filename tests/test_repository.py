@@ -800,7 +800,7 @@ class RepositoryTests(unittest.TestCase):
         """
         text = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
         for version in ('v1.0', 'v1.1', 'v1.2', 'v1.3', 'v1.3.1',
-                        'v1.4', 'v1.4.1', 'v1.5', 'v1.6', 'v1.7'):
+                        'v1.4', 'v1.4.1', 'v1.5', 'v1.6', 'v1.7', 'v1.8'):
             self.assertIn(
                 f'## [{version}]', text,
                 f'CHANGELOG.md has no section for released tag {version}',
@@ -2108,28 +2108,66 @@ exit 0
                 f'{relpath} no longer documents: {needle!r} — {why}',
             )
 
-        # D-05: the CHANGELOG entry sits under [Unreleased], not under the
-        # unrelated [v1.5] product tag that merely shares this milestone's
-        # number. Positional, not a version-string match — what needs proving
-        # is WHERE the entry sits, not what it is named.
+        # D-05 (reconciled 2026-10-05, then hardened the same day against a
+        # duplicate-escape hole): the work shipped in [v1.8], so the original
+        # "must sit under [Unreleased]" assertion expired the moment that
+        # section was promoted — the entry correctly moved out of the window
+        # it used to check. What the guard actually protects against is
+        # still live: the GSD milestone number 1.5 collides with the
+        # unrelated [v1.5] product tag (a 2026-08-20 release), so a
+        # positional slip could silently re-file this entry under that tag
+        # instead of its real release.
+        #
+        # The guard now slices the [v1.5] SECTION and asserts absence WITHIN
+        # that slice, rather than keying on changelog.find(NEEDLE) for both
+        # halves. find() returns only the FIRST occurrence in the whole file,
+        # so a find()-keyed negative cannot see a duplicate: an entry correctly
+        # filed under [v1.8] AND ALSO (incorrectly) duplicated under [v1.5]
+        # still has its first occurrence under [v1.8], and the old assertion
+        # read that as "not under [v1.5]" and passed. A section-slice
+        # assertNotIn checks every occurrence inside the [v1.5] window, so a
+        # duplicate is caught regardless of where the first occurrence lands.
         changelog = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
-        unreleased_idx = changelog.find('## [Unreleased]')
-        self.assertNotEqual(unreleased_idx, -1, 'CHANGELOG.md has no [Unreleased] '
-                             'heading')
-        next_release_idx = changelog.find('## [v', unreleased_idx + 1)
+        needle = 'LLM outcome evaluation'
+
+        # Presence half: the entry must appear somewhere in the [v1.8] window.
+        v18_idx = changelog.find('## [v1.8]')
+        self.assertNotEqual(v18_idx, -1, 'CHANGELOG.md has no [v1.8] heading')
+        next_release_idx = changelog.find('## [v', v18_idx + 1)
         self.assertNotEqual(next_release_idx, -1, 'CHANGELOG.md has no released '
-                             'version heading below [Unreleased]')
-        entry_idx = changelog.find('LLM outcome evaluation')
-        self.assertNotEqual(
-            entry_idx, -1,
-            'CHANGELOG.md has no entry for LLM outcome evaluation',
-        )
-        self.assertTrue(
-            unreleased_idx < entry_idx < next_release_idx,
+                             'version heading below [v1.8]')
+        self.assertIn(
+            needle, changelog[v18_idx:next_release_idx],
             'the LLM outcome evaluation CHANGELOG entry must sit under '
-            '[Unreleased], not under any released version heading — the '
-            '[v1.5] tag is an unrelated 2026-08-20 product release that '
-            'merely shares this planning milestone\'s number (D-05)',
+            '[v1.8], not under any other version heading — the [v1.5] tag '
+            'is an unrelated 2026-08-20 product release that merely shares '
+            'this planning milestone\'s number (D-05)',
+        )
+
+        # Absence half: the entry must not appear anywhere in the [v1.5]
+        # window, including as a duplicate of an entry correctly filed under
+        # [v1.8]. The assertNotEqual on v15_idx is load-bearing: without it,
+        # deleting the [v1.5] heading would make changelog[-1:-1] slice to an
+        # empty string and the assertNotIn below would pass vacuously on a
+        # section that no longer exists — the same defect class as a gate
+        # inspecting a gitignored path.
+        v15_idx = changelog.find('## [v1.5]')
+        self.assertNotEqual(
+            v15_idx, -1,
+            'CHANGELOG.md has no [v1.5] heading — the guard cannot verify '
+            'absence from a section that is not there',
+        )
+        v15_next_idx = changelog.find('## [v', v15_idx + 1)
+        v15_window = changelog[v15_idx:(
+            v15_next_idx if v15_next_idx != -1 else len(changelog)
+        )]
+        self.assertNotIn(
+            needle, v15_window,
+            'the LLM outcome evaluation CHANGELOG entry must NOT sit under '
+            '[v1.5] — that tag is an unrelated 2026-08-20 product release '
+            'that merely shares this planning milestone\'s number (D-05); '
+            'this is the collision the guard exists to catch, including a '
+            'duplicate left behind alongside a correctly-filed [v1.8] entry',
         )
 
     def test_roi_live_verification_evidence_is_committed_and_scrubbed(self):

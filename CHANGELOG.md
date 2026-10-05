@@ -9,13 +9,24 @@ this repository.
 
 ## [Unreleased]
 
-Two rounds of work on the same experimental **job-value estimation** feature: the first
-shipped it, the second replaced most of its internals so a model estimate can no longer
-read as an observed result. That feature stays **opt-in and off by default** throughout,
-and an install that leaves it off meters byte-identically to before. This release also
-carries auxiliary usage metering, which is **on by default** and is a permanent step-up
-in reported spend against unchanged traffic, documented in
-[Auxiliary usage migration](docs/migration-auxiliary-usage.md).
+## [v1.8] — 2026-10-05
+
+This release's headline is **subscriber attribution** for metered completions: a
+namespaced subscriber key, resolved from the session's actor, is attached at all four
+metered-completion sites once resolution succeeds, so spend attributes down to the
+individual subscriber instead of stopping at agent or session granularity. Two
+conditions gate it: the installed `revenium` CLI must accept `--subscriber-id` (an
+older CLI meters exactly as before), and the session must resolve to a safe actor
+identity — a completion with neither still ships, just without the key. Job records do
+not carry a subscriber key in this release — attribution lives only on metered
+completions this cycle. Two rounds of
+work on the same experimental **job-value estimation**
+feature also shipped here: the first added it, the second replaced most of its internals
+so a model estimate can no longer read as an observed result. That feature stays
+**opt-in and off by default** throughout, and an install that leaves it off meters
+byte-identically to before. This release also carries auxiliary usage metering, which is
+**on by default** and is a permanent step-up in reported spend against unchanged traffic,
+documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 
 ### Documentation
 
@@ -28,6 +39,9 @@ in reported spend against unchanged traffic, documented in
   truncation tiers, the correction record shape, the ledger lines, retention and pruning,
   and a symptom-to-cause troubleshooting table. The pages it was extracted from keep their
   summaries and link to it.
+- **[Cron and job cost reconciliation](docs/cron-and-job-cost-reconciliation.md)** —
+  the Phase 65 diagnosis record for TRU-01 and TRU-02, documentation only; nothing under
+  `skills/` changed. ([#141])
 
 ### Added — evidence grading and economic mechanisms
 
@@ -234,6 +248,61 @@ in reported spend against unchanged traffic, documented in
   once per `(outcome_id, reason)`, with a per-tick backlog aggregate line when the
   count is non-zero.
 
+### Added — subscriber attribution
+
+- **Subscriber identity resolution.** A session's actor is resolved into a namespaced
+  subscriber key, giving Revenium a stable identifier beneath agent and session that
+  persists for the same subscriber across sessions. ([#135])
+- **`--subscriber-id` carried to all four `meter completion` sites** — the per-marker
+  split path, the markerless path, the event path, and the auxiliary-usage pass — so no
+  metered completion ships unattributed once resolution succeeds. Agentic job records
+  (`jobs create` / `jobs outcome`) and tool events do not carry a subscriber key in this
+  release; subscriber attribution is scoped to metered completions only. ([#136])
+- **Email, obfuscation, and name legibility** (SUB-06, SUB-09). The new
+  `skills/revenium/scripts/subscriber-names.sh` resolves subscriber-facing names, legible
+  where an operator allows it and obfuscated where they don't, documented in
+  [Subscriber attribution](docs/subscriber-attribution.md). ([#137])
+- **Live proof against a real tenant** (SUB-10). Subscriber resolution and attribution
+  verified end to end on a live install, documented in
+  [Subscriber live proof](docs/subscriber-live-proof.md). ([#138])
+
+### Added — operator tooling
+
+- **Hermes Kanban ticket-id attribution.** Metered completions carry `--ticket-id` when a
+  ticket is active, capability-gated so an older `revenium` CLI is unaffected. ([#123])
+- **Per-job outcome metrics**, appended from the assessment sidecars via the new
+  `outcome-metrics-report.sh`. A `404` on the append is treated as a deferral rather than
+  a failure, and the behaviour is documented for operators. ([#131], [#133], [#134])
+- **`costs-status.sh`** — a read-only report of which classified job types have no
+  configured cost. ([#109])
+- **`inferred_role` is now constrained to the operator's own rate-card vocabulary**,
+  rather than a model-chosen label the rate card cannot match. ([#140])
+- **The `.ready` sentinel directory is pruned alongside marker files**, so marker garbage
+  collection no longer leaves orphaned sentinels behind. ([#139])
+
+### Fixed
+
+- `--organization-name` is now capability-probed on the jobs path; an install running an
+  older `revenium` CLI had been silently failing job creation in production. ([#124])
+- `owning_job_id` now resolves on the event path, so root-session rows link to their job
+  instead of showing a job cost of zero. ([#125])
+- A completion is never attributed to a job that does not exist yet, closing a race where
+  the event path could reach `jobs create`'s own in-flight window. ([#126])
+- A warn sentinel is kept alive while its session can still re-warn, instead of expiring
+  and letting the same rule re-fire within one session. ([#128])
+- SKILL.md declared a `required_credential_files` path that could never resolve, which made
+  the skill report `setup_needed` and caused Hermes' cron preflight to refuse any job
+  attaching it as `[blocked_config:silent]` — silently, every fire. Hermes joins declared
+  paths onto HERMES_HOME and does not expand `~`, so `~/.config/revenium/config.yaml`
+  resolved to `~/.hermes/~/.config/...`; a containment guard then rejects anything outside
+  HERMES_HOME by design. The scripts read the CLI config directly and never needed the
+  mount, so the declaration is removed and a regression test pins the rule. ([#132])
+
+### Changed
+
+- Every tick's root session ids are now resolved in one process instead of one subprocess
+  per session, a cron-tick performance improvement with no change to wire output. ([#129])
+
 ## [v1.7] — 2026-08-22
 
 ### Added
@@ -264,13 +333,6 @@ in reported spend against unchanged traffic, documented in
 - `plugin-status.sh` reported a false `firing` when a grace-window session masked a stall,
   and its remediation named the gateway on hosts where a desktop-app
   `--profile <name> serve` process owns the profile. ([#79])
-- SKILL.md declared a `required_credential_files` path that could never resolve, which made
-  the skill report `setup_needed` and caused Hermes' cron preflight to refuse any job
-  attaching it as `[blocked_config:silent]` — silently, every fire. Hermes joins declared
-  paths onto HERMES_HOME and does not expand `~`, so `~/.config/revenium/config.yaml`
-  resolved to `~/.hermes/~/.config/...`; a containment guard then rejects anything outside
-  HERMES_HOME by design. The scripts read the CLI config directly and never needed the
-  mount, so the declaration is removed and a regression test pins the rule. ([#132])
 
 ## [v1.6] — 2026-08-21
 
@@ -421,7 +483,8 @@ turning spend attribution from per-session totals into per-turn activity breakdo
 - Mechanical classification through a Hermes plugin, replacing the agent-side path.
 - `prune-markers.sh`.
 
-[Unreleased]: https://github.com/revenium/hermes-revenium/compare/v1.7...main
+[Unreleased]: https://github.com/revenium/hermes-revenium/compare/v1.8...main
+[v1.8]: https://github.com/revenium/hermes-revenium/compare/v1.7...v1.8
 [v1.7]: https://github.com/revenium/hermes-revenium/compare/v1.6...v1.7
 [v1.6]: https://github.com/revenium/hermes-revenium/compare/v1.5...v1.6
 [v1.5]: https://github.com/revenium/hermes-revenium/compare/v1.4.1...v1.5
@@ -437,10 +500,28 @@ turning spend attribution from per-session totals into per-turn activity breakdo
 [#75]: https://github.com/revenium/hermes-revenium/pull/75
 [#76]: https://github.com/revenium/hermes-revenium/pull/76
 [#77]: https://github.com/revenium/hermes-revenium/pull/77
+[#78]: https://github.com/revenium/hermes-revenium/pull/78
 [#79]: https://github.com/revenium/hermes-revenium/pull/79
 [#81]: https://github.com/revenium/hermes-revenium/pull/81
 [#82]: https://github.com/revenium/hermes-revenium/pull/82
 [#83]: https://github.com/revenium/hermes-revenium/pull/83
 [#84]: https://github.com/revenium/hermes-revenium/pull/84
 [#85]: https://github.com/revenium/hermes-revenium/pull/85
+[#109]: https://github.com/revenium/hermes-revenium/pull/109
+[#123]: https://github.com/revenium/hermes-revenium/pull/123
+[#124]: https://github.com/revenium/hermes-revenium/pull/124
+[#125]: https://github.com/revenium/hermes-revenium/pull/125
+[#126]: https://github.com/revenium/hermes-revenium/pull/126
+[#128]: https://github.com/revenium/hermes-revenium/pull/128
+[#129]: https://github.com/revenium/hermes-revenium/pull/129
+[#131]: https://github.com/revenium/hermes-revenium/pull/131
 [#132]: https://github.com/revenium/hermes-revenium/pull/132
+[#133]: https://github.com/revenium/hermes-revenium/pull/133
+[#134]: https://github.com/revenium/hermes-revenium/pull/134
+[#135]: https://github.com/revenium/hermes-revenium/pull/135
+[#136]: https://github.com/revenium/hermes-revenium/pull/136
+[#137]: https://github.com/revenium/hermes-revenium/pull/137
+[#138]: https://github.com/revenium/hermes-revenium/pull/138
+[#139]: https://github.com/revenium/hermes-revenium/pull/139
+[#140]: https://github.com/revenium/hermes-revenium/pull/140
+[#141]: https://github.com/revenium/hermes-revenium/pull/141
