@@ -311,8 +311,31 @@ reader:
 | Risk | Threat | Rationale | Status |
 |---|---|---|---|
 | **R-65-01** | Supply chain | No package-manager install occurs anywhere in this phase, so the legitimacy gate has nothing to gate. Accepting rather than mitigating a vacuous threat | Closed |
-| **R-65-02** | Class A residual | After the history rewrite, the forge may still retain the orphaned objects server-side, addressable by SHA. Removing them requires a support request to the forge operator, which is outside this repository's control | **OPEN — needs a human.** This is also why no pre-rewrite SHA is named anywhere in this file |
+| **R-65-02** | Class A residual | After the history rewrite, the forge may still retain the orphaned objects server-side, addressable by SHA. Removing them requires a support request to the forge operator, which is outside this repository's control | **OPEN, and now CONFIRMED rather than suspected — see below.** This is also why no pre-rewrite SHA is named anywhere in this file |
 | **R-65-03** | Review coverage | The merged deliverable's final revision was never covered by the external reviewer that found 29 defects in its predecessors, 7 of them in replacement prose written for earlier findings | **OPEN.** Closing it means requesting a review of the record as it stands on `main`, not re-reading PR #141 |
+
+### R-65-02 is confirmed live, not theoretical
+
+The risk was originally recorded in the conditional — the forge "may still
+retain" the orphaned objects. It does. Probed read-only on 2026-10-05, without
+fetching any object content:
+
+- **Four pre-rewrite commits**, all dated 2026-10-04, all touching
+  `docs/cron-and-job-cost-reconciliation.md` — the file that carried the name.
+- **Zero of the four are reachable** from `origin/main` or any other remote ref.
+  The rewrite did its job on the branch.
+- **All four are still served by the forge's API, HTTP 200**, addressable by
+  SHA.
+
+That is the residual exactly as predicted, now measured. Anyone holding one of
+those SHAs can still retrieve the pre-redaction content; nothing in this
+repository can change that. Closing it requires a garbage-collection request to
+the forge operator.
+
+The probe deliberately checked reachability only — HTTP status, filenames, and
+diff line counts — and never fetched object content, so producing this evidence
+did not re-expose the name. The four SHAs are recorded in the gitignored phase
+artifacts and are deliberately absent here, for the same reason.
 
 R-65-03 deserves its own note, because a merge decision was made on a claim that
 was false. The justification cited an external review of the final commit; no
