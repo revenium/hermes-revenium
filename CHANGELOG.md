@@ -11,10 +11,12 @@ this repository.
 
 ## [v1.8] — 2026-10-05
 
-This release's headline is **subscriber attribution**: metered completions, tool events,
-and agentic jobs now carry a namespaced subscriber key resolved from the session's actor,
-so spend attributes down to the individual subscriber instead of stopping at agent or
-session granularity. Two rounds of work on the same experimental **job-value estimation**
+This release's headline is **subscriber attribution** for metered completions: a
+namespaced subscriber key, resolved from the session's actor, is now attached to every
+metered completion, so spend attributes down to the individual subscriber instead of
+stopping at agent or session granularity. Job records do not carry a subscriber key in
+this release — attribution lives only on metered completions this cycle. Two rounds of
+work on the same experimental **job-value estimation**
 feature also shipped here: the first added it, the second replaced most of its internals
 so a model estimate can no longer read as an observed result. That feature stays
 **opt-in and off by default** throughout, and an install that leaves it off meters
@@ -249,7 +251,9 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
   persists for the same subscriber across sessions. ([#135])
 - **`--subscriber-id` carried to all four `meter completion` sites** — the per-marker
   split path, the markerless path, the event path, and the auxiliary-usage pass — so no
-  metered completion ships unattributed once resolution succeeds. ([#136])
+  metered completion ships unattributed once resolution succeeds. Agentic job records
+  (`jobs create` / `jobs outcome`) and tool events do not carry a subscriber key in this
+  release; subscriber attribution is scoped to metered completions only. ([#136])
 - **Email, obfuscation, and name legibility** (SUB-06, SUB-09). The new
   `skills/revenium/scripts/subscriber-names.sh` resolves subscriber-facing names, legible
   where an operator allows it and obfuscated where they don't, documented in
