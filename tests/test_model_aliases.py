@@ -134,7 +134,14 @@ class ApiEventReportAliasTests(unittest.TestCase):
 
     def _alias(self, model, aliases):
         self.assertIsNotNone(self.source, '_model_alias extraction failed')
+        # _model_alias calls the heredoc's own _infer_provider, defined
+        # above it in the same heredoc; exec both, extracted live.
         namespace = {'os': os}
+        text = API_EVENT_REPORT_SH.read_text()
+        start = text.find('def _infer_provider(model_lc):\n    if "claude"')
+        end = text.find('\n_ROUTING_LAYER_NAMES', start)
+        self.assertNotEqual(start, -1, '_infer_provider extraction failed')
+        exec(text[start:end], namespace)
         saved = os.environ.pop('REVENIUM_MODEL_ALIASES', None)
         try:
             if aliases is not None:
@@ -149,8 +156,16 @@ class ApiEventReportAliasTests(unittest.TestCase):
     def test_alias_with_provider_prefix(self):
         self.assertEqual(self._alias('model-default', ALIASES), ('anthropic', 'claude-sonnet-5-5'))
 
-    def test_bare_target_has_no_provider(self):
-        self.assertEqual(self._alias('FAST', ALIASES), ('', 'gemini-3.5-flash'))
+    def test_bare_target_provider_is_inferred(self):
+        self.assertEqual(self._alias('FAST', ALIASES), ('google', 'gemini-3.5-flash'))
+
+    def test_bare_target_provider_inferred_before_prefix_strip(self):
+        # `anthropic.` is the only provider cue in this target; stripping it
+        # first would infer `unknown`.
+        self.assertEqual(
+            self._alias('model-default', 'model-default=anthropic.sonnet-5-5'),
+            ('anthropic', 'sonnet-5-5'),
+        )
 
     def test_unaliased_unset_and_malformed_return_none(self):
         self.assertIsNone(self._alias('gpt-5.4', ALIASES))
@@ -162,7 +177,7 @@ class ApiEventReportAliasTests(unittest.TestCase):
     def test_model_prefix_stripped_like_clean_model_name(self):
         self.assertEqual(
             self._alias('model-default', 'model-default=global.claude-sonnet-5-5'),
-            ('', 'claude-sonnet-5-5'),
+            ('anthropic', 'claude-sonnet-5-5'),
         )
         self.assertEqual(
             self._alias('model-default', 'model-default=bedrock/anthropic.claude-sonnet-5-5'),
@@ -171,9 +186,10 @@ class ApiEventReportAliasTests(unittest.TestCase):
 
 
 class ReporterAgreementTests(unittest.TestCase):
-    """One mapping must ship one --model from both reporters."""
+    """One mapping must ship one --model and one --provider from both
+    reporters."""
 
-    def test_both_reporters_emit_the_same_model(self):
+    def test_both_reporters_emit_the_same_model_and_provider(self):
         hermes = HermesReportAliasTests()
         hermes.setUpClass()
         event = ApiEventReportAliasTests()
@@ -184,13 +200,14 @@ class ReporterAgreementTests(unittest.TestCase):
             'global.claude-sonnet-5-5',
             'bedrock/anthropic.claude-sonnet-5-5',
             'fireworks_ai/accounts/fireworks/models/glm-5p2',
+            'anthropic.sonnet-5-5',
+            'gemini-3.5-flash',
         ):
             aliases = 'model-default=' + target
             with self.subTest(target=target):
-                self.assertEqual(
-                    hermes._clean('model-default', aliases),
-                    event._alias('model-default', aliases)[1],
-                )
+                provider, model = event._alias('model-default', aliases)
+                self.assertEqual(hermes._clean('model-default', aliases), model)
+                self.assertEqual(hermes._infer('model-default', 'custom', aliases), provider)
 
     def test_model_source_keeps_the_recorded_provider(self):
         # Only --provider follows the alias; provider_raw (--model-source)

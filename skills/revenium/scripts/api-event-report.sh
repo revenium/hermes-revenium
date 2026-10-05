@@ -1283,10 +1283,12 @@ _ROUTING_LAYER_NAMES = {"openrouter", "bedrock", "custom", "none", "unknown", ""
 def _model_alias(model):
     # REVENIUM_MODEL_ALIASES: comma-separated alias=provider/model pairs, the
     # same contract hermes-report.sh's _clean_model_name honours. Returns
-    # (provider, model) for a matched alias, provider "" when the target names
-    # none; None when the model is not an alias. A target with an empty side
-    # of its `/` is malformed and skipped. The model gets _clean_model_name's
-    # prefix strip, so one mapping ships one --model from both reporters.
+    # (provider, model) for a matched alias; None when the model is not an
+    # alias. A target with an empty side of its `/` is malformed and skipped.
+    # The model gets _clean_model_name's prefix strip, so one mapping ships one
+    # --model from both reporters. A bare target's provider is inferred from
+    # the target BEFORE that strip, as hermes-report.sh's _infer_provider does:
+    # `anthropic.` in `anthropic.sonnet-5-5` is the provider cue.
     m_lc = (model or "").strip().lower()
     for pair in os.environ.get("REVENIUM_MODEL_ALIASES", "").split(","):
         alias, sep, target = pair.partition("=")
@@ -1301,7 +1303,7 @@ def _model_alias(model):
         for prefix in ("global.", "anthropic.", "openai.", "google.", "x-ai."):
             if name.startswith(prefix):
                 name = name[len(prefix):]
-        return (prov, name) if slash else ("", name)
+        return (prov, name) if slash else (_infer_provider(target.lower()), name)
     return None
 
 
@@ -1776,10 +1778,9 @@ try:
 
             if _aliased:
                 # An alias's provider column names the gateway, not the model
-                # provider: take the target's provider/ prefix, else infer it
-                # from the target. provider_raw stays as recorded, for
-                # --model-source.
-                provider_resolved = _aliased[0] or _infer_provider(response_model.lower())
+                # provider: _model_alias already resolved the target's. The
+                # provider_raw stays as recorded, for --model-source.
+                provider_resolved = _aliased[0]
             else:
                 provider_resolved = _resolve_provider(provider_raw, response_model)
             stop_reason = _stop_reason(r.get("finish_reason"))
