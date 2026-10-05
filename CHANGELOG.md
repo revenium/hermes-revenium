@@ -9,6 +9,19 @@ this repository.
 
 ## [Unreleased]
 
+### Changed
+
+- `FAILED` and `CANCELLED` job outcomes now send `--outcome-type UNSUCCESSFUL`. They
+  previously sent no outcome type, so Revenium left every failed or cancelled job's Outcome
+  Type at `PENDING` indefinitely. `SUCCESS` still sends `CONVERTED`, and the value flags
+  stay `SUCCESS`-only.
+
+### Added
+
+- `REVENIUM_MODEL_ALIASES` maps a gateway's model alias (e.g. LiteLLM's `model-default`) to
+  the model it serves, so completions metered behind a gateway carry a model and provider
+  Revenium can price. See [Configuration](docs/configuration.md#model-aliases).
+
 ## [v1.8] — 2026-10-05
 
 This release's headline is **subscriber attribution** for metered completions: a

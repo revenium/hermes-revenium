@@ -229,8 +229,12 @@ def _argv_conformance_reporting_fixture(record: dict, cfg: dict) -> "list | None
     # outcome is a separate axis from an execution result) -- arrived at
     # independently from THE CONTRACT and the golden's declared fields,
     # not by reading the bash script.
+    # FAILED / CANCELLED map to UNSUCCESSFUL, so no terminal arc is left at
+    # Revenium's PENDING default -- the same split hermes-report.sh ships.
     if status == "SUCCESS":
         argv += ["--outcome-type", "CONVERTED"]
+    elif status in ("FAILED", "CANCELLED"):
+        argv += ["--outcome-type", "UNSUCCESSFUL"]
 
     meta: dict = {}
     source = record.get("source")

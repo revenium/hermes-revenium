@@ -319,6 +319,14 @@ class ReportingConformanceTests(unittest.TestCase):
         self.assertNotIn('--budget-id', argv)
         self.assertNotIn('--alert-id', argv)
 
+    def test_non_success_arcs_map_to_unsuccessful(self):
+        fn = self.rep._argv_conformance_reporting_fixture
+        for status in ('FAILED', 'CANCELLED'):
+            with self.subTest(status=status):
+                argv = fn({'agentic_job_id': 'compat-job-003', 'execution_status': status}, {})
+                self.assertEqual(argv[argv.index('--outcome-type') + 1], 'UNSUCCESSFUL')
+                self.assertNotIn('--outcome-value', argv)
+
 
 class GoldenImmutabilityTests(unittest.TestCase):
     """The reporting conformance proof above reads the four immutable v1.x
