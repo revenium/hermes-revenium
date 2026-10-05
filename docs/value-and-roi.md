@@ -814,15 +814,16 @@ revenium jobs outcome <job-id>
   --result SUCCESS|FAILED|CANCELLED
   --quiet
   [--team-id <id>]
-  [--outcome-type CONVERTED]        # SUCCESS arcs only
+  [--outcome-type CONVERTED|UNSUCCESSFUL]
   [--outcome-value <value_low>]     # both value flags, or neither
   [--outcome-currency <cur>]
   [--metadata '<json>']
 ```
 
 `--result` is the execution result; `--outcome-type` is the separate business outcome. A
-`SUCCESS` arc maps to `CONVERTED` so Revenium does not leave the job's outcome type at its
-`PENDING` default. `FAILED` and `CANCELLED` carry no `--outcome-type`.
+`SUCCESS` arc maps to `CONVERTED` and a `FAILED` or `CANCELLED` arc to `UNSUCCESSFUL`, so
+Revenium never leaves a job's outcome type at its `PENDING` default. The value flags below
+stay `SUCCESS`-only.
 
 `--outcome-value` and `--outcome-currency` are probed together once per tick and fail open.
 On a CLI that predates them, the rest of the `jobs outcome` call still goes out. The two

@@ -414,7 +414,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             'q38-sid-002', 'q38-job-002', 'FAILED', failure_reason='3 assertions failed',
         )
         self.assertEqual(argv[argv.index('--result') + 1], 'FAILED')
-        self.assertNotIn('--outcome-type', argv)
+        self.assertEqual(argv[argv.index('--outcome-type') + 1], 'UNSUCCESSFUL')
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
         meta = json.loads(self._metadata_value(argv))
@@ -557,7 +557,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         )
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
-        self.assertNotIn('--outcome-type', argv)
+        self.assertEqual(argv[argv.index('--outcome-type') + 1], 'UNSUCCESSFUL')
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta.get('source'), 'test')
         self.assertEqual(meta.get('failure_reason'), 'boom')
@@ -570,7 +570,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(argv[argv.index('--result') + 1], 'CANCELLED')
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
-        self.assertNotIn('--outcome-type', argv)
+        self.assertEqual(argv[argv.index('--outcome-type') + 1], 'UNSUCCESSFUL')
 
     # -- Plan 43-02 Task 2: the reporter's own evidence_class allow-list --
 

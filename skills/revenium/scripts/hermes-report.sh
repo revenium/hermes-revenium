@@ -5266,11 +5266,15 @@ print('true' if ok else 'false')
         outcome_cmd+=(--team-id "${REVENIUM_TEAM_ID_RESOLVED}")
       fi
       # --result is the execution result; --outcome-type is the separate business
-      # outcome. A SUCCESS arc maps to a CONVERTED business outcome so Revenium does
-      # not leave the job's Outcome Type at its PENDING default. FAILED / CANCELLED
-      # carry no --outcome-type (Revenium default applies).
+      # outcome. Every terminal arc gets one, so Revenium never leaves a job's
+      # Outcome Type at its PENDING default: SUCCESS maps to CONVERTED, and
+      # FAILED / CANCELLED -- an arc that produced no business outcome -- to
+      # UNSUCCESSFUL. Without the latter, every failed or cancelled job read as
+      # still pending indefinitely. Value flags stay SUCCESS-only (below).
       if [[ "${outcome_status}" == "SUCCESS" ]]; then
         outcome_cmd+=(--outcome-type CONVERTED)
+      elif [[ "${outcome_status}" == "FAILED" || "${outcome_status}" == "CANCELLED" ]]; then
+        outcome_cmd+=(--outcome-type UNSUCCESSFUL)
       fi
       # Phase 38 (ROI-10): a resolved assessment ships as the two value flags,
       # never as --outcome-type — a SUCCESS arc already sends CONVERTED above,
