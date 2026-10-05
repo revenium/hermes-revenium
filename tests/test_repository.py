@@ -800,7 +800,7 @@ class RepositoryTests(unittest.TestCase):
         """
         text = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
         for version in ('v1.0', 'v1.1', 'v1.2', 'v1.3', 'v1.3.1',
-                        'v1.4', 'v1.4.1', 'v1.5', 'v1.6', 'v1.7'):
+                        'v1.4', 'v1.4.1', 'v1.5', 'v1.6', 'v1.7', 'v1.8'):
             self.assertIn(
                 f'## [{version}]', text,
                 f'CHANGELOG.md has no section for released tag {version}',
@@ -2108,28 +2108,46 @@ exit 0
                 f'{relpath} no longer documents: {needle!r} — {why}',
             )
 
-        # D-05: the CHANGELOG entry sits under [Unreleased], not under the
-        # unrelated [v1.5] product tag that merely shares this milestone's
-        # number. Positional, not a version-string match — what needs proving
-        # is WHERE the entry sits, not what it is named.
+        # D-05 (reconciled 2026-10-05): the work shipped in [v1.8], so the
+        # original "must sit under [Unreleased]" assertion expired the moment
+        # that section was promoted — the entry correctly moved out of the
+        # window it used to check. What the guard actually protects against
+        # is still live: the GSD milestone number 1.5 collides with the
+        # unrelated [v1.5] product tag (a 2026-08-20 release), so a
+        # positional slip could silently re-file this entry under that tag
+        # instead of its real release. Re-anchor to [v1.8] and keep proving
+        # the entry is NOT inside [v1.5] — positional, not a version-string
+        # match, exactly as before: what needs proving is WHERE the entry
+        # sits, not what it is named.
         changelog = (ROOT / 'CHANGELOG.md').read_text(errors='ignore')
-        unreleased_idx = changelog.find('## [Unreleased]')
-        self.assertNotEqual(unreleased_idx, -1, 'CHANGELOG.md has no [Unreleased] '
-                             'heading')
-        next_release_idx = changelog.find('## [v', unreleased_idx + 1)
+        v18_idx = changelog.find('## [v1.8]')
+        self.assertNotEqual(v18_idx, -1, 'CHANGELOG.md has no [v1.8] heading')
+        next_release_idx = changelog.find('## [v', v18_idx + 1)
         self.assertNotEqual(next_release_idx, -1, 'CHANGELOG.md has no released '
-                             'version heading below [Unreleased]')
+                             'version heading below [v1.8]')
         entry_idx = changelog.find('LLM outcome evaluation')
         self.assertNotEqual(
             entry_idx, -1,
             'CHANGELOG.md has no entry for LLM outcome evaluation',
         )
         self.assertTrue(
-            unreleased_idx < entry_idx < next_release_idx,
+            v18_idx < entry_idx < next_release_idx,
             'the LLM outcome evaluation CHANGELOG entry must sit under '
-            '[Unreleased], not under any released version heading — the '
-            '[v1.5] tag is an unrelated 2026-08-20 product release that '
-            'merely shares this planning milestone\'s number (D-05)',
+            '[v1.8], not under any other version heading — the [v1.5] tag '
+            'is an unrelated 2026-08-20 product release that merely shares '
+            'this planning milestone\'s number (D-05)',
+        )
+        v15_idx = changelog.find('## [v1.5]')
+        self.assertNotEqual(v15_idx, -1, 'CHANGELOG.md has no [v1.5] heading')
+        v15_next_idx = changelog.find('## [v', v15_idx + 1)
+        self.assertNotEqual(v15_next_idx, -1, 'CHANGELOG.md has no version '
+                             'heading below [v1.5]')
+        self.assertFalse(
+            v15_idx < entry_idx < v15_next_idx,
+            'the LLM outcome evaluation CHANGELOG entry must NOT sit under '
+            '[v1.5] — that tag is an unrelated 2026-08-20 product release '
+            'that merely shares this planning milestone\'s number (D-05); '
+            'this is the collision the guard exists to catch',
         )
 
     def test_roi_live_verification_evidence_is_committed_and_scrubbed(self):
