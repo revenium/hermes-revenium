@@ -161,6 +161,37 @@ class InstallPluginYamlShapeTests(unittest.TestCase):
         self.assertIn('- hermes-achievements', out)
         self.assertIn('- revenium-classifier', out)
 
+    def test_unindented_block_sequence_keeps_its_indentation(self):
+        """A block sequence at its key's own indentation (`  enabled:` /
+        `  - a`) -- PyYAML's default dump style, and what any config rewritten
+        by yaml.safe_dump carries -- must get the new item at that same
+        indentation.
+
+        Regression for a live incident on 2026-10-05: a kube-agents platform
+        profile, whose config the harness re-renders with yaml.safe_dump on
+        every start, got `    - revenium-classifier` above `  - hermes_otel`.
+        The mixed indentation does not parse, and Hermes refused to start any
+        kanban worker on that profile, so every delegated task crashed."""
+        result, out = self._run_with_config(
+            'plugins:\n'
+            '  enabled:\n'
+            '  - hermes_otel\n'
+            '  - tool_call_audit\n'
+            'tool_loop_guardrails:\n'
+            '  loop_caps:\n'
+            '    max_web_searches: 200\n'
+        )
+        self.assertEqual(result.returncode, 0,
+                         f'exit {result.returncode}: {result.stdout}\n{result.stderr}')
+        block = out[out.index('  enabled:\n') + len('  enabled:\n'):out.index('tool_loop_guardrails:')]
+        items = [line for line in block.splitlines() if line.strip()]
+        self.assertIn('  - revenium-classifier', items, f'new item misindented:\n{out}')
+        self.assertEqual(
+            {line[:len(line) - len(line.lstrip())] for line in items}, {'  '},
+            f'every plugins.enabled item must share one indentation:\n{out}',
+        )
+        self.assertIn('    max_web_searches: 200', out)
+
     def test_rerun_on_converted_config_is_idempotent(self):
         """After conversion the file is block form, so a second run takes the
         ordinary append path and must not duplicate the entry."""

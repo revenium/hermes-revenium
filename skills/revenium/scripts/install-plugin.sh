@@ -183,6 +183,15 @@ if enabled_value and not enabled_value.startswith("#"):
     print(f"✓ Replaced non-list plugins.enabled and added {plugin_name} in {path}")
     raise SystemExit(0)
 
+# Indent the new item like the existing ones. YAML lets a block sequence
+# sit at its key's own indentation (`  enabled:` / `  - a`), which is
+# PyYAML's default dump style and what a config rewritten by yaml.safe_dump
+# carries; appending at `indent + "  "` beneath such a list mixes two
+# indentations and the file no longer parses -- Hermes then refuses to start
+# on it. Fall back to `indent + "  "` only when the list has no items yet.
+item_match = re.match(r"\n(?:[ \t]*\n)*([ \t]*)- ", content[enabled_line_end_abs:])
+if item_match:
+    list_item_indent = item_match.group(1)
 new_content = (
     content[:enabled_line_end_abs]
     + f"\n{list_item_indent}- {plugin_name}"

@@ -22,6 +22,13 @@ this repository.
   the model it serves, so completions metered behind a gateway carry a model and provider
   Revenium can price. See [Configuration](docs/configuration.md#model-aliases).
 
+### Fixed
+
+- `install-plugin.sh` no longer corrupts a `config.yaml` whose `plugins.enabled` items sit at
+  the key's own indentation (`  enabled:` / `  - a`, PyYAML's default dump style). It
+  inserted the plugin two spaces deeper, the file stopped parsing, and Hermes refused to
+  start on that profile. The new item now takes the existing items' indentation.
+
 ## [v1.8] — 2026-10-05
 
 This release's headline is **subscriber attribution** for metered completions: a
