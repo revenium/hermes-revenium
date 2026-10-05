@@ -668,12 +668,20 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # Pure shift in both files -- the COUNT (4) and the emitted VALUE
         # expressions are unchanged. Verified against the diff hunks
         # themselves (`git diff -U0`), not by arithmetic on a prior value.
+        #
+        # REVENIUM_MODEL_ALIASES: _clean_model_name and _infer_provider each
+        # gained an 8- and a 12-line alias block, both above all three
+        # hermes-report.sh sites (+20): 1753->1773, 4145->4165, 4364->4384.
+        # api-event-report.sh gained _model_alias (15 lines), the alias
+        # rewrite in the row loop (3) and the aliased provider branch (+7 net),
+        # all above the event site (+25): 1896->1921. Pure shift again; count
+        # and values unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1753),
-            ('hermes-report.sh', 4145),
-            ('hermes-report.sh', 4364),
-            ('api-event-report.sh', 1896),
+            ('hermes-report.sh', 1773),
+            ('hermes-report.sh', 4165),
+            ('hermes-report.sh', 4384),
+            ('api-event-report.sh', 1921),
         }
         self.assertEqual(
             found_locations, expected_locations,

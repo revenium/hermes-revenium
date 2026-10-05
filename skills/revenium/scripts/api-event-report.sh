@@ -1280,6 +1280,21 @@ def _infer_provider(model_lc):
 _ROUTING_LAYER_NAMES = {"openrouter", "bedrock", "custom", "none", "unknown", ""}
 
 
+def _model_alias(model):
+    # REVENIUM_MODEL_ALIASES: comma-separated alias=provider/model pairs, the
+    # same contract hermes-report.sh's _clean_model_name honours. Returns
+    # (provider, model) for a matched alias, provider "" when the target names
+    # none; None when the model is not an alias.
+    m_lc = (model or "").strip().lower()
+    for pair in os.environ.get("REVENIUM_MODEL_ALIASES", "").split(","):
+        alias, sep, target = pair.partition("=")
+        target = target.strip()
+        if sep and alias.strip() and alias.strip().lower() == m_lc and target:
+            prov, slash, bare = target.partition("/")
+            return (prov, bare) if slash else ("", target)
+    return None
+
+
 def _resolve_provider(provider_raw, response_model):
     # Contract C-7: verbatim, unless the field names a ROUTING layer rather
     # than a model provider — in which case derive the model provider from
@@ -1713,6 +1728,9 @@ try:
             model = r.get("model") or ""
             response_model = r.get("response_model") or model
             provider_raw = r.get("provider") or ""
+            _aliased = _model_alias(response_model)
+            if _aliased:
+                response_model = _aliased[1]
             ts = r.get("ts")
             ended_at = r.get("ended_at")
             try:
@@ -1746,7 +1764,14 @@ try:
 
             skill_name, skill_trigger, skill_source, skill_marketplace = _skill_for(event_ts)
 
-            provider_resolved = _resolve_provider(provider_raw, response_model)
+            if _aliased:
+                # An alias's provider column names the gateway, not the model
+                # provider: take the target's provider/ prefix, else infer it
+                # from the target. provider_raw stays as recorded, for
+                # --model-source.
+                provider_resolved = _aliased[0] or _infer_provider(response_model.lower())
+            else:
+                provider_resolved = _resolve_provider(provider_raw, response_model)
             stop_reason = _stop_reason(r.get("finish_reason"))
 
             row = [

@@ -850,6 +850,14 @@ _clean_model_name() {
   MODEL="${model}" python3 - <<'PY' 2>/dev/null || printf '%s\n' "${model}"
 import os
 model = os.environ.get('MODEL', '')
+# REVENIUM_MODEL_ALIASES: comma-separated alias=provider/model pairs for hosts
+# whose Hermes names a gateway alias (e.g. LiteLLM's model-default) rather than
+# the model that serves it.
+for pair in os.environ.get('REVENIUM_MODEL_ALIASES', '').split(','):
+    alias, sep, target = pair.partition('=')
+    if sep and alias.strip() and alias.strip().lower() == model.strip().lower() and target.strip():
+        model = target.strip()
+        break
 if '/' in model:
     model = model.split('/', 1)[1]
 for prefix in ('global.', 'anthropic.', 'openai.', 'google.', 'x-ai.'):
@@ -881,6 +889,18 @@ _infer_provider() {
 import os
 model = os.environ.get('MODEL', '').lower()
 billing = os.environ.get('BILLING', '').lower()
+# REVENIUM_MODEL_ALIASES (see _clean_model_name): an aliased model's provider
+# is the target's provider/ prefix, else inferred from the target's name; the
+# billing column names the gateway, not the provider, so it is ignored.
+for pair in os.environ.get('REVENIUM_MODEL_ALIASES', '').split(','):
+    alias, sep, target = pair.partition('=')
+    if sep and alias.strip() and alias.strip().lower() == model.strip() and target.strip():
+        model = target.strip().lower()
+        billing = ''
+        if '/' in model:
+            print(model.split('/', 1)[0])
+            raise SystemExit(0)
+        break
 if billing and billing not in ('', 'none', 'unknown', 'auto'):
     if billing == 'openrouter' or 'litellm' in billing:
         if 'claude' in model or 'anthropic' in model:

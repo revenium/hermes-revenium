@@ -139,6 +139,17 @@ an optional env file at
 `organizationName` is neither of these. It names a company or product, and conflating it
 with an agent name is a common enough mistake that the installer warns about it.
 
+### Model aliases
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REVENIUM_MODEL_ALIASES` | *(empty)* | Comma-separated `alias=provider/model` pairs, e.g. `model-default=anthropic/claude-sonnet-5-5`. A completion whose model matches an alias (case-insensitively) ships the target's model as `--model` and its `provider/` prefix as `--provider`; without a prefix the provider is inferred from the target's name. `--model-source` still carries the provider Hermes recorded. |
+
+Set it when Hermes reaches its model through a gateway that serves an alias, such as LiteLLM's
+`model-default`. Hermes then records the alias as the model and `custom` as the provider, and
+Revenium cannot price either. The map is static: change it when the gateway's alias moves to a
+different model. Completions already shipped keep the name they shipped with.
+
 ### Paths
 
 | Variable | Default |
