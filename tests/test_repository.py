@@ -2108,7 +2108,7 @@ exit 0
                 f'{relpath} no longer documents: {needle!r} — {why}',
             )
 
-        # D-05 (reconciled 2026-10-05, then hardened 2026-10-04 against a
+        # D-05 (reconciled 2026-10-05, then hardened the same day against a
         # duplicate-escape hole): the work shipped in [v1.8], so the original
         # "must sit under [Unreleased]" assertion expired the moment that
         # section was promoted — the entry correctly moved out of the window

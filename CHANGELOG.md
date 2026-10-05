@@ -12,10 +12,14 @@ this repository.
 ## [v1.8] — 2026-10-05
 
 This release's headline is **subscriber attribution** for metered completions: a
-namespaced subscriber key, resolved from the session's actor, is now attached to every
-metered completion, so spend attributes down to the individual subscriber instead of
-stopping at agent or session granularity. Job records do not carry a subscriber key in
-this release — attribution lives only on metered completions this cycle. Two rounds of
+namespaced subscriber key, resolved from the session's actor, is attached at all four
+metered-completion sites once resolution succeeds, so spend attributes down to the
+individual subscriber instead of stopping at agent or session granularity. Two
+conditions gate it: the installed `revenium` CLI must accept `--subscriber-id` (an
+older CLI meters exactly as before), and the session must resolve to a safe actor
+identity — a completion with neither still ships, just without the key. Job records do
+not carry a subscriber key in this release — attribution lives only on metered
+completions this cycle. Two rounds of
 work on the same experimental **job-value estimation**
 feature also shipped here: the first added it, the second replaced most of its internals
 so a model estimate can no longer read as an observed result. That feature stays
