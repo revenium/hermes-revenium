@@ -18,6 +18,13 @@ this repository.
 
 ### Added
 
+- `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's
+  estimates (`MODEL_ESTIMATED_DEMO`) to Revenium. The evidence-class gate added in v1.8
+  withheld every model estimate's value with no way to turn that off, so an install without
+  rate cards, revenue cards, or confirmations could never send a job value. The key must be
+  a literal `true` and works only with `experimentalReportEstimates: true`; off, nothing
+  changes. `revenium jobs roi` shows a reported estimate with the same weight as a
+  measurement. See [Reporting the estimate's value](skills/revenium/references/config-schema.md#reporting-the-estimates-value-egv-18).
 - `REVENIUM_MODEL_ALIASES` maps a gateway's model alias (e.g. LiteLLM's `model-default`) to
   the model it serves, so completions metered behind a gateway carry a model and provider
   Revenium can price. See [Configuration](docs/configuration.md#model-aliases).

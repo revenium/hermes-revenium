@@ -4692,6 +4692,7 @@ except Exception:
           OUTCOME_JOB_ID="${outcome_id}" \
           OUTCOME_MARKERS_DIR="${outcome_markers_dir}" \
           OUTCOME_SID="${outcome_sid}" \
+          REVENIUM_CONFIG_FILE_PATH="${CONFIG_FILE}" \
           python3 - <<'PY' 2>/dev/null || true
 import json
 import os
@@ -5056,6 +5057,24 @@ _REPORTABLE_EVIDENCE_CLASSES = frozenset({
     'ACTIVITY_MEASURED', 'OUTPUT_OBSERVED', 'OUTCOME_OBSERVED',
     'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
 })
+# llmOutcomeEvaluation.reportModelEstimates: the one explicit opt-in that also
+# admits MODEL_ESTIMATED_DEMO, mirroring classifier.py's
+# _model_estimates_opted_in -- it and experimentalReportEstimates must both be
+# the literal JSON true. Read here, per outcome, rather than in a spawn at
+# script start: this heredoc runs only when there is an outcome to report, so
+# the no-outcome hot path gains no python3 process (test_reporter_spawn_guards).
+# Reading at report time also means switching it off withholds values not yet
+# sent. Any read failure is "not opted in". The set above is unchanged, so the
+# default and the divergence guard are unchanged too.
+def _model_estimates_opted_in():
+    try:
+        with open(os.environ.get('REVENIUM_CONFIG_FILE_PATH', '')) as _cf:
+            _c = json.load(_cf).get('llmOutcomeEvaluation')
+    except Exception:
+        return False
+    return (isinstance(_c, dict) and _c.get('reportModelEstimates') is True
+            and _c.get('experimentalReportEstimates') is True)
+_MODEL_ESTIMATES_OPTED_IN = _model_estimates_opted_in()
 # WR-02 (43-REVIEW.md): scope the absent-is-permissible exception to the
 # record kind that actually earns it. Only a kind:"correction" record
 # legitimately carries no evidence_class -- correct-assessment.sh has never
@@ -5097,7 +5116,8 @@ if _reject_evidence_class:
     if not _not_reportable_reason:
         _not_reportable_reason = 'evidence_class_unrecognized'
 elif not _evidence_class_missing and (
-        _raw_evidence_class not in _REPORTABLE_EVIDENCE_CLASSES):
+        _raw_evidence_class not in _REPORTABLE_EVIDENCE_CLASSES) and not (
+        _raw_evidence_class == 'MODEL_ESTIMATED_DEMO' and _MODEL_ESTIMATES_OPTED_IN):
     # Phase 53 (ROI-01, D-01): a RECOGNIZED class that may not carry a value
     # onto the wire -- MODEL_ESTIMATED_DEMO in practice. Distinct from the
     # rejection branch above in one load-bearing way: `evidence_class` is

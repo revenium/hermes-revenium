@@ -3211,6 +3211,28 @@ def _resolve_finish_reason(response) -> str:
         return _FINISH_REASON_UNKNOWN
 
 
+def _model_estimates_opted_in(cfg: "dict | None") -> bool:
+    """The one operator switch that admits MODEL_ESTIMATED_DEMO past the
+    evidence-class gate: `reportModelEstimates` AND `experimentalReportEstimates`,
+    both the literal JSON boolean true, identity-compared like every other
+    money switch here, so a near-miss ("true", 1) cannot turn it on.
+
+    This narrows D-02 rather than discarding it. _REPORTABLE_EVIDENCE_CLASSES
+    is unchanged and still refuses the forced constant by default; only an
+    install that names this key explicitly ships model estimates, which then
+    still carry evidence_class=MODEL_ESTIMATED_DEMO and the full provenance
+    family in --metadata. The motive is an install with no customer-supplied
+    rates, revenue cards or confirmations, where the estimate is the only
+    value there is. hermes-report.sh applies the same rule at its own gate,
+    reading the same two keys from the same config.json at report time.
+    """
+    return (
+        isinstance(cfg, dict)
+        and cfg.get("reportModelEstimates") is True
+        and cfg.get("experimentalReportEstimates") is True
+    )
+
+
 def _resolve_reportability_status(
     cfg: "dict | None", abstained: bool, job: "dict | None" = None,
     paths: "_Paths | None" = None, evidence_class: "str | None" = None,
@@ -3290,7 +3312,9 @@ def _resolve_reportability_status(
     # it, so None reaching here means either a test or a future caller that has
     # not been taught the gate, and neither should obtain `reportable` by
     # omission.
-    if evidence_class not in _REPORTABLE_EVIDENCE_CLASSES:
+    if evidence_class not in _REPORTABLE_EVIDENCE_CLASSES and not (
+            evidence_class == EVIDENCE_CLASS_MODEL_ESTIMATED
+            and _model_estimates_opted_in(cfg)):
         return REPORTABILITY_CANDIDATE
 
     impl_name = "config_opt_in"

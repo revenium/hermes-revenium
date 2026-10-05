@@ -118,16 +118,17 @@ is described in
   Both are capability-probed together; an older CLI meters the outcome without the value
   flags rather than failing (see [§13](#13-the-wire)).
 
-### The five opt-in surfaces
+### The six opt-in surfaces
 
-Five surfaces control the feature. There is no master flag, and none will be renamed.
-Four live inside `llmOutcomeEvaluation` in
-`~/.hermes/state/revenium/config.json`; the fifth does not.
+Six surfaces control the feature. There is no master flag, and none will be renamed.
+Five live inside `llmOutcomeEvaluation` in
+`~/.hermes/state/revenium/config.json`; the sixth does not.
 
 | Surface | Where it goes | Governs | Default |
 |---|---|---|---|
 | `enabled` | inside `llmOutcomeEvaluation` | Whether evaluation happens at all | `false` |
 | `experimentalReportEstimates` | inside `llmOutcomeEvaluation` | Whether a computed value may leave the machine | `false` |
+| `reportModelEstimates` | inside `llmOutcomeEvaluation` | Whether a model estimate (`MODEL_ESTIMATED_DEMO`) may leave it too; effective only with the key above | `false` |
 | `costs` | inside `llmOutcomeEvaluation` | Operator-supplied non-AI costs that net against the estimate | `{}` |
 | `studyId` / `studyVersion` | inside `llmOutcomeEvaluation` | A reference to an impact study; never changes an assessment's own evidence class | absent |
 | `boundaries` | **top level**, a sibling of `llmOutcomeEvaluation` | Which registered implementation serves each pluggable contract | built-ins |
@@ -182,6 +183,7 @@ enforcement.
 |---|---|---|
 | `enabled` | `false` | Must be a **literal JSON boolean**. `"true"`, `1`, and `"yes"` all leave it off. |
 | `experimentalReportEstimates` | `false` | Same literal-boolean discipline. Independent of `enabled`. |
+| `reportModelEstimates` | `false` | Same literal-boolean discipline. With `experimentalReportEstimates`, reports this evaluator's estimates; see [§11](#11-reportability-computed-vs-reportable). |
 | `evaluator` | `"llm"` | Name of a registered evaluator. An unknown name does not fall back; it skips and records the skip. |
 | `currency` | `"USD"` | ISO 4217, from `USD`, `EUR`, `GBP`, `CAD`, `AUD`, `JPY`, `CHF`. An assessment naming a different currency is rejected. |
 | `maxHoursSaved` | `40` | Ceiling on the hours assumption. |
@@ -657,13 +659,22 @@ estimates distinguishable from observations.
 
 `experimentalReportEstimates` is a second, independent opt-in stacked on top of `enabled`,
 because *computing* a value and *sending* it are different questions. The decision is
-stored as `reportability_status` and resolved by the classifier. The reporter only reads and
-obeys the field.
+stored as `reportability_status` and resolved by the classifier. The reporter obeys the
+field and applies the evidence-class gate a second time before it sends.
 
 | `reportability_status` | When | `--outcome-value` / `--outcome-currency` | Value family in `--metadata` | Provenance in `--metadata` | Outcome reported at all? |
 |---|---|---|---|---|---|
-| `reportable` | `experimentalReportEstimates` is literally `true`, and the assessment did not abstain | yes | yes | yes | yes |
+| `reportable` | `experimentalReportEstimates` is literally `true`, the assessment did not abstain, and its evidence class is reportable | yes | yes | yes | yes |
 | `candidate` | anything else, including every abstained assessment | no | **stripped** | yes | yes |
+
+The evidence-class gate (Phase 53, ROI-01) admits `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`,
+`OUTCOME_OBSERVED`, `CUSTOMER_CONFIGURED`, and `CUSTOMER_CONFIRMED`. Every estimate from the
+`llm` and `stub` evaluators is `MODEL_ESTIMATED_DEMO`, which the gate withholds unless
+`reportModelEstimates` is also literally `true`. That key exists for installs with no
+customer-supplied rates, revenue cards, or confirmations, where the model's estimate is the
+only value. `revenium jobs roi` shows no evidence class, so a reported estimate appears there
+with the same weight as a measurement; `--metadata` still carries
+`evidence_class: MODEL_ESTIMATED_DEMO`.
 
 Two properties enforce this separation:
 
