@@ -1280,6 +1280,33 @@ def _infer_provider(model_lc):
 _ROUTING_LAYER_NAMES = {"openrouter", "bedrock", "custom", "none", "unknown", ""}
 
 
+def _model_alias(model):
+    # REVENIUM_MODEL_ALIASES: comma-separated alias=provider/model pairs, the
+    # same contract hermes-report.sh's _clean_model_name honours. Returns
+    # (provider, model) for a matched alias; None when the model is not an
+    # alias. A target with an empty side of its `/` is malformed and skipped.
+    # The model gets _clean_model_name's prefix strip, so one mapping ships one
+    # --model from both reporters. A bare target's provider is inferred from
+    # the target BEFORE that strip, as hermes-report.sh's _infer_provider does:
+    # `anthropic.` in `anthropic.sonnet-5-5` is the provider cue.
+    m_lc = (model or "").strip().lower()
+    for pair in os.environ.get("REVENIUM_MODEL_ALIASES", "").split(","):
+        alias, sep, target = pair.partition("=")
+        target = target.strip()
+        prov, slash, bare = target.partition("/")
+        prov, bare = prov.strip(), bare.strip()
+        if not (sep and alias.strip() and target) or (slash and not (prov and bare)):
+            continue
+        if alias.strip().lower() != m_lc:
+            continue
+        name = bare if slash else target
+        for prefix in ("global.", "anthropic.", "openai.", "google.", "x-ai."):
+            if name.startswith(prefix):
+                name = name[len(prefix):]
+        return (prov, name) if slash else (_infer_provider(target.lower()), name)
+    return None
+
+
 def _resolve_provider(provider_raw, response_model):
     # Contract C-7: verbatim, unless the field names a ROUTING layer rather
     # than a model provider — in which case derive the model provider from
@@ -1713,6 +1740,9 @@ try:
             model = r.get("model") or ""
             response_model = r.get("response_model") or model
             provider_raw = r.get("provider") or ""
+            _aliased = _model_alias(response_model)
+            if _aliased:
+                response_model = _aliased[1]
             ts = r.get("ts")
             ended_at = r.get("ended_at")
             try:
@@ -1746,7 +1776,13 @@ try:
 
             skill_name, skill_trigger, skill_source, skill_marketplace = _skill_for(event_ts)
 
-            provider_resolved = _resolve_provider(provider_raw, response_model)
+            if _aliased:
+                # An alias's provider column names the gateway, not the model
+                # provider: _model_alias already resolved the target's. The
+                # provider_raw stays as recorded, for --model-source.
+                provider_resolved = _aliased[0]
+            else:
+                provider_resolved = _resolve_provider(provider_raw, response_model)
             stop_reason = _stop_reason(r.get("finish_reason"))
 
             row = [

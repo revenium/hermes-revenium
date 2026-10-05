@@ -87,6 +87,15 @@ REVENIUM_AGENT_NAME="${REVENIUM_AGENT_NAME:-Hermes}"
 # explicit operator declaration of squad identity and outranks any
 # marker-derived value.
 REVENIUM_SQUAD_NAME="${REVENIUM_SQUAD_NAME:-}"
+# Model aliases: comma-separated `alias=provider/model` pairs (the `provider/`
+# prefix is optional). Hermes behind a gateway such as LiteLLM records the
+# gateway's alias (e.g. `model-default`) as the model and the gateway as the
+# provider (`custom`), so neither --model nor --provider names anything
+# Revenium can price. hermes-report.sh's _clean_model_name/_infer_provider and
+# api-event-report.sh's _model_alias read this from the environment. Exported
+# because those readers are Python heredocs; the empty default leaves every
+# model name exactly as Hermes recorded it.
+export REVENIUM_MODEL_ALIASES="${REVENIUM_MODEL_ALIASES:-}"
 # v1.1 job-tracking scaffolding (D-13): separate ledger for agentic jobs and forward-compat taxonomy path.
 JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger}"
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"

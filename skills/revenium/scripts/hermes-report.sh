@@ -850,6 +850,20 @@ _clean_model_name() {
   MODEL="${model}" python3 - <<'PY' 2>/dev/null || printf '%s\n' "${model}"
 import os
 model = os.environ.get('MODEL', '')
+# REVENIUM_MODEL_ALIASES: comma-separated alias=provider/model pairs for hosts
+# whose Hermes names a gateway alias (e.g. LiteLLM's model-default) rather than
+# the model that serves it. A target with an empty side of its `/`
+# (`anthropic/`, `/claude-...`) is malformed and ignored, so a typo can never
+# ship an empty --model or --provider.
+for pair in os.environ.get('REVENIUM_MODEL_ALIASES', '').split(','):
+    alias, sep, target = pair.partition('=')
+    target = target.strip()
+    prov, slash, bare = target.partition('/')
+    if not (sep and alias.strip() and target) or (slash and not (prov.strip() and bare.strip())):
+        continue
+    if alias.strip().lower() == model.strip().lower():
+        model = target
+        break
 if '/' in model:
     model = model.split('/', 1)[1]
 for prefix in ('global.', 'anthropic.', 'openai.', 'google.', 'x-ai.'):
@@ -881,6 +895,22 @@ _infer_provider() {
 import os
 model = os.environ.get('MODEL', '').lower()
 billing = os.environ.get('BILLING', '').lower()
+# REVENIUM_MODEL_ALIASES (see _clean_model_name): an aliased model's provider
+# is the target's provider/ prefix, else inferred from the target's name; the
+# billing column names the gateway, not the provider, so it is ignored.
+for pair in os.environ.get('REVENIUM_MODEL_ALIASES', '').split(','):
+    alias, sep, target = pair.partition('=')
+    target = target.strip().lower()
+    prov, slash, bare = target.partition('/')
+    if not (sep and alias.strip() and target) or (slash and not (prov.strip() and bare.strip())):
+        continue
+    if alias.strip().lower() == model.strip():
+        model = target
+        billing = ''
+        if slash:
+            print(prov.strip())
+            raise SystemExit(0)
+        break
 if billing and billing not in ('', 'none', 'unknown', 'auto'):
     if billing == 'openrouter' or 'litellm' in billing:
         if 'claude' in model or 'anthropic' in model:
