@@ -4686,13 +4686,21 @@ except Exception:
         # documents for the sidecar directory itself).
         outcome_markers_dir="$(resolve_markers_dir "${outcome_sid}")"
         [[ -z "${outcome_markers_dir}" ]] && outcome_markers_dir="${MARKERS_DIR}"
+        # The reportModelEstimates opt-in is read from the config.json of the
+        # profile that OWNS this session -- the one whose classifier wrote the
+        # sidecar read above -- never the reporting process's own. A profile's
+        # config.json sits beside its job-assessments/ directory.
+        local outcome_config_file="${CONFIG_FILE}"
+        if [[ "${outcome_assessment_dir}" != "${JOB_ASSESSMENTS_DIR}" ]]; then
+          outcome_config_file="$(dirname "${outcome_assessment_dir}")/config.json"
+        fi
         local _assessment_kv
         _assessment_kv=$(
           ASSESSMENTS_DIR="${outcome_assessment_dir}" \
           OUTCOME_JOB_ID="${outcome_id}" \
           OUTCOME_MARKERS_DIR="${outcome_markers_dir}" \
           OUTCOME_SID="${outcome_sid}" \
-          REVENIUM_CONFIG_FILE_PATH="${CONFIG_FILE}" \
+          REVENIUM_CONFIG_FILE_PATH="${outcome_config_file}" \
           python3 - <<'PY' 2>/dev/null || true
 import json
 import os

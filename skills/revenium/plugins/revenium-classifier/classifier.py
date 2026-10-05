@@ -1763,11 +1763,16 @@ assert len(_DECLARABLE_EVIDENCE_CLASSES) == 6, (
 # is a membership question, not an ordering one -- no sort, no comparison, no
 # index.
 #
-# NOT operator-widenable, on purpose (D-02). There is deliberately no config key
-# that admits MODEL_ESTIMATED_DEMO here: a value-reporting gate an operator can
-# configure away is not a gate. Widening this requires a code change and review,
-# the same discipline Phase 43 and Phase 50 chose over policy wherever both were
-# available.
+# The SET is not operator-widenable (D-02): no config key adds a class to it, and
+# widening it requires a code change and review, the same discipline Phase 43 and
+# Phase 50 chose over policy wherever both were available. ONE narrow exception
+# sits beside the set rather than in it: llmOutcomeEvaluation.reportModelEstimates,
+# together with experimentalReportEstimates (both literal true), admits
+# MODEL_ESTIMATED_DEMO and nothing else -- see _model_estimates_opted_in. It
+# exists for installs with no customer-supplied rates, revenue cards or
+# confirmations, where the model's estimate is the only value; the read-surface
+# risk above applies in full once it is on. hermes-report.sh's outcome gate and
+# outcome-metrics-report.sh apply the same rule at report time.
 _REPORTABLE_EVIDENCE_CLASSES = _DECLARABLE_EVIDENCE_CLASSES - {
     EVIDENCE_CLASS_MODEL_ESTIMATED,
 }

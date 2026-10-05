@@ -295,8 +295,13 @@ LOCKPY
   # "1 entries" for a job whose four metrics were all supposedly ledgered.
   local econ_types
   econ_types="$(
-    ASSESS_DIR="${JOB_ASSESSMENTS_DIR}" python3 -c '
+    ASSESS_DIR="${JOB_ASSESSMENTS_DIR}" CONFIG_PATH="${CONFIG_FILE}" python3 -c '
 import glob, json, os, sys
+def model_opted_in():
+    try: c=json.load(open(os.environ["CONFIG_PATH"])).get("llmOutcomeEvaluation")
+    except Exception: return False
+    return isinstance(c, dict) and c.get("reportModelEstimates") is True and c.get("experimentalReportEstimates") is True
+model_ok=model_opted_in()
 seen=set()
 for path in sorted(glob.glob(os.path.join(os.environ["ASSESS_DIR"], "*.jsonl"))):
     try:
@@ -307,6 +312,7 @@ for path in sorted(glob.glob(os.path.join(os.environ["ASSESS_DIR"], "*.jsonl")))
             except ValueError: continue
             if r.get("kind")!="job_assessment": continue
             if r.get("reportability_status")!="reportable": continue
+            if r.get("evidence_class")=="MODEL_ESTIMATED_DEMO" and not model_ok: continue
             t=r.get("job_type") or ""
             if t and t not in seen:
                 seen.add(t); print(t)
@@ -341,10 +347,30 @@ for path in sorted(glob.glob(os.path.join(os.environ["ASSESS_DIR"], "*.jsonl")))
     MAX_JOBS="${REVENIUM_OUTCOME_METRICS_MAX_JOBS}" \
     UNIT_KEY="${OM_UNIT_METRIC_KEY}" \
     ECON_CACHE="${econ_cache_dir}" \
+    CONFIG_PATH="${CONFIG_FILE}" \
     python3 - <<'PY' 2>/dev/null
 import datetime, glob, json, os, sys
 
 assess_dir = os.environ['ASSESS_DIR']
+
+
+def _model_estimates_opted_in():
+    """llmOutcomeEvaluation.reportModelEstimates, read NOW rather than taken
+    from the stored reportability_status: a model estimate made reportable
+    while the switch was on must not reach this permanent append after the
+    operator has turned it off. Same literal-true rule as classifier.py's
+    _model_estimates_opted_in and hermes-report.sh's outcome gate; any read
+    failure is "not opted in"."""
+    try:
+        with open(os.environ.get('CONFIG_PATH', '')) as cf:
+            c = json.load(cf).get('llmOutcomeEvaluation')
+    except Exception:
+        return False
+    return (isinstance(c, dict) and c.get('reportModelEstimates') is True
+            and c.get('experimentalReportEstimates') is True)
+
+
+model_estimates_ok = _model_estimates_opted_in()
 ledger_path = os.environ['LEDGER']
 default_unit_key = os.environ['UNIT_KEY']
 econ_cache = os.environ.get('ECON_CACHE', '')
@@ -418,6 +444,8 @@ for path in sorted(glob.glob(os.path.join(assess_dir, '*.jsonl'))):
                 if r.get('kind') != 'job_assessment':
                     continue
                 if r.get('reportability_status') != 'reportable':
+                    continue
+                if r.get('evidence_class') == 'MODEL_ESTIMATED_DEMO' and not model_estimates_ok:
                     continue
                 jid = r.get('agentic_job_id')
                 if not jid:

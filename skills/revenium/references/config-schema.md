@@ -391,10 +391,13 @@ standing request that this gate substitutes for.
 An install with no customer-supplied rate card, revenue card, or confirmation
 has no value but the model's estimate. `reportModelEstimates: true`, together
 with `experimentalReportEstimates: true`, both literal JSON booleans inside
-`llmOutcomeEvaluation`, admits `MODEL_ESTIMATED_DEMO` at both enforcement
-points: the classifier writes `reportable`, and `hermes-report.sh`, which reads
-the same two keys from `config.json` when it sends the outcome, ships the value.
-Turning the key off withholds every value not yet sent.
+`llmOutcomeEvaluation`, admits `MODEL_ESTIMATED_DEMO` wherever a value can
+leave the host: the classifier writes `reportable`; `hermes-report.sh` ships the
+outcome's value; and `outcome-metrics-report.sh` appends it to the Outcome
+timeline. Both scripts re-read the two keys from `config.json` when they send,
+so turning the key off withholds every value not yet sent, including a timeline
+append still waiting. On a multiplexed host the outcome's check reads the
+`config.json` of the profile that owns the session.
 
 It admits that one class and nothing else. The permitted set above is
 unchanged, malformed and causal-impact classes stay refused, and an abstained
