@@ -2,9 +2,10 @@
 
 quick-260531-n4i: every job outcome ships a --metadata JSON carrying the session
 `source` (deployment environment); a FAILED arc additionally carries the
-classifier-supplied `failure_reason`. SUCCESS/CANCELLED arcs carry source only —
-that side is locked by tests/fixtures/compat/jobs-outcome.golden.json (anchored
-^{"source":"test"}$).
+classifier-supplied `failure_reason`. SUCCESS and genuine-halt CANCELLED arcs carry
+the source only — that side is locked by tests/fixtures/compat/jobs-outcome.golden.json
+(anchored ^{"source":"test"}$). An undetermined CANCELLED arc also carries
+`failure_reason` and `outcome_basis` (see tests/test_phase66_undetermined_outcome.py).
 
 Source-of-truth: skills/revenium/scripts/hermes-report.sh post-loop outcome stage.
 Reuses the no-shift shim + synthetic state.db harness from _compat_helpers.

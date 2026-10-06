@@ -15,6 +15,14 @@ this repository.
   previously sent no outcome type, so Revenium left every failed or cancelled job's Outcome
   Type at `PENDING` indefinitely. `SUCCESS` still sends `CONVERTED`, and the value flags
   stay `SUCCESS`-only.
+- A `CANCELLED` job outcome that is not a guardrail halt now explains itself. It ships a
+  fixed `failure_reason` (the arc ended without checkable evidence of success or failure, so
+  it was reported as `CANCELLED` by default) and `outcome_basis: undetermined` in
+  `--metadata`, because an uncertain arc and a halted one were otherwise indistinguishable on
+  the wire. A halt cancellation (`guardrail-halt-*` id, job type `interrupted`) ships exactly
+  as before, and the classifier's rule to use `CANCELLED` when uncertain is unchanged. The
+  reason rides in `--metadata` until a CLI release exposes the server's `outcomeReason`
+  field (V2-13).
 
 ### Added
 

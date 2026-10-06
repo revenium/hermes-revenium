@@ -139,7 +139,10 @@ linked back through `--agentic-job-id`.
 
 Every outcome also carries a `--metadata` blob holding the deployment `source`, taken from
 the session's source column. `FAILED` arcs add a `failure_reason`: a short plain-text cause
-inferred by the classifier. `SUCCESS` and `CANCELLED` arcs carry source alone.
+inferred by the classifier. `SUCCESS` arcs and genuine halt cancellations (a `guardrail-halt-*`
+job id, or job type `interrupted`) carry source alone. Any other `CANCELLED` arc adds a
+reporter-written `failure_reason` and `outcome_basis: undetermined`, because the classifier
+uses `CANCELLED` when it cannot tell how an arc ended.
 
 ### The bounded `--metadata` envelope (D-01/D-02/D-03, EGV-19)
 
@@ -149,8 +152,10 @@ capability is invented here.
 
 **Key inventory.** Three groups of keys can appear in the object:
 
-- **Base keys** — `source` (the deployment source) and `failure_reason` (a `FAILED` arc's
-  short cause). These are base metering and are never dropped.
+- **Base keys** — `source` (the deployment source), `failure_reason` (a `FAILED` arc's
+  short cause, or the fixed reporter-written reason on an undetermined `CANCELLED` arc), and
+  `outcome_basis` (`undetermined`, on that same `CANCELLED` arc). These are base metering and
+  are never dropped.
 - **The value family** — `value_low`, `value_base`, `value_high`, `bounds_source`,
   `net_value`, `assumptions`, `supplied_costs`, `cost_coverage`, `attribution_fraction`,
   `attribution_basis`. The economic estimate and its inputs. The attribution pair is in

@@ -836,6 +836,22 @@ revenium jobs outcome <job-id>
 Revenium never leaves a job's outcome type at its `PENDING` default. The value flags below
 stay `SUCCESS`-only.
 
+`CANCELLED` is also the classifier's catch-all when it is not sure how an arc ended, and a
+guardrail halt cancels an arc too. A `CANCELLED` arc that is not a halt cancellation (its job
+id does not start with `guardrail-halt-` and its job type is not `interrupted`, both written
+by the halt hook) is the undetermined bucket. It ships two extra `--metadata` keys,
+`failure_reason` and `outcome_basis: undetermined`. The reason is a fixed constant owned by
+the reporter, never model text: it says only that the arc ended without checkable evidence of
+success or failure, that it was reported as `CANCELLED` by default, and that no guardrail halt
+was recorded for the job. A halt cancellation ships source-only metadata, exactly as before.
+The reason rides in `outcomeMetadata` because the server's `outcomeReason` field has no flag
+in any released CLI (CLI drift item V2-13), which leaves `--metadata` as the only carrier. That
+is a deliberate departure from the server's API description, which names `outcomeReason` as
+the prescribed field for a failure reason and asks that it not be encoded inside metadata.
+The migration route: when a CLI release exposes the flag (V2-13), the reporter sends the
+reason through it behind a `supports_flag` probe, the way every new flag is adopted. Outcome
+rows already reported keep the metadata shape, because metering is forward-only.
+
 `--outcome-value` and `--outcome-currency` are probed together once per tick and fail open.
 On a CLI that predates them, the rest of the `jobs outcome` call still goes out. The two
 flags are always added together or not at all. A non-numeric
@@ -848,7 +864,7 @@ groups:
 
 | Group | Keys | Dropped under pressure? |
 |---|---|---|
-| **Base metering** | `source`, `failure_reason` | **never** |
+| **Base metering** | `source`, `failure_reason`, `outcome_basis` | **never** |
 | **Value family** | `value_low`, `value_base`, `value_high`, `bounds_source`, `net_value`, `assumptions`, `supplied_costs`, `cost_coverage` | first |
 | **Provenance family** | `evaluator`, `evaluator_version`, `model`, `evidence_class`, `reportability_status`, `study_id`, `study_version`, `confidence`, `economic_mechanism`, `double_counting_group`, `correction_sequence`, `inference_provider`, `inference_address_class` | second |
 
