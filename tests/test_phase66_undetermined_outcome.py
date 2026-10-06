@@ -585,12 +585,44 @@ class CeilingTests(unittest.TestCase):
         self.assertNotIn('metadata_truncated', meta)
         self.assertEqual(set(meta), {'source', 'failure_reason', 'outcome_basis'})
 
-    def test_new_keys_survive_the_shed_tiers(self):
+    def _unshed_size(self, env):
+        """Byte size of the payload with the ceiling lifted, so a fixture
+        that shrinks below the real ceiling fails loudly instead of letting
+        a shed-tier test pass without any tier running."""
+        lifted = self.body.replace(
+            '_METADATA_CEILING_BYTES = %d' % self._ceiling(),
+            '_METADATA_CEILING_BYTES = 10 ** 9')
+        self.assertNotEqual(lifted, self.body)
+        res = _run_forwarder(lifted, env)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        return len(res.stdout.strip().encode('utf-8'))
+
+    def _shed_case(self, source_len):
         env = {**os.environ, **_forwarder_env(
-            source='s' * 3800, assessment=_over_ceiling_assessment())}
+            source='s' * source_len, assessment=_over_ceiling_assessment())}
+        self.assertGreater(self._unshed_size(env), self._ceiling())
         res = _run_forwarder(self.body, env)
         self.assertEqual(res.returncode, 0, res.stderr)
         meta = json.loads(res.stdout.strip())
+        self.assertLessEqual(len(res.stdout.strip().encode('utf-8')), self._ceiling())
+        return meta
+
+    def test_new_keys_survive_the_shed_tiers(self):
+        # Tier 1 only: the value family is shed, provenance survives.
+        meta = self._shed_case(3400)
+        self.assertTrue(meta.get('metadata_truncated'))
+        self.assertNotIn('net_value', meta)
+        self.assertIn('evaluator', meta)
+        self.assertEqual(meta.get('outcome_basis'), 'undetermined')
+        self.assertEqual(meta.get('failure_reason'), self.reason)
+
+        # Tier 2: still over the ceiling after tier 1, so the provenance
+        # family is shed too. The two Phase 66 keys must still survive.
+        meta = self._shed_case(3800)
+        self.assertTrue(meta.get('metadata_truncated'))
+        self.assertNotIn('net_value', meta)
+        self.assertNotIn('evaluator', meta)
+        self.assertNotIn('model', meta)
         self.assertEqual(meta.get('outcome_basis'), 'undetermined')
         self.assertEqual(meta.get('failure_reason'), self.reason)
 
