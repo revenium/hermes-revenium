@@ -22,10 +22,10 @@ creations and two outcome reports on the development tenant.
 | # | Criterion | Source | Verdict |
 |---|-----------|--------|---------|
 | 1 | The server persisted `failure_reason` and `outcome_basis: undetermined` in `outcomeMetadata` for an undetermined `CANCELLED` job shipped by the real Phase 66 reporter, with `executionStatus` `CANCELLED` and `outcomeType` `UNSUCCESSFUL` | TRU-04 / SC1 (wire) | CONFIRMED |
-| 2 | The ROI page shows that reason in place for the undetermined job, and not for the halt-shaped job | TRU-04 / SC1 (page) | PENDING HUMAN CHECK |
+| 2 | The ROI page shows that reason in place for the undetermined job, and not for the halt-shaped job | TRU-04 / SC1 (page) | CONFIRMED |
 | 3 | A halt-shaped job (`guardrail-halt-*`, type `interrupted`) persisted `source` alone: no `failure_reason`, no `outcome_basis` | SC3 | CONFIRMED |
 
-*The TRU-04 status line is written after the page check (plan 66-02 Task 3).*
+**TRU-04 status:** satisfied on the wire and on the ROI page, on the development tenant. Phase 70 repeats the rendered-row check on the reference host (TRU-07).
 
 ## The environment
 
@@ -305,15 +305,88 @@ contrast: in the CLI's table the two rows read alike, and only
 
 ## What the ROI page shows
 
-PENDING HUMAN CHECK
+A human looked at the Revenium web app, signed in to the development tenant
+the local CLI is configured for, and opened both probe jobs by the ids in
+`## Jobs created`. The observation was reported on 2026-10-06 (UTC), after the
+read-back above. The verdict row comes from that observation and not from the
+API read-back.
+
+- Undetermined probe, `phase66-undetermined-20261006-142611`: the human
+  reported, verbatim, `outcome_basis is "undetermined"`, seen on that job's page
+  in the web app.
+- Halt probe, `guardrail-halt-p66-20261006-142611`: the human reported
+  `confirmed`, meaning the page shows no reason and no `outcome_basis` for it.
+
+So the page shows the undetermined marker in place for the undetermined job and
+nothing of the kind for the halt-shaped job, which is the contrast SC1 asks for.
+The page row therefore reads `CONFIRMED`.
+
+Read the observation precisely. What the human quoted is the `outcome_basis`
+value. They did not separately quote the `failure_reason` sentence, so this
+record does not claim the full reason text was seen on the page. The row is
+confirmed on the strength of `outcome_basis` being visible in place, which is
+the discriminator that tells an undetermined row from a halt cancellation. The
+redaction skim of `## The evidence` that the plan asks the human to make was
+performed by the orchestrator at the human's request; it found no tenant, team
+or owner id, no reference tenant id and no person's name or email, and only the
+opaque job resource ids remain raw.
 
 ## What this does not establish
 
-Written after the page check (plan 66-02 Task 3).
+1. **One development tenant, one run, one human observation.** The page was
+   looked at once, by one person, for two jobs written in a single reporter run.
+   It is not a repeat measure and not a second reader.
+2. **The observation quoted `outcome_basis`, not the reason sentence.** The page
+   verdict rests on `outcome_basis` being visible in place. Whether the page
+   also renders the full `failure_reason` sentence was not separately reported,
+   so it is not claimed here.
+3. **Not the reference host, and not post-deployment.** This is not the TRU-07
+   proof. That belongs to Phase 70, which checks the rendered row on the
+   reference host after the change is deployed there.
+4. **A synthetic session through the real reporter, not a classifier-written
+   marker.** The marker file was written by hand to the documented schema. Plan
+   01's tests cover the classifier-to-marker path locally; this probe does not
+   exercise it.
+5. **The local CLI version only.** `revenium 1.7.0 (dd64c11)`. Read-verb
+   availability has differed across CLI versions in this project before, and
+   the fleet runs other builds.
+6. **No re-measure of the 164-of-913 baseline.** That figure predates PR #145
+   and counts every `CANCELLED` job, halt-origin included. Phase 70 takes a
+   fresh before/after on the reference host.
+7. **The reason travels in `outcomeMetadata`, not `outcomeReason`.** The
+   server's own `outcomeReason` field read `null` for both arms, and no released
+   CLI has a flag that sets it (drift item V2-13). If a later CLI ships one, it
+   is the route to a purpose-built field. The page already renders what the
+   `--metadata` carrier puts there, so this is a migration note, not a gap.
 
 ## For Phase 70
 
-Written after the page check (plan 66-02 Task 3).
+This record is not the TRU-07 proof. Phase 70 repeats the check on the
+reference host, after deployment. A runnable recipe:
+
+1. **Before deploying, take a read-only baseline.** Page through
+   `revenium jobs list --output json`, slice the rows by agent, and count
+   `CANCELLED` jobs by `type`. Record the deploy time in UTC. Run every
+   `revenium` command with `REVENIUM_API_KEY` unset if the shell exports a
+   stray key, and confirm `revenium config show` names the reference tenant
+   you mean to measure.
+2. **Deploy without `--delete`.** Other skills nest inside the deployed skill
+   tree on that host, and a `--delete` sync removes them. Plugins are
+   per-profile, so a skill-tree sync alone leaves them stale: compare content,
+   not presence.
+3. **After deploying, find the first undetermined job.** Take the first
+   `CANCELLED` job created after the deploy time whose id does not start
+   `guardrail-halt-` and whose `type` is not `interrupted`. Check that
+   `revenium jobs get <id> --output json` shows `outcome_basis` `undetermined`
+   in `outcomeMetadata`. Also read any halt-origin job that occurs, which must
+   carry `source` alone. Then have a human open both rows on the page.
+4. **Never re-ship or revise earlier jobs.** Jobs reported before the deploy
+   keep their old shape by design, because metering is forward-only. No
+   `jobs outcome-update`, and no outcome for a job id the phase did not mint.
+5. **Requirements bookkeeping.** This record's TRU-04 line reads satisfied on
+   the page for the development tenant, so `.planning/REQUIREMENTS.md`'s TRU-04
+   row follows the normal completion flow. Phase 70 owns TRU-07 separately and
+   does not need to reset anything here.
 
 ## Jobs created
 

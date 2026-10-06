@@ -850,7 +850,10 @@ is a deliberate departure from the server's API description, which names `outcom
 the prescribed field for a failure reason and asks that it not be encoded inside metadata.
 The migration route: when a CLI release exposes the flag (V2-13), the reporter sends the
 reason through it behind a `supports_flag` probe, the way every new flag is adopted. Outcome
-rows already reported keep the metadata shape, because metering is forward-only.
+rows already reported keep the metadata shape, because metering is forward-only. On a development tenant a human
+saw the ROI page show `outcome_basis` in place for an undetermined job and nothing of the kind
+for a halt cancellation ([the render probe](undetermined-outcome-render-probe.md)); that is one
+observation, not yet the reference-host check.
 
 `--outcome-value` and `--outcome-currency` are probed together once per tick and fail open.
 On a CLI that predates them, the rest of the `jobs outcome` call still goes out. The two
