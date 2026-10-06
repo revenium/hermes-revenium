@@ -205,6 +205,23 @@ class OutcomeMetricsOptInTests(om._Base):
     def test_opted_in_model_estimate_appends(self):
         self.assertEqual(4, len(self._run_stage({'llmOutcomeEvaluation': OPTED_IN})))
 
+    def test_switched_off_does_not_fall_back_to_an_older_assessment(self):
+        """An older reportable assessment from another source must not stand
+        in for the job's newer, withheld model estimate."""
+        with tempfile.TemporaryDirectory(prefix='rme-om-older-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            self._shim(bin_dir, has_verb=True)
+            self._assessment(state_dir)
+            sidecar = os.path.join(state_dir, 'job-assessments', 'job-1.jsonl')
+            older = json.loads(open(sidecar).read())
+            older['evidence_class'] = 'CUSTOMER_CONFIGURED'
+            newer = dict(older, evidence_class=MODEL, sequence=1, estimated_value=90.0)
+            with open(sidecar, 'w') as f:
+                f.write(json.dumps(older) + '\n' + json.dumps(newer) + '\n')
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertEqual([], self._ledger(state_dir))
+
     def test_switched_off_model_estimate_appends_nothing(self):
         for config in (None, {'llmOutcomeEvaluation': {'experimentalReportEstimates': True}}):
             with self.subTest(config=config):

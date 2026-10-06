@@ -445,8 +445,6 @@ for path in sorted(glob.glob(os.path.join(assess_dir, '*.jsonl'))):
                     continue
                 if r.get('reportability_status') != 'reportable':
                     continue
-                if r.get('evidence_class') == 'MODEL_ESTIMATED_DEMO' and not model_estimates_ok:
-                    continue
                 jid = r.get('agentic_job_id')
                 if not jid:
                     continue
@@ -456,6 +454,16 @@ for path in sorted(glob.glob(os.path.join(assess_dir, '*.jsonl'))):
                     records[jid] = r
     except OSError:
         continue
+
+# The reportModelEstimates opt-out applies to the LATEST reportable
+# assessment of each job, after the latest-wins selection above. Filtering model estimates
+# out before it would let an older reportable assessment from another source
+# stand in for a newer withheld estimate, and append a superseded value
+# permanently. A job whose latest assessment is a withheld model estimate
+# appends nothing this tick.
+if not model_estimates_ok:
+    records = {jid: r for jid, r in records.items()
+               if r.get('evidence_class') != 'MODEL_ESTIMATED_DEMO'}
 
 emitted = 0
 for jid, r in sorted(records.items()):
