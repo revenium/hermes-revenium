@@ -53,6 +53,40 @@ estimated economic value, which Revenium combines with metered cost to display R
 
 </div>
 
+<details>
+<summary>Mermaid source</summary>
+
+```mermaid
+flowchart LR
+    subgraph Hermes["Hermes Agent"]
+        direction TB
+        Runtime["Agent runtime"]
+        Plugin["Classifier plugin<br/>tasks, jobs, API usage"]
+        Hooks["Shell hooks<br/>budget enforcement, tool capture"]
+        DB[("state.db<br/>sessions and token usage")]
+
+        Runtime --> Plugin
+        Runtime --> Hooks
+        Runtime --> DB
+    end
+
+    State["Local file bus<br/>markers · event spools · config<br/>taxonomies · ledgers · budget snapshot"]
+    Pipeline["Cron pipeline<br/>+ Revenium CLI"]
+    Platform["Revenium platform<br/>metering · jobs and ROI<br/>budget guardrails"]
+
+    Plugin -->|classify + spool| State
+    Hooks -->|tool events| State
+    DB -->|usage| Pipeline
+    State -->|events + settings| Pipeline
+    Pipeline -->|meter + report| Platform
+
+    Platform -.->|budget state| Pipeline
+    Pipeline -.->|snapshot| State
+    State -.->|enforce| Hooks
+```
+
+</details>
+
 The plugin and hooks do not call Revenium directly. They append local files; the cron
 worker is the only component that sends metering and job data to the Revenium platform.
 
