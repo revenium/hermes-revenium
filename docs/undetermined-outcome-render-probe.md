@@ -356,8 +356,9 @@ opaque job resource ids remain raw.
 7. **The reason travels in `outcomeMetadata`, not `outcomeReason`.** The
    server's own `outcomeReason` field read `null` for both arms, and no released
    CLI has a flag that sets it (drift item V2-13). If a later CLI ships one, it
-   is the route to a purpose-built field. The page already renders what the
-   `--metadata` carrier puts there, so this is a migration note, not a gap.
+   is the route to a purpose-built field. The page was observed to render
+   `outcome_basis` from the `--metadata` carrier (the `failure_reason` sentence
+   was not separately quoted), so this is a migration note, not a gap.
 
 ## For Phase 70
 
