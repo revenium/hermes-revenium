@@ -162,6 +162,7 @@ Absent from `config.json` is the same as disabled.
 | `revenueCardKey` | `""` | The non-empty string naming which `revenueCard` entry applies on this host, read from configuration only. |
 | `maxRevenueValue` | absent | Optional ceiling on a configured revenue amount, consulted only when the producing registrant declared and had accepted an operator-only mechanism for the call. See "`maxRevenueValue`" below. |
 | `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. **As of Phase 53 this flag alone is necessary but no longer sufficient** — see "Reporting the estimate's value" below for the record's evidence-class gate this flag now composes with. |
+| `reportModelEstimates` | `false` | Must be a **literal JSON boolean** `true`. Together with `experimentalReportEstimates: true`, admits `MODEL_ESTIMATED_DEMO` past the evidence-class gate, so a naked-LLM estimate ships its value. Off, model estimates stay local as before. See "Opting model estimates in" below. |
 | `studyId` | `""` | A non-empty string naming an `ImpactStudyResult` this install's job assessments reference. Recorded on every assessment this install produces; never changes an assessment's own `evidence_class` (EGV-13, D-08). |
 | `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. The pair is **all-or-none in both directions**: if either field is missing or malformed (a blank `studyId`, a non-integer or `< 1` `studyVersion`), both resolve to their absent defaults. A half-reference could never name a real `ImpactStudyResult`, so none is recorded. |
 | `costs` | `{}` | An object keyed by job type (EGV-14). Each job type's value is an object whose keys are drawn from the four `COST_CATEGORIES` names — `human_review`, `rework_or_error`, `handoff`, `training_or_change`. There is **no fleet-wide default bucket**: an absent job-type key means every category is unknown for that job type, exactly as if `costs` were absent entirely. A supplied `0` is knowledge and participates in the subtraction as a known zero; an absent category is unknown and does not participate (D-10) — these are different and both explicit. A malformed, non-numeric, boolean, or negative value resolves that category to unknown, never to zero. |
@@ -374,7 +375,7 @@ to report a value. The record must also carry one of these evidence classes:
 `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`,
 `CUSTOMER_CONFIGURED`, or `CUSTOMER_CONFIRMED`. The default naked-LLM evaluator
 (`"evaluator": "llm"`) produces `MODEL_ESTIMATED_DEMO`, which the gate refuses
-regardless of configuration.
+unless the install opts model estimates in (below).
 
 The permitted set is a code constant, not a config key (D-02). Widening it
 requires a code change and review. This prevents a model estimate from appearing
@@ -384,6 +385,30 @@ surface does not show `evidence_class`, `evaluator`, or `confidence`. See
 for the live finding and
 [`docs/roi-read-surface-ask.md`](../../../docs/roi-read-surface-ask.md) for the
 standing request that this gate substitutes for.
+
+#### Opting model estimates in (`reportModelEstimates`)
+
+An install with no customer-supplied rate card, revenue card, or confirmation
+has no value but the model's estimate. `reportModelEstimates: true`, together
+with `experimentalReportEstimates: true`, both literal JSON booleans inside
+`llmOutcomeEvaluation`, admits `MODEL_ESTIMATED_DEMO` wherever a value can
+leave the host: the classifier writes `reportable`; `hermes-report.sh` ships the
+outcome's value; and `outcome-metrics-report.sh` appends it to the Outcome
+timeline. Both scripts re-read the two keys from `config.json` when they send,
+so turning the key off withholds every value not yet sent, including a timeline
+append still waiting. On a multiplexed host the outcome's check reads the
+`config.json` of the profile that owns the session.
+
+It admits that one class and nothing else. The permitted set above is
+unchanged, malformed and causal-impact classes stay refused, and an abstained
+assessment is never reportable. The record still carries
+`evidence_class: MODEL_ESTIMATED_DEMO` and the full provenance family in
+`--metadata`.
+
+The risk this gate exists for applies in full once it is on: `revenium jobs roi`
+shows the estimate with the same weight as a measurement, and nothing on that
+surface says it is a model's guess. Turn it on knowing whoever reads that
+surface cannot tell the difference.
 
 ### Operator visibility (Phase 39, ROI-14)
 
@@ -399,18 +424,19 @@ not show them.
 
 Everything under `llmOutcomeEvaluation`, including the `boundaries` object
 below that selects an implementation for an assessment step, is
-**experimental**. Five surfaces make up the whole opt-in feature, each
+**experimental**. Six surfaces make up the whole opt-in feature, each
 governing a genuinely different thing:
 
 | Surface | Governs |
 |---|---|
 | `enabled` | Whether evaluation happens at all. |
 | `experimentalReportEstimates` | Whether a computed value is *reportable* to Revenium — independent of `enabled`, because a value can be computed and withheld from the wire. |
+| `reportModelEstimates` | Whether a `MODEL_ESTIMATED_DEMO` value may be reported at all. Effective only with `experimentalReportEstimates`. |
 | `boundaries` | Which registered implementation serves each pluggable contract (classification, valuation, evidence). |
 | `costs` | Operator-supplied inputs that net against a computed estimate. |
 | `studyId` / `studyVersion` | Reference an impact study; referencing one never changes an assessment's own evidence class. |
 
-These five are **independent. There is no master flag, and none of them will be
+These six are **independent. There is no master flag, and none of them will be
 renamed.**
 
 No master flag exists because adding a new gate to the billing path risks

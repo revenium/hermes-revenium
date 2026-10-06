@@ -56,7 +56,8 @@ An upgraded host keeps its legacy `alertId` field, but nothing reads it. See
 | `enabled` | no | Must be a **literal JSON boolean** `true` — the string `"true"`, the integer `1`, and any other truthy value all leave the feature off. `false` or absent (the default) meters exactly as before. |
 | `evaluator` | no | Which registered evaluator to use. Defaults to `"llm"`. |
 | `currency`, `maxHoursSaved`, `maxLoadedRate` | no | Bounds on the estimate. See the full schema for defaults and behaviour when exceeded. |
-| `experimentalReportEstimates` | no | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. `false` or absent (the default) computes and records an estimate locally but withholds its value from Revenium — the outcome and provenance still report, the number does not (`reportability_status: "candidate"`). `true` ships the value too (`reportability_status: "reportable"`). |
+| `experimentalReportEstimates` | no | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. `false` or absent (the default) computes and records an estimate locally but withholds its value from Revenium — the outcome and provenance still report, the number does not (`reportability_status: "candidate"`). `true` ships the value too (`reportability_status: "reportable"`) when the record's evidence class is a reportable one. A naked-LLM estimate (`MODEL_ESTIMATED_DEMO`) is not, unless `reportModelEstimates` is also `true`. |
+| `reportModelEstimates` | no | Must be a **literal JSON boolean** `true`. With `experimentalReportEstimates: true`, reports model estimates' values too: the only value an install has without a rate card, revenue card, or confirmation. `revenium jobs roi` will show them with the same weight as a measurement. |
 | `studyId`, `studyVersion` | no | Name an impact study (EGV-12/EGV-13) this install's job assessments reference — a non-empty string id paired with an integer version >= 1, all-or-none (configure one without the other and neither is recorded). Recorded on every assessment; referencing a study never changes that assessment's own `evidence_class`. |
 | `costs` | no | An object keyed by job type, each value an object of non-AI cost categories (`human_review`, `rework_or_error`, `handoff`, `training_or_change`) that subtract from `estimated_value` into a `net_value`. No fleet-wide default — an unconfigured job type nets nothing. Run `costs-status.sh` to list classified job types that have no configured costs. A supplied `0` and an absent category are different and both explicit in the record; see the full schema. |
 
@@ -74,12 +75,13 @@ and why the skill never emits an ROI ratio. It is in
 
 ### Opt-in surfaces and how they compose (D-09, EGV-23)
 
-The experimental outcome-evaluation feature has five independent settings:
+The experimental outcome-evaluation feature has six independent settings:
 
 | Surface | Governs |
 |---|---|
 | `enabled` | Whether evaluation happens at all. |
 | `experimentalReportEstimates` | Whether a computed value is *reportable* to Revenium — independent of `enabled`, because a value can be computed and withheld from the wire. |
+| `reportModelEstimates` | Whether a model estimate's value may be reported at all. Effective only with `experimentalReportEstimates`. |
 | `boundaries` | Which registered implementation serves each pluggable contract (classification, valuation, evidence). |
 | `costs` | Operator-supplied inputs that net against a computed estimate. |
 | `studyId` / `studyVersion` | Reference an impact study; referencing one never changes an assessment's own evidence class. |

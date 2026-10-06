@@ -150,6 +150,7 @@ configured currency, applied once to a completed job arc of that type.
   "llmOutcomeEvaluation": {
     "enabled": true,
     "experimentalReportEstimates": true,
+    "reportModelEstimates": true,
     "evaluator": "llm",
     "currency": "USD",
     "maxHoursSaved": 16,
@@ -177,7 +178,8 @@ JSON does not support comments, so the annotations follow the example.
 | Key | Value | Why |
 |---|---|---|
 | `enabled` | `true` | Turns evaluation on. Must be a **literal boolean**. `"true"` as a string, or `1`, leaves it off with no warning. Same for the key below. |
-| `experimentalReportEstimates` | `true` | Sends the number to Revenium. Set it to `false` (or omit it) to compute and store estimates locally while withholding the figure from the wire. See [Rolling it out](#rolling-it-out). |
+| `experimentalReportEstimates` | `true` | Lets a value be reported. Set it to `false` (or omit it) to compute and store estimates locally while withholding the figure from the wire. See [Rolling it out](#rolling-it-out). |
+| `reportModelEstimates` | `true` | Needed for this evaluator's estimates in particular: every one is labelled `MODEL_ESTIMATED_DEMO`, which is withheld unless this is also `true`. Leave it off to report only customer-configured or measured values. `revenium jobs roi` shows a reported estimate with the same weight as a measurement. |
 | `evaluator` | `"llm"` | The default. Named explicitly here so the file documents itself. |
 | `currency` | `"USD"` | Must match what the evaluator returns, or the assessment is rejected. Supported: `USD`, `EUR`, `GBP`, `CAD`, `AUD`, `JPY`, `CHF`. |
 
@@ -383,7 +385,9 @@ you're getting:
 cat ~/.hermes/state/revenium/job-taxonomy.json | python3 -c "import json,sys;print(*json.load(sys.stdin)['labels'],sep='\n')"
 ```
 
-3. Report. Set `experimentalReportEstimates: true`. Values now reach Revenium.
+3. Report. Set `experimentalReportEstimates: true` and `reportModelEstimates: true`. Values
+now reach Revenium. `experimentalReportEstimates` alone reports only customer-configured or
+measured values, never this evaluator's estimates.
 
 Verify the switch took at any stage:
 

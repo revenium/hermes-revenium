@@ -161,8 +161,9 @@ and for this label none did.
 That is the sentence this section exists to state in writing: mapping
 `MODEL_ESTIMATED_DEMO` onto any server value would not merely mislabel it, it
 would widen what Phase 53's reportability gate permits. The gate withholds
-the *value* — a `MODEL_ESTIMATED_DEMO` record never becomes `reportable`, so
-its figure never reaches Revenium at all. This mapping withholds the
+the *value* — a `MODEL_ESTIMATED_DEMO` record becomes `reportable` only on an
+install that sets `reportModelEstimates`, so by default its figure never reaches
+Revenium at all. This mapping withholds the
 *provenance claim* — even in the hypothetical world where the gate's
 allow-list changed, no cell here asserts a customer declared it, a system
 measured it, or a reporter attested to it. Both withholdings exist for the

@@ -245,7 +245,7 @@ def _correction_sidecar_record(job_id, sequence=1, **overrides):
 class TestPhase38ReporterPath(unittest.TestCase):
     def _run_one_outcome(self, sid, job_id, status, failure_reason='', source='test',
                           assessment=None, raw_agentic_job_id=None,
-                          outcome_value_capable=True, sidecar=None):
+                          outcome_value_capable=True, sidecar=None, config=None):
         """Drive hermes-report.sh for one job arc; return the parsed
         `jobs outcome` argv. Mirrors _run_one_outcome in
         tests/test_jobs_outcome_metadata.py, extended with an optional
@@ -345,6 +345,11 @@ class TestPhase38ReporterPath(unittest.TestCase):
                 with open(os.path.join(assessments_dir, f'{job_id}.jsonl'), 'w') as f:
                     for _rec in sidecar_records:
                         f.write(json.dumps(_rec, separators=(',', ':')) + '\n')
+
+            # config, when given, is written as ${state_dir}/config.json.
+            if config is not None:
+                with open(os.path.join(state_dir, 'config.json'), 'w') as f:
+                    json.dump(config, f)
 
             build_shim(shim, outcome_value_capable=outcome_value_capable)
 
