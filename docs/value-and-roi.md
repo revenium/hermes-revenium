@@ -844,6 +844,9 @@ by the halt hook) is the undetermined bucket. It ships two extra `--metadata` ke
 the reporter, never model text: it says only that the arc ended without checkable evidence of
 success or failure, that it was reported as `CANCELLED` by default, and that no guardrail halt
 was recorded for the job. A halt cancellation ships source-only metadata, exactly as before.
+The halt hook writes its marker only when a tool call is attempted while halted, so a halt
+that never reached a tool call leaves no marker and its arc ships as undetermined; the
+reason stays literally true, because no halt was recorded for that job.
 The reason rides in `outcomeMetadata` because the server's `outcomeReason` field has no flag
 in any released CLI (CLI drift item V2-13), which leaves `--metadata` as the only carrier. That
 is a deliberate departure from the server's API description, which names `outcomeReason` as

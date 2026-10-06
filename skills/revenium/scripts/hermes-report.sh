@@ -5296,6 +5296,11 @@ print('true' if ok else 'false')
       # reads both back out of that hook). Each literal only EXEMPTS, never asserts: a
       # spoofed or mistaken value falls back to the pre-phase wire shape, which is the
       # conservative direction. The empty default IS the pre-phase behaviour.
+      # Known limit: the halt marker is written only when a tool call is
+      # attempted while halted, so a halt that never reached a tool call
+      # writes no `guardrail-halt-*` marker and its arc ships as undetermined.
+      # The reason text stays literally true -- "No guardrail halt was
+      # recorded for this job" -- and says nothing about whether one happened.
       outcome_basis=""
       if [[ "${outcome_status}" == "CANCELLED" \
             && "${outcome_id}" != guardrail-halt-* \
