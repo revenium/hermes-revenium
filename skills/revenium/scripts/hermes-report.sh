@@ -2182,15 +2182,18 @@ PY
   local outcome_deferred_tick_count=0
   # WR-01 (39-REVIEW.md): job_outcome_queue is fed by two independent,
   # ungated producers within one session-loop iteration -- the
-  # token-independent marker precheck (`:1473`) and the in-loop jobs-create
-  # stage (`:2375`, gated on the growth guard at `:1884`). Any session whose
+  # token-independent marker precheck (the `precheck_job_rows` block, which
+  # pushes `precheck_clean_job_id`) and the in-loop jobs-create stage (which
+  # pushes `clean_job_id`, gated on the growth guard). Grep for
+  # `job_outcome_queue+=` to find both. Any session whose
   # token total grew this tick AND already has an unconfirmed job marker
   # clears both, pushing the SAME outcome_id twice in one tick. The
   # (outcome_id, reason) flag file already dedupes the per-job WARN line and
   # the retry is deliberately never gated -- but the aggregate increment
   # ran once per QUEUE ENTRY, not once per distinct job, so it could report
   # up to 2x the true backlog. This newline-delimited "seen set" is the same
-  # bash-3.2-compatible idiom LEGACY_RETAINED_SIDS uses above (`:283`,
+  # bash-3.2-compatible idiom LEGACY_RETAINED_SIDS uses above (see its
+  # declaration near the top of the script;
   # `case ... *$'\n'"${sid}"$'\n'*)`) -- no associative arrays. Declared
   # here for the identical herestring reason as outcome_deferred_tick_count:
   # the post-loop stage runs in THIS shell, so it survives across queue
