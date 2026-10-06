@@ -47,6 +47,12 @@ All 29 are recorded `fixed`. Reproduced here at one line each so a later reader
 can tell a triaged finding from a forgotten one — the purpose the original
 ledger served before it was lost to the gitignored tree.
 
+The remediation SHAs below are commits on PR #141's branch, not on `main`:
+the PR was squash-merged, so `main` carries all of them as the single commit
+`c87ef8c`. They stay reachable from the PR's own ref — `git fetch origin
+pull/141/head` — and from the PR's Commits tab, so `git log main` will not
+find them but they do resolve.
+
 **Round 1 — internal code review (19).** Remediation commits are named because
 they are durable and opaque; the pre-rewrite commits of CR-01 deliberately are
 not.
