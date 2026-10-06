@@ -81,6 +81,12 @@ This Hermes skill bundle uses a plugin, three shell hooks, and a cron for runtim
   reached neither a marker nor a sentinel — both the hook-dispatch leg and
   the scheduler-exception mechanism recorded as INFERRED — with each
   finding's own limits stated.
+- [How that record was reviewed and secured](reconciliation-review-and-security-record.md):
+  the companion provenance record — 29 review findings across 8 rounds
+  (including the two that changed a forward disposition), the threat
+  register and its classes, three accepted risks of which two are still
+  open, and the read-only evidence that producing the record did not
+  disturb the host it measured.
 - [ROI read-surface ask](roi-read-surface-ask.md): the tracked, standing
   ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
   on `jobs roi`, and the Phase 53 gate this skill shipped instead of waiting

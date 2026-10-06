@@ -820,7 +820,9 @@ section exists so the next reader does not repeat that mistake.
   that path is indistinguishable on this record's own evidence from never
   being dispatched. Separating the two needs the hook callback's own
   payload for this session, which was not captured here.
-- **A cron-side transcript read is not yet established to work.** GR-06
+- **A cron-side transcript read is not yet established to work.** Review
+  finding GR-06 (round 3 — see
+  [`reconciliation-review-and-security-record.md`](reconciliation-review-and-security-record.md))
   shows the run's own transcript persists in `state.db` and is readable
   by session id independent of hook dispatch — `_read_session_transcript`
   (`classifier.py:441-511`) — but a readable transcript is not the same

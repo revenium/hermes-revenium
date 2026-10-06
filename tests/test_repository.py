@@ -380,6 +380,13 @@ class RepositoryTests(unittest.TestCase):
             # `docs/internal/` are both gitignored, so a tracked docs/ file
             # plus this pin is the only durable home.
             ROOT / 'docs' / 'cron-and-job-cost-reconciliation.md',
+            # Companion to the record above: the 29-finding review ledger
+            # across 8 rounds, the 34-id threat register and its accepted
+            # risks (R-65-02 and R-65-03 both still open), and the evidence
+            # that the live probe stayed read-only. Authored to `.planning/`
+            # first, which is gitignored, so this pin is what keeps the
+            # record's provenance durable alongside the record itself.
+            ROOT / 'docs' / 'reconciliation-review-and-security-record.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
