@@ -43,6 +43,19 @@ agent's task, each task arc is tracked as a billable job, every tool call is met
 a blocking budget rule halts the agent structurally. A successful job can also include an
 estimated economic value, which Revenium combines with metered cost to display ROI.
 
+## Architecture
+
+<div align="center">
+
+<img src="assets/hermes-revenium-architecture.png" alt="Hermes and Revenium architecture showing local capture, cron-based metering, and budget enforcement" width="1400">
+
+[Open full-size diagram](assets/hermes-revenium-architecture.png) · [SVG source](assets/hermes-revenium-architecture.svg)
+
+</div>
+
+The plugin and hooks do not call Revenium directly. They append local files; the cron
+worker is the only component that sends metering and job data to the Revenium platform.
+
 ## What you get
 
 | | |
