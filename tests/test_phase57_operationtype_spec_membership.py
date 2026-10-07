@@ -676,11 +676,18 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # rewrite in the row loop (3) and the aliased provider branch (+6 net),
         # all above the event site (+36): 1896->1932. Pure shift again; count
         # and values unchanged.
+        #
+        # Phase 66 (undetermined CANCELLED label): three hunks sit between
+        # the aux site and the marker-split site -- the queue-producer comment
+        # (+2, +1) and the in-loop outcome-queue push gaining job_type (+4) --
+        # so the two main() sites shift by +7: 4175->4182, 4394->4401. The aux
+        # site (1783) and api-event-report.sh are untouched. Pure shift; count
+        # and values unchanged. Verified against `git diff -U0`.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1783),
-            ('hermes-report.sh', 4175),
-            ('hermes-report.sh', 4394),
+            ('hermes-report.sh', 4182),
+            ('hermes-report.sh', 4401),
             ('api-event-report.sh', 1932),
         }
         self.assertEqual(
