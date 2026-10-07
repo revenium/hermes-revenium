@@ -387,6 +387,14 @@ class RepositoryTests(unittest.TestCase):
             # first, which is gitignored, so this pin is what keeps the
             # record's provenance durable alongside the record itself.
             ROOT / 'docs' / 'reconciliation-review-and-security-record.md',
+            # Phase 67 (TRU-03) — the tracked confidence-omission record: the
+            # retained baseline for the evaluator's missing `confidence`, split
+            # from role misses by log-line pairing, and the replay that
+            # measures prompt changes against it. Phase 70 (TRU-07) reads the
+            # record's recipe and baseline. `.planning/` and `docs/internal/`
+            # are both gitignored, so a tracked docs/ file plus this pin is the
+            # only durable home.
+            ROOT / 'docs' / 'confidence-omission-experiment.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
