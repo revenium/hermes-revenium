@@ -283,6 +283,137 @@ def _confidence_store_violations(source):
     return violations
 
 
+# WR-01: the fence above is per-literal and classifier.py-only. The checker
+# below covers the whole plugin package and resolves keys through names, so
+# `raw.update(...)`, `setdefault(_K, ...)` and `raw[_K] = ...` cannot slip by.
+# Every current dict literal keyed 'confidence' in the plugin is allowlisted by
+# (module, function) with the reason it is legitimate. A NEW write anywhere
+# else, or a second one inside an allowlisted function, fails.
+_CONFIDENCE_LITERAL_ALLOWLIST = {
+    # Copies the VALIDATED, in-[0,1] value onto the returned assessment.
+    ('classifier.py', '_validate_assessment'): 1,
+    # Sidecar record: the assessment's own value, or 0.0 on an abstention.
+    ('classifier.py', '_build_job_assessment'): 1,
+    # Deterministic stub evaluators: a fixed fixture response, not a default
+    # applied to a model response that omitted the key.
+    ('evaluators.py', '_stub_evaluate'): 1,
+    ('evaluators.py', '_system_of_record_assessment_fixture'): 1,
+}
+
+
+def _plugin_sources():
+    return {str(p.relative_to(PLUGIN_DIR)): p.read_text()
+            for p in sorted(PLUGIN_DIR.rglob('*.py'))
+            if '__pycache__' not in p.parts}
+
+
+class _ConfidenceWriteVisitor(ast.NodeVisitor):
+    def __init__(self, module, aliases):
+        self.module = module
+        self.aliases = aliases
+        self.stack = []
+        self.violations = []
+        self.literal_counts = {}
+
+    def _is_key(self, node):
+        if _is_confidence_const(node):
+            return True
+        return isinstance(node, ast.Name) and node.id in self.aliases
+
+    @staticmethod
+    def _is_none(node):
+        return isinstance(node, ast.Constant) and node.value is None
+
+    def _flag(self, node, what):
+        self.violations.append(f"{self.module}:{node.lineno}: {what}")
+
+    def _enter(self, node):
+        self.stack.append(node.name)
+        self.generic_visit(node)
+        self.stack.pop()
+
+    visit_FunctionDef = _enter
+    visit_AsyncFunctionDef = _enter
+
+    def visit_Dict(self, node):
+        for key, value in zip(node.keys, node.values):
+            if key is not None and self._is_key(key) and not self._is_none(value):
+                scope = (self.module, self.stack[-1] if self.stack else '<module>')
+                self.literal_counts[scope] = self.literal_counts.get(scope, 0) + 1
+                if scope not in _CONFIDENCE_LITERAL_ALLOWLIST:
+                    self._flag(node, f"dict literal 'confidence' key in "
+                                     f"non-allowlisted scope {scope[1]}")
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node):
+        if isinstance(node.ctx, (ast.Store, ast.Del)) and self._is_key(node.slice):
+            self._flag(node, "store into a 'confidence' subscript")
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == 'setdefault':
+            if node.args and self._is_key(node.args[0]):
+                self._flag(node, "setdefault('confidence', ...)")
+        if isinstance(func, ast.Attribute) and func.attr == 'update':
+            parts = list(node.args) + [k.value for k in node.keywords]
+            for k in node.keywords:
+                if k.arg == 'confidence' and not self._is_none(k.value):
+                    self._flag(node, "update(confidence=...)")
+            for part in parts:
+                for sub in ast.walk(part):
+                    if isinstance(sub, ast.Dict):
+                        for key, value in zip(sub.keys, sub.values):
+                            if (key is not None and self._is_key(key)
+                                    and not self._is_none(value)):
+                                self._flag(node, "update({'confidence': ...})")
+                    if isinstance(sub, (ast.Tuple, ast.List)) and len(sub.elts) == 2:
+                        if (self._is_key(sub.elts[0])
+                                and not self._is_none(sub.elts[1])):
+                            self._flag(node, "update([('confidence', ...)])")
+                    if (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)
+                            and sub.func.id == 'dict'):
+                        for k in sub.keywords:
+                            if k.arg == 'confidence' and not self._is_none(k.value):
+                                self._flag(node, "update(dict(confidence=...))")
+        if isinstance(func, ast.Name) and func.id == 'dict':
+            for k in node.keywords:
+                if k.arg == 'confidence' and not self._is_none(k.value):
+                    self._flag(node, "dict(confidence=...) call")
+        self.generic_visit(node)
+
+
+def _confidence_aliases(tree):
+    """Every name bound (at any scope) to the string 'confidence'."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and _is_confidence_const(node.value):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        if (isinstance(node, ast.AnnAssign) and node.value is not None
+                and _is_confidence_const(node.value)
+                and isinstance(node.target, ast.Name)):
+            names.add(node.target.id)
+    return names
+
+
+def _plugin_confidence_write_violations(sources):
+    """`sources` maps module filename -> source text, for the whole plugin."""
+    violations = []
+    counts = {}
+    for module, source in sources.items():
+        tree = ast.parse(source)
+        visitor = _ConfidenceWriteVisitor(module, _confidence_aliases(tree))
+        visitor.visit(tree)
+        violations.extend(visitor.violations)
+        counts.update(visitor.literal_counts)
+    for scope, expected in _CONFIDENCE_LITERAL_ALLOWLIST.items():
+        if counts.get(scope, 0) != expected:
+            violations.append(
+                f"allowlisted scope {scope} has {counts.get(scope, 0)} "
+                f"'confidence' dict keys, expected {expected}")
+    return violations
+
+
 def _instrument_constant_violations(source):
     """The instrument format string occurs exactly once among the module's AST
     constants, and inside `_validate_assessment`."""
@@ -470,6 +601,96 @@ class NoWorkaroundFenceTests(unittest.TestCase):
     def test_instrument_check_reports_a_duplicate(self):
         mutated = self.source + f"\n_CONTROL = {INSTRUMENT_FORMAT!r}\n"
         self.assertTrue(_instrument_constant_violations(mutated))
+
+
+    # --- WR-01: whole-plugin write fence -------------------------------------
+
+    _ATTACH_SIG = ('    valid: dict, transcript: str, paths: "_Paths", '
+                   'double_counting_group: str = "",\n) -> None:\n')
+
+    def _plugin(self, **replace_module):
+        sources = _plugin_sources()
+        sources.update(replace_module)
+        return sources
+
+    def _inject_into_attach(self, statements):
+        self.assertEqual(self.source.count(self._ATTACH_SIG), 1)
+        return self.source.replace(
+            self._ATTACH_SIG, self._ATTACH_SIG + statements, 1)
+
+    def test_plugin_scan_covers_every_module(self):
+        names = set(_plugin_sources())
+        self.assertTrue({'classifier.py', 'evaluators.py', 'reporting.py'} <= names,
+                        names)
+
+    def test_no_confidence_write_anywhere_in_the_plugin(self):
+        self.assertEqual(_plugin_confidence_write_violations(_plugin_sources()), [])
+
+    def test_write_fence_reports_update_with_a_pair_list(self):
+        mutated = self._inject_into_attach(
+            "    raw = {}\n    raw.update([('confidence', 0.5)])\n")
+        self.assertTrue(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})))
+
+    def test_write_fence_reports_update_with_a_keyword(self):
+        mutated = self._inject_into_attach(
+            "    raw = {}\n    raw.update(confidence=0.5)\n")
+        self.assertTrue(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})))
+
+    def test_write_fence_reports_update_with_a_dict_literal(self):
+        mutated = self._inject_into_attach(
+            "    raw = {}\n    raw.update({'confidence': 0.5})\n")
+        self.assertTrue(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})))
+
+    def test_write_fence_reports_a_store_through_a_variable_key(self):
+        mutated = self._inject_into_attach(
+            "    _K = 'confidence'\n    raw = {}\n    raw[_K] = 0.5\n")
+        self.assertTrue(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})))
+
+    def test_write_fence_reports_a_store_through_a_module_level_alias(self):
+        mutated = self.source + (
+            "\n_K = 'confidence'\n\n\ndef _evil(raw):\n    raw[_K] = 0.5\n")
+        self.assertTrue(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})))
+
+    def test_write_fence_reports_setdefault_with_a_variable_key(self):
+        mutated = self._inject_into_attach(
+            "    _K = 'confidence'\n    raw = {}\n    raw.setdefault(_K, 0.5)\n")
+        self.assertTrue(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})))
+
+    def test_write_fence_reports_a_write_in_a_sibling_module(self):
+        for module in ('reporting.py', 'evaluators.py', 'valuation.py'):
+            with self.subTest(module=module):
+                sources = _plugin_sources()
+                sources[module] += (
+                    "\n\ndef _evil(raw):\n    raw.update(confidence=0.5)\n"
+                    "    raw.setdefault('confidence', 0.5)\n")
+                self.assertTrue(_plugin_confidence_write_violations(sources))
+
+    def test_write_fence_reports_a_new_literal_outside_the_allowlist(self):
+        sources = _plugin_sources()
+        sources['reporting.py'] += "\n_CONTROL = {'confidence': 0.7}\n"
+        self.assertTrue(_plugin_confidence_write_violations(sources))
+
+    def test_write_fence_reports_a_second_literal_in_an_allowlisted_scope(self):
+        needle = '"confidence": confidence,'
+        self.assertEqual(self.source.count(needle), 1)
+        mutated = self.source.replace(
+            needle, needle + ' **{"confidence": 0.5},', 1)
+        self.assertTrue(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})))
+
+    def test_write_fence_ignores_an_update_that_clears_with_none(self):
+        # Not a workaround: None keeps the key absent-equivalent and still
+        # rejected. Pins that the fence flags values, not the word itself.
+        mutated = self._inject_into_attach(
+            "    raw = {}\n    raw.update(confidence=None)\n")
+        self.assertEqual(_plugin_confidence_write_violations(
+            self._plugin(**{'classifier.py': mutated})), [])
 
 
 class ContractPinTests(unittest.TestCase):
