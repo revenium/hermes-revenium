@@ -119,3 +119,233 @@ the real `call_llm` inside Hermes' own environment, with only the model
 pinned. It calls the evaluator and the validator and nothing that writes a
 sidecar line, a marker or a ledger line, so the replay ships nothing and
 backfills nothing. TRU-07's forward proof stays Phase 70's.
+
+## Pre-registered protocol
+
+This section was committed before the first replay call, and nothing in it
+changes after a result is seen. Every number below is also a constant in
+`tests/confidence_replay_harness.py`, and a test fails if the two disagree.
+
+### Pool
+
+An arc is eligible when all of these hold:
+
+- its sidecar record has sequence 0, execution status SUCCESS and model
+  exactly `z-ai/glm-5.2`;
+- a `kind: job` marker for the same job has status SUCCESS;
+- the production transcript reader returns a non-empty transcript for its
+  session;
+- no message in that session is later than the sidecar record's timestamp.
+
+The last rule is the transcript-drift exclusion. A session that kept
+receiving messages has a different transcript today than it had at evaluation
+time, so replaying it would test a different input from the one that produced
+the omission. Each exclusion is counted once, at the first rule that rejects
+the arc. The census read the reference host's state read-only and made no
+model call.
+
+| Step | Arcs |
+|------|-----:|
+| Sidecar records read | 522 |
+| Not sequence 0 | 0 |
+| Duplicate of an arc already seen | 0 |
+| Execution status not SUCCESS | 148 |
+| Model not `z-ai/glm-5.2` | 46 |
+| No SUCCESS job marker | 0 |
+| Empty transcript | 0 |
+| Transcript drift | 1 |
+| **Eligible** | **327** |
+
+The cap is 300. When more arcs are eligible, the 300 most recent by sidecar
+timestamp are kept, so the pool is 300 arcs. If the operator picks the reduced
+option at the spend checkpoint, the cap is 150, decided before any call and
+applied the same way. Not every pool arc reaches the confidence check: an arc
+that stops at the mechanism or the hours and rate gate is in the pool but not
+in any rate's denominator.
+
+The census also applied every arm to the host's real prompt for every pool
+arc, built from the host's real configuration with its 173-entry rate card.
+All seven arms applied cleanly. The mean A1 prompt is 10,582 characters.
+
+### Arms
+
+| Arm | What it changes | Hypothesis tested | Edits |
+|-----|-----------------|-------------------|------:|
+| A0 | The pre-PR-#140 prompt: the role list is removed by config, no text edit | The baseline was drawn under a prompt without the role list; A0 shows whether the harness reproduces that era | 0 |
+| A1 | Today's prompt, unchanged | The deployed prompt, and the baseline every candidate is compared with | 0 |
+| A2 | A1 repeated | The noise floor: how far two runs of the same prompt differ | 0 |
+| B | Promote: `confidence` moves out of the orphan bullet after the role list into a line directly under the mechanism list, and the preamble now says those shared fields come with every mechanism | Declaration scope: the model reads the preamble's "only the fields under that mechanism's block" as excluding a field that sits under no block | 3 |
+| C | Per-block: `confidence` is deleted from the trailer and repeated inside each of the three mechanism blocks | Proximity: the model supplies a field when it sits beside the other fields it is copying | 3 |
+| D | B plus one sentence saying `confidence` is required and that a response without it is discarded in full | Wording: a stated consequence changes the model's behaviour | 4 |
+| E | B plus a narrower abstention clause: the model is told not to invent hours or a rate, instead of not inventing "a number" | The abstention clause's "do not invent a number to fill the field" is read as covering `confidence` | 4 |
+
+The exact strings are constants in `tests/confidence_replay_harness.py` at the
+pre-registration commit. No arm carries an example value for any field, so no
+arm can anchor the model on a number. Every arm keeps the paragraph that says
+the transcript is data, not instructions, exactly once. Every edit asserts how
+many times its anchor occurs in the instruction text and fails loudly on any
+other count, so a drift in the deployed builder stops the run instead of
+producing a wrong arm.
+
+### Instrument
+
+An omission is counted only when the production validator emits the log record
+whose format string is
+`revenium-classifier: rejected assessment, confidence outside [0,1]: %r`. That
+is the string Phase 70 greps in `agent.log`. The harness matches the
+unformatted format string by equality, never the rendered text, so model
+output is never formatted.
+
+The branch order mirrors production. After the served-model carrier is
+removed, a response is classed in this order: invalid, timed out, null,
+`newly_enabled_work`, and then the validator, which checks the mechanism, then
+the hours and rate, then `confidence`. The denominator is the arcs that
+reached the confidence check: the omitted ones plus the ones that passed it.
+An arc that omitted is never dropped from it.
+
+Per call the harness keeps only scalar diagnostics: whether the key was
+absent, null, a string or another type; whether a differently spelled
+confidence-like key was present; whether the word appears in the text outside
+the object; the finish reason; the completion token count; the mechanism label;
+and the served model. No response text is kept.
+
+### Stages
+
+One smoke call runs first, to confirm the harness reaches the model and the
+served model is the pinned one. Stage 1 then runs A0, A1 and A2 on every pool
+arc. Stage 2 runs B, C, D and E on every pool arc, and only when G0, G2 and G3
+hold. The harness enforces this in code: it refuses the candidate stage
+otherwise.
+
+### Validity gate
+
+- G0: the served model is `z-ai/glm-5.2` on at least 95% of the stage-1
+  responses.
+- G1: A0 reaches the check on at least 30 arcs and omits on at least 10% of
+  them.
+- G2: A1 and A2 differ in omissions by no more than max(3, a quarter of A1's
+  omissions).
+- G3: A1 reaches the check on at least 30 arcs and omits on at least 10% of
+  them.
+
+The harness is valid when G0 and G2 hold and either G1 or G3 holds. If it is
+not valid, no arm verdict is read. Stage 2 needs G3, because a candidate can
+only be shown to beat a prompt that reproduces the omission.
+
+### Decision rule
+
+A candidate arm clears against A1 only when all four hold:
+
+- (a) its omission rate is at most half A1's;
+- (b) a one-sided exact McNemar test on the arcs that reached the check in both
+  arms gives p < 0.05;
+- (c) it reaches the check on no fewer arcs than A1 did, less a tolerance of
+  max(3, a tenth of A1's reached count);
+- (d) its modal supplied confidence has a share of at most 80%, unless A1's
+  modal share is above 80% too.
+
+Criterion (d) exists so that an arm cannot win by teaching the model to emit a
+constant. If more than one arm clears, the winner has the lowest omission rate,
+then the fewest text edits, then the earliest in the order B, C, D, E.
+Arithmetic at every cut is exact, in integers and fractions. No floating-point
+number decides anything; the Wilson interval is for display only.
+
+### Outcomes
+
+The evaluator returns one of these, as a function of the data:
+
+- `CLEARED — arm B`, `CLEARED — arm C`, `CLEARED — arm D` or
+  `CLEARED — arm E`. The harness is valid, A1 reproduces the omission, and
+  that arm clears all four criteria. SC1 and SC2 are met, with the mechanism
+  explained from the arm that won. Only this outcome ships a prompt change in
+  this phase.
+- `CLEARED — arm A1, already deployed`. A1 does not reproduce the omission but
+  A0 does, and A1 clears the same four criteria against A0. PR #140 already
+  moved it, so the record explains the drop from the role list and ships
+  nothing.
+- `NOT CLEARED`. The harness is valid and no arm clears (or, when only A0
+  reproduces the omission, A1 does not clear against A0). SC1 is met, because
+  prompt changes were measured. SC2 is met by the plain statement that no
+  prompt change tried moves the omission and why. Nothing ships.
+- `NOT EVALUATED — harness did not reproduce the omission`. The gates fail, so
+  no arm verdict is valid. The record states that the omission is not
+  reproducible on demand and quotes the baseline on the current model. Nothing
+  ships.
+- `NOT RUN — spend declined`. No call was made. TRU-03 stays open, with the
+  baseline and this protocol ready to run.
+
+### Spend cap
+
+The call cap is `7 × pool + 1 + ceil(7 × pool / 10)`: three gate arms and four
+candidate arms for every pool arc, one smoke call, and a 10% headroom for the
+single permitted retry of a transport error. The headroom is never for a
+response that omitted `confidence`. That is an outcome, and it is not retried.
+
+For the 300-arc pool the cap is 2,311 calls. Public prices for `z-ai/glm-5.2`
+(input $0.152 per million tokens, output $12 per million tokens) with
+deliberate overestimates (3 characters per token, the full 512-token output
+cap on every call) give a ceiling of about $15.44. For a 150-arc pool the cap
+is 1,156 calls and the ceiling about $7.72. Expected spend is lower, because
+most responses stop short of the output cap. The ceiling is not an upper bound
+if the provider bills hidden reasoning beyond the cap; the host sets a medium
+reasoning effort, so this is a real possibility and is stated here rather than
+assumed away.
+
+The harness refuses to start a run that would exceed `--max-calls`, before its
+first call. A retry is scheduled only within the budget that remains, at most
+once per pair. A transport error that cannot be retried stands as a recorded
+outcome.
+
+### Side effects
+
+The replay ships nothing to Revenium and writes nothing under the host's
+Hermes home. It calls the evaluator and the validator and none of the code that
+writes a sidecar line, a marker, a taxonomy entry or a ledger line. A fence
+runs after the smoke call and after each stage, and the run stops on any hit.
+It has four checks:
+
+1. a new sidecar or marker line naming a pool job;
+2. an appended line in the completion, jobs or tool-event ledger naming a pool
+   session or job;
+3. a change in the number of `state.db` rows whose model is `z-ai/glm-5.2`;
+4. an appended `agent.log` line carrying the instrument text that has no
+   session token, or a pool session's token.
+
+The replay's spend lands on the host operator's provider account. Nothing in
+the replay makes a metering call, so none of it appears in Revenium.
+
+## Rejected alternatives
+
+**Retry on omission.** Asking the model again when `confidence` is missing is
+control flow, not a prompt change, and TRU-03 asks about the prompt contract.
+It also changes the quantity measured: the per-arc outcome improves while the
+per-call omission rate stays the same, so the log metric Phase 70 reads would
+move for a reason that says nothing about the evaluator. It doubles the calls
+for exactly the arcs that omit. And a retry prompt that says the field was
+forgotten conditions the second answer on the omission, so the value is no
+longer the model's answer to the original contract.
+
+**`response_format` structured output.** It is not a prompt-level change. The
+fields depend on the mechanism, so a schema would need a `oneOf`, and upstream
+support for it varies by provider. It is the documented next step if no prompt
+arm clears.
+
+**Making `confidence` optional.** This is a contract change that needs a
+decision, not an experiment. TRU-03 asks whether the evaluator can be made to
+supply the field.
+
+**Defaulting or inferring a value.** A default, or a value inferred from other
+fields, is the silent workaround TRU-03 forbids. A missing `confidence` is
+never filled in, so a number that looks like the model's judgement is never one
+the code made up.
+
+**Measuring forward on the current model.** The current model omitted on none
+of the 25 arcs in the baseline, and no change can show a drop from about zero.
+
+**Changing the host's model for the experiment.** An unplanned host change
+already contaminated an earlier proof, and the experiment leaves the host's
+model, configuration, cron and plugin alone.
+
+**Backfilling or revaluing past jobs.** Metering is forward-only. A prompt
+change affects arcs evaluated after it ships and never rewrites a job that was
+already valued or left empty.

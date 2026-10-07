@@ -2634,5 +2634,233 @@ class VerifyDeployTests(_HostCase):
         self.assertEqual(code, 0)
 
 
+# ---------------------------------------------------------------------------
+# Plan 03 task 2: the pre-registered protocol in the tracked record, tied to
+# the harness constants.
+# ---------------------------------------------------------------------------
+
+def _doc_section(text, heading, level='### '):
+    """The text of the section whose heading line equals `heading`, up to the
+    next heading at the same or a shallower level. Copied in shape from
+    tests/test_phase58_provenance_mapping_doc.py::_section."""
+    lines = text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == heading:
+            start = i
+            break
+    assert start is not None, f'no heading {heading!r}'
+    depth = len(level.rstrip())
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        line = lines[j]
+        if line.startswith('#') and len(line) - len(line.lstrip('#')) <= depth \
+                and line.lstrip('#').startswith(' '):
+            end = j
+            break
+    return '\n'.join(lines[start:end])
+
+
+def _doc_table_rows(section_text):
+    rows = []
+    for raw in section_text.splitlines():
+        line = raw.strip()
+        if not line.startswith('|'):
+            continue
+        cells = [c.strip() for c in line.strip('|').split('|')]
+        if all(set(c) <= set('-: ') for c in cells):
+            continue
+        rows.append(tuple(cells))
+    return rows[1:]  # drop the header row
+
+
+_PROTOCOL_SUBSECTIONS = (
+    '### Pool', '### Arms', '### Instrument', '### Stages',
+    '### Validity gate', '### Decision rule', '### Outcomes', '### Spend cap',
+    '### Side effects',
+)
+
+
+class PreRegistrationShapeTests(unittest.TestCase):
+    """The protocol is in the record, and every number in it is derived from
+    the harness constant, so a constant changed without the record fails."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RECORD_PATH.read_text(encoding='utf-8')
+        cls.protocol = _doc_section(
+            cls.text, '## Pre-registered protocol', level='## ')
+        cls.rejected = _doc_section(
+            cls.text, '## Rejected alternatives', level='## ')
+
+    def sub(self, heading):
+        return _doc_section(self.protocol, heading)
+
+    def flat(self, heading):
+        """The subsection with every whitespace run collapsed, so a phrase
+        wrapped across lines in the record is still found."""
+        return ' '.join(self.sub(heading).split())
+
+    def test_both_headings_follow_the_replay_rationale_in_order(self):
+        lines = self.text.splitlines()
+        rationale = lines.index('## Why a replay, not a forward measurement')
+        protocol = lines.index('## Pre-registered protocol')
+        rejected = lines.index('## Rejected alternatives')
+        self.assertLess(rationale, protocol)
+        self.assertLess(protocol, rejected)
+
+    def test_the_protocol_has_nine_subsections_in_order(self):
+        lines = self.protocol.splitlines()
+        found = [line for line in lines if line.startswith('### ')]
+        self.assertEqual(tuple(found), _PROTOCOL_SUBSECTIONS)
+
+    def test_the_protocol_opens_by_saying_it_precedes_every_call(self):
+        opening = ' '.join(self.protocol.split('###')[0].split())
+        self.assertIn('committed before the first replay call', opening)
+        self.assertIn('nothing in it changes after a result is seen', opening)
+
+    def test_each_outcome_constant_appears_verbatim(self):
+        for constant in (harness.OUTCOME_CLEARED_PREFIX,
+                         harness.OUTCOME_CLEARED_A1,
+                         harness.OUTCOME_NOT_CLEARED,
+                         harness.OUTCOME_NOT_EVALUATED,
+                         harness.OUTCOME_NOT_RUN):
+            self.assertIn(constant, self.protocol, constant)
+
+    def test_the_cleared_outcome_is_named_for_every_candidate_arm(self):
+        for arm in harness.CANDIDATE_ARMS:
+            self.assertIn(harness.OUTCOME_CLEARED_PREFIX + arm,
+                          self.flat('### Outcomes'))
+
+    def test_validity_thresholds_are_derived_from_the_constants(self):
+        gate = self.flat('### Validity gate')
+        self.assertIn(f'{int(harness.VALIDITY_MIN_RATE * 100)}%', gate)
+        self.assertIn(f'at least {harness.VALIDITY_MIN_REACHED}', gate)
+        self.assertIn(f'{int(harness.SERVED_MODEL_MIN_SHARE * 100)}%', gate)
+        self.assertIn(harness.REPLAY_MODEL, gate)
+
+    def test_noise_floor_phrase_follows_its_constants(self):
+        self.assertEqual(harness.NOISE_FLOOR_DIVISOR, 4)
+        self.assertEqual(harness.NOISE_FLOOR_MIN, 3)
+        self.assertIn('max(3, a quarter of A1', self.flat('### Validity gate'))
+
+    def test_decision_thresholds_are_derived_from_the_constants(self):
+        rule = self.flat('### Decision rule')
+        self.assertEqual(harness.DECISION_MAX_RATIO, Fraction(1, 2))
+        self.assertIn('at most half', rule)
+        self.assertEqual(harness.ALPHA, Fraction(1, 20))
+        self.assertIn('p < 0.05', rule)
+        self.assertIn(f'{int(harness.CALIBRATION_MODAL_MAX * 100)}%', rule)
+
+    def test_reach_tolerance_phrase_follows_its_constants(self):
+        self.assertEqual(harness.REACH_TOLERANCE_DIVISOR, 10)
+        self.assertEqual(harness.REACH_TOLERANCE_MIN, 3)
+        self.assertIn('max(3, a tenth of A1', self.flat('### Decision rule'))
+
+    def test_the_tie_break_and_exact_arithmetic_are_stated(self):
+        rule = self.flat('### Decision rule')
+        self.assertIn('lowest omission rate', rule)
+        self.assertIn('fewest text edits', rule)
+        self.assertIn('B, C, D, E', rule)
+        self.assertIn('exact', rule)
+
+    def test_pool_cap_and_the_reduced_cap_are_stated(self):
+        pool = self.flat('### Pool')
+        self.assertIn(str(harness.DEFAULT_POOL_CAP), pool)
+        self.assertIn('150', pool)
+        self.assertIn('transcript-drift exclusion', pool)
+
+    def test_the_census_funnel_is_arithmetically_consistent(self):
+        rows = _doc_table_rows(self.sub('### Pool'))
+        values = {}
+        for label, count in rows:
+            values[label.replace('*', '')] = int(count.replace('*', '')
+                                                 .replace(',', ''))
+        read = values['Sidecar records read']
+        eligible = values['Eligible']
+        excluded = sum(v for k, v in values.items()
+                       if k not in ('Sidecar records read', 'Eligible'))
+        self.assertEqual(read - excluded, eligible)
+        self.assertEqual(len(rows), 9)
+
+    def test_every_arm_is_in_the_arms_table_in_order(self):
+        rows = _doc_table_rows(self.sub('### Arms'))
+        self.assertEqual([r[0] for r in rows],
+                         ['A0', 'A1', 'A2', 'B', 'C', 'D', 'E'])
+        for row in rows:
+            self.assertEqual(len(row), 4)
+            self.assertTrue(all(row))
+
+    def test_the_edit_counts_in_the_table_are_the_harness_counts(self):
+        rows = _doc_table_rows(self.sub('### Arms'))
+        stated = {r[0]: int(r[3]) for r in rows}
+        for arm in harness.CANDIDATE_ARMS:
+            self.assertEqual(stated[arm], harness.EDIT_COUNT[arm], arm)
+        for arm in harness.GATE_ARMS:
+            self.assertEqual(stated[arm], 0, arm)
+
+    def test_the_arm_prose_names_the_invariants(self):
+        arms = self.flat('### Arms')
+        self.assertIn('No arm carries an example value', arms)
+        self.assertIn('exactly once', arms)
+        self.assertIn('tests/confidence_replay_harness.py', arms)
+
+    def test_the_instrument_string_is_quoted_verbatim(self):
+        instrument = self.flat('### Instrument')
+        self.assertIn(harness.INSTRUMENT_FORMAT, instrument)
+        self.assertIn('never dropped', instrument)
+        self.assertIn('No response text is kept', instrument)
+
+    def test_the_stage_order_and_the_gate_that_opens_stage_two(self):
+        stages = self.flat('### Stages')
+        self.assertIn('smoke', stages)
+        self.assertIn('G0, G2 and G3', stages)
+        for arm in harness.GATE_ARMS + harness.CANDIDATE_ARMS:
+            self.assertIn(arm, stages)
+
+    def test_the_spend_cap_formula_and_both_caps_are_stated(self):
+        cap = self.flat('### Spend cap')
+        self.assertIn('7 × pool + 1 + ceil(7 × pool / 10)', cap)
+        for pool in (harness.DEFAULT_POOL_CAP, 150):
+            calls = 7 * pool + 1 + -(-7 * pool // 10)
+            self.assertIn(f'{calls:,}', cap)
+
+    def test_the_spend_cap_names_the_retry_rule(self):
+        cap = self.flat('### Spend cap')
+        self.assertIn('never for a response that omitted', cap)
+        self.assertIn('stands as a recorded', cap)
+
+    def test_the_fence_has_four_numbered_checks(self):
+        side = self.sub('### Side effects')
+        numbered = [line for line in side.splitlines()
+                    if re.match(r'^\d+\. ', line)]
+        self.assertEqual(len(numbered), 4)
+        self.assertEqual(len(harness.FENCE_CHECKS), 4)
+
+    def test_the_spend_is_stated_to_land_off_revenium(self):
+        side = self.flat('### Side effects')
+        self.assertIn("host operator's provider account", side)
+        self.assertIn('none of it appears in Revenium', side)
+
+    def test_the_rejected_alternatives_are_all_present(self):
+        for lead in ('**Retry on omission.**',
+                     '**`response_format` structured output.**',
+                     '**Making `confidence` optional.**',
+                     '**Defaulting or inferring a value.**',
+                     '**Measuring forward on the current model.**',
+                     '**Changing the host\'s model for the experiment.**',
+                     '**Backfilling or revaluing past jobs.**'):
+            self.assertIn(lead, self.rejected)
+        self.assertIn('retry', self.rejected)
+        self.assertIn('response_format', self.rejected)
+
+    def test_the_record_carries_no_address_or_login(self):
+        self.assertIsNone(re.search(
+            r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b', self.text))
+        self.assertIsNone(re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', self.text))
+        self.assertNotIn('ubuntu', self.text)
+        self.assertNotIn('.pem', self.text)
+
+
 if __name__ == '__main__':
     unittest.main()
