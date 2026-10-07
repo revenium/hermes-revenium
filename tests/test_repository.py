@@ -703,6 +703,10 @@ class RepositoryTests(unittest.TestCase):
             # `confidence`, and the SC3 pins against the phase-start commit.
             # Deleting this module must turn the suite red.
             ROOT / 'tests' / 'test_phase67_confidence_contract.py',
+            # Phase 67 (TRU-03) on-host replay harness; operator-invoked,
+            # deliberately not `test_`-prefixed; Phase 70 re-runs it on a
+            # model change.
+            ROOT / 'tests' / 'confidence_replay_harness.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
