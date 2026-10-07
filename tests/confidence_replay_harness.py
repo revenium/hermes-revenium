@@ -44,17 +44,23 @@ lazily, so this module imports anywhere, including the local test run.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import importlib.util
+import inspect
 import json
 import logging
 import math
+import os
 import re
+import sqlite3
 import statistics
 import sys
 import time
+import urllib.parse
 from collections import Counter, namedtuple
 from fractions import Fraction
 from pathlib import Path
@@ -978,3 +984,844 @@ def report_to_json(report):
     """The report as JSON text, with every Fraction rendered as `k/n`."""
     return json.dumps(_jsonable(report), indent=2, sort_keys=True,
                       ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Host plumbing (plan 03): the pool, the side-effect fence and the CLI.
+#
+# Everything below reads the host's state and writes only under `--out-dir`,
+# which must resolve outside `--hermes-home`. `state.db` is opened with
+# `mode=ro`. Identifier-bearing data (job ids, job names, session ids) lives
+# only in `pool.json` (mode 0600) and `fence-snapshot.json` (arc keys only).
+# Everything printed, and `census.json`, `calls.jsonl` and `report.json`, hold
+# counts and opaque arc keys.
+# ---------------------------------------------------------------------------
+HostPaths = namedtuple("HostPaths", [
+    "hermes_home", "state_dir", "sidecar_dir", "markers_dir", "state_db",
+    "logs_dir", "config_json", "hermes_ledger", "jobs_ledger",
+    "tool_events_ledger",
+])
+
+# Overrides the classifier honours at import. They are cleared while the host's
+# classifier is loaded so every path derives from `--hermes-home`.
+_PATH_ENV_OVERRIDES = (
+    "REVENIUM_MARKERS_DIR", "REVENIUM_MARKERS_READY_DIR",
+    "REVENIUM_TAXONOMY_FILE", "REVENIUM_JOB_TAXONOMY_FILE",
+    "REVENIUM_JOB_ASSESSMENTS_DIR", "REVENIUM_CONFIG_FILE",
+)
+
+EXCLUSION_STEPS = (
+    "not_sequence_0", "duplicate_arc", "not_success", "wrong_model",
+    "no_success_marker", "no_transcript", "transcript_drift",
+)
+POOL_ENTRY_KEYS = ("arc", "agentic_job_id", "sid", "job_name", "job_type",
+                   "ts")
+FENCE_CHECKS = ("sidecar_marker_lines", "ledger_lines",
+                "state_db_model_rows", "agent_log_instrument")
+INSTRUMENT_NEEDLE = "rejected assessment, confidence outside [0,1]"
+SMOKE_ARM = "A1"
+SMOKE_STAGE = "smoke"
+STAGE_NUMBER = {"gate": 1, "candidates": 2}
+STAGE_ARMS = {"gate": GATE_ARMS, "candidates": CANDIDATE_ARMS}
+
+EXIT_OK = 0
+EXIT_FENCE = 1
+EXIT_USAGE = 2
+EXIT_BUDGET = 3
+EXIT_STAGE = 4
+EXIT_TIMESTAMP = 5
+EXIT_NO_CALLABLE = 6
+
+# A plausible range for `messages.timestamp` in epoch seconds (1973 to 5138).
+_EPOCH_MIN = 10 ** 8
+_EPOCH_MAX = 10 ** 11
+
+_SID_TOKEN_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \S+ [A-Z]+ \[([^\]]+)\] ")
+_LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+
+class TimestampUnitError(Exception):
+    """`messages.timestamp` is not plain epoch seconds; the drift test would
+    be a guess, so the census stops."""
+
+
+def host_paths(hermes_home):
+    home = Path(hermes_home).expanduser()
+    state = home / "state" / "revenium"
+    return HostPaths(
+        hermes_home=home, state_dir=state,
+        sidecar_dir=state / "job-assessments", markers_dir=state / "markers",
+        state_db=home / "state.db", logs_dir=home / "logs",
+        config_json=state / "config.json",
+        hermes_ledger=state / "revenium-hermes.ledger",
+        jobs_ledger=state / "revenium-jobs.ledger",
+        tool_events_ledger=state / "revenium-tool-events.ledger")
+
+
+def _ro_connect(db_path):
+    """Open `state.db` read-only. `mode=ro` means a missing file raises
+    rather than being created."""
+    uri = "file:" + urllib.parse.quote(str(db_path), safe="/") + "?mode=ro"
+    return sqlite3.connect(uri, uri=True, timeout=2.0)
+
+
+def _iter_jsonl(path):
+    """Yield `(dict_or_None)` per non-blank line; None marks a malformed
+    line. A missing or unreadable file yields nothing."""
+    try:
+        handle = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    with handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                value = json.loads(line)
+            except ValueError:
+                yield None
+                continue
+            yield value if isinstance(value, dict) else None
+
+
+def _is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _read_sidecar_records(paths):
+    records, malformed = [], 0
+    for path in sorted(paths.sidecar_dir.glob("*.jsonl")):
+        for rec in _iter_jsonl(path):
+            if rec is None:
+                malformed += 1
+            elif (rec.get("kind") == "job_assessment"
+                    and isinstance(rec.get("agentic_job_id"), str)):
+                records.append(rec)
+    return records, malformed
+
+
+def _read_job_markers(paths):
+    """job id -> the latest `kind: job` marker (by `ts`)."""
+    latest = {}
+    for path in sorted(paths.markers_dir.glob("*.jsonl")):
+        for rec in _iter_jsonl(path):
+            if (rec is None or rec.get("kind") != "job"
+                    or not isinstance(rec.get("agentic_job_id"), str)):
+                continue
+            ts = rec.get("ts") if _is_number(rec.get("ts")) else 0
+            prior = latest.get(rec["agentic_job_id"])
+            if prior is None or ts >= prior[0]:
+                latest[rec["agentic_job_id"]] = (ts, rec)
+    return {job: pair[1] for job, pair in latest.items()}
+
+
+def _message_stamps(conn, sid):
+    """`(max_numeric_timestamp_or_None, any_unusable)` for one session."""
+    try:
+        rows = conn.execute(
+            "SELECT timestamp, typeof(timestamp) FROM messages "
+            "WHERE session_id = ?", (sid,)).fetchall()
+    except sqlite3.Error:
+        return None, False
+    best, unusable = None, False
+    for value, kind in rows:
+        if kind == "null":
+            continue
+        if (kind not in ("integer", "real")
+                or not (_EPOCH_MIN < value < _EPOCH_MAX)):
+            unusable = True
+            continue
+        best = value if best is None else max(best, value)
+    return best, unusable
+
+
+def build_pool(paths, c, cap):
+    """Select the eligible arcs. Returns `(pool, counts)`.
+
+    An arc is eligible when its sidecar record has sequence 0, execution
+    status SUCCESS and model exactly `REPLAY_MODEL`; a `kind: job` marker for
+    the same job id has status SUCCESS; `_read_session_transcript` returns a
+    non-empty transcript; and no message in the session is later than the
+    sidecar record's `ts`. Each exclusion is counted once, at the first rule
+    that rejects the arc. With a cap, the most recent arcs by sidecar `ts` are
+    kept, then sorted ascending.
+    """
+    records, malformed = _read_sidecar_records(paths)
+    markers = _read_job_markers(paths)
+    counts = {step: 0 for step in EXCLUSION_STEPS}
+    counts["records_read"] = len(records)
+    counts["malformed_lines"] = malformed
+    seen = set()
+    eligible = []
+    conn = None
+    unit_seen = False
+    try:
+        try:
+            conn = _ro_connect(paths.state_db)
+        except sqlite3.Error:
+            conn = None
+        for rec in records:
+            job_id = rec["agentic_job_id"]
+            if rec.get("sequence") != 0 or isinstance(
+                    rec.get("sequence"), bool):
+                counts["not_sequence_0"] += 1
+                continue
+            if job_id in seen:
+                counts["duplicate_arc"] += 1
+                continue
+            seen.add(job_id)
+            if rec.get("execution_status") != "SUCCESS":
+                counts["not_success"] += 1
+                continue
+            if rec.get("model") != REPLAY_MODEL:
+                counts["wrong_model"] += 1
+                continue
+            marker = markers.get(job_id)
+            if (marker is None or marker.get("status") != "SUCCESS"
+                    or not isinstance(marker.get("sid"), str)
+                    or not marker["sid"]):
+                counts["no_success_marker"] += 1
+                continue
+            sid = marker["sid"]
+            if not c._read_session_transcript(sid):
+                counts["no_transcript"] += 1
+                continue
+            newest, unusable = (_message_stamps(conn, sid)
+                                if conn is not None else (None, False))
+            if unusable:
+                raise TimestampUnitError("messages.timestamp is not epoch "
+                                         "seconds")
+            if newest is not None:
+                unit_seen = True
+            ts = rec.get("ts")
+            if (not _is_number(ts)
+                    or (newest is not None and newest > ts)):
+                counts["transcript_drift"] += 1
+                continue
+            eligible.append({
+                "arc": arc_key(job_id), "agentic_job_id": job_id,
+                "sid": sid, "job_name": str(marker.get("job_name", "")),
+                "job_type": str(marker.get("job_type", "")), "ts": ts})
+    finally:
+        if conn is not None:
+            conn.close()
+    counts["eligible"] = len(eligible)
+    counts["pool_cap"] = cap
+    counts["timestamp_unit"] = "epoch_seconds" if unit_seen else "unobserved"
+    eligible.sort(key=lambda e: (e["ts"], e["arc"]))
+    pool = eligible[-cap:] if cap and cap > 0 else []
+    pool.sort(key=lambda e: (e["ts"], e["arc"]))
+    return pool, counts
+
+
+# -- private files ----------------------------------------------------------
+def _write_private_json(path, value):
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            json.dump(value, handle, sort_keys=True)
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _write_json(path, value):
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def _sha256_file(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+# -- the side-effect fence --------------------------------------------------
+def _sidecar_component(job_id):
+    """Mirror of the classifier's sidecar filename rule (duplicated on
+    purpose: the fence never loads the classifier)."""
+    if not isinstance(job_id, str):
+        return "_"
+    value = job_id
+    for bad in (":", " ", "\t", "\n", "\r"):
+        value = value.replace(bad, "_")
+    value = re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    return "_" if value in ("", ".", "..") else value
+
+
+def _file_size(path):
+    try:
+        return os.stat(path).st_size
+    except OSError:
+        return 0
+
+
+def _read_from(path, offset):
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(max(0, int(offset)))
+            return handle.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _model_row_count(paths):
+    try:
+        conn = _ro_connect(paths.state_db)
+    except sqlite3.Error:
+        return 0
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE model = ?",
+            (REPLAY_MODEL,)).fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
+def _agent_log_stat(paths):
+    try:
+        st = os.stat(paths.logs_dir / "agent.log")
+    except OSError:
+        return {"inode": None, "size": 0}
+    return {"inode": st.st_ino, "size": st.st_size}
+
+
+def _ledger_files(paths):
+    return {"hermes": paths.hermes_ledger, "jobs": paths.jobs_ledger,
+            "tool_events": paths.tool_events_ledger}
+
+
+def _sidecar_path(paths, entry):
+    return paths.sidecar_dir / (_sidecar_component(entry["agentic_job_id"])
+                                + ".jsonl")
+
+
+def _marker_path(paths, entry):
+    return paths.markers_dir / (entry["sid"] + ".jsonl")
+
+
+def fence_snapshot(paths, pool):
+    """Sizes only, keyed by opaque arc key: no identifier is stored."""
+    return {
+        "taken_at": int(time.time()),
+        "sidecar": {e["arc"]: _file_size(_sidecar_path(paths, e))
+                    for e in pool},
+        "markers": {e["arc"]: _file_size(_marker_path(paths, e))
+                    for e in pool},
+        "ledgers": {name: _file_size(path)
+                    for name, path in _ledger_files(paths).items()},
+        "model_rows": _model_row_count(paths),
+        "agent_log": _agent_log_stat(paths),
+    }
+
+
+def _agent_log_new_text(paths, before):
+    prior = before.get("agent_log") or {}
+    log = paths.logs_dir / "agent.log"
+    try:
+        st = os.stat(log)
+    except OSError:
+        st = None
+    offset = prior.get("size", 0)
+    if (st is not None and st.st_ino == prior.get("inode")
+            and st.st_size >= offset):
+        return _read_from(log, offset)
+    chunks = []
+    if st is None or st.st_ino != prior.get("inode"):
+        # Rotated: the file we snapshotted is now agent.log.1.
+        chunks.append(_read_from(paths.logs_dir / "agent.log.1", offset))
+    if st is not None:
+        chunks.append(_read_from(log, 0))
+    return "".join(chunks)
+
+
+def _log_line_epoch(line):
+    match = _LOG_TIME_RE.match(line)
+    if not match:
+        return None
+    try:
+        return time.mktime(time.strptime(match.group(1), "%Y-%m-%d %H:%M:%S"))
+    except (ValueError, OverflowError):
+        return None
+
+
+def fence_check(paths, pool, before, since_epoch=None):
+    """Four read-only checks against the snapshot. Returns a dict of check
+    name to violation count. Counts only, never an identifier."""
+    ids = sorted({e["agentic_job_id"] for e in pool}
+                 | {e["sid"] for e in pool})
+    pattern = (re.compile("|".join(re.escape(i) for i in ids))
+               if ids else None)
+    pool_sids = {e["sid"] for e in pool}
+
+    first = 0
+    for entry in pool:
+        for path, key in ((_sidecar_path(paths, entry), "sidecar"),
+                          (_marker_path(paths, entry), "markers")):
+            appended = _read_from(path, (before.get(key) or {}).get(
+                entry["arc"], 0))
+            for line in appended.splitlines():
+                if entry["agentic_job_id"] in line:
+                    first += 1
+
+    second = 0
+    for name, path in _ledger_files(paths).items():
+        appended = _read_from(path, (before.get("ledgers") or {}).get(name, 0))
+        if pattern is None:
+            continue
+        for line in appended.splitlines():
+            if pattern.search(line):
+                second += 1
+
+    third = abs(_model_row_count(paths) - before.get("model_rows", 0))
+
+    fourth = 0
+    horizon = since_epoch if since_epoch is not None else before.get(
+        "taken_at")
+    for line in _agent_log_new_text(paths, before).splitlines():
+        if INSTRUMENT_NEEDLE not in line:
+            continue
+        stamp = _log_line_epoch(line)
+        if horizon is not None and stamp is not None and stamp < horizon:
+            continue
+        match = _SID_TOKEN_RE.match(line)
+        if match is None or match.group(1) in pool_sids:
+            fourth += 1
+
+    return {"sidecar_marker_lines": first, "ledger_lines": second,
+            "state_db_model_rows": third, "agent_log_instrument": fourth}
+
+
+# -- loading the host's classifier and the model callable -------------------
+@contextlib.contextmanager
+def _host_env(home):
+    paths = host_paths(home)
+    keys = ("HERMES_HOME", "REVENIUM_STATE_DIR") + _PATH_ENV_OVERRIDES
+    saved = {k: os.environ.get(k) for k in keys}
+    for key in _PATH_ENV_OVERRIDES:
+        os.environ.pop(key, None)
+    os.environ["HERMES_HOME"] = str(paths.hermes_home)
+    os.environ["REVENIUM_STATE_DIR"] = str(paths.state_dir)
+    try:
+        yield paths
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def resolve_call_llm(hermes_agent_dir):
+    """Import Hermes' `call_llm` from `hermes_agent_dir`, or None. Never
+    called here."""
+    agent_dir = str(Path(hermes_agent_dir).expanduser())
+    if agent_dir not in sys.path:
+        sys.path.insert(0, agent_dir)
+    try:
+        from agent.auxiliary_client import call_llm
+    except Exception:
+        return None
+    return call_llm
+
+
+def accepts_provider_model(fn):
+    """Whether `fn` takes `provider` and `model` keyword arguments, decided
+    from its signature alone."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "provider" in params and "model" in params
+
+
+def _reasoning_effort(home):
+    """The value of the single `reasoning_effort` key in config.yaml, or
+    `unset`. Nothing else in the file is read into the result."""
+    try:
+        text = (Path(home) / "config.yaml").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return "unset"
+    match = re.search(r"^\s*reasoning_effort:\s*([^\s#]+)", text, re.M)
+    if not match:
+        return "unset"
+    value = match.group(1).strip("'\"")
+    return value if re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", value) else "other"
+
+
+# -- census -----------------------------------------------------------------
+_SYNTHETIC_JOB = {"agentic_job_id": "synthetic", "job_name": "synthetic",
+                  "job_type": "synthetic", "status": "SUCCESS"}
+_SYNTHETIC_TRANSCRIPT = "user: synthetic request\nassistant: synthetic reply"
+
+
+def _job_for(entry):
+    return {"agentic_job_id": entry["agentic_job_id"],
+            "job_name": entry["job_name"], "job_type": entry["job_type"],
+            "status": "SUCCESS"}
+
+
+def _surgery_survey(c, pool):
+    """Apply every arm to the real builder's prompt for every pool arc (or a
+    synthetic arc when the pool is empty). Returns `(surgery, mean_chars)`."""
+    cfg = c._llm_evaluation_config()
+    subjects = ([(_job_for(e), c._read_session_transcript(e["sid"]))
+                 for e in pool]
+                or [(_SYNTHETIC_JOB, _SYNTHETIC_TRANSCRIPT)])
+    surgery, means = {}, {}
+    for arm in ARM_EDITS:
+        arm_cfg = _arm_config(cfg, arm)
+        lengths = []
+        try:
+            for job, transcript in subjects:
+                prompt = c._build_outcome_evaluation_prompt(
+                    job, transcript, arm_cfg)
+                lengths.append(len(apply_arm(prompt, arm)))
+            surgery[arm] = "ok"
+        except ArmSurgeryError as exc:
+            surgery[arm] = str(exc)
+        means[arm] = sum(lengths) // len(lengths) if lengths else 0
+    return surgery, means
+
+
+def _cmd_census(args, paths, out_dir, real_call_llm):
+    c = load_plugin_package(args.plugin_dir)
+    cfg_cap = args.pool_cap
+    unit_error = False
+    try:
+        pool, counts = build_pool(paths, c, cfg_cap)
+    except TimestampUnitError:
+        pool, counts, unit_error = [], {step: 0 for step in EXCLUSION_STEPS}, True
+    unit = "unknown" if unit_error else counts.pop("timestamp_unit")
+    call_llm = real_call_llm or resolve_call_llm(args.hermes_agent_dir)
+    if unit_error:
+        surgery, means = {}, {}
+    else:
+        surgery, means = _surgery_survey(c, pool)
+    census = {
+        "counts": counts,
+        "pool_n": len(pool),
+        "timestamp_unit": unit,
+        "surgery": surgery,
+        "mean_prompt_chars": means,
+        "call_llm_resolved": call_llm is not None,
+        "call_llm_accepts_provider_model": (
+            call_llm is not None and accepts_provider_model(call_llm)),
+        "classifier_sha256": _sha256_file(
+            Path(args.plugin_dir) / "classifier.py"),
+        "evaluator_version": str(getattr(c, "LLM_EVALUATOR_VERSION", "")),
+        "reasoning_effort": _reasoning_effort(paths.hermes_home),
+        "harness_sha256": _sha256_file(__file__),
+    }
+    if unit_error:
+        _write_json(out_dir / "census.json", census)
+        print("census: timestamp unit is not epoch seconds; stopped")
+        return EXIT_TIMESTAMP
+    _write_private_json(out_dir / "pool.json", pool)
+    _write_json(out_dir / "census.json", census)
+    print("census: eligible=%d pool_n=%d" % (counts["eligible"], len(pool)))
+    for step in EXCLUSION_STEPS:
+        print("census: %s=%d" % (step, counts[step]))
+    bad = sorted(a for a, v in surgery.items() if v != "ok")
+    print("census: surgery %s" % ("ok" if not bad else "FAILED " + ",".join(bad)))
+    return EXIT_OK
+
+
+# -- calls ------------------------------------------------------------------
+def _load_pool(out_dir):
+    try:
+        with open(out_dir / "pool.json", encoding="utf-8") as handle:
+            pool = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return pool if isinstance(pool, list) else None
+
+
+def _calls_path(out_dir):
+    return out_dir / "calls.jsonl"
+
+
+def _read_calls(out_dir):
+    path = _calls_path(out_dir)
+    return read_records(str(path)) if path.exists() else []
+
+
+def effective_records(records):
+    """The last non-smoke record per `(arc, arm)` and the attempt count per
+    pair. A retry's record supersedes the `call_error` it retried."""
+    effective, attempts = {}, Counter()
+    for rec in records:
+        if rec["stage"] == SMOKE_STAGE:
+            continue
+        key = (rec["arc"], rec["arm"])
+        attempts[key] += 1
+        effective[key] = rec
+    return effective, attempts
+
+
+def _real_callable(args, real_call_llm):
+    return real_call_llm or resolve_call_llm(args.hermes_agent_dir)
+
+
+def _run_specs(c, specs, out_dir, concurrency, evaluator_version, pool_by_arc):
+    """Run `specs` (`(entry, arm, stage)`), appending each record as its
+    chunk finishes so a crash loses at most one chunk."""
+    transcripts = {}
+    cfg = c._llm_evaluation_config()
+    chunk = max(1, int(concurrency)) * 4
+    done = 0
+    for start in range(0, len(specs), chunk):
+        batch = []
+        for entry, arm, stage in specs[start:start + chunk]:
+            if entry["arc"] not in transcripts:
+                transcripts[entry["arc"]] = c._read_session_transcript(
+                    entry["sid"])
+            batch.append((_job_for(entry), transcripts[entry["arc"]], cfg,
+                          arm, stage))
+        records = asyncio.run(run_calls(
+            c, batch, concurrency, evaluator_version))
+        for rec in records:
+            append_record(str(_calls_path(out_dir)), rec)
+        done += len(records)
+    return done
+
+
+def _cmd_smoke(args, paths, out_dir, real_call_llm):
+    pool = _load_pool(out_dir)
+    if not pool:
+        print("smoke: no pool.json; run census first")
+        return EXIT_USAGE
+    records = _read_calls(out_dir)
+    if any(r["stage"] == SMOKE_STAGE for r in records):
+        print("smoke: already recorded; no call made")
+        return EXIT_OK
+    call_llm = _real_callable(args, real_call_llm)
+    if call_llm is None:
+        print("smoke: call_llm did not resolve")
+        return EXIT_NO_CALLABLE
+    c = load_plugin_package(args.plugin_dir)
+    install_replay_hooks(c, call_llm, args.provider, args.model)
+    try:
+        done = _run_specs(
+            c, [(pool[0], SMOKE_ARM, SMOKE_STAGE)], out_dir, 1,
+            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), None)
+    finally:
+        restore_replay_hooks(c)
+    [rec] = _read_calls(out_dir)[-1:]
+    print("smoke: calls=%d outcome=%s served_model=%s" % (
+        done, rec["outcome"], rec["served_model"]))
+    return EXIT_OK
+
+
+def _cmd_run(args, paths, out_dir, real_call_llm):
+    pool = _load_pool(out_dir)
+    if not pool:
+        print("run: no pool.json; run census first")
+        return EXIT_USAGE
+    if args.max_calls is None or args.max_calls < 0:
+        print("run: --max-calls is required")
+        return EXIT_USAGE
+    pool_keys = [e["arc"] for e in pool]
+    records = _read_calls(out_dir)
+    effective, attempts = effective_records(records)
+    if args.stage == "candidates":
+        try:
+            gates = evaluate_gates(list(effective.values()), pool_keys)
+        except (IncompleteStageError, DuplicateRecordError, ValueError):
+            print("run: refused, stage 1 is incomplete")
+            return EXIT_STAGE
+        if not gates["stage2_eligible"]:
+            print("run: refused, the validity gates do not allow stage 2 "
+                  "(failed: %s)" % ",".join(gates["reasons"]))
+            return EXIT_STAGE
+    arms = STAGE_ARMS[args.stage]
+    stage = STAGE_NUMBER[args.stage]
+    first = [(e, arm, stage) for e in pool for arm in arms
+             if (e["arc"], arm) not in attempts]
+    completed = len(records)
+    if completed + len(first) > args.max_calls:
+        print("run: refused, %d recorded + %d planned exceeds --max-calls %d"
+              % (completed, len(first), args.max_calls))
+        return EXIT_BUDGET
+    remaining = args.max_calls - completed - len(first)
+    retries = [
+        (e, arm, stage) for e in pool for arm in arms
+        if attempts.get((e["arc"], arm)) == 1
+        and effective[(e["arc"], arm)]["outcome"] == "call_error"
+    ][:remaining]
+    specs = first + retries
+    if not specs:
+        print("run: nothing to do; no call made")
+        return EXIT_OK
+    call_llm = _real_callable(args, real_call_llm)
+    if call_llm is None:
+        print("run: call_llm did not resolve")
+        return EXIT_NO_CALLABLE
+    c = load_plugin_package(args.plugin_dir)
+    install_replay_hooks(c, call_llm, args.provider, args.model)
+    try:
+        done = _run_specs(
+            c, specs, out_dir, args.concurrency,
+            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), None)
+    finally:
+        restore_replay_hooks(c)
+    print("run: stage=%s calls=%d first=%d retries=%d" % (
+        args.stage, done, len(first), len(retries)))
+    return EXIT_OK
+
+
+def _cmd_report(args, paths, out_dir, real_call_llm):
+    pool = _load_pool(out_dir)
+    if not pool:
+        print("report: no pool.json; run census first")
+        return EXIT_USAGE
+    effective, _attempts = effective_records(_read_calls(out_dir))
+    try:
+        report = evaluate_protocol(
+            list(effective.values()), [e["arc"] for e in pool])
+    except (IncompleteStageError, DuplicateRecordError, ValueError) as exc:
+        print("report: incomplete (%s)" % type(exc).__name__)
+        return EXIT_STAGE
+    (out_dir / "report.json").write_text(
+        report_to_json(report) + "\n", encoding="utf-8")
+    print(report["outcome"])
+    return EXIT_OK
+
+
+def _cmd_fence(args, paths, out_dir, real_call_llm):
+    pool = _load_pool(out_dir)
+    if not pool:
+        print("fence: no pool.json; run census first")
+        return EXIT_USAGE
+    snap_path = out_dir / "fence-snapshot.json"
+    if args.snapshot:
+        _write_private_json(snap_path, fence_snapshot(paths, pool))
+        print("fence: snapshot written")
+        return EXIT_OK
+    if not args.check:
+        print("fence: pass --snapshot or --check")
+        return EXIT_USAGE
+    try:
+        before = json.loads(snap_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print("fence: no snapshot; run fence --snapshot first")
+        return EXIT_USAGE
+    result = fence_check(paths, pool, before, args.since_epoch)
+    tripped = [(name, result[name]) for name in FENCE_CHECKS if result[name]]
+    for name, count in tripped:
+        print("FENCE VIOLATION check=%s count=%d" % (name, count))
+    if tripped:
+        return EXIT_FENCE
+    print("fence: clean")
+    return EXIT_OK
+
+
+def _cmd_verify_deploy(args, paths, out_dir, real_call_llm):
+    deployed = load_plugin_package(args.plugin_dir, "phase67_deployed_pkg")
+    baseline = load_plugin_package(
+        args.baseline_plugin_dir, "phase67_baseline_pkg")
+    cfg = deployed._llm_evaluation_config()
+    variants = (("full", cfg),
+                ("no_rate_card", {k: v for k, v in cfg.items()
+                                  if k != "rateCard"}))
+    ok = True
+    for label, variant in variants:
+        got = deployed._build_outcome_evaluation_prompt(
+            _SYNTHETIC_JOB, _SYNTHETIC_TRANSCRIPT, variant)
+        try:
+            want = apply_arm(baseline._build_outcome_evaluation_prompt(
+                _SYNTHETIC_JOB, _SYNTHETIC_TRANSCRIPT, variant), args.arm)
+        except ArmSurgeryError:
+            print("config=%s surgery_failed arm=%s" % (label, args.arm))
+            ok = False
+            continue
+        match = got == want
+        ok = ok and match
+        print("config=%s deployed_sha256=%s expected_sha256=%s match=%s" % (
+            label, hashlib.sha256(got.encode("utf-8")).hexdigest(),
+            hashlib.sha256(want.encode("utf-8")).hexdigest(),
+            "true" if match else "false"))
+    return EXIT_OK if ok else EXIT_FENCE
+
+
+_COMMANDS = {
+    "census": _cmd_census, "smoke": _cmd_smoke, "run": _cmd_run,
+    "report": _cmd_report, "fence": _cmd_fence,
+    "verify-deploy": _cmd_verify_deploy,
+}
+_NEEDS_CLASSIFIER = ("census", "smoke", "run", "verify-deploy")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="confidence_replay_harness",
+        description="Phase 67 on-host replay harness (TRU-03).")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--hermes-home", default="~/.hermes")
+    common.add_argument("--plugin-dir", default=None)
+    common.add_argument("--hermes-agent-dir", default=None)
+    common.add_argument("--out-dir", required=True)
+    common.add_argument("--model", default=REPLAY_MODEL)
+    common.add_argument("--provider", default=REPLAY_PROVIDER)
+    sub = parser.add_subparsers(dest="command", required=True)
+    census = sub.add_parser("census", parents=[common])
+    census.add_argument("--pool-cap", type=int, default=DEFAULT_POOL_CAP)
+    sub.add_parser("smoke", parents=[common])
+    run = sub.add_parser("run", parents=[common])
+    run.add_argument("--stage", choices=sorted(STAGE_NUMBER), required=True)
+    run.add_argument("--max-calls", type=int, default=None)
+    run.add_argument("--concurrency", type=int, default=4)
+    sub.add_parser("report", parents=[common])
+    fence = sub.add_parser("fence", parents=[common])
+    fence.add_argument("--snapshot", action="store_true")
+    fence.add_argument("--check", action="store_true")
+    fence.add_argument("--since-epoch", type=float, default=None)
+    verify = sub.add_parser("verify-deploy", parents=[common])
+    verify.add_argument("--baseline-plugin-dir", required=True)
+    verify.add_argument("--arm", required=True, choices=sorted(ARM_EDITS))
+    return parser
+
+
+def _inside(child, parent):
+    child, parent = Path(child).resolve(), Path(parent).resolve()
+    return child == parent or parent in child.parents
+
+
+def main(argv=None, real_call_llm=None):
+    """Run one subcommand and return its exit code. `real_call_llm` injects
+    the model callable (tests); the host leaves it None."""
+    sys.dont_write_bytecode = True
+    try:
+        args = build_parser().parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else EXIT_USAGE
+    home = Path(args.hermes_home).expanduser()
+    out_dir = Path(args.out_dir).expanduser()
+    if _inside(out_dir, home):
+        print("refused: --out-dir resolves inside --hermes-home")
+        return EXIT_USAGE
+    if args.plugin_dir is None:
+        args.plugin_dir = str(home / "plugins" / "revenium-classifier")
+    if args.hermes_agent_dir is None:
+        args.hermes_agent_dir = str(home / "hermes-agent")
+    out_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    handler = _COMMANDS[args.command]
+    if args.command in _NEEDS_CLASSIFIER:
+        with _host_env(home) as paths:
+            return handler(args, paths, out_dir, real_call_llm)
+    return handler(args, host_paths(home), out_dir, real_call_llm)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

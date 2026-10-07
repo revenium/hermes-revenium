@@ -32,7 +32,10 @@ Nothing here edits classifier.py. These tests only add guards around it.
 """
 import ast
 import asyncio
+import contextlib
+import hashlib
 import importlib.util
+import io
 import json
 import math
 import logging
@@ -40,6 +43,8 @@ import os
 import random
 import re
 import shutil
+import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -49,6 +54,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from tests import confidence_replay_harness as harness
+from tests._compat_helpers import build_state_db
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
@@ -1813,6 +1819,819 @@ class ProtocolConstantsTests(unittest.TestCase):
         self.assertEqual(
             harness.OUTCOME_NOT_EVALUATED,
             'NOT EVALUATED — harness did not reproduce the omission')
+
+
+# ---------------------------------------------------------------------------
+# Plan 03 task 1: host plumbing -- pool, side-effect fence, CLI.
+#
+# Every test builds a synthetic HERMES_HOME in a temp dir and uses a scripted
+# stub in place of the model. No model call is made.
+# ---------------------------------------------------------------------------
+
+_HOST_BASE_TS = 1790000000.0
+_N_ELIGIBLE = 32
+# Arc indexes beyond the eligible block, one per exclusion step.
+_IDX_WRONG_MODEL = 32
+_IDX_FAILED = 33
+_IDX_SEQ1 = 34
+_IDX_NO_MARKER = 35
+_IDX_NO_MESSAGES = 36
+_IDX_DRIFT = 37
+_OMIT_IDX = (3, 11, 19, 27)
+
+
+def _host_job(i):
+    return f'{SENTINEL_ID_PREFIX}{i:03d}'
+
+
+def _host_sid(i):
+    return f'sess-{SENTINEL_ID_PREFIX}{i:03d}'
+
+
+def _host_ts(i):
+    return _HOST_BASE_TS + i * 1000.0
+
+
+def _session_row(sid, model='z-ai/glm-5.3-flash'):
+    return {
+        'id': sid, 'model': model, 'source': 'cli', 'input_tokens': 10,
+        'output_tokens': 5, 'cache_read': 0, 'cache_write': 0, 'reasoning': 0,
+        'estimated_cost': '0.0', 'api_calls': 1,
+        'started_at': _HOST_BASE_TS, 'ended_at': _HOST_BASE_TS + 1,
+        'billing_provider': 'openrouter',
+    }
+
+
+def _sidecar_rec(i, sequence=0, status='SUCCESS', model='z-ai/glm-5.2'):
+    return {
+        'kind': 'job_assessment', 'ts': _host_ts(i),
+        'assessment_id': f'{_host_job(i)}:{sequence}', 'sequence': sequence,
+        'agentic_job_id': _host_job(i), 'execution_status': status,
+        'model': model,
+    }
+
+
+def _marker_rec(i, status='SUCCESS'):
+    return {
+        'kind': 'job', 'ts': _host_ts(i) - 10, 'sid': _host_sid(i),
+        'agentic_job_id': _host_job(i), 'job_name': SENTINEL_NAME,
+        'job_type': 'bug_fix', 'status': status,
+    }
+
+
+def _append_line(path, text):
+    with open(path, 'a', encoding='utf-8') as handle:
+        handle.write(text if text.endswith('\n') else text + '\n')
+
+
+def _write_host_home(root):
+    """A synthetic HERMES_HOME: 32 eligible arcs and one arc per exclusion
+    step, with sidecar, markers, state.db, logs, ledgers and config.json."""
+    home = Path(root) / 'hermes'
+    state = home / 'state' / 'revenium'
+    for sub in (state / 'job-assessments', state / 'markers',
+                home / 'logs', home / 'plugins'):
+        sub.mkdir(parents=True, exist_ok=True)
+
+    sidecar = state / 'job-assessments'
+    markers = state / 'markers'
+    for i in range(_N_ELIGIBLE):
+        _append_line(sidecar / f'{_host_job(i)}.jsonl',
+                     json.dumps(_sidecar_rec(i)))
+    _append_line(sidecar / f'{_host_job(_IDX_WRONG_MODEL)}.jsonl', json.dumps(
+        _sidecar_rec(_IDX_WRONG_MODEL, model='z-ai/glm-5.3-flash')))
+    _append_line(sidecar / f'{_host_job(_IDX_FAILED)}.jsonl', json.dumps(
+        _sidecar_rec(_IDX_FAILED, status='FAILED')))
+    _append_line(sidecar / f'{_host_job(_IDX_SEQ1)}.jsonl', json.dumps(
+        _sidecar_rec(_IDX_SEQ1, sequence=1)))
+    for i in (_IDX_NO_MARKER, _IDX_NO_MESSAGES, _IDX_DRIFT):
+        _append_line(sidecar / f'{_host_job(i)}.jsonl',
+                     json.dumps(_sidecar_rec(i)))
+
+    marked = [i for i in range(_N_ELIGIBLE)] + [
+        _IDX_WRONG_MODEL, _IDX_FAILED, _IDX_SEQ1, _IDX_NO_MESSAGES,
+        _IDX_DRIFT]
+    for i in marked:
+        _append_line(markers / f'{_host_sid(i)}.jsonl',
+                     json.dumps(_marker_rec(i)))
+
+    everyone = range(_IDX_DRIFT + 1)
+    build_state_db(home / 'state.db', [_session_row(_host_sid(i))
+                                       for i in everyone])
+    conn = sqlite3.connect(str(home / 'state.db'))
+    conn.execute(
+        'CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, '
+        'role TEXT, content TEXT, timestamp REAL)')
+    for i in everyone:
+        if i == _IDX_NO_MESSAGES:
+            continue
+        ts = _host_ts(i)
+        rows = [(_host_sid(i), 'user',
+                 f'{SENTINEL_TRANSCRIPT} T{i:03d}', ts - 500),
+                (_host_sid(i), 'assistant', 'done', ts - 400)]
+        if i == _IDX_DRIFT:
+            rows.append((_host_sid(i), 'user', 'later', ts + 500))
+        conn.executemany(
+            'INSERT INTO messages (session_id, role, content, timestamp) '
+            'VALUES (?,?,?,?)', rows)
+    conn.commit()
+    conn.close()
+
+    _append_line(home / 'logs' / 'agent.log',
+                 '2026-10-06 10:00:00,000 INFO [sess-other] '
+                 'revenium_classifier: ordinary line')
+    for name, line in (('revenium-hermes.ledger',
+                        'HERMES:sess-other:100:1790000000:muid'),
+                       ('revenium-jobs.ledger', 'JOB:other-job:created:1'),
+                       ('revenium-tool-events.ledger', 'TOOL:sess-other:1')):
+        _append_line(state / name, line)
+    (state / 'config.json').write_text(json.dumps({
+        'llmOutcomeEvaluation': {
+            'enabled': True, 'currency': 'USD', 'maxHoursSaved': 40,
+            'maxLoadedRate': 500,
+            'rateCard': {'Alpha Role': 100.0, 'Beta Role': 50.0,
+                         'Gamma Role': 75.0}}}))
+    return home
+
+
+def _host_main(argv, model=None):
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        code = harness.main(argv, real_call_llm=model)
+    return code, buf.getvalue()
+
+
+def _omitting_model(omit_idx=_OMIT_IDX, **kw):
+    """A model that supplies `confidence` everywhere except on the named arcs
+    under the stage-1 prompts (where the line sits in the trailer)."""
+    def content(message):
+        early = _declared_before_mechanism_blocks(message)
+        omit = any(f'T{i:03d}' in message for i in omit_idx) and not early
+        return json.dumps(_counterfactual_object(not omit))
+    return _ScriptedModel(content_fn=content, **kw)
+
+
+def _always_supplying_model(**kw):
+    return _ScriptedModel(
+        content_fn=lambda m: json.dumps(_counterfactual_object(True)), **kw)
+
+
+class _HostCase(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix='phase67-host-')
+        self._saved_env = {k: os.environ.get(k) for k in (
+            'HERMES_HOME', 'REVENIUM_STATE_DIR')}
+        self.home = _write_host_home(self._tmp)
+        self.out = Path(self._tmp) / 'out'
+
+    def tearDown(self):
+        for name in [m for m in sys.modules if m.startswith('phase67_')]:
+            del sys.modules[name]
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def argv(self, command, *extra, out=None):
+        return [command, '--hermes-home', str(self.home),
+                '--plugin-dir', str(PLUGIN_DIR),
+                '--hermes-agent-dir', str(self.home / 'no-agent'),
+                '--out-dir', str(out if out is not None else self.out),
+                *extra]
+
+    def census(self, *extra, model=None):
+        return _host_main(self.argv('census', *extra), model)
+
+    def census_json(self):
+        return json.loads((self.out / 'census.json').read_text())
+
+    def pool(self):
+        return json.loads((self.out / 'pool.json').read_text())
+
+    def records(self):
+        return harness.read_records(str(self.out / 'calls.jsonl'))
+
+
+class HostPlumbingTests(_HostCase):
+    """The pool rule, the census, `run`'s budget and stage rules, and the
+    host-side CLI contract, on a synthetic HERMES_HOME."""
+
+    # -- census and the pool ------------------------------------------------
+
+    def test_census_counts_every_exclusion_separately(self):
+        code, _out = self.census()
+        self.assertEqual(code, 0)
+        counts = self.census_json()['counts']
+        self.assertEqual(counts['eligible'], 32)
+        for step in ('not_sequence_0', 'not_success', 'wrong_model',
+                     'no_success_marker', 'no_transcript',
+                     'transcript_drift'):
+            self.assertEqual(counts[step], 1, step)
+        self.assertEqual(self.census_json()['pool_n'], 32)
+        self.assertEqual(self.census_json()['timestamp_unit'],
+                         'epoch_seconds')
+
+    def test_census_top_level_keys_are_exactly_the_named_ones(self):
+        self.census()
+        self.assertEqual(set(self.census_json()), {
+            'counts', 'pool_n', 'timestamp_unit', 'surgery',
+            'mean_prompt_chars', 'call_llm_resolved',
+            'call_llm_accepts_provider_model', 'classifier_sha256',
+            'evaluator_version', 'reasoning_effort', 'harness_sha256'})
+
+    def test_census_surgery_succeeds_for_all_seven_arms(self):
+        self.census()
+        census = self.census_json()
+        for arm in ('A0', 'A1', 'A2', 'B', 'C', 'D', 'E'):
+            self.assertEqual(census['surgery'][arm], 'ok', arm)
+            self.assertIsInstance(census['mean_prompt_chars'][arm], int)
+            self.assertGreater(census['mean_prompt_chars'][arm], 0)
+        # A0 has no role list, so it is the shortest prompt.
+        self.assertLess(census['mean_prompt_chars']['A0'],
+                        census['mean_prompt_chars']['A1'])
+
+    def test_census_reports_a_surgery_failure_as_an_error_string(self):
+        original = harness.apply_arm
+
+        def failing(prompt, arm):
+            if arm == 'C':
+                raise harness.ArmSurgeryError('arm C edit 2: drifted')
+            return original(prompt, arm)
+
+        harness.apply_arm = failing
+        try:
+            self.census()
+        finally:
+            harness.apply_arm = original
+        surgery = self.census_json()['surgery']
+        self.assertEqual(surgery['C'], 'arm C edit 2: drifted')
+        self.assertEqual(surgery['B'], 'ok')
+
+    def test_census_makes_zero_model_calls(self):
+        model = _ScriptedModel()
+        code, _out = self.census(model=model)
+        self.assertEqual(code, 0)
+        self.assertEqual(model.calls, [])
+
+    def test_census_json_and_stdout_hold_no_identifier(self):
+        _code, out = self.census()
+        text = (self.out / 'census.json').read_text() + out
+        for sentinel in SENTINELS + ('sess-',):
+            self.assertNotIn(sentinel, text)
+        for i in range(_IDX_DRIFT + 1):
+            self.assertNotIn(_host_job(i), text)
+            self.assertNotIn(_host_sid(i), text)
+
+    def test_pool_cap_keeps_the_most_recent_arcs_in_ascending_order(self):
+        self.census('--pool-cap', '20')
+        pool = self.pool()
+        self.assertEqual(len(pool), 20)
+        self.assertEqual([e['agentic_job_id'] for e in pool],
+                         [_host_job(i) for i in range(12, 32)])
+        self.assertEqual([e['ts'] for e in pool],
+                         sorted(e['ts'] for e in pool))
+        self.assertEqual(self.census_json()['pool_n'], 20)
+        self.assertEqual(self.census_json()['counts']['eligible'], 32)
+
+    def test_pool_selection_is_deterministic(self):
+        self.census('--pool-cap', '20')
+        first = (self.out / 'pool.json').read_text()
+        self.census('--pool-cap', '20')
+        self.assertEqual((self.out / 'pool.json').read_text(), first)
+
+    def test_pool_entries_have_exactly_the_named_keys_and_mode_0600(self):
+        self.census()
+        pool = self.pool()
+        self.assertEqual(len(pool), 32)
+        for entry in pool:
+            self.assertEqual(set(entry), {
+                'arc', 'agentic_job_id', 'sid', 'job_name', 'job_type', 'ts'})
+            self.assertEqual(entry['arc'],
+                             harness.arc_key(entry['agentic_job_id']))
+        mode = stat.S_IMODE(os.stat(self.out / 'pool.json').st_mode)
+        self.assertEqual(mode, 0o600)
+
+    def test_a_pool_arc_has_a_success_marker_and_a_transcript(self):
+        self.census()
+        names = {e['job_name'] for e in self.pool()}
+        self.assertEqual(names, {SENTINEL_NAME})
+        self.assertEqual(len({e['sid'] for e in self.pool()}), 32)
+
+    def test_a_malformed_sidecar_line_is_counted_not_fatal(self):
+        side = self.home / 'state' / 'revenium' / 'job-assessments'
+        _append_line(side / 'junk.jsonl', '{not json')
+        code, _out = self.census()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.census_json()['counts']['malformed_lines'], 1)
+        self.assertEqual(self.census_json()['counts']['eligible'], 32)
+
+    def test_census_records_digests_and_the_reasoning_effort(self):
+        (self.home / 'config.yaml').write_text(
+            'model:\n  default: x\nagent:\n  reasoning_effort: low\n')
+        self.census()
+        census = self.census_json()
+        expected = hashlib.sha256(CLASSIFIER_PATH.read_bytes()).hexdigest()
+        self.assertEqual(census['classifier_sha256'], expected)
+        self.assertEqual(census['harness_sha256'], hashlib.sha256(
+            HARNESS_PATH.read_bytes()).hexdigest())
+        self.assertEqual(census['reasoning_effort'], 'low')
+        self.assertTrue(census['evaluator_version'])
+
+    def test_reasoning_effort_is_unset_without_the_key(self):
+        self.census()
+        self.assertEqual(self.census_json()['reasoning_effort'], 'unset')
+
+    def test_call_llm_resolution_is_recorded_from_the_injected_callable(self):
+        self.census(model=_ScriptedModel())
+        census = self.census_json()
+        self.assertIs(census['call_llm_resolved'], True)
+        self.assertIs(census['call_llm_accepts_provider_model'], True)
+
+    def test_call_llm_unresolved_without_an_agent_dir(self):
+        self.census()
+        census = self.census_json()
+        self.assertIs(census['call_llm_resolved'], False)
+        self.assertIs(census['call_llm_accepts_provider_model'], False)
+
+    def test_signature_check_needs_provider_and_model(self):
+        def narrow(messages):
+            return None
+
+        def wide(provider, model, **kw):
+            return None
+
+        self.assertFalse(harness.accepts_provider_model(narrow))
+        self.assertTrue(harness.accepts_provider_model(wide))
+        self.assertTrue(harness.accepts_provider_model(lambda **kw: None))
+
+    def test_the_agent_client_is_not_imported_by_the_module(self):
+        self.assertNotIn('agent.auxiliary_client', sys.modules)
+
+    def test_an_out_dir_inside_the_home_exits_2(self):
+        inside = self.home / 'state' / 'run'
+        code, _out = _host_main(self.argv('census', out=inside))
+        self.assertEqual(code, 2)
+        self.assertFalse(inside.exists())
+        code, _out = _host_main(self.argv('census', out=self.home))
+        self.assertEqual(code, 2)
+
+    def test_state_db_is_only_ever_opened_read_only(self):
+        seen = []
+        real = sqlite3.connect
+
+        def spy(database, *args, **kwargs):
+            seen.append(str(database))
+            return real(database, *args, **kwargs)
+
+        sqlite3.connect = spy
+        try:
+            self.census()
+        finally:
+            sqlite3.connect = real
+        touching = [s for s in seen if 'state.db' in s]
+        self.assertTrue(touching)
+        for target in touching:
+            self.assertIn('mode=ro', target)
+
+    def test_a_non_numeric_timestamp_exits_5_without_guessing(self):
+        conn = sqlite3.connect(str(self.home / 'state.db'))
+        conn.execute(
+            'INSERT INTO messages (session_id, role, content, timestamp) '
+            "VALUES (?, 'user', 'x', 'yesterday')", (_host_sid(0),))
+        conn.commit()
+        conn.close()
+        code, _out = self.census()
+        self.assertEqual(code, 5)
+        self.assertEqual(self.census_json()['timestamp_unit'], 'unknown')
+        self.assertFalse((self.out / 'pool.json').exists())
+
+    def test_the_host_env_is_restored_after_main(self):
+        os.environ['HERMES_HOME'] = '/nonexistent-before'
+        self.census()
+        self.assertEqual(os.environ['HERMES_HOME'], '/nonexistent-before')
+
+    # -- run: budget, resume, retry, stage ------------------------------------
+
+    def _gate(self, model, max_calls, concurrency='1'):
+        return _host_main(
+            self.argv('run', '--stage', 'gate', '--max-calls', str(max_calls),
+                      '--concurrency', concurrency), model)
+
+    def _candidates(self, model, max_calls, concurrency='1'):
+        return _host_main(
+            self.argv('run', '--stage', 'candidates', '--max-calls',
+                      str(max_calls), '--concurrency', concurrency), model)
+
+    def test_run_refuses_one_below_budget_with_zero_calls(self):
+        self.census()
+        model = _ScriptedModel()
+        code, _out = self._gate(model, 3 * 32 - 1)
+        self.assertEqual(code, 3)
+        self.assertEqual(model.calls, [])
+        self.assertFalse((self.out / 'calls.jsonl').exists())
+
+    def test_run_at_exactly_the_budget_makes_every_call(self):
+        self.census()
+        model = _ScriptedModel()
+        code, _out = self._gate(model, 3 * 32, concurrency='4')
+        self.assertEqual(code, 0)
+        self.assertEqual(len(model.calls), 96)
+        records = self.records()
+        self.assertEqual(len(records), 96)
+        self.assertEqual(len({(r['arc'], r['arm']) for r in records}), 96)
+        self.assertEqual({r['stage'] for r in records}, {1})
+        for rec in records:
+            self.assertTrue(set(rec) <= harness.PER_CALL_RECORD_KEYS)
+
+    def test_a_second_identical_run_makes_zero_calls(self):
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+        model = _ScriptedModel()
+        code, _out = self._gate(model, 96)
+        self.assertEqual(code, 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(len(self.records()), 96)
+
+    def test_a_transport_error_is_retried_once_on_re_run(self):
+        self.census()
+
+        class _RaisesOnce(_ScriptedModel):
+            def __call__(self, **kw):
+                if len(self.calls) == 4:
+                    self.calls.append(kw)
+                    raise ConnectionError('boom')
+                return super().__call__(**kw)
+
+        model = _RaisesOnce()
+        self.assertEqual(self._gate(model, 96 + 4)[0], 0)
+        errors = [r for r in self.records() if r['outcome'] == 'call_error']
+        self.assertEqual(len(errors), 1)
+        retry = _ScriptedModel()
+        self.assertEqual(self._gate(retry, 96 + 4)[0], 0)
+        self.assertEqual(len(retry.calls), 1)
+        self.assertEqual(len(self.records()), 97)
+        again = _ScriptedModel()
+        self.assertEqual(self._gate(again, 96 + 4)[0], 0)
+        self.assertEqual(again.calls, [])
+
+    def test_a_pair_is_retried_at_most_once(self):
+        self.census()
+        always = _ScriptedModel(raises=ConnectionError('down'))
+        self.assertEqual(self._gate(always, 96 + 200)[0], 0)
+        self.assertEqual(len(always.calls), 96)
+        again = _ScriptedModel(raises=ConnectionError('down'))
+        self.assertEqual(self._gate(again, 96 + 200)[0], 0)
+        self.assertEqual(len(again.calls), 96)
+        third = _ScriptedModel(raises=ConnectionError('down'))
+        self.assertEqual(self._gate(third, 96 + 200)[0], 0)
+        self.assertEqual(third.calls, [])
+        self.assertEqual(len(self.records()), 192)
+
+    def test_a_retry_outside_the_budget_stands_as_the_outcome(self):
+        self.census()
+        always = _ScriptedModel(raises=ConnectionError('down'))
+        self.assertEqual(self._gate(always, 96)[0], 0)
+        again = _ScriptedModel()
+        self.assertEqual(self._gate(again, 96)[0], 0)
+        self.assertEqual(again.calls, [])
+        self.assertTrue(all(r['outcome'] == 'call_error'
+                            for r in self.records()))
+
+    def test_the_retry_is_within_the_remaining_budget_only(self):
+        self.census()
+        always = _ScriptedModel(raises=ConnectionError('down'))
+        self.assertEqual(self._gate(always, 96)[0], 0)
+        again = _ScriptedModel()
+        self.assertEqual(self._gate(again, 96 + 3)[0], 0)
+        self.assertEqual(len(again.calls), 3)
+
+    def test_candidates_are_refused_when_the_gates_fail(self):
+        self.census()
+        self.assertEqual(self._gate(_always_supplying_model(), 96)[0], 0)
+        model = _always_supplying_model()
+        code, _out = self._candidates(model, 10000)
+        self.assertEqual(code, 4)
+        self.assertEqual(model.calls, [])
+
+    def test_candidates_are_refused_before_stage_one_has_run(self):
+        self.census()
+        model = _ScriptedModel()
+        code, _out = self._candidates(model, 10000)
+        self.assertEqual(code, 4)
+        self.assertEqual(model.calls, [])
+
+    def test_candidates_proceed_when_omission_is_reproduced(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model(), 96)[0], 0)
+        model = _omitting_model()
+        code, _out = self._candidates(model, 96 + 4 * 32, concurrency='4')
+        self.assertEqual(code, 0)
+        self.assertEqual(len(model.calls), 128)
+        arms = {r['arm'] for r in self.records()}
+        self.assertEqual(arms, {'A0', 'A1', 'A2', 'B', 'C', 'D', 'E'})
+
+    def test_the_budget_counts_calls_already_made(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model(), 96)[0], 0)
+        model = _omitting_model()
+        code, _out = self._candidates(model, 96 + 4 * 32 - 1)
+        self.assertEqual(code, 3)
+        self.assertEqual(model.calls, [])
+
+    def test_report_writes_the_protocol_outcome(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model(), 96)[0], 0)
+        self.assertEqual(
+            self._candidates(_omitting_model(), 96 + 128)[0], 0)
+        code, out = _host_main(self.argv('report'))
+        self.assertEqual(code, 0)
+        report = json.loads((self.out / 'report.json').read_text())
+        self.assertEqual(report['outcome'], out.strip().splitlines()[-1])
+        self.assertTrue(
+            report['outcome'] in (harness.OUTCOME_NOT_CLEARED,
+                                  harness.OUTCOME_NOT_EVALUATED,
+                                  harness.OUTCOME_CLEARED_A1)
+            or report['outcome'].startswith(harness.OUTCOME_CLEARED_PREFIX))
+        self.assertTrue(report['gates']['stage2_eligible'])
+
+    def test_report_reads_the_last_record_of_a_retried_pair(self):
+        self.census()
+        always = _ScriptedModel(raises=ConnectionError('down'))
+        self.assertEqual(self._gate(always, 96 + 100)[0], 0)
+        self.assertEqual(
+            self._gate(_always_supplying_model(), 96 + 100)[0], 0)
+        code, _out = _host_main(self.argv('report'))
+        self.assertEqual(code, 0)
+        report = json.loads((self.out / 'report.json').read_text())
+        self.assertEqual(report['arms']['A1']['counts']['call_error'], 0)
+
+    def test_report_on_an_incomplete_stage_exits_4(self):
+        self.census()
+        code, _out = _host_main(self.argv('report'))
+        self.assertEqual(code, 4)
+
+    def test_calls_and_report_hold_no_identifier(self):
+        self.census()
+        self.assertEqual(self._gate(_always_supplying_model(), 96)[0], 0)
+        self.assertEqual(_host_main(self.argv('report'))[0], 0)
+        text = ((self.out / 'calls.jsonl').read_text()
+                + (self.out / 'report.json').read_text())
+        for sentinel in SENTINELS + ('sess-',):
+            self.assertNotIn(sentinel, text)
+
+    def test_smoke_makes_one_call_and_is_idempotent(self):
+        self.census()
+        model = _ScriptedModel()
+        code, _out = _host_main(self.argv('smoke'), model)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(model.calls), 1)
+        [rec] = self.records()
+        self.assertEqual(rec['stage'], 'smoke')
+        self.assertEqual(rec['arm'], 'A1')
+        again = _ScriptedModel()
+        self.assertEqual(_host_main(self.argv('smoke'), again)[0], 0)
+        self.assertEqual(again.calls, [])
+
+    def test_a_smoke_call_counts_against_the_budget(self):
+        self.census()
+        self.assertEqual(
+            _host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        model = _ScriptedModel()
+        code, _out = self._gate(model, 96)
+        self.assertEqual(code, 3)
+        self.assertEqual(model.calls, [])
+
+    def test_run_without_a_pool_exits_2(self):
+        model = _ScriptedModel()
+        code, _out = self._gate(model, 100)
+        self.assertEqual(code, 2)
+        self.assertEqual(model.calls, [])
+
+    def test_run_without_a_callable_and_without_an_agent_dir_exits_6(self):
+        self.census()
+        code, _out = self._gate(None, 96)
+        self.assertEqual(code, 6)
+
+    def test_run_leaves_the_host_state_untouched(self):
+        self.census()
+        state = self.home / 'state' / 'revenium'
+
+        def inventory():
+            out = {}
+            for root, _dirs, files in os.walk(self.home):
+                for name in files:
+                    full = os.path.join(root, name)
+                    out[full] = (os.path.getsize(full),
+                                 os.stat(full).st_mtime_ns)
+            return out
+
+        before = inventory()
+        self.assertEqual(self._gate(_omitting_model(), 96)[0], 0)
+        self.assertEqual(inventory(), before)
+        self.assertTrue(state.exists())
+
+
+class HostFenceTests(_HostCase):
+    """The side-effect fence: four checks, each tripped by exactly one
+    injected violation, and output that names the check and never an id."""
+
+    CHECKS = ('sidecar_marker_lines', 'ledger_lines', 'state_db_model_rows',
+              'agent_log_instrument')
+
+    def setUp(self):
+        super().setUp()
+        self.census()
+        self.snapshot()
+
+    def snapshot(self):
+        code, _out = _host_main(self.argv('fence', '--snapshot'))
+        self.assertEqual(code, 0)
+
+    def check(self):
+        return _host_main(self.argv('fence', '--check'))
+
+    def assertTripped(self, only):
+        code, out = self.check()
+        self.assertEqual(code, 1)
+        self.assertIn(only, out)
+        for other in self.CHECKS:
+            if other != only:
+                self.assertNotIn(other, out)
+        for i in range(_IDX_DRIFT + 1):
+            self.assertNotIn(_host_job(i), out)
+            self.assertNotIn(_host_sid(i), out)
+        self.assertNotIn(SENTINEL_NAME, out)
+
+    def test_a_clean_home_exits_0(self):
+        code, out = self.check()
+        self.assertEqual(code, 0)
+        for name in self.CHECKS:
+            self.assertNotIn(name, out)
+
+    def test_the_snapshot_holds_no_identifier(self):
+        text = (self.out / 'fence-snapshot.json').read_text()
+        for sentinel in SENTINELS + ('sess-',):
+            self.assertNotIn(sentinel, text)
+
+    def test_a_new_sidecar_line_for_a_pool_job_trips_the_check(self):
+        side = self.home / 'state' / 'revenium' / 'job-assessments'
+        _append_line(side / f'{_host_job(5)}.jsonl',
+                     json.dumps(_sidecar_rec(5, sequence=1)))
+        self.assertTripped('sidecar_marker_lines')
+
+    def test_a_new_sidecar_file_for_a_pool_job_trips_the_check(self):
+        side = self.home / 'state' / 'revenium' / 'job-assessments'
+        shutil.move(str(side / f'{_host_job(6)}.jsonl'),
+                    str(Path(self._tmp) / 'moved.jsonl'))
+        self.snapshot()
+        _append_line(side / f'{_host_job(6)}.jsonl',
+                     json.dumps(_sidecar_rec(6, sequence=1)))
+        self.assertTripped('sidecar_marker_lines')
+
+    def test_a_new_marker_line_for_a_pool_job_trips_the_check(self):
+        markers = self.home / 'state' / 'revenium' / 'markers'
+        _append_line(markers / f'{_host_sid(7)}.jsonl',
+                     json.dumps(_marker_rec(7)))
+        self.assertTripped('sidecar_marker_lines')
+
+    def test_a_marker_line_for_another_job_is_not_a_violation(self):
+        markers = self.home / 'state' / 'revenium' / 'markers'
+        _append_line(markers / 'sess-unrelated.jsonl',
+                     json.dumps(_marker_rec(900)))
+        self.assertEqual(self.check()[0], 0)
+
+    def test_an_appended_ledger_line_naming_a_pool_sid_trips_the_check(self):
+        ledger = self.home / 'state' / 'revenium' / 'revenium-hermes.ledger'
+        _append_line(ledger, f'HERMES:{_host_sid(8)}:500:1790000001:muid')
+        self.assertTripped('ledger_lines')
+
+    def test_a_jobs_ledger_line_naming_a_pool_job_trips_the_check(self):
+        ledger = self.home / 'state' / 'revenium' / 'revenium-jobs.ledger'
+        _append_line(ledger, f'JOB:{_host_job(9)}:created:1790000002')
+        self.assertTripped('ledger_lines')
+
+    def test_a_ledger_line_for_another_session_is_not_a_violation(self):
+        ledger = self.home / 'state' / 'revenium' / 'revenium-hermes.ledger'
+        _append_line(ledger, 'HERMES:sess-unrelated:500:1790000001:muid')
+        self.assertEqual(self.check()[0], 0)
+
+    def test_a_ledger_line_before_the_snapshot_is_not_a_violation(self):
+        ledger = self.home / 'state' / 'revenium' / 'revenium-hermes.ledger'
+        _append_line(ledger, f'HERMES:{_host_sid(8)}:500:1790000001:muid')
+        self.snapshot()
+        self.assertEqual(self.check()[0], 0)
+
+    def test_a_new_glm_5_2_session_row_trips_the_check(self):
+        conn = sqlite3.connect(str(self.home / 'state.db'))
+        row = _session_row('sess-other-new', model=harness.REPLAY_MODEL)
+        conn.execute(
+            'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (row['id'], row['model'], row['source'], 1, 1, 0, 0, 0, '0',
+             1, 1.0, 2.0, 'openrouter'))
+        conn.commit()
+        conn.close()
+        self.assertTripped('state_db_model_rows')
+
+    def test_an_instrument_line_with_no_session_token_trips_the_check(self):
+        log = self.home / 'logs' / 'agent.log'
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        _append_line(log, f'{stamp},000 WARNING revenium_classifier: '
+                          'revenium-classifier: rejected assessment, '
+                          'confidence outside [0,1]: None')
+        self.assertTripped('agent_log_instrument')
+
+    def test_an_instrument_line_for_a_pool_session_trips_the_check(self):
+        log = self.home / 'logs' / 'agent.log'
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        _append_line(log, f'{stamp},000 WARNING [{_host_sid(10)}] '
+                          'revenium_classifier: revenium-classifier: '
+                          'rejected assessment, confidence outside [0,1]: None')
+        self.assertTripped('agent_log_instrument')
+
+    def test_an_instrument_line_for_another_session_is_not_a_violation(self):
+        log = self.home / 'logs' / 'agent.log'
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        _append_line(log, f'{stamp},000 WARNING [20261006_000000_abc123] '
+                          'revenium_classifier: revenium-classifier: '
+                          'rejected assessment, confidence outside [0,1]: None')
+        self.assertEqual(self.check()[0], 0)
+
+    def test_a_rotated_agent_log_is_still_read(self):
+        logs = self.home / 'logs'
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        leak = (f'{stamp},000 WARNING revenium_classifier: '
+                'revenium-classifier: rejected assessment, '
+                'confidence outside [0,1]: None')
+        _append_line(logs / 'agent.log', leak)
+        os.rename(logs / 'agent.log', logs / 'agent.log.1')
+        _append_line(logs / 'agent.log', f'{stamp},000 INFO [sess-other] x')
+        self.assertTripped('agent_log_instrument')
+
+    def test_a_rotated_agent_log_without_a_leak_is_clean(self):
+        logs = self.home / 'logs'
+        stamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        os.rename(logs / 'agent.log', logs / 'agent.log.1')
+        _append_line(logs / 'agent.log', f'{stamp},000 INFO [sess-other] x')
+        self.assertEqual(self.check()[0], 0)
+
+    def test_since_epoch_ignores_older_log_lines(self):
+        log = self.home / 'logs' / 'agent.log'
+        _append_line(log, '2020-01-01 00:00:00,000 WARNING '
+                          'revenium_classifier: revenium-classifier: '
+                          'rejected assessment, confidence outside [0,1]: None')
+        code, _out = _host_main(self.argv(
+            'fence', '--check', '--since-epoch', str(int(time.time()) - 5)))
+        self.assertEqual(code, 0)
+
+    def test_check_without_a_snapshot_exits_2(self):
+        (self.out / 'fence-snapshot.json').unlink()
+        self.assertEqual(self.check()[0], 2)
+
+    def test_the_fence_does_not_load_the_classifier(self):
+        for name in [m for m in sys.modules if m.startswith('phase67_')]:
+            del sys.modules[name]
+        self.check()
+        self.assertFalse([m for m in sys.modules
+                          if m.startswith('phase67_replay_pkg')])
+
+
+class VerifyDeployTests(_HostCase):
+    def run_verify(self, arm):
+        return _host_main(self.argv(
+            'verify-deploy', '--baseline-plugin-dir', str(PLUGIN_DIR),
+            '--arm', arm))
+
+    def test_a1_matches_when_deployed_equals_baseline(self):
+        code, out = self.run_verify('A1')
+        self.assertEqual(code, 0)
+        self.assertEqual(len(re.findall(r'\b[0-9a-f]{64}\b', out)), 4)
+        self.assertIn('config=full', out)
+        self.assertIn('config=no_rate_card', out)
+
+    def test_arm_b_does_not_match_an_unchanged_deploy(self):
+        code, _out = self.run_verify('B')
+        self.assertEqual(code, 1)
+
+    def test_output_is_digests_only(self):
+        _code, out = self.run_verify('A1')
+        self.assertNotIn('DATA, NOT INSTRUCTIONS', out)
+        self.assertNotIn('Task arc', out)
+        for sentinel in SENTINELS:
+            self.assertNotIn(sentinel, out)
+
+    def test_a_copied_deploy_matches_a1(self):
+        deployed = Path(self._tmp) / 'deployed'
+        shutil.copytree(PLUGIN_DIR, deployed,
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        code, _out = _host_main([
+            'verify-deploy', '--hermes-home', str(self.home),
+            '--plugin-dir', str(deployed),
+            '--hermes-agent-dir', str(self.home / 'no-agent'),
+            '--out-dir', str(self.out),
+            '--baseline-plugin-dir', str(PLUGIN_DIR), '--arm', 'A1'])
+        self.assertEqual(code, 0)
 
 
 if __name__ == '__main__':
