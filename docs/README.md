@@ -87,6 +87,13 @@ This Hermes skill bundle uses a plugin, three shell hooks, and a cron for runtim
   register and its classes, three accepted risks of which two are still
   open, and the read-only evidence that producing the record did not
   disturb the host it measured.
+- [Undetermined-outcome render probe](undetermined-outcome-render-probe.md):
+  read-back from a development tenant showing that the reporter's
+  `failure_reason` and `outcome_basis: undetermined` reach the server for an
+  undetermined `CANCELLED` job and that a halt-shaped job carries `source`
+  alone, plus one human observation that the web app shows `outcome_basis`
+  for the undetermined job on a development tenant (one run, not the reference
+  host; Phase 70 owns that proof).
 - [ROI read-surface ask](roi-read-surface-ask.md): the tracked, standing
   ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
   on `jobs roi`, and the Phase 53 gate this skill shipped instead of waiting

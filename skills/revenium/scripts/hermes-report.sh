@@ -2182,15 +2182,18 @@ PY
   local outcome_deferred_tick_count=0
   # WR-01 (39-REVIEW.md): job_outcome_queue is fed by two independent,
   # ungated producers within one session-loop iteration -- the
-  # token-independent marker precheck (`:1473`) and the in-loop jobs-create
-  # stage (`:2375`, gated on the growth guard at `:1884`). Any session whose
+  # token-independent marker precheck (the `precheck_job_rows` block, which
+  # pushes `precheck_clean_job_id`) and the in-loop jobs-create stage (which
+  # pushes `clean_job_id`, gated on the growth guard). Grep for
+  # `job_outcome_queue+=` to find both. Any session whose
   # token total grew this tick AND already has an unconfirmed job marker
   # clears both, pushing the SAME outcome_id twice in one tick. The
   # (outcome_id, reason) flag file already dedupes the per-job WARN line and
   # the retry is deliberately never gated -- but the aggregate increment
   # ran once per QUEUE ENTRY, not once per distinct job, so it could report
   # up to 2x the true backlog. This newline-delimited "seen set" is the same
-  # bash-3.2-compatible idiom LEGACY_RETAINED_SIDS uses above (`:283`,
+  # bash-3.2-compatible idiom LEGACY_RETAINED_SIDS uses above (see its
+  # declaration near the top of the script;
   # `case ... *$'\n'"${sid}"$'\n'*)`) -- no associative arrays. Declared
   # here for the identical herestring reason as outcome_deferred_tick_count:
   # the post-loop stage runs in THIS shell, so it survives across queue
@@ -3058,8 +3061,8 @@ PY
           while IFS='|' read -r precheck_clean_job_id precheck_job_name precheck_job_type precheck_source precheck_status_raw precheck_marker_ts precheck_failure_reason; do
             [[ -z "${precheck_clean_job_id}" ]] && continue
 
-            # Phase 10: push every row to the outcome queue regardless of create outcome (JOB:<id>:outcome: gate dedupes; field 6 = sid, Phase 38 ROI-10). CR-01: precheck_source is the clamped field printed above, not the raw ${source}.
-            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${precheck_source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}")
+            # Phase 10: push every row to the outcome queue regardless of create outcome (JOB:<id>:outcome: gate dedupes; field 6 = sid, Phase 38 ROI-10; field 7 = job_type, Phase 66 TRU-04, appended last so no earlier field shifts). CR-01: precheck_source is the clamped field printed above, not the raw ${source}.
+            job_outcome_queue+=("${precheck_clean_job_id}|${precheck_status_raw}|${precheck_source}|${precheck_marker_ts}|${precheck_failure_reason}|${sid}|${precheck_job_type}")
 
             # D-09: single shared idempotency gate — same grep pattern as in-loop stage.
             if grep -q "^JOB:${precheck_clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -3961,7 +3964,11 @@ PY
             # Phase 38 (ROI-10): field 6 is sid, NOT the assessment itself — a nested
             # object cannot be a pipe field. The outcome stage re-reads this session's
             # marker for the assessment (38-RESEARCH.md: the marker is the carrier).
-            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}|${job_failure_reason}|${sid}")
+            # Phase 66 (TRU-04): field 7 is job_type, appended LAST so no earlier field
+            # shifts (the final IFS read variable absorbs any surplus pipes; job_type is
+            # already pipe-stripped above). It lets the outcome stage tell a genuine halt
+            # cancellation (job_type interrupted) from an undetermined one.
+            job_outcome_queue+=("${clean_job_id}|${job_status_raw}|${job_env_source}|${job_marker_ts}|${job_failure_reason}|${sid}|${job_type}")
 
             # D-09: ledger-gated idempotency — skip if this job was already created.
             if grep -q "^JOB:${clean_job_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null; then
@@ -4537,7 +4544,7 @@ PY
   # write this tick has already been written by the time this stage runs (D-01).
   # Mirrors the in-loop jobs create stage (D-06: API-first, ledger-on-exit-0).
   if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${#job_outcome_queue[@]}" -gt 0 ]]; then
-    local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid
+    local outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid outcome_job_type outcome_basis
     local outcome_status outcome_cmd_output outcome_cmd_exit outcome_success
     local outcome_now_ts _age_s _stale_threshold outcome_metadata
     local outcome_warn_reason outcome_warn_key outcome_warn_flag
@@ -4556,7 +4563,7 @@ PY
     local outcome_assessment_dir outcome_value outcome_currency outcome_markers_dir
     local outcome_assessment_json outcome_reason
     for _entry in "${job_outcome_queue[@]}"; do
-      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid <<< "${_entry}"
+      IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid outcome_job_type <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
 
       # OUTCOME-01 gate: skip if already reported (ledger-gated idempotency).
@@ -5283,6 +5290,27 @@ print('true' if ok else 'false')
         fi
       fi
 
+      # Phase 66 (TRU-04): an undetermined CANCELLED arc explains itself in
+      # --metadata. CANCELLED is the classifier's uncertainty catch-all, and a
+      # genuine guardrail halt is also CANCELLED, so the two were byte-identical on
+      # the wire. The halt marker is the one writer of the literal id prefix
+      # `guardrail-halt-` and the literal job_type `interrupted`
+      # (pre_tool_call.sh; tests/test_phase66_undetermined_outcome.py::HaltIdDriftTests
+      # reads both back out of that hook). Each literal only EXEMPTS, never asserts: a
+      # spoofed or mistaken value falls back to the pre-phase wire shape, which is the
+      # conservative direction. The empty default IS the pre-phase behaviour.
+      # Known limit: the halt marker is written only when a tool call is
+      # attempted while halted, so a halt that never reached a tool call
+      # writes no `guardrail-halt-*` marker and its arc ships as undetermined.
+      # The reason text stays literally true -- "No guardrail halt was
+      # recorded for this job" -- and says nothing about whether one happened.
+      outcome_basis=""
+      if [[ "${outcome_status}" == "CANCELLED" \
+            && "${outcome_id}" != guardrail-halt-* \
+            && "${outcome_job_type}" != "interrupted" ]]; then
+        outcome_basis="undetermined"
+      fi
+
       # D-06: API first — build command as array (bash 3.2 portability).
       local outcome_cmd=(
         revenium jobs outcome "${outcome_id}"
@@ -5319,7 +5347,9 @@ print('true' if ok else 'false')
       fi
       # Phase 24 (quick-260531-n4i): attach --metadata JSON. source (deployment
       # environment from the session source column) rides on every outcome when
-      # present; failure_reason is added only for FAILED arcs. json.dumps handles
+      # present; failure_reason is added for FAILED arcs (the marker's own text) and,
+      # since Phase 66 (TRU-04), for an undetermined CANCELLED arc (a reporter-owned
+      # constant plus outcome_basis, never model text). json.dumps handles
       # quoting/escaping so prose reasons cannot break the JSON arg. Omit the flag
       # entirely when there is nothing to send (preserves v1.4 wire shape for
       # source-less sessions).
@@ -5334,6 +5364,7 @@ print('true' if ok else 'false')
       outcome_metadata=$(
         OUTCOME_SOURCE="${outcome_source}" \
         OUTCOME_STATUS="${outcome_status}" \
+        OUTCOME_BASIS="${outcome_basis}" \
         OUTCOME_FAILURE_REASON="${outcome_failure_reason}" \
         ASSESSMENT_JSON="${outcome_assessment_json}" \
         python3 - <<'PY' 2>/dev/null || true
@@ -5372,9 +5403,19 @@ import json, os
 # pipeline has the serialized bytes to measure.
 _METADATA_CEILING_BYTES = 4096
 
+# Phase 66 (TRU-04): the reason an undetermined CANCELLED arc ships. Reporter-
+# owned and never model text: the bucket mixes classifier-uncertain, agent-
+# declared-unverified and user-pivot arcs, so the sentence has to be true of
+# all of them, and it says only that no halt was RECORDED. ASCII, no quote
+# characters, well under the --metadata ceiling. It rides in --metadata
+# because no released CLI has a flag for the server's outcomeReason field
+# (CLI drift item V2-13).
+_UNDETERMINED_OUTCOME_REASON = 'Outcome not determined: the arc ended without checkable evidence of success or failure, so it was reported as CANCELLED by default. No guardrail halt was recorded for this job.'
+
 # The two ordered drop tiers, in the order they are popped below: the
-# enrichment yields before base metering ever does (D-02). `source` and
-# `failure_reason` are the base metering keys and are never in either tuple.
+# enrichment yields before base metering ever does (D-02). `source`,
+# `failure_reason` and (Phase 66) `outcome_basis` are the base metering keys and
+# are never in either tuple.
 _VALUE_FAMILY_META_KEYS = (
     'value_low', 'value_base', 'value_high', 'bounds_source',
     'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
@@ -5414,6 +5455,13 @@ status = os.environ.get('OUTCOME_STATUS', '').strip().upper()
 reason = os.environ.get('OUTCOME_FAILURE_REASON', '').strip()
 if status == 'FAILED' and reason:
     meta['failure_reason'] = reason
+# Phase 66 (TRU-04): the discriminator lives in bash (it needs the id and the
+# job_type); this is the defence-in-depth status gate. Base metering: neither
+# key is in a shed tuple below, so the ceiling never drops them.
+if (status == 'CANCELLED'
+        and os.environ.get('OUTCOME_BASIS', '').strip() == 'undetermined'):
+    meta['failure_reason'] = _UNDETERMINED_OUTCOME_REASON
+    meta['outcome_basis'] = 'undetermined'
 
 # Phase 42 (C-04): the sidecar's resolved assessment record, parsed once
 # from ASSESSMENT_JSON. Present whenever the sidecar re-read above found
@@ -5766,7 +5814,7 @@ if assessment_raw:
 
 # Phase 46 (EGV-19, D-01/D-02/D-03): bounded emit -- the single place the
 # actual wire bytes are measured before the payload leaves the machine.
-# Base metering (source, failure_reason) is NEVER popped; only the Phase
+# Base metering (source, failure_reason, outcome_basis) is NEVER popped; only the Phase
 # 42-45 enrichment yields, value family first, then provenance, in that
 # order (D-02: metering never breaks, the enrichment is what gives way).
 # metadata_truncated marks a partial payload so a consumer can distinguish

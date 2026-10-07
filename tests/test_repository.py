@@ -387,6 +387,15 @@ class RepositoryTests(unittest.TestCase):
             # first, which is gitignored, so this pin is what keeps the
             # record's provenance durable alongside the record itself.
             ROOT / 'docs' / 'reconciliation-review-and-security-record.md',
+            # Phase 66 (TRU-04) — the tracked render-probe record: whether the
+            # `failure_reason` / `outcome_basis` that Phase 66 puts in
+            # `--metadata` for an undetermined CANCELLED job reaches the
+            # server and the ROI page, read back from a development tenant
+            # through the real CLI. Phase 70 (TRU-07) builds its
+            # reference-host proof on this record's recipe. `.planning/` and
+            # `docs/internal/` are both gitignored, so a tracked docs/ file
+            # plus this pin is the only durable home.
+            ROOT / 'docs' / 'undetermined-outcome-render-probe.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
