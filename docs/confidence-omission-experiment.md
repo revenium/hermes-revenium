@@ -349,3 +349,30 @@ model, configuration, cron and plugin alone.
 **Backfilling or revaluing past jobs.** Metering is forward-only. A prompt
 change affects arcs evaluated after it ships and never rewrites a job that was
 already valued or left empty.
+
+## The environment
+
+- **Harness.** `tests/confidence_replay_harness.py`, sha256
+  `b82270ef59ddd4aa71bbd822269ee8bdda072c233855c34a297842fd83e4d709`. The
+  host's copy has the same digest, and the file is unchanged since the
+  pre-registration commit `d333d20`, committed `2026-10-06T22:59:05-04:00`.
+  Commits on the phase branch stay reachable through the phase PR after a
+  squash merge.
+- **Classifier under replay.** The deployed `classifier.py` has sha256
+  `843e9f49fdf7a05dd2049d1e115e0723327b6c13ab483cb61a312a52ffb601b4`. The
+  repo file at commit `ed1fa95` (PR #140) has that digest. The phase-start
+  commit's file does not: it carries the later `reportModelEstimates` change,
+  which the host has not deployed.
+- **Model.** Pinned to `z-ai/glm-5.2` through provider `openrouter`. The smoke
+  call observed the served model `z-ai/glm-5.2`.
+- **Reasoning.** The host inherits `agent.reasoning_effort` of `medium`. The
+  replay assumes `call_llm` applies it the same way here as it does inside the
+  gateway (research assumption A2). Nothing in this record shows it does.
+- **Call parameters.** Temperature 0.0, `max_tokens` 512
+  (`_EVAL_MAX_TOKENS`), timeout 15.0 seconds (`_EVAL_TIMEOUT_SECONDS`).
+- **Concurrency and runtime.** Concurrency 4, on the Python 3.11.15 interpreter
+  from Hermes' own venv. The run started at `2026-10-07T15:14:42Z`.
+- **Fence after the smoke call.** Exit 0, `fence: clean`. The smoke call made
+  one recorded call, whose outcome passed the confidence gate.
+- **Spend.** The calls ran on the host operator's provider account, after a
+  human re-confirmed the spend at the point of spend.
