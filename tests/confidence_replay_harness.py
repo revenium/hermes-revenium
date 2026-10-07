@@ -50,10 +50,13 @@ import hashlib
 import importlib.util
 import json
 import logging
+import math
 import re
+import statistics
 import sys
 import time
-from collections import namedtuple
+from collections import Counter, namedtuple
+from fractions import Fraction
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -163,14 +166,66 @@ _PROMOTE_EDITS = (
             'or "newly_enabled_work"\n' + CONFIDENCE_LINE + "\n", 1),
 )
 
+_PER_BLOCK_EDITS = (
+    ArmEdit(TRAILER_CONFIDENCE_BULLET, "", 1),
+    ArmEdit(
+        COUNTERFACTUAL_BASIS_LINE,
+        COUNTERFACTUAL_BASIS_LINE[:-1] + CONFIDENCE_LINE + "\n", 2),
+    ArmEdit(
+        NEWLY_ENABLED_BASIS_LINE,
+        NEWLY_ENABLED_BASIS_LINE[:-1] + CONFIDENCE_LINE + "\n", 1),
+)
+
 # Arm A0 has no text edits; its config transform removes `rateCard`
 # (see `_arm_config`), which reproduces the pre-PR-#140 prompt.
+#   B "promote"       M1, declaration scope
+#   C "per-block"     M1, proximity
+#   D "required"      M2: B plus a sentence that confidence is required
+#   E "abstain-scope" M4: B plus a narrower abstention clause
 ARM_EDITS = {
     "A0": (),
     "A1": (),
     "A2": (),
     "B": _PROMOTE_EDITS,
+    "C": _PER_BLOCK_EDITS,
+    "D": _PROMOTE_EDITS + (
+        ArmEdit(TRAILER_CONFIDENCE_BULLET,
+                TRAILER_CONFIDENCE_BULLET + REQUIRED_SENTENCE, 1),
+    ),
+    "E": _PROMOTE_EDITS + (
+        ArmEdit(ABSTAIN_FIELD_CLAUSE, ABSTAIN_SCOPED_CLAUSE, 1),
+    ),
 }
+
+GATE_ARMS = ("A0", "A1", "A2")
+CANDIDATE_ARMS = ("B", "C", "D", "E")
+# The tie-break's edit count: the number of ArmEdits per candidate arm.
+EDIT_COUNT = {arm: len(ARM_EDITS[arm]) for arm in CANDIDATE_ARMS}
+
+# ---------------------------------------------------------------------------
+# The pre-registered protocol's constants. Never changed after plan 03's
+# commit. Every cut is compared with ints or Fractions, never a float.
+# ---------------------------------------------------------------------------
+VALIDITY_MIN_RATE = Fraction(1, 10)
+VALIDITY_MIN_REACHED = 30
+SERVED_MODEL_MIN_SHARE = Fraction(19, 20)
+NOISE_FLOOR_MIN = 3
+NOISE_FLOOR_DIVISOR = 4
+DECISION_MAX_RATIO = Fraction(1, 2)
+ALPHA = Fraction(1, 20)
+REACH_TOLERANCE_MIN = 3
+REACH_TOLERANCE_DIVISOR = 10
+CALIBRATION_MODAL_MAX = Fraction(4, 5)
+DEFAULT_POOL_CAP = 300
+
+OUTCOME_CLEARED_PREFIX = "CLEARED \u2014 arm "
+OUTCOME_CLEARED_A1 = "CLEARED \u2014 arm A1, already deployed"
+OUTCOME_NOT_CLEARED = "NOT CLEARED"
+OUTCOME_NOT_EVALUATED = (
+    "NOT EVALUATED \u2014 harness did not reproduce the omission")
+# Exists so the record's vocabulary has one source. The harness never
+# returns it: it is written by the operator path when spend is declined.
+OUTCOME_NOT_RUN = "NOT RUN \u2014 spend declined"
 
 # Whitelisted per-call record fields. Nothing else is ever persisted.
 PER_CALL_RECORD_KEYS = frozenset({
@@ -592,3 +647,334 @@ def aggregate(records):
         if rec["outcome"] == "passed_confidence_gate" and rec["valued"]:
             slot["valued"] += 1
     return arms
+
+
+# ---------------------------------------------------------------------------
+# Exact statistics
+# ---------------------------------------------------------------------------
+def mcnemar_one_sided_p(b, c):
+    """Exact one-sided McNemar p for `b` arcs omitted in the baseline only and
+    `c` omitted in the candidate only: the binomial tail P(X <= c) with
+    n = b + c and p = 1/2, as an exact Fraction. No discordant pairs gives 1.
+    """
+    n = b + c
+    if n == 0:
+        return Fraction(1)
+    return Fraction(sum(math.comb(n, i) for i in range(c + 1)), 2 ** n)
+
+
+def wilson_interval(k, n, z=1.959963984540054):
+    """Wilson score interval for k of n. REPORTING ONLY: floats, never an
+    input to a decision. (0.0, 0.0) when n is 0."""
+    if n == 0:
+        return (0.0, 0.0)
+    phat = k / n
+    denom = 1 + z * z / n
+    center = (phat + z * z / (2 * n)) / denom
+    half = z * math.sqrt(phat * (1 - phat) / n + z * z / (4 * n * n)) / denom
+    low = 0.0 if k == 0 else max(0.0, center - half)
+    high = 1.0 if k == n else min(1.0, center + half)
+    return (low, high)
+
+
+def calibration(values):
+    """n, distinct values, the modal value's count, and the mean."""
+    n = len(values)
+    if n == 0:
+        return {"n": 0, "distinct": 0, "modal_count": 0, "mean": None}
+    counts = Counter(values)
+    return {
+        "n": n,
+        "distinct": len(counts),
+        "modal_count": max(counts.values()),
+        "mean": sum(values) / n,
+    }
+
+
+def modal_share(values):
+    """The modal value's share as an exact Fraction, or None for no values
+    (which the calibration guard treats as a pass)."""
+    if not values:
+        return None
+    return Fraction(max(Counter(values).values()), len(values))
+
+
+# ---------------------------------------------------------------------------
+# The pre-registered gates and decision rule
+# ---------------------------------------------------------------------------
+class IncompleteStageError(Exception):
+    """A stage lacks a record for some pool arc. The protocol never judges a
+    stage it only partly has."""
+
+
+class DuplicateRecordError(ValueError):
+    """More than one record for one (arc, arm). Counting both would shape the
+    measurement, so the evaluator refuses."""
+
+
+def _views(records, arms):
+    """arm -> {arc: record} for the requested arms. Other arms are ignored."""
+    views = {arm: {} for arm in arms}
+    for rec in records:
+        view = views.get(rec["arm"])
+        if view is None:
+            continue
+        if rec["arc"] in view:
+            raise DuplicateRecordError(
+                f"arm {rec['arm']}: more than one record for one arc")
+        view[rec["arc"]] = rec
+    return views
+
+
+def _check_complete(views, pool, arms):
+    for arm in arms:
+        stray = set(views[arm]) - pool
+        if stray:
+            raise ValueError(
+                f"arm {arm}: {len(stray)} record(s) for arcs outside the pool")
+        missing = len(pool) - len(views[arm])
+        if missing:
+            raise IncompleteStageError(
+                f"arm {arm}: {missing} of {len(pool)} pool arc(s) have no "
+                f"record")
+
+
+def _arm_sets(view):
+    """(reached, omitted) arc sets for one arm's {arc: record} view."""
+    reached = frozenset(
+        arc for arc, rec in view.items()
+        if rec["outcome"] in _REACHED_CLASSES)
+    omitted = frozenset(
+        arc for arc, rec in view.items()
+        if rec["outcome"] == "confidence_omitted")
+    return reached, omitted
+
+
+def _gate_values(views):
+    r0, o0 = _arm_sets(views["A0"])
+    r1, o1 = _arm_sets(views["A1"])
+    r2, o2 = _arm_sets(views["A2"])
+    responded = [
+        rec for arm in GATE_ARMS for rec in views[arm].values()
+        if rec.get("served_model") is not None]
+    matched = sum(
+        1 for rec in responded if rec["served_model"].startswith(REPLAY_MODEL))
+    g0 = (len(responded) > 0
+          and Fraction(matched, len(responded)) >= SERVED_MODEL_MIN_SHARE)
+    g1 = (len(r0) >= VALIDITY_MIN_REACHED
+          and Fraction(len(o0), len(r0)) >= VALIDITY_MIN_RATE)
+    g2 = (abs(len(o1) - len(o2))
+          <= max(NOISE_FLOOR_MIN, len(o1) // NOISE_FLOOR_DIVISOR))
+    g3 = (len(r1) >= VALIDITY_MIN_REACHED
+          and Fraction(len(o1), len(r1)) >= VALIDITY_MIN_RATE)
+    return {
+        "G0": g0, "G1": g1, "G2": g2, "G3": g3,
+        "valid": g0 and g2 and (g1 or g3),
+        "stage2_eligible": g0 and g2 and g3,
+        "reasons": [name for name, ok in
+                    (("G0", g0), ("G1", g1), ("G2", g2), ("G3", g3))
+                    if not ok],
+    }
+
+
+def evaluate_gates(records, pool_keys):
+    """The validity gates, from the stage-1 records (A0, A1, A2) alone.
+
+    Raises IncompleteStageError when any pool arc lacks a record for any
+    stage-1 arm.
+    """
+    pool = frozenset(pool_keys)
+    views = _views(records, GATE_ARMS)
+    _check_complete(views, pool, GATE_ARMS)
+    return _gate_values(views)
+
+
+def _supplied_confidences(view):
+    return [rec["conf_value"] for rec in view.values()
+            if rec["outcome"] == "passed_confidence_gate"
+            and rec.get("conf_value") is not None]
+
+
+def clears(records, x_arm, base_arm):
+    """Whether arm `x_arm` clears against `base_arm` on all four criteria.
+
+    Returns a dict: `crit_a` (at most half the baseline rate, by
+    cross-multiplication), `crit_b` (exact one-sided McNemar p < ALPHA over
+    arcs that reached in both arms), `crit_c` (reach guard), `crit_d`
+    (calibration guard), `clears` (all four), the discordant counts `b`
+    (omitted in the base only) and `c` (omitted in `x_arm` only), and the
+    exact Fraction `p`.
+
+    The calibration guard disqualifies a candidate whose modal confidence
+    share is above CALIBRATION_MODAL_MAX unless the baseline's is too. A
+    baseline that supplied no confidence at all is not above it.
+    """
+    views = _views(records, (x_arm, base_arm))
+    vx, vb = views[x_arm], views[base_arm]
+    rx, ox = _arm_sets(vx)
+    rb, ob = _arm_sets(vb)
+
+    crit_a = (DECISION_MAX_RATIO.denominator * len(ox) * len(rb)
+              <= DECISION_MAX_RATIO.numerator * len(ob) * len(rx))
+
+    both = rx & rb
+    b = len((ob & both) - ox)
+    c = len((ox & both) - ob)
+    p = mcnemar_one_sided_p(b, c)
+    crit_b = p < ALPHA
+
+    crit_c = len(rx) >= len(rb) - max(
+        REACH_TOLERANCE_MIN, len(rb) // REACH_TOLERANCE_DIVISOR)
+
+    share_x = modal_share(_supplied_confidences(vx))
+    share_base = modal_share(_supplied_confidences(vb))
+    x_flat = share_x is not None and share_x > CALIBRATION_MODAL_MAX
+    base_flat = share_base is not None and share_base > CALIBRATION_MODAL_MAX
+    crit_d = (not x_flat) or base_flat
+
+    return {
+        "crit_a": crit_a, "crit_b": crit_b, "crit_c": crit_c,
+        "crit_d": crit_d,
+        "clears": crit_a and crit_b and crit_c and crit_d,
+        "b": b, "c": c, "p": p,
+    }
+
+
+def _tie_break_key(view, arm):
+    reached, omitted = _arm_sets(view)
+    rate = Fraction(len(omitted), len(reached)) if reached else Fraction(1)
+    return (rate, EDIT_COUNT[arm], CANDIDATE_ARMS.index(arm))
+
+
+def evaluate_protocol(records, pool_keys):
+    """Apply the pre-registered protocol to `records` over `pool_keys`.
+
+    The outcome is one of four strings, as a function of the data: a clear
+    candidate (`CLEARED \u2014 arm X`), A1 already deployed, NOT CLEARED, or
+    NOT EVALUATED when the gates fail. Raises IncompleteStageError rather than
+    judging a stage that lacks a record for any pool arc. Candidate arms are
+    read only when stage 2 is eligible.
+    """
+    pool = frozenset(pool_keys)
+    gates = evaluate_gates(records, pool)
+    eligible = gates["stage2_eligible"]
+    arms = GATE_ARMS + (CANDIDATE_ARMS if eligible else ())
+    views = _views(records, arms)
+    if eligible:
+        _check_complete(views, pool, CANDIDATE_ARMS)
+
+    raw_comparisons = {}
+    if eligible:
+        for arm in CANDIDATE_ARMS:
+            raw_comparisons[arm] = clears(records, arm, "A1")
+    raw_diag = clears(records, "A1", "A0")
+
+    winner = None
+    if not gates["valid"]:
+        outcome = OUTCOME_NOT_EVALUATED
+    elif gates["G3"]:
+        clearing = [arm for arm in CANDIDATE_ARMS
+                    if raw_comparisons[arm]["clears"]]
+        if clearing:
+            winner = min(clearing,
+                         key=lambda arm: _tie_break_key(views[arm], arm))
+            outcome = OUTCOME_CLEARED_PREFIX + winner
+        else:
+            outcome = OUTCOME_NOT_CLEARED
+    elif raw_diag["clears"]:
+        winner = "A1"
+        outcome = OUTCOME_CLEARED_A1
+    else:
+        outcome = OUTCOME_NOT_CLEARED
+
+    return {
+        "arms": {arm: _arm_report(views[arm]) for arm in arms},
+        "gates": gates,
+        "comparisons": {arm: _comparison_report(res)
+                        for arm, res in raw_comparisons.items()},
+        "diagnostic_a0_a1": _comparison_report(raw_diag),
+        "m0": _m0_report(views, arms),
+        "calibration": {arm: _calibration_report(views[arm]) for arm in arms},
+        "outcome": outcome,
+        "winner": winner,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Reporting helpers. Display floats live here, never in a decision function.
+# ---------------------------------------------------------------------------
+def _fraction_text(value):
+    return f"{value.numerator}/{value.denominator}"
+
+
+def _arm_report(view):
+    reached, omitted = _arm_sets(view)
+    agg = aggregate(list(view.values()))
+    slot = next(iter(agg.values()))
+    k, n = len(omitted), len(reached)
+    return {
+        "counts": slot["counts"],
+        "total": slot["total"],
+        "reached": n,
+        "omitted": k,
+        "valued": slot["valued"],
+        "rate": f"{k}/{n}",
+        "rate_exact": Fraction(k, n) if n else None,
+        "wilson": list(wilson_interval(k, n)),
+    }
+
+
+def _comparison_report(res):
+    return {
+        "criteria": {"a": res["crit_a"], "b": res["crit_b"],
+                     "c": res["crit_c"], "d": res["crit_d"]},
+        "clears": res["clears"],
+        "b": res["b"],
+        "c": res["c"],
+        "p": _fraction_text(res["p"]),
+        "p_exact": res["p"],
+        "p_float": float(res["p"]),
+    }
+
+
+def _calibration_report(view):
+    values = _supplied_confidences(view)
+    out = calibration(values)
+    share = modal_share(values)
+    out["modal_share"] = _fraction_text(share) if share is not None else None
+    out["modal_share_exact"] = share
+    return out
+
+
+def _m0_report(views, arms):
+    """Aggregates over the omitted responses, to say what an omission looks
+    like (M0): a null, a renamed key, text outside the JSON, a truncation."""
+    omitted = [rec for arm in arms for rec in views[arm].values()
+               if rec["outcome"] == "confidence_omitted"]
+    tokens = [rec["completion_tokens"] for rec in omitted
+              if isinstance(rec.get("completion_tokens"), int)]
+    return {
+        "n": len(omitted),
+        "value_kind": dict(Counter(rec["value_kind"] for rec in omitted)),
+        "conf_like_key": sum(1 for rec in omitted if rec["conf_like_key"]),
+        "conf_in_text": sum(1 for rec in omitted if rec["conf_in_text"]),
+        "finish_reason": dict(Counter(rec["finish_reason"] for rec in omitted)),
+        "median_completion_tokens": (
+            statistics.median(tokens) if tokens else None),
+    }
+
+
+def _jsonable(value):
+    if isinstance(value, Fraction):
+        return _fraction_text(value)
+    if isinstance(value, dict):
+        return {k: _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def report_to_json(report):
+    """The report as JSON text, with every Fraction rendered as `k/n`."""
+    return json.dumps(_jsonable(report), indent=2, sort_keys=True,
+                      ensure_ascii=False)

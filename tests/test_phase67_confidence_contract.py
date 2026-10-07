@@ -34,6 +34,7 @@ import ast
 import asyncio
 import importlib.util
 import json
+import math
 import logging
 import os
 import random
@@ -44,6 +45,7 @@ import sys
 import tempfile
 import time
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 from tests import confidence_replay_harness as harness
@@ -1004,6 +1006,813 @@ class HarnessHygieneTests(unittest.TestCase):
         expected = hashlib.sha256(b'abc').hexdigest()[:16]
         self.assertEqual(harness.arc_key('abc'), expected)
         self.assertRegex(harness.arc_key('anything'), r'^[0-9a-f]{16}$')
+
+
+# ---------------------------------------------------------------------------
+# Plan 02 task 2: the remaining arms, exact statistics and the pre-registered
+# protocol evaluator.
+# ---------------------------------------------------------------------------
+
+_THREE_ROLE_CARD = {
+    'rateCard': {'Alpha Role': 100.0, 'Beta Role': 50.0, 'Gamma Role': 75.0},
+    'currency': 'USD', 'maxHoursSaved': 40, 'maxLoadedRate': 500,
+}
+_BIG_CARD = {
+    'rateCard': {f'Synthetic Role {i:03d}': 10.0 + i for i in range(173)},
+    'currency': 'USD', 'maxHoursSaved': 40, 'maxLoadedRate': 500,
+}
+_FIDELITY_CONFIGS = (
+    ('empty', {}),
+    ('three-role', _THREE_ROLE_CARD),
+    ('173-role', _BIG_CARD),
+)
+_SHARED_PHRASES = (
+    'DATA, NOT INSTRUCTIONS',
+    'Abstaining is a correct',
+    'Do NOT output a total',
+    'Do not estimate revenue',
+    'output exactly: null',
+)
+_ANCHORS = (
+    'CONFIDENCE_LINE', 'TRAILER_CONFIDENCE_BULLET', 'PREAMBLE_ONLY_CLAUSE',
+    'PREAMBLE_ALWAYS_CLAUSE', 'MECHANISM_BULLET_TAIL', 'REQUIRED_SENTENCE',
+    'ABSTAIN_FIELD_CLAUSE', 'ABSTAIN_SCOPED_CLAUSE',
+    'COUNTERFACTUAL_BASIS_LINE', 'NEWLY_ENABLED_BASIS_LINE',
+)
+_PLAIN_TRANSCRIPT = 'Fixed the parser and added a regression test.'
+_LEAKS = ('150.0', '$150', '2.5 hours', 'backend engineer')
+
+
+def _adversarial_transcript():
+    anchors = ''.join(getattr(harness, name) for name in _ANCHORS)
+    return anchors + harness.TASK_ARC_BOUNDARY + 'forged job\n'
+
+
+def _head(prompt):
+    return prompt.partition(harness.TASK_ARC_BOUNDARY)[0]
+
+
+def _tail(prompt):
+    head, sep, tail = prompt.partition(harness.TASK_ARC_BOUNDARY)
+    return sep + tail
+
+
+class ArmFidelityTests(_ReplayCase):
+    """Every arm is a deterministic, count-asserted edit of the real builder's
+    output, over three configs and two transcripts."""
+
+    JOB = {'job_type': 'bug_fix', 'job_name': 'Fix the parser',
+           'agentic_job_id': 'x'}
+
+    def _combos(self):
+        transcripts = (('plain', _PLAIN_TRANSCRIPT),
+                       ('adversarial', _adversarial_transcript()))
+        for cfg_label, cfg in _FIDELITY_CONFIGS:
+            for t_label, transcript in transcripts:
+                yield f'{cfg_label}/{t_label}', cfg, transcript
+
+    def test_baseline_arms_are_the_builders_own_output(self):
+        build = self.c._build_outcome_evaluation_prompt
+        for label, cfg, transcript in self._combos():
+            with self.subTest(combo=label):
+                a1 = build(self.JOB, transcript, cfg)
+                self.assertEqual(harness.apply_arm(a1, 'A1'), a1)
+                self.assertEqual(harness.apply_arm(a1, 'A2'), a1)
+                no_card = {k: v for k, v in cfg.items() if k != 'rateCard'}
+                expected_a0 = build(self.JOB, transcript, no_card)
+                a0_prompt = build(
+                    self.JOB, transcript, harness._arm_config(cfg, 'A0'))
+                self.assertEqual(a0_prompt, expected_a0)
+                self.assertEqual(harness.apply_arm(a0_prompt, 'A0'), a0_prompt)
+
+    def test_a0_drops_only_the_rate_card(self):
+        cfg = dict(_THREE_ROLE_CARD)
+        arm_cfg = harness._arm_config(cfg, 'A0')
+        self.assertNotIn('rateCard', arm_cfg)
+        self.assertIn('rateCard', cfg, 'the input config must not be mutated')
+        self.assertEqual(
+            {k: v for k, v in arm_cfg.items()},
+            {k: v for k, v in cfg.items() if k != 'rateCard'})
+        self.assertIs(harness._arm_config(cfg, 'A1'), cfg)
+
+    def test_candidate_arms_edit_only_the_head(self):
+        build = self.c._build_outcome_evaluation_prompt
+        for label, cfg, transcript in self._combos():
+            a1 = build(self.JOB, transcript, cfg)
+            for arm in harness.CANDIDATE_ARMS:
+                with self.subTest(combo=label, arm=arm):
+                    prompt = harness.apply_arm(a1, arm)
+                    self.assertNotEqual(prompt, a1)
+                    self.assertEqual(_tail(prompt), _tail(a1))
+                    self.assertTrue(
+                        harness.numeric_tokens(prompt)
+                        <= harness.numeric_tokens(a1))
+                    head = _head(prompt)
+                    for phrase in _SHARED_PHRASES:
+                        self.assertEqual(head.count(phrase), 1, phrase)
+                    for leak in _LEAKS:
+                        self.assertNotIn(leak, head)
+
+    def test_confidence_declaration_sites(self):
+        build = self.c._build_outcome_evaluation_prompt
+        marker = 'If economic_mechanism is'
+        for label, cfg, transcript in self._combos():
+            a1 = build(self.JOB, transcript, cfg)
+            head_a1 = _head(a1)
+            self.assertEqual(head_a1.count(harness.CONFIDENCE_LINE), 1)
+            self.assertGreater(
+                head_a1.index(harness.CONFIDENCE_LINE), head_a1.index(marker))
+            for arm in ('B', 'D', 'E'):
+                with self.subTest(combo=label, arm=arm):
+                    head = _head(harness.apply_arm(a1, arm))
+                    self.assertEqual(head.count(harness.CONFIDENCE_LINE), 1)
+                    self.assertLess(head.index(harness.CONFIDENCE_LINE),
+                                    head.index(marker))
+            with self.subTest(combo=label, arm='C'):
+                head = _head(harness.apply_arm(a1, 'C'))
+                self.assertEqual(head.count(harness.CONFIDENCE_LINE), 3)
+                self.assertGreater(head.index(harness.CONFIDENCE_LINE),
+                                   head.index(marker))
+
+    def test_d_and_e_carry_their_own_extra_edit(self):
+        build = self.c._build_outcome_evaluation_prompt
+        for label, cfg, transcript in self._combos():
+            a1 = build(self.JOB, transcript, cfg)
+            with self.subTest(combo=label):
+                d = _head(harness.apply_arm(a1, 'D'))
+                self.assertEqual(d.count(harness.REQUIRED_SENTENCE), 1)
+                e = _head(harness.apply_arm(a1, 'E'))
+                self.assertEqual(e.count(harness.ABSTAIN_SCOPED_CLAUSE), 1)
+                self.assertEqual(e.count(harness.ABSTAIN_FIELD_CLAUSE), 0)
+                for arm in ('B', 'C', 'E'):
+                    self.assertEqual(
+                        _head(harness.apply_arm(a1, arm)).count(
+                            harness.REQUIRED_SENTENCE), 0)
+
+    def test_d_and_e_are_b_plus_one_edit(self):
+        build = self.c._build_outcome_evaluation_prompt
+        a1 = build(self.JOB, _PLAIN_TRANSCRIPT, {})
+        b = harness.apply_arm(a1, 'B')
+        d = harness.apply_arm(a1, 'D')
+        e = harness.apply_arm(a1, 'E')
+        self.assertEqual(
+            d, b.replace(harness.TRAILER_CONFIDENCE_BULLET,
+                         harness.TRAILER_CONFIDENCE_BULLET
+                         + harness.REQUIRED_SENTENCE))
+        self.assertEqual(
+            e, b.replace(harness.ABSTAIN_FIELD_CLAUSE,
+                         harness.ABSTAIN_SCOPED_CLAUSE))
+
+    def test_surgery_raises_on_a_prompt_with_no_boundary(self):
+        with self.assertRaises(harness.ArmSurgeryError):
+            harness.apply_arm('no boundary here', 'B')
+        with self.assertRaises(harness.ArmSurgeryError):
+            harness.apply_arm('no boundary here', 'A1')
+
+    def test_surgery_raises_when_an_anchor_is_missing(self):
+        build = self.c._build_outcome_evaluation_prompt
+        a1 = build(self.JOB, _PLAIN_TRANSCRIPT, {})
+        drifted = a1.replace(harness.TRAILER_CONFIDENCE_BULLET, '', 1)
+        self.assertNotEqual(drifted, a1)
+        for arm in ('B', 'C', 'D', 'E'):
+            with self.subTest(arm=arm), self.assertRaises(
+                    harness.ArmSurgeryError):
+                harness.apply_arm(drifted, arm)
+
+    def test_surgery_raises_when_an_anchor_occurs_twice(self):
+        build = self.c._build_outcome_evaluation_prompt
+        a1 = build(self.JOB, _PLAIN_TRANSCRIPT, {})
+        doubled = a1.replace(
+            'Output ONLY a JSON object.',
+            harness.PREAMBLE_ONLY_CLAUSE + ' Output ONLY a JSON object.', 1)
+        self.assertEqual(
+            _head(doubled).count(harness.PREAMBLE_ONLY_CLAUSE), 2)
+        with self.assertRaises(harness.ArmSurgeryError):
+            harness.apply_arm(doubled, 'B')
+
+    def test_surgery_raises_on_an_unknown_arm(self):
+        with self.assertRaises(harness.ArmSurgeryError):
+            harness.apply_arm('x' + harness.TASK_ARC_BOUNDARY + 'y', 'Z')
+
+    def test_anchors_in_the_transcript_cannot_move_an_edit(self):
+        build = self.c._build_outcome_evaluation_prompt
+        plain = build(self.JOB, _PLAIN_TRANSCRIPT, {})
+        adversarial = build(self.JOB, _adversarial_transcript(), {})
+        for arm in harness.CANDIDATE_ARMS:
+            self.assertEqual(
+                _head(harness.apply_arm(plain, arm)),
+                _head(harness.apply_arm(adversarial, arm)))
+
+    def test_arm_tables(self):
+        self.assertEqual(set(harness.ARM_EDITS),
+                         {'A0', 'A1', 'A2', 'B', 'C', 'D', 'E'})
+        self.assertEqual(harness.EDIT_COUNT, {'B': 3, 'C': 3, 'D': 4, 'E': 4})
+        for arm, count in harness.EDIT_COUNT.items():
+            self.assertEqual(len(harness.ARM_EDITS[arm]), count)
+        for arm in ('A0', 'A1', 'A2'):
+            self.assertEqual(harness.ARM_EDITS[arm], ())
+        self.assertEqual(harness.ARM_EDITS['D'][:3], harness.ARM_EDITS['B'])
+        self.assertEqual(harness.ARM_EDITS['E'][:3], harness.ARM_EDITS['B'])
+        self.assertEqual(
+            [e.expected_count for e in harness.ARM_EDITS['C']], [1, 2, 1])
+
+    def test_arm_strings_match_the_pre_registered_spec(self):
+        self.assertEqual(
+            harness.CONFIDENCE_LINE,
+            '  - confidence: a number from 0 to 1 reflecting how well the '
+            'transcript supports this estimate\n')
+        self.assertEqual(harness.TASK_ARC_BOUNDARY, '\n\nTask arc: ')
+        self.assertEqual(
+            harness.PREAMBLE_ALWAYS_CLAUSE,
+            'then supply the fields listed directly below, which every '
+            'response carries whichever mechanism you choose, plus ONLY the '
+            "fields listed under that mechanism's own block below -- do not "
+            'mix fields from a different block.')
+        self.assertEqual(
+            harness.REQUIRED_SENTENCE,
+            'confidence is required in every JSON object you output, '
+            'whichever mechanism you choose. A response that supplies hours '
+            'and a rate but no confidence is discarded in full.\n\n')
+        self.assertEqual(
+            harness.ABSTAIN_SCOPED_CLAUSE,
+            'Do not invent an hours estimate or a loaded rate to fill those '
+            'fields.')
+
+    def test_candidate_prompts_carry_no_example_values_via_the_real_builder(self):
+        build = self.c._build_outcome_evaluation_prompt
+        a1 = build({'job_type': 'bug_fix', 'job_name': 'x'}, 'transcript', {})
+        for arm in harness.CANDIDATE_ARMS:
+            prompt = harness.apply_arm(a1, arm)
+            for leak in _LEAKS:
+                self.assertNotIn(leak, prompt)
+
+
+class StatsTests(unittest.TestCase):
+    def test_mcnemar_boundaries_are_exact_fractions(self):
+        p = harness.mcnemar_one_sided_p(5, 0)
+        self.assertIsInstance(p, Fraction)
+        self.assertEqual(p, Fraction(1, 32))
+        self.assertEqual(harness.mcnemar_one_sided_p(4, 0), Fraction(1, 16))
+        self.assertEqual(harness.mcnemar_one_sided_p(0, 0), 1)
+        self.assertIsInstance(harness.mcnemar_one_sided_p(0, 0), Fraction)
+
+    def test_mcnemar_is_the_exact_binomial_tail(self):
+        p = harness.mcnemar_one_sided_p(18, 3)
+        self.assertIsInstance(p, Fraction)
+        expected = Fraction(sum(math.comb(21, i) for i in range(4)), 2 ** 21)
+        self.assertEqual(p, expected)
+
+    def test_mcnemar_is_large_when_the_candidate_is_worse(self):
+        p = harness.mcnemar_one_sided_p(0, 5)
+        self.assertEqual(p, Fraction(1))
+        self.assertGreater(harness.mcnemar_one_sided_p(3, 7), Fraction(1, 2))
+
+    def test_wilson_interval_matches_the_recorded_baseline(self):
+        lo, hi = harness.wilson_interval(22, 102)
+        self.assertAlmostEqual(lo, 0.147, delta=0.001)
+        self.assertAlmostEqual(hi, 0.305, delta=0.001)
+
+    def test_wilson_interval_at_zero_and_empty(self):
+        lo, hi = harness.wilson_interval(0, 25)
+        self.assertEqual(lo, 0.0)
+        self.assertAlmostEqual(hi, 0.133, delta=0.001)
+        self.assertEqual(harness.wilson_interval(0, 0), (0.0, 0.0))
+        lo, hi = harness.wilson_interval(25, 25)
+        self.assertEqual(hi, 1.0)
+
+    def test_calibration_summary(self):
+        cal = harness.calibration([0.6, 0.6, 0.7])
+        self.assertEqual(cal['n'], 3)
+        self.assertEqual(cal['distinct'], 2)
+        self.assertEqual(cal['modal_count'], 2)
+        self.assertAlmostEqual(cal['mean'], 0.6333, delta=1e-4)
+
+    def test_calibration_of_nothing_is_none_not_a_pass_by_accident(self):
+        cal = harness.calibration([])
+        self.assertEqual(cal['n'], 0)
+        self.assertEqual(cal['modal_count'], 0)
+        self.assertIsNone(cal['mean'])
+        self.assertIsNone(harness.modal_share([]))
+        self.assertEqual(harness.modal_share([0.5, 0.5, 0.6, 0.7]),
+                         Fraction(1, 2))
+
+
+# --- synthetic records for the rule tests ----------------------------------
+
+def _akey(i):
+    return f'arc{i:03d}'
+
+
+def _pool(n):
+    return [_akey(i) for i in range(n)]
+
+
+def _default_conf(i):
+    return 0.30 + (i % 7) * 0.05
+
+
+def _rec(arc, arm, outcome, conf=None, served='z-ai/glm-5.2', stage=1):
+    reached = outcome in ('confidence_omitted', 'passed_confidence_gate')
+    record = {
+        'arc': arc, 'arm': arm, 'stage': stage, 'outcome': outcome,
+        'tokens': ['confidence_omitted'] if outcome == 'confidence_omitted'
+        else [],
+        'valued': outcome == 'passed_confidence_gate',
+        'has_key': outcome == 'passed_confidence_gate',
+        'value_kind': 'number' if outcome == 'passed_confidence_gate'
+        else 'absent',
+        'conf_value': conf if outcome == 'passed_confidence_gate' else None,
+        'conf_like_key': False, 'conf_in_text': False,
+        'mechanism': 'labor_substitution' if reached else 'none',
+        'finish_reason': 'stop', 'completion_tokens': 60 if reached else None,
+        'served_model': served, 'call_error': False, 'ts': 1,
+    }
+    assert set(record) == harness.PER_CALL_RECORD_KEYS
+    return record
+
+
+def _arm_records(arm, n, omitted=(), unreached=(), confs=None,
+                 served='z-ai/glm-5.2', no_response=(), stage=1):
+    out = []
+    for i in range(n):
+        if i in omitted:
+            out.append(_rec(_akey(i), arm, 'confidence_omitted',
+                            served=served, stage=stage))
+        elif i in unreached:
+            out.append(_rec(_akey(i), arm, 'abstain_null',
+                            served=served, stage=stage))
+        else:
+            conf = confs[i] if confs is not None else _default_conf(i)
+            out.append(_rec(_akey(i), arm, 'passed_confidence_gate',
+                            conf=conf, served=served, stage=stage))
+    for i in no_response:
+        out[i] = dict(out[i], served_model=None)
+    return out
+
+
+def _stage1(n, a0=(), a1=(), a2=(), **kw):
+    return (_arm_records('A0', n, omitted=set(a0), **kw)
+            + _arm_records('A1', n, omitted=set(a1), **kw)
+            + _arm_records('A2', n, omitted=set(a2), **kw))
+
+
+def _gates(n, a0=(), a1=(), a2=(), **kw):
+    return harness.evaluate_gates(_stage1(n, a0, a1, a2, **kw), _pool(n))
+
+
+class GateBoundaryTests(unittest.TestCase):
+    """The validity gate, at and one off every cut."""
+
+    def test_baseline_at_exactly_ten_percent_with_thirty_reached_passes(self):
+        self.assertTrue(_gates(30, a0=range(3), a1=range(3), a2=range(3))['G3'])
+        self.assertTrue(_gates(30, a0=range(3), a1=range(3), a2=range(3))['G1'])
+
+    def test_two_of_thirty_fails(self):
+        gates = _gates(30, a0=range(2), a1=range(2), a2=range(2))
+        self.assertFalse(gates['G3'])
+        self.assertFalse(gates['G1'])
+        self.assertFalse(gates['valid'])
+
+    def test_three_of_twenty_nine_fails_on_reach(self):
+        # 30 arcs, but one arc did not reach the gate in A0 and in A1.
+        records = (
+            _arm_records('A0', 30, omitted={0, 1, 2}, unreached={29})
+            + _arm_records('A1', 30, omitted={0, 1, 2}, unreached={29})
+            + _arm_records('A2', 30, omitted={0, 1, 2}))
+        gates = harness.evaluate_gates(records, _pool(30))
+        self.assertFalse(gates['G3'])
+        self.assertFalse(gates['G1'])
+
+    def test_served_model_share_at_nineteen_twentieths_passes(self):
+        # 60 stage-1 calls; 3 answered by another model is exactly 57/60.
+        def stage1(n_other):
+            recs = _stage1(20)
+            for i in range(n_other):
+                recs[i] = dict(recs[i], served_model='other/model')
+            return recs
+        self.assertTrue(
+            harness.evaluate_gates(stage1(3), _pool(20))['G0'])
+        self.assertFalse(
+            harness.evaluate_gates(stage1(4), _pool(20))['G0'])
+
+    def test_served_model_prefix_match_and_no_response_exclusion(self):
+        recs = _stage1(20)
+        for i in range(20):
+            recs[i] = dict(recs[i], served_model='z-ai/glm-5.2:variant')
+        self.assertTrue(harness.evaluate_gates(recs, _pool(20))['G0'])
+        # Calls that returned no response are not in the denominator.
+        recs = _stage1(20, no_response=range(5))
+        self.assertEqual(sum(r['served_model'] is None for r in recs), 15)
+        self.assertTrue(harness.evaluate_gates(recs, _pool(20))['G0'])
+        # But a stage with no response at all cannot pass.
+        recs = [dict(r, served_model=None) for r in _stage1(20)]
+        self.assertFalse(harness.evaluate_gates(recs, _pool(20))['G0'])
+
+    def test_a1_a2_agreement_at_the_noise_floor(self):
+        self.assertTrue(
+            _gates(40, a0=range(12), a1=range(12), a2=range(9))['G2'])
+        self.assertFalse(
+            _gates(40, a0=range(12), a1=range(12), a2=range(8))['G2'])
+        # max(3, A1 // 4) = 5 for A1 = 20.
+        self.assertTrue(
+            _gates(40, a0=range(20), a1=range(20), a2=range(15))['G2'])
+        self.assertFalse(
+            _gates(40, a0=range(20), a1=range(20), a2=range(14))['G2'])
+        # A2 above A1 is the same distance.
+        self.assertTrue(
+            _gates(40, a0=range(12), a1=range(12), a2=range(15))['G2'])
+        self.assertFalse(
+            _gates(40, a0=range(12), a1=range(12), a2=range(16))['G2'])
+
+    def test_validity_and_stage2_eligibility_combine_the_gates(self):
+        both = _gates(40, a0=range(10), a1=range(10), a2=range(10))
+        self.assertTrue(both['valid'])
+        self.assertTrue(both['stage2_eligible'])
+        self.assertEqual(both['reasons'], [])
+        g1_only = _gates(40, a0=range(10), a1=range(2), a2=range(2))
+        self.assertTrue(g1_only['G1'])
+        self.assertFalse(g1_only['G3'])
+        self.assertTrue(g1_only['valid'])
+        self.assertFalse(g1_only['stage2_eligible'])
+        self.assertEqual(g1_only['reasons'], ['G3'])
+        g3_only = _gates(40, a0=range(2), a1=range(10), a2=range(10))
+        self.assertTrue(g3_only['valid'])
+        self.assertTrue(g3_only['stage2_eligible'])
+        neither = _gates(40, a0=range(1), a1=range(1), a2=range(1))
+        self.assertFalse(neither['valid'])
+        self.assertFalse(neither['stage2_eligible'])
+        bad_noise = _gates(40, a0=range(12), a1=range(12), a2=range(0))
+        self.assertFalse(bad_noise['G2'])
+        self.assertFalse(bad_noise['valid'])
+        self.assertFalse(bad_noise['stage2_eligible'])
+        self.assertEqual(set(both), {'G0', 'G1', 'G2', 'G3', 'valid',
+                                     'stage2_eligible', 'reasons'})
+
+    def test_a_missing_a2_record_is_an_incomplete_stage(self):
+        recs = [r for r in _stage1(40, a0=range(10), a1=range(10),
+                                   a2=range(10))
+                if not (r['arm'] == 'A2' and r['arc'] == _akey(7))]
+        with self.assertRaises(harness.IncompleteStageError):
+            harness.evaluate_gates(recs, _pool(40))
+        with self.assertRaises(harness.IncompleteStageError):
+            harness.evaluate_protocol(recs, _pool(40))
+
+    def test_a_duplicate_record_is_refused_not_double_counted(self):
+        recs = _stage1(40, a0=range(10), a1=range(10), a2=range(10))
+        recs.append(dict(recs[0]))
+        with self.assertRaises(harness.DuplicateRecordError):
+            harness.evaluate_gates(recs, _pool(40))
+
+    def test_a_record_for_an_arc_outside_the_pool_is_refused(self):
+        recs = _stage1(40, a0=range(10), a1=range(10), a2=range(10))
+        recs.append(_rec('stranger', 'A1', 'confidence_omitted'))
+        with self.assertRaises(ValueError):
+            harness.evaluate_gates(recs, _pool(40))
+
+
+class ClearsBoundaryTests(unittest.TestCase):
+    """The four decision criteria, each at and one off its cut."""
+
+    def _clears(self, x_arm_records, base_arm_records):
+        return harness.clears(x_arm_records + base_arm_records, 'X', 'BASE')
+
+    def _pair(self, n, base_omitted, x_omitted, x_unreached=(), x_confs=None,
+              base_confs=None):
+        base = _arm_records('BASE', n, omitted=set(base_omitted),
+                            confs=base_confs)
+        x = _arm_records('X', n, omitted=set(x_omitted),
+                         unreached=set(x_unreached), confs=x_confs)
+        return self._clears(x, base)
+
+    def test_half_the_baseline_rate_qualifies_and_one_more_does_not(self):
+        at_half = self._pair(40, range(10), range(5))
+        self.assertTrue(at_half['crit_a'])
+        over_half = self._pair(40, range(10), range(6))
+        self.assertFalse(over_half['crit_a'])
+
+    def test_half_rate_is_a_cross_multiplication_across_unequal_reach(self):
+        # 4 of 36 against 10 of 40: 2*4*40 = 320 <= 10*36 = 360 holds.
+        res = self._pair(40, range(10), range(4), x_unreached=range(30, 34))
+        self.assertTrue(res['crit_a'])
+        # 5 of 36: 2*5*40 = 400 > 360 fails.
+        res = self._pair(40, range(10), range(5), x_unreached=range(30, 34))
+        self.assertFalse(res['crit_a'])
+
+    def test_mcnemar_five_against_zero_clears_and_four_does_not(self):
+        res = self._pair(40, range(5), ())
+        self.assertEqual((res['b'], res['c']), (5, 0))
+        self.assertEqual(res['p'], Fraction(1, 32))
+        self.assertTrue(res['crit_b'])
+        res = self._pair(40, range(4), ())
+        self.assertEqual((res['b'], res['c']), (4, 0))
+        self.assertEqual(res['p'], Fraction(1, 16))
+        self.assertFalse(res['crit_b'])
+
+    def test_mcnemar_pairs_only_arcs_that_reached_in_both_arms(self):
+        # Arcs 0-4 omitted in base; X did not reach on arcs 0 and 1.
+        res = self._pair(40, range(5), (), x_unreached={0, 1})
+        self.assertEqual((res['b'], res['c']), (3, 0))
+        self.assertFalse(res['crit_b'])
+
+    def test_mcnemar_counts_candidate_only_omissions(self):
+        res = self._pair(40, range(8), {0, 1, 2, 20})
+        self.assertEqual((res['b'], res['c']), (5, 1))
+
+    def test_p_is_compared_strictly_against_one_twentieth(self):
+        # b=5, c=0 is 1/32 < 1/20; b=4, c=0 is 1/16 > 1/20. b=6,c=1 is
+        # (1+7)/128 = 1/16, b=7,c=1 is (1+8)/256 = 9/256 < 1/20.
+        self.assertTrue(harness.mcnemar_one_sided_p(7, 1) < Fraction(1, 20))
+        self.assertFalse(harness.mcnemar_one_sided_p(6, 1) < Fraction(1, 20))
+
+    def test_p_equal_to_alpha_does_not_clear(self):
+        # No (b, c) has p exactly 1/20 (5 does not divide 2**n), so strictness
+        # is pinned by moving ALPHA onto a reachable p instead.
+        from unittest import mock
+        with mock.patch.object(harness, 'ALPHA', Fraction(1, 32)):
+            res = self._pair(40, range(5), ())
+            self.assertEqual(res['p'], Fraction(1, 32))
+            self.assertFalse(res['crit_b'])
+        with mock.patch.object(harness, 'ALPHA', Fraction(1, 31)):
+            self.assertTrue(self._pair(40, range(5), ())['crit_b'])
+
+    def test_reach_guard_at_the_cut(self):
+        # reached_base = 40: tolerance max(3, 4) = 4, so 36 passes, 35 fails.
+        ok = self._pair(40, range(10), (), x_unreached=range(30, 34))
+        self.assertTrue(ok['crit_c'])
+        bad = self._pair(40, range(10), (), x_unreached=range(30, 35))
+        self.assertFalse(bad['crit_c'])
+        # reached_base = 20: tolerance max(3, 2) = 3, so 17 passes, 16 fails.
+        ok = self._pair(20, range(10), (), x_unreached=range(17, 20))
+        self.assertTrue(ok['crit_c'])
+        bad = self._pair(20, range(10), (), x_unreached=range(16, 20))
+        self.assertFalse(bad['crit_c'])
+
+    def test_calibration_guard_at_four_fifths(self):
+        eight_of_ten = [0.6] * 8 + [0.7, 0.8]
+        nine_of_ten = [0.6] * 9 + [0.7]
+        base_varied = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]
+        res = self._pair(10, range(3), (), x_confs=eight_of_ten,
+                         base_confs=base_varied)
+        self.assertTrue(res['crit_d'])
+        res = self._pair(10, range(3), (), x_confs=nine_of_ten,
+                         base_confs=base_varied)
+        self.assertFalse(res['crit_d'])
+
+    def test_calibration_guard_is_waived_when_the_baseline_is_just_as_flat(self):
+        flat = [0.5] * 10
+        res = self._pair(10, range(3), (), x_confs=[0.6] * 10, base_confs=flat)
+        self.assertTrue(res['crit_d'])
+        mostly_flat = [0.5] * 9 + [0.6]
+        res = self._pair(10, range(3), (), x_confs=[0.6] * 10,
+                         base_confs=mostly_flat)
+        self.assertTrue(res['crit_d'])
+
+    def test_calibration_guard_passes_with_no_supplied_confidence(self):
+        res = self._pair(10, range(3), range(10))
+        self.assertTrue(res['crit_d'])
+
+    def test_a_constant_filler_confidence_never_clears(self):
+        # The variant "wins" on omission by supplying 0.5 every time.
+        res = self._pair(40, range(10), (), x_confs=[0.5] * 40)
+        self.assertTrue(res['crit_a'] and res['crit_b'] and res['crit_c'])
+        self.assertFalse(res['crit_d'])
+        self.assertFalse(res['clears'])
+
+    def test_clears_needs_all_four(self):
+        res = self._pair(40, range(10), range(2))
+        self.assertTrue(res['clears'])
+        self.assertTrue(all(res[k] for k in
+                            ('crit_a', 'crit_b', 'crit_c', 'crit_d')))
+
+
+def _full_records(n, a0, a1, a2, candidates=None, confs=None):
+    """Stage 1 plus all four candidate arms. `candidates` maps an arm to the
+    set of arcs it omits (default: the same as A1)."""
+    recs = _stage1(n, a0, a1, a2)
+    for arm in harness.CANDIDATE_ARMS:
+        omitted = (candidates or {}).get(arm, set(a1))
+        recs += _arm_records(arm, n, omitted=set(omitted), stage=2,
+                             confs=(confs or {}).get(arm))
+    return recs
+
+
+class DecisionRuleTests(unittest.TestCase):
+    """`evaluate_protocol` returns one of four outcomes, as a function of the
+    data."""
+
+    N = 40
+
+    def _protocol(self, **kw):
+        recs = _full_records(self.N, **kw)
+        return harness.evaluate_protocol(recs, _pool(self.N))
+
+    def test_a_candidate_that_clears_against_a1_wins(self):
+        report = self._protocol(
+            a0=range(10), a1=range(10), a2=range(10),
+            candidates={'B': set(range(3))})
+        self.assertEqual(report['outcome'], 'CLEARED — arm B')
+        self.assertEqual(report['winner'], 'B')
+
+    def test_g1_only_and_a1_clears_against_a0_is_already_deployed(self):
+        report = harness.evaluate_protocol(
+            _stage1(self.N, a0=range(12), a1=range(2), a2=range(2)),
+            _pool(self.N))
+        self.assertFalse(report['gates']['G3'])
+        self.assertTrue(report['gates']['G1'])
+        self.assertEqual(report['outcome'], 'CLEARED — arm A1, already deployed')
+        self.assertEqual(report['winner'], 'A1')
+        self.assertEqual(report['comparisons'], {})
+
+    def test_g1_only_and_a1_not_better_than_a0_is_not_cleared(self):
+        report = harness.evaluate_protocol(
+            _stage1(self.N, a0=range(5), a1=range(3), a2=range(3)),
+            _pool(self.N))
+        self.assertFalse(report['gates']['G3'])
+        self.assertTrue(report['gates']['G1'])
+        self.assertEqual(report['outcome'], 'NOT CLEARED')
+        self.assertIsNone(report['winner'])
+
+    def test_ties_go_to_the_fewest_edits(self):
+        report = self._protocol(
+            a0=range(10), a1=range(10), a2=range(10),
+            candidates={'B': {0, 1, 2}, 'D': {3, 4, 5}})
+        self.assertEqual(report['winner'], 'B')
+        self.assertEqual(report['outcome'], 'CLEARED — arm B')
+
+    def test_ties_on_rate_and_edits_go_to_the_declared_order(self):
+        report = self._protocol(
+            a0=range(10), a1=range(10), a2=range(10),
+            candidates={'C': {0, 1, 2}, 'B': {3, 4, 5}})
+        self.assertEqual(report['winner'], 'B')
+
+    def test_the_lowest_rate_beats_fewer_edits(self):
+        report = self._protocol(
+            a0=range(10), a1=range(10), a2=range(10),
+            candidates={'B': {0, 1, 2}, 'D': {0, 1}})
+        self.assertEqual(report['winner'], 'D')
+
+    def test_rate_ties_compare_exactly_across_unequal_reach(self):
+        # E: 3 of 40; C: 3 of 40 => same; make C reach 39 (3/39 < 3/40? no,
+        # 3/39 > 3/40) so E, with the lower rate, wins despite more edits.
+        recs = _full_records(
+            self.N, a0=range(10), a1=range(10), a2=range(10),
+            candidates={'C': {0, 1, 2}, 'E': {0, 1, 2}})
+        recs = [dict(r, outcome='abstain_null', has_key=False, conf_value=None,
+                     valued=False, tokens=[], value_kind='absent',
+                     mechanism='none', completion_tokens=None)
+                if (r['arm'] == 'C' and r['arc'] == _akey(39)) else r
+                for r in recs]
+        report = harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertEqual(report['winner'], 'E')
+
+    def test_a_gate_failure_is_not_evaluated(self):
+        report = harness.evaluate_protocol(
+            _stage1(self.N, a0=range(1), a1=range(1), a2=range(1)),
+            _pool(self.N))
+        self.assertEqual(
+            report['outcome'],
+            'NOT EVALUATED — harness did not reproduce the omission')
+        self.assertIsNone(report['winner'])
+        self.assertFalse(report['gates']['valid'])
+
+    def test_g3_with_nothing_clearing_is_not_cleared(self):
+        report = self._protocol(a0=range(10), a1=range(10), a2=range(10))
+        self.assertEqual(report['outcome'], 'NOT CLEARED')
+        self.assertIsNone(report['winner'])
+        for arm in harness.CANDIDATE_ARMS:
+            self.assertFalse(report['comparisons'][arm]['clears'])
+
+    def test_an_eligible_stage_with_a_missing_candidate_record_is_incomplete(self):
+        recs = [r for r in _full_records(
+            self.N, a0=range(10), a1=range(10), a2=range(10))
+            if not (r['arm'] == 'D' and r['arc'] == _akey(3))]
+        with self.assertRaises(harness.IncompleteStageError):
+            harness.evaluate_protocol(recs, _pool(self.N))
+
+    def test_candidate_records_are_ignored_when_stage_two_is_not_eligible(self):
+        recs = _full_records(self.N, a0=range(1), a1=range(1), a2=range(1))
+        report = harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertEqual(report['comparisons'], {})
+        self.assertNotIn('B', report['arms'])
+
+    def test_a_filler_confidence_variant_is_disqualified_not_reported_as_a_fix(self):
+        report = self._protocol(
+            a0=range(10), a1=range(10), a2=range(10),
+            candidates={'B': set()}, confs={'B': [0.5] * self.N})
+        self.assertFalse(report['comparisons']['B']['criteria']['d'])
+        self.assertEqual(report['outcome'], 'NOT CLEARED')
+
+    def test_the_outcome_is_always_one_of_four_strings(self):
+        allowed = {
+            'CLEARED — arm B', 'CLEARED — arm C', 'CLEARED — arm D',
+            'CLEARED — arm E', 'CLEARED — arm A1, already deployed',
+            'NOT CLEARED',
+            'NOT EVALUATED — harness did not reproduce the omission'}
+        for kw in (
+                dict(a0=range(10), a1=range(10), a2=range(10)),
+                dict(a0=range(10), a1=range(10), a2=range(10),
+                     candidates={'E': {0}}),
+                dict(a0=range(1), a1=range(1), a2=range(1))):
+            self.assertIn(self._protocol(**kw)['outcome'], allowed)
+        self.assertEqual(harness.OUTCOME_NOT_RUN, 'NOT RUN — spend declined')
+
+    def test_report_shape_and_exact_values(self):
+        report = self._protocol(
+            a0=range(10), a1=range(10), a2=range(10),
+            candidates={'B': set(range(3))})
+        self.assertEqual(set(report), {
+            'arms', 'gates', 'comparisons', 'diagnostic_a0_a1', 'm0',
+            'calibration', 'outcome', 'winner'})
+        self.assertEqual(report['arms']['A1']['rate'], '10/40')
+        self.assertEqual(report['arms']['B']['rate'], '3/40')
+        self.assertIsInstance(report['arms']['A1']['rate_exact'], Fraction)
+        self.assertEqual(report['arms']['A1']['rate_exact'], Fraction(1, 4))
+        lo, hi = report['arms']['A1']['wilson']
+        self.assertLess(lo, 0.25)
+        self.assertGreater(hi, 0.25)
+        cmp_b = report['comparisons']['B']
+        self.assertIsInstance(cmp_b['p_exact'], Fraction)
+        self.assertEqual(cmp_b['p'], f"{cmp_b['p_exact'].numerator}/"
+                                     f"{cmp_b['p_exact'].denominator}")
+        self.assertEqual((cmp_b['b'], cmp_b['c']), (7, 0))
+        self.assertEqual(set(cmp_b['criteria']), {'a', 'b', 'c', 'd'})
+        self.assertIsInstance(cmp_b['p_float'], float)
+        self.assertIsInstance(
+            report['calibration']['A1']['modal_share_exact'], (Fraction, type(None)))
+        diag = report['diagnostic_a0_a1']
+        self.assertEqual((diag['b'], diag['c']), (0, 0))
+        self.assertEqual(diag['p'], '1/1')
+
+    def test_json_form_renders_fractions_as_k_over_n_and_holds_no_arc_keys(self):
+        report = self._protocol(
+            a0=range(10), a1=range(10), a2=range(10),
+            candidates={'B': set(range(3))})
+        blob = harness.report_to_json(report)
+        data = json.loads(blob)
+        self.assertEqual(data['arms']['B']['rate'], '3/40')
+        self.assertEqual(data['arms']['B']['rate_exact'], '3/40')
+        self.assertRegex(data['comparisons']['B']['p'], r'^\d+/\d+$')
+        self.assertRegex(data['comparisons']['B']['p_exact'], r'^\d+/\d+$')
+        self.assertNotIn('arc0', blob)
+
+    def test_m0_aggregates_over_omitted_responses_only(self):
+        recs = _full_records(self.N, a0=range(10), a1=range(10), a2=range(10))
+        recs = [dict(r, value_kind='null', conf_like_key=True,
+                     conf_in_text=True, finish_reason='length',
+                     completion_tokens=100)
+                if r['outcome'] == 'confidence_omitted' else r for r in recs]
+        report = harness.evaluate_protocol(recs, _pool(self.N))
+        m0 = report['m0']
+        self.assertEqual(m0['value_kind'], {'null': m0['n']})
+        self.assertEqual(m0['conf_like_key'], m0['n'])
+        self.assertEqual(m0['conf_in_text'], m0['n'])
+        self.assertEqual(m0['finish_reason'], {'length': m0['n']})
+        self.assertEqual(m0['median_completion_tokens'], 100)
+        self.assertGreater(m0['n'], 0)
+
+    def test_no_float_reaches_a_decision_cut(self):
+        # A source guard: the gate and decision functions are written in ints
+        # and Fractions. Display floats and the Wilson interval live in
+        # reporting helpers outside these functions.
+        tree = ast.parse(HARNESS_PATH.read_text())
+        for name in ('clears', 'evaluate_gates', 'evaluate_protocol',
+                     'mcnemar_one_sided_p', 'modal_share', '_arm_sets',
+                     '_gate_values'):
+            func = _function_def(tree, name)
+            self.assertIsNotNone(func, name)
+            for node in ast.walk(func):
+                where = f'{name}: line {getattr(node, "lineno", "?")}'
+                if isinstance(node, ast.Constant):
+                    self.assertNotIsInstance(node.value, float, where)
+                if isinstance(node, ast.BinOp):
+                    self.assertNotIsInstance(node.op, ast.Div, where)
+                if isinstance(node, ast.Call) and isinstance(
+                        node.func, ast.Name):
+                    self.assertNotEqual(node.func.id, 'float', where)
+
+
+class ProtocolConstantsTests(unittest.TestCase):
+    def test_pre_registered_thresholds(self):
+        self.assertEqual(harness.VALIDITY_MIN_RATE, Fraction(1, 10))
+        self.assertEqual(harness.VALIDITY_MIN_REACHED, 30)
+        self.assertEqual(harness.SERVED_MODEL_MIN_SHARE, Fraction(19, 20))
+        self.assertEqual(harness.NOISE_FLOOR_MIN, 3)
+        self.assertEqual(harness.NOISE_FLOOR_DIVISOR, 4)
+        self.assertEqual(harness.DECISION_MAX_RATIO, Fraction(1, 2))
+        self.assertEqual(harness.ALPHA, Fraction(1, 20))
+        self.assertEqual(harness.REACH_TOLERANCE_MIN, 3)
+        self.assertEqual(harness.REACH_TOLERANCE_DIVISOR, 10)
+        self.assertEqual(harness.CALIBRATION_MODAL_MAX, Fraction(4, 5))
+        self.assertEqual(harness.DEFAULT_POOL_CAP, 300)
+        self.assertEqual(harness.GATE_ARMS, ('A0', 'A1', 'A2'))
+        self.assertEqual(harness.CANDIDATE_ARMS, ('B', 'C', 'D', 'E'))
+        self.assertEqual(harness.OUTCOME_CLEARED_PREFIX, 'CLEARED — arm ')
+        self.assertEqual(harness.OUTCOME_CLEARED_A1,
+                         'CLEARED — arm A1, already deployed')
+        self.assertEqual(harness.OUTCOME_NOT_CLEARED, 'NOT CLEARED')
+        self.assertEqual(
+            harness.OUTCOME_NOT_EVALUATED,
+            'NOT EVALUATED — harness did not reproduce the omission')
 
 
 if __name__ == '__main__':
