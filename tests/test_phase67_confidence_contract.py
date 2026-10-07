@@ -2862,5 +2862,60 @@ class PreRegistrationShapeTests(unittest.TestCase):
         self.assertNotIn('.pem', self.text)
 
 
+class ResultsShapeTests(unittest.TestCase):
+    """Plan 04: the verdict block of the record keeps its shape. These check
+    shape, never which outcome the experiment produced."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RECORD_PATH.read_text(encoding='utf-8')
+        cls.lines = cls.text.splitlines()
+        cls.readme = (ROOT / 'docs' / 'README.md').read_text(encoding='utf-8')
+
+    def _values(self, label):
+        prefix = '**%s:** ' % label
+        return [line[len(prefix):] for line in self.lines
+                if line.startswith('**%s:**' % label)]
+
+    def test_each_status_line_appears_exactly_once(self):
+        for label in ('TRU-03 status', 'Validity gate',
+                      'Decision rule outcome'):
+            with self.subTest(label=label):
+                self.assertEqual(len(self._values(label)), 1)
+
+    def test_the_outcome_is_drawn_from_the_harness_vocabulary(self):
+        [outcome] = self._values('Decision rule outcome')
+        allowed = {harness.OUTCOME_CLEARED_A1, harness.OUTCOME_NOT_CLEARED,
+                   harness.OUTCOME_NOT_EVALUATED, harness.OUTCOME_NOT_RUN}
+        allowed.update(harness.OUTCOME_CLEARED_PREFIX + arm
+                       for arm in harness.CANDIDATE_ARMS)
+        self.assertIn(outcome, allowed)
+
+    def test_no_verdict_cell_is_still_a_placeholder(self):
+        for line in self.lines:
+            if re.match(r'^\|\s*[0-9]+\s*\|', line):
+                cells = [c.strip() for c in line.strip().strip('|').split('|')]
+                if len(cells) == 4 and cells[2] in (
+                        'TRU-03 / SC1', 'TRU-03 / SC2', 'SC3'):
+                    self.assertFalse(cells[3].startswith('PENDING'), line)
+
+    def test_the_closing_sections_are_present(self):
+        self.assertIn('## What this does not establish', self.lines)
+        self.assertIn('## For Phase 70', self.lines)
+
+    def test_exactly_one_of_mechanism_or_limit(self):
+        n = (self.lines.count('## The mechanism')
+             + self.lines.count('## The documented limit'))
+        self.assertEqual(n, 1)
+
+    def test_results_is_present_unless_the_run_was_declined(self):
+        [outcome] = self._values('Decision rule outcome')
+        if outcome != harness.OUTCOME_NOT_RUN:
+            self.assertIn('## Results', self.lines)
+
+    def test_the_index_no_longer_says_results_are_pending(self):
+        self.assertNotIn('results pending', self.readme)
+
+
 if __name__ == '__main__':
     unittest.main()

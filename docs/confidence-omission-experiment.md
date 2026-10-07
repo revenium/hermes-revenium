@@ -14,19 +14,26 @@ missing `confidence` is never defaulted, inferred or waved through.
 The record measures prompt-level changes against the omission rather than
 mining logs again. It opens with the baseline, preserved from logs that were
 about to rotate away. The forward proof on the reference host (TRU-07) is not
-this phase's. It belongs to Phase 70 and runs after deployment. As of this
-commit, nothing under `skills/` has changed: this record and the tests that
-guard the code it must not touch are the only additions.
+this phase's. It belongs to Phase 70 and runs after deployment. The replay ran, and its pre-registered rule computed
+`CLEARED — arm A1, already deployed`: today's prompt omits `confidence` on 0 of
+300 replayed arcs where the prompt without the role list omitted it on 133 of
+300, so no further prompt change ships. Nothing under `skills/` changed: this
+record and the tests that guard the code it must not touch are the only
+additions.
 
 ## Verdict, up front — every criterion, in one table
 
 | # | Criterion | Source | Verdict |
 |---|-----------|--------|---------|
-| 1 | At least one prompt-level change to the evaluator contract is tried and measured against the omission-rate baseline below | TRU-03 / SC1 | PENDING — not yet measured |
-| 2 | Either the omission rate measurably drops and the mechanism is explained here, or this record states plainly that no prompt change tried moves it, and why | TRU-03 / SC2 | PENDING — not yet measured |
-| 3 | No change to `LABEL_RE`, `TRIVIAL_BLOCKLIST`, the reportability gate or evidence-class promotion | SC3 | PENDING — not yet measured |
+| 1 | At least one prompt-level change to the evaluator contract is tried and measured against the omission-rate baseline below | TRU-03 / SC1 | CONFIRMED — the deployed prompt (PR #140) was measured against the prompt without its role list: 133 of 300 omitted under the second, 0 of 300 under the first |
+| 2 | Either the omission rate measurably drops and the mechanism is explained here, or this record states plainly that no prompt change tried moves it, and why | TRU-03 / SC2 | CONFIRMED — the rate dropped and the mechanism is explained (as a hypothesis; see The mechanism) |
+| 3 | No change to `LABEL_RE`, `TRIVIAL_BLOCKLIST`, the reportability gate or evidence-class promotion | SC3 | CONFIRMED — the contract pin tests pass and nothing under `skills/` differs from the phase start |
 
-**TRU-03 status:** baseline preserved; the experiment itself has not run.
+**TRU-03 status:** satisfied — today's prompt (PR #140, already deployed) lowered the conditional omission rate on z-ai/glm-5.2 from 133/300, under the prompt the glm-5.2-era arcs saw, to 0/300 under the pre-registered rule; no further prompt change ships.
+
+**Validity gate:** PASSED
+
+**Decision rule outcome:** CLEARED — arm A1, already deployed
 
 ## The baseline
 
@@ -376,3 +383,224 @@ already valued or left empty.
   one recorded call, whose outcome passed the confidence gate.
 - **Spend.** The calls ran on the host operator's provider account, after a
   human re-confirmed the spend at the point of spend.
+
+## Results
+
+Counts only. Everything below is transcribed from the report the harness
+computed. The protocol was committed before the first call (`d333d20`,
+`2026-10-06T22:59:05-04:00`), and the first call ran at
+`2026-10-07T15:14:42Z`, the day after.
+
+The replay made 901 calls: one smoke call and 900 stage-1 calls (A0, A1 and A2
+on each of 300 arcs). Every response was served by `z-ai/glm-5.2`, and every
+finish reason was `stop`. There were no transport errors and no retries. The
+cap was 2,311 calls. Stage 2 did not run, for the reason given under
+"Validity gate" below.
+
+### Per arm
+
+| Arm | Calls | Reached the check | Omitted | Omission rate (Wilson 95%) | Valued | Other outcomes |
+|-----|------:|------------------:|--------:|---------------------------:|-------:|---------------:|
+| A0 | 300 | 300 | 133 | 44.3% (38.8% to 50.0%) | 0 | 0 |
+| A1 | 300 | 300 | 0 | 0.0% (0.0% to 1.3%) | 300 | 0 |
+| A2 | 300 | 300 | 0 | 0.0% (0.0% to 1.3%) | 300 | 0 |
+
+A0 shows 0 valued because its configuration removes the rate card. With no
+card, the valuation step cannot value any arc, so the `Valued` column of the A0
+row says nothing about the model. Its 167 arcs that passed the confidence check
+are not valued by construction. "Other outcomes" counts invalid, timed-out,
+null, newly-enabled-work, mechanism-rejected and hours-or-rate-rejected
+responses. All three arms have none.
+
+### Validity gate
+
+| Gate | Holds | Reading |
+|------|:-----:|---------|
+| G0 | yes | The served model was `z-ai/glm-5.2` on every stage-1 response. |
+| G1 | yes | A0 reached the check on 300 arcs and omitted on 133 (44.3%). |
+| G2 | yes | A1 and A2 differ in omissions by 0, which is within max(3, a quarter of A1's omissions). |
+| G3 | no | A1 reached the check on 300 arcs and omitted on 0, below the 10% needed. |
+
+The harness is valid: G0 and G2 hold, and G1 holds. Stage 2 needs G3, because a
+candidate arm can only be shown to beat a prompt that reproduces the omission.
+A1 does not, so stage 2 was not eligible and no candidate arm (B, C, D or E)
+was called. Running one anyway would have been a post-hoc analysis outside the
+pre-registered protocol.
+
+### Comparisons
+
+| Comparison | b | c | Exact one-sided p | (a) at most half | (b) p < 0.05 | (c) reach | (d) calibration | Clears |
+|------------|--:|--:|------------------:|:----------------:|:------------:|:---------:|:---------------:|:------:|
+| A1 versus A0 (diagnostic) | 133 | 0 | 2^-133 (about 9.2e-41) | yes | yes | yes | yes | yes |
+| B, C, D, E versus A1 | not run | not run | not run | not run | not run | not run | not run | not run |
+
+Here b counts the arcs that omitted under A0 and reached the check cleanly
+under A1, and c counts the arcs the other way round. The paired test covers all
+300 arcs, because every arc reached the check under both arms.
+
+### Diagnostics over omitted responses
+
+The only omitted responses belong to A0 (A1 and A2 have none), so the table
+covers 133 responses.
+
+| Diagnostic | A0 (133 omitted) |
+|------------|-----------------:|
+| `confidence` key absent | 133 |
+| Explicit null | 0 |
+| Present but not a number | 0 |
+| Differently spelled confidence-like key | 0 |
+| The word `confidence` in the text outside the object | 1 |
+| Finish reason `stop` | 133 |
+| Median completion tokens | 329 |
+
+### Calibration of the supplied confidence
+
+| Arm | n | Distinct values | Modal share | Mean |
+|-----|--:|----------------:|------------:|-----:|
+| A0 | 167 | 7 | 137/167 (82.0%) | 0.690 |
+| A1 | 300 | 7 | 181/300 (60.3%) | 0.661 |
+| A2 | 300 | 6 | 190/300 (63.3%) | 0.669 |
+
+### Fence and pre-registration
+
+The side-effect fence exited 0 after the smoke call and after stage 1. It was
+not needed after stage 2, which did not run. The directory names under the
+host's plugin root matched the list taken at the census.
+
+## The mechanism
+
+**What the data isolates.** A0 and A1 differ by the approved-role block, which
+the rate card's presence switches on: A0 is today's evaluator prompt with the
+card removed from the configuration, so the block is absent (its mean prompt is
+8,738 characters, against 10,582 for A1), and A1 is today's prompt as PR #140
+deployed it. On the same 300 arcs, at temperature 0, A0 omitted
+`confidence` on 133 and A1 on none. Not one arc went the other way (c is 0).
+Two runs of A1 agree exactly (A2 also omits on 0), so the drop is not
+run-to-run noise.
+
+**The hypothesis, stated as one.** PR #140 added the role-list instruction. The
+data show that the prompt which carries that instruction does not omit and the
+prompt without it does. The data do not show which part of the change does the
+work, because the replay has no arm that adds only part of the role block. Two
+readings fit and neither is tested here. The first is that the role block
+changes where the closing field list sits relative to the rest of the contract,
+so the model reads `confidence` as part of the common fields. The second is that
+naming a closed vocabulary for the role makes the model treat the response as a
+structured record with every field to fill. Candidate arms B and C were built around
+placement and D and E around wording, and none ran, because A1 gave them no
+omission to beat.
+
+**What the diagnostics show about the omissions.** In all 133 omitted A0
+responses the `confidence` key was absent. It was never null, never a non-number
+and never a renamed key, and every response finished normally (`stop`). So the
+model dropped the field. It did not mangle it, hit the output cap, or put it
+under another name. The median completion length of omitted responses (329
+tokens) is close to that of A0 overall, so they are not short or truncated
+answers. In one response the word appeared in the surrounding text, which is
+too few to read anything into.
+
+**Known Risk 1, checked for the winner and its baseline.** Under A1, 300 of 300
+arcs passed the confidence check and all 300 were valued, so no arc that passed
+the check then abstained on a role miss. That is consistent with what PR #140
+set out to do: it constrains the role to the operator's list. A0 cannot be
+compared on this, because its valued count is zero by construction (see the
+note under the per-arm table). So the replay shows no role-miss abstention under
+A1 on this pool, and says nothing about how many a host with a different card
+or a different transcript mix would see.
+
+**What changes.** Nothing ships. The deployed prompt is the one that cleared,
+and no candidate arm was run. Plan 05's ship condition, a `CLEARED — arm`
+outcome naming B, C, D or E, is not met.
+
+## What this does not establish
+
+- **One host and one replayed model.** The pool is 300 arcs from one reference
+  host, all replayed through `z-ai/glm-5.2`. Nothing here says how another model
+  behaves on this prompt.
+- **A single temperature-0 pass per arm, plus A2.** Each arm was called once per
+  arc. A2 is the only repeat, and it agrees exactly with A1 (0 and 0). That
+  shows the replay is stable on this pool, not that every re-run would be.
+- **Possible routing variance on OpenRouter.** The served model name matched on
+  every response, but a provider behind the same name could still differ from
+  the one that produced the original omissions.
+- **Transcripts read today, not at evaluation time.** The one arc whose session
+  kept receiving messages was excluded by the drift rule. A replay still reads
+  the stored transcript as it is now, which can differ from what the evaluator
+  saw.
+- **The replay rate is not the log rate.** A0 omitted on 44.3% of its arcs. The
+  baseline from the retained logs was 21.6% (22 of 102) for `z-ai/glm-5.2`.
+  The populations differ (the replay pool is the 300 most recent eligible arcs
+  and the logs cover only the later part of that model's era), and this record
+  does not explain the gap. The comparison that matters, A1 against A0, is
+  paired and does not depend on it.
+- **The pool is one mechanism.** Every replayed response carried the same
+  `economic_mechanism` label. The result says nothing about a response with a
+  different mechanism, where the shape of the expected fields differs.
+- **Not the forward proof.** TRU-07 is Phase 70's. This record shows a prompt
+  that does not omit on replayed glm-5.2-era arcs, not that the reference host
+  stops losing assessments to a missing `confidence`.
+- **Nothing about the current model beyond its baseline count.** At snapshot time the
+  host served `z-ai/glm-5.3-flash`, which omitted on 0 of 25 arcs in the retained logs. A
+  zero there is where it started, and it cannot show a prompt change working.
+- **Nothing about Job Value fill rate.** A job can pass the confidence check and
+  still abstain on a role, and a replayed arc's `valued` flag is not what a
+  deployed host's Job Value shows.
+- **Nothing about the other agent that shares the tenant**, or about
+  tenant-level aggregates.
+- **The reasoning-inheritance assumption.** The host sets a medium reasoning
+  effort, and the replay assumes `call_llm` applies it the same way in this
+  process as the gateway does. If it does not, the replay measured a slightly
+  different model configuration.
+
+## For Phase 70
+
+TRU-07 is a forward measurement on the reference host. This is a read-only
+recipe for it. It writes nothing and calls nothing.
+
+**Count three things per day.** From a stated UTC start (the day of the
+deployment you are measuring from; no deployment comes out of this phase), count
+the lines in `agent.log*` that contain each of these, and read the whole rotation
+set oldest first:
+
+- `rejected assessment, confidence outside [0,1]` (the instrument line: a
+  confidence omission);
+- `outcome evaluated job=` (a valued arc);
+- `valuation implementation` (the role-miss and invalid-value lines).
+
+For example, per file: `grep -c 'confidence outside \[0,1\]' agent.log*`,
+then the same with each of the other two strings, tallied by the date stamp at
+the start of each line.
+
+**Slice by each line and never use Job Value fill rate.** Fill rate mixes two
+causes. An arc rescued from the confidence gate can still abstain on a role the
+card does not list, so the fill rate can stay flat while the omission count
+falls. Each cause has its own line, and the instrument line is the one that
+measures this requirement.
+
+**On the current model, read zero as no-regression.** The host serves a model
+that omitted on 0 of 25 arcs before any change. A zero count of the instrument
+line is a report of "no regression", never of "improvement". A forward
+measurement cannot show a drop from zero.
+
+**If the host's configured model changes, re-run the experiment.** The harness
+and the commands are unchanged. Run them with the Hermes venv's Python and an
+`--out-dir` outside `~/.hermes` (for example `~/phase67-replay/run`), in this
+order:
+
+1. `confidence_replay_harness.py census --out-dir <dir> --hermes-home ~/.hermes`
+2. `confidence_replay_harness.py fence --snapshot --out-dir <dir> --hermes-home ~/.hermes`,
+   then record the run start with `date -u +%s`
+3. `confidence_replay_harness.py smoke --out-dir <dir> --hermes-home ~/.hermes`
+4. `confidence_replay_harness.py fence --check --since-epoch <start> --out-dir <dir> --hermes-home ~/.hermes`
+5. `confidence_replay_harness.py run --stage gate --max-calls <cap> --concurrency 4 --out-dir <dir> --hermes-home ~/.hermes`
+6. `confidence_replay_harness.py report --out-dir <dir> --hermes-home ~/.hermes`
+7. `confidence_replay_harness.py run --stage candidates --max-calls <cap> --concurrency 4 --out-dir <dir> --hermes-home ~/.hermes`,
+   only when the report says stage 2 is eligible, then `report` again
+8. `confidence_replay_harness.py fence --check --since-epoch <start> --out-dir <dir> --hermes-home ~/.hermes`
+
+Take the cap from the formula under "Spend cap", and ask the operator before
+spending on their provider account. Delete the pool file (`pool.json`, the only
+file that holds job names) from the run directory when finished.
+
+**Metering is forward-only.** A change affects arcs evaluated after it ships.
+Never re-ship or revalue past jobs.
