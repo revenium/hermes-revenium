@@ -697,6 +697,12 @@ class RepositoryTests(unittest.TestCase):
             # and the shape-only guard over docs/upgrading.md's closing
             # section. Same pin rationale as its siblings above.
             ROOT / 'tests' / 'test_phase60_feature_off_closeout.py',
+            # Phase 67 (TRU-03) -- the confidence contract guards: the
+            # instrument pin (the exact log string Phase 70 greps), the AST
+            # fence against every silent workaround for a missing
+            # `confidence`, and the SC3 pins against the phase-start commit.
+            # Deleting this module must turn the suite red.
+            ROOT / 'tests' / 'test_phase67_confidence_contract.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')
