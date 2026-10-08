@@ -713,6 +713,17 @@ class IncompleteStageError(Exception):
     stage it only partly has."""
 
 
+class ServedModelError(Exception):
+    """A stage-2 arm (A1 or a candidate) has a served-model share below
+    SERVED_MODEL_MIN_SHARE. Not a ValueError, so the callers' existing except
+    tuples never swallow it. `arm` names the arm that fell short."""
+
+    def __init__(self, arm):
+        super().__init__(
+            f"arm {arm}: served-model share below the required share")
+        self.arm = arm
+
+
 class DuplicateRecordError(ValueError):
     """More than one record for one (arc, arm). Counting both would shape the
     measurement, so the evaluator refuses."""
@@ -756,17 +767,28 @@ def _arm_sets(view):
     return reached, omitted
 
 
-def _gate_values(views):
+def _served_model_holds(records, expected_model):
+    """Whether the calls that got a response were served by `expected_model`
+    at SERVED_MODEL_MIN_SHARE or better. A match is a prefix match, so a
+    variant suffix still counts. Calls with no response are not in the
+    denominator, and no response at all cannot pass. G0 and the per-arm
+    stage-2 check both come through here so they cannot drift apart."""
+    responded = [rec for rec in records
+                 if rec.get("served_model") is not None]
+    matched = sum(
+        1 for rec in responded
+        if rec["served_model"].startswith(expected_model))
+    return (len(responded) > 0
+            and Fraction(matched, len(responded)) >= SERVED_MODEL_MIN_SHARE)
+
+
+def _gate_values(views, expected_model=REPLAY_MODEL):
     r0, o0 = _arm_sets(views["A0"])
     r1, o1 = _arm_sets(views["A1"])
     r2, o2 = _arm_sets(views["A2"])
-    responded = [
-        rec for arm in GATE_ARMS for rec in views[arm].values()
-        if rec.get("served_model") is not None]
-    matched = sum(
-        1 for rec in responded if rec["served_model"].startswith(REPLAY_MODEL))
-    g0 = (len(responded) > 0
-          and Fraction(matched, len(responded)) >= SERVED_MODEL_MIN_SHARE)
+    g0 = _served_model_holds(
+        [rec for arm in GATE_ARMS for rec in views[arm].values()],
+        expected_model)
     g1 = (len(r0) >= VALIDITY_MIN_REACHED
           and Fraction(len(o0), len(r0)) >= VALIDITY_MIN_RATE)
     g2 = (abs(len(o1) - len(o2))
@@ -783,8 +805,9 @@ def _gate_values(views):
     }
 
 
-def evaluate_gates(records, pool_keys):
+def evaluate_gates(records, pool_keys, expected_model=REPLAY_MODEL):
     """The validity gates, from the stage-1 records (A0, A1, A2) alone.
+    `expected_model` is the model G0 expects to have served the calls.
 
     Raises IncompleteStageError when any pool arc lacks a record for any
     stage-1 arm.
@@ -792,7 +815,7 @@ def evaluate_gates(records, pool_keys):
     pool = frozenset(pool_keys)
     views = _views(records, GATE_ARMS)
     _check_complete(views, pool, GATE_ARMS)
-    return _gate_values(views)
+    return _gate_values(views, expected_model)
 
 
 def _supplied_confidences(view):
@@ -852,7 +875,7 @@ def _tie_break_key(view, arm):
     return (rate, EDIT_COUNT[arm], CANDIDATE_ARMS.index(arm))
 
 
-def evaluate_protocol(records, pool_keys):
+def evaluate_protocol(records, pool_keys, expected_model=REPLAY_MODEL):
     """Apply the pre-registered protocol to `records` over `pool_keys`.
 
     The outcome is one of four strings, as a function of the data: a clear
@@ -860,14 +883,27 @@ def evaluate_protocol(records, pool_keys):
     NOT EVALUATED when the gates fail. Raises IncompleteStageError rather than
     judging a stage that lacks a record for any pool arc. Candidate arms are
     read only when stage 2 is eligible.
+
+    When stage 2 is eligible, A1 and each candidate arm must also meet the
+    served-model share on its own, or ServedModelError names the first arm
+    that does not. That check extends G0 past the pre-registered text and can
+    only refuse a result, never produce a winner.
     """
     pool = frozenset(pool_keys)
-    gates = evaluate_gates(records, pool)
+    gates = evaluate_gates(records, pool, expected_model)
     eligible = gates["stage2_eligible"]
     arms = GATE_ARMS + (CANDIDATE_ARMS if eligible else ())
     views = _views(records, arms)
     if eligible:
         _check_complete(views, pool, CANDIDATE_ARMS)
+        # A1 is the base of every stage-2 comparison. Pooled G0 lets one arm
+        # fall well below the share (all the off-model calls in A1), so a
+        # candidate could beat a mixed-model base. The G1-only path (A1
+        # against A0) stays on pooled G0 as pre-registered: it is the path
+        # the recorded run took, and it never reads a candidate arm.
+        for arm in ("A1",) + CANDIDATE_ARMS:
+            if not _served_model_holds(views[arm].values(), expected_model):
+                raise ServedModelError(arm)
 
     raw_comparisons = {}
     if eligible:
@@ -994,7 +1030,8 @@ def report_to_json(report):
 # `mode=ro`. Identifier-bearing data (job ids, job names, session ids) lives
 # only in `pool.json` (mode 0600) and `fence-snapshot.json` (arc keys only).
 # Everything printed, and `census.json`, `calls.jsonl` and `report.json`, hold
-# counts and opaque arc keys.
+# counts and opaque arc keys. `run-model.json` holds only the provider and
+# model names the run is bound to.
 # ---------------------------------------------------------------------------
 HostPaths = namedtuple("HostPaths", [
     "hermes_home", "state_dir", "sidecar_dir", "markers_dir", "state_db",
@@ -1016,6 +1053,7 @@ EXCLUSION_STEPS = (
 )
 POOL_ENTRY_KEYS = ("arc", "agentic_job_id", "sid", "job_name", "job_type",
                    "ts")
+RUN_MODEL_FILE = "run-model.json"
 FENCE_CHECKS = ("sidecar_marker_lines", "ledger_lines",
                 "state_db_model_rows", "agent_log_instrument")
 INSTRUMENT_NEEDLE = "rejected assessment, confidence outside [0,1]"
@@ -1548,6 +1586,46 @@ def _load_pool(out_dir):
     return pool if isinstance(pool, list) else None
 
 
+def _resolve_run_model(args, out_dir):
+    """The `(provider, model)` this out-dir's run is bound to, or None when
+    the invocation must be refused.
+
+    A binding file is authoritative: an explicit flag that differs from it, or
+    a file that is not a JSON object with string `provider` and `model`, is a
+    refusal. With no binding the pair is the explicit flag, else the replay
+    defaults. A later stage must be judged against the model that answered
+    the earlier ones, so the pair cannot change mid-run.
+    """
+    explicit_provider = getattr(args, "provider", None)
+    explicit_model = getattr(args, "model", None)
+    path = out_dir / RUN_MODEL_FILE
+    if path.exists():
+        try:
+            bound = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (not isinstance(bound, dict)
+                or not isinstance(bound.get("provider"), str)
+                or not isinstance(bound.get("model"), str)):
+            return None
+        if (explicit_provider is not None
+                and explicit_provider != bound["provider"]):
+            return None
+        if explicit_model is not None and explicit_model != bound["model"]:
+            return None
+        return bound["provider"], bound["model"]
+    return (explicit_provider or REPLAY_PROVIDER,
+            explicit_model or REPLAY_MODEL)
+
+
+def _bind_run_model(out_dir, provider, model):
+    """Write the binding when there is none yet. Called only once every
+    refusal has passed, so a refused invocation never binds."""
+    path = out_dir / RUN_MODEL_FILE
+    if not path.exists():
+        _write_json(path, {"model": model, "provider": provider})
+
+
 def _calls_path(out_dir):
     return out_dir / "calls.jsonl"
 
@@ -1602,6 +1680,11 @@ def _cmd_smoke(args, paths, out_dir, real_call_llm):
     if not pool:
         print("smoke: no pool.json; run census first")
         return EXIT_USAGE
+    bound = _resolve_run_model(args, out_dir)
+    if bound is None:
+        print("smoke: refused, --model/--provider differ from this run's "
+              "bound model")
+        return EXIT_USAGE
     records = _read_calls(out_dir)
     if any(r["stage"] == SMOKE_STAGE for r in records):
         print("smoke: already recorded; no call made")
@@ -1611,7 +1694,8 @@ def _cmd_smoke(args, paths, out_dir, real_call_llm):
         print("smoke: call_llm did not resolve")
         return EXIT_NO_CALLABLE
     c = load_plugin_package(args.plugin_dir)
-    install_replay_hooks(c, call_llm, args.provider, args.model)
+    _bind_run_model(out_dir, *bound)
+    install_replay_hooks(c, call_llm, *bound)
     try:
         done = _run_specs(
             c, [(pool[0], SMOKE_ARM, SMOKE_STAGE)], out_dir, 1,
@@ -1632,12 +1716,18 @@ def _cmd_run(args, paths, out_dir, real_call_llm):
     if args.max_calls is None or args.max_calls < 0:
         print("run: --max-calls is required")
         return EXIT_USAGE
+    bound = _resolve_run_model(args, out_dir)
+    if bound is None:
+        print("run: refused, --model/--provider differ from this run's "
+              "bound model")
+        return EXIT_USAGE
     pool_keys = [e["arc"] for e in pool]
     records = _read_calls(out_dir)
     effective, attempts = effective_records(records)
     if args.stage == "candidates":
         try:
-            gates = evaluate_gates(list(effective.values()), pool_keys)
+            gates = evaluate_gates(
+                list(effective.values()), pool_keys, bound[1])
         except (IncompleteStageError, DuplicateRecordError, ValueError):
             print("run: refused, stage 1 is incomplete")
             return EXIT_STAGE
@@ -1669,7 +1759,8 @@ def _cmd_run(args, paths, out_dir, real_call_llm):
         print("run: call_llm did not resolve")
         return EXIT_NO_CALLABLE
     c = load_plugin_package(args.plugin_dir)
-    install_replay_hooks(c, call_llm, args.provider, args.model)
+    _bind_run_model(out_dir, *bound)
+    install_replay_hooks(c, call_llm, *bound)
     try:
         done = _run_specs(
             c, specs, out_dir, args.concurrency,
@@ -1681,16 +1772,49 @@ def _cmd_run(args, paths, out_dir, real_call_llm):
     return EXIT_OK
 
 
+def _print_stage_two_state(records, pool_keys, expected_model, exc):
+    """Tell the operator why `report` cannot judge yet. With stage 1 complete
+    and stage 2 eligible, show each gate and the next step, so an operator is
+    not left reading "incomplete" with no way to see that stage 2 is open.
+    Every other case keeps the plain incomplete line. Nothing is written."""
+    try:
+        gates = evaluate_gates(records, pool_keys, expected_model)
+    except (IncompleteStageError, DuplicateRecordError, ValueError):
+        gates = None
+    if gates is None or not gates["stage2_eligible"]:
+        print("report: incomplete (%s)" % type(exc).__name__)
+        return
+    for name in ("G0", "G1", "G2", "G3"):
+        print("report: %s %s" % (name, "pass" if gates[name] else "fail"))
+    if any(rec["arm"] in CANDIDATE_ARMS for rec in records):
+        print("report: stage 2 eligible; candidates incomplete")
+    else:
+        print("report: stage 2 eligible; run --stage candidates")
+
+
 def _cmd_report(args, paths, out_dir, real_call_llm):
     pool = _load_pool(out_dir)
     if not pool:
         print("report: no pool.json; run census first")
         return EXIT_USAGE
+    bound = _resolve_run_model(args, out_dir)
+    if bound is None:
+        print("report: refused, --model/--provider differ from this run's "
+              "bound model")
+        return EXIT_USAGE
     effective, _attempts = effective_records(_read_calls(out_dir))
+    records = list(effective.values())
+    pool_keys = [e["arc"] for e in pool]
     try:
-        report = evaluate_protocol(
-            list(effective.values()), [e["arc"] for e in pool])
-    except (IncompleteStageError, DuplicateRecordError, ValueError) as exc:
+        report = evaluate_protocol(records, pool_keys, bound[1])
+    except ServedModelError as exc:
+        print("report: refused, served model below the required share in "
+              "arm %s" % exc.arm)
+        return EXIT_STAGE
+    except IncompleteStageError as exc:
+        _print_stage_two_state(records, pool_keys, bound[1], exc)
+        return EXIT_STAGE
+    except (DuplicateRecordError, ValueError) as exc:
         print("report: incomplete (%s)" % type(exc).__name__)
         return EXIT_STAGE
     (out_dir / "report.json").write_text(
@@ -1772,8 +1896,10 @@ def build_parser():
     common.add_argument("--plugin-dir", default=None)
     common.add_argument("--hermes-agent-dir", default=None)
     common.add_argument("--out-dir", required=True)
-    common.add_argument("--model", default=REPLAY_MODEL)
-    common.add_argument("--provider", default=REPLAY_PROVIDER)
+    # None means "the run's bound model, else the replay default"; see
+    # `_resolve_run_model`.
+    common.add_argument("--model", default=None)
+    common.add_argument("--provider", default=None)
     sub = parser.add_subparsers(dest="command", required=True)
     census = sub.add_parser("census", parents=[common])
     census.add_argument("--pool-cap", type=int, default=DEFAULT_POOL_CAP)

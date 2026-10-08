@@ -2004,7 +2004,7 @@ class DecisionRuleTests(unittest.TestCase):
         tree = ast.parse(HARNESS_PATH.read_text())
         for name in ('clears', 'evaluate_gates', 'evaluate_protocol',
                      'mcnemar_one_sided_p', 'modal_share', '_arm_sets',
-                     '_gate_values'):
+                     '_gate_values', '_served_model_holds'):
             func = _function_def(tree, name)
             self.assertIsNotNone(func, name)
             for node in ast.walk(func):
@@ -2016,6 +2016,135 @@ class DecisionRuleTests(unittest.TestCase):
                 if isinstance(node, ast.Call) and isinstance(
                         node.func, ast.Name):
                     self.assertNotEqual(node.func.id, 'float', where)
+
+
+def _reserve(records, arm, count, model='other/model'):
+    """`records` with the first `count` records of `arm` re-served by
+    `model`."""
+    out, done = [], 0
+    for rec in records:
+        if rec['arm'] == arm and done < count:
+            rec = dict(rec, served_model=model)
+            done += 1
+        out.append(rec)
+    return out
+
+
+class ServedModelPerArmTests(unittest.TestCase):
+    """P1-3: when stage 2 is eligible, A1 and every candidate arm must meet
+    the served-model share on its own, against the run's expected model."""
+
+    N = 40
+
+    def _eligible(self):
+        return _full_records(
+            self.N, a0=range(10), a1=range(10), a2=range(10),
+            candidates={'B': set(range(3))})
+
+    def test_a_candidate_arm_at_exactly_the_share_passes(self):
+        # 38 of 40 is exactly 19/20.
+        recs = _reserve(self._eligible(), 'B', 2)
+        report = harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertEqual(report['outcome'], 'CLEARED — arm B')
+
+    def test_a_candidate_arm_one_below_the_share_is_refused(self):
+        recs = _reserve(self._eligible(), 'B', 3)
+        with self.assertRaises(harness.ServedModelError) as caught:
+            harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertEqual(caught.exception.arm, 'B')
+        self.assertIn('B', str(caught.exception))
+
+    def test_each_candidate_arm_is_checked_in_declared_order(self):
+        for arm in harness.CANDIDATE_ARMS:
+            with self.subTest(arm=arm):
+                recs = _reserve(self._eligible(), arm, 3)
+                with self.assertRaises(harness.ServedModelError) as caught:
+                    harness.evaluate_protocol(recs, _pool(self.N))
+                self.assertEqual(caught.exception.arm, arm)
+        recs = _reserve(_reserve(self._eligible(), 'E', 3), 'C', 3)
+        with self.assertRaises(harness.ServedModelError) as caught:
+            harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertEqual(caught.exception.arm, 'C')
+
+    def test_a1_is_checked_when_pooled_g0_still_holds(self):
+        # 6 of 120 stage-1 calls off-model is exactly 19/20 pooled, so G0
+        # holds, but all six sit in A1 (34 of 40).
+        recs = _reserve(self._eligible(), 'A1', 6)
+        gates = harness.evaluate_gates(recs, _pool(self.N))
+        self.assertTrue(gates['G0'])
+        self.assertTrue(gates['stage2_eligible'])
+        with self.assertRaises(harness.ServedModelError) as caught:
+            harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertEqual(caught.exception.arm, 'A1')
+
+    def test_the_g1_only_path_stays_on_pooled_g0(self):
+        # The same skew, with stage 2 not eligible: nothing is raised and the
+        # recorded run's outcome is unchanged.
+        recs = _reserve(
+            _stage1(self.N, a0=range(12), a1=range(2), a2=range(2)), 'A1', 6)
+        report = harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertFalse(report['gates']['stage2_eligible'])
+        self.assertEqual(
+            report['outcome'], 'CLEARED — arm A1, already deployed')
+
+    def test_candidate_records_are_ignored_when_stage_two_is_not_eligible(self):
+        recs = _full_records(self.N, a0=range(1), a1=range(1), a2=range(1))
+        for arm in harness.CANDIDATE_ARMS:
+            recs = _reserve(recs, arm, self.N)
+        report = harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertEqual(
+            report['outcome'],
+            'NOT EVALUATED — harness did not reproduce the omission')
+
+    def test_the_expected_model_moves_g0(self):
+        recs = [dict(r, served_model='other/model') for r in _stage1(20)]
+        self.assertFalse(harness.evaluate_gates(recs, _pool(20))['G0'])
+        self.assertTrue(harness.evaluate_gates(
+            recs, _pool(20), expected_model='other/model')['G0'])
+        self.assertFalse(harness.evaluate_protocol(
+            recs, _pool(20))['gates']['G0'])
+        self.assertTrue(harness.evaluate_protocol(
+            recs, _pool(20), expected_model='other/model')['gates']['G0'])
+
+    def test_the_expected_model_moves_the_per_arm_check(self):
+        recs = [dict(r, served_model='other/model')
+                for r in self._eligible()]
+        # Against the default model G0 fails first, so stage 2 is never read.
+        report = harness.evaluate_protocol(recs, _pool(self.N))
+        self.assertFalse(report['gates']['G0'])
+        self.assertEqual(
+            report['outcome'],
+            'NOT EVALUATED — harness did not reproduce the omission')
+        report = harness.evaluate_protocol(
+            recs, _pool(self.N), expected_model='other/model')
+        self.assertEqual(report['outcome'], 'CLEARED — arm B')
+        # And the per-arm check follows the same expected model.
+        recs = _reserve(recs, 'B', 3, model='z-ai/glm-5.2')
+        with self.assertRaises(harness.ServedModelError) as caught:
+            harness.evaluate_protocol(
+                recs, _pool(self.N), expected_model='other/model')
+        self.assertEqual(caught.exception.arm, 'B')
+
+    def test_the_helper_needs_a_response_and_matches_by_prefix(self):
+        holds = harness._served_model_holds
+        self.assertFalse(holds([], 'z-ai/glm-5.2'))
+        self.assertFalse(holds([{'served_model': None}], 'z-ai/glm-5.2'))
+        self.assertTrue(holds(
+            [{'served_model': 'z-ai/glm-5.2:variant'}], 'z-ai/glm-5.2'))
+        # Calls with no response are not in the denominator.
+        self.assertTrue(holds(
+            [{'served_model': 'z-ai/glm-5.2'}, {'served_model': None}],
+            'z-ai/glm-5.2'))
+
+    def test_g0_and_the_per_arm_check_share_one_helper(self):
+        tree = ast.parse(HARNESS_PATH.read_text())
+        for name in ('_gate_values', 'evaluate_protocol'):
+            func = _function_def(tree, name)
+            called = {n.func.id for n in ast.walk(func)
+                      if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Name)}
+            self.assertIn('_served_model_holds', called, name)
+
 
 
 class ProtocolConstantsTests(unittest.TestCase):
@@ -2652,6 +2781,263 @@ class HostPlumbingTests(_HostCase):
         self.assertEqual(self._gate(_omitting_model(), 96)[0], 0)
         self.assertEqual(inventory(), before)
         self.assertTrue(state.exists())
+
+
+class ReportEligibilityTests(_HostCase):
+    """P1-1: `report` shows each gate and the next step once stage 1 is
+    complete and stage 2 is eligible, and writes no report.json until the
+    protocol can be judged."""
+
+    GATE_LINES = ('report: G0 pass', 'report: G1 pass', 'report: G2 pass',
+                  'report: G3 pass')
+
+    def assertNoIdentifier(self, text):
+        for sentinel in SENTINELS + ('sess-',):
+            self.assertNotIn(sentinel, text)
+        for i in range(_IDX_DRIFT + 1):
+            self.assertNotIn(_host_job(i), text)
+            self.assertNotIn(_host_sid(i), text)
+
+    def _report(self, *extra):
+        return _host_main(self.argv('report', *extra))
+
+    def test_stage_one_done_shows_the_gates_and_the_next_step(self):
+        self.census()
+        self.assertEqual(
+            _host_main(self.argv(
+                'run', '--stage', 'gate', '--max-calls', '96',
+                '--concurrency', '1'), _omitting_model())[0], 0)
+        code, out = self._report()
+        self.assertEqual(code, 4)
+        lines = out.splitlines()
+        for line in self.GATE_LINES:
+            self.assertIn(line, lines)
+        self.assertEqual(
+            [line for line in lines if line.startswith('report: G')],
+            list(self.GATE_LINES))
+        self.assertTrue(any(
+            'stage 2 eligible; run' in line
+            and 'run --stage candidates' in line for line in lines), out)
+        self.assertNotIn('incomplete', out)
+        self.assertFalse((self.out / 'report.json').exists())
+        self.assertNoIdentifier(out)
+
+    def test_a_stage_that_can_be_judged_prints_only_the_outcome(self):
+        self.census()
+        self.assertEqual(
+            _host_main(self.argv(
+                'run', '--stage', 'gate', '--max-calls', '96',
+                '--concurrency', '1'), _always_supplying_model())[0], 0)
+        code, out = self._report()
+        # Negative control. No omission anywhere: G1 and G3 fail, stage 2 is
+        # not eligible and the report is the complete, judged one.
+        self.assertEqual(code, 0)
+        self.assertNotIn('stage 2 eligible', out)
+
+    def test_a_partial_candidate_stage_says_so(self):
+        self.census()
+        self.assertEqual(
+            _host_main(self.argv(
+                'run', '--stage', 'gate', '--max-calls', '96',
+                '--concurrency', '1'), _omitting_model())[0], 0)
+        self.assertEqual(
+            _host_main(self.argv(
+                'run', '--stage', 'candidates', '--max-calls', '224',
+                '--concurrency', '1'), _omitting_model())[0], 0)
+        calls = self.out / 'calls.jsonl'
+        # Negative control: the untouched full run is judged and written.
+        code, _out = self._report()
+        self.assertEqual(code, 0)
+        self.assertTrue((self.out / 'report.json').exists())
+        (self.out / 'report.json').unlink()
+        lines = calls.read_text().splitlines(keepends=True)
+        calls.write_text(''.join(lines[:-1]))
+        code, out = self._report()
+        self.assertEqual(code, 4)
+        self.assertTrue(any('stage 2 eligible; candidates incomplete' in line
+                            for line in out.splitlines()), out)
+        for line in self.GATE_LINES:
+            self.assertIn(line, out.splitlines())
+        self.assertFalse((self.out / 'report.json').exists())
+        self.assertNoIdentifier(out)
+
+    def test_stage_one_incomplete_keeps_the_incomplete_line(self):
+        self.census()
+        code, out = self._report()
+        self.assertEqual(code, 4)
+        self.assertIn('report: incomplete (', out)
+        self.assertNotIn('stage 2 eligible', out)
+        self.assertNotIn('report: G0', out)
+        self.assertFalse((self.out / 'report.json').exists())
+
+    def test_a_stage_one_arm_short_of_a_record_keeps_the_incomplete_line(self):
+        self.census()
+        self.assertEqual(
+            _host_main(self.argv(
+                'run', '--stage', 'gate', '--max-calls', '96',
+                '--concurrency', '1'), _omitting_model())[0], 0)
+        calls = self.out / 'calls.jsonl'
+        lines = calls.read_text().splitlines(keepends=True)
+        calls.write_text(''.join(lines[:-1]))
+        code, out = self._report()
+        self.assertEqual(code, 4)
+        self.assertIn('report: incomplete (', out)
+        self.assertNotIn('stage 2 eligible', out)
+
+    def test_a_candidate_arm_served_by_another_model_is_refused(self):
+        self.census()
+        self.assertEqual(
+            _host_main(self.argv(
+                'run', '--stage', 'gate', '--max-calls', '96',
+                '--concurrency', '1'), _omitting_model())[0], 0)
+        self.assertEqual(
+            _host_main(self.argv(
+                'run', '--stage', 'candidates', '--max-calls', '224',
+                '--concurrency', '1'),
+                _omitting_model(model='other/model'))[0], 0)
+        code, out = self._report()
+        self.assertEqual(code, 4)
+        self.assertIn('report: refused, served model below the required '
+                      'share in arm B', out)
+        self.assertFalse((self.out / 'report.json').exists())
+        self.assertNoIdentifier(out)
+
+
+class RunModelBindingTests(_HostCase):
+    """P1-3: the expected model is bound per out-dir by the first invocation
+    that makes calls, and later invocations read it back."""
+
+    REFUSAL = "refused, --model/--provider differ from this run's bound model"
+
+    def _gate(self, model, *extra, max_calls='100'):
+        return _host_main(self.argv(
+            'run', '--stage', 'gate', '--max-calls', max_calls,
+            '--concurrency', '1', *extra), model)
+
+    def _candidates(self, model, *extra, max_calls='224'):
+        return _host_main(self.argv(
+            'run', '--stage', 'candidates', '--max-calls', max_calls,
+            '--concurrency', '1', *extra), model)
+
+    def test_the_first_smoke_binds_the_model_and_provider(self):
+        self.census()
+        model = _ScriptedModel()
+        code, _out = _host_main(self.argv(
+            'smoke', '--model', 'z-ai/other', '--provider', 'p2'), model)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads((self.out / 'run-model.json').read_text()),
+            {'model': 'z-ai/other', 'provider': 'p2'})
+        self.assertEqual(model.calls[0]['model'], 'z-ai/other')
+        self.assertEqual(model.calls[0]['provider'], 'p2')
+
+    def test_a_conflicting_flag_later_is_refused_with_zero_calls(self):
+        self.census()
+        _host_main(self.argv(
+            'smoke', '--model', 'z-ai/other', '--provider', 'p2'),
+            _ScriptedModel())
+        model = _ScriptedModel()
+        code, out = self._gate(model, '--model', 'z-ai/glm-5.2')
+        self.assertEqual(code, 2)
+        self.assertIn(self.REFUSAL, out)
+        self.assertEqual(model.calls, [])
+        code, _out = self._gate(model, '--provider', 'openrouter')
+        self.assertEqual(code, 2)
+        self.assertEqual(model.calls, [])
+        # The refusal did not rebind.
+        self.assertEqual(
+            json.loads((self.out / 'run-model.json').read_text()),
+            {'model': 'z-ai/other', 'provider': 'p2'})
+
+    def test_no_flags_later_reads_the_binding_back(self):
+        self.census()
+        _host_main(self.argv(
+            'smoke', '--model', 'z-ai/other', '--provider', 'p2'),
+            _ScriptedModel())
+        model = _ScriptedModel()
+        code, _out = self._gate(model)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(model.calls), 96)
+        for call in model.calls:
+            self.assertEqual(call['model'], 'z-ai/other')
+            self.assertEqual(call['provider'], 'p2')
+        # A matching explicit flag is not a conflict.
+        code, _out = self._gate(_ScriptedModel(), '--model', 'z-ai/other')
+        self.assertEqual(code, 0)
+
+    def test_report_refuses_a_conflicting_model_and_writes_nothing(self):
+        self.census()
+        _host_main(self.argv('smoke', '--model', 'z-ai/other'),
+                   _ScriptedModel())
+        self.assertEqual(self._gate(_always_supplying_model())[0], 0)
+        code, out = _host_main(self.argv('report', '--model', 'z-ai/glm-5.2'))
+        self.assertEqual(code, 2)
+        self.assertIn(self.REFUSAL, out)
+        self.assertFalse((self.out / 'report.json').exists())
+        # Negative control: without the conflicting flag it is judged.
+        self.assertEqual(_host_main(self.argv('report'))[0], 0)
+
+    def test_report_never_binds(self):
+        self.census()
+        _host_main(self.argv('report', '--model', 'z-ai/other'))
+        self.assertFalse((self.out / 'run-model.json').exists())
+
+    def test_a_refused_invocation_never_binds(self):
+        self.census()
+        code, _out = self._gate(_ScriptedModel(), max_calls='1')
+        self.assertEqual(code, 3)
+        self.assertFalse((self.out / 'run-model.json').exists())
+        code, _out = self._gate(None)
+        self.assertEqual(code, 6)
+        self.assertFalse((self.out / 'run-model.json').exists())
+
+    def test_a_malformed_binding_is_a_refusal(self):
+        self.census()
+        (self.out / 'run-model.json').write_text('{"model": 3}')
+        model = _ScriptedModel()
+        code, out = self._gate(model)
+        self.assertEqual(code, 2)
+        self.assertEqual(model.calls, [])
+        self.assertIn(self.REFUSAL, out)
+
+    def test_the_candidates_gate_check_uses_the_bound_model(self):
+        self.census()
+        self.assertEqual(
+            self._gate(_omitting_model(model='z-ai/other'),
+                       '--model', 'z-ai/other')[0], 0)
+        model = _omitting_model(model='z-ai/other')
+        code, _out = self._candidates(model)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(model.calls), 128)
+
+    def test_without_the_binding_the_candidates_gate_check_refuses(self):
+        # Negative control for the test above: the same setup, with the
+        # binding file gone, resolves to the default model and G0 fails.
+        self.census()
+        self.assertEqual(
+            self._gate(_omitting_model(model='z-ai/other'),
+                       '--model', 'z-ai/other')[0], 0)
+        (self.out / 'run-model.json').unlink()
+        model = _omitting_model(model='z-ai/other')
+        code, out = self._candidates(model)
+        self.assertEqual(code, 4)
+        self.assertIn('G0', out)
+        self.assertEqual(model.calls, [])
+
+    def test_the_default_model_still_binds_the_default(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model())[0], 0)
+        self.assertEqual(
+            json.loads((self.out / 'run-model.json').read_text()),
+            {'model': harness.REPLAY_MODEL,
+             'provider': harness.REPLAY_PROVIDER})
+
+    def test_the_binding_holds_only_the_two_names(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model())[0], 0)
+        data = json.loads((self.out / 'run-model.json').read_text())
+        self.assertEqual(set(data), {'model', 'provider'})
+
 
 
 class HostFenceTests(_HostCase):
