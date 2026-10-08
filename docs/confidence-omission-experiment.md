@@ -604,3 +604,59 @@ file that holds job names) from the run directory when finished.
 
 **Metering is forward-only.** A change affects arcs evaluated after it ships.
 Never re-ship or revalue past jobs.
+
+## Harness amendments after the replay
+
+The harness was amended after the recorded run, in response to review of
+PR #149. The digest under "The environment" is the file that ran, and it stays
+as written. The "Pre-registered protocol" section is unchanged, and a test now
+pins its text. The amendments are in commits `30bdb28` and `0a4d7c0`.
+
+The recorded verdict, `CLEARED — arm A1, already deployed`, and every number
+in this record are unchanged. The checks below can refuse a result. None of
+them can produce a winner.
+
+**Report shows stage 2 eligibility.** `report` used to print one line,
+`report: incomplete`, whenever any stage lacked a record. With stage 1 complete
+and stage 2 eligible, it now prints one pass or fail line for each of G0 to G3
+and names the next step: `run --stage candidates`, or "candidates incomplete"
+when some candidate records exist. It still writes no `report.json` until the
+protocol can be judged. The new output appears only in that state. The recorded
+report had G3 = no, so it took the unchanged path.
+
+**Replay inputs are pinned to the census.** Each pool entry now carries
+`transcript_sha256`, the digest of the transcript the census read. `smoke` and
+`run` re-read each arc's transcript before any call. If any digest differs, or
+a pool has no digests, they print a count, make no call and exit `7`. The calls
+then use the text that was checked, read once per arc per invocation. The
+census also stops, with exit 5 and `timestamp_unit` `unreadable`, when
+`state.db` cannot be opened or the timestamp query fails. Before, a failed read
+passed as "no drift".
+
+What the evidence supports is narrow. The recorded census reported
+`timestamp_unit` `epoch_seconds`, so `state.db` opened and the query returned
+stamps. The old harness read each transcript once per invocation and gave that
+text to every arm in the invocation. The record cannot show, after the fact,
+whether a pool session gained messages between the census and the run. The
+900 stage-1 call timestamps form one continuous span of about 21 minutes with
+no gap longer than 49 seconds. That is consistent with stage 1 running as one
+invocation. It is not proof.
+
+**Served model is checked per stage-2 arm.** When stage 2 is eligible, A1 and
+each candidate arm must meet the 95% served-model share on its own. A1 is
+checked because it is the base of every candidate comparison, and a pooled G0
+can hold while one arm sits well below the share. Stage 2 never ran, so the
+check never ran. The expected model is bound per out-dir in `run-model.json`,
+which holds only the provider and model names. The first `smoke` or `run` that
+makes calls writes it. Later invocations read it back, and a conflicting
+`--model` or `--provider` exits 2 with no call. With no `--model`, the model
+resolves to `z-ai/glm-5.2`, the model the environment section records, so G0
+compared against the same model as before. These checks extend G0 past the
+pre-registered text.
+
+**Operator notes for a re-run.** A `pool.json` written before this amendment is
+refused with exit `7`, so run `census` into a fresh `--out-dir`. Exit `7` after
+a fresh census means a pool session changed since the census. Start over in a
+fresh out-dir. A re-census into the same dir would leave records for arcs
+outside the new pool. The first `smoke` or `run` binds the provider and model,
+and later invocations read them back.

@@ -3750,5 +3750,69 @@ class ResultsShapeTests(unittest.TestCase):
         self.assertNotIn('results pending', self.readme)
 
 
+# The sha256 of the "## Pre-registered protocol" section as committed at the
+# pre-registration commit d333d205c31e3377a9c0b82704b28a8002faa5eb, before the
+# first replay call. Hardcoded, not read from git at test time: after a squash
+# merge that commit is not in main's history.
+_PROTOCOL_SECTION_SHA256 = (
+    'bc0c75c652fd7115dcc039f79b62985ca4273dbfd8fc0a1bf99fab97bd6b9e5b')
+_HARNESS_SHA256_THAT_RAN = (
+    'b82270ef59ddd4aa71bbd822269ee8bdda072c233855c34a297842fd83e4d709')
+
+
+class AmendmentRecordTests(unittest.TestCase):
+    """The protocol section is frozen, and the amendments made after the
+    replay sit in their own section."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RECORD_PATH.read_text(encoding='utf-8')
+        cls.lines = cls.text.splitlines()
+
+    @staticmethod
+    def _digest(text):
+        return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+    def _protocol(self, text):
+        return _doc_section(text, '## Pre-registered protocol', level='## ')
+
+    def test_the_protocol_section_is_byte_identical_to_the_pre_registration(
+            self):
+        section = self._protocol(self.text)
+        # An empty or truncated extraction cannot pass.
+        self.assertTrue(section.startswith('## Pre-registered protocol'))
+        for heading in _PROTOCOL_SUBSECTIONS:
+            self.assertIn('\n' + heading + '\n', section, heading)
+        self.assertEqual(self._digest(section), _PROTOCOL_SECTION_SHA256)
+
+    def test_an_edited_protocol_section_trips_the_pin(self):
+        # Negative control: one word replaced changes the digest.
+        section = self._protocol(self.text)
+        self.assertIn('committed', section)
+        edited = section.replace('committed', 'drafted', 1)
+        self.assertNotEqual(edited, section)
+        self.assertNotEqual(self._digest(edited), _PROTOCOL_SECTION_SHA256)
+
+    def test_the_amendments_section_follows_for_phase_70_exactly_once(self):
+        heading = '## Harness amendments after the replay'
+        self.assertEqual(self.lines.count(heading), 1)
+        self.assertGreater(self.lines.index(heading),
+                           self.lines.index('## For Phase 70'))
+
+    def test_the_amendments_section_names_what_changed(self):
+        section = _doc_section(
+            self.text, '## Harness amendments after the replay', level='## ')
+        flat = ' '.join(section.split())
+        self.assertIn('transcript_sha256', flat)
+        self.assertIn('run-model.json', flat)
+        self.assertIn('exit `7`', flat)
+        self.assertIn('`CLEARED \u2014 arm A1, already deployed`', flat)
+
+    def test_the_historical_harness_digest_stays_under_the_environment(self):
+        environment = _doc_section(
+            self.text, '## The environment', level='## ')
+        self.assertIn(_HARNESS_SHA256_THAT_RAN, environment)
+
+
 if __name__ == '__main__':
     unittest.main()
