@@ -49,7 +49,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
+from unittest import mock
 from fractions import Fraction
 from pathlib import Path
 
@@ -2456,8 +2458,8 @@ class HostPlumbingTests(_HostCase):
         pool = self.pool()
         self.assertEqual(len(pool), 32)
         for entry in pool:
-            self.assertEqual(set(entry), {
-                'arc', 'agentic_job_id', 'sid', 'job_name', 'job_type', 'ts'})
+            self.assertEqual(set(entry), set(harness.POOL_ENTRY_KEYS))
+            self.assertIn('transcript_sha256', harness.POOL_ENTRY_KEYS)
             self.assertEqual(entry['arc'],
                              harness.arc_key(entry['agentic_job_id']))
         mode = stat.S_IMODE(os.stat(self.out / 'pool.json').st_mode)
@@ -3037,6 +3039,230 @@ class RunModelBindingTests(_HostCase):
         self.assertEqual(self._gate(_omitting_model())[0], 0)
         data = json.loads((self.out / 'run-model.json').read_text())
         self.assertEqual(set(data), {'model', 'provider'})
+
+
+
+def _transcript_digest(home, sid):
+    """sha256 of the transcript the classifier reads for `sid`, loaded the
+    way the harness loads it."""
+    with harness._host_env(home):
+        c = harness.load_plugin_package(PLUGIN_DIR)
+        return hashlib.sha256(
+            c._read_session_transcript(sid).encode('utf-8')).hexdigest()
+
+
+class TranscriptDriftTests(_HostCase):
+    """P1-2: every replay call uses the transcript the census saw. A session
+    that grew, or a pool with no digests, stops the whole invocation before
+    any call."""
+
+    def _grow(self, i):
+        conn = sqlite3.connect(str(self.home / 'state.db'))
+        conn.execute(
+            'INSERT INTO messages (session_id, role, content, timestamp) '
+            "VALUES (?, 'user', 'grew after the census', ?)",
+            (_host_sid(i), _host_ts(i) + 900))
+        conn.commit()
+        conn.close()
+
+    def _gate(self, model):
+        return _host_main(self.argv(
+            'run', '--stage', 'gate', '--max-calls', '96',
+            '--concurrency', '1'), model)
+
+    def assertNoIdentifier(self, text):
+        for sentinel in SENTINELS + ('sess-',):
+            self.assertNotIn(sentinel, text)
+        for i in range(_IDX_DRIFT + 1):
+            self.assertNotIn(_host_job(i), text)
+            self.assertNotIn(_host_sid(i), text)
+
+    def test_every_pool_entry_carries_the_transcript_digest(self):
+        self.census()
+        for entry in self.pool():
+            self.assertEqual(
+                entry['transcript_sha256'],
+                _transcript_digest(self.home, entry['sid']))
+
+    def test_a_pool_that_has_not_drifted_smokes_normally(self):
+        # Negative control for the drift tests below.
+        self.census()
+        model = _ScriptedModel()
+        code, _out = _host_main(self.argv('smoke'), model)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(model.calls), 1)
+
+    def test_smoke_refuses_a_changed_transcript_with_zero_calls(self):
+        self.census()
+        self._grow(0)
+        model = _ScriptedModel()
+        code, out = _host_main(self.argv('smoke'), model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+        self.assertFalse((self.out / 'calls.jsonl').exists())
+        self.assertIn('1 pool arc(s) changed since census; no call made', out)
+        self.assertNoIdentifier(out)
+
+    def test_run_refuses_a_changed_transcript_with_zero_calls(self):
+        self.census()
+        self._grow(5)
+        model = _ScriptedModel()
+        code, out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+        self.assertFalse((self.out / 'calls.jsonl').exists())
+        self.assertIn('1 pool arc(s) changed since census; no call made', out)
+        self.assertNoIdentifier(out)
+
+    def test_run_counts_every_changed_arc_once(self):
+        self.census()
+        for i in (2, 9, 30):
+            self._grow(i)
+        model = _ScriptedModel()
+        code, out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertIn('3 pool arc(s) changed', out)
+        self.assertEqual(model.calls, [])
+
+    def test_a_refused_drift_does_not_bind_the_model(self):
+        self.census()
+        self._grow(5)
+        self._gate(_ScriptedModel())
+        self.assertFalse((self.out / 'run-model.json').exists())
+
+    def test_a_pool_written_before_the_digest_is_refused(self):
+        self.census()
+        pool = self.pool()
+        for entry in pool:
+            del entry['transcript_sha256']
+        (self.out / 'pool.json').write_text(json.dumps(pool))
+        model = _ScriptedModel()
+        code, out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+        self.assertIn('32 pool arc(s) changed', out)
+        code, _out = _host_main(self.argv('smoke'), model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_a_non_string_digest_counts_as_drifted(self):
+        self.census()
+        pool = self.pool()
+        pool[0]['transcript_sha256'] = 12345
+        (self.out / 'pool.json').write_text(json.dumps(pool))
+        model = _ScriptedModel()
+        code, _out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_each_pool_transcript_is_read_once_per_invocation(self):
+        self.census()
+        pool_sids = {e['sid'] for e in self.pool()}
+        reads = []
+        real_load = harness.load_plugin_package
+
+        def counting_load(plugin_dir, *args, **kwargs):
+            c = real_load(plugin_dir, *args, **kwargs)
+            real_read = c._read_session_transcript
+
+            def counted(sid, *a, **kw):
+                reads.append(sid)
+                return real_read(sid, *a, **kw)
+
+            c._read_session_transcript = counted
+            return c
+
+        with mock.patch.object(harness, 'load_plugin_package', counting_load):
+            code, _out = self._gate(_omitting_model())
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(reads), sorted(pool_sids))
+
+    def test_the_calls_use_the_verified_text(self):
+        self.census()
+        model = _ScriptedModel()
+        self.assertEqual(self._gate(model)[0], 0)
+        self.assertEqual(len(model.calls), 96)
+        for i in range(_N_ELIGIBLE):
+            marker = f'{SENTINEL_TRANSCRIPT} T{i:03d}'
+            seen = [c for c in model.calls
+                    if marker in _user_message(c)]
+            self.assertEqual(len(seen), 3, marker)
+
+
+class TimestampReadTests(_HostCase):
+    """P1-2: a failed read of message timestamps stops the census. It must not
+    pass as "no drift"."""
+
+    def test_an_unreadable_state_db_stops_the_census(self):
+        (self.home / 'state.db').unlink()
+        code, out = self.census()
+        self.assertEqual(code, 5)
+        self.assertEqual(self.census_json()['timestamp_unit'], 'unreadable')
+        self.assertFalse((self.out / 'pool.json').exists())
+        self.assertIn('census: cannot read message timestamps; stopped', out)
+        for sentinel in SENTINELS + ('sess-',):
+            self.assertNotIn(sentinel, out)
+            self.assertNotIn(
+                sentinel, (self.out / 'census.json').read_text())
+
+    def test_an_intact_home_still_builds_a_pool(self):
+        # Negative control.
+        code, _out = self.census()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.census_json()['timestamp_unit'],
+                         'epoch_seconds')
+
+    def test_a_dropped_messages_table_excludes_every_arc_before_any_stamp(self):
+        conn = sqlite3.connect(str(self.home / 'state.db'))
+        conn.execute('DROP TABLE messages')
+        conn.commit()
+        conn.close()
+        code, out = self.census()
+        # The transcript read fails open to "" first, so every arc is
+        # excluded and no stamp is ever queried; the census is not stopped.
+        self.assertEqual(code, 0)
+        self.assertEqual(self.census_json()['counts']['eligible'], 0)
+
+    def test_build_pool_raises_when_the_query_raises(self):
+        stub = types.SimpleNamespace(
+            _read_session_transcript=lambda sid: 'text')
+        paths = harness.host_paths(self.home)
+        pool, _counts = harness.build_pool(paths, stub, 300)
+        # The stub reads a transcript for every arc, including the one with
+        # no messages, so one more than the real pool of 32 is eligible.
+        self.assertEqual(len(pool), 33)
+        digest = hashlib.sha256(b'text').hexdigest()
+        self.assertEqual({e['transcript_sha256'] for e in pool}, {digest})
+        conn = sqlite3.connect(str(self.home / 'state.db'))
+        conn.execute('DROP TABLE messages')
+        conn.commit()
+        conn.close()
+        with self.assertRaises(harness.TimestampReadError):
+            harness.build_pool(paths, stub, 300)
+
+    def test_build_pool_raises_when_state_db_cannot_open(self):
+        stub = types.SimpleNamespace(
+            _read_session_transcript=lambda sid: 'text')
+        (self.home / 'state.db').unlink()
+        with self.assertRaises(harness.TimestampReadError):
+            harness.build_pool(harness.host_paths(self.home), stub, 300)
+
+    def test_message_stamps_raises_without_a_messages_table(self):
+        conn = sqlite3.connect(':memory:')
+        try:
+            with self.assertRaises(harness.TimestampReadError):
+                harness._message_stamps(conn, 'any')
+        finally:
+            conn.close()
+
+    def test_message_stamps_still_reads_a_good_table(self):
+        conn = sqlite3.connect(str(self.home / 'state.db'))
+        try:
+            best, unusable = harness._message_stamps(conn, _host_sid(0))
+        finally:
+            conn.close()
+        self.assertEqual(best, _host_ts(0) - 400)
+        self.assertFalse(unusable)
 
 
 

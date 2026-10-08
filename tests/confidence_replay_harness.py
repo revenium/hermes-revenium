@@ -1052,7 +1052,7 @@ EXCLUSION_STEPS = (
     "no_success_marker", "no_transcript", "transcript_drift",
 )
 POOL_ENTRY_KEYS = ("arc", "agentic_job_id", "sid", "job_name", "job_type",
-                   "ts")
+                   "ts", "transcript_sha256")
 RUN_MODEL_FILE = "run-model.json"
 FENCE_CHECKS = ("sidecar_marker_lines", "ledger_lines",
                 "state_db_model_rows", "agent_log_instrument")
@@ -1069,6 +1069,7 @@ EXIT_BUDGET = 3
 EXIT_STAGE = 4
 EXIT_TIMESTAMP = 5
 EXIT_NO_CALLABLE = 6
+EXIT_DRIFT = 7
 
 # A plausible range for `messages.timestamp` in epoch seconds (1973 to 5138).
 _EPOCH_MIN = 10 ** 8
@@ -1081,6 +1082,11 @@ _LOG_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 class TimestampUnitError(Exception):
     """`messages.timestamp` is not plain epoch seconds; the drift test would
     be a guess, so the census stops."""
+
+
+class TimestampReadError(Exception):
+    """`state.db` could not be opened or its `messages` query failed. A failed
+    read must not pass as "no drift", so the census stops."""
 
 
 def host_paths(hermes_home):
@@ -1165,7 +1171,7 @@ def _message_stamps(conn, sid):
             "SELECT timestamp, typeof(timestamp) FROM messages "
             "WHERE session_id = ?", (sid,)).fetchall()
     except sqlite3.Error:
-        return None, False
+        raise TimestampReadError("messages query failed") from None
     best, unusable = None, False
     for value, kind in rows:
         if kind == "null":
@@ -1187,7 +1193,10 @@ def build_pool(paths, c, cap):
     non-empty transcript; and no message in the session is later than the
     sidecar record's `ts`. Each exclusion is counted once, at the first rule
     that rejects the arc. With a cap, the most recent arcs by sidecar `ts` are
-    kept, then sorted ascending.
+    kept, then sorted ascending. Each entry carries the sha256 of the
+    transcript the non-empty check read, so a later stage can tell whether the
+    session changed. Raises TimestampReadError when `state.db` cannot be
+    opened or queried.
     """
     records, malformed = _read_sidecar_records(paths)
     markers = _read_job_markers(paths)
@@ -1202,7 +1211,7 @@ def build_pool(paths, c, cap):
         try:
             conn = _ro_connect(paths.state_db)
         except sqlite3.Error:
-            conn = None
+            raise TimestampReadError("state.db cannot be opened") from None
         for rec in records:
             job_id = rec["agentic_job_id"]
             if rec.get("sequence") != 0 or isinstance(
@@ -1226,11 +1235,11 @@ def build_pool(paths, c, cap):
                 counts["no_success_marker"] += 1
                 continue
             sid = marker["sid"]
-            if not c._read_session_transcript(sid):
+            transcript = c._read_session_transcript(sid)
+            if not transcript:
                 counts["no_transcript"] += 1
                 continue
-            newest, unusable = (_message_stamps(conn, sid)
-                                if conn is not None else (None, False))
+            newest, unusable = _message_stamps(conn, sid)
             if unusable:
                 raise TimestampUnitError("messages.timestamp is not epoch "
                                          "seconds")
@@ -1244,7 +1253,9 @@ def build_pool(paths, c, cap):
             eligible.append({
                 "arc": arc_key(job_id), "agentic_job_id": job_id,
                 "sid": sid, "job_name": str(marker.get("job_name", "")),
-                "job_type": str(marker.get("job_type", "")), "ts": ts})
+                "job_type": str(marker.get("job_type", "")), "ts": ts,
+                "transcript_sha256": hashlib.sha256(
+                    transcript.encode("utf-8")).hexdigest()})
     finally:
         if conn is not None:
             conn.close()
@@ -1536,12 +1547,14 @@ def _surgery_survey(c, pool):
 def _cmd_census(args, paths, out_dir, real_call_llm):
     c = load_plugin_package(args.plugin_dir)
     cfg_cap = args.pool_cap
-    unit_error = False
+    unit_error = None
     try:
         pool, counts = build_pool(paths, c, cfg_cap)
-    except TimestampUnitError:
-        pool, counts, unit_error = [], {step: 0 for step in EXCLUSION_STEPS}, True
-    unit = "unknown" if unit_error else counts.pop("timestamp_unit")
+    except (TimestampUnitError, TimestampReadError) as exc:
+        pool, counts = [], {step: 0 for step in EXCLUSION_STEPS}
+        unit_error = ("unreadable" if isinstance(exc, TimestampReadError)
+                      else "unknown")
+    unit = unit_error or counts.pop("timestamp_unit")
     call_llm = real_call_llm or resolve_call_llm(args.hermes_agent_dir)
     if unit_error:
         surgery, means = {}, {}
@@ -1564,7 +1577,9 @@ def _cmd_census(args, paths, out_dir, real_call_llm):
     }
     if unit_error:
         _write_json(out_dir / "census.json", census)
-        print("census: timestamp unit is not epoch seconds; stopped")
+        print("census: cannot read message timestamps; stopped"
+              if unit_error == "unreadable"
+              else "census: timestamp unit is not epoch seconds; stopped")
         return EXIT_TIMESTAMP
     _write_private_json(out_dir / "pool.json", pool)
     _write_json(out_dir / "census.json", census)
@@ -1652,19 +1667,43 @@ def _real_callable(args, real_call_llm):
     return real_call_llm or resolve_call_llm(args.hermes_agent_dir)
 
 
-def _run_specs(c, specs, out_dir, concurrency, evaluator_version, pool_by_arc):
+def _verify_transcripts(c, entries):
+    """Re-read each distinct arc's transcript and compare its digest with the
+    pool's. Returns `({arc: verified_text}, drifted_arc_count)`.
+
+    Arms of one arc are paired, so every call must replay the census-time
+    input whichever invocation makes it. An entry with no digest, or a
+    non-string one, counts as drifted: a pool written before the digest
+    existed cannot be checked. The verified text is what the calls use, so
+    what was checked and what is sent are the same bytes.
+    """
+    texts, seen, drifted = {}, set(), 0
+    for entry in entries:
+        arc = entry["arc"]
+        if arc in seen:
+            continue
+        seen.add(arc)
+        text = c._read_session_transcript(entry["sid"])
+        digest = entry.get("transcript_sha256")
+        if (isinstance(digest, str) and isinstance(text, str)
+                and hashlib.sha256(text.encode("utf-8")).hexdigest()
+                == digest):
+            texts[arc] = text
+        else:
+            drifted += 1
+    return texts, drifted
+
+
+def _run_specs(c, specs, out_dir, concurrency, evaluator_version, transcripts):
     """Run `specs` (`(entry, arm, stage)`), appending each record as its
-    chunk finishes so a crash loses at most one chunk."""
-    transcripts = {}
+    chunk finishes so a crash loses at most one chunk. `transcripts` is the
+    verified `{arc: text}` map; no transcript is read here."""
     cfg = c._llm_evaluation_config()
     chunk = max(1, int(concurrency)) * 4
     done = 0
     for start in range(0, len(specs), chunk):
         batch = []
         for entry, arm, stage in specs[start:start + chunk]:
-            if entry["arc"] not in transcripts:
-                transcripts[entry["arc"]] = c._read_session_transcript(
-                    entry["sid"])
             batch.append((_job_for(entry), transcripts[entry["arc"]], cfg,
                           arm, stage))
         records = asyncio.run(run_calls(
@@ -1694,12 +1733,17 @@ def _cmd_smoke(args, paths, out_dir, real_call_llm):
         print("smoke: call_llm did not resolve")
         return EXIT_NO_CALLABLE
     c = load_plugin_package(args.plugin_dir)
+    transcripts, drifted = _verify_transcripts(c, [pool[0]])
+    if drifted:
+        print("smoke: refused, %d pool arc(s) changed since census; no call "
+              "made" % drifted)
+        return EXIT_DRIFT
     _bind_run_model(out_dir, *bound)
     install_replay_hooks(c, call_llm, *bound)
     try:
         done = _run_specs(
             c, [(pool[0], SMOKE_ARM, SMOKE_STAGE)], out_dir, 1,
-            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), None)
+            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), transcripts)
     finally:
         restore_replay_hooks(c)
     [rec] = _read_calls(out_dir)[-1:]
@@ -1759,12 +1803,17 @@ def _cmd_run(args, paths, out_dir, real_call_llm):
         print("run: call_llm did not resolve")
         return EXIT_NO_CALLABLE
     c = load_plugin_package(args.plugin_dir)
+    transcripts, drifted = _verify_transcripts(c, [e for e, _a, _s in specs])
+    if drifted:
+        print("run: refused, %d pool arc(s) changed since census; no call "
+              "made" % drifted)
+        return EXIT_DRIFT
     _bind_run_model(out_dir, *bound)
     install_replay_hooks(c, call_llm, *bound)
     try:
         done = _run_specs(
             c, specs, out_dir, args.concurrency,
-            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), None)
+            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), transcripts)
     finally:
         restore_replay_hooks(c)
     print("run: stage=%s calls=%d first=%d retries=%d" % (
