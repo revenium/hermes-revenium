@@ -1777,8 +1777,8 @@ JUDGE_TEMPERATURE = 0
 JUDGE_MAX_TOKENS = 4096
 # Plan 05 sets this from prereg-gate.json; `gate` refuses while it is None.
 GATE_THRESHOLD = None
-# Verified against the OpenRouter provider-routing documentation in plan 04
-# Task 2; see `OPENROUTER_PROVIDER_PREFS` below.
+# Hard caps for the whole phase, enforced on RECORDED spend and calls. The
+# human approves or changes them at plan 04's checkpoint.
 SPEND_CAP_USD = Decimal("25")
 MAX_CALLS = 120
 
@@ -2544,19 +2544,23 @@ def _smoke_verdict(calls_path, judges):
 
 
 # -- the real transport -------------------------------------------------------------
-# Set only to a documented request option; see the SUMMARY for what was
-# verified. None sends no provider preferences.
-OPENROUTER_PROVIDER_PREFS = None
-OPENROUTER_REQUEST_USAGE = None
+# Verified against openrouter.ai/docs/guides/routing/provider-selection on
+# 2026-10-09: the request-level `provider.data_collection` field accepts
+# "deny" ("use only providers which do not collect user data"). A stricter
+# `provider.zdr: true` also exists (Zero Data Retention endpoints only); it
+# can leave a pinned model with no endpoint, so it is offered at the
+# checkpoint rather than defaulted. Neither is a contract: the docs call the
+# policy tags "not a definitive source of third party data policies".
+# `usage: {include: true}` is deprecated and needs no request option: cost
+# is always returned in `usage.cost`.
+OPENROUTER_PROVIDER_PREFS = {"data_collection": "deny"}
 
 
 def openrouter_request_body(model, messages):
     body = {"model": model, "messages": messages,
             "temperature": JUDGE_TEMPERATURE, "max_tokens": JUDGE_MAX_TOKENS}
     if OPENROUTER_PROVIDER_PREFS is not None:
-        body["provider"] = OPENROUTER_PROVIDER_PREFS
-    if OPENROUTER_REQUEST_USAGE is not None:
-        body["usage"] = OPENROUTER_REQUEST_USAGE
+        body["provider"] = dict(OPENROUTER_PROVIDER_PREFS)
     return body
 
 

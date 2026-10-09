@@ -817,5 +817,683 @@ class GatePreRegistrationTests(unittest.TestCase):
         self.assertEqual(self.gate(good, out_dir=copy)[0], H.EXIT_DRIFT)
 
 
+# ---------------------------------------------------------------------------
+# Task 2: spend that cannot overrun, the served-model check, the key
+# ---------------------------------------------------------------------------
+JUDGES = H.current_judges()
+
+
+def tiny_session(label, n_messages=2, jobs=2):
+    messages = []
+    for i in range(1, n_messages + 1):
+        messages.append({'role': 'user', 'content': f'{label} request {i}',
+                         'timestamp': 100.0 * i})
+        messages.append({'role': 'assistant', 'content': f'{label} reply {i}',
+                         'timestamp': 100.0 * i + 1})
+    turns = H.segment_turns(messages)
+    return {'label': label, 'turns': turns,
+            'jobs': [(f'J{k}', 'type', f'name {k}') for k in range(1, jobs + 1)]}
+
+
+def good_response(n, label='J1'):
+    return verdict_text([label] * n)
+
+
+class CountingTransport:
+    """A recording transport. `script` is a list of per-call behaviours:
+    a response text, a (text, served_model) pair, an exception instance to
+    raise, or None for the default good response."""
+
+    def __init__(self, n_turns=2, script=None, usage=None):
+        self.n_turns = n_turns
+        self.script = list(script or [])
+        self.calls = []
+        self.usage = usage if usage is not None else {
+            'prompt_tokens': 100, 'completion_tokens': 20}
+
+    def __call__(self, model, messages):
+        index = len(self.calls)
+        self.calls.append((model, messages))
+        step = self.script[index] if index < len(self.script) else None
+        if isinstance(step, BaseException):
+            raise step
+        served = model
+        text = good_response(self.n_turns)
+        if isinstance(step, tuple):
+            text, served = step
+        elif isinstance(step, str):
+            text = step
+        return text, served, self.usage
+
+
+class SpendSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='gsd-p68-spend-'))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.run_dir = self.tmp / 'run'
+        self.calls_path = self.run_dir / 'calls.jsonl'
+
+    def sessions(self, n=3):
+        return [tiny_session(f'S{i}') for i in range(1, n + 1)]
+
+    def run_judge(self, transport, sessions=None, **kwargs):
+        kwargs.setdefault('orderings', ('forward',))
+        with contextlib.redirect_stderr(io.StringIO()):
+            return H.run_judge(sessions or self.sessions(), transport,
+                               self.run_dir, **kwargs)
+
+    def records(self):
+        return H.load_calls(self.calls_path)
+
+    def planned_total(self, sessions=None, orderings=('forward',)):
+        plan = H.plan_calls(sessions or self.sessions(), JUDGES, orderings)
+        return sum((i['reserved'] for i in plan), Decimal(0)), len(plan)
+
+    # -- crash and resume ----------------------------------------------------
+    def test_a_crash_on_the_third_call_keeps_every_completed_record(self):
+        transport = CountingTransport(script=[None, None, RuntimeError('boom')])
+        with self.assertRaises(RuntimeError):
+            self.run_judge(transport)
+        records = self.records()
+        statuses = [r['status'] for r in records]
+        self.assertEqual(statuses.count('ok'), 2)
+        self.assertEqual(statuses.count('pending'), 3)
+        view = H.settle_view(records)
+        self.assertEqual(len(view['dangling']), 1)
+        self.assertEqual(len(transport.calls), 3)
+
+    def test_a_resume_counts_the_dangling_reservation_and_calls_only_the_rest(self):
+        crash = CountingTransport(script=[None, None, RuntimeError('boom')])
+        with self.assertRaises(RuntimeError):
+            self.run_judge(crash)
+        before = H.settle_view(self.records())
+        dangling = [r for r in self.records() if r['status'] == 'pending'][-1]
+        settled_cost = sum((Decimal(r['cost_usd']) for r in self.records()
+                            if r['status'] == 'ok'), Decimal(0))
+        self.assertEqual(before['spend'],
+                         settled_cost + Decimal(dangling['reserved_usd']))
+        resume = CountingTransport()
+        self.assertEqual(self.run_judge(resume), H.EXIT_OK)
+        self.assertEqual(len(resume.calls), 4)      # 6 planned, 2 settled
+        keys = {}
+        for r in self.records():
+            keys.setdefault((r['session_label'], r['judge']), []).append(
+                r['status'])
+        first_two = [k for k in sorted(keys) if keys[k] == ['pending', 'ok']]
+        self.assertEqual(len(first_two), 5)         # 2 old + 3 re-run once
+        retried = [v for v in keys.values()
+                   if v == ['pending', 'pending', 'ok']]
+        self.assertEqual(len(retried), 1)           # the crashed triple, once
+        self.assertEqual(self.run_judge(CountingTransport()), H.EXIT_OK)
+
+    def test_a_completed_run_makes_no_further_call(self):
+        self.assertEqual(self.run_judge(CountingTransport()), H.EXIT_OK)
+        again = CountingTransport()
+        self.assertEqual(self.run_judge(again), H.EXIT_OK)
+        self.assertEqual(again.calls, [])
+
+    def test_the_reservation_is_durable_before_the_call_is_made(self):
+        seen = []
+
+        def transport(model, messages):
+            on_disk = H.load_calls(self.calls_path)
+            seen.append([r['status'] for r in on_disk])
+            return good_response(2), model, {'prompt_tokens': 1,
+                                             'completion_tokens': 1}
+        self.run_judge(transport, sessions=[tiny_session('S1')])
+        self.assertEqual(seen[0], ['pending'])
+        self.assertEqual(seen[1], ['pending', 'ok', 'pending'])
+
+    def test_every_append_is_fsynced(self):
+        with mock.patch.object(H.os, 'fsync', wraps=os.fsync) as fsync:
+            self.run_judge(CountingTransport(), sessions=[tiny_session('S1')])
+        self.assertGreaterEqual(fsync.call_count, 4)    # 2 calls x 2 records
+
+    # -- caps ------------------------------------------------------------------
+    def test_planned_reservations_over_the_cap_by_a_cent_run_zero_calls(self):
+        total, _n = self.planned_total()
+        transport = CountingTransport()
+        with mock.patch.object(H, 'SPEND_CAP_USD', total - Decimal('0.01')):
+            self.assertEqual(self.run_judge(transport), H.EXIT_BUDGET)
+        self.assertEqual(transport.calls, [])
+        self.assertEqual(self.records(), [])
+
+    def test_a_cap_exactly_equal_to_the_reservations_runs_every_call(self):
+        total, planned = self.planned_total()
+        transport = CountingTransport()
+        with mock.patch.object(H, 'SPEND_CAP_USD', total):
+            self.assertEqual(self.run_judge(transport), H.EXIT_OK)
+        self.assertEqual(len(transport.calls), planned)
+
+    def test_max_calls_one_below_the_plan_runs_zero_calls(self):
+        _total, planned = self.planned_total()
+        transport = CountingTransport()
+        with mock.patch.object(H, 'MAX_CALLS', planned - 1):
+            self.assertEqual(self.run_judge(transport), H.EXIT_BUDGET)
+        self.assertEqual(transport.calls, [])
+
+    def test_recorded_calls_count_against_max_calls_on_a_resume(self):
+        crash = CountingTransport(script=[None, RuntimeError('boom')])
+        with self.assertRaises(RuntimeError):
+            self.run_judge(crash)
+        _total, planned = self.planned_total()
+        resume = CountingTransport()
+        # 3 pending records are on disk (2 calls + 0) ... 2 recorded; 5 todo
+        with mock.patch.object(H, 'MAX_CALLS', 2 + (planned - 1) - 1):
+            self.assertEqual(self.run_judge(resume), H.EXIT_BUDGET)
+        self.assertEqual(resume.calls, [])
+
+    def test_the_cap_is_rechecked_before_every_call(self):
+        total, _n = self.planned_total()
+        transport = CountingTransport(usage={
+            'prompt_tokens': 1, 'completion_tokens': 1,
+            'cost': total})       # the first call "cost" the whole budget
+        with mock.patch.object(H, 'SPEND_CAP_USD', total):
+            self.assertEqual(self.run_judge(transport), H.EXIT_BUDGET)
+        self.assertEqual(len(transport.calls), 1)
+
+    # -- the lock ----------------------------------------------------------------
+    def test_a_second_run_while_the_lock_is_held_exits_locked_with_no_call(self):
+        self.run_dir.mkdir(parents=True)
+        fd = H.acquire_run_lock(self.run_dir)
+        self.assertIsNotNone(fd)
+        self.addCleanup(lambda: os.close(fd) if fd is not None else None)
+        transport = CountingTransport()
+        self.assertEqual(self.run_judge(transport), H.EXIT_LOCKED)
+        self.assertEqual(transport.calls, [])
+        os.close(fd)
+        fd = None
+        self.assertEqual(self.run_judge(CountingTransport()), H.EXIT_OK)
+
+    def test_the_lock_is_released_when_a_run_crashes(self):
+        with self.assertRaises(RuntimeError):
+            self.run_judge(CountingTransport(script=[RuntimeError('x')]))
+        fd = H.acquire_run_lock(self.run_dir)
+        self.assertIsNotNone(fd)
+        os.close(fd)
+
+    # -- retries and served model --------------------------------------------------
+    def test_a_failed_call_is_retried_once_and_a_second_failure_stands(self):
+        err = H.TransportError('503')
+        transport = CountingTransport(script=[err, err, err, err])
+        one = [tiny_session('S1')]
+        self.assertEqual(self.run_judge(transport, sessions=one,
+                                        judges=(JUDGES[0],)), H.EXIT_OK)
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual([r['status'] for r in self.records()],
+                         ['pending', 'call_error', 'pending', 'call_error'])
+        again = CountingTransport()
+        self.run_judge(again, sessions=one, judges=(JUDGES[0],))
+        self.assertEqual(again.calls, [])          # the second error stands
+
+    def test_a_failure_then_a_success_is_recorded_ok(self):
+        transport = CountingTransport(script=[H.TransportError('x')])
+        self.run_judge(transport, sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],))
+        self.assertEqual([r['status'] for r in self.records()],
+                         ['pending', 'call_error', 'pending', 'ok'])
+
+    def test_the_retry_is_only_made_within_the_remaining_cap(self):
+        transport = CountingTransport(script=[H.TransportError('x')] * 2)
+        with mock.patch.object(H, 'MAX_CALLS', 1):
+            rc = self.run_judge(transport, sessions=[tiny_session('S1')],
+                                judges=(JUDGES[0],))
+        self.assertEqual(rc, H.EXIT_BUDGET)
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_a_call_error_resumes_with_one_retry_left(self):
+        first = CountingTransport(script=[H.TransportError('x')])
+        with mock.patch.object(H, 'MAX_CALLS', 1):
+            self.run_judge(first, sessions=[tiny_session('S1')],
+                           judges=(JUDGES[0],))
+        resume = CountingTransport(script=[H.TransportError('x'), None])
+        self.run_judge(resume, sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],))
+        self.assertEqual(len(resume.calls), 1)     # attempts 2 of 2, no more
+
+    def test_a_different_served_model_is_recorded_and_never_counted(self):
+        pinned = JUDGES[0][1]
+        transport = CountingTransport(
+            script=[(good_response(2), pinned + '-20261001')] * 2)
+        self.run_judge(transport, sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],), orderings=('forward', 'reversed'))
+        records = [r for r in self.records() if r['status'] != 'pending']
+        self.assertEqual({r['status'] for r in records},
+                         {'served_model_mismatch'})
+        self.assertEqual(records[0]['served_model'], pinned + '-20261001')
+        self.assertIsNone(records[0]['verdicts'])
+        combined = H.combine_verdicts(records, 2, judges=('A',))
+        self.assertEqual([t['bucket'] for t in combined],
+                         ['invalid', 'invalid'])
+        again = CountingTransport()
+        self.run_judge(again, sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],), orderings=('forward', 'reversed'))
+        self.assertEqual(again.calls, [])           # never silently retried
+
+    def test_an_unparseable_response_is_invalid_and_not_retried(self):
+        transport = CountingTransport(script=['I think J1.'])
+        self.run_judge(transport, sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],))
+        self.assertEqual([r['status'] for r in self.records()],
+                         ['pending', 'invalid'])
+        self.assertEqual(len(transport.calls), 1)
+
+    # -- cost -----------------------------------------------------------------------
+    def test_cost_comes_from_the_provider_else_from_tokens_at_the_prices(self):
+        reported = CountingTransport(usage={
+            'prompt_tokens': 1000, 'completion_tokens': 100,
+            'cost': Decimal('0.5')})
+        self.run_judge(reported, sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],))
+        ok = [r for r in self.records() if r['status'] == 'ok'][0]
+        self.assertEqual(Decimal(ok['cost_usd']), Decimal('0.5'))
+        shutil.rmtree(self.run_dir)
+        computed = CountingTransport(usage={
+            'prompt_tokens': 1000, 'completion_tokens': 100})
+        self.run_judge(computed, sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],))
+        ok = [r for r in self.records() if r['status'] == 'ok'][0]
+        self.assertEqual(Decimal(ok['cost_usd']), Decimal('0.006'))
+
+    def test_the_reservation_is_the_worst_case_formula_exactly(self):
+        model = JUDGES[0][1]
+        prompt = 'x' * 3000
+        price_in, price_out = H.JUDGE_PRICES[model]
+        expected = Decimal(1000) * price_in + Decimal(H.JUDGE_MAX_TOKENS) \
+            * price_out
+        self.assertEqual(H.reserve_usd(model, prompt), expected)
+
+    def test_a_record_with_an_unlisted_key_is_refused(self):
+        self.run_dir.mkdir(parents=True)
+        with self.assertRaises(ValueError):
+            H.append_record(self.calls_path, {'session_label': 'S1',
+                                              'transcript_text': 'leak'})
+        self.assertFalse(self.calls_path.exists())
+
+    def test_a_torn_final_line_is_skipped_not_fatal(self):
+        self.run_judge(CountingTransport(), sessions=[tiny_session('S1')],
+                       judges=(JUDGES[0],))
+        with open(self.calls_path, 'a') as handle:
+            handle.write('{"session_label": "S1", "jud')
+        self.assertEqual(len(H.load_calls(self.calls_path)), 2)
+
+    # -- smoke --------------------------------------------------------------------------
+    def test_smoke_is_one_forward_call_per_judge_on_the_smallest_session(self):
+        sessions = [tiny_session('S1', n_messages=5),
+                    tiny_session('S2', n_messages=1),
+                    tiny_session('S3', n_messages=3)]
+        transport = CountingTransport(n_turns=1)
+        self.assertEqual(self.run_judge(transport, sessions=sessions,
+                                        smoke=True), H.EXIT_OK)
+        done = [r for r in self.records() if r['status'] == 'ok']
+        self.assertEqual(sorted((r['session_label'], r['judge'], r['ordering'])
+                                for r in done),
+                         [('S2', 'A', 'forward'), ('S2', 'B', 'forward')])
+
+    def test_a_full_run_after_smoke_skips_what_smoke_recorded(self):
+        sessions = [tiny_session('S1'), tiny_session('S2', n_messages=1)]
+        self.run_judge(CountingTransport(n_turns=1), sessions=sessions,
+                       smoke=True)
+        full = CountingTransport()
+        self.run_judge(full, sessions=sessions,
+                       orderings=('forward', 'reversed'))
+        self.assertEqual(len(full.calls), 8 - 2)
+
+    def test_smoke_stops_on_a_served_model_mismatch_and_names_it(self):
+        sessions = [tiny_session('S1')]
+        transport = CountingTransport(script=[
+            (good_response(2), JUDGES[0][1] + '-dated')])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = H.run_judge(sessions, transport, self.run_dir, smoke=True)
+        self.assertEqual(rc, H.EXIT_MODEL)
+        self.assertIn(JUDGES[0][1] + '-dated', err.getvalue())
+        self.assertIn('served model mismatch', err.getvalue())
+
+
+class EstimateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = _scratch_root()
+        cls.host = judge_host(cls.tmp)
+        cls.out = Path(cls.tmp) / 'pulled'
+        _run_main(cls.host.pull_argv(cls.out))
+
+    @classmethod
+    def tearDownClass(cls):
+        _cleanup(cls.tmp)
+
+    def test_estimate_prints_the_plan_and_a_ceiling_under_the_cap(self):
+        rc, out, _e = _run_main(['estimate', '--out-dir', str(self.out)])
+        self.assertEqual(rc, H.EXIT_OK)
+        self.assertIn('planned calls: 4', out)
+        self.assertRegex(out, r'input characters: \d+')
+        self.assertIn(H.JUDGE_A_MODEL, out)
+        self.assertIn(H.JUDGE_B_MODEL, out)
+        self.assertIn('0.000004', out)
+        self.assertRegex(out, r'ceiling: [0-9.]+ USD')
+        self.assertNotIn('did some work', out)
+
+    def test_estimate_exits_budget_when_the_ceiling_exceeds_the_cap(self):
+        with mock.patch.object(H, 'SPEND_CAP_USD', Decimal('0.01')):
+            rc, out, _e = _run_main(['estimate', '--out-dir', str(self.out)])
+        self.assertEqual(rc, H.EXIT_BUDGET)
+        self.assertIn('ceiling:', out)
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self):
+        return self.body
+
+
+class RecordingOpener:
+    """Stands in for urllib.request.urlopen: records each request and answers
+    with a well-formed envelope holding a verdict for 6 turns."""
+
+    def __init__(self, content=None, served=None, fail=None):
+        self.requests = []
+        self.content = content or verdict_text(['J1'] * 4 + ['J2'] * 2)
+        self.served = served
+        self.fail = fail
+
+    def __call__(self, request, timeout=None):
+        self.requests.append({
+            'url': request.full_url, 'timeout': timeout,
+            'headers': dict(request.header_items()),
+            'body': json.loads(request.data)})
+        if self.fail is not None:
+            raise self.fail
+        model = json.loads(request.data)['model']
+        return FakeResponse(json.dumps({
+            'choices': [{'message': {'content': self.content}}],
+            'model': self.served or model,
+            'usage': {'prompt_tokens': 120, 'completion_tokens': 30,
+                      'cost': 0.00123}}).encode())
+
+
+FAKE_KEY = 'sk-or-TESTKEY-recognisable'
+
+
+class KeyHandlingTests(unittest.TestCase):
+    MESSAGES = [{'role': 'user', 'content': 'hello'}]
+
+    def test_the_request_shape(self):
+        opener = RecordingOpener()
+        with mock.patch.dict(os.environ, {H.KEY_ENV: FAKE_KEY}):
+            content, served, usage = H.openrouter_transport(
+                'anthropic/claude-opus-5.5', self.MESSAGES, opener=opener)
+        request = opener.requests[0]
+        self.assertEqual(request['url'],
+                         'https://openrouter.ai/api/v1/chat/completions')
+        self.assertEqual(request['timeout'], 300)
+        self.assertEqual(request['headers']['Authorization'],
+                         'Bearer ' + FAKE_KEY)
+        body = request['body']
+        self.assertEqual(body['model'], 'anthropic/claude-opus-5.5')
+        self.assertEqual(body['messages'], self.MESSAGES)
+        self.assertEqual(body['temperature'], 0)
+        self.assertEqual(body['max_tokens'], H.JUDGE_MAX_TOKENS)
+        self.assertEqual(body['provider'], {'data_collection': 'deny'})
+        self.assertNotIn(FAKE_KEY, json.dumps(body))
+        self.assertEqual(served, 'anthropic/claude-opus-5.5')
+        self.assertEqual(usage['cost'], Decimal('0.00123'))
+
+    def test_without_a_documented_option_no_provider_field_is_sent(self):
+        opener = RecordingOpener()
+        with mock.patch.dict(os.environ, {H.KEY_ENV: FAKE_KEY}), \
+                mock.patch.object(H, 'OPENROUTER_PROVIDER_PREFS', None):
+            H.openrouter_transport('m', self.MESSAGES, opener=opener)
+        self.assertNotIn('provider', opener.requests[0]['body'])
+
+    def test_no_key_at_call_time_is_a_transport_error_with_no_request(self):
+        opener = RecordingOpener()
+        env = {k: v for k, v in os.environ.items() if k != H.KEY_ENV}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(H.TransportError):
+                H.openrouter_transport('m', self.MESSAGES, opener=opener)
+        self.assertEqual(opener.requests, [])
+
+    def test_transport_failures_carry_no_body_and_no_key(self):
+        import urllib.error
+        cases = [urllib.error.HTTPError('u', 429, 'x', {}, None),
+                 urllib.error.URLError('down'), TimeoutError('slow'),
+                 ConnectionResetError('reset')]
+        for exc in cases:
+            with self.subTest(type(exc).__name__):
+                opener = RecordingOpener(fail=exc)
+                with mock.patch.dict(os.environ, {H.KEY_ENV: FAKE_KEY}):
+                    with self.assertRaises(H.TransportError) as ctx:
+                        H.openrouter_transport('m', self.MESSAGES,
+                                               opener=opener)
+                self.assertNotIn(FAKE_KEY, str(ctx.exception))
+
+    def test_a_malformed_envelope_is_a_transport_error(self):
+        class Bad:
+            def __call__(self, request, timeout=None):
+                return FakeResponse(b'{"choices": []}')
+        with mock.patch.dict(os.environ, {H.KEY_ENV: FAKE_KEY}):
+            with self.assertRaises(H.TransportError):
+                H.openrouter_transport('m', self.MESSAGES, opener=Bad())
+
+    def test_judge_without_the_key_exits_no_key_before_any_request(self):
+        tmp = _scratch_root()
+        try:
+            host = judge_host(tmp)
+            out = Path(tmp) / 'pulled'
+            self.assertEqual(_run_main(host.pull_argv(out))[0], 0)
+            opener = RecordingOpener()
+            env = {k: v for k, v in os.environ.items() if k != H.KEY_ENV}
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(H, 'HTTP_OPENER', opener):
+                rc, _o, err = _run_main(['judge', '--out-dir', str(out),
+                                         '--transport', 'openrouter'])
+            self.assertEqual(rc, H.EXIT_NO_KEY)
+            self.assertEqual(opener.requests, [])
+            self.assertFalse((out / 'run' / 'calls.jsonl').exists())
+            self.assertIn(H.KEY_ENV, err)
+        finally:
+            _cleanup(tmp)
+
+    def test_the_key_reaches_only_the_authorization_header(self):
+        tmp = _scratch_root()
+        try:
+            host = judge_host(tmp)
+            out = Path(tmp) / 'pulled'
+            self.assertEqual(_run_main(host.pull_argv(out))[0], 0)
+            self.assertEqual(_run_main(['census', '--out-dir', str(out)])[0], 0)
+            opener = RecordingOpener()
+            prereg = prereg_file(Path(tmp) / 'prereg-gate.json')
+            streams = []
+            with mock.patch.dict(os.environ, {H.KEY_ENV: FAKE_KEY}), \
+                    mock.patch.object(H, 'HTTP_OPENER', opener), gate_patch():
+                for argv in (['judge', '--out-dir', str(out), '--transport',
+                              'openrouter'],
+                             ['gate', '--out-dir', str(out), '--prereg',
+                              prereg],
+                             ['report', '--out-dir', str(out)]):
+                    rc, o, e = _run_main(argv)
+                    self.assertEqual(rc, 0, e)
+                    streams += [o, e]
+            self.assertEqual(len(opener.requests), 4)
+            for request in opener.requests:
+                self.assertEqual(request['headers']['Authorization'],
+                                 'Bearer ' + FAKE_KEY)
+                self.assertNotIn(FAKE_KEY, json.dumps(request['body']))
+            for stream in streams:
+                self.assertNotIn(FAKE_KEY, stream)
+                self.assertNotIn('TESTKEY', stream)
+            leaked = []
+            for path in Path(out).rglob('*'):
+                if path.is_file() and b'TESTKEY' in path.read_bytes():
+                    leaked.append(path.name)
+            self.assertEqual(leaked, [])
+            records = H.load_calls(out / 'run' / 'calls.jsonl')
+            self.assertEqual(len([r for r in records if r['status'] == 'ok']),
+                             4)
+            self.assertEqual(
+                {Decimal(r['cost_usd']) for r in records
+                 if r['status'] == 'ok'}, {Decimal('0.00123')})
+        finally:
+            _cleanup(tmp)
+
+
+HARNESS = ROOT / 'tests' / 'job_attribution_harness.py'
+WRITE_ALLOWED = frozenset({
+    '_write_private_text',   # behind _write_private_json and _write_aggregate
+    'append_record',         # the calls.jsonl appender
+    'acquire_run_lock',      # opens run.lock for flock
+    'run_remote',            # streams a remote command into a local file
+    'extract_tar',           # extracts a pulled archive into the out-dir
+    '_store_messages',       # fills the LOCAL state.db copy
+    '_rebuild_state_db',     # builds the LOCAL state.db copy
+})
+KEY_NAMES = frozenset({'api_key'})   # the VALUE; KEY_ENV is only its name
+
+
+def _functions(tree):
+    return [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+
+def _names(node):
+    found = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            found.add(n.id)
+    return found
+
+
+def _is_write_call(node):
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == 'open':
+        mode = node.args[1] if len(node.args) > 1 else next(
+            (k.value for k in node.keywords if k.arg == 'mode'), None)
+        return (isinstance(mode, ast.Constant) and isinstance(mode.value, str)
+                and any(c in mode.value for c in 'wax+'))
+    if isinstance(func, ast.Attribute):
+        if func.attr in ('write_text', 'write_bytes'):
+            return True
+        if (func.attr == 'open' and isinstance(func.value, ast.Name)
+                and func.value.id == 'os'):
+            return any(isinstance(n, ast.Attribute) and n.attr in (
+                'O_WRONLY', 'O_RDWR', 'O_CREAT', 'O_APPEND')
+                for a in node.args for n in ast.walk(a))
+        if (func.attr == 'connect' and isinstance(func.value, ast.Name)
+                and func.value.id == 'sqlite3'):
+            return not any(k.arg == 'uri' for k in node.keywords)
+    return False
+
+
+class HarnessHygieneTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tree = ast.parse(HARNESS.read_text())
+
+    def test_the_harness_references_no_production_writer(self):
+        seen = set()
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Name):
+                seen.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                seen.add(node.attr)
+        self.assertFalse(seen & H.FORBIDDEN_WRITERS,
+                         seen & H.FORBIDDEN_WRITERS)
+
+    def test_a_local_file_is_written_only_by_the_named_writers(self):
+        offenders = []
+        for func in _functions(self.tree):
+            if func.name in WRITE_ALLOWED:
+                continue
+            for node in ast.walk(func):
+                if _is_write_call(node):
+                    offenders.append((func.name, node.lineno))
+        self.assertEqual(offenders, [])
+        for node in self.tree.body:        # and nothing at module level
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                continue
+            for inner in ast.walk(node):
+                self.assertFalse(_is_write_call(inner))
+
+    def test_every_allowed_writer_exists(self):
+        names = {f.name for f in _functions(self.tree)}
+        self.assertLessEqual(WRITE_ALLOWED, names)
+
+    def test_the_key_is_never_formatted_into_a_string(self):
+        offenders = []
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.JoinedStr) and _names(node) & KEY_NAMES:
+                offenders.append(('f-string', node.lineno))
+            elif (isinstance(node, ast.Call)
+                  and isinstance(node.func, ast.Attribute)
+                  and node.func.attr == 'format'
+                  and _names(node) & KEY_NAMES):
+                offenders.append(('format', node.lineno))
+            elif (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod)
+                  and _names(node) & KEY_NAMES):
+                offenders.append(('percent', node.lineno))
+        self.assertEqual(offenders, [])
+
+    def test_the_key_is_never_printed_or_logged(self):
+        offenders = []
+        for node in ast.walk(self.tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else (
+                func.attr if isinstance(func, ast.Attribute) else '')
+            if name in ('print', 'write', 'info', 'warning', 'error',
+                        'debug', 'exception', 'critical', 'format'):
+                if any(isinstance(n, ast.Name) and n.id == 'api_key'
+                       for a in node.args for n in ast.walk(a)):
+                    offenders.append((name, node.lineno))
+        self.assertEqual(offenders, [])
+
+    def test_the_key_variable_lives_only_in_the_transport(self):
+        for func in _functions(self.tree):
+            if func.name == 'openrouter_transport':
+                continue
+            uses = [n for n in ast.walk(func) if isinstance(n, ast.Name)
+                    and n.id == 'api_key']
+            self.assertEqual(uses, [], func.name)
+
+    def test_the_environment_is_read_for_the_key_only_by_name_constant(self):
+        sources = HARNESS.read_text()
+        self.assertNotIn('os.getenv', sources)
+        uses = []
+        for node in ast.walk(self.tree):
+            if (isinstance(node, ast.Attribute) and node.attr == 'environ'
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == 'os'):
+                uses.append(node)
+        self.assertEqual(len(uses), 2)      # cmd_judge's check + the transport
+        for call in (n for n in ast.walk(self.tree)
+                     if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Attribute)
+                     and isinstance(n.func.value, ast.Attribute)
+                     and n.func.value.attr == 'environ'):
+            self.assertEqual(call.func.attr, 'get')
+            self.assertEqual(call.args[0].id, 'KEY_ENV')
+
+    def test_the_run_lock_and_the_fsync_exist(self):
+        text = HARNESS.read_text()
+        self.assertIn('LOCK_NB', text)
+        self.assertIn('os.fsync', text)
+
+    def test_no_literal_secret_is_committed(self):
+        text = HARNESS.read_text() + Path(__file__).read_text()
+        self.assertNotRegex(text, r'sk-or-v1-[A-Za-z0-9]{20,}')
+
+
 if __name__ == '__main__':
     unittest.main()
