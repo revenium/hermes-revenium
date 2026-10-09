@@ -37,6 +37,7 @@ from tests._compat_helpers import (
     build_state_db,
     run_script,
     SCRIPTS_DIR,
+    seed_parent_session_ids,
 )
 
 SID = "bug1-slow-job-sid"
@@ -64,6 +65,9 @@ class TestBug1SlowJobInference(unittest.TestCase):
             "estimated_cost": "0", "api_calls": 1,
             "started_at": started, "ended_at": started, "billing_provider": "anthropic",
         }])
+        # Production hosts carry parent_session_id (research F4); D-17 attributes a
+        # resolved owner only on positive root evidence.
+        seed_parent_session_ids(state_db, {SID: None})
 
         shim = os.path.join(bin_dir, "revenium")
         build_shim(shim)
