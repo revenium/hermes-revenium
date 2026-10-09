@@ -481,10 +481,15 @@ class RemoteCommandAllowlistTests(unittest.TestCase):
         'from_iso': '2026-09-08T00:00:00Z',
         'to_iso': '2026-10-08T00:00:00Z',
         'page': 0,
+        'hermes_home': '~/.hermes',
+        'columns': 'session_id, role, content, timestamp, id',
+        'sid_list': "'20261001_000001_ab12cd', 'a:b.c-d'",
+        'order_by': 'session_id, timestamp, id',
+        'file_list': 'api-events/20261001_000001_ab12cd.jsonl',
     }
 
     def test_every_template_is_accepted(self):
-        self.assertGreaterEqual(len(H.REMOTE_COMMAND_TEMPLATES), 9)
+        self.assertGreaterEqual(len(H.REMOTE_COMMAND_TEMPLATES), 14)
         for name, template in H.REMOTE_COMMAND_TEMPLATES.items():
             cmd = template.format(**self.SAMPLE)
             H.validate_remote_command(cmd)  # must not raise
@@ -1151,7 +1156,9 @@ class ShapeCensusTests(_Scratch):
         lay.row('zq7leaksid', 1.0, job=jobs[0], muid=muids[0])
         lay.jobs = [f'JOB:{jobs[0]}:created:{IN_WIN}']
         agg, priv = lay.census()
-        self.assertEqual(set(agg), H.AGGREGATE_KEYS)
+        # plan 04 added the judge-half keys to the whitelist; the census
+        # alone fills exactly the plan-03 keys.
+        self.assertEqual(set(agg), H.AGGREGATE_KEYS - H.JUDGE_AGGREGATE_KEYS)
         text = json.dumps(agg, default=str).lower()
         for needle in ('zq7leaksid', 'zq7leakjob', muids[0].lower()):
             self.assertNotIn(needle, text)
