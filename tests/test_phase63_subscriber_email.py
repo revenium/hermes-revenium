@@ -96,6 +96,7 @@ from tests._compat_helpers import (
     build_state_db,
     load_golden,
     run_script,
+    seed_parent_session_ids,
     seed_user_ids,
     ROOT,
     SCRIPTS_DIR,
@@ -695,6 +696,9 @@ class MarkerSplitSubscriberEmailWiringTests(unittest.TestCase):
         }])
         if user_id_mapping is not None:
             seed_user_ids(tree.state_db, user_id_mapping)
+        # Production hosts carry parent_session_id (research F4); D-17 attributes a
+        # resolved owner only on positive root evidence.
+        seed_parent_session_ids(tree.state_db, {self.SID: None})
         task_marker = {
             'muid': self.MUID,
             'ts': 1715515000.5,
