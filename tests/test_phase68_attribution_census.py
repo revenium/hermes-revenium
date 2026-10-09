@@ -8,11 +8,13 @@ aggregate, the remote-command allowlist and the redaction audit.
 
 Nothing here touches a real host, a real tenant, or the network.
 """
+import calendar
 import contextlib
 import io
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import stat
@@ -24,6 +26,14 @@ from fractions import Fraction
 from pathlib import Path
 
 from tests import job_attribution_harness as H
+from tests._compat_helpers import (
+    SCRIPTS_DIR,
+    argv_to_flags,
+    build_shim,
+    build_state_db,
+    run_script,
+    seed_parent_session_ids,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -642,6 +652,719 @@ class AuditTests(unittest.TestCase):
         rc, _o, _e = self._audit('personnel only\n',
                                  '--denylist', str(self.denylist))
         self.assertEqual(rc, H.EXIT_OK)
+
+
+
+# ---------------------------------------------------------------------------
+# Plan 03 task 2: resolver replay, shape census, D-07, D-18, D-15a
+# ---------------------------------------------------------------------------
+WINDOW_FROM = '2026-09-08T00:00:00Z'
+WINDOW_TO = '2026-10-08T00:00:00Z'
+
+
+def _epoch(iso):
+    return calendar.timegm(__import__('time').strptime(iso, '%Y-%m-%dT%H:%M:%SZ'))
+
+
+IN_WIN = float(_epoch('2026-09-20T00:00:00Z'))
+OUT_WIN = float(_epoch('2026-08-01T00:00:00Z'))
+
+
+class Layout:
+    """A pulled-host layout built directly on disk (no ssh), plus a manifest,
+    so census arithmetic can be tested fast and exactly."""
+
+    def __init__(self, tmp, with_parent=True):
+        self.out = Path(tmp) / 'pulled'
+        for sub in ('markers', 'completions', 'jobs'):
+            (self.out / sub).mkdir(parents=True)
+        self.with_parent = with_parent
+        self.sessions = []
+        self.rows = []
+        self.hermes = []
+        self.jobs = []
+        self.events = None
+
+    def marker_file(self, sid, shape, jobs=None):
+        """Write `<sid>.jsonl` from a shape string. Returns (muids, job ids)."""
+        muids, job_ids, records = [], [], []
+        jobs = list(jobs or [])
+        for index, char in enumerate(shape):
+            if char == 'T':
+                muid = f'{sid}-m{index}'
+                muids.append(muid)
+                first = shape.index('T') == index
+                records.append({
+                    'muid': muid, 'ts': 1000.0 + 10 * index, 'sid': sid,
+                    'task_type': 'code_review',
+                    'operation_type': ('GUARDRAIL' if first and
+                                       shape.count('T') > 1 else 'CHAT'),
+                    'trace_id': sid})
+            else:
+                job_id = jobs.pop(0) if jobs else f'j{index}x{sid}'
+                job_ids.append(job_id)
+                records.append({
+                    'kind': 'job', 'ts': 1000.0 + 10 * index, 'sid': sid,
+                    'agentic_job_id': job_id, 'job_name': 'a job',
+                    'job_type': 'a_type', 'status': 'SUCCESS'})
+        path = self.out / 'markers' / f'{sid}.jsonl'
+        with open(path, 'w') as handle:
+            for rec in records:
+                handle.write(json.dumps(rec, separators=(',', ':')) + '\n')
+        return muids, job_ids
+
+    def session(self, sid, parent=None, tokens=1500, cost=1.0, started=IN_WIN):
+        self.sessions.append((sid, started, tokens, 0, 0, 0, cost, parent))
+
+    def row(self, sid, cost, job=None, muid=None, total=1500, agent=SLICE,
+            txn=None):
+        txn = txn or (f'{sid}-{total}-{muid}' if muid else f'{sid}-{total}')
+        self.rows.append({'agent': agent, 'agenticJobId': job,
+                          'transactionId': txn, 'totalCost': cost})
+
+    def finish(self):
+        db = self.out / 'state.db'
+        conn = sqlite3.connect(str(db))
+        extra = ', parent_session_id TEXT' if self.with_parent else ''
+        conn.execute(
+            'CREATE TABLE sessions (id TEXT PRIMARY KEY, started_at REAL, '
+            'input_tokens INTEGER, output_tokens INTEGER, '
+            'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+            'estimated_cost_usd REAL' + extra + ')')
+        for sid, started, tokens, out_t, cr, cw, cost, parent in self.sessions:
+            if self.with_parent:
+                conn.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)',
+                             (sid, started, tokens, out_t, cr, cw, cost,
+                              parent))
+            else:
+                conn.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?)',
+                             (sid, started, tokens, out_t, cr, cw, cost))
+        conn.commit()
+        conn.close()
+        (self.out / 'revenium-hermes.ledger').write_text(
+            ''.join(line + '\n' for line in self.hermes))
+        (self.out / 'revenium-jobs.ledger').write_text(
+            ''.join(line + '\n' for line in self.jobs))
+        if self.events is not None:
+            (self.out / 'revenium-api-events.ledger').write_text(
+                ''.join(line + '\n' for line in self.events))
+        (self.out / 'completions' / 'page-0000.json').write_text(
+            _json_text(self.rows))
+        (self.out / 'completions' / 'page-0001.json').write_text('[]')
+        (self.out / 'jobs' / 'page-0000.json').write_text('[]')
+        return H.write_manifest(self.out, {
+            'host_label': 't', 'slice_agent': SLICE,
+            'window': {'from': WINDOW_FROM, 'to': WINDOW_TO, 'days': 30},
+            'markers_pulled_at': '2026-10-08T00:00:01Z',
+            'sessions_pulled_at': '2026-10-08T00:00:02Z',
+            'revenium_pulled_at': '2026-10-08T00:00:03Z',
+            'paging': {'completions': {'pages_read': 2, 'rows': len(self.rows),
+                                       'last_page_empty': True,
+                                       'first_page_index': 0},
+                       'jobs': {'pages_read': 1, 'rows': 0,
+                                'last_page_empty': True,
+                                'first_page_index': 0}},
+            'event_ledger_present': self.events is not None,
+            'tenant': 'unavailable'})
+
+    def census(self):
+        manifest = self.finish()
+        aggregate, private = H.build_census(self.out, manifest, SLICE)
+        return aggregate, private
+
+
+class _Scratch(unittest.TestCase):
+    def setUp(self):
+        self.tmp = _scratch_root()
+        self.addCleanup(_cleanup, self.tmp)
+
+
+# -- resolver replay pinned to both reporters ------------------------------
+SHAPES = ('TJ', 'TTJ', 'TTJJ', 'TTJJTTTT', 'JTT', 'TT')
+
+
+def _shape_records(sid, shape):
+    """Marker records for a shape; the first two task markers are the
+    production GUARDRAIL + CHAT pair, the rest are CHAT. Job ids are
+    `eqjob<n>`; every marker carries a distinct, ascending ts."""
+    records, task_n, job_n = [], 0, 0
+    ts0 = 1715515000.0
+    for index, char in enumerate(shape):
+        ts = ts0 + 10 * index
+        if char == 'T':
+            guardrail = task_n == 0 and shape.count('T') > 1
+            records.append({
+                'muid': f'muid{index:03d}', 'ts': ts, 'sid': sid,
+                'task_type': 'code_review',
+                'operation_type': 'GUARDRAIL' if guardrail else 'CHAT',
+                'trace_id': sid})
+            task_n += 1
+        else:
+            job_n += 1
+            records.append({
+                'kind': 'job', 'ts': ts, 'sid': sid,
+                'agentic_job_id': f'eqjob{job_n}', 'job_name': 'Eq job',
+                'job_type': 'eq_type', 'status': 'SUCCESS'})
+    return records
+
+
+def _write_jsonl(path, records):
+    with open(path, 'w', encoding='utf-8') as handle:
+        for rec in records:
+            handle.write(json.dumps(rec, separators=(',', ':')) + '\n')
+
+
+def _event_record(sid, arid, ts, ended_at):
+    return {
+        'v': 1, 'sid': sid, 'api_request_id': arid, 'ts': ts,
+        'ended_at': ended_at, 'duration_ms': 500, 'platform': 'cli',
+        'model': 'claude-sonnet-4-6', 'response_model': 'claude-sonnet-4-6',
+        'provider': 'anthropic', 'base_url': 'https://api.anthropic.com',
+        'api_mode': 'anthropic_messages', 'finish_reason': 'stop',
+        'input_tokens': 100, 'output_tokens': 50, 'cache_read_tokens': 0,
+        'cache_write_tokens': 0, 'reasoning_tokens': 0, 'total_tokens': 150}
+
+
+def _seed_event_sessions_db(db_path, sid):
+    """sessions with parent_session_id and profile_name, a confirmed root
+    (copied by value from tests/test_event_path_owning_job_id.py)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            'CREATE TABLE sessions (id TEXT PRIMARY KEY, model TEXT, '
+            'source TEXT, input_tokens INTEGER, output_tokens INTEGER, '
+            'cache_read_tokens INTEGER, cache_write_tokens INTEGER, '
+            'reasoning_tokens INTEGER, estimated_cost_usd REAL, '
+            'api_call_count INTEGER, started_at REAL, ended_at REAL, '
+            'billing_provider TEXT, parent_session_id TEXT, '
+            'profile_name TEXT)')
+        conn.execute(
+            'INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (sid, 'claude-sonnet-4-6', 'test', 100, 50, 0, 0, 0, 0.0, 1,
+             1715514000.0, 1715514000.0, 'anthropic', None, None))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _completions(meter_log):
+    out = []
+    if os.path.exists(meter_log):
+        with open(meter_log) as handle:
+            for line in handle:
+                line = line.rstrip('\n')
+                if line:
+                    argv = shlex.split(line)
+                    if argv[:2] == ['meter', 'completion']:
+                        out.append(argv_to_flags(argv))
+    return out
+
+
+def run_legacy_reporter(shape, sid):
+    """Drive hermes-report.sh on one confirmed-root session holding `shape`.
+    Returns {muid: --agentic-job-id or None} for every shipped completion."""
+    tmpdir = tempfile.mkdtemp(prefix='gsd-p68-legacy-')
+    try:
+        hermes_home = os.path.join(tmpdir, 'hh')
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        markers_dir = os.path.join(state_dir, 'markers')
+        os.makedirs(markers_dir, mode=0o700)
+        shim_home = os.path.join(tmpdir, 'home')
+        bin_dir = os.path.join(shim_home, '.local', 'bin')
+        os.makedirs(bin_dir)
+        state_db = os.path.join(hermes_home, 'state.db')
+        build_state_db(state_db, [{
+            'id': sid, 'model': 'claude-sonnet-4-6', 'source': 'test',
+            'input_tokens': 1000, 'output_tokens': 500, 'cache_read': 0,
+            'cache_write': 0, 'reasoning': 0, 'estimated_cost': '0',
+            'api_calls': 1, 'started_at': 1715514000.0,
+            'ended_at': 1715514000.0, 'billing_provider': 'anthropic'}])
+        seed_parent_session_ids(state_db, {sid: None})
+        _write_jsonl(os.path.join(markers_dir, f'{sid}.jsonl'),
+                     _shape_records(sid, shape))
+        build_shim(os.path.join(bin_dir, 'revenium'))
+        meter_log = os.path.join(tmpdir, 'meter.log')
+        inv_log = os.path.join(tmpdir, 'inv.log')
+        env = {**os.environ, 'HOME': shim_home, 'HERMES_HOME': hermes_home,
+               'REVENIUM_STATE_DIR': state_dir,
+               'PATH': bin_dir + os.pathsep + os.environ.get('PATH', ''),
+               'INVOCATIONS_LOG': inv_log, 'METER_LOG': meter_log,
+               'JOBS_LOG': os.path.join(tmpdir, 'jobs.log'), 'TZ': 'UTC',
+               'REVENIUM_ORGANIZATION_NAME': ''}
+        rc, _inv, out = run_script(SCRIPTS_DIR / 'hermes-report.sh', env,
+                                   inv_log)
+        if rc != 0:
+            raise AssertionError(f'hermes-report.sh rc={rc}: {out}')
+        prefix = f'{sid}-1500-'
+        shipped = {}
+        for flags in _completions(meter_log):
+            txn = flags['--transaction-id']
+            if not txn.startswith(prefix):
+                raise AssertionError(f'unexpected transaction id {txn}')
+            shipped[txn[len(prefix):]] = flags.get('--agentic-job-id')
+        return shipped
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def run_event_reporter(shape, sid):
+    """Drive api-event-report.sh with one event timed onto each CHAT marker.
+    Returns {muid: --agentic-job-id or None} for CHAT markers."""
+    tmpdir = tempfile.mkdtemp(prefix='gsd-p68-event-')
+    try:
+        hermes_home = os.path.join(tmpdir, 'hh')
+        state_dir = os.path.join(hermes_home, 'state', 'revenium')
+        spool_dir = os.path.join(state_dir, 'api-events')
+        markers_dir = os.path.join(state_dir, 'markers')
+        ready_dir = os.path.join(markers_dir, '.ready')
+        for d in (spool_dir, markers_dir, ready_dir):
+            os.makedirs(d, mode=0o700)
+        shim_home = os.path.join(tmpdir, 'home')
+        bin_dir = os.path.join(shim_home, '.local', 'bin')
+        os.makedirs(bin_dir)
+        build_shim(os.path.join(bin_dir, 'revenium'))
+        records = _shape_records(sid, shape)
+        _write_jsonl(os.path.join(markers_dir, f'{sid}.jsonl'), records)
+        Path(ready_dir, sid).touch()
+        _seed_event_sessions_db(os.path.join(hermes_home, 'state.db'), sid)
+        events, by_arid = [], {}
+        for index, rec in enumerate(records):
+            if rec.get('kind') == 'job' or rec['operation_type'] != 'CHAT':
+                continue
+            arid = f'{sid}:t{index}:api:{index}'
+            by_arid[f'event:{arid}'] = rec['muid']
+            events.append(_event_record(sid, arid, rec['ts'] + 0.5,
+                                        rec['ts'] + 1.0))
+        _write_jsonl(os.path.join(spool_dir, f'{sid}.jsonl'), events)
+        with open(os.path.join(state_dir, 'revenium-jobs.ledger'), 'w') as fh:
+            for rec in records:
+                if rec.get('kind') == 'job':
+                    fh.write(f"JOB:{rec['agentic_job_id']}:created:"
+                             "1715515200.0\n")
+        meter_log = os.path.join(tmpdir, 'meter.log')
+        inv_log = os.path.join(tmpdir, 'inv.log')
+        env = {**os.environ, 'HOME': shim_home, 'HERMES_HOME': hermes_home,
+               'REVENIUM_STATE_DIR': state_dir,
+               'PATH': os.environ.get('PATH', ''),
+               'INVOCATIONS_LOG': inv_log, 'METER_LOG': meter_log,
+               'TZ': 'UTC', 'REVENIUM_EVENT_METERING_MODE': 'live'}
+        rc, _inv, out = run_script(SCRIPTS_DIR / 'api-event-report.sh', env,
+                                   inv_log)
+        if rc != 0:
+            raise AssertionError(f'api-event-report.sh rc={rc}: {out}')
+        shipped = {}
+        for flags in _completions(meter_log):
+            shipped[by_arid[flags['--transaction-id']]] = flags.get(
+                '--agentic-job-id')
+        return shipped
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class ResolverEquivalenceTests(unittest.TestCase):
+    """`resolve_owner` returns, for every task marker, the `--agentic-job-id`
+    the legacy reporter ships and, for every CHAT marker, the one the event
+    reporter ships. Driven end to end on a confirmed-root session, so it
+    holds before and after plan 02's positive-root gate lands."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix='gsd-p68-eq-')
+        cls.legacy, cls.event, cls.replay = {}, {}, {}
+        for shape in SHAPES:
+            sid = f'eq-{shape.lower()}-sid'
+            path = Path(cls.tmp) / f'{sid}.jsonl'
+            _write_jsonl(path, _shape_records(sid, shape))
+            cls.replay[shape] = H.replay_marker_file(path)
+            cls.legacy[shape] = run_legacy_reporter(shape, sid)
+            cls.event[shape] = run_event_reporter(shape, sid)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _expected(self, shape, chat_only=False):
+        return {t['muid']: t['owner'] for t in self.replay[shape]['tasks']
+                if not chat_only or t['operation_type'] == 'CHAT'}
+
+    def test_legacy_reporter_ships_the_owner_the_replay_computes(self):
+        for shape in SHAPES:
+            with self.subTest(shape=shape):
+                expected = self._expected(shape)
+                self.assertEqual(set(self.legacy[shape]), set(expected))
+                self.assertEqual(self.legacy[shape], expected)
+
+    def test_event_reporter_ships_the_owner_the_replay_computes(self):
+        for shape in SHAPES:
+            with self.subTest(shape=shape):
+                expected = self._expected(shape, chat_only=True)
+                self.assertTrue(expected)
+                self.assertEqual(self.event[shape], expected)
+
+    def test_the_two_reporters_agree_with_each_other_on_every_shape(self):
+        for shape in SHAPES:
+            with self.subTest(shape=shape):
+                for muid, owner in self.event[shape].items():
+                    self.assertEqual(self.legacy[shape][muid], owner)
+
+    def _rules(self, shape):
+        return [(t['rule'], t['owner']) for t in self.replay[shape]['tasks']]
+
+    def test_ttjj_binds_both_task_markers_forward_to_the_first_job(self):
+        self.assertEqual(self._rules('TTJJ'),
+                         [('forward', 'eqjob1'), ('forward', 'eqjob1')])
+
+    def test_ttjjtttt_binds_the_four_trailing_markers_by_fallback_to_job_two(
+            self):
+        rules = self._rules('TTJJTTTT')
+        self.assertEqual(rules[:2], [('forward', 'eqjob1')] * 2)
+        self.assertEqual(rules[2:], [('fallback', 'eqjob2')] * 4)
+
+    def test_jtt_is_bound_by_fallback_and_tt_has_no_owner(self):
+        self.assertEqual(self._rules('JTT'), [('fallback', 'eqjob1')] * 2)
+        self.assertEqual(self._rules('TT'), [('none', None)] * 2)
+        self.assertEqual(self._rules('TJ'), [('forward', 'eqjob1')])
+        self.assertEqual(self._rules('TTJ'), [('forward', 'eqjob1')] * 2)
+
+    def test_resolve_owner_is_a_pure_position_function(self):
+        jobs = [(5, 'a'), (9, 'b')]
+        self.assertEqual(H.resolve_owner(1, jobs), ('a', 'forward'))
+        self.assertEqual(H.resolve_owner(6, jobs), ('b', 'forward'))
+        self.assertEqual(H.resolve_owner(12, jobs), ('b', 'fallback'))
+        self.assertEqual(H.resolve_owner(3, []), (None, 'none'))
+
+    def test_the_loader_matches_the_reporters_on_odd_lines(self):
+        path = Path(self.tmp) / 'odd.jsonl'
+        lines = [
+            '',                                       # blank: no position
+            'not json',                               # torn: skipped
+            '[1, 2]',                                 # non-dict: skipped
+            json.dumps({'kind': 'future', 'x': 1}),   # unknown kind: counted
+            json.dumps({'muid': 'm1', 'ts': 1, 'sid': 's',
+                        'task_type': 'code_review',
+                        'operation_type': 'CHAT'}),
+            json.dumps({'kind': 'job', 'agentic_job_id': 'a b:c',
+                        'job_type': 't', 'status': 'S'}),
+            json.dumps({'kind': 'job', 'agentic_job_id': 'nokeys'}),
+            json.dumps({'muid': 'm2', 'ts': 1, 'sid': 's',
+                        'task_type': 'ack', 'operation_type': 'CHAT'}),
+            'x' * 5000,                               # over 4 KB: skipped
+        ]
+        path.write_text('\n'.join(lines) + '\n')
+        replay = H.replay_marker_file(path)
+        self.assertEqual(replay['shape'], 'TJ')
+        self.assertEqual(replay['jobs'][0]['id'], 'a_b_c')
+        self.assertEqual(replay['jobs'][0]['pos'], 3)
+        self.assertEqual(replay['tasks'][0]['owner'], 'a_b_c')
+
+
+class ShapeCensusTests(_Scratch):
+    def test_shapes_and_jobs_per_file_are_counted(self):
+        lay = Layout(self.tmp)
+        for sid, shape in (('s1', 'TTJ'), ('s2', 'TTJJ'), ('s3', 'TT'),
+                           ('s4', 'JTT')):
+            lay.marker_file(sid, shape)
+            lay.session(sid)
+        agg, _priv = lay.census()
+        self.assertEqual(agg['shapes'],
+                         {'JTT': 1, 'TT': 1, 'TTJ': 1, 'TTJJ': 1})
+        self.assertEqual({int(k): v for k, v in agg['jobs_per_file'].items()},
+                         {0: 1, 1: 2, 2: 1})
+
+    def test_resolver_rules_bind_dollars_by_rule(self):
+        lay = Layout(self.tmp)
+        muids, jobs = lay.marker_file('s1', 'TTJJTTTT')
+        lay.session('s1')
+        for muid in muids:
+            lay.row('s1', 1.0, job=jobs[0], muid=muid)
+        lay.row('s1', 5.0)  # a markerless-shaped row on the same session
+        agg, _p = lay.census()
+        rules = agg['resolver_rules']
+        self.assertEqual((rules['forward']['markers'],
+                          Decimal(rules['forward']['cost'])), (2, Decimal(2)))
+        self.assertEqual((rules['fallback']['markers'],
+                          Decimal(rules['fallback']['cost'])), (4, Decimal(4)))
+        self.assertEqual(rules['none']['markers'], 0)
+        self.assertEqual((rules['no_marker']['rows'],
+                          Decimal(rules['no_marker']['cost'])),
+                         (1, Decimal(5)))
+
+    def test_multi_single_and_zero_job_populations_carry_dollars(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('m1', 'TTJJ')
+        lay.session('m1', cost=2.0)
+        lay.row('m1', 3.0, job='jm')
+        lay.marker_file('o1', 'TTJ')
+        lay.session('o1', cost=1.0)
+        lay.row('o1', 4.0, job='jo')
+        lay.marker_file('z1', 'TT')
+        lay.session('z1', cost=0.5)
+        lay.session('nomark', cost=0.25)
+        lay.row('nomark', 1.0)
+        agg, _p = lay.census()
+        self.assertEqual(agg['multi_job']['sessions'], 1)
+        self.assertEqual(Decimal(agg['multi_job']['cost']), Decimal(3))
+        self.assertEqual(Decimal(agg['multi_job']['local_cost']), Decimal(2))
+        self.assertEqual(agg['single_job']['sessions'], 1)
+        self.assertFalse(agg['single_job']['testable_by_judge'])
+        self.assertEqual(agg['zero_job']['marker_files']['sessions'], 1)
+        self.assertEqual(agg['zero_job']['markerless_sessions']['sessions'], 1)
+        self.assertEqual(
+            Decimal(agg['zero_job']['markerless_sessions']['cost']), Decimal(1))
+
+    def test_unjoined_rows_are_counted_with_their_dollars(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('s1', 'TTJ')
+        lay.session('s1')
+        lay.row('s1', 1.0, job='j')
+        lay.row('ghost', 2.5, job='j')
+        lay.row('s1', 9.0, txn='no-such-id')
+        agg, _p = lay.census()
+        self.assertEqual(agg['unjoined']['rows'], 2)
+        self.assertEqual(Decimal(agg['unjoined']['cost']), Decimal('11.5'))
+
+    def test_the_longest_known_sid_wins_the_transaction_id_join(self):
+        known = {'abc', 'abc-def'}
+        rows = [{'transactionId': 'abc-def-100-m1'},
+                {'transactionId': 'abc-100'},
+                {'transactionId': 'event:abc-def:t1:api:1'},
+                {'transactionId': 'abc-def-xyz-m1'}]
+        joined, unjoined = H.join_rows(rows, known)
+        self.assertEqual([(s, m) for _r, s, m in joined],
+                         [('abc-def', 'm1'), ('abc', None), ('abc-def', None)])
+        self.assertEqual(len(unjoined), 1)
+
+    def test_local_cost_totals_sessions_inside_the_window_only(self):
+        lay = Layout(self.tmp)
+        lay.session('in1', cost=1.25)
+        lay.session('in2', cost=0.75)
+        lay.session('old', cost=100.0, started=OUT_WIN)
+        agg, _p = lay.census()
+        self.assertEqual(agg['local_cost']['sessions'], 2)
+        self.assertEqual(Decimal(agg['local_cost']['cost']), Decimal(2))
+
+    def test_the_aggregate_carries_every_key_and_no_identifier(self):
+        lay = Layout(self.tmp)
+        muids, jobs = lay.marker_file('zq7leaksid', 'TTJJ',
+                                      jobs=['zq7leakjob_ab12', 'zq7leakjob2'])
+        lay.session('zq7leaksid')
+        lay.row('zq7leaksid', 1.0, job=jobs[0], muid=muids[0])
+        lay.jobs = [f'JOB:{jobs[0]}:created:{IN_WIN}']
+        agg, priv = lay.census()
+        self.assertEqual(set(agg), H.AGGREGATE_KEYS)
+        text = json.dumps(agg, default=str).lower()
+        for needle in ('zq7leaksid', 'zq7leakjob', muids[0].lower()):
+            self.assertNotIn(needle, text)
+        labels = priv['multi_job_labels']
+        self.assertEqual(set(labels), {'S1'})
+        self.assertEqual(set(labels['S1']['jobs']), {'J1', 'J2'})
+        self.assertEqual(labels['S1']['sid'], 'zq7leaksid')
+
+
+# -- D-07 --------------------------------------------------------------------
+def _created(job_id, ts=IN_WIN + 1000):
+    return f'JOB:{job_id}:created:{ts}'
+
+
+class ZeroCostCensusTests(_Scratch):
+    def _cause_layout(self, lay):
+        """One zero-cost job per cause, plus a costed sibling and a job
+        created outside the window."""
+        # (d) genuinely no spend: a zero-token session.
+        lay.marker_file('sd', 'TTJ', jobs=['jd'])
+        lay.session('sd', tokens=0, cost=0.0)
+        # (c) created, session never metered, real spend locally.
+        lay.marker_file('sc', 'TTJ', jobs=['jc'])
+        lay.session('sc', tokens=1500)
+        # (b) event path withheld: the event shipped before the job existed.
+        lay.marker_file('sb', 'TTJ', jobs=['jb'])
+        lay.session('sb', tokens=1500)
+        lay.events = [f'API:sb:t1:api:1|sb|{IN_WIN + 10}']
+        # (a) sibling absorbed: TTJJ binds both tasks to the first job.
+        lay.marker_file('sa', 'TTJJ', jobs=['ja1', 'ja2'])
+        lay.session('sa', tokens=1500)
+        lay.hermes.append(f'HERMES:sa:1500:{IN_WIN}:sa-m0')
+        lay.row('sa', 2.0, job='ja1', muid='sa-m0')
+        # unexplained: metered, bound, spent, yet zero cost.
+        lay.marker_file('su', 'TTJ', jobs=['ju'])
+        lay.session('su', tokens=1500)
+        lay.hermes.append(f'HERMES:su:1500:{IN_WIN}:su-m0')
+        # outside the window: never counted.
+        lay.marker_file('so', 'TTJ', jobs=['jold'])
+        lay.session('so', tokens=1500, started=OUT_WIN)
+        lay.jobs = [_created(j) for j in ('jd', 'jc', 'jb', 'ja1', 'ja2', 'ju')]
+        lay.jobs.append(_created('jold', OUT_WIN + 1000))
+
+    def test_one_job_per_cause_yields_one_count_in_each_bucket(self):
+        lay = Layout(self.tmp)
+        self._cause_layout(lay)
+        agg, _p = lay.census()
+        zc = agg['zero_cost_jobs']
+        self.assertEqual(zc['by_cause'], {
+            'd_no_spend': 1, 'c_never_metered': 1,
+            'b_event_path_withheld': 1, 'a_sibling_absorbed': 1,
+            'unexplained': 1})
+        self.assertEqual(zc['created_in_window'], 6)
+        self.assertEqual(zc['zero_cost'], 5)  # ja1 carries dollars
+        self.assertEqual(zc['multi_cause'], 0)
+        self.assertEqual(zc['unexplained_no_marker_file'], 0)
+        self.assertEqual(zc['event_ledger_lines'], 1)
+
+    def test_a_job_with_no_marker_file_is_unexplained_and_counted_apart(self):
+        lay = Layout(self.tmp)
+        lay.jobs = [_created('jn')]
+        agg, _p = lay.census()
+        zc = agg['zero_cost_jobs']
+        self.assertEqual(zc['by_cause']['unexplained'], 1)
+        self.assertEqual(zc['unexplained_no_marker_file'], 1)
+        self.assertEqual(sum(zc['by_cause'].values()), 1)
+
+    def test_a_job_matching_two_causes_is_counted_once_by_precedence(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('sdc', 'TTJJ', jobs=['jdc1', 'jdc2'])
+        lay.session('sdc', tokens=1500)
+        lay.jobs = [_created('jdc1'), _created('jdc2')]
+        agg, _p = lay.census()
+        zc = agg['zero_cost_jobs']
+        # jdc1 is (c) only; jdc2 is (c) and (a), counted under (c).
+        self.assertEqual(zc['by_cause']['c_never_metered'], 2)
+        self.assertEqual(zc['by_cause']['a_sibling_absorbed'], 0)
+        self.assertEqual(zc['multi_cause'], 1)
+        self.assertEqual(sum(zc['by_cause'].values()), zc['zero_cost'])
+
+    def test_with_no_event_ledger_cause_b_is_zero_by_construction(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('sb', 'TTJ', jobs=['jb'])
+        lay.session('sb', tokens=1500)
+        lay.jobs = [_created('jb')]
+        agg, _p = lay.census()
+        zc = agg['zero_cost_jobs']
+        self.assertEqual(zc['event_ledger_lines'], 0)
+        self.assertEqual(zc['by_cause']['b_event_path_withheld'], 0)
+
+    def test_a_job_with_sliced_cost_above_zero_is_not_counted(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('s1', 'TTJ', jobs=['j1'])
+        lay.session('s1')
+        lay.row('s1', 1.5, job='j1', muid='s1-m0')
+        lay.row('s1', 99.0, job='j1', muid='s1-m1', agent='Hermes-ent')
+        lay.jobs = [_created('j1')]
+        agg, _p = lay.census()
+        self.assertEqual(agg['zero_cost_jobs']['zero_cost'], 0)
+
+    def test_a_job_only_another_agent_paid_for_is_zero_cost_here(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('s1', 'TTJ', jobs=['j1'])
+        lay.session('s1')
+        lay.row('s1', 50.0, job='j1', muid='s1-m0', agent='Hermes-ent')
+        lay.jobs = [_created('j1')]
+        agg, _p = lay.census()
+        self.assertEqual(agg['zero_cost_jobs']['zero_cost'], 1)
+
+
+# -- D-18 --------------------------------------------------------------------
+class AmbiguousRootCensusTests(_Scratch):
+    def test_cycles_no_row_sessions_and_the_dollars_legacy_shipped(self):
+        lay = Layout(self.tmp)
+        lay.session('R')                      # confirmed root
+        lay.session('C', parent='R')          # an ordinary child
+        lay.session('S', parent='S')          # self-loop
+        lay.session('A', parent='B')          # A-B-A cycle
+        lay.session('B', parent='A')
+        lay.marker_file('X', 'TTJ')           # marker session with no row
+        costs = {'R': 4.0, 'C': 0.5, 'S': 1.0, 'A': 2.0, 'B': 0.25}
+        for sid, cost in costs.items():
+            lay.row(sid, cost, job='j' + sid)
+        lay.row('R', 3.0)                     # not owner-attributed
+        agg, _p = lay.census()
+        amb = agg['ambiguous_root']
+        self.assertTrue(amb['has_parent_column'])
+        self.assertEqual((amb['root'], amb['child']), (1, 4))
+        self.assertEqual(amb['cycles'], 2)
+        self.assertEqual(amb['cyclic_sessions'], 3)
+        self.assertEqual(amb['no_row_marker_sessions'], 1)
+        self.assertEqual(amb['ambiguous_sessions'], 4)
+        self.assertEqual(amb['owner_attributed_rows'], 3)
+        self.assertEqual(Decimal(amb['owner_attributed_cost']),
+                         Decimal('3.25'))
+
+    def test_a_table_without_the_parent_column_makes_every_session_ambiguous(
+            self):
+        lay = Layout(self.tmp, with_parent=False)
+        lay.session('s1')
+        lay.session('s2')
+        lay.marker_file('s3', 'TTJ')
+        lay.row('s1', 1.0, job='j1')
+        lay.row('s2', 2.0, job='j2')
+        lay.row('s2', 4.0)
+        agg, _p = lay.census()
+        amb = agg['ambiguous_root']
+        self.assertFalse(amb['has_parent_column'])
+        self.assertEqual(amb['ambiguous_sessions'], 3)
+        self.assertIsNone(amb['root'])
+        self.assertEqual(Decimal(amb['owner_attributed_cost']), Decimal(3))
+
+    def test_the_walk_is_the_production_sidecars_own(self):
+        sidecar = H.load_sidecar()
+        self.assertTrue(hasattr(sidecar, '_walk_parent_map'))
+        self.assertEqual(H.SIDECAR.name, 'get-root-session-id.py')
+        self.assertEqual(
+            sidecar._walk_parent_map('A', {'A': 'B', 'B': 'A'}), 'A')
+
+    def test_a_clean_host_reports_nothing_ambiguous(self):
+        lay = Layout(self.tmp)
+        lay.session('R1')
+        lay.session('R2')
+        lay.session('K', parent='R1')
+        lay.marker_file('R1', 'TTJ')
+        lay.row('R1', 1.0, job='j')
+        agg, _p = lay.census()
+        amb = agg['ambiguous_root']
+        self.assertEqual((amb['cycles'], amb['ambiguous_sessions'],
+                          amb['no_row_marker_sessions']), (0, 0, 0))
+        self.assertEqual(Decimal(amb['owner_attributed_cost']), Decimal(0))
+
+
+class CounterfactualTests(_Scratch):
+    def test_before_after_d17_and_after_m1_are_exact_fractions(self):
+        lay = Layout(self.tmp)
+        lay.session('R1')                     # confirmed root, one job
+        lay.marker_file('R1', 'TTJ')
+        lay.row('R1', 4.0, job='j1')
+        lay.row('R1', 3.0)                    # unattributed
+        lay.session('M')                      # confirmed root, two jobs
+        lay.marker_file('M', 'TTJJ')
+        lay.row('M', 2.0, job='jm')
+        lay.session('S', parent='S')          # ambiguous self-loop
+        lay.row('S', 1.0, job='js')
+        agg, _p = lay.census()
+        cf = agg['counterfactual']
+        self.assertEqual(cf['before']['fraction'], '7/10')
+        self.assertEqual(cf['before']['display_pct'], '70.00%')
+        self.assertEqual(cf['after_d17']['fraction'], '3/5')
+        self.assertEqual(cf['after_d17']['display_pct'], '60.00%')
+        self.assertEqual(cf['after_m1']['fraction'], '2/5')
+        self.assertEqual(cf['after_m1']['display_pct'], '40.00%')
+        self.assertEqual(Decimal(cf['before']['delta_cost_from_before']), 0)
+        self.assertEqual(Decimal(cf['after_d17']['delta_cost_from_before']),
+                         Decimal(1))
+        self.assertEqual(Decimal(cf['after_m1']['delta_cost_from_before']),
+                         Decimal(3))
+        self.assertEqual(Decimal(cf['after_m1']['cost_attributed']),
+                         Decimal(4))
+
+    def test_a_session_both_ambiguous_and_multi_job_is_removed_once(self):
+        lay = Layout(self.tmp)
+        lay.session('Q', parent='Q')
+        lay.marker_file('Q', 'TTJJ')
+        lay.row('Q', 2.0, job='jq')
+        lay.row('Q', 2.0)
+        agg, _p = lay.census()
+        cf = agg['counterfactual']
+        self.assertEqual(cf['after_d17']['fraction'], '0/1')
+        self.assertEqual(cf['after_m1']['fraction'], '0/1')
+        self.assertEqual(Decimal(cf['after_m1']['delta_cost_from_before']),
+                         Decimal(2))
 
 
 if __name__ == '__main__':

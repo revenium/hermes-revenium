@@ -893,13 +893,570 @@ def cmd_audit(args):
 
 
 # ---------------------------------------------------------------------------
-# census
+# Resolver replay (pinned to both reporters by ResolverEquivalenceTests)
 # ---------------------------------------------------------------------------
+JOB_REQUIRED = ("agentic_job_id", "job_type", "status")
+TASK_REQUIRED = ("muid", "ts", "sid", "task_type", "operation_type")
+TRIVIAL_TASK_TYPES = frozenset({
+    "ack", "acknowledgment", "greeting", "confirmation", "hello", "thanks"})
+_JOB_ID_BAD = (":", " ", "\t", "\n", "\r")
+MAX_MARKER_LINE = 4096
+
+
+def resolve_owner(task_pos, job_positions):
+    """The owning job of the task marker at file position `task_pos`.
+
+    `job_positions` is ascending `[(file_pos, clean_job_id, ...), ...]`.
+    Forward rule first: the FIRST job marker whose position is greater than
+    the task marker's. Fallback (TRACE-FIX 2026-06-25): with no later job
+    marker, the NEAREST PRECEDING one. File position, never timestamp, exactly
+    as hermes-report.sh's deferred pass and api-event-report.sh's port do.
+    Returns (owner_or_None, rule) with rule `forward`, `fallback` or `none`.
+    """
+    for entry in job_positions:
+        if entry[0] > task_pos:
+            return entry[1], "forward"
+    for entry in reversed(job_positions):
+        if entry[0] < task_pos:
+            return entry[1], "fallback"
+    return None, "none"
+
+
+def _clean_job_id(job_id):
+    for bad in _JOB_ID_BAD:
+        job_id = job_id.replace(bad, "_")
+    return job_id
+
+
+def replay_marker_file(path):
+    """Reproduce the reporters' marker loader and resolver on one file.
+
+    A position is counted for every parsed dict line (unknown kinds
+    included); non-dict and over-4096-byte lines are skipped; a job line is
+    accepted only with a non-empty string `agentic_job_id` and the
+    JOB_REQUIRED keys; a task line needs the five TASK_REQUIRED keys and a
+    non-trivial `task_type`. Returns the shape string (`T` per task marker,
+    `J` per job marker in file order), the job list and, per task marker,
+    its owner and the rule that bound it.
+    """
+    position = 0
+    order, jobs, tasks = [], [], []
+    try:
+        handle = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        handle = None
+    if handle is not None:
+        with handle:
+            for line in handle:
+                line = line.rstrip("\n")
+                if not line or len(line) > MAX_MARKER_LINE:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                position += 1
+                kind = record.get("kind")
+                if kind == "job":
+                    job_id = record.get("agentic_job_id")
+                    if (isinstance(job_id, str) and job_id
+                            and all(k in record for k in JOB_REQUIRED)):
+                        jobs.append({"pos": position,
+                                     "id": _clean_job_id(job_id)})
+                        order.append("J")
+                    continue
+                if kind is not None:
+                    continue
+                if not all(k in record for k in TASK_REQUIRED):
+                    continue
+                task_type = record.get("task_type")
+                if isinstance(task_type, str) and \
+                        task_type in TRIVIAL_TASK_TYPES:
+                    continue
+                tasks.append({"muid": record["muid"],
+                              "operation_type": record.get("operation_type"),
+                              "pos": position})
+                order.append("T")
+    job_positions = [(j["pos"], j["id"]) for j in jobs]
+    for task in tasks:
+        task["owner"], task["rule"] = resolve_owner(task["pos"], job_positions)
+    return {"shape": "".join(order), "job_count": len(jobs), "jobs": jobs,
+            "tasks": tasks}
+
+
+def load_markers(out_dir):
+    """{sid: replay} for every pulled marker file."""
+    markers = {}
+    for path in sorted((Path(out_dir) / "markers").glob("*.jsonl")):
+        markers[path.stem] = replay_marker_file(path)
+    return markers
+
+
+def shape_census(markers):
+    """Counts of marker-file shapes and of job markers per file."""
+    shapes, per_file = {}, {}
+    for replay in markers.values():
+        key = replay["shape"] or "empty"
+        shapes[key] = shapes.get(key, 0) + 1
+        per_file[replay["job_count"]] = per_file.get(
+            replay["job_count"], 0) + 1
+    return {"shapes": dict(sorted(shapes.items())),
+            "jobs_per_file": dict(sorted(per_file.items()))}
+
+
+def absorbed_jobs(replay):
+    """Job ids in a file that the resolver binds zero task markers to."""
+    bound = {t["owner"] for t in replay["tasks"]}
+    seen, out = set(), []
+    for job in replay["jobs"]:
+        if job["id"] not in bound and job["id"] not in seen:
+            seen.add(job["id"])
+            out.append(job["id"])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Loading a pulled host for the census
+# ---------------------------------------------------------------------------
+def _epoch(iso):
+    import calendar
+    return calendar.timegm(time.strptime(iso, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+_TOKEN_COLUMNS = ("input_tokens", "output_tokens", "cache_read_tokens",
+                  "cache_write_tokens")
+
+
+def load_sessions(out_dir):
+    """The pulled `sessions` table, only the columns the census reads.
+
+    Returns (sessions, has_parent_column) with `sessions` as
+    {sid: {"parent", "tokens", "cost", "started_at"}}."""
+    db = Path(out_dir) / "state.db"
+    sessions = {}
+    if not db.is_file():
+        return sessions, False
+    conn = _ro_connect(db)
+    try:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(sessions)")]
+        if "id" not in columns:
+            return sessions, False
+        has_parent = "parent_session_id" in columns
+        wanted = ["id"]
+        wanted += ["parent_session_id"] if has_parent else []
+        wanted += [c for c in _TOKEN_COLUMNS if c in columns]
+        wanted += [c for c in ("actual_cost_usd", "estimated_cost_usd",
+                               "started_at") if c in columns]
+        query = "SELECT " + ", ".join(f'"{c}"' for c in wanted) \
+            + " FROM sessions"
+        for values in conn.execute(query):
+            row = dict(zip(wanted, values))
+            tokens = 0
+            for column in _TOKEN_COLUMNS:
+                value = row.get(column)
+                if isinstance(value, (int, float)):
+                    tokens += int(value)
+            cost = to_decimal(row.get("actual_cost_usd"))
+            if cost is None:
+                cost = to_decimal(row.get("estimated_cost_usd"))
+            started = row.get("started_at")
+            sessions[str(row["id"])] = {
+                "parent": (None if row.get("parent_session_id") is None
+                           else str(row["parent_session_id"])),
+                "tokens": tokens,
+                "cost": cost if cost is not None else Decimal(0),
+                "started_at": (float(started)
+                               if isinstance(started, (int, float))
+                               else None),
+            }
+    finally:
+        conn.close()
+    return sessions, has_parent
+
+
+def parse_hermes_ledger(lines):
+    """{sid: [(total_tokens, ts_or_None, muid_or_None)]}. The line shape is
+    `HERMES:<sid>:<total>:<ts>:<muid>`; a session id may itself hold colons,
+    so the fields are taken from the right."""
+    out = {}
+    for line in lines:
+        if not line.startswith("HERMES:"):
+            continue
+        rest = line[len("HERMES:"):]
+        for take in (3, 2):
+            parts = rest.rsplit(":", take)
+            if len(parts) == take + 1 and parts[1].isdigit():
+                muid = parts[3] if take == 3 else None
+                out.setdefault(parts[0], []).append(
+                    (int(parts[1]), parts[2], muid))
+                break
+    return out
+
+
+def parse_jobs_ledger(lines):
+    """{job_id: created_epoch} from `JOB:<id>:created:<ts>` lines."""
+    created = {}
+    for line in lines:
+        parts = line.split(":")
+        if len(parts) >= 4 and parts[0] == "JOB" and parts[2] == "created":
+            try:
+                created[parts[1]] = float(parts[3])
+            except ValueError:
+                continue
+    return created
+
+
+def parse_event_ledger(lines):
+    """{sid: [ts, ...]} from `API:<arid>|<sid>|<ts>` lines."""
+    out = {}
+    for line in lines:
+        if not line.startswith("API:"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        try:
+            out.setdefault(parts[1], []).append(float(parts[2]))
+        except ValueError:
+            continue
+    return out
+
+
+class Pull:
+    """Everything the census reads from one pulled host."""
+
+    def __init__(self, out_dir, manifest):
+        self.out_dir = Path(out_dir)
+        self.manifest = manifest
+        self.sessions, self.has_parent_column = load_sessions(out_dir)
+        self.markers = load_markers(out_dir)
+        self.hermes = parse_hermes_ledger(
+            _read_lines(self.out_dir / "revenium-hermes.ledger"))
+        self.jobs_created = parse_jobs_ledger(
+            _read_lines(self.out_dir / "revenium-jobs.ledger"))
+        self.event_lines = _read_lines(
+            self.out_dir / "revenium-api-events.ledger")
+        self.events = parse_event_ledger(self.event_lines)
+        self.completions = load_rows(out_dir, "completions")
+        self.window_from = _epoch(manifest["window"]["from"])
+        self.window_to = _epoch(manifest["window"]["to"])
+
+    def in_window(self, sid):
+        info = self.sessions.get(sid)
+        if info is None or info["started_at"] is None:
+            return info is not None
+        return self.window_from <= info["started_at"] < self.window_to
+
+
+_LEGACY_TXN_RE = re.compile(r"(\d+)(?:-(.+))?")
+
+
+def join_rows(rows, known_sids):
+    """Join Revenium rows to a pulled session by `transactionId`.
+
+    A legacy id is `<sid>-<total>` or `<sid>-<total>-<muid>` and an event id
+    is `event:<api_request_id>` whose id starts with the session id. The
+    longest known session id that prefixes the id wins. Returns
+    (joined, unjoined) with joined as [(row, sid, muid_or_None)]."""
+    joined, unjoined = [], []
+    for row in rows:
+        txn = row.get("transactionId")
+        match = None
+        if isinstance(txn, str):
+            if txn.startswith("event:"):
+                body = txn[len("event:"):]
+                for index in [i for i, c in enumerate(body) if c == ":"][::-1]:
+                    if body[:index] in known_sids:
+                        match = (body[:index], None)
+                        break
+            else:
+                for index in [i for i, c in enumerate(txn) if c == "-"][::-1]:
+                    sid = txn[:index]
+                    if sid in known_sids:
+                        found = _LEGACY_TXN_RE.fullmatch(txn[index + 1:])
+                        if found:
+                            match = (sid, found.group(2))
+                            break
+        if match is None:
+            unjoined.append(row)
+        else:
+            joined.append((row, match[0], match[1]))
+    return joined, unjoined
+
+
+# ---------------------------------------------------------------------------
+# Ambiguous roots (D-18), with the production sidecar's own walk
+# ---------------------------------------------------------------------------
+SIDECAR = ROOT / "skills" / "revenium" / "scripts" / "get-root-session-id.py"
+
+
+def load_sidecar():
+    """The production `get-root-session-id.py`, loaded by importlib so the
+    cycle count cannot drift from the reporter's own walk."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("grsi_census", SIDECAR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _distinct_cycles(parents, members):
+    """Distinct parent-pointer cycles among `members`."""
+    cycles = set()
+    for start in members:
+        path, seen, node = [], set(), start
+        while node is not None and node in parents and node not in seen:
+            seen.add(node)
+            path.append(node)
+            node = parents[node]
+        if node is not None and node in seen:
+            cycles.add(frozenset(path[path.index(node):]))
+    return len(cycles)
+
+
+def ambiguous_roots(pull):
+    """D-18: the sessions D-17 would change, and how many of them there are.
+
+    A session is AMBIGUOUS when the legacy reporter treats it as a root
+    (`get_root_session_id(sid) == sid`) but root status is not positively
+    established (a row exists AND `parent_session_id IS NULL`). With the
+    column absent every session is ambiguous. Returns (stats, ambiguous_set,
+    legacy_root_set)."""
+    known = set(pull.sessions) | set(pull.markers)
+    no_row = sorted(s for s in pull.markers if s not in pull.sessions)
+    if not pull.has_parent_column:
+        stats = {"has_parent_column": False,
+                 "sessions_total": len(pull.sessions), "root": None,
+                 "child": None, "cycles": 0, "cyclic_sessions": 0,
+                 "no_row_marker_sessions": len(no_row),
+                 "ambiguous_sessions": len(known)}
+        return stats, set(known), set(known)
+    sidecar = load_sidecar()
+    parents = {sid: info["parent"] for sid, info in pull.sessions.items()}
+    root = sum(1 for p in parents.values() if p is None)
+    cyclic = sorted(
+        sid for sid, parent in parents.items()
+        if parent is not None
+        and sidecar._walk_parent_map(sid, parents) == sid)
+    legacy_root = {sid for sid in known
+                   if sidecar._walk_parent_map(sid, parents) == sid}
+    confirmed = {sid for sid, parent in parents.items() if parent is None}
+    ambiguous = legacy_root - confirmed
+    stats = {"has_parent_column": True,
+             "sessions_total": len(parents), "root": root,
+             "child": len(parents) - root,
+             "cycles": _distinct_cycles(parents, cyclic),
+             "cyclic_sessions": len(cyclic),
+             "no_row_marker_sessions": len(no_row),
+             "ambiguous_sessions": len(ambiguous)}
+    return stats, ambiguous, legacy_root
+
+
+# ---------------------------------------------------------------------------
+# Census quantities
+# ---------------------------------------------------------------------------
+def _sum_cost(rows):
+    total = Decimal(0)
+    for row in rows:
+        total += row_cost(row)
+    return total
+
+
+def _attributed(rows):
+    return [r for r in rows if _has_job(r)]
+
+
+def _group_dollars(joined):
+    """{sid: [rows]} of the joined, sliced rows."""
+    by_sid = {}
+    for row, sid, _muid in joined:
+        by_sid.setdefault(sid, []).append(row)
+    return by_sid
+
+
+def _bucket(pull, by_sid, sids):
+    rows = [r for sid in sids for r in by_sid.get(sid, [])]
+    local = Decimal(0)
+    for sid in sids:
+        info = pull.sessions.get(sid)
+        if info is not None and pull.in_window(sid):
+            local += info["cost"]
+    return {"sessions": len(sids), "rows": len(rows),
+            "cost": decimal_text(_sum_cost(rows)),
+            "cost_attributed": decimal_text(_sum_cost(_attributed(rows))),
+            "local_cost": decimal_text(local)}
+
+
+def resolver_rule_census(pull, joined):
+    """Task markers and sliced dollars bound by each resolver rule."""
+    rules = {r: {"markers": 0, "rows": 0, "cost": Decimal(0)}
+             for r in ("forward", "fallback", "none")}
+    rules["no_marker"] = {"markers": 0, "rows": 0, "cost": Decimal(0)}
+    by_muid = {}
+    for sid, replay in pull.markers.items():
+        for task in replay["tasks"]:
+            rules[task["rule"]]["markers"] += 1
+            by_muid[(sid, str(task["muid"]))] = task["rule"]
+    for row, sid, muid in joined:
+        key = by_muid.get((sid, muid)) if muid is not None else None
+        bucket = rules[key] if key else rules["no_marker"]
+        bucket["rows"] += 1
+        bucket["cost"] += row_cost(row)
+    return {name: {"markers": b["markers"], "rows": b["rows"],
+                   "cost": decimal_text(b["cost"])}
+            for name, b in rules.items()}
+
+
+def zero_cost_job_census(pull, sliced):
+    """D-07: zero-cost jobs created in the window, by one primary cause.
+
+    Causes are tested independently, then assigned by fixed precedence
+    (d) genuinely no spend, (c) created but session never metered,
+    (b) event path withheld, (a) sibling absorbed, else unexplained. A job
+    matching more than one cause is also counted in `multi_cause`. A job with
+    no marker file cannot be tested and is unexplained, counted again in
+    `unexplained_no_marker_file`. `(c)` excludes a session that is `(d)`: a
+    zero-spend session is never metered, and that is not a metering gap."""
+    cost_by_job = {}
+    for row in sliced:
+        if _has_job(row):
+            job = str(row["agenticJobId"])
+            cost_by_job[job] = cost_by_job.get(job, Decimal(0)) + row_cost(row)
+    sid_of_job = {}
+    for sid in sorted(pull.markers):
+        for job in pull.markers[sid]["jobs"]:
+            sid_of_job.setdefault(job["id"], sid)
+    by_cause = {"d_no_spend": 0, "c_never_metered": 0,
+                "b_event_path_withheld": 0, "a_sibling_absorbed": 0,
+                "unexplained": 0}
+    created = zero = multi = no_marker = 0
+    for job_id, created_at in sorted(pull.jobs_created.items()):
+        if not pull.window_from <= created_at < pull.window_to:
+            continue
+        created += 1
+        if cost_by_job.get(job_id, Decimal(0)) > 0:
+            continue
+        zero += 1
+        sid = sid_of_job.get(job_id)
+        if sid is None:
+            by_cause["unexplained"] += 1
+            no_marker += 1
+            continue
+        info = pull.sessions.get(sid)
+        matches = []
+        no_spend = (info is not None and info["tokens"] == 0
+                    and info["cost"] == 0)
+        if no_spend:
+            matches.append("d_no_spend")
+        metered = sid in pull.hermes or sid in pull.events
+        if not metered and not no_spend:
+            matches.append("c_never_metered")
+        if any(ts < created_at for ts in pull.events.get(sid, [])):
+            matches.append("b_event_path_withheld")
+        if job_id in absorbed_jobs(pull.markers[sid]):
+            matches.append("a_sibling_absorbed")
+        by_cause[matches[0] if matches else "unexplained"] += 1
+        if len(matches) > 1:
+            multi += 1
+    return {"created_in_window": created, "zero_cost": zero,
+            "by_cause": by_cause, "multi_cause": multi,
+            "unexplained_no_marker_file": no_marker,
+            "event_ledger_lines": len(pull.event_lines)}
+
+
+def counterfactuals(pull, cov, joined, ambiguous, legacy_root):
+    """D-15a: cost-weighted coverage before and after each fix, from the
+    measured pull. `after_d17` removes the owner-attributed dollars of
+    ambiguous-root sessions; `after_m1` additionally removes those of root
+    sessions whose marker file holds two or more job markers."""
+    total = Fraction(Decimal(cov["cost_total"]))
+    attributed = Fraction(Decimal(cov["cost_attributed"]))
+    by_sid = _group_dollars(joined)
+
+    def owner_dollars(sids):
+        return Fraction(_sum_cost(_attributed(
+            [r for sid in sids for r in by_sid.get(sid, [])])))
+
+    multi_roots = {sid for sid, replay in pull.markers.items()
+                   if replay["job_count"] >= 2 and sid in legacy_root}
+    d17_removed = owner_dollars(ambiguous)
+    m1_removed = owner_dollars(ambiguous | multi_roots)
+
+    def block(removed):
+        fraction = (attributed - removed) / total if total else Fraction(0, 1)
+        return {"fraction": fraction_text(fraction),
+                "display_pct": display_pct(fraction),
+                "cost_attributed": decimal_text(
+                    _exact_decimal(attributed - removed)),
+                "delta_cost_from_before": decimal_text(
+                    _exact_decimal(removed))}
+
+    return {"before": block(Fraction(0)), "after_d17": block(d17_removed),
+            "after_m1": block(m1_removed)}
+
+
+def _exact_decimal(fraction):
+    """A Fraction of money as Decimal. Money here is a sum of finite
+    decimals, so the denominator divides a power of ten."""
+    numerator, denominator = fraction.numerator, fraction.denominator
+    from decimal import localcontext
+    with localcontext() as ctx:
+        ctx.prec = 60
+        return Decimal(numerator) / Decimal(denominator)
+
+
+def opaque_labels(markers):
+    """S1..Sn for multi-job sessions and J1..Jn within each, ordered by the
+    sha256 of the real id, so a label reveals nothing. Private only."""
+    def digest(text):
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    multi = sorted((s for s, r in markers.items() if r["job_count"] >= 2),
+                   key=digest)
+    labels = {}
+    for index, sid in enumerate(multi, 1):
+        ids = sorted({j["id"] for j in markers[sid]["jobs"]}, key=digest)
+        labels[f"S{index}"] = {
+            "sid": sid,
+            "jobs": {f"J{n}": job for n, job in enumerate(ids, 1)}}
+    return labels
+
+
 def build_census(out_dir, manifest, agent):
     """Every aggregate the record publishes from one pull. Returns
-    (aggregate, private): `aggregate` holds counts and exact dollars only."""
-    completions = load_rows(out_dir, "completions")
-    cov = coverage(completions, agent)
+    (aggregate, private): `aggregate` holds counts and exact dollars only,
+    sliced by `agent`; identifying material goes to `private`."""
+    pull = Pull(out_dir, manifest)
+    cov = coverage(pull.completions, agent)
+    sliced = slice_rows(pull.completions, agent)
+    known = set(pull.sessions) | set(pull.markers)
+    joined, unjoined = join_rows(sliced, known)
+    by_sid = _group_dollars(joined)
+
+    shapes = shape_census(pull.markers)
+    multi = sorted(s for s, r in pull.markers.items() if r["job_count"] >= 2)
+    single = sorted(s for s, r in pull.markers.items()
+                    if r["job_count"] == 1)
+    zero_files = sorted(s for s, r in pull.markers.items()
+                        if r["job_count"] == 0)
+    markerless = sorted(s for s in pull.sessions if s not in pull.markers)
+
+    ambiguous_stats, ambiguous, legacy_root = ambiguous_roots(pull)
+    ambiguous_rows = _attributed(
+        [r for sid in ambiguous for r in by_sid.get(sid, [])])
+    ambiguous_stats = dict(ambiguous_stats)
+    ambiguous_stats["owner_attributed_rows"] = len(ambiguous_rows)
+    ambiguous_stats["owner_attributed_cost"] = decimal_text(
+        _sum_cost(ambiguous_rows))
+
+    local_total = Decimal(0)
+    local_sessions = 0
+    for sid, info in pull.sessions.items():
+        if pull.in_window(sid):
+            local_total += info["cost"]
+            local_sessions += 1
+
     aggregate = {
         "window": dict(manifest["window"]),
         "pulled_at": {
@@ -915,11 +1472,28 @@ def build_census(out_dir, manifest, agent):
             "rows_missing_cost": cov["rows_missing_cost"],
         },
         "paging": manifest["paging"],
+        "shapes": shapes["shapes"],
+        "jobs_per_file": shapes["jobs_per_file"],
+        "resolver_rules": resolver_rule_census(pull, joined),
+        "multi_job": _bucket(pull, by_sid, multi),
+        "single_job": dict(_bucket(pull, by_sid, single),
+                           testable_by_judge=False),
+        "zero_job": {"marker_files": _bucket(pull, by_sid, zero_files),
+                     "markerless_sessions": _bucket(pull, by_sid, markerless)},
+        "unjoined": {"rows": len(unjoined),
+                     "cost": decimal_text(_sum_cost(unjoined))},
+        "zero_cost_jobs": zero_cost_job_census(pull, sliced),
+        "ambiguous_root": ambiguous_stats,
+        "counterfactual": counterfactuals(pull, cov, joined, ambiguous,
+                                          legacy_root),
+        "local_cost": {"sessions": local_sessions,
+                       "cost": decimal_text(local_total)},
         "harness_sha256": sha256_file(Path(__file__)),
         "manifest_sha256": sha256_file(Path(out_dir) / "MANIFEST.json"),
     }
     private = {"host_label": manifest.get("host_label"),
-               "slice_agent": agent}
+               "slice_agent": agent,
+               "multi_job_labels": opaque_labels(pull.markers)}
     return aggregate, private
 
 
