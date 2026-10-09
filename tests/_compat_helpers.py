@@ -495,6 +495,37 @@ def seed_user_ids(db_path, mapping):
         conn.close()
 
 
+def seed_parent_session_ids(db_path, mapping):
+    """Add a `parent_session_id` column to an existing `sessions` table if
+    absent, then set it per session id from `mapping`.
+
+    The opt-in arm for D-17's positive-root evidence (Phase 68), sibling of
+    `seed_user_ids`, deliberately NOT folded into `build_state_db`: every
+    `build_state_db` caller that does not opt in stays the column-ABSENT arm,
+    byte-identical to before. Every production host measured carries the
+    column (Phase 68 research F4), so a fixture that pins a root session's
+    job-attributed argv should model it.
+
+    A mapping value of `None` leaves that session's `parent_session_id` NULL
+    (positive evidence the session is a root). A non-None value marks the
+    session as a child of that id. A session id absent from the table is
+    ignored (the UPDATE matches no row).
+    """
+    conn = sqlite3.connect(str(db_path))
+    try:
+        cols = [row[1] for row in conn.execute('PRAGMA table_info(sessions)').fetchall()]
+        if 'parent_session_id' not in cols:
+            conn.execute('ALTER TABLE sessions ADD COLUMN parent_session_id TEXT')
+        for sid, parent in mapping.items():
+            conn.execute(
+                'UPDATE sessions SET parent_session_id = ? WHERE id = ?',
+                (parent, sid),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def build_session_model_usage(path, rows):
     """Create the `session_model_usage` table at an existing state.db and seed rows.
 
