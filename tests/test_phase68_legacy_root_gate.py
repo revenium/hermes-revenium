@@ -359,5 +359,143 @@ class GateCostTests(_GateBase):
         self.assertIn('-readonly', gate_calls[0])
 
 
+def _aux_row(sid):
+    return {
+        'session_id': sid, 'model': 'claude-3-5-haiku',
+        'billing_provider': 'anthropic', 'billing_base_url': '',
+        'billing_mode': '', 'task': 'approval', 'api_call_count': 3,
+        'input_tokens': 40, 'output_tokens': 10, 'cache_read_tokens': 0,
+        'cache_write_tokens': 0, 'estimated_cost_usd': 0.002,
+        'first_seen': 1715514500.0, 'last_seen': 1715514600.0,
+    }
+
+
+def _split_meter(meter):
+    """(main-loop argv flags, auxiliary argv flags) from a tick's meter log."""
+    flags = [argv_to_flags(a) for a in meter]
+    aux = [f for f in flags if f.get('--operation-type') == 'OTHER']
+    main = [f for f in flags if f.get('--operation-type') != 'OTHER']
+    return main, aux
+
+
+class AuxParityTests(_GateBase):
+    """Phase 55 scope parity under the gate: an auxiliary row carries the same
+    job dimension as its session's main-loop row."""
+
+    def _run(self, parents, extra_env=None):
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents=parents,
+            markers={ROOT_SID: [_task_marker(ROOT_SID, 'compat-muid-001'), _job_marker(ROOT_SID)]},
+            aux_rows=[_aux_row(ROOT_SID)],
+        )
+        res = self._tick(fx, 0, extra_env)
+        self.assertEqual(res['rc'], 0, res['output'])
+        main, aux = _split_meter(res['meter'])
+        self.assertEqual(len(main), 1, res['meter'])
+        self.assertEqual(len(aux), 1, res['meter'])
+        return main[0], aux[0]
+
+    def test_confirmed_root_aux_row_keeps_its_job_id(self):
+        main, aux = self._run({ROOT_SID: None})
+        self.assertEqual(main.get('--agentic-job-id'), JOB_ID)
+        self.assertEqual(aux.get('--agentic-job-id'), JOB_ID)
+
+    def test_column_absent_root_aux_row_omits_job_id_like_its_main_row(self):
+        main, aux = self._run(None)
+        self.assertNotIn('--agentic-job-id', main)
+        self.assertNotIn('--agentic-job-id', aux)
+
+    def test_self_loop_root_aux_row_omits_job_id_like_its_main_row(self):
+        main, aux = self._run({ROOT_SID: ROOT_SID})
+        self.assertNotIn('--agentic-job-id', main)
+        self.assertNotIn('--agentic-job-id', aux)
+
+    def _gate_queries(self, extra_env):
+        """Session with a job marker and NO task marker: the markerless path
+        never ships a job id, so the only possible gate caller is the auxiliary
+        cache."""
+        real = shutil.which('sqlite3')
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents={ROOT_SID: None},
+            markers={ROOT_SID: [_job_marker(ROOT_SID)]},
+            aux_rows=[_aux_row(ROOT_SID)],
+        )
+        log = os.path.join(fx['tmpdir'], 'sqlite3-calls.log')
+        shim = os.path.join(fx['bin_dir'], 'sqlite3')
+        with open(shim, 'w') as f:
+            f.write(
+                '#!/usr/bin/env bash\n'
+                f'printf \'%s\\n@@END@@\\n\' "$*" >> {shlex.quote(log)}\n'
+                f'exec {shlex.quote(real)} "$@"\n'
+            )
+        os.chmod(shim, 0o755)
+        res = self._tick(fx, 0, extra_env)
+        self.assertEqual(res['rc'], 0, res['output'])
+        if not os.path.exists(log):
+            return 0
+        with open(log) as f:
+            calls = [c for c in f.read().split('@@END@@\n') if c.strip()]
+        return len([c for c in calls if 'parent_session_id IS NULL' in c])
+
+    def test_disabled_aux_pass_costs_no_gate_query(self):
+        self.assertEqual(
+            self._gate_queries({'REVENIUM_AUX_METERING': 'disabled'}), 0)
+
+    def test_enabled_aux_pass_costs_one_gate_query(self):
+        """Sanity: the instrument above can see the aux cache's query."""
+        self.assertEqual(self._gate_queries(None), 1)
+
+
+class ColumnAbsentWarnTests(_GateBase):
+    """T-68-05: a host without `sessions.parent_session_id` says so ONCE, and
+    only when the gate actually withheld an owner."""
+
+    def _lines(self, fx):
+        return [
+            ln for ln in self._log_text(fx).splitlines()
+            if 'parent_session_id' in ln
+        ]
+
+    def test_column_absent_with_a_job_marker_warns_exactly_once_across_runs(self):
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents=None,
+            markers={ROOT_SID: [_task_marker(ROOT_SID, 'compat-muid-001'), _job_marker(ROOT_SID)]},
+            aux_rows=[_aux_row(ROOT_SID)],
+        )
+        r1 = self._tick(fx, 0)
+        self.assertEqual(r1['rc'], 0, r1['output'])
+        self.assertEqual(len(self._lines(fx)), 1, self._log_text(fx))
+        r2 = self._tick(fx, 1)
+        self.assertEqual(r2['rc'], 0, r2['output'])
+        self.assertEqual(len(self._lines(fx)), 1, self._log_text(fx))
+        sentinel = os.path.join(
+            fx['state_dir'], 'markers', '.probe-warn',
+            'sessions-parent_session_id-absent')
+        self.assertTrue(os.path.exists(sentinel))
+
+    def test_column_present_self_loop_never_warns(self):
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents={ROOT_SID: ROOT_SID},
+            markers={ROOT_SID: [_task_marker(ROOT_SID, 'compat-muid-001'), _job_marker(ROOT_SID)]},
+        )
+        res = self._tick(fx)
+        self.assertEqual(res['rc'], 0, res['output'])
+        self.assertEqual(self._lines(fx), [], self._log_text(fx))
+
+    def test_column_absent_with_nothing_withheld_never_warns(self):
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents=None,
+            markers={ROOT_SID: [_task_marker(ROOT_SID, 'compat-muid-001')]},
+        )
+        res = self._tick(fx)
+        self.assertEqual(res['rc'], 0, res['output'])
+        self.assertEqual(self._lines(fx), [], self._log_text(fx))
+
+
 if __name__ == '__main__':
     unittest.main()

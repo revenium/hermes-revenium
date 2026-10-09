@@ -687,11 +687,19 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # (1783) is above all of it and unmoved. Measured with
         # `git diff -U0`. Pure shift; the COUNT (4) and the emitted VALUE
         # expressions are unchanged.
+        # Re-measured again (Phase 68 D-17 task 2, same convention):
+        # `_parent_column_absent_warn_once` (21 lines with its comment) was added
+        # beside `_aux_warn_once`, ABOVE all three hermes-report.sh sites
+        # (+21 each), and the auxiliary-cache job-field gate (19 lines) sits
+        # above the two main() sites (+19), so: aux 1783->1804, per-marker
+        # 4181->4221, markerless 4408->4450 (the last also takes the +2 of the
+        # ship site's `else` branch). Measured from `git diff -U0`. Pure
+        # shift; the COUNT (4) and the emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1783),
-            ('hermes-report.sh', 4181),
-            ('hermes-report.sh', 4408),
+            ('hermes-report.sh', 1804),
+            ('hermes-report.sh', 4221),
+            ('hermes-report.sh', 4450),
             ('api-event-report.sh', 1932),
         }
         self.assertEqual(

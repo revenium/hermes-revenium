@@ -984,6 +984,27 @@ _aux_warn_once() {
   fi
 }
 
+# Phase 68 (D-17, T-68-05): called wherever the positive-root gate WITHHELD a
+# job id. When the reason is a `sessions` table with no `parent_session_id`
+# column, every root on the host is unconfirmable, so every job is created and
+# then never attributed -- $0 jobs, silently, until Hermes is upgraded. Say so
+# once per host through a PROBE_WARN_FLAGS_DIR sentinel. A host that HAS the
+# column never gets this line (its withholds are individual sessions with
+# unprovable ancestry, not a schema gap), and a host where nothing was withheld
+# never reaches here at all. Never returns non-zero: a read-only state dir
+# degrades to an un-gated warn on this call only.
+_parent_column_absent_warn_once() {
+  if sessions_has_parent_session_id; then
+    return 0
+  fi
+  local flag_path="${PROBE_WARN_FLAGS_DIR}/sessions-parent_session_id-absent"
+  if [[ ! -e "${flag_path}" ]]; then
+    mkdir -p "${PROBE_WARN_FLAGS_DIR}" 2>/dev/null && touch "${flag_path}" 2>/dev/null
+    warn "state.db has no sessions.parent_session_id column, so root sessions cannot be confirmed: completions omit --agentic-job-id (jobs are still created and will show \$0 until Hermes is upgraded)"
+  fi
+  return 0
+}
+
 # Phase 59 Plan 03 (D-17, folded todo aux-pass-silently-drops-zero-token-
 # sessions): the main session loop only appends a session's context into the
 # accumulated cache while iterating `sessions WHERE (input_tokens > 0 OR
@@ -2938,6 +2959,25 @@ PY
       local _aux_ctx_root_sid="${root_sid//[|$'\n'$'\r']/_}"
       local _aux_ctx_root_agent_name="${root_agent_name//[|$'\n'$'\r']/_}"
       local _aux_ctx_aux_job_id="${aux_job_id//[|$'\n'$'\r']/_}"
+      # Phase 68 (D-17): scope parity with the main-loop row. A root session
+      # whose rootness is not positively confirmed ships its main completions
+      # WITHOUT --agentic-job-id (per-marker ship site), so its auxiliary rows
+      # must omit it too or the two would land in different rule scopes. Only
+      # a root (root_sid == sid) is gated; a subagent's aux_job_id is its
+      # ROOT's id and keeps the Phase 22/29 rule. Resolved through the same
+      # per-session memo the ship site uses, so the query is paid once.
+      if [[ "${AUX_METERING_ENABLED}" == "true" && "${root_sid}" == "${sid}" && -n "${_aux_ctx_aux_job_id}" ]]; then
+        if [[ -z "${root_confirmed}" ]]; then
+          root_confirmed="false"
+          if session_is_confirmed_root "${sid}"; then
+            root_confirmed="true"
+          fi
+        fi
+        if [[ "${root_confirmed}" != "true" ]]; then
+          _aux_ctx_aux_job_id=""
+          _parent_column_absent_warn_once
+        fi
+      fi
       local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
       local _aux_ctx_subscriber_key="${subscriber_key//[|$'\n'$'\r']/_}"
       aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}|${_aux_ctx_subscriber_key}"$'\n'
@@ -4234,6 +4274,8 @@ PY
               if [[ -n "${m_owning_job_type}" ]]; then
                 cmd+=(--agentic-job-type "${m_owning_job_type}")
               fi
+            else
+              _parent_column_absent_warn_once
             fi
           elif [[ "${root_sid}" != "${sid}" && -n "${root_aid}" ]]; then
             cmd+=(--agentic-job-id "${root_aid}")

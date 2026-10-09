@@ -39,6 +39,12 @@ FALLBACK_WARN_FLAGS_DIR="${REVENIUM_FALLBACK_WARN_FLAGS_DIR:-${MARKERS_DIR}/.fal
 # "unsupported" (fail open), but warns once so the condition is visible
 # instead of silently stripping a dimension off every row in the tick.
 # Created lazily by its writer, deliberately absent from the eager mkdir -p.
+#
+# Second key family (Phase 68 D-17): schema capabilities of state.db, one flag
+# per absent column, named `sessions-<column>-absent`. Today there is exactly
+# one, `sessions-parent_session_id-absent`, written when the positive-root gate
+# withholds a job id on a host whose `sessions` table has no such column. The
+# probe family above is keyed `<subcommand>-<flag>`; the two cannot collide.
 PROBE_WARN_FLAGS_DIR="${REVENIUM_PROBE_WARN_FLAGS_DIR:-${MARKERS_DIR}/.probe-warn}"
 
 # Fourth sentinel directory in the same family as WARN_FLAGS_DIR,
@@ -923,6 +929,28 @@ sessions_has_user_id() {
     fi
   fi
   [[ "${_SESSIONS_HAS_USER_ID_MEMO}" == "yes" ]]
+}
+
+# Phase 68 (D-17): memoised schema-capability probe for
+# `sessions.parent_session_id`, built exactly like sessions_has_user_id above
+# (PRAGMA capture inside the substitution, anchored here-string `grep -qx`,
+# never `| grep -q`). Fails OPEN to "absent" on an unreadable or empty capture
+# -- which is the safe direction for its only caller: it decides nothing, it
+# only picks the wording of a once-per-host warn when the root gate withheld an
+# owner (hermes-report.sh `_parent_column_absent_warn_once`). Nothing runs at
+# source time.
+_SESSIONS_HAS_PARENT_SESSION_ID_MEMO=""
+sessions_has_parent_session_id() {
+  if [[ -z "${_SESSIONS_HAS_PARENT_SESSION_ID_MEMO}" ]]; then
+    local cols
+    cols="$(sqlite3 "${STATE_DB}" "PRAGMA table_info(sessions);" 2>/dev/null | cut -d'|' -f2)"
+    if grep -qx 'parent_session_id' <<< "${cols}"; then
+      _SESSIONS_HAS_PARENT_SESSION_ID_MEMO="yes"
+    else
+      _SESSIONS_HAS_PARENT_SESSION_ID_MEMO="no"
+    fi
+  fi
+  [[ "${_SESSIONS_HAS_PARENT_SESSION_ID_MEMO}" == "yes" ]]
 }
 
 # Phase 61 (SUB-01/SUB-02/SUB-04/D-03/D-05/D-06/D-07): resolve a session's
