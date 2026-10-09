@@ -676,11 +676,22 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # rewrite in the row loop (3) and the aliased provider branch (+6 net),
         # all above the event site (+36): 1896->1932. Pure shift again; count
         # and values unchanged.
+        #
+        # Re-measured again (Phase 68 D-17 task 1, same convention): the
+        # `root_confirmed` per-session memo declaration (6 lines with its
+        # comment) was added after `root_sid`'s resolution, above both main()
+        # sites: the per-marker site moved +6 (4175->4181). The positive-root
+        # gate (+8 lines) was added further down, between the per-marker
+        # site's `--operation-type` line and the markerless site, so the
+        # markerless site moved +14 (4394->4408). hermes-report.sh's aux site
+        # (1783) is above all of it and unmoved. Measured with
+        # `git diff -U0`. Pure shift; the COUNT (4) and the emitted VALUE
+        # expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1783),
-            ('hermes-report.sh', 4175),
-            ('hermes-report.sh', 4394),
+            ('hermes-report.sh', 4181),
+            ('hermes-report.sh', 4408),
             ('api-event-report.sh', 1932),
         }
         self.assertEqual(

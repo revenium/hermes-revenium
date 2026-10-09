@@ -2325,6 +2325,12 @@ PY
     # never expand to empty under set -uo pipefail).
     [[ -z "${root_sid}" ]] && root_sid="${sid}"
 
+    # Phase 68 (D-17): per-session memo for session_is_confirmed_root. Empty
+    # means "not asked yet"; resolved lazily, only when a resolved owner or an
+    # auxiliary job id is about to be used, so a session with no job marker
+    # never pays the query and a session with several markers pays it once.
+    local root_confirmed=""
+
     # ROOTNESS IS FAIL-OPEN HERE, DELIBERATELY -- and this file's three
     # job-identity sites rely on that. Recorded 2026-09-17 alongside the
     # OPPOSITE choice made in api-event-report.sh (`_is_confirmed_root`), so
@@ -4214,12 +4220,20 @@ PY
           # note at root_sid's resolution for why that is correct here, and why
           # copying that gate onto this site would silently stop ROI on some hosts.
           if [[ "${root_sid}" == "${sid}" && -n "${m_owning_job_id}" ]]; then
-            cmd+=(--agentic-job-id "${m_owning_job_id}")
-            if [[ -n "${m_owning_job_name}" ]]; then
-              cmd+=(--agentic-job-name "${m_owning_job_name}")
+            if [[ -z "${root_confirmed}" ]]; then
+              root_confirmed="false"
+              if session_is_confirmed_root "${sid}"; then
+                root_confirmed="true"
+              fi
             fi
-            if [[ -n "${m_owning_job_type}" ]]; then
-              cmd+=(--agentic-job-type "${m_owning_job_type}")
+            if [[ "${root_confirmed}" == "true" ]]; then
+              cmd+=(--agentic-job-id "${m_owning_job_id}")
+              if [[ -n "${m_owning_job_name}" ]]; then
+                cmd+=(--agentic-job-name "${m_owning_job_name}")
+              fi
+              if [[ -n "${m_owning_job_type}" ]]; then
+                cmd+=(--agentic-job-type "${m_owning_job_type}")
+              fi
             fi
           elif [[ "${root_sid}" != "${sid}" && -n "${root_aid}" ]]; then
             cmd+=(--agentic-job-id "${root_aid}")

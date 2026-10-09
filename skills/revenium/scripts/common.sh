@@ -866,6 +866,33 @@ build_root_sid_map() {
   return 0
 }
 
+# Phase 68 (D-17): POSITIVE evidence that a session is a root -- its `sessions`
+# row exists AND its `parent_session_id` IS NULL. The bash twin of
+# api-event-report.sh's `_is_confirmed_root`, and used only at SHIP sites
+# (hermes-report.sh's per-marker --agentic-job-id and the auxiliary cache),
+# never at a jobs-create site: `get_root_session_id` fails open, so
+# `root_sid == sid` cannot tell "root" from "could not tell", and a fail-closed
+# gate at a create site would mean no job at all.
+#
+# Returns 0 only when the query prints exactly `1`. Every other outcome -- no
+# row, a non-NULL parent, no column, an unreadable or missing state.db, no
+# sqlite3 -- returns 1 (fails CLOSED). An id carrying a single quote is
+# rejected without querying: the id is interpolated into the SQL string, and
+# sessions.id is a Hermes-generated token that never legitimately holds one
+# (T-68-03). The database is opened -readonly and the capture happens INSIDE
+# the command substitution so an error resolves to "not confirmed", never to
+# stderr noise. Nothing runs at source time; this file is sourced by the
+# in-session hooks on every call.
+session_is_confirmed_root() {
+  local sid="${1:-}"
+  [[ -z "${sid}" ]] && return 1
+  [[ "${sid}" == *"'"* ]] && return 1
+  [[ -f "${STATE_DB}" && -r "${STATE_DB}" ]] || return 1
+  local answer
+  answer="$(sqlite3 -readonly "${STATE_DB}" "SELECT parent_session_id IS NULL FROM sessions WHERE id='${sid}';" 2>/dev/null)"
+  [[ "${answer}" == "1" ]]
+}
+
 # Phase 61 (SUB-01..04/D-02): memoised schema-capability probe for the
 # identity column. common.sh is sourced by the three in-session hooks on
 # every LLM/tool call, so nothing runs at source time — only
