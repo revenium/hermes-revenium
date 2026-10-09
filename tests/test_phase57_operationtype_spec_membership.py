@@ -695,11 +695,17 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # 4181->4221, markerless 4408->4450 (the last also takes the +2 of the
         # ship site's `else` branch). Measured from `git diff -U0`. Pure
         # shift; the COUNT (4) and the emitted VALUE expressions are unchanged.
+        # Re-measured again (Phase 68 D-17 task 3, same convention): rewriting
+        # the rootness rationale at `root_sid`'s resolution (+3 net) and the
+        # per-marker ship-site comment (+2 net) moved the two main() sites:
+        # per-marker 4221->4224, markerless 4450->4455. The aux site (1804) is
+        # above both edits. Measured from `git diff -U0`. Pure shift; the COUNT
+        # (4) and the emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 1804),
-            ('hermes-report.sh', 4221),
-            ('hermes-report.sh', 4450),
+            ('hermes-report.sh', 4224),
+            ('hermes-report.sh', 4455),
             ('api-event-report.sh', 1932),
         }
         self.assertEqual(

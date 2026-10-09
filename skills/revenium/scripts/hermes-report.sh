@@ -2352,25 +2352,16 @@ PY
     # never pays the query and a session with several markers pays it once.
     local root_confirmed=""
 
-    # ROOTNESS IS FAIL-OPEN HERE, DELIBERATELY -- and this file's three
-    # job-identity sites rely on that. Recorded 2026-09-17 alongside the
-    # OPPOSITE choice made in api-event-report.sh (`_is_confirmed_root`), so
-    # the asymmetry reads as intentional rather than as drift.
+    # ROOTNESS: FAIL-OPEN FOR CREATION, POSITIVE EVIDENCE FOR ATTRIBUTION.
+    # (Phase 68, D-17. This block replaces the 2026-09-17 note that called
+    # rootness fail-open at every job-identity site; that is no longer true at
+    # the two SHIP sites, and the old reasoning below is rewritten, not kept.)
     #
-    # THE LOAD-BEARING REASON, which does not depend on enumerating how the
-    # walk can be wrong: in THIS file, creation and attribution are driven by
-    # the SAME `root_sid == sid` test. So however a subagent comes to look like
-    # a root, the misidentification is SELF-CONSISTENT -- it creates the job
-    # and then points at it. The worst outcome is a spurious subagent job (a
-    # JOB-02 policy deviation), never a dangling reference.
-    #
-    # The EVENT path has no such symmetry: it ATTRIBUTES without ever CREATING,
-    # so the same misidentification points at a row JOB-02 suppressed -- an
-    # orphan. That asymmetry, not the walk's failure modes, is why the two
-    # files gate differently.
-    #
-    # For completeness, `root_sid == sid` can mean "root" OR any of:
-    #   - no state.db, sqlite OperationalError, or any other exception
+    # `root_sid == sid` cannot tell "root" from "could not tell".
+    # get-root-session-id.py fails open, so `root_sid == sid` can mean "root" OR
+    # any of:
+    #   - no state.db, sqlite OperationalError (including a `sessions` table
+    #     with no parent_session_id column), or any other exception
     #     (`return sid`);
     #   - no row for THIS session on the first hop (`return current` while
     #     current is still sid);
@@ -2382,24 +2373,36 @@ PY
     # returns an ancestor id -- `root_sid != sid`, which suppresses creation and
     # attribution together and so needs no defending.
     #
-    # main()'s session list is SELECTed FROM that same sessions table, so the
-    # first-hop no-row case cannot arise for the session being processed. The
-    # rest require a missing/unreadable db or corrupt cyclic ancestry, and are
-    # covered by the self-consistency argument above rather than excluded.
+    # CREATION stays fail-open, for the reason that has not changed: a
+    # fail-closed gate at a jobs-create site means NO JOB AT ALL, not merely a
+    # missing dimension. It would need `sessions.parent_session_id`, which is
+    # NOT universal -- this repo's own default test schema
+    # (_compat_helpers.build_state_db) omits it -- and on such a host ROI would
+    # stop entirely. DO NOT copy the confirmed-root gate onto the jobs-create
+    # sites below.
     #
-    # DO NOT "harmonize" the two by copying `_is_confirmed_root` onto the
-    # jobs-create sites below. That gate fails CLOSED, and closed at a CREATE
-    # site means NO JOB AT ALL -- not merely a missing dimension. It needs
-    # `sessions.parent_session_id`, which is NOT universal: this repo's own
-    # default test schema (_compat_helpers.build_state_db) omits it, and
-    # get-root-session-id.py catches OperationalError for exactly that case.
-    # On such a host the change would silently stop ROI entirely -- and there
-    # subagent handling is already globally wrong (squad-role, trace rollup,
-    # markers resolution), so tightening the job sites alone would fix nothing.
+    # ATTRIBUTION now requires POSITIVE root evidence (Phase 68, D-17): the
+    # per-marker --agentic-job-id site and the auxiliary cache ship a resolved
+    # owner for a root session only when session_is_confirmed_root says the
+    # session's `sessions` row exists AND its parent_session_id IS NULL -- the
+    # same evidence as api-event-report.sh's `_is_confirmed_root`. Every other
+    # outcome omits --agentic-job-id and its name/type siblings and still ships
+    # the completion (D-15; the PR #126 rule: withhold the dimension, never the
+    # event). Creation and attribution used to be self-consistent -- a
+    # misidentified subagent created a job and then pointed at it. They are no
+    # longer symmetric, and the worst case moves from "a spurious subagent job
+    # with its spend attributed" to "a job created and its id withheld": a $0
+    # job, never a wrong attribution. A host whose `sessions` table lacks
+    # parent_session_id gets one warn per host (_parent_column_absent_warn_once),
+    # because every root there is unconfirmable and its jobs will show $0.
     #
-    # Measured on the fleet 2026-09-17: all 10 profiles HAVE the column and
-    # every session row resolves, so this branch only ever runs in its correct
-    # form there.
+    # Why now: the legacy path is the one Jupi meters through, and D-17 ships
+    # whether or not the Phase 68 resolver fix gate opens. It is inert where the
+    # evidence exists. Measured on the fleet 2026-09-17: all 10 profiles HAVE the
+    # column and every session row resolves. Measured on Jupi 2026-10-08: column
+    # present, 9,769 sessions (9,439 NULL parent, 330 with a parent), 0 cyclic,
+    # so 0 sessions flip and the wire is byte-identical there. The census
+    # (Phase 68 D-18) re-measures it.
 
     # Phase 61 (SUB-01/SUB-02/D-03/D-05): resolve THIS session's OWN identity
     # once, mirroring root_sid's once-per-iteration resolution immediately
@@ -4255,10 +4258,12 @@ PY
         #   orphan-reference a non-existent Revenium job row since JOB-02
         #   suppresses the create). Next cron tick retries idempotently.
         if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
-          # `root_sid == sid` is fail-open (root, or we could not tell) and is
-          # deliberately NOT the event path's `_is_confirmed_root` gate -- see the
-          # note at root_sid's resolution for why that is correct here, and why
-          # copying that gate onto this site would silently stop ROI on some hosts.
+          # Phase 68 (D-17): `root_sid == sid` alone is "root, or we could not
+          # tell", so a resolved owner ships here only with POSITIVE root
+          # evidence (session_is_confirmed_root, memoised in root_confirmed).
+          # Unconfirmed: omit --agentic-job-id and its name/type siblings, ship
+          # the completion anyway (D-15). Creation is NOT gated -- see the note
+          # at root_sid's resolution for why, and for the whole contract.
           if [[ "${root_sid}" == "${sid}" && -n "${m_owning_job_id}" ]]; then
             if [[ -z "${root_confirmed}" ]]; then
               root_confirmed="false"
