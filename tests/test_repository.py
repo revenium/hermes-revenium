@@ -395,6 +395,14 @@ class RepositoryTests(unittest.TestCase):
             # are both gitignored, so a tracked docs/ file plus this pin is the
             # only durable home.
             ROOT / 'docs' / 'confidence-omission-experiment.md',
+            # Phase 68 (TRU-05) — the tracked job-completion attribution record:
+            # the denominator correction for the "3.2%" (a marker count, not an
+            # attribution rate), the legacy reporter's positive-root gate, and
+            # the pre-registered fix gate and judge protocol, committed before
+            # the measurement they govern. `.planning/` and `docs/internal/`
+            # are both gitignored, so a tracked docs/ file plus this pin is the
+            # only durable home.
+            ROOT / 'docs' / 'job-completion-attribution.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',

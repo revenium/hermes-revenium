@@ -753,7 +753,10 @@ class GatePreRegistrationTests(unittest.TestCase):
         if patched:
             with gate_patch():
                 return _run_main(argv)
-        return _run_main(argv)
+        # Unset: the shipped constant is the pre-registered fraction since
+        # plan 05, so the "unset" case is made explicit rather than assumed.
+        with mock.patch.object(H, 'GATE_THRESHOLD', None):
+            return _run_main(argv)
 
     def test_a_missing_prereg_exits_prereg(self):
         rc, _o, _e = self.gate(Path(self.tmp) / 'absent.json')

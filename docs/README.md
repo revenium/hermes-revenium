@@ -93,6 +93,10 @@ This Hermes skill bundle uses a plugin, three shell hooks, and a cron for runtim
   measures prompt changes against it; the deployed prompt omits on 0 of 300
   replayed arcs where the prompt without its role list omits on 133, so no
   further prompt change ships.
+- [Job-completion attribution](job-completion-attribution.md):
+  the 3.2% was a marker count, not an attribution rate; this record holds
+  the pre-registered fix gate and judge protocol, and measures dollar
+  coverage and correctness on the reference host.
 - [ROI read-surface ask](roi-read-surface-ask.md): the tracked, standing
   ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
   on `jobs roi`, and the Phase 53 gate this skill shipped instead of waiting

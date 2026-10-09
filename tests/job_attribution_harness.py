@@ -1775,8 +1775,12 @@ JUDGE_PRICES = {
 ORDERINGS = ("forward", "reversed")
 JUDGE_TEMPERATURE = 0
 JUDGE_MAX_TOKENS = 4096
-# Plan 05 sets this from prereg-gate.json; `gate` refuses while it is None.
-GATE_THRESHOLD = None
+# Pre-registered by a human before any host data was read (prereg-gate.json,
+# 2026-10-09T03:12:00Z): 1.0% of the slice's dollars, comparator `>=`.
+# `_check_prereg` makes `gate` refuse (EXIT_PREREG) unless this equals the
+# fraction in that file, and the Phase 68 record's tests derive the stated
+# number from this constant.
+GATE_THRESHOLD = Fraction(1, 100)
 # Hard caps for the whole phase, enforced on RECORDED spend and calls. The
 # human approves or changes them at plan 04's checkpoint.
 SPEND_CAP_USD = Decimal("25")
