@@ -2265,14 +2265,20 @@ def misattribution(session):
     a job is the weight of both-judge-agreed turns that name it over the
     session's total weight. Turns both judges call `none` never enter it
     (`agreed_none_attributed`). upper adds the dollar share of disagree,
-    unstable and invalid turns whose candidate labels do not include the
-    resolver's single owner (all of it when the dollars went to more than one
-    job, or none of the turns names a candidate)."""
+    unstable turns whose candidate labels do not include the resolver's
+    single owner (all of it when the dollars went to more than one job, or
+    none of the turns names a candidate), and the dollar share of every
+    invalid turn. A session that could not be tested at all (no transcript,
+    or no weight to apportion) adds all its attributed dollars to upper and
+    nothing to lower."""
     zero = Fraction(0)
     weights, total_weight, by_label, dollars = _session_money(session)
     result = {"dollars": dollars, "lower": zero, "upper": zero,
               "agreed_none_attributed": zero}
-    if total_weight == 0 or dollars == 0:
+    if dollars == 0:
+        return result
+    if total_weight == 0 or not session["combined"]:
+        result["upper"] = dollars
         return result
     agreed, none_mass, open_mass = {}, zero, zero
     owners = list(by_label)
@@ -2283,7 +2289,8 @@ def misattribution(session):
                 none_mass += weight
             else:
                 agreed[turn["label"]] = agreed.get(turn["label"], zero) + weight
-        elif owner is None or owner not in turn["candidates"]:
+        elif (turn["bucket"] == "invalid" or owner is None
+              or owner not in turn["candidates"]):
             open_mass += weight
     lower = zero
     for label, mass in agreed.items():

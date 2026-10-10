@@ -644,6 +644,35 @@ class MisattributionTests(unittest.TestCase):
         self.assertEqual(Fraction(summary['buckets']['no_transcript']['dollars']),
                          3)
 
+    def test_a_session_with_no_transcript_widens_the_upper_bound_only(self):
+        session = {'weights': [], 'combined': [], 'named_cause': True,
+                   'dollars_by_label': {'J1': Decimal('3')}}
+        result = H.misattribution(session)
+        self.assertEqual(result['lower'], 0)
+        self.assertEqual(result['upper'], Fraction(3))
+        summary = H.summarize([session], Fraction(100))
+        self.assertEqual(Fraction(summary['multi_job']['lower']), 0)
+        self.assertEqual(Fraction(summary['multi_job']['upper']), 3)
+        gate = H.evaluate_gate([session], Fraction(100), Fraction(1, 100))
+        self.assertEqual(Fraction(gate['total_lower']), 0)
+        self.assertEqual(Fraction(gate['upper']), 3)
+        self.assertFalse(gate['opens'])
+
+    def test_an_invalid_turn_stays_open_even_when_the_owner_is_a_candidate(self):
+        combined = [entry('agreed', 'J1'),
+                    entry('invalid', None, {'J1'})]
+        session = money_session([1, 1], combined, {'J1': '6'})
+        result = H.misattribution(session)
+        self.assertEqual(result['lower'], 0)
+        self.assertEqual(result['upper'], Fraction(3))   # 6 x 1/2
+
+    def test_a_session_whose_weights_sum_to_zero_is_untested_not_exact(self):
+        session = money_session([0, 0], [entry('agreed', 'J1'),
+                                         entry('agreed', 'J1')], {'J1': '2'})
+        result = H.misattribution(session)
+        self.assertEqual((result['lower'], result['upper']),
+                         (0, Fraction(2)))
+
     def test_named_cause_distinguishes_binding_rules(self):
         def replay(shape):
             import tempfile as _t
