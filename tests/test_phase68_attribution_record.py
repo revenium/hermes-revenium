@@ -406,5 +406,56 @@ class FixGateRecordTests(unittest.TestCase):
         self.assertEqual(Fraction(result['threshold']), harness.GATE_THRESHOLD)
 
 
+class RecordCompletenessTests(unittest.TestCase):
+    """The closing guard: nothing in the record is left unsettled."""
+
+    UNSETTLED = 'PENDING'
+    ADDED_HEADINGS = (
+        '## Coverage, re-taken',
+        '## Correctness',
+        '## Zero-cost jobs by cause',
+        '## Ambiguous-root population',
+        '## Before and after',
+        '## Fleet corroborating read',
+        FIX_GATE_HEADING,
+        '## What this does not establish',
+        '## For Phase 70',
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RECORD_PATH.read_text(encoding='utf-8')
+        cls.lines = [line.strip() for line in cls.text.splitlines()]
+        cls.verdict_section = _section(cls.text, HEADINGS[0])
+
+    def test_the_verdict_table_has_three_rows_and_none_is_unsettled(self):
+        rows = [r for r in _table_rows(self.verdict_section)
+                if r[0] in ('1', '2', '3')]
+        self.assertEqual([r[0] for r in rows], ['1', '2', '3'])
+        for row in rows:
+            for cell in row:
+                self.assertNotIn(self.UNSETTLED, cell.upper(), row)
+
+    def test_the_status_line_is_settled(self):
+        status = [line for line in self.lines
+                  if line.startswith('**TRU-05 status:**')]
+        self.assertEqual(len(status), 1, status)
+        self.assertNotIn(self.UNSETTLED, status[0].upper())
+
+    def test_no_heading_the_phase_added_is_missing_or_duplicated(self):
+        for heading in HEADINGS + self.ADDED_HEADINGS:
+            self.assertEqual(self.lines.count(heading), 1, heading)
+
+    def test_the_fix_gate_carries_exactly_one_bold_verdict_word(self):
+        section = _section(self.text, FIX_GATE_HEADING)
+        self.assertEqual(len(re.findall(r'\*\*[A-Z]+\*\*', section)), 1)
+
+    def test_an_open_gate_states_where_the_fix_goes(self):
+        section = _section(self.text, FIX_GATE_HEADING)
+        if '**OPEN**' not in section:
+            self.skipTest('the gate is closed')
+        self.assertIn('### Fix status', section)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -33,7 +33,7 @@ committed before that read; the commit that added them is the pre-registration.
 | 2 | The attribution rate is measured on the reference host and stated as a number in a tracked doc | ROADMAP criterion 2 | MEASURED — 96.36% cost-weighted, `agent == Jupiter` slice, 30 days to 2026-10-09; see below |
 | 3 | Attribution stays exact-match only: no fuzzy, nearest-match or fallback binding is introduced by any fix | ROADMAP criterion 3 | CONFIRMED — no fuzzy, nearest-match or fallback binding was introduced; D-17 narrowed attribution; the pre-existing fallback is recorded as a limit |
 
-**TRU-05 status:** PENDING — the measurement has run (criterion 2); criteria 1 and 3 and the final verdict are settled after the fix decision is reviewed.
+**TRU-05 status:** CLOSED AS A DOCUMENTED LIMIT — criterion 2 is measured, criteria 1 and 3 are confirmed, and the pre-registered gate stayed closed, so no correctness fix ships in Phase 68.
 
 ## The 3.2% was a marker count, not an attribution rate
 
