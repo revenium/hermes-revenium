@@ -1005,6 +1005,45 @@ _parent_column_absent_warn_once() {
   return 0
 }
 
+# Resolves the caller's per-session `root_confirmed` memo ("true"/"false") from
+# session_is_confirmed_root. It assigns the caller's local by name (bash
+# dynamic scope) because a `$(...)` capture would pay a fork per call and the
+# memo is what keeps the gate to one query per session. Returns 2 and leaves
+# the memo empty when the gate could not tell, so a transient sqlite fault is
+# retried by the next call or tick instead of being cached as "not a root".
+_resolve_root_gate() {
+  [[ -n "${root_confirmed}" ]] && return 0
+  local gate_rc=0
+  session_is_confirmed_root "$1" || gate_rc=$?
+  case "${gate_rc}" in
+    0) root_confirmed="true" ;;
+    1) root_confirmed="false" ;;
+    *) return 2 ;;
+  esac
+  return 0
+}
+
+# Records a session as deferred by the root gate, once however many ship sites
+# defer it. Updates main()'s root_gate_deferred_* locals by name (dynamic scope)
+# for the same fork-avoidance reason as _resolve_root_gate.
+_note_root_gate_deferral() {
+  if [[ "${root_gate_deferred_sids}" != *$'\n'"$1"$'\n'* ]]; then
+    root_gate_deferred_sids+="$1"$'\n'
+    root_gate_deferred_count=$((root_gate_deferred_count + 1))
+  fi
+}
+
+# True when any row of the pipe-delimited split output names an owning job
+# (field 12). The per-marker ship site uses it to run the root gate before
+# anything ships, so a session that must be deferred has shipped no marker.
+_split_rows_have_owner() {
+  local _muid _t _op _di _do _cr _cw _tot _cost _agent _trace _owner _rest
+  while IFS='|' read -r _muid _t _op _di _do _cr _cw _tot _cost _agent _trace _owner _rest; do
+    [[ -n "${_owner}" ]] && return 0
+  done <<< "$1"
+  return 1
+}
+
 # Phase 59 Plan 03 (D-17, folded todo aux-pass-silently-drops-zero-token-
 # sessions): the main session loop only appends a session's context into the
 # accumulated cache while iterating `sessions WHERE (input_tokens > 0 OR
@@ -1031,7 +1070,7 @@ _parent_column_absent_warn_once() {
 # zero-valued summary line) — this function must never be able to cost the
 # auxiliary pass the context it already had.
 _supplement_aux_session_ctx() {
-  local existing_ctx="$1"
+  local existing_ctx="$1" deferred_sids="${2:-}"
   local recovered=0 not_owned=0 unresolvable=0
 
   # Step 1: the sids that need supplementing -- session_model_usage sids
@@ -1096,6 +1135,11 @@ PY
   local owned_sids="" sid markers_dir
   while IFS= read -r sid; do
     [[ -z "${sid}" ]] && continue
+    # Deferred by the root gate (CR-01): recovering it here would ship its
+    # auxiliary rows with an empty job id, the loss the deferral exists to avoid.
+    if [[ -n "${deferred_sids}" ]] && grep -qxF "${sid}" <<< "${deferred_sids}"; then
+      continue
+    fi
     markers_dir="$(resolve_markers_dir "${sid}")"
     [[ -z "${markers_dir}" ]] && markers_dir="${MARKERS_DIR}"
     if [[ "${markers_dir}" != "${MARKERS_DIR}" ]]; then
@@ -1284,7 +1328,7 @@ PY
 # call and ~150 lines of root/trace/job resolution the session loop already
 # performed once per session).
 report_auxiliary_usage() {
-  local session_ctx="$1"
+  local session_ctx="$1" deferred_sids="${2:-}"
   # Phase 59 Plan 03 (D-17): declared here, at the top, so `set -u` is
   # satisfied on every path out of this function, including the disabled
   # and lock-timeout early returns below where they are never assigned.
@@ -1368,7 +1412,7 @@ PY
   # header comment above -- so it is parsed out here and stripped before
   # session_ctx reaches the emit query below.
   local _supplement_raw _supplement_summary
-  _supplement_raw="$(_supplement_aux_session_ctx "${session_ctx}")"
+  _supplement_raw="$(_supplement_aux_session_ctx "${session_ctx}" "${deferred_sids}")"
   _supplement_summary="$(grep '^SUPPLEMENT_SUMMARY|' <<< "${_supplement_raw}" | tail -1)"
   if [[ -n "${_supplement_summary}" ]]; then
     local _supplement_label
@@ -2174,6 +2218,13 @@ PY
   # root_aid resolution). Same fed-by-herestring, survives-in-this-shell
   # discipline as attribution_rows immediately above.
   local aux_session_ctx=""
+  # Sessions whose root gate could not read state.db this tick (CR-01). The
+  # leading newline lets a whole-line `*$'\n'sid$'\n'*` match dedupe a session
+  # deferred by both ship sites; the count feeds ONE warn after the loop.
+  local root_gate_deferred_sids=$'\n' root_gate_deferred_count=0
+  # Subset deferred at the auxiliary cache; report_auxiliary_usage must not
+  # let the supplement recover these with an empty job id.
+  local aux_deferred_sids=""
   # quick-260813-wnz (LOG-01/D-02): fed by a herestring (`done <<< "${sessions}"`
   # at the loop's close below), NOT a pipe -- the loop body therefore runs in
   # THIS shell, so a counter incremented inside it survives to the aggregate
@@ -2969,21 +3020,27 @@ PY
       # a root (root_sid == sid) is gated; a subagent's aux_job_id is its
       # ROOT's id and keeps the Phase 22/29 rule. Resolved through the same
       # per-session memo the ship site uses, so the query is paid once.
+      #
+      # A gate that could not read state.db (CR-01) defers the session's
+      # auxiliary rows instead: they stay out of the cache, and out of the
+      # supplement via aux_deferred_sids, so the next tick ships them with the
+      # right job id rather than shipping now without one.
+      local _aux_gate_deferred="false"
       if [[ "${AUX_METERING_ENABLED}" == "true" && "${root_sid}" == "${sid}" && -n "${_aux_ctx_aux_job_id}" ]]; then
-        if [[ -z "${root_confirmed}" ]]; then
-          root_confirmed="false"
-          if session_is_confirmed_root "${sid}"; then
-            root_confirmed="true"
-          fi
-        fi
-        if [[ "${root_confirmed}" != "true" ]]; then
+        if ! _resolve_root_gate "${sid}"; then
+          _aux_gate_deferred="true"
+          aux_deferred_sids+="${sid}"$'\n'
+          _note_root_gate_deferral "${sid}"
+        elif [[ "${root_confirmed}" != "true" ]]; then
           _aux_ctx_aux_job_id=""
           _parent_column_absent_warn_once
         fi
       fi
-      local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
-      local _aux_ctx_subscriber_key="${subscriber_key//[|$'\n'$'\r']/_}"
-      aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}|${_aux_ctx_subscriber_key}"$'\n'
+      if [[ "${_aux_gate_deferred}" != "true" ]]; then
+        local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
+        local _aux_ctx_subscriber_key="${subscriber_key//[|$'\n'$'\r']/_}"
+        aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}|${_aux_ctx_subscriber_key}"$'\n'
+      fi
     fi
 
     # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.
@@ -4196,6 +4253,18 @@ PY
         continue
       fi
 
+      # Phase 68 CR-01: settle the root gate BEFORE any marker ships. A gate
+      # that could not read state.db defers the whole session -- nothing ships
+      # and no ledger line is written -- because a completion shipped without
+      # its job id is ledgered and never re-shipped. The next tick retries.
+      if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${root_sid}" == "${sid}" ]] \
+        && _split_rows_have_owner "${split_rows}" \
+        && ! _resolve_root_gate "${sid}"; then
+        _note_root_gate_deferral "${sid}"
+        ((skipped_count++)) || true
+        continue
+      fi
+
       local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
       local m_owning_job_id m_owning_job_name m_owning_job_type
       while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id m_owning_job_name m_owning_job_type; do
@@ -4265,12 +4334,8 @@ PY
           # the completion anyway (D-15). Creation is NOT gated -- see the note
           # at root_sid's resolution for why, and for the whole contract.
           if [[ "${root_sid}" == "${sid}" && -n "${m_owning_job_id}" ]]; then
-            if [[ -z "${root_confirmed}" ]]; then
-              root_confirmed="false"
-              if session_is_confirmed_root "${sid}"; then
-                root_confirmed="true"
-              fi
-            fi
+            # root_confirmed was resolved before this loop (see the gate ahead
+            # of it), so a session that could not be confirmed never got here.
             if [[ "${root_confirmed}" == "true" ]]; then
               cmd+=(--agentic-job-id "${m_owning_job_id}")
               if [[ -n "${m_owning_job_name}" ]]; then
@@ -4585,6 +4650,12 @@ PY
     fi
     fi # LEGACY_COMPLETIONS_SKIP + session_event_owned guard (Phase 32 Plan 03 C-11/D-13; quick-260817-tfe OWN-01)
   done <<< "${sessions}"
+
+  # One line per tick, not per session or marker: the deferral repeats every
+  # tick for as long as state.db stays unreadable to the gate.
+  if [[ "${root_gate_deferred_count}" -gt 0 ]]; then
+    warn "root gate could not read state.db for ${root_gate_deferred_count} session(s); their completions and auxiliary rows with a job id are deferred to the next tick"
+  fi
 
   # The map is a per-tick scratch file, not state: drop it and unexport, so the
   # post-loop stages below (outcome reporting, the auxiliary pass) resolve any
@@ -5998,7 +6069,7 @@ PY
   # tick could write already exists, so aux rows can reach --agentic-job-id)
   # and before the cost-reconciliation block below, so an aux query or emit
   # failure structurally cannot reach main-loop rows.
-  report_auxiliary_usage "${aux_session_ctx}"
+  report_auxiliary_usage "${aux_session_ctx}" "${aux_deferred_sids}"
 
   # Phase 44 Plan 04 (EGV-17/D-15): one per-tick reconciliation line naming
   # the classified/unclassified/unallocated cost totals, built by

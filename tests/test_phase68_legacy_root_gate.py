@@ -151,6 +151,24 @@ class _GateBase(unittest.TestCase):
         return env
 
     @staticmethod
+    def _install_sqlite_stub(fx, match, rc=5):
+        """A `sqlite3` in $HOME/.local/bin that fails (exit `rc`, a lock-style
+        message) for any invocation whose argv contains `match`, and otherwise
+        defers to the real binary."""
+        real = shutil.which('sqlite3')
+        shim = os.path.join(fx['bin_dir'], 'sqlite3')
+        with open(shim, 'w') as f:
+            f.write(
+                '#!/usr/bin/env bash\n'
+                'case "$*" in\n'
+                f'  *"{match}"*) echo "Error: database is locked" >&2; exit {rc} ;;\n'
+                'esac\n'
+                f'exec {shlex.quote(real)} "$@"\n'
+            )
+        os.chmod(shim, 0o755)
+        return shim
+
+    @staticmethod
     def _read_argv_log(path):
         out = []
         if os.path.exists(path):
@@ -273,10 +291,12 @@ class SessionIsConfirmedRootTests(_GateBase):
             'HOME': fx['shim_home'],
             'HERMES_HOME': fx['hermes_home'],
             'REVENIUM_STATE_DIR': fx['state_dir'],
+            'PATH': fx['bin_dir'] + os.pathsep + os.environ.get('PATH', ''),
         }
         script = (
             'source "$1/common.sh"; '
-            'if session_is_confirmed_root "$2"; then echo yes; else echo no; fi'
+            'session_is_confirmed_root "$2"; '
+            'case $? in 0) echo yes ;; 1) echo no ;; *) echo unknown ;; esac'
         )
         res = subprocess.run(
             ['bash', '-c', script, 'bash', str(SCRIPTS_DIR), sid],
@@ -302,9 +322,29 @@ class SessionIsConfirmedRootTests(_GateBase):
         fx = self._fx({'root-a': None, 'child-b': 'root-a'})
         self.assertEqual(self._call(fx, 'child-b')[0], 'no')
 
-    def test_missing_state_db_is_not_confirmed(self):
+    def test_missing_state_db_is_could_not_tell(self):
         fx = self._fx({'root-a': None})
-        self.assertEqual(self._call(fx, 'root-a', remove_db=True)[0], 'no')
+        self.assertEqual(self._call(fx, 'root-a', remove_db=True)[0], 'unknown')
+
+    def test_sqlite_failure_is_could_not_tell_not_not_a_root(self):
+        """The CR-01 shape: a genuine NULL-parent root, but sqlite3 exits 5
+        (busy/locked). That must never read as "confirmed not a root"."""
+        fx = self._fx({'root-a': None})
+        self._install_sqlite_stub(fx, 'parent_session_id IS NULL')
+        self.assertEqual(self._call(fx, 'root-a')[0], 'unknown')
+
+    def test_missing_column_exits_non_zero_yet_is_not_a_root_rather_than_unknown(self):
+        """sqlite3 exits 1 on a missing column, like any fault. Reading that as
+        "could not tell" would defer every job-bearing session on a host
+        without the column, forever."""
+        fx = self._fx(None)
+        res = subprocess.run(
+            ['sqlite3', '-readonly', fx['state_db'],
+             "SELECT parent_session_id IS NULL FROM sessions WHERE id='root-a';"],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertEqual(self._call(fx, 'root-a')[0], 'no')
 
     def test_column_absent_is_not_confirmed(self):
         fx = self._fx(None)
@@ -495,6 +535,144 @@ class ColumnAbsentWarnTests(_GateBase):
         res = self._tick(fx)
         self.assertEqual(res['rc'], 0, res['output'])
         self.assertEqual(self._lines(fx), [], self._log_text(fx))
+
+
+_GATE_QUERY = 'parent_session_id IS NULL'
+_DEFER_WARN = 'root gate could not read state.db'
+
+
+class GateFaultDefersTests(_GateBase):
+    """CR-01: a gate that could not read state.db is not "not a root". The
+    session defers -- no completion ships, no ledger line is written -- and the
+    next tick with a working sqlite ships it WITH its job id, exactly once."""
+
+    @staticmethod
+    def _ledger_lines(fx, name, sid=ROOT_SID):
+        path = os.path.join(fx['state_dir'], name)
+        if not os.path.exists(path):
+            return []
+        with open(path) as f:
+            return [ln for ln in f.read().splitlines() if sid in ln]
+
+    def _build_root(self, task_muids=('compat-muid-001',), aux=False):
+        markers = [
+            _task_marker(ROOT_SID, m, 1715515000.5 + i * 0.1)
+            for i, m in enumerate(task_muids)
+        ] + [_job_marker(ROOT_SID)]
+        return self._build(
+            [_session(ROOT_SID)],
+            parents={ROOT_SID: None},
+            markers={ROOT_SID: markers},
+            aux_rows=[_aux_row(ROOT_SID)] if aux else None,
+        )
+
+    def _warns(self, res):
+        return [ln for ln in res['log_text'].splitlines() if _DEFER_WARN in ln]
+
+    def test_faulting_gate_ships_nothing_and_writes_no_ledger_line(self):
+        fx = self._build_root()
+        self._install_sqlite_stub(fx, _GATE_QUERY)
+        res = self._tick(fx, 0)
+        self.assertEqual(res['rc'], 0, res['output'])
+        self.assertEqual(res['meter'], [], res['meter'])
+        self.assertEqual(self._ledger_lines(fx, 'revenium-hermes.ledger'), [])
+
+    def test_job_is_still_created_while_the_ship_is_deferred(self):
+        """The gate sits at the ship sites only; creation is not deferred."""
+        fx = self._build_root()
+        self._install_sqlite_stub(fx, _GATE_QUERY)
+        res = self._tick(fx, 0)
+        creates = [a for a in res['jobs'] if a[:2] == ['jobs', 'create']]
+        self.assertEqual(len(creates), 1, res['jobs'])
+
+    def test_next_tick_with_working_sqlite_ships_with_the_job_id_exactly_once(self):
+        fx = self._build_root()
+        shim = self._install_sqlite_stub(fx, _GATE_QUERY)
+        self.assertEqual(self._tick(fx, 0)['meter'], [])
+        os.remove(shim)
+
+        recovered = self._tick(fx, 1)
+        self.assertEqual(recovered['rc'], 0, recovered['output'])
+        self.assertEqual(len(recovered['meter']), 1, recovered['meter'])
+        self.assertEqual(
+            argv_to_flags(recovered['meter'][0]).get('--agentic-job-id'), JOB_ID)
+        self.assertEqual(len(self._ledger_lines(fx, 'revenium-hermes.ledger')), 1)
+
+        again = self._tick(fx, 2)
+        self.assertEqual(again['meter'], [], again['meter'])
+        self.assertEqual(len(self._ledger_lines(fx, 'revenium-hermes.ledger')), 1)
+
+    def test_deferral_warns_once_per_tick_however_many_markers_wait(self):
+        fx = self._build_root(
+            task_muids=('compat-muid-001', 'compat-muid-002', 'compat-muid-003'),
+            aux=True,
+        )
+        self._install_sqlite_stub(fx, _GATE_QUERY)
+        res = self._tick(fx, 0)
+        self.assertEqual(len(self._warns(res)), 1, res['log_text'])
+        res = self._tick(fx, 1)
+        self.assertEqual(len(self._warns(res)), 2, res['log_text'])
+
+    def test_a_healthy_gate_never_warns(self):
+        fx = self._build_root()
+        res = self._tick(fx, 0)
+        self.assertEqual(self._warns(res), [], res['log_text'])
+
+    def test_faulting_gate_defers_the_auxiliary_row_with_its_main_row(self):
+        fx = self._build_root(aux=True)
+        shim = self._install_sqlite_stub(fx, _GATE_QUERY)
+        res = self._tick(fx, 0)
+        self.assertEqual(res['rc'], 0, res['output'])
+        main, aux = _split_meter(res['meter'])
+        self.assertEqual((main, aux), ([], []), res['meter'])
+        self.assertEqual(self._ledger_lines(fx, 'revenium-aux.ledger'), [])
+        os.remove(shim)
+
+        recovered = self._tick(fx, 1)
+        main, aux = _split_meter(recovered['meter'])
+        self.assertEqual(len(main), 1, recovered['meter'])
+        self.assertEqual(len(aux), 1, recovered['meter'])
+        self.assertEqual(main[0].get('--agentic-job-id'), JOB_ID)
+        self.assertEqual(aux[0].get('--agentic-job-id'), JOB_ID)
+
+        again = self._tick(fx, 2)
+        self.assertEqual(again['meter'], [], again['meter'])
+
+    def test_auxiliary_row_of_a_markerless_ship_is_deferred_not_supplemented_bare(self):
+        """A job marker and no task marker: the markerless path never ships a
+        job id, so the auxiliary cache is the only gate caller. A deferred
+        session must not be recovered by the supplement with an empty job id."""
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents={ROOT_SID: None},
+            markers={ROOT_SID: [_job_marker(ROOT_SID)]},
+            aux_rows=[_aux_row(ROOT_SID)],
+        )
+        shim = self._install_sqlite_stub(fx, _GATE_QUERY)
+        res = self._tick(fx, 0)
+        self.assertEqual(res['rc'], 0, res['output'])
+        _main, aux = _split_meter(res['meter'])
+        self.assertEqual(aux, [], res['meter'])
+        self.assertEqual(self._ledger_lines(fx, 'revenium-aux.ledger'), [])
+        os.remove(shim)
+
+        recovered = self._tick(fx, 1)
+        _main, aux = _split_meter(recovered['meter'])
+        self.assertEqual(len(aux), 1, recovered['meter'])
+        self.assertEqual(aux[0].get('--agentic-job-id'), JOB_ID)
+
+    def test_session_without_a_job_marker_is_not_deferred_by_a_faulting_gate(self):
+        """No owner, so the gate is never asked and the fault cannot matter."""
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents={ROOT_SID: None},
+            markers={ROOT_SID: [_task_marker(ROOT_SID, 'compat-muid-001')]},
+        )
+        self._install_sqlite_stub(fx, _GATE_QUERY)
+        res = self._tick(fx, 0)
+        self.assertEqual(len(res['meter']), 1, res['meter'])
+        self.assertNotIn('--agentic-job-id', argv_to_flags(res['meter'][0]))
+        self.assertEqual(self._warns(res), [], res['log_text'])
 
 
 if __name__ == '__main__':

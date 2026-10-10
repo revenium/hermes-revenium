@@ -880,23 +880,37 @@ build_root_sid_map() {
 # `root_sid == sid` cannot tell "root" from "could not tell", and a fail-closed
 # gate at a create site would mean no job at all.
 #
-# Returns 0 only when the query prints exactly `1`. Every other outcome -- no
-# row, a non-NULL parent, no column, an unreadable or missing state.db, no
-# sqlite3 -- returns 1 (fails CLOSED). An id carrying a single quote is
-# rejected without querying: the id is interpolated into the SQL string, and
-# sessions.id is a Hermes-generated token that never legitimately holds one
-# (T-68-03). The database is opened -readonly and the capture happens INSIDE
-# the command substitution so an error resolves to "not confirmed", never to
-# stderr noise. Nothing runs at source time; this file is sourced by the
-# in-session hooks on every call.
+# Three outcomes, because a ship site must not treat "could not ask" as "not a
+# root": the completion's ledger line is written after the CLI call, so a job
+# id withheld on a transient error is lost for good.
+#   0  confirmed root: the row exists and parent_session_id IS NULL.
+#   1  confirmed NOT a root: a non-NULL parent, no row, a sessions table with
+#      no parent_session_id column (a schema fact, not a fault), an empty id,
+#      or an id carrying a single quote. The id is interpolated into the SQL
+#      string, and sessions.id is a Hermes-generated token that never
+#      legitimately holds one (T-68-03).
+#   2  could not tell: no sqlite3, state.db missing or unreadable, or sqlite3
+#      exited non-zero for any reason other than the missing column (busy,
+#      locked, killed). Callers defer and retry next tick; they never memoise
+#      it.
+# The 3s busy timeout rides a -cmd so a writer's brief lock is waited out
+# rather than surfacing as rc 2. stderr is folded into the capture to tell
+# "no such column" from a real fault. Nothing runs at source time; this file
+# is sourced by the in-session hooks on every call.
 session_is_confirmed_root() {
-  local sid="${1:-}"
+  local sid="${1:-}" answer rc
   [[ -z "${sid}" ]] && return 1
   [[ "${sid}" == *"'"* ]] && return 1
-  [[ -f "${STATE_DB}" && -r "${STATE_DB}" ]] || return 1
-  local answer
-  answer="$(sqlite3 -readonly "${STATE_DB}" "SELECT parent_session_id IS NULL FROM sessions WHERE id='${sid}';" 2>/dev/null)"
-  [[ "${answer}" == "1" ]]
+  [[ -f "${STATE_DB}" && -r "${STATE_DB}" ]] || return 2
+  command -v sqlite3 >/dev/null 2>&1 || return 2
+  answer="$(sqlite3 -readonly -cmd '.timeout 3000' "${STATE_DB}" "SELECT parent_session_id IS NULL FROM sessions WHERE id='${sid}';" 2>&1)"
+  rc=$?
+  if (( rc != 0 )); then
+    [[ "${answer}" == *"no such column"* ]] && return 1
+    return 2
+  fi
+  [[ "${answer}" == "1" ]] && return 0
+  return 1
 }
 
 # Phase 61 (SUB-01..04/D-02): memoised schema-capability probe for the

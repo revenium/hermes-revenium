@@ -701,11 +701,17 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # per-marker 4221->4224, markerless 4450->4455. The aux site (1804) is
         # above both edits. Measured from `git diff -U0`. Pure shift; the COUNT
         # (4) and the emitted VALUE expressions are unchanged.
+        # Re-measured again (Phase 68 CR-01, same convention): the root-gate
+        # helpers (+39) and the supplement's deferred-sid skip (+5) sit above
+        # all three hermes-report.sh sites, moving the aux site 1804->1848;
+        # the ship-site pre-gate (+12 before the per-marker loop, -4 inside
+        # it) and the aux-cache deferral move the main() sites 4224->4293 and
+        # 4455->4520. Measured from `git diff -U0`. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1804),
-            ('hermes-report.sh', 4224),
-            ('hermes-report.sh', 4455),
+            ('hermes-report.sh', 1848),
+            ('hermes-report.sh', 4293),
+            ('hermes-report.sh', 4520),
             ('api-event-report.sh', 1932),
         }
         self.assertEqual(
