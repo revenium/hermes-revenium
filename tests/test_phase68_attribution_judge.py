@@ -632,10 +632,28 @@ class MisattributionTests(unittest.TestCase):
         self.assertEqual(Fraction(summary['buckets']['agreed']['dollars']), 6)
         self.assertEqual(Fraction(summary['buckets']['disagree']['dollars']), 2)
         # stable pairs on all 3 turns; agreed weight 3 of 4
+        # two of three stable turns agree, whatever each turn spent
         self.assertEqual(summary['agreement']['turn_weighted_display_pct'],
-                         '75.00%')
+                         '66.67%')
         self.assertEqual(summary['agreement']['dollar_weighted_display_pct'],
                          '75.00%')
+
+    def test_turn_figures_count_each_turn_once_and_dollar_figures_use_dollars(
+            self):
+        combined = H.combine_verdicts(
+            four(['J1', 'J1', 'J2'], ['J1', 'J1', 'J2'],
+                 ['J1', 'J2', 'J2'], ['J1', 'J2', 'J2']), 3)
+        session = money_session([1, 1, 8], combined, {'J1': '10'})
+        agreement = H.summarize([session], Fraction(100))['agreement']
+        pairs = [t['pair'] for t in combined]
+        self.assertEqual(agreement['turn_weighted_display_pct'], '66.67%')
+        self.assertEqual(agreement['dollar_weighted_display_pct'], '90.00%')
+        self.assertAlmostEqual(agreement['kappa_turn'],
+                               H.cohen_kappa(pairs), places=12)
+        self.assertAlmostEqual(agreement['kappa_dollar'],
+                               H.cohen_kappa(pairs, [1, 1, 8]), places=12)
+        self.assertNotAlmostEqual(agreement['kappa_turn'],
+                                  agreement['kappa_dollar'], places=3)
 
     def test_a_session_with_no_transcript_is_bucketed_not_dropped(self):
         session = {'weights': [], 'combined': [], 'named_cause': True,

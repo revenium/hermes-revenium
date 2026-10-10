@@ -2355,7 +2355,7 @@ def summarize(sessions, total):
     buckets = {b: {"turns": 0, "dollars": zero} for b in BUCKETS}
     buckets["no_transcript"] = {"turns": 0, "dollars": zero}
     lower = upper = none_attr = dollars_all = zero
-    pairs, w_turn, w_dollar = [], [], []
+    pairs, w_dollar = [], []
     stable_turn = agreed_turn = stable_dollar = agreed_dollar = zero
     for session in sessions:
         weights, total_weight, _by_label, dollars = _session_money(session)
@@ -2375,19 +2375,18 @@ def summarize(sessions, total):
             bucket["dollars"] += share
             if turn["pair"] is not None:
                 pairs.append(turn["pair"])
-                w_turn.append(weight)
                 w_dollar.append(share)
-                stable_turn += weight
+                stable_turn += 1
                 stable_dollar += share
                 if turn["bucket"] == "agreed":
-                    agreed_turn += weight
+                    agreed_turn += 1
                     agreed_dollar += share
 
     def ratio_pct(num, den):
         return display_pct(num / den) if den else "n/a"
 
-    def kappa(weights):
-        if not pairs or sum(weights, zero) == 0:
+    def kappa(weights=None):
+        if not pairs or (weights is not None and sum(weights, zero) == 0):
             return None
         return cohen_kappa(pairs, weights)
 
@@ -2408,7 +2407,7 @@ def summarize(sessions, total):
             "turn_weighted_display_pct": ratio_pct(agreed_turn, stable_turn),
             "dollar_weighted_display_pct": ratio_pct(agreed_dollar,
                                                      stable_dollar),
-            "kappa_turn": kappa(w_turn),
+            "kappa_turn": kappa(),
             "kappa_dollar": kappa(w_dollar),
         },
         "buckets": {name: {"turns": b["turns"], "dollars": _fmt(b["dollars"])}
