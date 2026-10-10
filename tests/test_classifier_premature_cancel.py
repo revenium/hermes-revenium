@@ -540,6 +540,78 @@ class RejudgeSidecarTests(_ClassifierHarness):
         self.assertEqual(self._job_markers()[-1]['status'], 'SUCCESS')
 
 
+class GreptileReviewFixesTests(_ClassifierHarness):
+    """Greptile P1 findings on #152: the correction race and the stuck window."""
+
+    def _evaluators(self, c):
+        return _sys.modules[c.__name__.rsplit('.', 1)[0] + '.evaluators']
+
+    def test_a_correction_filed_while_the_evaluator_runs_is_not_superseded(self):
+        c = self._load()
+        [job_id] = self._first_pass(c, [_job()])
+        correction = {
+            'kind': 'correction', 'ts': time.time(), 'agentic_job_id': job_id,
+            'assessment_schema_version': 1, 'value_low': 900.0, 'value_base': 900.0,
+            'value_high': 900.0, 'currency': 'USD', 'reason': 'operator priced it',
+        }
+        sidecar_path = os.path.join(self.assessments_dir, f'{job_id}.jsonl')
+
+        def evaluator(job, transcript, cfg):
+            # The operator files the correction while the evaluation is in
+            # flight, AFTER the re-judge's pre-check saw no correction.
+            os.makedirs(self.assessments_dir, exist_ok=True)
+            with open(sidecar_path, 'a') as f:
+                f.write(json.dumps(correction, separators=(',', ':')) + '\n')
+            return dict(EVAL_PAYLOAD)
+
+        self._evaluators(c).register('pcancel-stub', evaluator)
+        self._trigger(c, [_resp(_verdicts((1, 'SUCCESS')))])
+        self.assertEqual(self._sidecar(job_id)[-1], correction)
+        self.assertEqual(self._job_markers()[-1]['status'], 'SUCCESS')
+
+    def test_write_job_assessment_refuses_only_when_asked(self):
+        c = self._load()
+        os.makedirs(self.assessments_dir, exist_ok=True)
+        path = os.path.join(self.assessments_dir, 'job_x.jsonl')
+        with open(path, 'w') as f:
+            f.write(json.dumps({'kind': 'correction', 'agentic_job_id': 'job_x'}) + '\n')
+        rec = {'agentic_job_id': 'job_x', 'value_base': 1.0}
+        self.assertIsNone(c._write_job_assessment(rec, refuse_if_corrected=True))
+        self.assertEqual(len(_read_jsonl(path)), 1)
+        self.assertIsNotNone(c._write_job_assessment(rec))
+        self.assertEqual(len(_read_jsonl(path)), 2)
+
+    def test_more_than_the_cap_rotates_so_every_job_is_rechecked(self):
+        c = self._load()
+        n = c.REJUDGE_MAX_JOBS + 2
+        names = [f'Arc {chr(ord("A") + i)} work' for i in range(n)]
+        records = self._task_pair(self.SID, time.time() - 100)
+        for i, name in enumerate(names):
+            records.append({
+                'kind': 'job', 'ts': time.time() - 50 + i, 'sid': self.SID,
+                'agentic_job_id': f'arc_{i:02d}_abcd', 'job_name': name,
+                'job_type': 'documentation', 'status': 'CANCELLED',
+            })
+        self._seed_markers(records)
+        prompts = []
+
+        def spy(**kwargs):
+            prompts.append(kwargs['messages'][-1]['content'])
+            return _resp(_verdicts())
+
+        for _ in range(2):
+            with mock.patch.object(c, 'call_llm', side_effect=spy), \
+                 mock.patch.object(c, '_read_session_transcript', return_value=TRANSCRIPT):
+                asyncio.run(c.run_classification_async(
+                    session_id=self.SID, message='m', response='r'))
+        self.assertEqual(len(prompts), 2, 'one call per trigger')
+        first = {name for name in names if name in prompts[0]}
+        self.assertEqual(len(first), c.REJUDGE_MAX_JOBS)
+        covered = {name for name in names if any(name in pr for pr in prompts)}
+        self.assertEqual(covered, set(names),
+                         'the second trigger must reach the jobs past the cap')
+
+
 class RejudgeNeverRaisesTests(_ClassifierHarness):
 
     def _assert_unchanged_after(self, c, responses, **kw):
@@ -1102,3 +1174,31 @@ class QueueReducerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReporterJobOwnershipTests(_ReporterBase):
+    """Greptile P1 on #152, legacy path: a re-judge marker for job A appended
+    after job B's marker must not take task markers away from B."""
+
+    def test_a_task_after_job_b_stays_with_b_when_job_a_is_rejudged(self):
+        job_b = 'second_job_b_2222'
+        fx = self._fixture_with_markers(
+            [
+                self._m('CANCELLED', 2990.0),
+                self._m('SUCCESS', 2985.0, job_id=job_b),
+                self._task_marker(self.SID, 'rep-muid-after-b', self.now - 2980.0),
+                self._m('SUCCESS', 2000.0),
+            ],
+            extra_ledger=(f'JOB:{job_b}:created:{self.now - 2900.0:.0f}.000',),
+        )
+        t1 = self._tick(fx)
+        self.assertEqual(t1['rc'], 0, t1['output'])
+        owners = {}
+        for argv in self._main_completions_for(t1['new'], self.SID):
+            flags = argv_to_flags(argv)
+            # --transaction-id is <sid>-<total_tokens>-<muid>; muids contain '-'.
+            muid = flags['--transaction-id'][len(self.SID) + 1:].split('-', 1)[1]
+            owners[muid] = flags.get('--agentic-job-id')
+        self.assertEqual(owners.get('rep-muid-after-b'), job_b, f"{owners!r}\n{t1['output']}")
+        self.assertEqual(owners.get('rep-muid-0001'), JOB, owners)
+

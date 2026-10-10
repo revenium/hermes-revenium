@@ -65,9 +65,17 @@ this repository.
   when the status moves. `SUCCESS` and `FAILED` stay final, the guardrail-halt cancel is never
   re-judged, and a `SUCCESS` is evaluated exactly as a first-pass `SUCCESS` is. The
   reporter now reports the latest marker for a job id (by marker `ts`, a tie going to the
-  later line), where it used to report and ledger the first. An operator correction in a job's
-  sidecar is not superseded by the new estimate. A `CANCELLED` outcome already ledgered
-  before the re-judge lands is final, as every ledgered outcome is.
+  later line), where it used to report and ledger the first. The re-judge marker updates the
+  job's status only: task-marker ownership, in both reporters, still counts just the first
+  marker per job id, so spend never moves between jobs. An operator correction in a job's
+  sidecar is not superseded by the new estimate, including one filed while the evaluator is
+  running (the check repeats under the sidecar lock at write time). A session with more than
+  eight `CANCELLED` jobs re-checks a rotating window of eight per trigger. A `CANCELLED`
+  outcome already ledgered before the re-judge lands is final, as every ledgered outcome is.
+- The open-session hold no longer closes an active long session when `state.db` is locked
+  during its column probe. A failed probe used to pin `started_at` as the idle clock for the
+  rest of the run; a locked probe now defers, and only a probe that read the schema is
+  remembered.
 
 ## [v1.8] — 2026-10-05
 

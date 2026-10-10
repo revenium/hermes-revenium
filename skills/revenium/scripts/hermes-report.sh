@@ -1167,8 +1167,21 @@ _open_session_defers_cancelled() {
   local max_idle="${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS:-86400}"
   [[ "${max_idle}" =~ ^[0-9]+$ ]] || max_idle=86400
 
+  # Only a probe that READ the schema is memoized. A locked database must not
+  # pin started_at for the rest of the run: the verdict query below waits out
+  # the lock and would then judge a long session that is still active as idle
+  # and ship its CANCELLED permanently. Contention defers, like the verdict
+  # query's; any other probe failure fails open.
   if [[ -z "${_SESSIONS_ACTIVITY_COL}" ]]; then
-    if sqlite3 "${STATE_DB}" "PRAGMA table_info(sessions);" 2>/dev/null | grep -q '|last_activity_at|'; then
+    local probe probe_rc
+    probe="$(sqlite3 -cmd ".timeout 1500" "${STATE_DB}" "PRAGMA table_info(sessions);" 2>&1)" && probe_rc=0 || probe_rc=$?
+    if [[ "${probe_rc}" -ne 0 ]]; then
+      case "${probe}" in
+        *[Ll]ocked*|*[Bb]usy*) return 0 ;;
+        *) return 1 ;;
+      esac
+    fi
+    if [[ "${probe}" == *'|last_activity_at|'* ]]; then
       _SESSIONS_ACTIVITY_COL="COALESCE(last_activity_at, started_at)"
     else
       _SESSIONS_ACTIVITY_COL="started_at"
@@ -3966,6 +3979,12 @@ jobs_by_id = {}
 # valid job markers seen in the file, used for deferred owning_job_id resolution.
 # Resolved over the full file regardless of the prior-ledger emission cutoff (D-12).
 job_positions = []
+# classifier-premature-cancel: a re-judged job gets a SECOND marker with the same
+# id, appended at the end of the file. It updates the job's status (jobs_by_id,
+# last line wins) but must not become a new ownership boundary: with markers
+# job A, job B, task T, re-judge of A, a boundary at the re-judge would hand T
+# to A instead of B. So only the FIRST marker per id enters job_positions.
+_job_position_ids = set()
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
 markers = []
@@ -4019,12 +4038,14 @@ if marker_path.is_file():
                         # order (D-12). job_name/job_type ride along so the deferred
                         # resolution pass can stamp --agentic-job-name / --agentic-job-type
                         # onto each owned task marker's meter completion call.
-                        job_positions.append((
-                            _file_pos,
-                            clean_id,
-                            m.get('job_name', '') or '',
-                            m.get('job_type', '') or '',
-                        ))
+                        if clean_id not in _job_position_ids:
+                            _job_position_ids.add(clean_id)
+                            job_positions.append((
+                                _file_pos,
+                                clean_id,
+                                m.get('job_name', '') or '',
+                                m.get('job_type', '') or '',
+                            ))
                         jobs_by_id[job_id] = m  # D-12: last line wins
                     continue  # never reaches task-marker collector
                 elif kind is not None:
@@ -4074,8 +4095,8 @@ if marker_path.is_file():
 # pure "first job after" rule assumed every arc closes with its own job marker
 # below it, but the classifier's _job_marker_exists gate infers jobs at most ONCE
 # per session, written EARLY (after the first arc). (A later CANCELLED re-judge
-# can append a second marker for the SAME job id; owners are resolved by id, so
-# that changes no task marker's owner.) In long-lived
+# can append a second marker for the SAME job id; only the first marker per id
+# is a position above, so that changes no task marker's owner.) In long-lived
 # multi-turn sessions (daily pipeline, Slack gateway) the remaining task markers
 # accumulate BELOW that single early job marker and were silently dropped to
 # owning_job_id = None — shipping ~95% of completions with no --agentic-job-id,

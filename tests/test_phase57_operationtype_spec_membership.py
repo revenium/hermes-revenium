@@ -695,12 +695,20 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # 4520->4572, 4739->4791. api-event-report.sh is untouched. Pure shift once more --
         # the COUNT (4) and the emitted VALUE expressions are unchanged;
         # re-measured with `grep -n -- '--operation-type'`.
+        # Greptile review fixes on #152 (2026-10-10): the locked-probe guard in
+        # `_open_session_defers_cancelled` (+13) sits above all three
+        # hermes-report.sh sites, and the first-marker-per-id ownership guard
+        # (+8) above the two main() sites: 2054->2067, 4572->4593, 4791->4812.
+        # api-event-report.sh gains the same ownership guard (+5):
+        # 1932->1937. Pure shift -- the COUNT (4) and the emitted VALUE
+        # expressions are unchanged; re-measured with
+        # `grep -n -- '--operation-type'`.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2054),
-            ('hermes-report.sh', 4572),
-            ('hermes-report.sh', 4791),
-            ('api-event-report.sh', 1932),
+            ('hermes-report.sh', 2067),
+            ('hermes-report.sh', 4593),
+            ('hermes-report.sh', 4812),
+            ('api-event-report.sh', 1937),
         }
         self.assertEqual(
             found_locations, expected_locations,

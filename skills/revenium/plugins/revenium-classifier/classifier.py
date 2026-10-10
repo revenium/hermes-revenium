@@ -568,6 +568,15 @@ HALT_JOB_ID_PREFIX = "guardrail-halt-"
 # simultaneously-unconfirmed arcs is not one whose extra jobs a single status
 # prompt should be asked to track.
 REJUDGE_MAX_JOBS = 8
+# Per-session rotation offset for re-judge candidates, so a session with more
+# than REJUDGE_MAX_JOBS CANCELLED jobs re-checks a different window on each
+# trigger instead of the same first eight forever (first-pass inference, and a
+# registered classification implementation, can return any number of jobs).
+# In-process only: a Hermes restart starts the rotation over, which still
+# reaches every job within ceil(n / REJUDGE_MAX_JOBS) triggers. Cleared rather
+# than grown past _REJUDGE_ROTATION_MAX_SESSIONS entries.
+_REJUDGE_ROTATION: dict = {}
+_REJUDGE_ROTATION_MAX_SESSIONS = 1024
 # The transcript budget for a re-judge. Deliberately the same 6000 chars
 # _build_job_inference_prompt and the evaluator slice to, but applied at READ
 # time through _read_session_transcript's head+tail sampler rather than as a
@@ -4145,7 +4154,11 @@ def _sidecar_filename_component(raw_job_id) -> str:
     return value
 
 
-def _write_job_assessment(record: dict, paths: "_Paths | None" = None) -> "Path | None":
+def _write_job_assessment(
+    record: dict,
+    paths: "_Paths | None" = None,
+    refuse_if_corrected: bool = False,
+) -> "Path | None":
     """Atomic O_APPEND + fcntl.LOCK_EX append of one JobAssessment sidecar
     line to <job_assessments_dir>/<sanitized_job_id>.jsonl.
 
@@ -4155,6 +4168,13 @@ def _write_job_assessment(record: dict, paths: "_Paths | None" = None) -> "Path 
     is worse written than not written, because it looks like data. Never
     raises; the D-12 call site wraps this in its own try/except so a sidecar
     write failure never prevents _write_job_marker from still running.
+
+    `refuse_if_corrected=True` (the CANCELLED re-judge) also returns None,
+    writing nothing, when an operator `kind:"correction"` line is already in the
+    sidecar. The check runs under the same LOCK_EX correct-assessment.sh takes,
+    so a correction filed while the evaluator call was in flight is still seen:
+    the reporter reads the sidecar last-match-wins, and a model estimate
+    appended after a correction would replace the operator's figure.
     """
     p = paths or _module_paths()
     p.job_assessments_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -4168,8 +4188,22 @@ def _write_job_assessment(record: dict, paths: "_Paths | None" = None) -> "Path 
             SIDECAR_LINE_MAX_BYTES, record.get("agentic_job_id", ""),
         )
         return None
-    with open(sidecar_path, "ab", buffering=0) as f:
+    with open(sidecar_path, "a+b" if refuse_if_corrected else "ab", buffering=0) as f:
         fcntl.flock(f, fcntl.LOCK_EX)
+        if refuse_if_corrected:
+            f.seek(0)
+            for existing in f.read().decode("utf-8", errors="replace").splitlines():
+                try:
+                    rec = json.loads(existing)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") == "correction":
+                    logger.info(
+                        "revenium-classifier: operator correction present, "
+                        "re-judge assessment not written for job=%s",
+                        record.get("agentic_job_id", ""),
+                    )
+                    return None
         f.write(line.encode("utf-8"))
     return sidecar_path
 
@@ -5356,6 +5390,7 @@ async def _persist_job_verdict(
     session_id: str,
     p: "_Paths",
     write_assessment: bool = True,
+    refuse_if_corrected: bool = False,
 ) -> None:
     """Attach the assessment (or abstention record) for one validated job, write
     its sidecar line, then append its kind:"job" marker.
@@ -5371,7 +5406,11 @@ async def _persist_job_verdict(
     sidecar line it would produce) but still appends the marker. Only the
     re-judge passes it, when an operator correction already sits in the job's
     sidecar: the reporter reads the sidecar last-match-wins, so a model estimate
-    appended after a correction would supersede it.
+    appended after a correction would supersede it. That pre-check is only an
+    economy (it skips the evaluator call); the re-judge also passes
+    `refuse_if_corrected=True`, which repeats the check under the sidecar lock at
+    write time, closing the window in which an operator files a correction
+    while the evaluator is running.
 
     Raises whatever its collaborators raise; both callers wrap it in their own
     try/except so one job's failure never abandons the others (D-04).
@@ -5495,9 +5534,15 @@ async def _persist_job_verdict(
     _assessment_record = valid.pop("_assessment_record", None)
     if isinstance(_assessment_record, dict) and _assessment_record:
         try:
-            await asyncio.to_thread(
-                _write_job_assessment, _assessment_record, p
-            )
+            if refuse_if_corrected:
+                await asyncio.to_thread(
+                    _write_job_assessment, _assessment_record, p,
+                    refuse_if_corrected=True,
+                )
+            else:
+                await asyncio.to_thread(
+                    _write_job_assessment, _assessment_record, p
+                )
         except Exception as exc:
             logger.warning(
                 "revenium-classifier: sidecar assessment write "
@@ -5606,7 +5651,8 @@ async def _rejudge_cancelled_jobs(session_id: str, paths: "_Paths") -> None:
         new id would be a new Revenium job.
       * One status-only LLM call per trigger however many candidates there are
         (at most REJUDGE_MAX_JOBS, in one prompt), and none when the transcript
-        is empty. A verdict that is still CANCELLED, unparseable or missing
+        is empty. When there are more, the window rotates across triggers
+        (_REJUDGE_ROTATION) so every job is eventually re-checked. A verdict that is still CANCELLED, unparseable or missing
         appends nothing.
       * A moved status is persisted through _persist_job_verdict -- the very
         path first-pass inference uses -- so a re-judged SUCCESS is evaluated,
@@ -5632,10 +5678,14 @@ async def _rejudge_cancelled_jobs(session_id: str, paths: "_Paths") -> None:
             if not isinstance(job_type, str) or not LABEL_RE.match(job_type):
                 continue
             candidates.append(rec)
-            if len(candidates) >= REJUDGE_MAX_JOBS:
-                break
         if not candidates:
             return
+        if len(candidates) > REJUDGE_MAX_JOBS:
+            offset = _REJUDGE_ROTATION.get(session_id, 0) % len(candidates)
+            candidates = (candidates[offset:] + candidates[:offset])[:REJUDGE_MAX_JOBS]
+            if len(_REJUDGE_ROTATION) >= _REJUDGE_ROTATION_MAX_SESSIONS:
+                _REJUDGE_ROTATION.clear()
+            _REJUDGE_ROTATION[session_id] = offset + REJUDGE_MAX_JOBS
 
         # A budget below the 8000-char default so no downstream cut is needed:
         # _build_job_inference_prompt re-slices head-only to 6000, which would
@@ -5664,6 +5714,7 @@ async def _rejudge_cancelled_jobs(session_id: str, paths: "_Paths") -> None:
                     valid, transcript, session_id, paths,
                     write_assessment=not _sidecar_has_correction(
                         valid["agentic_job_id"], paths=paths),
+                    refuse_if_corrected=True,
                 )
             except Exception as exc:
                 logger.warning(

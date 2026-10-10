@@ -890,6 +890,48 @@ class ShellPredicateTests(unittest.TestCase):
         blocker.execute('ROLLBACK')
         self._each_bash('_open_session_defers_cancelled s-ended', 1)
 
+    def test_a_locked_column_probe_defers_and_is_not_memoized(self):
+        # Greptile P1 on #152: the PRAGMA probe used to fall back to started_at
+        # on ANY failure and memoize that for the rest of the run. Once the lock
+        # cleared, a long session that is still active (recent
+        # last_activity_at) was judged idle on started_at and its CANCELLED
+        # shipped permanently. A locked probe now defers and leaves the memo
+        # empty, so the next call probes again.
+        self._add_session('s-ended', 3000.0, ended_ago=10.0)  # would report
+        blocker = sqlite3.connect(self.db, isolation_level=None)
+        self.addCleanup(blocker.close)
+        blocker.execute('BEGIN EXCLUSIVE')
+        call = ('_open_session_defers_cancelled s-ended; r=$?; '
+                'echo "memo=[${_SESSIONS_ACTIVITY_COL}]"; (exit $r)')
+        for bash in self.BASHES:
+            rc, out = self._call(bash, call)
+            self.assertEqual(rc, 0, f'{bash}: {out.stdout}{out.stderr}')
+            self.assertIn('memo=[]', out.stdout, bash)
+        blocker.execute('ROLLBACK')
+
+    def test_last_activity_keeps_a_long_open_session_held(self):
+        # The case the memo bug broke: started two days ago, active seconds ago.
+        db = os.path.join(self.tmp, 'activity.db')
+        conn = sqlite3.connect(db)
+        conn.execute('CREATE TABLE sessions (id TEXT, started_at REAL, '
+                     'ended_at REAL, last_activity_at REAL)')
+        conn.execute('INSERT INTO sessions VALUES (?,?,?,?)',
+                     ('s-long', self.now - 2 * 86400, None, self.now - 10))
+        conn.commit()
+        conn.close()
+        self._each_bash('_open_session_defers_cancelled s-long', 0, db=db)
+
+    def test_an_unreadable_column_probe_fails_open_without_memoizing(self):
+        junk = os.path.join(self.tmp, 'junk2.db')
+        with open(junk, 'wb') as f:
+            f.write(b'this is not a sqlite database' * 100)
+        call = ('_open_session_defers_cancelled s-open; r=$?; '
+                'echo "memo=[${_SESSIONS_ACTIVITY_COL}]"; (exit $r)')
+        for bash in self.BASHES:
+            rc, out = self._call(bash, call, db=junk)
+            self.assertEqual(rc, 1, bash)
+            self.assertIn('memo=[]', out.stdout, bash)
+
     # -- _job_child_hold_age ---------------------------------------------------
 
     def _flag_dir(self):
