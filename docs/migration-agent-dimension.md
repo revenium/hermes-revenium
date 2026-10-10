@@ -10,12 +10,12 @@ behavior. Both changes touch the same emit paths in
 
 Before v1.4, a subagent session with no marker file reported `--agent` as a
 hardcoded read of `REVENIUM_AGENT_NAME`. As of v1.4, that same completion
-resolves `--agent` through the session's root — a subagent inherits the agent
+resolves `--agent` through the session's root: a subagent inherits the agent
 name of the root session that dispatched it, via the same once-per-session
 `root_agent_name` resolution the squad flags below already use.
 
 The emitted value is identical on every current install. No code path in
-this skill has ever written an `agent` field into a marker record — not
+this skill has ever written an `agent` field into a marker record: not
 `_write_marker_pair`, not `_write_job_marker`. Root-inherited resolution
 therefore falls back to `REVENIUM_AGENT_NAME` exactly as before, for every
 session, on every install, today.
@@ -30,8 +30,8 @@ The current behavior has these consequences:
 **What would invalidate this.** If a future change adds an `"agent"` key to
 `_write_marker_pair`'s record closure or `_write_job_marker`'s record dict in
 `classifier.py`, root inheritance begins producing genuinely different
-per-subagent values, and this section must be rewritten. The test that
-enforces this today is `tests/test_phase29_agent_inheritance.py` — its
+per-subagent values and this section must be rewritten. The test that
+enforces this today is `tests/test_phase29_agent_inheritance.py`: its
 byte-diff test compares captured argv against a golden fixture and goes red
 the moment a markerless completion's `--agent` value stops matching
 `REVENIUM_AGENT_NAME`.
@@ -45,19 +45,19 @@ entirely):
 
 | Flag | Value |
 |------|-------|
-| `--squad-id` | The root session's id — the same session that dispatched every subagent hanging off it. |
-| `--squad-name` | The operator-set `REVENIUM_SQUAD_NAME` override, if set; otherwise the root's marker-derived agent name; otherwise `REVENIUM_AGENT_NAME` — never emitted empty. |
+| `--squad-id` | The root session's id: the same session that dispatched every subagent hanging off it. |
+| `--squad-name` | The operator-set `REVENIUM_SQUAD_NAME` override, if set; otherwise the root's marker-derived agent name; otherwise `REVENIUM_AGENT_NAME`: never emitted empty. |
 | `--squad-role` | The literal string `root` for the root session itself, `subagent` for every session dispatched from it. |
 
 **`REVENIUM_SQUAD_NAME` (quick-260814-okp).** The override was added because
-squad grouping on the Revenium platform is by *name*, and name-equals-agent-
+squad grouping on the Revenium platform is by *name* and name-equals-agent-
 name made every squad single-agent on a multi-profile fleet (each profile's
 distinct `Hermes-<profile>` agent name produced a distinct, single-member
 squad). Setting `REVENIUM_SQUAD_NAME` lets an operator declare one squad
-identity that spans many agents. Installs that do not set it see **no change
-on the wire** — the resolution falls through to exactly the two-level
+identity that spans many agents. Installs that do not set it see no change
+on the wire: the resolution falls through to exactly the two-level
 fallback this table originally described. See
-`skills/revenium/references/setup.md` → **Squad grouping across the fleet**
+`skills/revenium/references/setup.md` → Squad grouping across the fleet
 for the fleet recipe.
 
 `--squad-role` describes topology, not function: where a
@@ -69,7 +69,7 @@ are missing.
 
 **Availability.** The three flags appear only when the installed `revenium`
 CLI advertises support for them (v1.3.0 and newer). An older CLI continues to
-meter exactly as it did before this release — no missing-flag errors, no
+meter exactly as it did before this release: no missing-flag errors, no
 behavior change on the wire.
 
 ## Hook registration: three triggers, one wider source set
@@ -77,15 +77,15 @@ behavior change on the wire.
 As of v1.4, the `revenium-classifier` plugin registers three hooks
 (`__init__.py:308-310`, mirrored in `plugin.yaml:4-7`):
 
-- `on_session_end` — the pre-existing hook, unchanged.
-- `on_session_finalize` — new in v1.4, the session-boundary trigger.
-- `post_llm_call` — new in v1.4, the per-turn trigger.
+- `on_session_end`: the pre-existing hook, unchanged.
+- `on_session_finalize`: new in v1.4, the session-boundary trigger.
+- `post_llm_call`: new in v1.4, the per-turn trigger.
 
 Before this release, exactly one of the three fired: `on_session_end`.
 
 Interactive gateway session conversation content now reaches the auxiliary
 classifier LLM. Before this release, in practice only
-the scheduled `cron_*` sessions' content reached it — interactive gateway
+the scheduled `cron_*` sessions' content reached it: interactive gateway
 sessions never fired any hook at all. `_read_session_messages` (called at
 `classifier.py:1079`) and `_read_session_transcript` (called at
 `classifier.py:1106`) are the two readers that carry that content into the
@@ -108,11 +108,11 @@ N.
 ## Where to look if you build on this
 
 - `tests/test_phase29_agent_inheritance.py` is the test suite that keeps the
-  "no observable change" claim honest. If it ever fails, this document's first
+  "no observable change" claim testable. If it ever fails, this document's first
   half is what needs updating.
 - `scripts/common.sh:26` documents `REVENIUM_AGENT_NAME` and the
   `--filter AGENT:IS:${REVENIUM_AGENT_NAME}` guardrail convention this release
   does not disturb.
 - If you build a saved view or a guardrail filter on `--squad-role`, the two
-  values you will see are `root` and `subagent` — no other values are emitted
+  values you will see are `root` and `subagent`: no other values are emitted
   by this release.

@@ -7,7 +7,7 @@ the SKILL.md `## FINAL ACTION — JOB DECLARATION` section applies.
 
 ## Arc definition (goal-continuity rule)
 
-**Same arc:** the same goal, including follow-up fixes, refinements, and corrections. Example: "the tests fail" sent after "implement X" is still arc X. X is not done until it works. Do NOT declare the job at "implement X" if you know verification is still needed.
+**Same arc:** the same goal, including follow-up fixes, refinements and corrections. Example: "the tests fail" sent after "implement X" is still arc X. X is not done until it works. Do NOT declare the job at "implement X" if you know verification is still needed.
 
 **New arc:** a goal that is NOT a continuation of the current one, such as a topic pivot or unrelated request.
 
@@ -30,31 +30,31 @@ Declare a job marker if ANY of these are true:
 
 Exactly one of: `SUCCESS`, `FAILED`, `CANCELLED` (uppercase).
 
-- `SUCCESS` requires positive, checkable evidence established in the session: tests run and passed, build green, diff demonstrably correct, or question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. Self-verification is sufficient; user sign-off is not required.
-- `FAILED` is narrow: the fix did not work, the build cannot pass, or the goal is objectively unachievable. For a `FAILED` arc, also set `failure_reason` to a brief plain-text cause (e.g. "tests failed: 3 assertion errors in auth module"). The cron forwards it to Revenium as `--metadata` on the job outcome. Omit `failure_reason` for `SUCCESS` and `CANCELLED`.
-- `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded, or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
+- `SUCCESS` requires positive, checkable evidence established in the session: tests run and passed, build green, diff demonstrably correct or question fully answered. "I made the change but did not or could not verify it" is `CANCELLED`, not `SUCCESS`. Self-verification is sufficient; user sign-off is not required.
+- `FAILED` is narrow: the fix did not work, the build cannot pass or the goal is objectively unachievable. For a `FAILED` arc, also set `failure_reason` to a brief plain-text cause (e.g. "tests failed: 3 assertion errors in auth module"). The cron forwards it to Revenium as `--metadata` on the job outcome. Omit `failure_reason` for `SUCCESS` and `CANCELLED`.
+- `CANCELLED` is the catch-all and the uncertainty-bias target: abandoned, interrupted, superseded or outcome genuinely uncertain. When in doubt, use `CANCELLED`.
 
 ## Examples
 
-**Example 1 — Arc complete, self-verified (SUCCESS):**
-User asked you to add a pagination endpoint. You wrote the code, ran the test suite (all green), and the diff does what was asked.
+**Example 1: Arc complete, self-verified (SUCCESS):**
+User asked you to add a pagination endpoint. You wrote the code, ran the test suite (all green) and the diff does what was asked.
 - `agentic_job_id`: `add-pagination-endpoint-3b1e`
 - `job_name`: "Add pagination to /api/users endpoint"
 - `job_type`: `feature_development` (or mint `api_endpoint_development` if more specific)
 - `status`: `SUCCESS` (tests ran and passed; self-verified)
 
-**Example 2 — Arc complete but NOT verified (CANCELLED, not SUCCESS):**
-User asked you to fix a bug. You wrote the fix but did not run the tests (no terminal access, or deferred to user).
+**Example 2: Arc complete but NOT verified (CANCELLED, not SUCCESS):**
+User asked you to fix a bug. You wrote the fix but did not run the tests (no terminal access or deferred to user).
 - `status`: `CANCELLED` because you made the change but could not verify it. Do NOT set `SUCCESS` here. If the user later confirms it works, that confirmation is a separate arc.
 
-**Example 3 — Arc definitively failed (FAILED):**
+**Example 3: Arc definitively failed (FAILED):**
 User asked you to make the CI pipeline green. After 3 attempts the underlying library has a known unresolved upstream bug that makes the goal objectively unachievable today.
 - `agentic_job_id`: `fix-ci-upstream-blocker-9f2a`
 - `job_type`: `debugging`
 - `status`: `FAILED` (the goal is unachievable)
 - `failure_reason`: "upstream library bug blocks CI; no workaround after 3 attempts"
 
-**Example 4 — User pivot before arc declared (CANCELLED for abandoned arc):**
+**Example 4: User pivot before arc declared (CANCELLED for abandoned arc):**
 User asked you to refactor the auth module (arc in progress, not yet declared). Mid-arc, the user says, "actually forget that; help me write a release announcement."
 - First: write a `CANCELLED` job marker for the abandoned refactor arc (`job_type`: `refactoring`, `status`: `CANCELLED`).
 - Then: begin the new arc (release announcement writing).
@@ -69,7 +69,7 @@ assessment, a `SUCCESS` job marker carries one extra key: `assessment`.
 
 This contract is frozen. Marker readers written before v1.5 must keep
 parsing, so every reader uses `.get("assessment", {})`; the key is
-**absent** whenever evaluation is off, the arc is not `SUCCESS`, or the evaluator
+**absent** whenever evaluation is off, the arc is not `SUCCESS` or the evaluator
 abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 
 ```json
@@ -94,7 +94,7 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 | key | type | constraint |
 |---|---|---|
 | `estimated_value` | number | **Derived** as `estimated_hours_saved x assumed_loaded_rate`, rounded to 2dp. A value supplied by an evaluator is discarded. |
-| `currency` | string | ISO 4217, from an explicit supported set, and must match the configured currency. |
+| `currency` | string | ISO 4217, from an explicit supported set and must match the configured currency. |
 | `basis` | string | Clamped to 200 chars. |
 | `assumptions.inferred_role` | string | Clamped to 60 chars. |
 | `assumptions.estimated_hours_saved` | number | Finite, `0 < h <= maxHoursSaved` (default 40). |
@@ -103,19 +103,19 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 | `evaluator`, `evaluator_version` | string | Recorded from the resolved evaluator, never read from its output. |
 | `evidence_class` | string | Resolved from the boundary registry for whichever evaluator ran, never read from its output. On the naked-LLM path that resolution always yields `MODEL_ESTIMATED_DEMO`. |
 
-Every string field has `|`, newline, and carriage return replaced with a space
-before persistence. The cron's job-outcome queue is `IFS='|'`-parsed, and one
+Every string field has `|`, newline and carriage return replaced with a space
+before persistence. The cron's job-outcome queue is `IFS='|'`-parsed and one
 pipe reaching that tuple shifts every following field.
 
 ### What `MODEL_ESTIMATED_DEMO` means
 
 `MODEL_ESTIMATED_DEMO` is an unverified model estimate. It is not measured, observed,
-customer-confirmed, or defensible ROI. Revenium computes a displayed ROI
+customer-confirmed or defensible ROI. Revenium computes a displayed ROI
 from this reported value and the metered cost; the value's quality is the
-model's, and the feature is labelled experimental for that reason.
+model's and the feature is labelled experimental for that reason.
 
 **A future non-LLM evaluator must report a different evidence class.** ONNX
-classifiers, deterministic customer policies, vertical models, and
+classifiers, deterministic customer policies, vertical models and
 system-of-record adapters each carry their own. Do not widen this one to cover
 measured value. The field exists to keep the two
 distinguishable after the fact.
@@ -150,9 +150,9 @@ Everything in this section describes the **`job_assessment` sidecar record**
 Assessment Sidecar" section of
 [`config-schema.md`](config-schema.md)), not the job marker documented above.
 This phase adds nothing to the frozen `kind: "job"` marker shape shown in the
-JSON example above — its `assessment` key stays the same 9-key summary it has
+JSON example above; its `assessment` key stays the same 9-key summary it has
 been since v1.5, byte-unchanged. A reader looking for `net_value`,
-`supplied_costs`, `cost_coverage`, `economic_mechanism`, or
+`supplied_costs`, `cost_coverage`, `economic_mechanism` or
 `double_counting_group` on the marker line will not find them there; they
 live on the sidecar record `hermes-report.sh` reads to build `--metadata`.
 
@@ -164,85 +164,84 @@ mirroring the shape of the nine evidence-class labels above: `labor_substitution
 `augmentation_capacity_expansion`, `newly_enabled_work`,
 `quality_decision_improvement`, `risk_avoidance`, `incremental_revenue`.
 
-Three are evaluator-selectable — `labor_substitution`,
-`augmentation_capacity_expansion`, `newly_enabled_work` — and three are
-operator-declared only — `quality_decision_improvement`, `risk_avoidance`,
+Three are evaluator-selectable: `labor_substitution`,
+`augmentation_capacity_expansion`, `newly_enabled_work`. Three are
+operator-declared only: `quality_decision_improvement`, `risk_avoidance`,
 `incremental_revenue`. A mechanism is a claim about the work, which the
 session transcript evidences, so the naked-LLM evaluator may choose among the
 three it can evidence from what it actually observed. Revenue, risk
-avoidance, and quality or decision improvement are claims a transcript cannot
+avoidance and quality or decision improvement are claims a transcript cannot
 support, so the evaluator may never assert them.
 
 **Producible by an operator, never by the evaluator.** Phase 44 declared these
-three with no producer at all. Two now exist, and both are operator-driven by
-construction: `correct-assessment.sh --mechanism` (Phase 51), and a valuation
-registrant that declares one at registration (Phase 54) — the shipped
+three with no producer at all. Two now exist and both are operator-driven by
+construction: `correct-assessment.sh --mechanism` (Phase 51) and a valuation
+registrant that declares one at registration (Phase 54). The shipped
 `revenueCard` fixture declares `incremental_revenue`, reached by configuring
 `boundaries.valuation` plus a `revenueCard` entry.
 
-What has NOT changed is the part that matters: the evaluator still cannot
-select any of the three. `_resolve_economic_mechanism`'s membership test runs
+The evaluator still cannot select any of the three.
+`_resolve_economic_mechanism`'s membership test runs
 only against `EVALUATOR_MECHANISMS`, never the full set, so a transcript alone
-can never assert `quality_decision_improvement`, `risk_avoidance`, or
+can never assert `quality_decision_improvement`, `risk_avoidance` or
 `incremental_revenue`. That is a structural guarantee, not a gap awaiting a
-producer — a mechanism a transcript cannot evidence must come from an operator
+producer. A mechanism a transcript cannot evidence must come from an operator
 who can. `quality_decision_improvement` and `risk_avoidance` still have no
 producer; the intended one remains a study reference.
 
-An unrecognised value, or one of the three operator-only mechanisms,
+An unrecognised value or one of the three operator-only mechanisms
 appearing in an evaluator response resolves to the `unknown` sentinel and
 abstains. The field is absent from the record's asserted mechanism claim
 rather than clamped to a working default.
 
 ### Net value and the coverage list (EGV-14, EGV-15)
 
-A successful, evaluated record carries `net_value`, `supplied_costs`, and
+A successful, evaluated record carries `net_value`, `supplied_costs` and
 `cost_coverage` alongside the existing `estimated_value`. `estimated_value`
-remains the gross figure — unchanged in meaning. `net_value` is a sibling
+remains the gross figure, unchanged in meaning. `net_value` is a sibling
 field that subtracts every operator-supplied cost category
 (`skills/revenium/references/config-schema.md`'s `costs` block) from
 `estimated_value`.
 
 `cost_coverage` names, in a fixed order, which categories were included,
-which of those were supplied as a known zero, which are unknown, and which
+which of those were supplied as a known zero, which are unknown and which
 are deliberately excluded. Metered AI cost is the one deliberately-excluded
-category — Revenium already holds the metered cost for the job and completes
+category. Revenium already holds the metered cost for the job and completes
 that half of the subtraction on its side; this skill never nets AI cost
 itself. No ratio is emitted here: the skill ships the operands (value,
-costs, coverage), and Revenium derives ratios from figures it already holds.
+costs, coverage) and Revenium derives ratios from figures it already holds.
 
 ### Abstention and the non-SUCCESS record (EGV-05, EGV-17)
 
 A `newly_enabled_work` arc records its mechanism and omits the entire value
-family — no `value_low`/`value_base`/`value_high`/`bounds_source`/
+family: no `value_low`/`value_base`/`value_high`/`bounds_source`/
 `currency`/`estimated_value`/`assumptions`/`net_value`. That mechanism has no
-counterfactual human role by definition, and asking for one is exactly what
+counterfactual human role by definition and asking for one is exactly what
 produces invented numbers. This abstention carries `abstention_reason:
 "mechanism_abstains_from_value"`.
 
-A `FAILED` or `CANCELLED` job now gets its own sidecar record too — built
-directly, never through the evaluator — carrying its `supplied_costs`, its
-`cost_coverage`, and its `double_counting_group`, with the same value family
+A `FAILED` or `CANCELLED` job now gets its own sidecar record too, built
+directly without the evaluator, carrying its `supplied_costs`, its
+`cost_coverage` and its `double_counting_group`, with the same value family
 absent (`abstention_reason: "not_evaluated_non_success"`). This is how
 negative ROI stays visible downstream WITHOUT this skill asserting a negative
-number it never measured: the job's real cost is present, and no
+number it never measured: the job's real cost is present and no
 manufactured value sits opposite it. The marker-level statement in "Failed
-and cancelled arcs" above — no evaluator call, no `assessment` key on the
-marker — is unchanged; this is the separate sidecar record that now exists
+and cancelled arcs" above (no evaluator call, no `assessment` key on the
+marker) is unchanged; this is the separate sidecar record that now exists
 alongside that marker.
 
 ### double_counting_group (EGV-16)
 
-Several jobs inferred from ONE session's transcript carry the same
+Several jobs inferred from one session's transcript carry the same
 `double_counting_group` id, so a consumer can see they must not be summed
-naively. **Known gap, stated in the same paragraph as the capability:**
-`double_counting_group` groups same-session, multi-job records only. It does
-**not** resolve cross-session or root-plus-subagent attribution — job
+naively. `double_counting_group` groups same-session, multi-job records only.
+It does not resolve cross-session or root-plus-subagent attribution. Job
 inference runs only when the session is its own root
 (`root_sid == session_id`), so a subagent session never independently
 produces a second assessment record to relate to its root's. Deliberately
-absent from the record: any allocation fraction, share, or weight. An
-allocation is a causal claim, and a naked LLM does not get to make one — the
+absent from the record: any allocation fraction, share or weight. An
+allocation is a causal claim and a naked LLM does not get to make one. The
 skill marks the relationship and stops there.
 
 ### The classified/unclassified/unallocated cost reconciliation (EGV-17)
@@ -251,25 +250,23 @@ EGV-17's second half is the metered-cost reconciliation, produced by
 `hermes-report.sh`, not by the classifier. Every tick, the reporter
 partitions the metered cost it observed into three `ATTRIBUTION_BUCKETS`:
 
-- `classified` — metered cost the reporter split across real markers
+- `classified`: metered cost the reporter split across real markers
   carrying an attribution.
-- `unclassified` — metered cost on a session with no marker at all.
-- `unallocated` — metered cost the reporter observed but did not attribute
+- `unclassified`: metered cost on a session with no marker at all.
+- `unallocated`: metered cost the reporter observed but did not attribute
   this tick.
 
-The reporter emits ONE reconciliation line per tick in
+The reporter emits one reconciliation line per tick in
 `revenium-metering.log`, naming all three totals. The three sum back to the
-observed total exactly — byte-exact for token fields, `Decimal`-exact for
-cost. That is what "totals still reconcile" means in operational terms: an
-operator can see how much metered spend this skill attributed and how much
-it did not, rather than inferring attribution coverage from a number that
-silently omits what it could not place.
+observed total exactly: byte-exact for token fields, `Decimal`-exact for
+cost. Operators can see how much metered spend the skill attributed and how much
+it could not attribute.
 
 The partition is observability only. Nothing in the metering decision path
-consults it, and no ledger line, CLI argument, or reportability outcome
+consults it and no ledger line, CLI argument or reportability outcome
 depends on it. `unallocated` covers only rows for which a real
-`revenium meter completion` invocation was attempted and failed — it does
+`revenium meter completion` invocation was attempted and failed. It does
 not cover the several pre-attempt skip sites already in the reporter
-(already-ledgered, the growth guard, a zero delta, or empty-split-rows), so
+(already-ledgered, the growth guard, a zero delta or empty-split-rows), so
 expect it to read `0.000000` on a healthy tick and become nonzero only when
 a `revenium` invocation genuinely fails mid-tick.

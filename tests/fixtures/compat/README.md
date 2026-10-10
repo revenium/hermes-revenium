@@ -9,36 +9,36 @@ the entire v1.x release line.
 
 ## The four fixtures
 
-- **meter-completion.golden.json** — `revenium meter completion` argv;
+- **meter-completion.golden.json**: `revenium meter completion` argv;
   loaded by `tests/test_compat_meter_completion.py`; pins the
   per-marker happy-path argv including `--trace-id`, `--task-type`,
-  `--agentic-job-id`, `--transaction-id`, and provider routing.
-- **jobs-create.golden.json** — `revenium jobs create` argv;
+  `--agentic-job-id`, `--transaction-id` and provider routing.
+- **jobs-create.golden.json**: `revenium jobs create` argv;
   loaded by `tests/test_compat_jobs_create.py`; pins the
-  job-marker-driven create call including `--name`, `--type`, and
+  job-marker-driven create call including `--name`, `--type` and
   `--environment` routing.
-- **jobs-outcome.golden.json** — `revenium jobs outcome` argv (SUCCESS
+- **jobs-outcome.golden.json**: `revenium jobs outcome` argv (SUCCESS
   path); loaded by `tests/test_compat_jobs_outcome.py`; pins the
   positional `<agentic-job-id>` plus outcome flags.
-- **meter-tool-event.golden.json** — `revenium meter tool-event` argv;
+- **meter-tool-event.golden.json**: `revenium meter tool-event` argv;
   loaded by `tests/test_compat_meter_tool_event.py`; pins the
   success-path bare `--success` flag and the absence of
   `--error-message`.
 
 ## AGENT-01 no-observable-change baseline
 
-- **meter-completion-markerless.golden.json** — a fifth fixture, added in
+- **meter-completion-markerless.golden.json**: a fifth fixture, added in
   Phase 29 Plan 03, that is NOT part of the immutability contract above. It
   captures the markerless `revenium meter completion` argv from the working
   tree immediately BEFORE the AGENT-01 edit (root-inherited `--agent`), and
   pins the full ordered token list under `argv_order` so
   `tests/test_phase29_agent_inheritance.py` can prove the post-edit argv is
-  byte-identical when no root agent value exists — the "no observable
-  change" claim in `docs/migration-agent-dimension.md` made falsifiable.
+  byte-identical when no root agent value exists, making the "no observable
+  change" claim in `docs/migration-agent-dimension.md` falsifiable.
 
 ## jobs-outcome-metadata-truncated.golden.json — the over-ceiling `--metadata` shape (Phase 46)
 
-- **jobs-outcome-metadata-truncated.golden.json** — a seventh fixture, added
+- **jobs-outcome-metadata-truncated.golden.json**: a seventh fixture, added
   in Phase 46 Plan 03 (EGV-19, D-02/D-03), that is NOT part of the
   immutability contract above. Loaded by
   `tests/test_compat_jobs_outcome.py::TestCompatJobsOutcomeMetadataTruncated`.
@@ -52,15 +52,15 @@ the entire v1.x release line.
   `evaluator_version`, `model`, `evidence_class`, `reportability_status`,
   `inference_provider`, `inference_address_class`) still present. It has
   the same additive standing as `meter-completion-markerless.golden.json`,
-  `meter-completion-assessment.golden.json`, and
-  `jobs-outcome-update.golden.json` above — it is eligible for change and
+  `meter-completion-assessment.golden.json` and
+  `jobs-outcome-update.golden.json` above; it is eligible for change and
   is not enforced by the v1.4 umbrella meta suite
   (`tests/test_compat_v1_4_meta.py`).
 
   This fixture pins a payload **shape**, not a payload **size**: the byte
   ceiling itself lives in `hermes-report.sh`'s `_METADATA_CEILING_BYTES`
   and is asserted by `tests/test_phase46_metadata_envelope.py`, so raising
-  the ceiling later does not require editing this fixture — only
+  the ceiling later does not require editing this fixture, only
   re-capturing it if the truncated key set changes (and, per
   `TestCompatJobsOutcomeMetadataTruncated`'s own untruncated-payload
   assertion, a ceiling raise that stops this fixture's record from
@@ -74,7 +74,7 @@ v1.x). Any modification is a wire-shape change that would break
 downstream Revenium analytics consumers depending on the v1.x argv
 contract.
 
-The contract is enforced two ways:
+Two test layers enforce the contract:
 
 1. The four underlying runners
    (`tests/test_compat_meter_completion.py`,
@@ -91,7 +91,7 @@ The contract is enforced two ways:
 If a future phase needs to change the wire shape (e.g. add a new
 field): create a NEW sibling fixture (e.g.
 `meter-completion.v2.golden.json`), add a NEW sibling test class (e.g.
-`tests/test_compat_v2_meter_completion.py`), and bump the skill's major
+`tests/test_compat_v2_meter_completion.py`) and bump the skill's major
 version to v2.0. **Silent edits to the existing v1.x fixtures are
 PROHIBITED** and will be caught by the v1.4 meta umbrella.
 
@@ -99,13 +99,13 @@ PROHIBITED** and will be caught by the v1.4 meta umbrella.
 
 The fixture design was locked in during Phase 20:
 
-- **Phase 20 D-01** — golden-argv unit test pattern.
-- **Phase 20 D-02** — reconstruct fixture from script source (the
+- **Phase 20 D-01**: golden-argv unit test pattern.
+- **Phase 20 D-02**: reconstruct fixture from script source (the
   fixture is derived from a precise pointer into
   `hermes-report.sh` / `tool-event-report.sh`, not from a live
   observation).
-- **Phase 20 D-03** — one canonical happy-path golden per verb.
-- **Phase 20 D-04** — `exact_match_fields` (literal allowlist) plus
+- **Phase 20 D-03**: one canonical happy-path golden per verb.
+- **Phase 20 D-04**: `exact_match_fields` (literal allowlist) plus
   `pattern_fields` (regex-bounded variation, e.g. ISO timestamps) plus
   `forbidden_fields` (denylist for accidental v1.0/v1.1 budget-id
   leaks).
@@ -117,11 +117,11 @@ v1.4 milestone gate by adding the umbrella test and this README.
 
 Each golden JSON file pins:
 
-- **`exact_match_fields`** — literal flag-to-value pairs the captured
+- **`exact_match_fields`**: literal flag-to-value pairs the captured
   argv MUST contain (e.g. `--trace-id` = the session id).
-- **`pattern_fields`** — flags whose values vary across runs but
+- **`pattern_fields`**: flags whose values vary across runs but
   match a regex (e.g. ISO-8601 `--started-at`).
-- **`forbidden_fields`** — flags whose presence in the captured argv
+- **`forbidden_fields`**: flags whose presence in the captured argv
   would indicate a v1.0/v1.1 regression and so MUST be absent.
 
 The assertion machinery lives in
@@ -131,7 +131,7 @@ without losing token boundaries.
 
 ## meter-completion-event.golden.json — the event path's own contract (Phase 32)
 
-- **meter-completion-event.golden.json** — a sixth fixture, added in Phase 32
+- **meter-completion-event.golden.json**: a sixth fixture, added in Phase 32
   Plan 04, pinning the `revenium meter completion` argv shape shipped by
   `skills/revenium/scripts/api-event-report.sh` (the new event-driven
   completion path, contract C-2/C-5/C-7/C-8). Loaded by
@@ -139,7 +139,7 @@ without losing token boundaries.
 
 This fixture is **additive** to the v1.x contract above, not a replacement for
 it, and is **NOT** part of the immutability contract or the v1.4 umbrella
-meta suite (`test_compat_v1_4_meta.py`) — that suite's identifier is the
+meta suite (`test_compat_v1_4_meta.py`); that suite's identifier is the
 milestone-level acceptance gate for the *legacy* (cron-reconstructed) wire
 shape specifically. The event path is a second, independently-versioned
 argv contract that ships alongside the legacy one during shadow/canary/drain,
@@ -147,18 +147,18 @@ and eventually on its own once the legacy path is retired. The four v1.x
 fixtures above remain immutable and untouched by this fixture's existence.
 
 It pins the event path's own deliberate differences from the legacy shape as
-required *absences* in `forbidden_fields`: `--total-cost` (contract C-8 — the
+required *absences* in `forbidden_fields`: `--total-cost` (contract C-8: the
 event carries no cost field; Revenium prices the row server-side) and
 `--input-messages` / `--output-response` (content flags the CLI offers that
 this path must never pass, matching the spool record's closed 19-key
 schema). It also asserts directly (not just via the golden) that `--model`
 is populated from the spooled event's `response_model` field rather than its
-`model` field — the source of the multi-model attribution the legacy path's
+`model` field, the source of the multi-model attribution the legacy path's
 session-level `model` column could not resolve.
 
 ## meter-completion-aux.golden.json — the auxiliary-usage path's own contract (Phase 55)
 
-- **meter-completion-aux.golden.json** — an eighth fixture, added in Phase 55
+- **meter-completion-aux.golden.json**: an eighth fixture, added in Phase 55
   Plan 03 (D-02), pinning the `revenium meter completion --operation-type AUX`
   argv shape shipped by `report_auxiliary_usage`, the post-loop auxiliary-usage
   pass in `skills/revenium/scripts/hermes-report.sh` (Phase 55 Plan 01,
@@ -166,7 +166,7 @@ session-level `model` column could not resolve.
 
 This fixture is **additive** to the v1.x contract above, not a replacement for
 it, and is **NOT** part of the immutability contract or the v1.4 umbrella
-meta suite (`tests/test_compat_v1_4_meta.py`) — that suite's identifier is the
+meta suite (`tests/test_compat_v1_4_meta.py`); that suite's identifier is the
 milestone-level acceptance gate for the *legacy* (cron-reconstructed) wire
 shape specifically. The auxiliary path is a second, additive argv shape that
 ships alongside the main-loop completion for the same session, on its own
@@ -176,11 +176,11 @@ fixtures above remain immutable and untouched by this fixture's existence.
 It pins the auxiliary path's own deliberate differences from the legacy
 main-loop shape as required *presences*/*patterns* in `exact_match_fields` /
 `pattern_fields`: `--operation-type AUX` (never `CHAT`), an `aux_`-prefixed
-`--task-type` (e.g. `aux_approval`), and a `--transaction-id` carrying the
+`--task-type` (e.g. `aux_approval`) and a `--transaction-id` carrying the
 `aux-` prefix (pinned by regex, since it also embeds the session id and a
 cumulative-counter-derived digest that vary per row). It also asserts a
 required *absence* in `forbidden_fields`: `--reasoning-tokens`, which neither
-the main-loop nor the auxiliary emit path ships — its appearance on either
+the main-loop nor the auxiliary emit path ships; its appearance on either
 would be a silent parity break.
 
 ## `argv_order` — the exact-list guard, extended to three more goldens (Phase 62)
@@ -196,13 +196,13 @@ names, so a NEW flag added anywhere in the emitted argv passes every one of
 them silently. An ordered-list equality catches it.
 
 Phase 62 (SUB-05/07/08, the `--subscriber-id` wiring) extended this pattern to
-three more goldens, and all three exact-order guards now EXIST: the
+three more goldens, and all three exact-order guards now exist: the
 marker-split site (`meter-completion.golden.json`, plan 62-01), the event site
 (`meter-completion-event.golden.json`, plan 62-02) and the auxiliary site
 (`meter-completion-aux.golden.json`, plan 62-03). Together with
 `meter-completion-markerless.golden.json`, which has carried an `argv_order`
 since Phase 29, **all four `meter completion` emission sites are now pinned by
-exact-order equality** — which is what makes the flag-absent case provable:
+exact-order equality**, which is what makes the flag-absent case provable:
 `assert_argv_matches_golden` iterates only `exact_match_fields`,
 `pattern_fields` and `forbidden_fields`, so it asserts neither argv length nor
 the set of flags present and cannot by itself detect a newly added flag.
@@ -216,17 +216,17 @@ fixed string that stands in for the VALUE of every flag named in that
 golden's own `pattern_fields`, at that flag's exact position in
 `argv_order`. `tests/_compat_helpers.py::assert_argv_is_golden_argv_order`
 reads this key (if present) and performs the identical substitution on the
-captured argv before comparing — self-describing metadata on the golden
+captured argv before comparing. This is self-describing metadata on the golden
 itself, so no call site can forget to normalise a non-deterministic field.
 `meter-completion-markerless.golden.json` has no such key (its own fixture
 happens to produce fixed literal timestamps) and is compared with those
 literal values unchanged, exactly as the four pre-existing modules do.
 
 Adding a new flag to an emission site means updating THAT site's
-`argv_order` list deliberately — it is not maintained automatically, and
-`assert_argv_is_golden_argv_order`'s whole purpose is to fail loudly the
+`argv_order` list deliberately; it is not maintained automatically, and
+`assert_argv_is_golden_argv_order` fails the
 moment a captured argv and a golden's list diverge in length, in flag
-order, or in value.
+order or in value.
 
 ## v1.4 subagent inheritance — orthogonal to top-level compat
 

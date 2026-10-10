@@ -3,9 +3,9 @@
 [← Documentation index](README.md)
 
 A Hermes profile is a separate Hermes home under `~/.hermes/profiles/<name>/`; the default
-profile uses `~/.hermes/` directly. Every command in these docs applies to one home, and
+profile uses `~/.hermes/` directly. Every command in these docs applies to one home and
 the default home is not a superset of the others. An unnamed profile gets no plugin,
-hooks, or cron and meters nothing. The default profile can keep working, making the host
+hooks or cron and meters nothing. The default profile can keep working, making the host
 appear healthy.
 
 To wire a fleet, name the profiles:
@@ -16,20 +16,20 @@ bash ~/.hermes/skills/revenium/scripts/install.sh --all-profiles
 bash ~/.hermes/skills/revenium/scripts/install.sh --profile gtm --profile qa
 ```
 
-This installs the plugin, hooks, and cron in each profile home.
+This installs the plugin, hooks and cron in each profile home.
 
 Each profile gets a distinct AGENT. `REVENIUM_AGENT_NAME` defaults to `Hermes-<profile>`; the default
 profile stays `Hermes`. Revenium then separates spend per agent.
 
 This is the AGENT dimension, not the ORGANIZATION dimension. `organizationName` names a
-company or product (`tableforone`, say) and is threaded through completions, tool-events,
+company or product (`tableforone`, say) and is threaded through completions, tool-events
 and `jobs create` alike, so a job and its transactions share one org. Never set it to an
 agent name. Set it non-interactively with `--organization-name <name>` on `install.sh` or
 `setup-guardrails.sh`; it persists to each profile's `config.json` even under
 `--skip-guardrails`.
 
 Each profile gets a unique crontab marker, `# hermes-revenium-metering-<profile>`, so another profile
-install never clobbers the first. `uninstall-cron.sh` removes every profile's line, and
+install never clobbers the first. `uninstall-cron.sh` removes every profile's line and
 lines orphaned by a `~/.hermes` reset are reconciled automatically.
 
 Fleet installs set `hooks_auto_accept: true`. A headless profile gateway never shows the hook-approval
@@ -48,10 +48,10 @@ These problems can make an active installation appear healthy.
 
 ### The process serving the profile must restart before its plugin loads — and it is often not the gateway
 
-Plugin discovery is per-profile, and the classifier is *copied* into
+Plugin discovery is per-profile and the classifier is *copied* into
 `~/.hermes/profiles/<name>/plugins/`. Whatever process serves that profile keeps running
 the code it started with. Until it restarts, the profile meters normally and classifies
-nothing: no markers, no jobs, `traceType: uncategorized`, no tool-events, and no error
+nothing: no markers, no jobs, `traceType: uncategorized`, no tool-events and no error
 anywhere.
 
 Find the real owner before restarting anything:
@@ -89,11 +89,11 @@ with no budget rule. The installer says so at the end.
 ### Dashboards must filter on the per-profile agent
 
 Spend for profile `ent` arrives as agent `Hermes-ent`. A view scoped to `Hermes` will not
-show it, and a budget rule filtered `AGENT:IS:Hermes` will never match it.
+show it and a budget rule filtered `AGENT:IS:Hermes` will never match it.
 
 ### State is per-profile too
 
-Ledgers, markers, `config.json`, and `guardrail-status.json` all live under
+Ledgers, markers, `config.json` and `guardrail-status.json` all live under
 `~/.hermes/profiles/<name>/state/revenium/`. Point diagnostics at the profile you mean:
 
 ```bash
@@ -108,7 +108,7 @@ and last cron run, which identifies profiles that have stopped reporting.
 
 Both modes work. One process per profile is the simpler case. The multiplexed single
 gateway (`gateway.multiplex_profiles: true`) also works: the classifier resolves the
-owning profile's home, `state.db`, and markers per session from the `agent:<profile>:…`
+owning profile's home, `state.db` and markers per session from the `agent:<profile>:…`
 namespace.
 
 Either way, size `REVENIUM_CRON_SETTLE_SECONDS` (default 600s) above worst-case

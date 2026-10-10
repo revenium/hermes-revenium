@@ -3,12 +3,12 @@
 [← Documentation index](README.md)
 
 Installation has two steps: copy the files to the host, then wire them into Hermes.
-Option 1 does both. The other three do only the first, and you finish with
+Option 1 does both. The other three do only the first and you finish with
 [Set up guardrails, cron, and hooks](#set-up-guardrails-cron-and-hooks).
 
 The second step installs the runtime components. `hermes skills install` delivers only the
 skill: `SKILL.md` and the support files it names. The classifier plugin,
-shell hooks, and cron classify, enforce, and meter. Each is installed separately. See
+shell hooks and cron classify, enforce and meter. Each is installed separately. See
 [What's actually installed](../README.md#whats-actually-installed).
 
 ## Install paths
@@ -22,7 +22,7 @@ bash ~/.hermes/skills/revenium/references/bootstrap.sh
 
 The first command uses Hermes' native install path, which ships `SKILL.md` plus only the
 support files `SKILL.md` names as bundle-relative paths. `references/bootstrap.sh` is one
-of them. `plugins/` is not, and cannot be: Hermes disallows a `plugins/` directory in a
+of them. `plugins/` is not and cannot be: Hermes disallows a `plugins/` directory in a
 skill bundle outright, so the classifier can never arrive this way.
 
 The second command fetches the missing `scripts/` and `plugins/`
@@ -61,7 +61,7 @@ pass file paths and computed deltas.
 > Observed 2026-08-21 against scanner `skills-guard-v1` (rules `git_clone`,
 > `persistence_cron`). Hermes' scanner produces this verdict, not this repo, so it can
 > change independently of anything here. If you get `CAUTION` or `DANGEROUS`, please
-> [open an issue](https://github.com/revenium/hermes-revenium/issues) — that difference is
+> [open an issue](https://github.com/revenium/hermes-revenium/issues); that difference is
 > worth knowing about.
 
 To verify the behaviour yourself, read
@@ -79,7 +79,7 @@ skills:
 ```
 
 Restart Hermes or start a new session. External skill directories are read-only discovery
-sources, and a local `~/.hermes/skills/` install wins on a name collision.
+sources and a local `~/.hermes/skills/` install wins on a name collision.
 
 ### Option 3: Local copy
 
@@ -120,7 +120,7 @@ skipped, so re-running it is how you upgrade.
 | `--hard-limit N --period P` | Set the budget without prompting |
 | `--organization-name <name>` | Set the ORGANIZATION dimension |
 | `--non-interactive` | Take credentials from the `REVENIUM_*` environment variables |
-| `--profile <name>`, `--all-profiles` | Wire a fleet — see [Multi-profile installs](fleet.md) |
+| `--profile <name>`, `--all-profiles` | Wire a fleet, see [Multi-profile installs](fleet.md) |
 | `--shadow-mode` | Compute without shipping |
 | `--skip-guardrails`, `--skip-cron`, `--no-restart` | Omit a step |
 
@@ -141,7 +141,7 @@ revenium config set owner-id  <OWNER_ID>
 ```
 
 On every interactive run, `install.sh` walks the full `revenium` CLI config: API URL,
-API key, Team ID, Tenant ID, and Owner ID. It shows each current value in brackets as the
+API key, Team ID, Tenant ID and Owner ID. It shows each current value in brackets as the
 default. Enter keeps it; typing replaces it. It confirms rather than silently skipping
 because an API URL pointing at the wrong environment is otherwise invisible until it
 surfaces as an opaque `HTTP 403` on guardrail-rule creation.
@@ -152,12 +152,12 @@ surfaces as an opaque `HTTP 403` on guardrail-rule creation.
 bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
 ```
 
-The script asks for a hard limit, period, organization name, autonomous mode, and
-notification channel, and optionally for per-task-type rules. It then creates the Revenium
+The script asks for a hard limit, period, organization name, autonomous mode and
+notification channel and optionally for per-task-type rules. It then creates the Revenium
 budget rules and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. It needs
 the four credentials above.
 
-Installs still carrying a legacy `alertId` migrate on the first cron tick — see
+Installs still carrying a legacy `alertId` migrate on the first cron tick: see
 [Guardrails migration](migration-guardrails.md).
 
 ### The per-minute metering cron
@@ -191,7 +191,7 @@ Valid intervals are `1..60`. `--dry-run` prints the crontab line without install
 bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
 ```
 
-This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` handlers in
+This registers the `pre_llm_call`, `pre_tool_call` and `post_tool_call` handlers in
 `~/.hermes/config.yaml`. They stay inert until you approve them at the prompt Hermes shows
 the first time each one fires. Without them, budget enforcement and tool-event capture do
 nothing.
@@ -203,10 +203,10 @@ bash ~/.hermes/skills/revenium/scripts/install-plugin.sh
 ```
 
 Hermes loads plugins from `~/.hermes/plugins/`, separate from the
-`~/.hermes/skills/` tree the skill installs into, and neither `hermes skills install` nor
+`~/.hermes/skills/` tree the skill installs into and neither `hermes skills install` nor
 `external_dirs` relocates a bundled `plugins/` directory. This script bridges that gap: it
 copies `revenium-classifier` into `~/.hermes/plugins/`, adds it to `plugins.enabled` in
-`~/.hermes/config.yaml`, and restarts the gateway.
+`~/.hermes/config.yaml` and restarts the gateway.
 
 Skip it and completion metering still works, but nothing writes `kind:"job"` markers, so
 agentic-job usage never reaches Revenium. Re-run it after every skill upgrade; it is
@@ -215,17 +215,17 @@ idempotent. `--dry-run` previews, `--no-restart` leaves the gateway alone.
 ## First-time setup
 
 `setup-guardrails.sh --interactive` runs the setup flow. You can reach it three ways:
-`install.sh` runs it, you can invoke it directly, or you can type `/revenium` inside a
+`install.sh` runs it, you can invoke it directly or you can type `/revenium` inside a
 Hermes session. When no `config.json` or `ruleIds` exists, the skill starts setup on its
 own; once configured, `/revenium` offers status and reconfigure instead.
 
 The flow:
 
 1. Check credentials. `setup-guardrails.sh` does not prompt for them; it only checks
-   that a Team ID resolves, and exits if not, because budget-rule creation fails without
+   that a Team ID resolves and exits if not, because budget-rule creation fails without
    one. Set them with `install.sh` or `revenium config set`.
 2. Optionally ask for an organization name for Revenium reporting attribution.
-3. Ask for a hard limit, warn threshold, and period (`DAILY`, `WEEKLY`, `MONTHLY`,
+3. Ask for a hard limit, warn threshold and period (`DAILY`, `WEEKLY`, `MONTHLY`,
    `QUARTERLY`).
 4. Ask whether the agent runs autonomously and which Hermes messaging channel
    should receive halt notifications.
@@ -251,7 +251,7 @@ cat ~/.hermes/state/revenium/guardrail-status.json  # expect rules[] populated
 tail -f ~/.hermes/state/revenium/revenium-metering.log
 ```
 
-For a single read-only report covering all of the above plus ledgers, the settle gate, and
+For a single read-only report covering all of the above plus ledgers, the settle gate and
 plugin state, run `diagnose.sh`:
 
 ```bash

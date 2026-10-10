@@ -2,12 +2,12 @@
 
 [← Documentation index](README.md)
 
-This reference records Hermes plugin behavior measured on a **v0.20.1
-(2026.8.13)** install. It is dated
+This reference records Hermes plugin behavior measured on a v0.20.1
+(2026.8.13) install. It is dated
 2026-08-13, with one correction applied 2026-08-15.
 
 This contributor reference is not required to run the skill. Shipped code
-depends on it: `api_event_spool.py` parses the E2 payload below, and E1 rules out
+depends on it: `api_event_spool.py` parses the E2 payload below and E1 rules out
 a change that would break halt enforcement.
 
 Read the version caveat at the bottom before relying on any of it: v0.20.0 does
@@ -20,8 +20,8 @@ was involved and no production data appears here.
 
 | ID | Finding | Status |
 |---|---|---|
-| E1 | Registered prompt sections **cannot** carry live halt state — they freeze at session start | **Load-bearing negative.** Do not move live state into a prompt section. |
-| E2 | `post_api_request` is a complete real-time metering event, with a natural idempotency key | **Shipped.** The basis for event-driven metering in v1.5. |
+| E1 | Registered prompt sections cannot carry live halt state: they freeze at session start | Enforcement constraint. Do not move live state into a prompt section. |
+| E2 | `post_api_request` is a complete real-time metering event, with a natural idempotency key | Shipped. The basis for event-driven metering in v1.5. |
 | E3 | `ctx.state` and an out-of-process cron can safely share state under `fcntl` | Viable, with a named coupling risk |
 | E4 | `exit 2` and `fail_closed` both work in the hook dispatcher | `fail_closed` is a policy decision, not a free win |
 
@@ -40,10 +40,10 @@ forcing a second main-loop LLM call within the same session.
 
 | Event | Observed |
 |---|---|
-| `section_render` | fired **exactly once** (`call_no=1`) |
+| `section_render` | fired exactly once (`call_no=1`) |
 | halt flipped to `true` | after render, before turn 2 |
 | Main-loop call 1 system prompt | `halted=False` |
-| Main-loop call 2 system prompt (same session) | `halted=False` ← **stale** |
+| Main-loop call 2 system prompt (same session) | `halted=False` ← stale |
 
 The section is frozen at session start, so a halt arriving mid-session never
 reaches it.
@@ -58,9 +58,9 @@ enforcement when a halt fires during a long autonomous run.
 
 - **Prompt section** → the *standing* instruction. Durable and compression-proof;
   legitimately retires the dilution-survivability concern for the instruction half.
-- **`pre_llm_call` hook** → *live* halt state. Remains load-bearing. Do not remove.
+- **`pre_llm_call` hook** → *live* halt state. Remains required. Do not remove.
 
-Also observed: auxiliary calls (title generation) do **not** receive plugin prompt
+Also observed: auxiliary calls (title generation) do not receive plugin prompt
 sections. Only the main loop does.
 
 ## E2 — `post_api_request` is a complete real-time metering event
@@ -69,12 +69,12 @@ sections. Only the main loop does.
 
 | Surface | Result |
 |---|---|
-| CLI query (`-z`) | `on_session_start`, `pre`/`post_llm_call`, `pre`/`post_tool_call`, `pre`/`post_api_request`, **`on_session_end`** all fire |
-| Cron (`hermes cron run`) | **identical full lifecycle**, including `on_session_end`; session id shaped `cron_<job>_<ts>` |
-| Gateway | not driven live *by this probe* — no messaging credentials on the probe machine. Answered separately since; see the caveat below. |
+| CLI query (`-z`) | `on_session_start`, `pre`/`post_llm_call`, `pre`/`post_tool_call`, `pre`/`post_api_request`, `on_session_end` all fire |
+| Cron (`hermes cron run`) | identical full lifecycle, including `on_session_end`; session id shaped `cron_<job>_<ts>` |
+| Gateway | not driven live *by this probe*: no messaging credentials on the probe machine. Answered separately since; see the caveat below. |
 
-`pre`/`post_llm_call` fire **once per turn**; `pre`/`post_api_request` fire **once
-per API call** (2 calls in the tool-call session). **Metering depends on that distinction.**
+`pre`/`post_llm_call` fire once per turn; `pre`/`post_api_request` fire once
+per API call (2 calls in the tool-call session). Metering depends on that distinction.
 
 **Captured `post_api_request` payload** (real, from the probe; identifiers
 replaced with their shapes):
@@ -104,7 +104,7 @@ currently reconstructs by polling `state.db` and computing scaled deltas:
   `HERMES:<sid>:<total_tokens>` key.
 - **`provider` + `base_url` arrive as data**, so the provider-inference Python
   heredocs in `hermes-report.sh` become unnecessary.
-- **`response_model` is the model that actually served** and is fallback-aware,
+- **`response_model` is the model that served** and is fallback-aware,
   fixing the multi-model misattribution baked into reading a single
   `sessions.model` column per session.
 - **`platform`** identifies the surface (`cli` / `cron` / gateway) for free.
@@ -126,16 +126,16 @@ This establishes two requirements:
 
 1. **Registering both `on_session_end` and `on_session_finalize` against one
    handler is exactly what first-party does.** That is this skill's Phase 29
-   pattern — keep it, do not "simplify" it away.
+   pattern: keep it, do not "simplify" it away.
 2. **Port langfuse's sanitized-response fix rather than rediscovering it.** It
-   carries a load-bearing comment: on gateway turns `response` is a *sanitized
+   documents the failure: on gateway turns `response` is a *sanitized
    dict* with no `.usage` attribute, so gating on `getattr(response, "usage")`
-   silently drops usage and cost for **every gateway turn**. Fall back to the
+   silently drops usage and cost for every gateway turn. Fall back to the
    `usage` summary dict.
 
 The gateway caveat was resolved after this document was written. This probe never
 drove the gateway surface, so as of 2026-08-13 it was unproven whether
-`post_api_request` fires on gateway turns at all. **It does.** The v1.5 shadow
+`post_api_request` fires on gateway turns at all. It does. The v1.5 shadow
 stage answered it live: a continuously-open gateway-served conversation produced
 spooled events with exact per-call agreement against `state.db`, corroborated by
 the owning profile's gateway-service configuration. See
@@ -152,7 +152,7 @@ string `gateway`.** Do not match on `"gateway"`.
 with a 10 MiB quota.
 
 Cross-process locking is explicit and documented in `hermes_cli/plugins.py`
-(`_locked_plugin_state`): an `fcntl` lock on a **sibling** `.state.json.lock` file
+(`_locked_plugin_state`): an `fcntl` lock on a sibling `.state.json.lock` file
 (msvcrt on Windows), plus a thread lock, with atomic `os.replace`.
 
 **Experiment.** Derived the namespace independently in a standalone script, took
@@ -161,18 +161,18 @@ session calling `ctx.state.set()`.
 
 | Step | Result |
 |---|---|
-| Derived namespace independently | **exact match** |
+| Derived namespace independently | exact match |
 | Out-of-process read-modify-write under `fcntl` | succeeded; in-process marker preserved |
-| In-process `set()` afterwards | out-of-process writes **survived** — no clobber |
+| In-process `set()` afterwards | out-of-process writes survived: no clobber |
 
 A two-part architecture is viable on `ctx.state` if the cron half
-(a) derives the namespace, (b) takes the `fcntl` lock on `.state.json.lock`, and
+(a) derives the namespace, (b) takes the `fcntl` lock on `.state.json.lock` and
 (c) writes atomically.
 
 `_portable_skill_namespace` is a
 private, underscore-prefixed function. Depending on its exact digest scheme couples
-the out-of-process half to a Hermes internal with no stability contract, and the
-upstream compat suite covers *plugin APIs*, not this. Either pin and test it, or
+the out-of-process half to a Hermes internal with no stability contract and the
+upstream compat suite covers *plugin APIs*, not this. Either pin and test it or
 keep the current file contract under `~/.hermes/state/revenium/`.
 
 ## E4 — `exit 2` and `fail_closed` both work
@@ -181,14 +181,13 @@ A single `hermes hooks test pre_tool_call` run with three hooks:
 
 | Hook | Exit | Config | Dispatcher verdict |
 |---|---|---|---|
-| exit-2 | 2 | default | **BLOCK** — `{"action":"block","message":"…"}`, stderr used verbatim |
-| crash | 7 + garbage stdout | `fail_closed: true` | **BLOCK** — "failed closed: unparseable stdout" |
-| crash-open | 9 + garbage stdout | default | **fails open** — contributed nothing to the dispatcher |
+| exit-2 | 2 | default | BLOCK: `{"action":"block","message":"…"}`, stderr used verbatim |
+| crash | 7 + garbage stdout | `fail_closed: true` | BLOCK: "failed closed: unparseable stdout" |
+| crash-open | 9 + garbage stdout | default | fails open: contributed nothing to the dispatcher |
 
 Two consequences for `pre_tool_call.sh`:
 
-- The hand-built block JSON could collapse to `exit 2` plus a stderr message —
-  less code, same wire shape. **But the halt response string is contractual**
+- The hand-built block JSON could collapse to `exit 2` plus a stderr message: less code, same wire shape. But the halt response string is contractual
   (see the "Modifying the halt response string" anti-pattern in `CLAUDE.md`), so
   verify the stderr path reproduces it byte-for-byte before adopting.
 - **`fail_closed: true` changes the availability policy.** It contradicts the
@@ -200,15 +199,14 @@ Two consequences for `pre_tool_call.sh`:
 ## Dead ends — do not chase
 
 - **`ctx.cron` does not exist.** It appeared on an upstream tracker, but the
-  shipping PR states "Excludes cron", and it is confirmed absent from
+  shipping PR states "Excludes cron" and it is confirmed absent from
   `PluginContext`. The crontab installer cannot be retired this way.
-  `ctx.spawn_task` is supervised-but-in-process — it runs only while Hermes runs,
+  `ctx.spawn_task` is supervised-but-in-process: it runs only while Hermes runs,
   whereas the current cron runs regardless. Not an equivalent.
 - **Capabilities/consent will not clear the security scanner.** The consent gates
   are all LLM/tool-override (`tools.override`, `llm.provider_override`,
   `llm.model_override`, `llm.agent_id_override`, `llm.profile_override`,
-  `llm.task_override`). None covers filesystem, subprocess, or `os.environ` —
-  which is what the DANGEROUS verdict flags. Not a path to scanner clearance.
+  `llm.task_override`). None covers filesystem, subprocess or `os.environ`, which is what the DANGEROUS verdict flags. Not a path to scanner clearance.
   (The consent flow itself *does* work: enabling the probe non-interactively left
   the capability ungranted, failing closed as documented.)
 
@@ -218,20 +216,20 @@ Two consequences for `pre_tool_call.sh`:
 
 The original note asserted that a fresh v0.20.1 defaults its `session_reset` policy
 to a mode of `none`, making gateway sessions continuous so `on_session_end`
-structurally never fires. **That explanation does not hold** — the root
+structurally never fires. That explanation does not hold: the root
 configuration actually sets that policy to a mode of `both`. The *observation*
 (that `on_session_end` did not fire for gateway sessions) was real and was
 addressed by registering `on_session_finalize` alongside a guarded `post_llm_call`,
 shipped and live-proven on 2026-07-29. Only the stated cause was incorrect.
 
-The incorrect cause could lead a reader to change a config knob that is not the problem, and
+The incorrect cause could lead a reader to change a config knob that is not the problem and
 changing that particular knob has a real cost, since forcing a reset policy makes
 conversations lose context. Rejecting that change is a standing decision in this
 repository, pinned by a repository-scoped test
 (`tests/test_phase29_no_session_reset_change.py`) that fails if `session_reset`
 appears in shipped CODE.
 
-**Note on spelling — revised 2026-08-19 (PR #62).** This section previously wrote
+**Note on spelling: revised 2026-08-19 (PR #62).** This section previously wrote
 the setting's name in prose ("session-reset policy") rather than as its literal
 underscored config key, because the guard then scanned every shipped file for the
 bare token and a documentation file was not considered a reason to add an
@@ -239,21 +237,21 @@ exclusion. That was the wrong trade: it also forced two production docstrings in
 `revenium-classifier/__init__.py` to name a key that does not exist, which made
 the design rationale unfindable by grep for the thing it is about.
 
-The guard is now positional rather than textual — it scans CODE only, skipping
-comments, Python docstrings, and prose-only files (`.md`, `.txt`). Documentation
-is free to name `session_reset` directly, and this paragraph now does. Code may
+The guard is now positional rather than textual: it scans CODE only, skipping
+comments, Python docstrings and prose-only files (`.md`, `.txt`). Documentation
+is free to name `session_reset` directly and this paragraph now does. Code may
 not touch the key at all; reads are in scope on purpose, because this skill
 references it nowhere today and any code reference would be a deliberate change
 worth a conversation.
 
 ## Auxiliary calls are not covered
 
-`post_api_request` does **not** fire for auxiliary calls. A single run was
-directly observed serving two chat-completions calls — one main-loop, one title
-generation — and emitting only **one** `post_api_request` event.
+`post_api_request` does not fire for auxiliary calls. A single run was
+directly observed serving two chat-completions calls (one main-loop, one title
+generation) and emitting only one `post_api_request` event.
 
 Event-driven metering does not capture auxiliary usage. `session_model_usage` remains the only source for
-auxiliary spend, and nothing in this skill reads it, so auxiliary usage is
+auxiliary spend and nothing in this skill reads it, so auxiliary usage is
 currently unmetered by both paths.
 
 ## Verified against
@@ -261,12 +259,12 @@ currently unmetered by both paths.
 Date: 2026-08-13; corrections applied 2026-08-15. Method: a throwaway probe plugin
 on a dedicated test VM running Hermes v0.20.1, driven against a local
 OpenAI-compatible mock so that no model spend and no production data were involved.
-The runtime surface confirmed **37 hooks** in `VALID_HOOKS` and a `PluginContext`
+The runtime surface confirmed 37 hooks in `VALID_HOOKS` and a `PluginContext`
 exposing `register_system_prompt_section`, `state`, `get_config`/`set_config`,
-`spawn_task`, `subagent_lifecycle`, `platform_actions`, `emit`/`subscribe`, and
+`spawn_task`, `subagent_lifecycle`, `platform_actions`, `emit`/`subscribe` and
 `on_unload`.
 
-Host addresses, probe file paths, service unit names, and individual session
+Host addresses, probe file paths, service unit names and individual session
 identifiers are omitted; identifier *shapes* are retained where a
 future implementation depends on them. A local development box on v0.20.0 does
-**not** expose these surfaces — version-check before relying on any finding here.
+**not** expose these surfaces: version-check before relying on any finding here.

@@ -5,10 +5,9 @@
 The task taxonomy is an agent-owned vocabulary stored at `${TAXONOMY_FILE}` (declared
 in `common.sh`; defaults to `~/.hermes/state/revenium/task-taxonomy.json`). Fresh installs copy
 the seed file at `skills/revenium/task-taxonomy.json` into `${TAXONOMY_FILE}` through the
-root `install.sh` on the repo-clone path, and by `scripts/install.sh` on the tap path
-(`hermes skills install` → `references/bootstrap.sh`). Both are guarded on file existence: an
-existing taxonomy is a vocabulary the host has grown, and is never overwritten. Until
-quick task 260817-l6o only the root script seeded it, so tap-installed hosts started with no
+root `install.sh` on the repo-clone path and by `scripts/install.sh` on the tap path
+(`hermes skills install` → `references/bootstrap.sh`). Both check whether the file
+exists and never overwrite an existing taxonomy. Until quick task 260817-l6o only the root script seeded it, so tap-installed hosts started with no
 runtime taxonomy at all and classified against an empty vocabulary. After installation, the live file at `${TAXONOMY_FILE}` is mutable:
 the agent adds new labels to it over time via the atomic write pattern documented below.
 
@@ -23,8 +22,8 @@ write pattern documented below.
 The taxonomy file is a JSON object with a single top-level key, `labels`. Its value is an object
 mapping label names to per-label descriptors. Each descriptor has exactly two keys:
 
-- `description` — a short string (at most 25 words) describing when to use this label
-- `examples` — an array of exactly two short example phrases
+- `description`: a short string (at most 25 words) describing when to use this label
+- `examples`: an array of exactly two short example phrases
 
 No other keys are present in the per-label descriptor.
 
@@ -47,7 +46,7 @@ No other keys are present in the per-label descriptor.
 Labels are lowercase, snake_case strings. The following rules apply to every label key, whether
 seeded or minted:
 
-- All characters must be lowercase ASCII letters, digits, or underscores.
+- All characters must be lowercase ASCII letters, digits or underscores.
 - The label must start with a lowercase letter.
 - The label must be at least 2 characters and at most 48 characters long.
 - The label must match the regular expression:
@@ -56,7 +55,7 @@ seeded or minted:
 ^[a-z][a-z0-9_]{1,47}$
 ```
 
-Hyphens, spaces, uppercase letters, and non-ASCII characters are not permitted. When minting a
+Hyphens, spaces, uppercase letters and non-ASCII characters are not permitted. When minting a
 new label, normalize the candidate name by converting hyphens and spaces to underscores and
 lowercasing all characters before applying the regex check.
 
@@ -79,13 +78,13 @@ The blocklist is a closed set for v1. Adding entries requires a release.
 The classifier reads `${TAXONOMY_FILE}` before every substantive turn and mints a SPECIFIC,
 DESCRIPTIVE label that captures what the agent actually did (2-4 words joined by underscores).
 The prompt deliberately carries no concrete example labels: they were copied verbatim onto
-unrelated work in 20% of classifications, and removing them also improved granularity
+unrelated work in 20% of classifications and removing them also improved granularity
 (quick task 260815-r39). Existing labels are reused only when they describe the SAME
 specific work. "Close enough" reuse caused taxonomy
 fragmentation in practice (quick task 260514-nfb).
 
-When uncertain whether to mint or reuse, mint a new specific label rather than collapsing to
-a bland catch-all. Catch-alls to avoid when a more specific label fits: `generation`, `analysis`,
+When uncertain whether to mint or reuse, mint a new specific label rather than using
+a catch-all. Catch-alls to avoid when a more specific label fits: `generation`, `analysis`,
 `review`, `task`.
 
 These four are deliberately absent from the seed file. Seeding a catch-all contradicts the
@@ -147,8 +146,8 @@ because `os.rename` provides the atomicity.
 ### research
 
 Use `research` when the turn's primary activity is information gathering: reading documentation,
-exploring the codebase to understand how something works, or searching the web to learn before
-taking action. The turn output is primarily knowledge, not a produced artifact.
+exploring the codebase to understand how something works or searching the web to learn before
+taking action. The turn primarily returns knowledge rather than an artifact.
 
 Examples: "find all usages of X", "what does this API return"
 
@@ -158,14 +157,14 @@ profiling system behavior, mint a specific label for that diagnosis (e.g.
 
 ### code_review
 
-Use `code_review` when the turn evaluates a function, diff, module, or architectural
-decision for correctness, style, or architectural fit.
+Use `code_review` when the turn evaluates a function, diff, module or architectural
+decision for correctness, style or architectural fit.
 
 Examples: "review this function", "check this diff for bugs"
 
-Disambiguation: when the subject of review is a design document, runbook, or prose rather than
+Disambiguation: when the subject of review is a design document, runbook or prose rather than
 code, mint a specific label naming the artifact (e.g. `runbook_review`, `adr_review`).
-`code_review` applies specifically to a function, diff, module, or architectural decision.
+`code_review` applies specifically to a function, diff, module or architectural decision.
 
 ### refactor
 
@@ -180,7 +179,7 @@ was produced (e.g. `webhook_handler_impl`), not a generic one.
 
 ### planning
 
-Use `planning` when the turn produces a plan, roadmap, design document, or task breakdown. The
+Use `planning` when the turn produces a plan, roadmap, design document or task breakdown. The
 output is a structured description of future work, not the work itself.
 
 Examples: "break this into subtasks", "design the schema for X"

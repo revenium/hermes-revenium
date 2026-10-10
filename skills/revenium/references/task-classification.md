@@ -1,6 +1,6 @@
 # Task Classification — Operational Detail
 
-This file defines the trigger rules, `write_marker` snippet, blocklist, and examples for the `## FINAL ACTION — TASK CLASSIFICATION` step in `SKILL.md`.
+This file defines the trigger rules, `write_marker` snippet, blocklist and examples for the `## FINAL ACTION — TASK CLASSIFICATION` step in `SKILL.md`.
 
 ## Trigger (binary — no judgment calls)
 
@@ -13,15 +13,15 @@ You **MUST** skip the marker write ONLY when ALL of these are true:
 - Your entire response is ≤ 2 sentences.
 - You called zero tools.
 
-There is no "borderline / when in doubt skip" path. If either side is arguable, rule (a), (b), or (c) has already triggered; classify.
+Do not skip a borderline turn. If either side is arguable, rule (a), (b) or (c) has already triggered; classify.
 
 ## Required action sequence
 
-Before your final response yields back to the user, you **MUST** call `execute_code` with the snippet below. **DO NOT skip it. DO NOT defer it to "next turn". DO NOT respond to the user without performing it.** The success print line (`markers written: <path>`) is your confirmation that the action completed.
+Before your final response, you MUST call `execute_code` with the snippet below. Do not skip it or defer it to the next turn. The success print line (`markers written: <path>`) confirms that the action completed.
 
-**Step 1 — pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent. A slightly broad label can be corrected.
+**Step 1: pick a `task_type` label.** Read the live taxonomy at `~/.hermes/state/revenium/task-taxonomy.json` and reuse the closest-fitting existing label. Mint a new `^[a-z][a-z0-9_]{1,47}$` snake_case label only if no existing label fits. Fragmentation (`code_review` vs `code-review`) is permanent. A slightly broad label can be corrected.
 
-The cron REJECTS markers carrying any of these `task_type` values — using them is a protocol violation:
+The cron REJECTS markers carrying any of these `task_type` values; using them is a protocol violation:
 
 - `ack`
 - `acknowledgment`
@@ -30,9 +30,9 @@ The cron REJECTS markers carrying any of these `task_type` values — using them
 - `hello`
 - `thanks`
 
-For the full schema, normalization rules, and the atomic mint pattern, see `references/task-taxonomy.md`. The seed file ships at `skills/revenium/task-taxonomy.json`; the live mutable copy is at `~/.hermes/state/revenium/task-taxonomy.json`.
+For the full schema, normalization rules and the atomic mint pattern, see `references/task-taxonomy.md`. The seed file ships at `skills/revenium/task-taxonomy.json`; the live mutable copy is at `~/.hermes/state/revenium/task-taxonomy.json`.
 
-**Step 2 — call `execute_code` with this snippet.** Replace `"code_review"` with the label you picked in Step 1. Make both calls in the same `execute_code` invocation: one with `operation_type="GUARDRAIL"` (the classification span) and one with `operation_type="CHAT"` (the work span). Every substantive turn requires two records. One record or zero records violates the protocol.
+**Step 2: call `execute_code` with this snippet.** Replace `"code_review"` with the label you picked in Step 1. Make both calls in the same `execute_code` invocation: one with `operation_type="GUARDRAIL"` (the classification span) and one with `operation_type="CHAT"` (the work span). Every substantive turn requires two records. One record or zero records violates the protocol.
 
 ```python
 import fcntl, json, os, secrets, time
@@ -93,22 +93,22 @@ Immediately before yielding your final response, answer these three questions. I
 
 ## Examples
 
-**Example 1 — Clear substantive (CLASSIFY):**
+**Example 1: Clear substantive (CLASSIFY):**
 User asked for a code review. You called `read_file` twice and `terminal` once (for grep). You wrote 12 sentences with suggested changes.
 - Rule (a) triggered: `terminal` is a non-read-only tool.
 - Required action: `write_marker("code_review", "GUARDRAIL")` then `write_marker("code_review", "CHAT")`.
 
-**Example 2 — Clear trivial (SKIP):**
+**Example 2: Clear trivial (SKIP):**
 User typed "what is 2+2?" You replied "4." in one sentence. No tools called.
 - All skip conditions met: ≤ 2 sentences AND zero tools.
 - Required action: NONE. No marker written.
 
-**Example 3 — Borderline classify (CLASSIFY):**
-User asked you to explain POSIX O_APPEND atomicity. You wrote a five-paragraph response covering the kernel guarantee, macOS vs Linux behavior, and the belt-and-suspenders flock recommendation. No tools were called.
+**Example 3: Borderline classify (CLASSIFY):**
+User asked you to explain POSIX O_APPEND atomicity. You wrote a five-paragraph response covering the kernel guarantee, macOS vs Linux behavior and the additional flock recommendation. No tools were called.
 - Rule (b) triggered: > 200 words of new content.
 - Required action: `write_marker("posix_append_atomicity_explainer", "GUARDRAIL")` then `write_marker("posix_append_atomicity_explainer", "CHAT")`.
 
-**Example 4 — Borderline skip (SKIP):**
+**Example 4: Borderline skip (SKIP):**
 User said "good morning, can you confirm you're ready?" You replied "Good morning, ready when you are." over two short lines. No tools called.
 - All skip conditions met: ≤ 2 sentences AND zero tools.
 - Required action: NONE.

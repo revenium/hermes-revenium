@@ -1,7 +1,7 @@
 # Host Integration
 
-How to attach the classification core to a host that is not Hermes — what an adapter must
-supply, what it costs, and where classification must sit relative to the request path.
+How to attach the classification core to a host that is not Hermes: what an adapter must
+supply, what it costs and where classification must sit relative to the request path.
 
 ## Requirements
 
@@ -18,12 +18,12 @@ From the `portable-task-classifier` idea in `.planning/spikes/MANIFEST.md`:
 
 ### What an adapter owes the library
 
-Three things, and nothing else:
+The adapter must:
 
-1. **Extract** `(user_message, assistant_response)` — and a transcript string if you want job
+1. **Extract** `(user_message, assistant_response)` and a transcript string if you want job
    inference.
 2. **Gate** on substance before calling (see What to Avoid).
-3. **Supply identity** — whatever this host has to attribute spend with.
+3. **Supply identity**: whatever this host has to attribute spend with.
 
 ### Measured adapter cost
 
@@ -34,14 +34,14 @@ Claude Code adapter                    56 lines    -> 80% shared
 client shims (both hosts)              26 lines
 ```
 
-Honest reading: those ratios are "to get a label", not "to run a metering pipeline". Neither
-adapter does dedupe, idempotency, marker persistence, or delivery — the parts that make up most
-of Hermes' host-bound 76%. A production Claude Code metering host needs most of them back.
+Those ratios are "to get a label", not "to run a metering pipeline". Neither
+adapter does dedupe, idempotency, marker persistence or delivery, the parts that make up most
+of Hermes' host-bound 76%. A production Claude Code metering host needs to implement most of them.
 
 ### Host A — LiteLLM guardrail (`sources/002-host-fit/hosts/litellm_guardrail.py`)
 
 The hook sees **one** request/response pair: no session history, no session DB, no durable
-per-session filesystem. Everything Hermes does to *find* a transcript is inapplicable — it is
+per-session filesystem. Everything Hermes does to *find* a transcript is inapplicable; it is
 simply handed to you. That is why the adapter is 22 lines.
 
 ```python
@@ -55,7 +55,7 @@ def extract_turn(payload):
 ```
 
 Identity available: `metadata.user_api_key_team_id` / `user_id` / `alias`, plus the model. No
-session id — so **per-arc job inference is meaningless here** (one request is not an arc), and
+session id, so **per-arc job inference is meaningless here** (one request is not an arc), and
 the taxonomy has nowhere local to live. Use `InMemoryTaxonomy` backed by a service.
 
 ### Host B — Claude Code session transcript (`sources/002-host-fit/hosts/claude_code.py`)
@@ -63,7 +63,7 @@ the taxonomy has nowhere local to live. Use `InMemoryTaxonomy` backed by a servi
 One JSONL per session at `~/.claude/projects/<slug>/<session-uuid>.jsonl`. Record shapes
 verified on a real machine (2026-08-15):
 
-*(The shipped fixture reproduces these shapes with synthetic content — see the sources
+*(The shipped fixture reproduces these shapes with synthetic content; see the sources
 README. The shapes themselves were observed on a real machine.)*
 
 - `type=user` → `message.content` (str **or** content-block list), `sessionId`, `isSidechain`,
@@ -74,17 +74,17 @@ README. The shapes themselves were observed on a real machine.)*
 - also present and ignorable: `ai-title`, `last-prompt`, `mode`, `permission-mode`,
   `attachment`, `file-history-snapshot`/`delta`, `system`
 
-Content blocks must be flattened — `text` blocks joined, `tool_use` blocks rendered as
+Content blocks must be flattened: `text` blocks joined, `tool_use` blocks rendered as
 `[tool_use:<name>]`.
 
 This host is a much closer analogue to Hermes than the guardrail: it *has* a session, a
-subagent flag (`isSidechain`, the analogue of `parent_session_id`), per-call usage numbers, and
-a durable per-session file. Which means it re-poses most of the questions Hermes' host-bound 76%
-answers — dedupe, idempotency, where markers live — against different primitives.
+subagent flag (`isSidechain`, the analogue of `parent_session_id`), per-call usage numbers and
+a durable per-session file. It therefore needs to solve most of the problems Hermes' host-bound 76%
+handles (dedupe, idempotency, marker storage) using different host APIs and storage.
 
 ### Where classification must sit
 
-**Out of band. Always, unless you are routing on the label rather than billing on it.**
+**Classify out of band unless you are routing on the label rather than billing on it.**
 
 | Path | Added latency to the caller |
 |------|-----------------------------|
@@ -95,7 +95,7 @@ The LiteLLM use case wants the **post-hoc half** of Hermes' design, not the inli
 
 ### Cost envelope, measured
 
-Per-classification input is **bounded** — the library's 1024-char cap on the labels block binds
+Per-classification input is **bounded**: the library's 1024-char cap on the labels block binds
 from ~100 labels onward:
 
 | Vocabulary size | Prompt bytes | Est. tokens | Truncated |
@@ -108,7 +108,7 @@ from ~100 labels onward:
 ~560 estimated input tokens and a handful of output tokens, regardless of how large the taxonomy
 grows. Preserve that cap in any extraction.
 
-Vocabulary-service hop (real loopback HTTP, 50 samples): **p50 0.37 ms, p95 0.69 ms** — a floor,
+Vocabulary-service hop (real loopback HTTP, 50 samples): **p50 0.37 ms, p95 0.69 ms**, a lower bound,
 not a forecast. Same-region realistically 1–20 ms.
 
 ## What to Avoid
@@ -120,12 +120,12 @@ not a forecast. Same-region realistically 1–20 ms.
   `assert_extraction_nonempty` from `sources/002-host-fit/run_hosts.py`.
 - **Never route the classifier's own model call through the proxy it guards.** The
   classification call becomes customer-visible traffic: metered, and subject to the guardrails
-  being enforced — *including the halt rule it may be evaluating*. Under an active halt, the
+  being enforced, *including the halt rule it may be evaluating*. Under an active halt, the
   classifier can be blocked by the rule it is helping enforce. Give it direct provider
   credentials or an explicit exemption. (Hermes avoids this by construction: its classifier uses
   `agent.auxiliary_client` and enforcement lives in a different process reading a status file.)
 - **Do not quote a latency number from the `claude` CLI harness.** Its ~5.2 s process-startup
-  floor swamps the measurement — a trivial prompt and a 560-token classification are
+  minimum dominates the measurement; a trivial prompt and a 560-token classification are
   statistically indistinguishable through it (delta(min) `+0.02s`, delta(median) `−1.62s`,
   distributions overlapping). The first attempt reported classification as *faster* than an
   `ok` prompt, an ordering artifact. Measure with a direct API client at temperature 0.
@@ -135,7 +135,7 @@ not a forecast. Same-region realistically 1–20 ms.
 
 ## Constraints
 
-- Job/arc inference requires a session concept. A guardrail has none — turn-level `task_type`
+- Job/arc inference requires a session concept. A guardrail has none and supports turn-level `task_type`
   only.
 - The guardrail has no durable per-session filesystem; `FileTaxonomy` is inapplicable there.
 - Claude Code transcript content may be a string *or* a content-block list; handle both.

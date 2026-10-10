@@ -2,37 +2,37 @@
 
 [← Back to the docs index](README.md)
 
-This repo-only page defines the distinctions among output, outcome, valuation, impact, and
+This repo-only page defines the distinctions among output, outcome, valuation, impact and
 ROI; the chain connecting them; the product-truth boundary; the project's vocabulary; and
 the milestone's exclusions. It is not part of the skill bundle and is unavailable on a
 tap-installed host. The linked shipped references remain authoritative for contract terms,
-including the nine evidence labels, config keys, and assessment schema.
+including the nine evidence labels, config keys and assessment schema.
 
-Once the frame is clear, [Job value and ROI](value-and-roi.md) is the mechanism: how the
-number is produced, bounded, recorded, and reported.
+[Job value and ROI](value-and-roi.md) explains how the
+number is produced, bounded, recorded and reported.
 
 ## Output, outcome, valuation, impact, ROI
 
 This project distinguishes five commonly conflated terms.
 
-**Output** is what the work produced — a merged diff, a passed test suite, a shipped
-endpoint. It is the thing an agent can self-verify at the moment it finishes. This skill
+**Output** is what the work produced: a merged diff, a passed test suite, a shipped
+endpoint. An agent can self-verify it when the work finishes. This skill
 observes output directly, through the session transcript a job marker is built from.
 
-**Outcome** is what happened as a result of that output being accepted and used — a bug
+**Outcome** is what happened as a result of that output being accepted and used: a bug
 that stopped recurring, a review that caught a defect, a release that shipped on schedule.
 An outcome requires the output to have been adopted by something or someone downstream of
-the agent; producing the output is not the same as the output mattering. This skill infers
+the agent; producing the output does not establish adoption. This skill infers
 a `SUCCESS`/`FAILED`/`CANCELLED` status from the transcript, which is closer to output than
-to outcome — self-verification is not downstream adoption.
+to outcome: self-verification is not downstream adoption.
 
 **Valuation** is a monetary figure attached to a claimed outcome, under stated assumptions.
 It requires an outcome (or an assumed one) plus a rate or price to convert it to money. This
-skill's `llmOutcomeEvaluation` feature produces a valuation — an hours-saved figure times a
-loaded rate — but the outcome the valuation is attached to is itself assumed, not observed.
+skill's `llmOutcomeEvaluation` feature produces a valuation (an hours-saved figure times a
+loaded rate) but the outcome the valuation is attached to is itself assumed, not observed.
 The rest of this page describes that evidence gap.
 
-**Impact** is the causal contribution of the intervention, relative to a comparator — what
+**Impact** is the causal contribution of the intervention, relative to a comparator: what
 would have happened without the agent's work. Establishing impact requires an identification
 strategy (a control group, a natural experiment, a pre/post design with confounders
 addressed) that this product does not run. This skill can name that an impact claim exists as
@@ -40,34 +40,33 @@ a contract (see `references/job-declaration.md`'s `ImpactStudyResult`), but it d
 produce one.
 
 **ROI** is a ratio of a valuation to a cost. It inherits every weakness of the valuation it is
-built from, plus whatever imprecision the cost side carries. A ROI computed from an unverified
-model estimate is not made more certain by the division; it is simply a ratio of one soft
-number to one hard one.
+built from, plus whatever imprecision the cost side carries. An ROI computed from an unverified
+model estimate remains an estimate; division does not verify its inputs.
 
-The skill can produce observed output, a coarse self-verified success/failure signal, and a
+The skill can produce observed output, a coarse self-verified success/failure signal and a
 model-estimated valuation hypothesis. It cannot produce a verified downstream outcome,
-impact without an identification strategy, or ROI stronger than its valuation input.
+impact without an identification strategy or ROI stronger than its valuation input.
 
 ## The results chain
 
 The results chain runs from agent execution to a potentially monetized business outcome.
 Each link names the evidence required and whether the skill observes it.
 
-1. **Execution** — the agent ran. Observed directly (the session exists).
-2. **Output** — the agent produced something. Observed directly (the transcript, self-
+1. **Execution**: the agent ran. Observed directly (the session exists).
+2. **Output**: the agent produced something. Observed directly (the transcript, self-
    verified per the job-declaration `SUCCESS` bar).
-3. **Acceptance** — a human or system accepted the output. Would require a merge event, a
-   review approval, or an equivalent downstream signal. Not observed by this skill.
-4. **Adoption** — the accepted output was actually used. Would require usage telemetry from
+3. **Acceptance**: a human or system accepted the output. Would require a merge event, a
+   review approval or an equivalent downstream signal. Not observed by this skill.
+4. **Adoption**: the accepted output was used. Would require usage telemetry from
    whatever the output was integrated into. Not observed.
-5. **Operational outcome** — using it changed some operational metric (fewer incidents, faster
+5. **Operational outcome**: using it changed some operational metric (fewer incidents, faster
    cycle time). Would require a system-of-record adapter reading that metric before and after.
    Not observed; see "What this milestone does not ship" below.
-6. **Business outcome** — the operational change moved a business metric (revenue, retention,
+6. **Business outcome**: the operational change moved a business metric (revenue, retention,
    cost). Would require attribution work well beyond this skill's scope. Not observed.
-7. **Monetized value** — the business outcome was converted to a dollar figure under a
+7. **Monetized value**: the business outcome was converted to a dollar figure under a
    defensible method. This skill computes a number here, but it computes it from links 1–2
-   directly, skipping links 3–6 entirely — an assumed hours-saved figure standing in for
+   directly, skipping links 3–6 entirely: an assumed hours-saved figure standing in for
    the whole unobserved middle of the chain.
 
 `llmOutcomeEvaluation`'s valuation is not a measurement of link 7. It is a model estimate of
@@ -76,20 +75,20 @@ number the skill emits from the chain that number claims to summarize.
 
 ## Evidence labels and the product-truth boundary
 
-Every assessment this skill produces carries an `evidence_class` — one of nine labels. They
-are a set of **distinct claim kinds**, not a confidence ladder ranking one label above
-another. The nine labels, their exact spellings, and the resolution rule that assigns one to
+Every assessment this skill produces carries an `evidence_class`: one of nine labels. They
+are a set of distinct claim kinds, not a confidence ladder ranking one label above
+another. The nine labels, their exact spellings and the resolution rule that assigns one to
 a given assessment are owned by
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)'s "The
-nine evidence-class labels" section — this page does not re-enumerate them.
+nine evidence-class labels" section: this page does not re-enumerate them.
 
 The labels do not form a ladder. Customer confirmation may be commercially
 authoritative because a customer said the outcome happened, yet causally weak, because a customer
 confirming an outcome is not the same as observing that the agent's work caused it.
-Observation proves occurrence, not cause — seeing an event happen does not establish what
-made it happen. Configuration establishes an approved rate, not actual hours worked — a
+Observation proves occurrence, not cause: seeing an event happen does not establish what
+made it happen. Configuration establishes an approved rate, not actual hours worked: a
 rate card tells you what an hour is worth, not how many hours a task actually took. And a
-classifier's confidence score is predictive, not causal — it measures how sure a model is
+classifier's confidence score is predictive, not causal: it measures how sure a model is
 about its own output, not whether that output reflects reality. None of these four is simply
 "more" or "less" trustworthy than the others in a single dimension; each fails in a different
 way, which is why the labels sit side by side rather than in a rank order.
@@ -99,7 +98,7 @@ way, which is why the labels sit side by side rather than in a rank order.
 This boundary applies to every number the skill reports.
 
 A live verification against a real Revenium tenant found that `revenium jobs roi <id>`
-surfaces no `evidence_class`, no `evaluator`, and no `confidence` in either its JSON or its
+surfaces no `evidence_class`, no `evaluator` and no `confidence` in either its JSON or its
 table output. A model-estimated value is displayed with the exact same visual weight a
 measured value would get on that read-back surface. Only the separate `jobs outcome-history`
 command echoes the metadata blob at all.
@@ -108,10 +107,10 @@ The skill's `--metadata` payload and this documentation are the only places that
 value is an unverified model estimate; Revenium's primary read-back surfaces do not.
 Revenium's product does not draw the
 distinction this page draws; nothing downstream of the wire enforces it. If this skill's
-`--metadata` payload ever stopped carrying `evidence_class`, or if a reader never opened this
+`--metadata` payload ever stopped carrying `evidence_class` or if a reader never opened this
 page, an estimate and a measurement would be visually indistinguishable to anyone looking at
 `jobs roi`. That is the boundary: the product tells the truth only as far as this skill's own
-metadata and documentation carry it, and no further.
+metadata and documentation carry it and no further.
 
 ## Why a model-estimated value is a hypothesis
 
@@ -120,47 +119,46 @@ Four properties make that class a hypothesis rather than an established result:
 
 1. **The figure is derived, not asserted.** `estimated_value` is computed as
    `estimated_hours_saved x assumed_loaded_rate` from two independently capped assumption
-   inputs — it is never a number an evaluator states directly and this skill just forwards.
-2. **The assumptions are recorded alongside the figure**, not hidden behind it — a reader
+   inputs: it is never a number an evaluator states directly and this skill just forwards.
+2. **The assumptions are recorded alongside the figure**, not hidden behind it: a reader
    can see the hours and the rate that produced the number, not just the number.
 3. **Nothing in the path observes the claimed outcome occurring.** The evaluator reasons over
-   the session transcript alone; no downstream system confirms the outcome actually happened.
+   the session transcript alone; no downstream system confirms the outcome happened.
 4. **The reportability resolver, not the evaluator, decides whether the number may leave the
-   machine at all.** A computed value and a reportable value are two different gates, and an
+   machine at all.** A computed value and a reportable value are two different gates and an
    evaluator's opinion about its own estimate never overrides the resolver's decision.
 
-What `MODEL_ESTIMATED_DEMO` means in full, and the rule that a future non-LLM evaluator must
+What `MODEL_ESTIMATED_DEMO` means in full and the rule that a future non-LLM evaluator must
 report its own, different evidence class rather than widening this one, is owned by
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)'s "What
-`MODEL_ESTIMATED_DEMO` means" section — read it there.
+`MODEL_ESTIMATED_DEMO` means" section: read it there.
 
 ## The vocabulary this project uses
 
 Five phrases are the allowed vocabulary for describing what this skill's numbers are, drawn
 directly from this project's requirements. Each is right for a specific claim:
 
-- **"model-estimated value"** — the right term for the naked-LLM path's output: a number a
+- **"model-estimated value"**: the right term for the naked-LLM path's output: a number a
   model derived, not one anyone observed.
-- **"configured value estimate"** — the right term when describing a valuation produced by an
+- **"configured value estimate"**: the right term when describing a valuation produced by an
   operator-configured, non-LLM boundary (a rate-card fixture, for example) rather than the
   naked-LLM evaluator.
-- **"observed outcome"** — the right term only when this skill (or a system-of-record adapter
-  it does not yet ship) has actually seen the outcome occur, not merely inferred or assumed it.
-- **"associational result"** — the right term for a correlation-shaped finding that stops short
-  of a causal claim — an `ASSOCIATIONAL` evidence-class record, for example.
-- **"estimated ROI under stated assumptions"** — the right term for a ratio derived from a
+- **"observed outcome"**: the right term only when this skill (or a system-of-record adapter
+  it does not yet ship) has seen the outcome occur, not merely inferred or assumed it.
+- **"associational result"**: a correlation-shaped finding that stops short
+  of a causal claim, such as an `ASSOCIATIONAL` evidence-class record.
+- **"estimated ROI under stated assumptions"**: the right term for a ratio derived from a
   model-estimated value, when the assumptions the estimate rests on are stated alongside it.
 
-A second, prohibited set of phrases also exists, and it is machine-enforced across every
-shipped text file in this repository — not just documentation. Rather than quote the five
+A second, prohibited set of phrases also exists and it is machine-enforced across every
+shipped text file in this repository, not just documentation. Rather than quote the five
 prohibited phrases here (which would defeat the guard's own purpose the moment this page
 shipped), this page describes what each one asserts: a claim of measurement where none was
 taken, a claim of realized saving where only an estimate exists, a claim of agent causation
 where no identification strategy ran, a claim of established business value where only a
-hypothesis exists, and a claim of causal effect where at most an association was observed.
+hypothesis exists and a claim of causal effect where at most an association was observed.
 For the exact literal strings, read
-[`tests/test_repository.py::test_no_prohibited_claim_language_left`](../tests/test_repository.py)
-— the disallowed strings live in that test's own pattern list, exactly as `CLAUDE.md`'s
+[`tests/test_repository.py::test_no_prohibited_claim_language_left`](../tests/test_repository.py): the disallowed strings live in that test's own pattern list, exactly as `CLAUDE.md`'s
 "Legacy naming guards" section already instructs for this repository's legacy-branding list.
 
 The allowed vocabulary above is guidance only. No test requires any of the five phrases in
@@ -170,26 +168,26 @@ acceptable terms.
 
 ## Configuration and privacy modes
 
-The whole `llmOutcomeEvaluation` feature is opt-in and off by default, and every read of its
-configuration fails closed: a missing, unreadable, or malformed config resolves to disabled,
+The whole `llmOutcomeEvaluation` feature is opt-in and off by default and every read of its
+configuration fails closed: a missing, unreadable or malformed config resolves to disabled,
 never to estimating money by accident. A second, separate switch decides whether a computed
-value may be reported to Revenium at all — a value can be computed and retained locally while
+value may be reported to Revenium at all: a value can be computed and retained locally while
 its number is withheld from the wire, which is a different question from whether evaluation
 runs in the first place. Cost inputs (a `costs` block, keyed by job type and cost category)
 are entirely operator-supplied and net against the computed estimate; this skill invents no
-cost figure of its own. The exact key names, defaults, and validation rules for all of this
+cost figure of its own. The exact key names, defaults and validation rules for all of this
 are owned by [`docs/configuration.md`](configuration.md) and
-[`references/config-schema.md`](../skills/revenium/references/config-schema.md) — this page
+[`references/config-schema.md`](../skills/revenium/references/config-schema.md): this page
 links to them rather than restating them.
 
 Separately, every job assessment records two observable facts about the configured LLM: the
-resolved inference provider name, and a derived address class describing where inference was
+resolved inference provider name and a derived address class describing where inference was
 **configured** to run. Both describe the CONFIGURED endpoint, not anything this skill actually
 watched happen along the way. The skill can observe only where inference was configured to go;
-it cannot observe the preprocessing, logging, or retention parts of that path, so it records
-only the part it can see and draws no conclusion from the rest. Nothing on this page, or
+it cannot observe the preprocessing, logging or retention parts of that path, so it records
+only the part it can see and draws no conclusion from the rest. Nothing on this page or
 anywhere else this skill ships, should be read as a statement about where data went, was kept,
-was logged, or was retained — in either a stated or a negated form. The two configured-locality
+was logged or was retained: in either a stated or a negated form. The two configured-locality
 facts are inputs to an operator's own judgment about their own deployment, not a conclusion
 this skill draws on the operator's behalf.
 
@@ -200,20 +198,20 @@ classification (turn-level `task_type` labelling and job/arc inference), output/
 assessment (the evaluator that produces or withholds an `assessment`), economic valuation (how
 an accepted outcome converts to a number), evidence resolution and reportability (which
 `evidence_class` a boundary declares and whether the result may be reported), cohort impact
-(a contract only — no estimator ships), and Revenium reporting. Each is a registry: an
-implementation registers a name, and an operator selects among registered implementations by
+(a contract only: no estimator ships) and Revenium reporting. Each is a registry: an
+implementation registers a name and an operator selects among registered implementations by
 that name.
 
 Each non-LLM implementation reports its own evidence class. A deterministic rate-card
 valuation does not borrow the naked-LLM path's evidence class just because it produces a
-similar-looking number; it declares its own, honest label. This is what makes "fits without
-masquerading" a structural property rather than a promise — a later ONNX classifier,
-deterministic policy, vertical model, or system-of-record adapter can be added behind these
+similar-looking number; it declares its own label. This is what makes "fits without
+masquerading" a structural property rather than a promise: a later ONNX classifier,
+deterministic policy, vertical model or system-of-record adapter can be added behind these
 contracts without ever pretending to be the model that isn't there.
 
-The selector keys an operator sets to choose among registered implementations — the
-`boundaries` object's `classification`/`valuation`/`evidence` fields, and
-`llmOutcomeEvaluation.evaluator` for the output/outcome-assessment boundary — are owned by
+The selector keys an operator sets to choose among registered implementations (the
+`boundaries` object's `classification`/`valuation`/`evidence` fields and
+`llmOutcomeEvaluation.evaluator` for the output/outcome-assessment boundary) are owned by
 [`references/config-schema.md`](../skills/revenium/references/config-schema.md); the nine
 evidence-class labels and the resolution rule that assigns one to an assessment are owned by
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md).
@@ -227,9 +225,9 @@ A future reader can check the description below against that test directly; if t
 disagree, the test is the one to trust.
 
 An operator corrects a job's assessment through `correct-assessment.sh`, a human-facing
-terminal command that requires `--job-id`, `--value`, `--currency`, and `--reason`. The
-correction **appends** a revision line to the job's assessment sidecar record; the observed
-test confirms the original line is byte-unchanged after the append — a correction is never a
+terminal command that requires `--job-id`, `--value`, `--currency` and `--reason`. The
+correction appends a revision line to the job's assessment sidecar record; the observed
+test confirms the original line is byte-unchanged after the append: a correction is never a
 rewrite. Each appended revision carries a `sequence` number that orders it relative to any
 earlier corrections, starting at `1` for the first correction against a given job. The
 appended revision also carries the record it superseded (`prior_value_low`,
@@ -238,9 +236,8 @@ not just a new number replacing an old one.
 
 The corrected bound is what ships: the observed test confirms the wire call's
 `--outcome-value` equals the appended record's own corrected low bound, read off the record
-that was just written — never a value retyped anywhere else. The wire call's `--metadata`
-carries the same `sequence` number and the same prior-value fields the local record carries —
-this is the marker a downstream consumer uses to tell a revision from an original, since an
+that was just written: never a value retyped anywhere else. The wire call's `--metadata`
+carries the same `sequence` number and the same prior-value fields the local record carries: this is the marker a downstream consumer uses to tell a revision from an original, since an
 ordinary, uncorrected `jobs outcome` payload never carries a `sequence` key at all.
 
 The per-minute cron pipeline cannot reach the correction path:
@@ -249,42 +246,42 @@ operator can invoke it from a terminal.
 
 ## Abstention, zero, and negative value
 
-Three distinct "no positive number" outcomes exist, and this skill keeps them visibly distinct
-from each other and from an ordinary valued outcome — each is driven and observed by its own
+Three distinct "no positive number" outcomes exist and this skill keeps them visibly distinct
+from each other and from an ordinary valued outcome: each is driven and observed by its own
 test in `tests/test_phase47_end_to_end.py`.
 
 - **The evaluator declines.** When the evaluator abstains rather than producing an assessment,
   the job's outcome still reports to Revenium, carrying provenance (`evaluator`,
-  `evaluator_version`) but no value flags at all — a real, provenance-bearing record, not a
+  `evaluator_version`) but no value flags at all: a real, provenance-bearing record, not a
   silently dropped report. Observed by
   `test_abstention_path_ships_outcome_with_provenance_and_no_value`.
 - **The reportability gate is closed.** When a value is computed but the separate reportability
-  switch is off, the estimate is computed and retained locally — the sidecar carries a real
-  `value_low` — while the number itself is withheld from the wire; provenance
-  (`evidence_class`, `evaluator`, `evaluator_version`, `model`) still ships, and
+  switch is off, the estimate is computed and retained locally (the sidecar carries a real
+  `value_low`) while the number itself is withheld from the wire; provenance
+  (`evidence_class`, `evaluator`, `evaluator_version`, `model`) still ships and
   `reportability_status` reads `candidate` rather than `reportable`. Observed by
   `test_withheld_candidate_path_withholds_value_and_keeps_provenance`.
 - **Supplied costs meet or exceed the estimate.** When an operator-supplied cost is at or above
-  the derived value, `net_value` goes to or below zero — and the record stays visible on both
-  the sidecar and the wire, rather than being clamped to zero, suppressed, or dropped. Observed
+  the derived value, `net_value` goes to or below zero, and the record stays visible on both
+  the sidecar and the wire, rather than being clamped to zero, suppressed or dropped. Observed
   by `test_negative_net_value_stays_visible_with_the_value_family_intact`.
 
 Work that produced no value and work that was never valued must remain distinct in the data.
-An abstained outcome, a withheld candidate, and a negative net value each describe a different
+An abstained outcome, a withheld candidate and a negative net value each describe a different
 job state. Collapsing them into a blank or zero would erase the distinction between "nothing
 to report" and "something to report, but not this way."
 
 ## Operator-declared mechanism and attribution
 
-An operator may declare any of the six economic mechanisms, and may record an
-attribution fraction alongside a value. Both are **assertions by a person**,
-recorded as such, and neither is evidence.
+An operator may declare any of the six economic mechanisms and may record an
+attribution fraction alongside a value. Both are assertions by a person,
+recorded as such and neither is evidence.
 
 Placed against the five distinctions above: a declared mechanism says which
 *kind* of value is being claimed. An attribution fraction says what share of a
 larger figure the operator assigns to this job. Neither closes any link in the
-results chain — acceptance, adoption, operational outcome and business outcome
-remain unobserved by this skill whatever an operator declares, and an
+results chain: acceptance, adoption, operational outcome and business outcome
+remain unobserved by this skill whatever an operator declares and an
 attributed figure is still a figure attached to an outcome nothing here saw.
 
 Two properties keep the boundary from eroding:
@@ -292,8 +289,8 @@ Two properties keep the boundary from eroding:
 - **Neither moves `evidence_class`.** The label reflects the evidence behind a
   record; an operator flag is not evidence. In particular neither can promote a
   record toward the three labels reserved for study-backed claims.
-- **The fraction is applied only on the configured path, and only ever
-  produces what it persists.** Two paths can attach a fraction to a value, and
+- **The fraction is applied only on the configured path and only ever
+  produces what it persists.** Two paths can attach a fraction to a value and
   they behave differently:
   - On the CLI path (`correct-assessment.sh --attribution-fraction`), the
     operator supplies the already-attributed figure; the skill is not given a
@@ -301,13 +298,13 @@ Two properties keep the boundary from eroding:
   - On the configured path (a `revenueCard` entry, Phase 54, D-09), the skill
     multiplies a configured `grossPerJob` by the configured
     `attributionFraction` and records only the product. The gross still never
-    appears in anything the skill persists or transmits — no record, no
-    `meter` argv, no `--metadata` envelope, and no log line.
+    appears in anything the skill persists or transmits: no record, no
+    `meter` argv, no `--metadata` envelope and no log line.
   On both paths a fraction is documentation of the operator's own reasoning,
   which is why the stated basis is required alongside it.
 
 Where a defensible figure is wanted rather than a plausible one, the route is
-a holdout comparison, which is a study — it needs the study contract this tree
+a holdout comparison, which is a study: it needs the study contract this tree
 describes but does not run.
 
 ## What this milestone does not ship
@@ -320,11 +317,11 @@ through an LLM call on the operator's own configured provider. Nothing in this t
 on-device or locally-hosted model of any kind.
 
 **No system-of-record outcome adapter ships here.** Nothing in this tree observes a downstream
-system — a ticketing tool, an incident tracker, a revenue system — to confirm that a claimed
+system (a ticketing tool, an incident tracker, a revenue system) to confirm that a claimed
 outcome occurred. Every outcome this skill records is self-reported by the classifier from the
 session transcript alone.
 
-**Nothing here produces a causal claim.** The impact-study structure is a contract only — no
+**Nothing here produces a causal claim.** The impact-study structure is a contract only: no
 estimator, no experiment orchestration, nothing that runs an identification strategy. An
 individual job may carry a reference to such a study without that reference letting a cohort
 estimate stand in for an individually observed cause. No evaluator anywhere in this tree can
@@ -333,34 +330,34 @@ convention or reviewer discipline.
 
 **The relationship between a job assessment and an impact study result is not implemented.**
 This is stated as an absence, not a partial feature: an assessment carries a slot that could
-reference a study, and nothing in this tree fills that slot and nothing reads it.
+reference a study and nothing in this tree fills that slot and nothing reads it.
 
 ### Two requirements recorded as partial rather than closed
 
-**EGV-02 — a later implementation fits without masquerading.** True today: all six pluggable
-boundaries exist as registries, and each carries a non-LLM fixture that declares its own,
-honest evidence class rather than borrowing the naked-LLM path's `MODEL_ESTIMATED_DEMO`.
-Not true today: a configured boundary's own declared class does not reach the persisted record —
-resolution runs against the evaluators registry only, so an active valuation or evidence
+**EGV-02: a later implementation fits without masquerading.** True today: all six pluggable
+boundaries exist as registries and each carries a non-LLM fixture that declares its own,
+own evidence class rather than borrowing the naked-LLM path's `MODEL_ESTIMATED_DEMO`.
+Not true today: a configured boundary's own declared class does not reach the persisted record.
+Resolution runs against the evaluators registry only, so an active valuation or evidence
 boundary's declared class is not what ends up on the sidecar. The recorded class therefore
-under-claims rather than over-claims, which is the safe direction — no record ever shows more
+under-claims rather than over-claims, which is the safe direction: no record ever shows more
 certainty than it should. This was left open rather than patched because closing it needs a
-cross-boundary precedence rule that no decision covers — which class wins when the evaluator,
-the valuation boundary, and the evidence boundary each declare one. A registration-time
+cross-boundary precedence rule that no decision covers, which class wins when the evaluator,
+the valuation boundary and the evidence boundary each declare one. A registration-time
 declaration by trusted in-repo code and an untrusted model output are two different threat
-models, covering two different moments — import time versus call time — not, as this page once
+models, covering two different moments (import time versus call time), not, as this page once
 reasoned, the same mechanism reached from a different source; `boundary_registry.py`'s own
 `register()` docstring and `classifier.py:1160`'s docstring both argue this directly. The
 precedence rule itself now lives in `docs/evidence-class-precedence.md` (Phase 48, 2026-08-29).
 
-**EGV-05 — six economic mechanisms are representable.** True today: all six mechanism values
-are representable on the wire and accepted by the reporter's allow-list, and two producers now
-exist for the operator-declared three — `correct-assessment.sh --mechanism` (Phase 51), and, as
+**EGV-05: six economic mechanisms are representable.** True today: all six mechanism values
+are representable on the wire and accepted by the reporter's allow-list and two producers now
+exist for the operator-declared three: `correct-assessment.sh --mechanism` (Phase 51) and, as
 of Phase 54, a valuation registrant declaring one at registration (the shipped `revenueCard`
-fixture declares `incremental_revenue`). Not true today, and structurally so: the evaluator
-still cannot select any of the three — `_resolve_economic_mechanism`'s membership test runs
-only against `EVALUATOR_MECHANISMS`, never `ECONOMIC_MECHANISMS` — so a transcript alone can
-never assert `quality_decision_improvement`, `risk_avoidance`, or `incremental_revenue`.
+fixture declares `incremental_revenue`). Not true today and structurally so: the evaluator
+still cannot select any of the three (`_resolve_economic_mechanism`'s membership test runs
+only against `EVALUATOR_MECHANISMS`, never `ECONOMIC_MECHANISMS`) so a transcript alone can
+never assert `quality_decision_improvement`, `risk_avoidance` or `incremental_revenue`.
 
 Both gaps are recorded in full, including their re-deferral history, in
 `.planning/REQUIREMENTS.md`. That file is the authoritative record of both; this page states
