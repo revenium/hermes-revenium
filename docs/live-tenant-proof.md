@@ -307,7 +307,7 @@ item 6).
 
 Two real Hermes profiles (differing `boundaries` configuration, one with a
 genuine rate-card boundary, one with none) were built on the host, each
-running the deployed classifier plugin proven current by per-file sha256 (0 mismatches, 15 files each) presence was not treated as currency.
+running the deployed classifier plugin proven current by per-file sha256 (0 mismatches, 15 files each). Presence was not treated as currency.
 `gateway.multiplex_profiles: true` was genuinely activated and confirmed
 from the gateway's own log: one process serving three profiles (`default`,
 `p52alpha`, `p52beta`). Two real, non-mock sessions were driven through the
@@ -382,7 +382,7 @@ From the deployed Hermes' own source (`gateway/session.py:1070-1087`, its
 docstring verbatim):
 
 > The historical key format is `agent:main:<platform>:<chat_type>:...` where
-> `main` is a static namespace literal (**NOT** a branch name; branching keys
+> `main` is a static namespace literal (**NOT** a branch name — branching keys
 > off `session_id`, not this slot).
 
 with the default profile mapping to `agent:main` and a named profile `coder` to
