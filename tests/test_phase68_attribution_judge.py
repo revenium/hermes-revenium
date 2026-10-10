@@ -9,6 +9,7 @@ transcript, no real model and no network is involved.
 """
 import ast
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -866,6 +867,30 @@ class GatePreRegistrationTests(unittest.TestCase):
         good = prereg_file(Path(self.tmp) / 'good3.json')
         self.assertEqual(self.gate(good, out_dir=copy)[0], H.EXIT_DRIFT)
 
+    def test_a_bound_record_made_on_a_different_prompt_is_drift(self):
+        copy = Path(self.tmp) / 'copy3'
+        shutil.copytree(self.out, copy)
+        (copy / 'run').mkdir(exist_ok=True)
+        digest = H.build_judge_sessions(
+            copy, self.manifest, SLICE)[0][0]['transcript_sha256']
+        H.append_record(copy / 'run' / 'calls.jsonl', rec(
+            'S1', 'A', 'forward', ['J1'] * 6, ts='2026-10-09T00:00:00Z',
+            transcript_sha256=digest, call_binding_sha256='0' * 64))
+        good = prereg_file(Path(self.tmp) / 'good4.json')
+        self.assertEqual(self.gate(good, out_dir=copy)[0], H.EXIT_DRIFT)
+
+    def test_a_record_with_no_binding_is_still_read_by_the_gate(self):
+        copy = Path(self.tmp) / 'copy4'
+        shutil.copytree(self.out, copy)
+        (copy / 'run').mkdir(exist_ok=True)
+        digest = H.build_judge_sessions(
+            copy, self.manifest, SLICE)[0][0]['transcript_sha256']
+        H.append_record(copy / 'run' / 'calls.jsonl', rec(
+            'S1', 'A', 'forward', ['J1'] * 6, ts='2026-10-09T00:00:00Z',
+            transcript_sha256=digest))
+        good = prereg_file(Path(self.tmp) / 'good5.json')
+        self.assertEqual(self.gate(good, out_dir=copy)[0], H.EXIT_OK)
+
 
 # ---------------------------------------------------------------------------
 # Task 2: spend that cannot overrun, the served-model check, the key
@@ -1041,6 +1066,69 @@ class SpendSafetyTests(unittest.TestCase):
         with mock.patch.object(H, 'SPEND_CAP_USD', total):
             self.assertEqual(self.run_judge(transport), H.EXIT_BUDGET)
         self.assertEqual(len(transport.calls), 1)
+
+    # -- a saved call is bound to the prompt and the model it was made on ----
+    def test_every_record_carries_the_binding_of_the_call_it_belongs_to(self):
+        sessions = [tiny_session('S1')]
+        self.run_judge(CountingTransport(), sessions=sessions)
+        pins = dict(JUDGES)
+        for record in self.records():
+            prompt, _p, _t = H.build_judge_prompt(
+                sessions[0]['turns'], sessions[0]['jobs'], record['ordering'])
+            self.assertEqual(
+                record['call_binding_sha256'],
+                H.call_binding(pins[record['judge']], prompt))
+
+    def test_the_binding_changes_with_the_job_list_the_labels_and_the_model(
+            self):
+        turns = tiny_session('S1')['turns']
+        jobs = [('J1', 'type', 'name 1'), ('J2', 'type', 'name 2')]
+        base = H.call_binding('m', H.build_judge_prompt(
+            turns, jobs, 'forward')[0])
+        renamed = [('J1', 'type', 'name 1'), ('J2', 'type', 'other')]
+        relabelled = [('J2', 'type', 'name 1'), ('J1', 'type', 'name 2')]
+        self.assertNotEqual(base, H.call_binding('m', H.build_judge_prompt(
+            turns, renamed, 'forward')[0]))
+        self.assertNotEqual(base, H.call_binding('m', H.build_judge_prompt(
+            turns, relabelled, 'forward')[0]))
+        self.assertNotEqual(base, H.call_binding('n', H.build_judge_prompt(
+            turns, jobs, 'forward')[0]))
+
+    def assert_resume_refused(self, **kwargs):
+        resume = CountingTransport()
+        before = self.records()
+        self.assertEqual(self.run_judge(resume, **kwargs), H.EXIT_DRIFT)
+        self.assertEqual(resume.calls, [])
+        self.assertEqual(self.records(), before)
+
+    def test_a_resume_refuses_calls_saved_against_a_different_job_list(self):
+        self.run_judge(CountingTransport(), sessions=[tiny_session('S1')])
+        changed = tiny_session('S1')
+        changed['jobs'] = [('J1', 'type', 'a renamed job'),
+                           ('J2', 'type', 'name 2')]
+        self.assert_resume_refused(sessions=[changed])
+
+    def test_a_resume_refuses_calls_saved_against_a_different_model_pin(self):
+        self.run_judge(CountingTransport(), sessions=[tiny_session('S1')])
+        repinned = (('A', JUDGES[1][1]), JUDGES[1])
+        self.assert_resume_refused(sessions=[tiny_session('S1')],
+                                   judges=repinned)
+
+    def test_a_resume_refuses_a_saved_call_that_has_no_binding(self):
+        session = tiny_session('S1')
+        self.run_dir.mkdir(parents=True)
+        H.append_record(self.calls_path, rec(
+            'S1', 'A', 'forward', ['J1', 'J1'],
+            transcript_sha256=hashlib.sha256(
+                H.render_turns(session['turns']).encode('utf-8')).hexdigest()))
+        self.assert_resume_refused(sessions=[session])
+
+    def test_a_resume_on_unchanged_input_still_reuses_every_saved_call(self):
+        self.run_judge(CountingTransport(), sessions=[tiny_session('S1')])
+        again = CountingTransport()
+        self.assertEqual(
+            self.run_judge(again, sessions=[tiny_session('S1')]), H.EXIT_OK)
+        self.assertEqual(again.calls, [])
 
     # -- the lock ----------------------------------------------------------------
     def test_a_second_run_while_the_lock_is_held_exits_locked_with_no_call(self):

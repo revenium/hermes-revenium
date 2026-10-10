@@ -1844,6 +1844,7 @@ PER_CALL_RECORD_KEYS = frozenset({
     "session_label", "judge", "ordering", "status", "reserved_usd",
     "cost_usd", "prompt_tokens", "completion_tokens", "served_model",
     "verdicts", "ts", "prompt_sha256", "transcript_sha256",
+    "call_binding_sha256",
 })
 TERMINAL_STATUSES = frozenset({"ok", "invalid", "call_error",
                                "served_model_mismatch"})
@@ -2028,6 +2029,12 @@ def build_judge_prompt(turns, jobs, ordering):
             hashlib.sha256(transcript.encode("utf-8")).hexdigest())
 
 
+def call_binding(model, prompt):
+    """Digest of the model pin and the fully rendered prompt, job list and
+    labels included. A saved call is reusable only against the same one."""
+    return hashlib.sha256(f"{model}\n{prompt}".encode("utf-8")).hexdigest()
+
+
 # -- parser -------------------------------------------------------------------
 _FENCE_RE = re.compile(r"\A```(?:json)?[ \t]*\n(.*?)\n?```\Z", re.DOTALL)
 
@@ -2110,7 +2117,8 @@ def judge_one(session, judge, model, ordering, transport, reserved=None):
         session["turns"], session["jobs"], ordering)
     base = {"session_label": session["label"], "judge": judge,
             "ordering": ordering, "reserved_usd": reserved,
-            "prompt_sha256": prompt_sha, "transcript_sha256": transcript_sha}
+            "prompt_sha256": prompt_sha, "transcript_sha256": transcript_sha,
+            "call_binding_sha256": call_binding(model, prompt)}
     announce = getattr(transport, "set_context", None)
     if announce is not None:
         announce(session["label"], judge, ordering)
@@ -2509,8 +2517,18 @@ def plan_calls(sessions, judges, orderings):
                     "session": session, "judge": judge, "model": model,
                     "ordering": ordering,
                     "reserved": reserve_usd(model, prompt),
+                    "binding": call_binding(model, prompt),
                     "chars": len(prompt)})
     return plan
+
+
+def _rebound_keys(plan, records):
+    """The planned keys that have a saved record made on a different prompt
+    or model pin, or on none recorded at all."""
+    planned = {item["key"]: item["binding"] for item in plan}
+    return {_key(record) for record in records
+            if _key(record) in planned
+            and record.get("call_binding_sha256") != planned[_key(record)]}
 
 
 def acquire_run_lock(run_dir):
@@ -2559,7 +2577,14 @@ def _run_locked(sessions, transport, run_dir, judges, orderings, smoke):
     calls_path = run_dir / "calls.jsonl"
     plan = (_smoke_plan(sessions, judges) if smoke
             else plan_calls(sessions, judges, orderings))
-    view = settle_view(load_calls(calls_path))
+    saved = load_calls(calls_path)
+    rebound = _rebound_keys(plan, saved)
+    if rebound:
+        print(f"refused: {len(rebound)} saved call(s) were made on a "
+              "different prompt or model pin, or carry no binding; start a "
+              "new run directory", file=sys.stderr)
+        return EXIT_DRIFT
+    view = settle_view(saved)
     todo = [item for item in plan if _attempts_left(item["key"], view)]
     planned = sum((item["reserved"] for item in todo), Decimal(0))
     if view["spend"] + planned > SPEND_CAP_USD:
@@ -2582,7 +2607,8 @@ def _run_locked(sessions, transport, run_dir, judges, orderings, smoke):
                 return EXIT_BUDGET
             base = {"session_label": item["key"][0], "judge": item["judge"],
                     "ordering": item["ordering"], "status": "pending",
-                    "reserved_usd": item["reserved"], "ts": now_stamp()}
+                    "reserved_usd": item["reserved"], "ts": now_stamp(),
+                    "call_binding_sha256": item["binding"]}
             append_record(calls_path, make_record(**base))
             record = judge_one(item["session"], item["judge"], item["model"],
                                item["ordering"], transport,
@@ -2791,6 +2817,26 @@ def build_judge_sessions(out_dir, manifest, agent):
     return sessions, pull
 
 
+def _check_bindings(sessions, records):
+    """Raises DriftError when a recorded call that carries a binding was made
+    on a prompt or model pin the pulled data and current pins no longer
+    reproduce. A record with no binding predates it and is read as before."""
+    pins = dict(current_judges())
+    by_label = {session["label"]: session for session in sessions}
+    for record in records:
+        bound = record.get("call_binding_sha256")
+        session = by_label.get(record.get("session_label"))
+        if (bound is None or session is None or not session["turns"]
+                or record.get("judge") not in pins
+                or record.get("ordering") not in ORDERINGS):
+            continue
+        prompt, _p, _t = build_judge_prompt(
+            session["turns"], session["jobs"], record["ordering"])
+        if bound != call_binding(pins[record["judge"]], prompt):
+            raise DriftError("a judge record's prompt and model binding "
+                             "differs from the pulled data and the pins")
+
+
 def judged_sessions(out_dir, manifest, agent):
     """build_judge_sessions plus each session's combined verdicts from
     calls.jsonl. Raises DriftError when a recorded call was made on a
@@ -2806,6 +2852,7 @@ def judged_sessions(out_dir, manifest, agent):
                 raise DriftError("a judge record's transcript digest differs "
                                  "from the pulled transcript")
         session["combined"] = combine_verdicts(mine, len(session["turns"]))
+    _check_bindings(sessions, records)
     return sessions, pull, records
 
 
