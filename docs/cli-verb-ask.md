@@ -8,7 +8,7 @@ unavailable on a tap-installed host.
 
 It is a companion to
 [`docs/roi-read-surface-ask.md`](roi-read-surface-ask.md), an earlier ask to
-the same team about the same CLI, and the two are deliberately separate
+the same team about the same CLI and the two are deliberately separate
 documents: that page requests fields on a display verb that already
 exists (`jobs roi`); this page requests verbs and flags that do not exist
 at all. Folding them together would blur "add a field to an existing
@@ -18,7 +18,7 @@ of ask with a different kind of fix.
 ## What is true today
 
 Verified live against the installed CLI on 2026-09-04, by running the
-probes below and reading exactly what they printed — not transcribed from
+probes below and reading exactly what they printed, not transcribed from
 any planning document.
 
 ```
@@ -34,24 +34,23 @@ revenium 1.5.0 (0f5f3a7)
 `revenium jobs types --help` shows a leaf command that takes only flags
 (`-h`/`--help` plus the global flags) and has **no subcommands**. Running
 `revenium jobs types` lists the available job types; there is no
-`economics`, `baselines`, or `facts` verb anywhere under `jobs types`, and
+`economics`, `baselines` or `facts` verb anywhere under `jobs types` and
 no other command in the twelve-item list above fronts them either. All
 three surfaces are unreachable from this CLI today.
 
-`revenium jobs outcome-update --help` advertises exactly six flags —
-`--execution-status`, `--metadata`, `--outcome-currency`,
-`--outcome-type`, `--outcome-value`, `--reason` — and no version flag
+`revenium jobs outcome-update --help` advertises exactly six flags (`--execution-status`, `--metadata`, `--outcome-currency`,
+`--outcome-type`, `--outcome-value`, `--reason`) and no version flag
 under any spelling.
 
-`revenium metrics --help` lists ten subcommands — `ai`, `api`, `audio`,
+`revenium metrics --help` lists ten subcommands (`ai`, `api`, `audio`,
 `completions`, `dimensions`, `image`, `squads`, `tool-events`, `traces`,
-`video` — and none of them covers job outcomes.
+`video`) and none of them covers job outcomes.
 
-One thing already present narrows the ask: `revenium jobs get --help`'s
-own example (`revenium jobs get loan-app-12345 --json`) and the root
+`revenium jobs get --help`'s
+example (`revenium jobs get loan-app-12345 --json`) and the root
 `revenium --help`'s documented `--json` global flag confirm that reading a
 job back as JSON needs nothing new. The read half of optimistic
-concurrency — fetching a job's current version — already works; only the
+concurrency (fetching a job's current version) already works; only the
 write-side version flag on `jobs outcome-update` is missing (see below).
 
 ## Why the CLI-only boundary makes this blocking, not optional
@@ -59,17 +58,12 @@ write-side version flag on `jobs outcome-update` is missing (see below).
 This project has been CLI-only by architecture since it started. Calling
 the Revenium Platform API directly over HTTP was considered and declined,
 on the record, on 2026-09-03 (`.planning/REQUIREMENTS.md`, "Explicitly out
-of scope"), specifically to preserve that boundary. Given that choice, a
-server endpoint with no CLI verb in front of it is not merely awkward to
-reach from this project — it is unreachable, full stop. No amount of work
-on this side substitutes for a verb that doesn't exist; the work that
-depends on one of these five gaps cannot be finished by trying harder here.
+of scope"), specifically to preserve that boundary. Under that boundary, a
+server endpoint without a CLI verb is unreachable from this project. Work
+that depends on any of these five gaps must wait for the missing verb.
 
-Say the important distinction plainly: the endpoints themselves already
-exist server-side. This is a client-surface gap, not a platform gap. That
-is what makes each of the five asks below small — no new capability is
-being requested, only a way for this CLI to reach a capability the
-platform already has.
+The endpoints already exist server-side. Each request below adds CLI
+access to an existing platform capability; none asks for a new endpoint.
 
 ## What this project built instead of waiting
 
@@ -79,14 +73,14 @@ built ahead of it, all inert until a verb or flag ships:
 - **The valuation seam**
   (`skills/revenium/plugins/revenium-classifier/valuation_sources.py`).
   Its one shipped source is deliberately shaped after the server's
-  `baselines` surface — `hourlyRate`, `minutesPerUnit`, `provenance` — so
+  `baselines` surface (`hourlyRate`, `minutesPerUnit`, `provenance`) so
   that a later server-backed source is a like-for-like swap, not a
   rewrite.
 - **An independent capability probe on the correction path**
   (`skills/revenium/scripts/correct-assessment.sh:614-648`). Its whole
-  positive branch — reading a job's current version and appending
-  `--expected-entity-version` to the correction call — is written and
-  tested today, and stays dead code until the probed flag ships under a
+  positive branch (reading a job's current version and appending
+  `--expected-entity-version` to the correction call) is written and
+  tested today and stays dead code until the probed flag ships under a
   real spelling.
 - **A decided local-to-server provenance mapping**
   ([`docs/provenance-mapping.md`](provenance-mapping.md)). Every local
@@ -100,13 +94,12 @@ what this project chose to do on its own side while waiting.
 
 ## The concrete ask
 
-Five entries, and only five — everything this milestone actually hit while
-building, per its own roadmap instruction. Nothing plausible-but-unhit is
-included.
+The five requests cover gaps encountered during this milestone, as its
+roadmap required. Hypothetical gaps are excluded.
 
 1. **A read verb, `jobs types economics`, for the job-type `economics`
    surface** (the figures a server-computed job-type economics record
-   carries — monetization, `overheadPerUnit`, `unitMetricKey` — per
+   carries (monetization, `overheadPerUnit`, `unitMetricKey`) per
    `.planning/REQUIREMENTS.md`'s summary of the platform's own schema).
    Today only the write side is documented anywhere this project can see;
    read access is the blocking half, since this project has nothing to
@@ -115,7 +108,7 @@ included.
    **What changes here the day this ships:** `valuation_sources.register()`
    gains a server-backed source function, registered exactly as the
    shipped file source already is
-   (`valuation_sources.py:206-239`) — a new source function plus a config
+   (`valuation_sources.py:206-239`): a new source function plus a config
    key, no caller changes.
 
 2. **A read verb, `jobs types baselines`, for the job-type `baselines`
@@ -124,19 +117,19 @@ included.
    the read verb must return, at minimum, these three fields, by these
    names:
 
-   - `hourlyRate` — a positive number.
-   - `minutesPerUnit` — a positive number.
-   - `provenance` — a string.
+   - `hourlyRate`: a positive number.
+   - `minutesPerUnit`: a positive number.
+   - `provenance`: a string.
 
    A verb returning a differently-named or differently-shaped set of
    fields is one `valuation_sources.py`'s existing seam cannot consume
-   without a code change on this side — which defeats the point of having
+   without a code change on this side, which defeats the point of having
    built the seam ahead of time.
 
    **What changes here the day this ships:** `valuation_sources.register()`
    gains a server-backed source function, registered exactly as the
    shipped file source already is
-   (`valuation_sources.py:206-239`) — a new source function plus a config
+   (`valuation_sources.py:206-239`): a new source function plus a config
    key, no caller changes.
 
 3. **A read verb, `jobs types facts`, for the job-type `facts` surface**
@@ -146,7 +139,7 @@ included.
    **What changes here the day this ships:** `valuation_sources.register()`
    gains a server-backed source function, registered exactly as the
    shipped file source already is
-   (`valuation_sources.py:206-239`) — a new source function plus a config
+   (`valuation_sources.py:206-239`): a new source function plus a config
    key, no caller changes.
 
 4. **A version flag on `jobs outcome-update`.** Its exact spelling is the
@@ -161,10 +154,10 @@ included.
 5. **A CLI surface for job-outcome metrics**, fronting the platform's
    outcome-metrics surface (`POST /jobs/{id}/outcome/metrics` per
    `.planning/REQUIREMENTS.md`'s summary). Both halves of the gap are
-   missing today: no `jobs` verb writes a late-arriving outcome metric,
+   missing today: no `jobs` verb writes a late-arriving outcome metric
    and none of `revenium metrics`' ten subcommands reads one back.
 
-   **What changes here the day this ships:** nothing, today — no gate
+   **What changes here the day this ships:** nothing, today: no gate
    exists in this codebase for this one, because there was nothing to
    probe against. Saying so plainly is more useful to the implementer
    than inventing a gate that isn't there. What it would unlock: a way for
@@ -172,7 +165,7 @@ included.
    the correction path's current append-only overwrite of the original
    outcome value.
 
-No commitment above names a date, a phase number, or who will do the work.
+No commitment above names a date, a phase number or who will do the work.
 Each one describes a mechanism already sitting in this tree; the mechanism
 is checkable today and a schedule is not this project's promise to make.
 
@@ -188,21 +181,18 @@ supports_flag "jobs outcome-update" "--expected-entity-version"
 That spelling was derived, not observed: it is a straight kebab-case
 transliteration of the platform's own OAS field name,
 `expectedEntityVersion`, following the same kebab-case convention verified
-against three flag/field pairs the CLI already ships —
-`--outcome-value`/`outcomeValue`, `--outcome-currency`/`outcomeCurrency`,
+against three flag/field pairs the CLI already ships: `--outcome-value`/`outcomeValue`, `--outcome-currency`/`outcomeCurrency`
 and `--execution-status`/`executionStatus`.
 **`--expected-entity-version` has never been observed on a real `--help`.**
 
-The consequence is precise, and it is the reason this passage exists: if
-the shipped flag uses a different spelling, the probe above simply stays
-negative forever, the correction path fails open exactly as it does
-today, and the entire positive branch — the guarded `jobs get` read plus
-the conditional flag append — is silently inert. Working code that never
-runs, with no error anywhere to point at it.
+If the shipped flag uses a different spelling, the probe stays negative
+and the correction path continues to fail open. Neither the guarded
+`jobs get` read nor the conditional flag append runs, with no error
+indicating the mismatch.
 
 If the real spelling is different, tell us. The fix on this side is one
-constant — the string literal in the `supports_flag` call at
-`correct-assessment.sh:631` — and one fixture,
+constant (the string literal in the `supports_flag` call at
+`correct-assessment.sh:631`) and one fixture,
 `tests/fixtures/compat/jobs-outcome-update-versioned.golden.json`, which
 pins the version-carrying argv shape. Nothing else in this codebase
 depends on the guessed spelling.
@@ -213,25 +203,24 @@ depends on the guessed spelling.
   reading a new surface or adding a flag this project would opt into; none
   of it changes the record shape or the wire payload this skill already
   ships.
-- **Not direct HTTP access, and not an SDK.** The CLI-only boundary is
+- **Not direct HTTP access and not an SDK.** The CLI-only boundary is
   this project's own architectural choice, made and re-affirmed on the
   record; it is not up for renegotiation in this document.
 - **Not write verbs first.** Read access is what unblocks the seam this
   project has already built; the write side of `economics` / `baselines` /
   `facts` is out of scope here.
-- **Not a schedule.** Every commitment above is mechanical — a gate that
-  flips — not a date.
+- **Not a schedule.** Every commitment above is mechanical (a gate that
+  flips), not a date.
 
 ## Where the evidence lives
 
-- [`docs/wire-contract-audit-2.20.0.md`](wire-contract-audit-2.20.0.md) —
-  where the OAS field `expectedEntityVersion` was read from, and the
+- [`docs/wire-contract-audit-2.20.0.md`](wire-contract-audit-2.20.0.md): where the OAS field `expectedEntityVersion` was read from and the
   field-by-field audit of every request this skill already sends against
   the `2.20.0-SNAPSHOT` platform API spec.
-- [`docs/provenance-mapping.md`](provenance-mapping.md) — the server
+- [`docs/provenance-mapping.md`](provenance-mapping.md): the server
   `provenance` vocabulary names for the `baselines` and `facts`/outcome-
-  metrics surfaces named above, and the decided mapping from this
+  metrics surfaces named above and the decided mapping from this
   project's own evidence classes onto them.
-- [`docs/roi-read-surface-ask.md`](roi-read-surface-ask.md) — the sibling,
+- [`docs/roi-read-surface-ask.md`](roi-read-surface-ask.md): the sibling,
   earlier ask to the same team: fields missing from an existing display
   verb, deliberately not part of this page.

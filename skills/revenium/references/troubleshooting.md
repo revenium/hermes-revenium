@@ -36,8 +36,8 @@ bash ~/.hermes/skills/revenium/scripts/clear-halt.sh
 
 ## No data appearing in Revenium
 
-Start with this read-only report. It covers every pipeline stage, ordered by how often
-each stage causes the problem:
+Run the read-only diagnostic report. It checks each pipeline stage, starting with
+the most common failures:
 
 ```bash
 bash ~/.hermes/skills/revenium/scripts/diagnose.sh
@@ -47,9 +47,9 @@ It changes nothing and ships nothing unless you add `--tick` (which runs one
 real cron tick). It never prints the API key, so the output is safe to paste
 into an issue. Add `--profile <name>` to inspect one profile home of a fleet.
 
-Read `0. WHICH ENVIRONMENT` first. An `api-url` pointing at
-one environment while you watch another environment's dashboard makes every
-other stage look healthy while the data lands where you are not looking.
+Read `0. WHICH ENVIRONMENT` first. If `api-url` points to a different environment
+from the dashboard you are watching, the other stages can look healthy while
+the data arrives elsewhere.
 
 For the raw log on its own:
 
