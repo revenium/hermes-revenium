@@ -947,24 +947,34 @@ sessions_has_user_id() {
 
 # Phase 68 (D-17): memoised schema-capability probe for
 # `sessions.parent_session_id`, built exactly like sessions_has_user_id above
-# (PRAGMA capture inside the substitution, anchored here-string `grep -qx`,
-# never `| grep -q`). Fails OPEN to "absent" on an unreadable or empty capture
-# -- which is the safe direction for its only caller: it decides nothing, it
-# only picks the wording of a once-per-host warn when the root gate withheld an
-# owner (hermes-report.sh `_parent_column_absent_warn_once`). Nothing runs at
-# source time.
+# (anchored here-string `grep -qx`, never `| grep -q`). Three outcomes:
+#   0  the column is present.
+#   1  a successful PRAGMA returned columns and this is not one of them.
+#   2  could not tell: the PRAGMA failed, state.db is missing, or the capture
+#      was empty (a locked database, or no sessions table).
+# Only 0 and 1 are memoised. Its only caller picks the wording of a
+# once-per-host warn (hermes-report.sh `_parent_column_absent_warn_once`), and
+# that warn writes a permanent sentinel, so caching a transient failure as
+# "absent" would assert a false schema claim on a host that has the column and
+# then suppress the real warning forever. The database is opened -readonly so
+# the probe can never create it. Nothing runs at source time.
 _SESSIONS_HAS_PARENT_SESSION_ID_MEMO=""
 sessions_has_parent_session_id() {
   if [[ -z "${_SESSIONS_HAS_PARENT_SESSION_ID_MEMO}" ]]; then
-    local cols
-    cols="$(sqlite3 "${STATE_DB}" "PRAGMA table_info(sessions);" 2>/dev/null | cut -d'|' -f2)"
+    local pragma rc cols
+    [[ -f "${STATE_DB}" && -r "${STATE_DB}" ]] || return 2
+    pragma="$(sqlite3 -readonly -cmd '.timeout 3000' "${STATE_DB}" "PRAGMA table_info(sessions);" 2>/dev/null)"
+    rc=$?
+    (( rc == 0 )) && [[ -n "${pragma}" ]] || return 2
+    cols="$(cut -d'|' -f2 <<< "${pragma}")"
     if grep -qx 'parent_session_id' <<< "${cols}"; then
       _SESSIONS_HAS_PARENT_SESSION_ID_MEMO="yes"
     else
       _SESSIONS_HAS_PARENT_SESSION_ID_MEMO="no"
     fi
   fi
-  [[ "${_SESSIONS_HAS_PARENT_SESSION_ID_MEMO}" == "yes" ]]
+  [[ "${_SESSIONS_HAS_PARENT_SESSION_ID_MEMO}" == "yes" ]] && return 0
+  return 1
 }
 
 # Phase 61 (SUB-01/SUB-02/SUB-04/D-03/D-05/D-06/D-07): resolve a session's

@@ -675,5 +675,87 @@ class GateFaultDefersTests(_GateBase):
         self.assertEqual(self._warns(res), [], res['log_text'])
 
 
+_PRAGMA = 'PRAGMA table_info(sessions)'
+
+
+class ColumnProbeTests(_GateBase):
+    """WR-02: `sessions_has_parent_session_id` separates "the PRAGMA saw the
+    schema and the column is missing" from "the PRAGMA failed", and only the
+    first may become a warn plus a permanent sentinel."""
+
+    def _probe(self, fx, script_tail, remove_db=False):
+        if remove_db:
+            os.remove(fx['state_db'])
+        env = {
+            **os.environ,
+            'HOME': fx['shim_home'],
+            'HERMES_HOME': fx['hermes_home'],
+            'REVENIUM_STATE_DIR': fx['state_dir'],
+            'PATH': fx['bin_dir'] + os.pathsep + os.environ.get('PATH', ''),
+        }
+        script = 'source "$1/common.sh"; ' + script_tail
+        res = subprocess.run(
+            ['bash', '-c', script, 'bash', str(SCRIPTS_DIR)],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        return res.stdout.split()
+
+    _RC = 'sessions_has_parent_session_id; echo $?; '
+
+    def test_column_present_is_zero(self):
+        fx = self._build([_session(ROOT_SID)], parents={ROOT_SID: None})
+        self.assertEqual(self._probe(fx, self._RC), ['0'])
+
+    def test_successful_pragma_without_the_column_is_one(self):
+        fx = self._build([_session(ROOT_SID)], parents=None)
+        self.assertEqual(self._probe(fx, self._RC), ['1'])
+
+    def test_failed_pragma_is_two(self):
+        fx = self._build([_session(ROOT_SID)], parents={ROOT_SID: None})
+        self._install_sqlite_stub(fx, _PRAGMA)
+        self.assertEqual(self._probe(fx, self._RC), ['2'])
+
+    def test_missing_state_db_is_two_and_is_not_created(self):
+        fx = self._build([_session(ROOT_SID)], parents={ROOT_SID: None})
+        self.assertEqual(self._probe(fx, self._RC, remove_db=True), ['2'])
+        self.assertFalse(os.path.exists(fx['state_db']))
+
+    def test_a_failed_probe_is_not_memoised_as_absent(self):
+        """First call fails (stub on PATH), second succeeds in the SAME shell:
+        a memoised "no" would answer 1 here."""
+        fx = self._build([_session(ROOT_SID)], parents={ROOT_SID: None})
+        stub_dir = os.path.join(fx['tmpdir'], 'stubbin')
+        os.makedirs(stub_dir)
+        shutil.move(self._install_sqlite_stub(fx, _PRAGMA),
+                    os.path.join(stub_dir, 'sqlite3'))
+        tail = (
+            f'PATH={shlex.quote(stub_dir)}:"$PATH"; hash -r; '
+            f'{self._RC}'
+            f'PATH="${{PATH#{shlex.quote(stub_dir)}:}}"; hash -r; '
+            f'{self._RC}'
+        )
+        self.assertEqual(self._probe(fx, tail), ['2', '0'])
+
+    def test_failed_pragma_never_writes_the_absent_sentinel_or_warns(self):
+        """A withheld owner on a column-absent host reaches the warn; a PRAGMA
+        that cannot be read must not turn that into a permanent false claim."""
+        fx = self._build(
+            [_session(ROOT_SID)],
+            parents=None,
+            markers={ROOT_SID: [_task_marker(ROOT_SID, 'compat-muid-001'), _job_marker(ROOT_SID)]},
+        )
+        self._install_sqlite_stub(fx, _PRAGMA)
+        sentinel = os.path.join(
+            fx['state_dir'], 'markers', '.probe-warn',
+            'sessions-parent_session_id-absent')
+
+        res = self._tick(fx, 0)
+        self.assertEqual(res['rc'], 0, res['output'])
+        self.assertEqual(len(res['meter']), 1, res['meter'])
+        self.assertNotIn('--agentic-job-id', argv_to_flags(res['meter'][0]))
+        self.assertFalse(os.path.exists(sentinel))
+        self.assertNotIn('no sessions.parent_session_id column', res['log_text'])
+
+
 if __name__ == '__main__':
     unittest.main()

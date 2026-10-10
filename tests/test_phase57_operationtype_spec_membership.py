@@ -707,11 +707,14 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # the ship-site pre-gate (+12 before the per-marker loop, -4 inside
         # it) and the aux-cache deferral move the main() sites 4224->4293 and
         # 4455->4520. Measured from `git diff -U0`. Pure shift.
+        # Re-measured again (Phase 68 WR-02, same convention): the probe-rc
+        # handling in `_parent_column_absent_warn_once` (+5 net) sits above all
+        # three sites: 1848->1853, 4293->4298, 4520->4525. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1848),
-            ('hermes-report.sh', 4293),
-            ('hermes-report.sh', 4520),
+            ('hermes-report.sh', 1853),
+            ('hermes-report.sh', 4298),
+            ('hermes-report.sh', 4525),
             ('api-event-report.sh', 1932),
         }
         self.assertEqual(

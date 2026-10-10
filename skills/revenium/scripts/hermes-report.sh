@@ -994,7 +994,12 @@ _aux_warn_once() {
 # never reaches here at all. Never returns non-zero: a read-only state dir
 # degrades to an un-gated warn on this call only.
 _parent_column_absent_warn_once() {
-  if sessions_has_parent_session_id; then
+  # Only a probe that SAW the schema and found the column missing may warn:
+  # rc 2 (could not tell) neither logs nor writes the sentinel, which would
+  # otherwise make a transient fault permanent on a host that has the column.
+  local probe_rc=0
+  sessions_has_parent_session_id || probe_rc=$?
+  if [[ "${probe_rc}" -ne 1 ]]; then
     return 0
   fi
   local flag_path="${PROBE_WARN_FLAGS_DIR}/sessions-parent_session_id-absent"
