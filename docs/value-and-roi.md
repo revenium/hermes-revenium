@@ -1210,7 +1210,7 @@ reporter re-reads the sidecar at outcome time and reports status-only when it fi
 | Symptom | Likely cause | Check |
 |---|---|---|
 | `diagnose.sh` shows `enabled=false` after you edited the config | You edited a different profile's `config.json` or wrote `"true"` / `1` instead of a literal `true` | `python3 -c 'import json;print(json.load(open("<profile>/state/revenium/config.json"))["llmOutcomeEvaluation"])'` |
-| Jobs appear, but never any value | Every arc is `CANCELLED`, not `SUCCESS`; the job-declaration bar requires self-verification | Grep markers for `"status":"SUCCESS"` |
+| Jobs appear, but never any value | Every arc is `CANCELLED`, not `SUCCESS`; the job-declaration bar requires self-verification. A `CANCELLED` verdict is re-judged on later turns, so an arc whose work finished after the first verdict should gain a `SUCCESS` marker for the same job id; one already reported as `CANCELLED` stays that way | Grep markers for `"status":"SUCCESS"`; the job id appears twice in the marker file when a re-judge moved it |
 | `evaluator=INVALID(not-a-string)` | `evaluator` is set to a non-string | Fix the config; the runtime skips rather than falling back |
 | Outcome reports with no value flags | `reportability_status: "candidate"`; `experimentalReportEstimates` is not literally `true` | Read the sidecar's `reportability_status` |
 | Outcome reports with no value flags and the sidecar has none either | The evaluator abstained | Read the record's `abstention_reason` ([§6](#6-validation-and-abstention)) |

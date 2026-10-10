@@ -35,6 +35,39 @@ this repository.
   the key's own indentation (`  enabled:` / `  - a`, PyYAML's default dump style). It
   inserted the plugin two spaces deeper. The file stopped parsing and Hermes refused to
   start on that profile. The new item now takes the existing items' indentation.
+- Auxiliary usage no longer resurrects closed jobs. The first tick after an upgrade reports
+  each session's accumulated auxiliary usage, and every row carried its session's
+  `--agentic-job-id` whether or not that job was still live. Revenium creates a job for any
+  id it has not seen, so 151 long-closed jobs reappeared as nameless `PENDING` rows. An
+  auxiliary row now links to a job only when its create is in the jobs ledger and the job is
+  open or closed within `REVENIUM_JOBS_STALE_SECONDS`. The spend is still reported, without
+  the link. The aux ledger and transaction ids are unchanged.
+- A subagent's completion no longer reaches Revenium before its root job exists. The session
+  query visits a subagent before its root, so the completion carried the root's job id first;
+  Revenium created the job with no name or type, and the root's later `jobs create` got a 409
+  that was treated as success, losing both for good. The completion is now held, with nothing
+  ledgered, until the create is confirmed. The hold ends after `REVENIUM_JOBS_STALE_SECONDS`,
+  when the completion ships without the job link rather than strand the spend.
+- A `CANCELLED` job outcome is no longer reported while its session is still open. The
+  classifier uses `CANCELLED` as its "uncertain" verdict and writes it a couple of minutes
+  into a session, so jobs were closed `UNSUCCESSFUL` while the work was still running. The
+  outcome is now held until the session ends, or has been idle for
+  `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` (default one day). `SUCCESS`, `FAILED` and the
+  guardrail-halt cancel are reported as before. The held outcome is logged as
+  `outcome held while session open: id=`.
+- A job the classifier first judged `CANCELLED` is now re-judged, so a finished job can reach
+  Revenium as `SUCCESS` with a value. The classifier infers a session's jobs once, mid-session,
+  and `CANCELLED` is its "uncertain" verdict, so an arc whose work was still running (a
+  subagent mid-flight) was latched `CANCELLED` for the life of the session. A `CANCELLED`
+  arc is never evaluated, so it shipped with no job value. Every later trigger now re-checks
+  a still-`CANCELLED` job against the transcript as it stands, at the cost of one status-only
+  call per trigger however many jobs are open, and appends a new marker for the same job id
+  when the status moves. `SUCCESS` and `FAILED` stay final, the guardrail-halt cancel is never
+  re-judged, and a `SUCCESS` is evaluated exactly as a first-pass `SUCCESS` is. The
+  reporter now reports the latest marker for a job id (by marker `ts`, a tie going to the
+  later line), where it used to report and ledger the first. An operator correction in a job's
+  sidecar is not superseded by the new estimate. A `CANCELLED` outcome already ledgered
+  before the re-judge lands is final, as every ledgered outcome is.
 
 ## [v1.8] — 2026-10-05
 
