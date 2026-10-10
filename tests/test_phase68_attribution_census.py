@@ -583,7 +583,7 @@ class AuditTests(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix='gsd-p68-audit-')
         cls.denylist = Path(cls.tmp) / 'denylist.json'
         cls.denylist.write_text(json.dumps({
-            'tokens': ['zq7jobtypesentinel', 'person'],
+            'tokens': ['zq7jobtypesentinel', 'zqperson', 'coverage', 'false'],
             'deny_exact': [SENT_JOB_ID],
         }))
 
@@ -647,16 +647,65 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(rc, H.EXIT_USAGE)
 
     def test_matching_is_whole_word_and_case_insensitive(self):
-        rc, _o, _e = self._audit('A PERSON was named.\n',
+        rc, _o, _e = self._audit('A ZQPERSON was named.\n',
                                  '--denylist', str(self.denylist))
         self.assertEqual(rc, H.EXIT_AUDIT)
-        rc, _o, _e = self._audit('personnel are not a person-name hit?\n',
+        rc, _o, _e = self._audit('zqpersonnel are not a zqperson-name hit?\n',
                                  '--denylist', str(self.denylist))
-        # "person-name" splits on the hyphen, so the whole word "person" hits
+        # "zqperson-name" splits on the hyphen, so the whole word hits
         self.assertEqual(rc, H.EXIT_AUDIT)
-        rc, _o, _e = self._audit('personnel only\n',
+        rc, _o, _e = self._audit('zqpersonnel only\n',
                                  '--denylist', str(self.denylist))
         self.assertEqual(rc, H.EXIT_OK)
+
+    def test_a_deny_listed_generic_word_the_repo_already_publishes_is_exempt(self):
+        aggregate = json.dumps({'coverage': {'ok': False, 'cost': '1.00'}},
+                               indent=2)
+        rc, out, _e = self._audit(aggregate + '\n',
+                                  '--denylist', str(self.denylist))
+        self.assertEqual(rc, H.EXIT_OK, out)
+
+    def test_the_exemption_never_hides_a_real_corpus_identifier(self):
+        text = json.dumps({'coverage': 'zq7jobtypesentinel'}) + '\n'
+        rc, out, err = self._audit(text, '--denylist', str(self.denylist))
+        self.assertEqual(rc, H.EXIT_AUDIT)
+        self.assertNotIn('zq7jobtypesentinel', out + err)
+        rc, _o, _e = self._audit(f'see {SENT_JOB_ID} please\n',
+                                 '--denylist', str(self.denylist))
+        self.assertEqual(rc, H.EXIT_AUDIT)
+
+    def test_no_public_vocab_restores_the_strict_match(self):
+        rc, _o, _e = self._audit('coverage was measured\n',
+                                 '--denylist', str(self.denylist),
+                                 '--no-public-vocab')
+        self.assertEqual(rc, H.EXIT_AUDIT)
+
+    def test_audit_text_exempts_only_what_the_vocabulary_holds(self):
+        vocab = H.public_vocabulary()
+        self.assertIn('coverage', vocab)
+        self.assertNotIn('zq7jobtypesentinel', vocab)
+        hits = H.audit_text('zq7jobtypesentinel and coverage\n',
+                            {'tokens': ['zq7jobtypesentinel', 'coverage']},
+                            vocab)
+        self.assertEqual([masked for _n, masked in hits],
+                         ['zq' + '*' * (len('zq7jobtypesentinel') - 2)])
+
+    def test_the_record_cannot_exempt_its_own_words(self):
+        import io
+        import tarfile
+        from unittest import mock
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w') as tar:
+            for name, body in ((H.RECORD_REL_PATH, b'zqrecordonly'),
+                               ('docs/other.md', b'zqotherdoc')):
+                info = tarfile.TarInfo(name)
+                info.size = len(body)
+                tar.addfile(info, io.BytesIO(body))
+        done = mock.Mock(returncode=0, stdout=buf.getvalue())
+        with mock.patch.object(H.subprocess, 'run', return_value=done):
+            vocab = H.public_vocabulary()
+        self.assertIn('zqotherdoc', vocab)
+        self.assertNotIn('zqrecordonly', vocab)
 
 
 

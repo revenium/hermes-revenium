@@ -40,6 +40,7 @@ import argparse
 import datetime
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
@@ -1035,14 +1036,60 @@ def mask_token(token):
     return token[:2] + "*" * max(len(token) - 2, 0)
 
 
-def audit_text(text, denylist=None):
+PUBLIC_VOCAB_ROOTS = ("skills", "docs")
+PUBLIC_VOCAB_SUFFIXES = (".md", ".sh", ".py", ".json", ".yaml", ".yml")
+RECORD_REL_PATH = "docs/job-completion-attribution.md"
+
+
+def public_vocabulary(audited_path=None):
+    """Word tokens already public: this harness's own source (its schema keys
+    and literals), plus the committed `skills/` and `docs/` text at HEAD.
+
+    The deny-list is built from titles, names and ids, so it also holds
+    ordinary words ("false", "coverage", provider names) that hit the harness's
+    own JSON keys and any prose. A word the repository already publishes
+    cannot newly identify a corpus record, so it is exempt from the
+    token match. Exact ids and the shape regexes are never exempted. The
+    record and the audited file are left out so a document cannot exempt its
+    own words. Without git it falls back to the harness-only set."""
+    words = set(_TOKEN_RE.findall(
+        Path(__file__).read_text(encoding="utf-8",
+                                 errors="replace").lower()))
+    skip = {RECORD_REL_PATH}
+    if audited_path is not None:
+        try:
+            skip.add(Path(audited_path).absolute().relative_to(ROOT).as_posix())
+        except ValueError:
+            pass
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "archive", "HEAD",
+             *PUBLIC_VOCAB_ROOTS],
+            capture_output=True, timeout=60, check=False)
+        if done.returncode != 0:
+            return frozenset(words)
+        with tarfile.open(fileobj=io.BytesIO(done.stdout)) as archive:
+            for member in archive:
+                if (not member.isfile() or member.name in skip
+                        or not member.name.endswith(PUBLIC_VOCAB_SUFFIXES)):
+                    continue
+                data = archive.extractfile(member)
+                if data is not None:
+                    words.update(_TOKEN_RE.findall(
+                        data.read().decode("utf-8", "replace").lower()))
+    except (OSError, subprocess.SubprocessError, tarfile.TarError):
+        pass
+    return frozenset(words)
+
+
+def audit_text(text, denylist=None, public_vocab=frozenset()):
     """[(line_number, masked_token)] for every hit in `text`."""
     hits = []
     word_re = None
     exact = []
     if denylist:
-        tokens = sorted(set(denylist.get("tokens", [])), key=len,
-                        reverse=True)
+        tokens = sorted(set(denylist.get("tokens", [])) - set(public_vocab),
+                        key=len, reverse=True)
         if tokens:
             word_re = re.compile(
                 r"(?<![a-z0-9])(?:" + "|".join(re.escape(t) for t in tokens)
@@ -1082,7 +1129,9 @@ def cmd_audit(args):
         print(f"usage: cannot read the document: {type(exc).__name__}",
               file=sys.stderr)
         return EXIT_USAGE
-    hits = audit_text(text, None if args.shapes_only else denylist)
+    vocab = (frozenset() if args.shapes_only or args.no_public_vocab
+             else public_vocabulary(path))
+    hits = audit_text(text, None if args.shapes_only else denylist, vocab)
     for number, masked in hits:
         print(f"line {number}: {masked}")
     return EXIT_AUDIT if hits else EXIT_OK
@@ -3001,6 +3050,8 @@ def _parser():
     audit.add_argument("path")
     audit.add_argument("--denylist")
     audit.add_argument("--shapes-only", action="store_true")
+    audit.add_argument("--no-public-vocab", action="store_true",
+                       help="match every deny-list token, exempting none")
     return parser
 
 
