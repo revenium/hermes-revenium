@@ -337,5 +337,74 @@ class ResultsShapeTests(unittest.TestCase):
             self.assertIn(needle, body)
 
 
+SCRATCH_GATE_RESULT = SCRATCH_GATE.parent / 'jupi' / 'gate-result.json'
+FIX_GATE_HEADING = '## The fix gate'
+
+
+class FixGateRecordTests(unittest.TestCase):
+    """The verdict is transcribed from the pre-registered gate, never argued."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = RECORD_PATH.read_text(encoding='utf-8')
+        cls.lines = cls.text.splitlines()
+        cls.section = _section(cls.text, FIX_GATE_HEADING)
+        cls.verdicts = re.findall(r'\*\*(OPEN|CLOSED)\*\*', cls.section)
+
+    def _verdict_rows(self):
+        rows = _table_rows(_section(self.text, HEADINGS[0]))
+        return {r[0]: r for r in rows if r[0] in ('1', '3')}
+
+    def test_the_section_follows_the_fleet_read(self):
+        self.assertIn(FIX_GATE_HEADING, self.lines)
+        self.assertLess(self.lines.index('## Fleet corroborating read'),
+                        self.lines.index(FIX_GATE_HEADING))
+        self.assertLess(self.lines.index(FIX_GATE_HEADING),
+                        self.lines.index('## What this does not establish'))
+
+    def test_it_carries_exactly_one_verdict_word(self):
+        self.assertEqual(len(self.verdicts), 1, self.verdicts)
+
+    def test_it_states_the_threshold_as_a_fraction_and_a_percent(self):
+        flat = _flat(self.section)
+        threshold = harness.GATE_THRESHOLD
+        self.assertIn(f'{threshold.numerator}/{threshold.denominator}', flat)
+        self.assertIn(harness.display_pct(threshold), flat)
+
+    def test_it_states_both_parts_and_the_bounds(self):
+        flat = _flat(self.section).lower()
+        for needle in ('part (a)', 'part (b)', 'named-cause lower bound',
+                       'total lower bound', 'upper bound'):
+            self.assertIn(needle, flat)
+
+    def test_a_closed_gate_is_a_documented_limit_with_rows_settled(self):
+        if self.verdicts != ['CLOSED']:
+            self.skipTest('the gate is not closed')
+        self.assertIn('### Documented limit', self.section)
+        limit = _flat(_section(self.section, '### Documented limit', '### '))
+        for needle in ('no correctness fix ships', 'nearest-preceding',
+                       'nearest-match', 'D-17 shipped regardless'):
+            self.assertIn(needle, limit)
+        for row in self._verdict_rows().values():
+            self.assertTrue(row[-1].startswith('CONFIRMED'), row[-1])
+
+    def test_an_open_gate_leaves_rows_one_and_three_pending(self):
+        if self.verdicts != ['OPEN']:
+            self.skipTest('the gate is not open')
+        for row in self._verdict_rows().values():
+            self.assertTrue(row[-1].startswith('PENDING'), row[-1])
+
+    @unittest.skipUnless(SCRATCH_GATE_RESULT.is_file(),
+                         'the gitignored gate result is not on this checkout')
+    def test_the_verdict_word_and_figures_equal_the_gate_result(self):
+        result = json.loads(SCRATCH_GATE_RESULT.read_text())
+        self.assertEqual(self.verdicts == ['OPEN'], bool(result['opens']))
+        flat = _flat(self.section)
+        for key in ('named_lower_display_pct', 'total_lower_display_pct',
+                    'upper_display_pct'):
+            self.assertIn(result[key], flat)
+        self.assertEqual(Fraction(result['threshold']), harness.GATE_THRESHOLD)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -29,9 +29,9 @@ committed before that read; the commit that added them is the pre-registration.
 
 | # | Criterion | Source | Verdict |
 |---|-----------|--------|---------|
-| 1 | The denominator error behind the "3.2%" is recorded in a tracked doc, and any measured misattribution that clears the pre-registered gate is fixed at its source | ROADMAP criterion 1, restated | PENDING — measured below |
+| 1 | The denominator error behind the "3.2%" is recorded in a tracked doc, and any measured misattribution that clears the pre-registered gate is fixed at its source | ROADMAP criterion 1, restated | CONFIRMED — the denominator error is recorded above; the measured misattribution did not clear the pre-registered gate, so it stands as a documented limit, not a fix |
 | 2 | The attribution rate is measured on the reference host and stated as a number in a tracked doc | ROADMAP criterion 2 | MEASURED — 96.36% cost-weighted, `agent == Jupiter` slice, 30 days to 2026-10-09; see below |
-| 3 | Attribution stays exact-match only: no fuzzy, nearest-match or fallback binding is introduced by any fix | ROADMAP criterion 3 | PENDING — measured below |
+| 3 | Attribution stays exact-match only: no fuzzy, nearest-match or fallback binding is introduced by any fix | ROADMAP criterion 3 | CONFIRMED — no fuzzy, nearest-match or fallback binding was introduced; D-17 narrowed attribution; the pre-existing fallback is recorded as a limit |
 
 **TRU-05 status:** PENDING — the measurement has run (criterion 2); criteria 1 and 3 and the final verdict are settled after the fix decision is reviewed.
 
@@ -473,6 +473,40 @@ No fleet figure is published. Nothing is estimated, extrapolated or substituted
 for it, and no other host stands in for it. The reference host's figures above
 are the only numbers of record; they are the figures of one agent slice on one
 host, and nothing here corroborates them elsewhere.
+
+## The fix gate
+
+The pre-registered gate was recomputed on the frozen harness from the
+pre-registered inputs and compared byte for byte with the result taken at the
+measurement. The two files are identical. Nothing below is re-weighted,
+re-thresholded or re-argued; it is transcribed.
+
+- **Threshold:** `1/100`, displayed as 1.00%, comparator greater than or equal
+  to, of the `agent == Jupiter` total of $230.40 for the same pull.
+- **Named-cause lower bound:** $0.0557, 0.02% of the slice total.
+- **Total lower bound:** $0.0557, 0.02% of the slice total.
+- **Upper bound:** $0.0557, 0.02% of the slice total.
+- **Part (a)**, the total lower bound reaches the threshold: false.
+- **Part (b)**, the named-cause lower bound reaches the threshold: false.
+
+The gate opens on part (b). Part (b) is false, so the gate is **CLOSED**.
+
+### Documented limit
+
+The measured misattribution did not clear the pre-registered gate: 0.02% of the
+slice's dollars against a threshold of 1.00%. As registered, no correctness fix
+ships in Phase 68, and the marker schema and the classifier are unchanged.
+
+The file-position resolver stays as it was. It carries the nearest-preceding
+fallback from the commit named above, which is itself a nearest-match: a task
+marker with no job after it takes the closest job before it. This record does
+not claim the fallback is exact. It measured the dollars the fallback and the
+forward rule put on a wrong sibling in this window, and they did not reach the
+gate.
+
+D-17 shipped regardless of the verdict, as the gate's own rule says: the legacy
+root gate narrowed attribution rather than widening it. The limit is
+one host, one pass and six multi-job sessions; see the next section.
 
 ## What this does not establish
 
