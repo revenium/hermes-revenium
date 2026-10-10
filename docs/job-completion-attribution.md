@@ -81,14 +81,21 @@ Plan 02 of this phase (commits `ab0b02d`, `d6d368c`, `eabb1b9`) gives the legacy
 reporter the same rule, at the ship sites only:
 
 - A helper in `common.sh` answers one `sqlite3 -readonly` query per session and
-  returns true only on an exact positive answer. It fails closed on an empty id,
-  an id containing a quote (never queried), an unreadable `state.db`, a missing
-  column, a missing row or a non-NULL parent.
+  has three outcomes. It confirms a root only on an exact positive answer: the
+  row exists and its parent is NULL. It confirms a non-root on a non-NULL
+  parent, a missing row, a missing column, an empty id or an id containing a
+  quote (never queried). It reports that it could not tell when `state.db` is
+  unreadable or locked, or sqlite fails for any other reason.
 - The per-marker `meter completion` block passes the three job flags only for a
   confirmed root. The auxiliary-usage cache follows its session's main row, so
   an auxiliary row never carries a job its main row withholds.
-- Anything else omits the job id and still ships the completion: withhold the
-  dimension, never the event. Spend is never lost; it is simply unattributed.
+- A session confirmed not to be a root omits the job id and still ships the
+  completion: withhold the dimension, never the event. That spend is
+  unattributed.
+- A read failure ships nothing for the session and writes no ledger line, so a
+  later tick asks again and the job id is not lost. The tick logs one aggregate
+  warn however many sessions are affected. That spend is delayed, not
+  unattributed.
 - A confirmed root ships argv byte-identical to before; the golden fixtures are
   unchanged. A session that is not confirmed ships the same argv minus the three
   job flags, with the same `--transaction-id`, so nothing double-reports.
