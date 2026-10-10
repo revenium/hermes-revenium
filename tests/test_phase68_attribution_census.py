@@ -409,6 +409,35 @@ class OutDirGuardTests(unittest.TestCase):
             shutil.rmtree(outside, ignore_errors=True)
             _cleanup(tmp)
 
+    def test_a_non_empty_out_dir_is_refused_before_any_remote_command(self):
+        tmp = _scratch_root()
+        try:
+            host = _tracer_host(tmp)
+            out = Path(tmp) / 'pulled'
+            out.mkdir()
+            stale = out / 'completions-page-99.json'
+            stale.write_text('[]')
+            rc, _o, err = _run_main(host.pull_argv(out))
+            self.assertEqual(rc, H.EXIT_USAGE, err)
+            self.assertIn('not empty', err)
+            self.assertEqual(sorted(p.name for p in out.iterdir()),
+                             [stale.name])
+            self.assertFalse(host.ssh_log.exists()
+                             and host.ssh_log.read_text().strip())
+        finally:
+            _cleanup(tmp)
+
+    def test_an_existing_empty_out_dir_is_still_accepted(self):
+        tmp = _scratch_root()
+        try:
+            host = _tracer_host(tmp)
+            out = Path(tmp) / 'pulled'
+            out.mkdir()
+            rc, _o, err = _run_main(host.pull_argv(out))
+            self.assertEqual(rc, H.EXIT_OK, err)
+        finally:
+            _cleanup(tmp)
+
     def test_a_tracked_looking_path_inside_the_repo_is_refused_too(self):
         tmp = _scratch_root()
         try:

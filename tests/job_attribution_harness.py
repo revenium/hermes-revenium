@@ -644,6 +644,11 @@ def cmd_pull(args):
         print("refused: --out-dir is not ignored by git "
               "(git check-ignore -q failed)", file=sys.stderr)
         return EXIT_USAGE
+    if out_dir.exists() and (not out_dir.is_dir() or any(out_dir.iterdir())):
+        print("refused: --out-dir is not empty; a second pull into it would "
+              "leave the first pull's stale pages and markers in the "
+              "manifest", file=sys.stderr)
+        return EXIT_USAGE
     try:
         from_iso, to_iso = _window(args)
     except ValueError as exc:
