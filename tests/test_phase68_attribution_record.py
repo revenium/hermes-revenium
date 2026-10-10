@@ -294,6 +294,19 @@ class ResultsShapeTests(unittest.TestCase):
         self.assertIn('applies only if D-13 ships', ' '.join(m1[0]))
         self.assertIn('nothing is backfilled', _flat(section))
 
+    def test_the_fleet_section_is_separate_and_names_no_host_or_agent(self):
+        self.assertIn('## Fleet corroborating read', self.lines)
+        self.assertLess(self.lines.index('## Before and after'),
+                        self.lines.index('## Fleet corroborating read'))
+        self.assertLess(self.lines.index('## Fleet corroborating read'),
+                        self.lines.index('## What this does not establish'))
+        body = _section(self.text, '## Fleet corroborating read')
+        self.assertTrue('not pooled with the Jupi figures' in body
+                        or 'not obtained' in body)
+        self.assertNotIn('Hermes-', self.text)
+        self.assertNotRegex(
+            self.text, r'(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])')
+
     def test_the_limits_name_the_required_gaps(self):
         flat = _flat(_section(self.text, '## What this does not establish')).lower()
         for needle in ('single-job sessions', 'never inferred',

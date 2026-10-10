@@ -456,8 +456,27 @@ percentage points of coverage for 0.02% of correctness.
 Only transactions shipped after a deploy carry the change; nothing is
 backfilled. A rewrite of history is never the proof of a fix (TRU-07).
 
+## Fleet corroborating read
+
+Fleet corroboration was not obtained. The fleet host was unreachable on the
+research probe and on every probe taken for this phase, and after the third the
+operator decided to stop and not retry. Each probe was a read-only `true`
+command over ssh, and each ended the same way:
+
+| Attempt | UTC time | Outcome class |
+|---------|----------|---------------|
+| 1 | 2026-10-09T23:05:01Z | timeout |
+| 2 | 2026-10-09T23:35:46Z | timeout |
+| 3 | 2026-10-10T00:06:34Z | timeout |
+
+No fleet figure is published. Nothing is estimated, extrapolated or substituted
+for it, and no other host stands in for it. The reference host's figures above
+are the only numbers of record; they are the figures of one agent slice on one
+host, and nothing here corroborates them elsewhere.
+
 ## What this does not establish
 
+- No fleet host corroborates these figures; the read was not obtained.
 - Single-job sessions are untestable by re-inference. The 936 single-job
   sessions and their $221.82 are correct by construction of the method and
   unmeasured by it.
