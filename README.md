@@ -42,6 +42,60 @@ the agent's task, tracks each task arc as a billable job and meters every tool c
 Shell hooks halt the agent when a budget rule blocks it. A successful job can also include an
 estimated economic value, which Revenium combines with metered cost to display ROI.
 
+## What you get
+
+| | |
+|---|---|
+| **Semantic task types** | Every completion ships with `--task-type` and `--operation-type` from a controlled vocabulary. A plugin infers them from the session transcript instead of asking the agent to label itself. |
+| **Agentic job tracking** | Discrete task arcs become Revenium jobs with immutable, once-only outcomes. Their transactions link back via `--agentic-job-id`. |
+| **Tool-event metering** | Every Hermes tool call is metered through `revenium meter tool-event`, including its name, duration, success and error. |
+| **Structural budget guardrails** | Hermes shell hooks read a local guardrail snapshot before every LLM call and every tool call, so enforcement does not depend on the agent choosing to comply. |
+| **Job value estimation** *(experimental, opt-in, off by default)* | On a `SUCCESS` arc only, one bounded LLM call on your own provider estimates the job's economic value from two independently capped inputs. It is an unverified model estimate, not an observed outcome. Absent or malformed config fails closed, so an existing install meters byte-identically to before. Start with the [practical overview](docs/value-overview.md); [Job value and ROI](docs/value-and-roi.md) is the full reference. |
+| **Auxiliary usage metering** *(on by default)* | Hermes' own compression, title-generation, approval, vision, web-extract and session-search LLM calls are metered as their own `--operation-type AUX` completions from a fixed `aux_*` vocabulary. This permanently increases reported spend against unchanged traffic; an off switch is available. **[Auxiliary usage migration](docs/migration-auxiliary-usage.md)** has the measured size and the caveats. |
+
+> When value estimation is enabled, `--outcome-value`
+> ships the **low** bound of the low/base/high band: the conservative figure, not the base.
+> All three bounds and their provenance are included in `--metadata`, so the full range
+> remains recoverable. The value on a Revenium dashboard is the floor of the range.
+> [Job value and ROI](docs/value-and-roi.md) documents the whole path.
+
+## Prerequisites
+
+- [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) installed and running
+- [Revenium](https://app.revenium.ai/connections) API key, Team ID, Tenant ID and User ID
+- [`revenium` CLI](https://github.com/revenium/revenium-cli): `brew install revenium/tap/revenium`
+- `sqlite3` and `python3` on `PATH`
+
+```bash
+revenium config show
+sqlite3 --version
+python3 --version
+```
+
+## Quick start
+
+```bash
+hermes skills install revenium/hermes-revenium/skills/revenium
+bash ~/.hermes/skills/revenium/references/bootstrap.sh
+```
+
+The first command installs the skill through Hermes' native path; it scans `SAFE`, so no
+`--force` is needed. The second fetches `scripts/` and `plugins/`, which that path cannot
+carry, then completes setup: credentials, classifier plugin, shell hooks,
+guardrail budget rule, per-minute cron, gateway restart. It is idempotent, so re-running it
+is always safe.
+
+Then start a Hermes session and **approve the hooks** at the prompt Hermes shows the first
+time each one fires. Until you do, they are registered but inert.
+
+> **Running more than one Hermes profile?** Add `--profile <name>` (repeatable) or
+> `--all-profiles`. Every command here is scoped to **one** Hermes home, and the default
+> home does not include the others. A profile you never name gets no plugin, hooks or
+> cron and meters nothing. See [Multi-profile / fleet installs](docs/fleet.md).
+
+See [docs/installation.md](docs/installation.md) for full instructions, the other three
+install paths and security-scanner output.
+
 ## Architecture
 
 <div align="center">
@@ -89,23 +143,6 @@ flowchart LR
 The plugin and hooks do not call Revenium directly. They append local files; the cron
 worker is the only component that sends metering and job data to the Revenium platform.
 
-## What you get
-
-| | |
-|---|---|
-| **Semantic task types** | Every completion ships with `--task-type` and `--operation-type` from a controlled vocabulary. A plugin infers them from the session transcript instead of asking the agent to label itself. |
-| **Agentic job tracking** | Discrete task arcs become Revenium jobs with immutable, once-only outcomes. Their transactions link back via `--agentic-job-id`. |
-| **Tool-event metering** | Every Hermes tool call is metered through `revenium meter tool-event`, including its name, duration, success and error. |
-| **Structural budget guardrails** | Hermes shell hooks read a local guardrail snapshot before every LLM call and every tool call, so enforcement does not depend on the agent choosing to comply. |
-| **Job value estimation** *(experimental, opt-in, off by default)* | On a `SUCCESS` arc only, one bounded LLM call on your own provider estimates the job's economic value from two independently capped inputs. It is an unverified model estimate, not an observed outcome. Absent or malformed config fails closed, so an existing install meters byte-identically to before. Start with the [practical overview](docs/value-overview.md); [Job value and ROI](docs/value-and-roi.md) is the full reference. |
-| **Auxiliary usage metering** *(on by default)* | Hermes' own compression, title-generation, approval, vision, web-extract and session-search LLM calls are metered as their own `--operation-type AUX` completions from a fixed `aux_*` vocabulary. This permanently increases reported spend against unchanged traffic; an off switch is available. **[Auxiliary usage migration](docs/migration-auxiliary-usage.md)** has the measured size and the caveats. |
-
-> When value estimation is enabled, `--outcome-value`
-> ships the **low** bound of the low/base/high band: the conservative figure, not the base.
-> All three bounds and their provenance are included in `--metadata`, so the full range
-> remains recoverable. The value on a Revenium dashboard is the floor of the range.
-> [Job value and ROI](docs/value-and-roi.md) documents the whole path.
-
 ## What's actually installed
 
 The package installs six pieces. Only one is the skill:
@@ -131,43 +168,6 @@ sidecar and remotely through `revenium jobs outcome-update`, which adds a revisi
 than replacing one. The original stays byte-identical and readable. It is operator-only and
 deliberately unreachable from cron, and `--dry-run` shows what it would do without writing
 anything, locally or remotely.
-
-## Quick start
-
-```bash
-hermes skills install revenium/hermes-revenium/skills/revenium
-bash ~/.hermes/skills/revenium/references/bootstrap.sh
-```
-
-The first command installs the skill through Hermes' native path; it scans `SAFE`, so no
-`--force` is needed. The second fetches `scripts/` and `plugins/`, which that path cannot
-carry, then completes setup: credentials, classifier plugin, shell hooks,
-guardrail budget rule, per-minute cron, gateway restart. It is idempotent, so re-running it
-is always safe.
-
-Then start a Hermes session and **approve the hooks** at the prompt Hermes shows the first
-time each one fires. Until you do, they are registered but inert.
-
-> **Running more than one Hermes profile?** Add `--profile <name>` (repeatable) or
-> `--all-profiles`. Every command here is scoped to **one** Hermes home, and the default
-> home does not include the others. A profile you never name gets no plugin, hooks or
-> cron and meters nothing. See [Multi-profile / fleet installs](docs/fleet.md).
-
-See [docs/installation.md](docs/installation.md) for full instructions, the other three
-install paths and security-scanner output.
-
-## Prerequisites
-
-- [Hermes Agent](https://hermes-agent.nousresearch.com/docs/) installed and running
-- [Revenium](https://app.revenium.ai/connections) API key, Team ID, Tenant ID and User ID
-- [`revenium` CLI](https://github.com/revenium/revenium-cli): `brew install revenium/tap/revenium`
-- `sqlite3` and `python3` on `PATH`
-
-```bash
-revenium config show
-sqlite3 --version
-python3 --version
-```
 
 ## Documentation
 
