@@ -97,8 +97,8 @@ reporter the same rule, at the ship sites only:
   warn however many sessions are affected. That spend is delayed, not
   unattributed.
 - A confirmed root ships argv byte-identical to before; the golden fixtures are
-  unchanged. A session that is not confirmed ships the same argv minus the three
-  job flags, with the same `--transaction-id`, so nothing double-reports.
+  unchanged. A session confirmed not to be a root ships the same argv minus the
+  three job flags, with the same `--transaction-id`, so nothing double-reports.
 - A host whose `sessions` table has no `parent_session_id` column gets one warn
   per host, and its jobs still exist but show $0 cost.
 - The `jobs create` sites are deliberately not gated: creation stays fail-open.
@@ -204,9 +204,12 @@ the loop, so the measurement is not one classifier grading itself.
   usage joined by timestamp, else by assistant-message count, else uniformly.
   The lower bound counts only agreed turns; the upper bound adds the dollar share
   of disagree, unstable and invalid turns whose candidate labels do not include
-  the resolver's single owner. Both bounds are published.
-- **Agreement:** the raw agreement rate and Cohen's kappa are published, turn-weighted
-  and dollar-weighted. Nothing gates on them.
+  the resolver's single owner. Both bounds are published. After the read, review
+  widened the upper bound only: every invalid turn, and every paid session with
+  no transcript, now counts in full. The gate's quantity is the lower bound, and
+  this read had no such dollars, so no published figure moved.
+- **Agreement:** the raw agreement rate and Cohen's kappa are published, per turn
+  (each turn counted once) and dollar-weighted. Nothing gates on them.
 - **Call settings:** temperature 0, at most 4096 output tokens.
 - **Spend:** a hard cap of $25 and 120 calls for the whole phase, enforced on
   recorded spend (settled plus unsettled reservations) and recorded calls before
