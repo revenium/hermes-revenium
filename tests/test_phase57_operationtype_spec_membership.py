@@ -676,12 +676,39 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # rewrite in the row loop (3) and the aliased provider branch (+6 net),
         # all above the event site (+36): 1896->1932. Pure shift again; count
         # and values unchanged.
+        # Job-lifecycle guards (phantom-jobs fix, 2026-10-09): hermes-report.sh
+        # gained a block of job-lifecycle helpers ABOVE report_auxiliary_usage
+        # (and a three-variable memo declaration inside it), shifting the aux
+        # site 1783->2004 (+221). The marker-split and markerless sites sit
+        # below the per-session RC-2 hold gate, the resolved_aid ts read and
+        # the RC-3 outcome-stage block as well, shifting them by +345 in total:
+        # 4175->4520, 4394->4739. api-event-report.sh is untouched. Pure shift
+        # -- the COUNT (4) and the emitted VALUE expressions are unchanged;
+        # re-measured with `grep -n -- '--operation-type'`, not by arithmetic.
+        # classifier-premature-cancel (2026-10-10): the outcome-queue reducer
+        # `_reduce_job_outcome_queue` (a 50-line helper with its comment) was
+        # added beside the other job-lifecycle helpers, ABOVE all three
+        # hermes-report.sh sites, and a 2-line edit to the owner-resolution
+        # comment inside the per-session marker block sits above the two
+        # main() sites (the reducer's call site sits BELOW them). Net shift
+        # +50 for the aux site and +52 for the other two: 2004->2054,
+        # 4520->4572, 4739->4791. api-event-report.sh is untouched. Pure shift once more --
+        # the COUNT (4) and the emitted VALUE expressions are unchanged;
+        # re-measured with `grep -n -- '--operation-type'`.
+        # Greptile review fixes on #152 (2026-10-10): the locked-probe guard in
+        # `_open_session_defers_cancelled` (+13) sits above all three
+        # hermes-report.sh sites, and the first-marker-per-id ownership guard
+        # (+8) above the two main() sites: 2054->2067, 4572->4593, 4791->4812.
+        # api-event-report.sh gains the same ownership guard (+5):
+        # 1932->1937. Pure shift -- the COUNT (4) and the emitted VALUE
+        # expressions are unchanged; re-measured with
+        # `grep -n -- '--operation-type'`.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 1783),
-            ('hermes-report.sh', 4175),
-            ('hermes-report.sh', 4394),
-            ('api-event-report.sh', 1932),
+            ('hermes-report.sh', 2067),
+            ('hermes-report.sh', 4593),
+            ('hermes-report.sh', 4812),
+            ('api-event-report.sh', 1937),
         }
         self.assertEqual(
             found_locations, expected_locations,

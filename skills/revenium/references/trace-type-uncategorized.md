@@ -29,7 +29,7 @@ echo "${REVENIUM_MARKERS_DIR:-${HOME}/.hermes/state/revenium/markers}"
 cat ~/.hermes/state/revenium/markers/<root-session-id>.jsonl 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "no marker file for this session"
 ```
 
-If that marker file does not exist, or exists with no `kind:"job"` line inside it, the reporter
+If that marker file does not exist or exists with no `kind:"job"` line inside it, the reporter
 falls back to `uncategorized` for every completion in that trace. The sections below describe
 each on-disk signature.
 
@@ -48,14 +48,14 @@ writing the marker. A registration outage, where Hermes never loaded the plugin,
 caused a nine-day fleet-wide incident. The check below detects this outage.
 
 First confirm which process serves this profile. The plugin is loaded once
-at process start, and on a desktop-app host the gateway is usually not the owner:
+at process start and on a desktop-app host the gateway is usually not the owner:
 
 ```bash
 ps -axo pid,lstart,command | grep -E 'hermes.*(serve|gateway run)' | grep -v grep
 ```
 
 A `--profile <name> serve` process is spawned by the Hermes desktop app: quit and reopen the
-app to reload it. `hermes gateway restart` will not affect it, and a gateway whose
+app to reload it. `hermes gateway restart` will not affect it and a gateway whose
 `HERMES_HOME` is the default home never touches a profile at all. Compare each process's start
 time against the plugin's mtime. A server older than the plugin cannot have loaded it.
 
@@ -69,18 +69,18 @@ bash ~/.hermes/skills/revenium/scripts/plugin-status.sh
 This replaces an older instruction that listed the skill bundle's own plugin source directory.
 That directory is not one of Hermes' plugin-discovery roots, so a listing of it succeeds whether
 or not the plugin is loaded. It reported "present" throughout the nine-day
-outage. `plugin-status.sh` checks registration and runtime liveness instead, and its exit code
+outage. `plugin-status.sh` checks registration and runtime liveness instead and its exit code
 tells you what to do next:
 
 | Exit code | Meaning | Next step |
 |-----------|---------|-----------|
-| `1` | Not registered — the plugin directory is absent from a Hermes plugin-discovery root, or it is not listed in `plugins.enabled` | Run `bash ~/.hermes/skills/revenium/scripts/install-plugin.sh` |
-| `2` | Registered but not firing (liveness `stalled`) — the plugin is placed and enabled, but the running gateway is not producing sentinels for recently-ended sessions | Restart the Hermes gateway so it reloads the plugin, then re-run `plugin-status.sh` to confirm |
-| `0` | Healthy — the registration path is fine | The cause is elsewhere in this document; continue to the sections below |
+| `1` | Not registered: the plugin directory is absent from a Hermes plugin-discovery root or it is not listed in `plugins.enabled` | Run `bash ~/.hermes/skills/revenium/scripts/install-plugin.sh` |
+| `2` | Registered but not firing (liveness `stalled`): the plugin is placed and enabled, but the running gateway is not producing sentinels for recently-ended sessions | Restart the Hermes gateway so it reloads the plugin, then re-run `plugin-status.sh` to confirm |
+| `0` | Healthy: the registration path is fine | The cause is elsewhere in this document; continue to the sections below |
 
 If `plugin-status.sh` reports exit `0` and the marker file is still never written after a fresh
-session completes, an operator cannot resolve it by re-running the cron. It
-needs the classifier plugin itself investigated. Re-running
+session completes, an operator cannot resolve it by re-running the cron. Investigate
+the classifier plugin instead. Re-running
 `bash ~/.hermes/skills/revenium/scripts/cron.sh` will not create the marker; the marker is written
 by the classifier, not the reporter.
 
@@ -94,7 +94,7 @@ cat ~/.hermes/state/revenium/markers/<root-session-id>.jsonl | grep '"kind":"job
 ```
 
 The classifier attempted classification but produced nothing usable: the LLM
-call returned zero jobs (a valid, non-error outcome), the LLM call itself failed, or every
+call returned zero jobs (a valid, non-error outcome), the LLM call itself failed or every
 candidate job it proposed failed label validation. These three cases currently leave an
 identical on-disk footprint. See the note at the end of this file for what that means for
 diagnosing this specific mode today.
@@ -125,7 +125,7 @@ In a multi-profile fleet, each profile has its own `~/.hermes/profiles/<name>/`
 home. If the cron wrapper that invokes `cron.sh` sets a different `HERMES_HOME` /
 `REVENIUM_STATE_DIR` per profile than the one the classifier's own Hermes process resolves for
 that profile, the two sides read and write different `markers/` directories for the same
-session, and the reporter never sees a marker that genuinely exists.
+session and the reporter never sees a marker that genuinely exists.
 
 Confirm both sides resolve to the identical directory for the profile in question. The
 cron wrapper's `HERMES_HOME`/`REVENIUM_STATE_DIR` assignment for that profile must match what the
@@ -139,7 +139,7 @@ affect.
 
 Some fleets use a wrapper script that is not part of this repository, for example, a
 `cron-fleet.sh` that this skill does not ship and cannot read. This documents an assumption about
-one such deployment. No code in this repository accommodates a file it cannot read,
+one such deployment. No code in this repository accommodates a file it cannot read
 and there is no detection step or compatibility shim for it here.
 
 Such a wrapper typically repoints `HERMES_HOME` to give each profile its own Hermes home, rather
@@ -148,7 +148,7 @@ layout the cron side and the classifier side agree on the markers directory by c
 both run against the exact same per-profile `HERMES_HOME`, so there is no separate namespace for
 the two to disagree about.
 
-Do not run this repository's own repository-native per-profile cron (`install-cron.sh` invoked
+Do not run this repository's per-profile cron (`install-cron.sh` invoked
 once per profile home) alongside such a wrapper. Two schedulers metering the same sessions
 double-report: each scheduler maintains its own ledger view of what it has already reported, so
 running both against the same profile's sessions produces duplicate `revenium meter completion`
@@ -172,7 +172,7 @@ zero-marker fallback path, a synthetic `unclassified-<timestamp>` value with no 
 comparing this timestamp against something else to check a timing race, use field 4.
 
 The reporter defers a session until either the classifier's `.ready` sentinel
-lands under the markers directory's `.ready/` subdirectory, or the session ages past a settle
+lands under the markers directory's `.ready/` subdirectory or the session ages past a settle
 window, whichever comes first. If job inference is slow enough (heavy concurrent load, a slow
 LLM call) that neither the sentinel nor the marker lands before the settle window elapses, the
 reporter reports the session as `uncategorized` and never revisits it, even after the marker
@@ -193,7 +193,7 @@ since it produces the same end symptom as the other three failure modes.
 ## Reason codes in the metering log
 
 Every time the reporter falls back to `uncategorized`, it also writes exactly one `reason=` line
-to `revenium-metering.log` naming which of a closed, three-literal vocabulary caused it. Grep the
+to `revenium-metering.log` with one of three fixed reason codes. Grep the
 log directly rather than guessing from the wire value alone:
 
 ```bash
@@ -202,9 +202,9 @@ grep 'reason=' ~/.hermes/state/revenium/revenium-metering.log | tail -20
 
 | Reason literal | On-disk symptom | Next step |
 |-----------------|------------------|-----------|
-| `reason=plugin_unregistered` | `plugin-status.sh` reports the classifier is not registered (exit `1`) or registered but not firing (exit `2`) — checked and reported FIRST, ahead of any marker-state reasoning | See "No marker file for the root session" above; run `plugin-status.sh` and follow its exit-code table |
-| `reason=no_job_classified` | The plugin is registered and healthy, but the marker lookup found nothing usable — either no marker file yet, or a marker file with no `kind:"job"` line | See "Marker file present, no job record" and "Reporter runs before the classifier writes the marker" above |
-| `reason=marker_lookup_failed` | The plugin is registered and healthy, but reading the marker file itself raised an error (for example, something other than a plain file occupying that path, or a permissions problem) | Inspect the marker path directly with `ls -la` and check ownership/permissions; this is not the same symptom as an absent file |
+| `reason=plugin_unregistered` | `plugin-status.sh` reports the classifier is not registered (exit `1`) or registered but not firing (exit `2`): checked and reported FIRST, ahead of any marker-state reasoning | See "No marker file for the root session" above; run `plugin-status.sh` and follow its exit-code table |
+| `reason=no_job_classified` | The plugin is registered and healthy, but the marker lookup found nothing usable: either no marker file yet or a marker file with no `kind:"job"` line | See "Marker file present, no job record" and "Reporter runs before the classifier writes the marker" above |
+| `reason=marker_lookup_failed` | The plugin is registered and healthy, but reading the marker file itself raised an error (for example, something other than a plain file occupying that path or a permissions problem) | Inspect the marker path directly with `ls -la` and check ownership/permissions; this is not the same symptom as an absent file |
 
 No in-plugin diagnostic could report `reason=plugin_unregistered` because the failure mode
 means the plugin never loaded. The cron therefore performs this check.
@@ -213,9 +213,9 @@ means the plugin never loaded. The cron therefore performs this check.
 
 As of this version of the skill, the metering log's `reason=`
 line separates a registration outage (`plugin_unregistered`) from every other cause of
-`uncategorized`, and separates a genuine marker-read error (`marker_lookup_failed`) from an
+`uncategorized` and separates a genuine marker-read error (`marker_lookup_failed`) from an
 absent-or-jobless marker (`no_job_classified`). What it does not separate is the finer split
 inside "marker present, no job record": whether the LLM call returned zero jobs, the LLM call
-itself failed, or every candidate job failed label validation. Those three causes still share the
+itself failed or every candidate job failed label validation. Those three causes still share the
 same `no_job_classified` reason code and the same on-disk marker shape. Telling them apart still
 means inspecting the classifier plugin's own logs, not this document.

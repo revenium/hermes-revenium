@@ -3,12 +3,12 @@
 This record establishes, against the reference host and a real Revenium tenant, whether the
 subscriber-attribution wire dimension shipped in Phases 61-63 behaves as designed for three
 arms: a `cli` session shipping no subscriber at all, a Slack session attributing spend to the
-human who drove it, and a subagent session inheriting its root's actor. Verification ran on
+human who drove it and a subagent session inheriting its root's actor. Verification ran on
 2026-09-30. This phase observes shipped behaviour and builds no new capability.
 
-This page covers evidence only - the live verdict for each arm, and how it was scored. For
+This page covers evidence only - the live verdict for each arm and how it was scored. For
 the dimension's own design (the `<source>:<id>` key, the `subscriberEmailMode` switch and its
-accepted limits, and the `subscriber-names.sh` mapping procedure), see
+accepted limits and the `subscriber-names.sh` mapping procedure), see
 `docs/subscriber-attribution.md`; this record does not restate that content.
 
 ## Results
@@ -24,12 +24,12 @@ All three arms are scored live, from one induced arc, against one window pull
 
 ## How each arm was scored
 
-CLI read-back against the tenant is the **only** admissible tenant-side evidence for any arm
+CLI read-back against the tenant is the only admissible tenant-side evidence for any arm
 in this record. No UI or dashboard observation was used, for any arm, at any point. This
 mirrors the bar `docs/live-tenant-proof.md` set and `docs/live-envelope-verification.md`
 reaffirmed: a CLI read-back is reproducible by a later phase and a screenshot is not.
 
-Scoring is a **point lookup of the specific transaction**, never an aggregate showing the
+Scoring is a point lookup of the specific transaction, never an aggregate showing the
 dimension merely exists somewhere in the tenant's data. Each arm's claim rests on matching one
 induced session's ledger-derived transaction id against one tenant-side row.
 
@@ -56,7 +56,7 @@ sequence below is a recorded procedure, reproducible by a future reader, not shi
    # -> HERMES:<sid>:<total_tokens>:<unix_ts>:<muid>
    ```
    Two candidate transaction ids follow from this tuple: `<sid>-<total_tokens>-<muid>` for the
-   marker-split completion path, and `<sid>-<total_tokens>` for the markerless path. Try the
+   marker-split completion path and `<sid>-<total_tokens>` for the markerless path. Try the
    marker-split form first when the session carries a `.ready` sentinel.
 
 2. **Pull a completions window as JSON**, on the reference host, with the reference host's own
@@ -65,8 +65,8 @@ sequence below is a recorded procedure, reproducible by a future reader, not shi
    revenium metrics completions --from "<window-start-ISO8601>" --to "<now-ISO8601>" \
      --output json > /tmp/window.json
    ```
-   `metrics completions get <id>` is **not** the right verb here - its `<id>` argument is the
-   server's own short opaque row id, and passing the skill's own transaction id returns
+   `metrics completions get <id>` is not the right verb here - its `<id>` argument is the
+   server's own short opaque row id and passing the skill's own transaction id returns
    `HTTP 400: Failed to decode hashed Id`. There is no server-side subscriber or transaction
    filter on this endpoint; all slicing is client-side, which is why the window is pulled once
    and matched afterward rather than filtered server-side.
@@ -93,7 +93,7 @@ sequence below is a recorded procedure, reproducible by a future reader, not shi
    The matched row's `subscriberId`, `subscriberEmail`, `source` and `taskType` are then read
    directly from the returned JSON - never inferred, never re-derived locally.
 
-This is a **recorded procedure**, deliberately not packaged as a script (D-10). A later phase
+This is a recorded procedure, deliberately not packaged as a script (D-10). A later phase
 can promote it into one if a standing need for repeated live proofs emerges.
 
 ## Omission - a cli session ships no subscriber
@@ -161,7 +161,7 @@ agenticJobId: signup_pipeline_sqlite_fix_0266
 ```
 
 `subscriberEmail` reads `null` here, as expected: the email flag ships only for the `email`
-source, and this session is Slack-sourced. No unexpected non-null value was observed.
+source and this session is Slack-sourced. No unexpected non-null value was observed.
 
 **Three-way agreement, confirmed byte-for-byte:**
 
@@ -214,12 +214,12 @@ Reported: session=20260930_215830_b26423 ... subscriber=slack:<redacted-actor-id
 
 **The claim this arm establishes is a comparison, not a value.** The child row's
 `subscriberId` was compared byte-for-byte against the root row's `subscriberId` (scored in the
-Attribution section above): both read `slack:<redacted-actor-id>`, and the comparison returned
+Attribution section above): both read `slack:<redacted-actor-id>` and the comparison returned
 equal.
 
 **Equality alone would not establish inheritance** - a child that resolved its *own* identity
 to the same actor would produce the identical row. Two further read-only observations against
-the reference host rule that out, and are what make this verdict auditable:
+the reference host rule that out and are what make this verdict auditable:
 
 1. **The child has no identity of its own.** A direct `state.db` read of the child's own
    session row returns a null `user_id`, so there was nothing for `resolve_subscriber_id` to
@@ -228,7 +228,7 @@ the reference host rule that out, and are what make this verdict auditable:
    20260930_215808_13016a29|slack|<redacted-actor-id>   <- root
    20260930_215830_b26423  |subagent|<NULL>             <- child, no user_id of its own
    ```
-2. **The parent link is resolved by the root-walk itself**, not asserted:
+2. The parent link is resolved by the root-walk itself, not asserted:
    ```bash
    python3 ~/.hermes/skills/revenium/scripts/get-root-session-id.py 20260930_215830_b26423
    # -> 20260930_215808_13016a29
@@ -237,11 +237,11 @@ the reference host rule that out, and are what make this verdict auditable:
    row was scored in the Attribution section - so the child's key demonstrably came from that
    root and not from somewhere else.
 
-Together: the child had nothing of its own, the root-walk links it to this specific root, and
+Together: the child had nothing of its own, the root-walk links it to this specific root and
 its shipped key is byte-identical to that root's. The child inherited its root's actor exactly,
 through the existing root-walk, with no divergence.
 
-`revenium squads get` was **not** used to score this arm. Research (`64-RESEARCH.md` RQ-4)
+`revenium squads get` was not used to score this arm. Research (`64-RESEARCH.md` RQ-4)
 probed both the root session id and a subagent child id on this host and both returned
 `Resource not found` - the squad entity requires deliberate squad-dimension configuration that
 this induced arc never set, so a 404 there would be an artifact of squad configuration, not
@@ -260,7 +260,7 @@ test suite and established by measurement on that host (D-15).
 ## What this does not establish
 
 1. **One host, one tenant, one cron pass.** Nothing here establishes behaviour on a
-   multi-profile host, across tenants, or across repeated cron passes. Every arm was read
+   multi-profile host, across tenants or across repeated cron passes. Every arm was read
    back from the same single pass, against the same single tenant.
 2. **One induced arc per arm.** The attribution and inheritance arms come from a single
    Slack-driven arc - one root session and three subagent children; the omission arm from a
@@ -276,9 +276,9 @@ test suite and established by measurement on that host (D-15).
    this host but arrives on its own schedule and was neither induced nor read back here; SUB-10
    asks for `cli`, per D-14.
 6. **Positive inheritance only.** Phase 61's D-11 negative-inheritance arm - a `cron` child
-   inheriting nothing - is not re-proven live here; it is already pinned in the test suite, and
+   inheriting nothing - is not re-proven live here; it is already pinned in the test suite and
    Phase 61 established by measurement that inheritance is additive on this host, per D-15.
-7. **The Slack-triggers-subagents pattern's reproducibility, and how it was induced.** It took
+7. **The Slack-triggers-subagents pattern's reproducibility and how it was induced.** It took
    exactly one induction attempt on this host (`64-02-SUMMARY.md`, Task 1: "Attempts: 1."),
    answering research Open Question 1 affirmatively for this host. But the induction message
    explicitly named the delegation toolset and asked for three parallel subagents by name,
@@ -290,8 +290,8 @@ test suite and established by measurement on that host (D-15).
 8. **Nothing about spend accuracy or cost attribution.** These arms establish that an identity
    dimension is carried on the wire and read back correctly; they say nothing about whether the
    token or cost figures on those same rows are themselves correct.
-9. **No arm in this record scored NOT CONFIRMED.** All three arms - omission, attribution, and
-   inheritance - scored CONFIRMED. None remains open, and none required a fallback read.
+9. **No arm in this record scored NOT CONFIRMED.** All three arms - omission, attribution and
+   inheritance - scored CONFIRMED. None remains open and none required a fallback read.
 
 ## The environment
 

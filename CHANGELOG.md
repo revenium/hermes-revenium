@@ -21,8 +21,8 @@ this repository.
 - `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's
   estimates (`MODEL_ESTIMATED_DEMO`) to Revenium. The evidence-class gate added in v1.8
   withheld every model estimate's value with no way to turn that off, so an install without
-  rate cards, revenue cards, or confirmations could never send a job value. The key must be
-  a literal `true` and works only with `experimentalReportEstimates: true`; off, nothing
+  rate cards, revenue cards or confirmations could never send a job value. The key must be
+  a literal `true` and works only with `experimentalReportEstimates: true`; when it is off, nothing
   changes. `revenium jobs roi` shows a reported estimate with the same weight as a
   measurement. See [Reporting the estimate's value](skills/revenium/references/config-schema.md#reporting-the-estimates-value-egv-18).
 - `REVENIUM_MODEL_ALIASES` maps a gateway's model alias (e.g. LiteLLM's `model-default`) to
@@ -33,69 +33,110 @@ this repository.
 
 - `install-plugin.sh` no longer corrupts a `config.yaml` whose `plugins.enabled` items sit at
   the key's own indentation (`  enabled:` / `  - a`, PyYAML's default dump style). It
-  inserted the plugin two spaces deeper, the file stopped parsing, and Hermes refused to
+  inserted the plugin two spaces deeper. The file stopped parsing and Hermes refused to
   start on that profile. The new item now takes the existing items' indentation.
+- Auxiliary usage no longer resurrects closed jobs. The first tick after an upgrade reports
+  each session's accumulated auxiliary usage, and every row carried its session's
+  `--agentic-job-id` whether or not that job was still live. Revenium creates a job for any
+  id it has not seen, so 151 long-closed jobs reappeared as nameless `PENDING` rows. An
+  auxiliary row now links to a job only when its create is in the jobs ledger and the job is
+  open or closed within `REVENIUM_JOBS_STALE_SECONDS`. The spend is still reported, without
+  the link. The aux ledger and transaction ids are unchanged.
+- A subagent's completion no longer reaches Revenium before its root job exists. The session
+  query visits a subagent before its root, so the completion carried the root's job id first;
+  Revenium created the job with no name or type, and the root's later `jobs create` got a 409
+  that was treated as success, losing both for good. The completion is now held, with nothing
+  ledgered, until the create is confirmed. The hold ends after `REVENIUM_JOBS_STALE_SECONDS`,
+  when the completion ships without the job link rather than strand the spend.
+- A `CANCELLED` job outcome is no longer reported while its session is still open. The
+  classifier uses `CANCELLED` as its "uncertain" verdict and writes it a couple of minutes
+  into a session, so jobs were closed `UNSUCCESSFUL` while the work was still running. The
+  outcome is now held until the session ends, or has been idle for
+  `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` (default one day). `SUCCESS`, `FAILED` and the
+  guardrail-halt cancel are reported as before. The held outcome is logged as
+  `outcome held while session open: id=`.
+- A job the classifier first judged `CANCELLED` is now re-judged, so a finished job can reach
+  Revenium as `SUCCESS` with a value. The classifier infers a session's jobs once, mid-session,
+  and `CANCELLED` is its "uncertain" verdict, so an arc whose work was still running (a
+  subagent mid-flight) was latched `CANCELLED` for the life of the session. A `CANCELLED`
+  arc is never evaluated, so it shipped with no job value. Every later trigger now re-checks
+  a still-`CANCELLED` job against the transcript as it stands, at the cost of one status-only
+  call per trigger however many jobs are open, and appends a new marker for the same job id
+  when the status moves. `SUCCESS` and `FAILED` stay final, the guardrail-halt cancel is never
+  re-judged, and a `SUCCESS` is evaluated exactly as a first-pass `SUCCESS` is. The
+  reporter now reports the latest marker for a job id (by marker `ts`, a tie going to the
+  later line), where it used to report and ledger the first. The re-judge marker updates the
+  job's status only: task-marker ownership, in both reporters, still counts just the first
+  marker per job id, so spend never moves between jobs. An operator correction in a job's
+  sidecar is not superseded by the new estimate, including one filed while the evaluator is
+  running (the check repeats under the sidecar lock at write time). A session with more than
+  eight `CANCELLED` jobs re-checks a rotating window of eight per trigger. A `CANCELLED`
+  outcome already ledgered before the re-judge lands is final, as every ledgered outcome is.
+- The open-session hold no longer closes an active long session when `state.db` is locked
+  during its column probe. A failed probe used to pin `started_at` as the idle clock for the
+  rest of the run; a locked probe now defers, and only a probe that read the schema is
+  remembered.
 
 ## [v1.8] — 2026-10-05
 
-This release's headline is **subscriber attribution** for metered completions: a
+This release adds **subscriber attribution** for metered completions: a
 namespaced subscriber key, resolved from the session's actor, is attached at all four
 metered-completion sites once resolution succeeds, so spend attributes down to the
 individual subscriber instead of stopping at agent or session granularity. Two
-conditions gate it: the installed `revenium` CLI must accept `--subscriber-id` (an
+conditions must hold: the installed `revenium` CLI must accept `--subscriber-id` (an
 older CLI meters exactly as before), and the session must resolve to a safe actor
-identity — a completion with neither still ships, just without the key. Job records do
-not carry a subscriber key in this release — attribution lives only on metered
+identity. A completion with neither still ships, just without the key. Job records do
+not carry a subscriber key in this release; attribution lives only on metered
 completions this cycle. Two rounds of
 work on the same experimental **job-value estimation**
 feature also shipped here: the first added it, the second replaced most of its internals
 so a model estimate can no longer read as an observed result. That feature stays
 **opt-in and off by default** throughout, and an install that leaves it off meters
 byte-identically to before. This release also carries auxiliary usage metering, which is
-**on by default** and is a permanent step-up in reported spend against unchanged traffic,
+**on by default** and is a permanent increase in reported spend for unchanged traffic,
 documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 
 ### Documentation
 
-- **[Job value and ROI](docs/value-and-roi.md)** — a dedicated reference for the whole
+- **[Job value and ROI](docs/value-and-roi.md)**: a dedicated reference for the whole
   experimental value path, replacing the fragments previously spread across the README,
-  `docs/how-it-works.md`, `docs/configuration.md`, `references/config-schema.md`, and
-  `references/job-declaration.md`. It documents, in one place, what was previously in no
-  document at all: the evaluator call's own bounds, the eight-word abstention vocabulary,
+  `docs/how-it-works.md`, `docs/configuration.md`, `references/config-schema.md` and
+  `references/job-declaration.md`. It documents previously undocumented details: the evaluator call's own bounds,
+  the eight-word abstention vocabulary,
   the full sidecar field inventory, the exact `--metadata` key order on the wire, the two
-  truncation tiers, the correction record shape, the ledger lines, retention and pruning,
-  and a symptom-to-cause troubleshooting table. The pages it was extracted from keep their
+  truncation tiers, the correction record shape, the ledger lines and retention and pruning.
+  It also includes a symptom-to-cause troubleshooting table. The pages it was extracted from keep their
   summaries and link to it.
-- **[Cron and job cost reconciliation](docs/cron-and-job-cost-reconciliation.md)** —
+- **[Cron and job cost reconciliation](docs/cron-and-job-cost-reconciliation.md)**:
   the Phase 65 diagnosis record for TRU-01 and TRU-02, documentation only; nothing under
   `skills/` changed. ([#141])
 
 ### Added — evidence grading and economic mechanisms
 
 - **Nine evidence labels** (`evidence_class`), replacing the single forced constant.
-  They are deliberately **not** a confidence ladder: customer confirmation can be
-  commercially authoritative yet causally weak, observation proves that something
-  happened rather than what produced it, and configuration establishes an approved rate
-  rather than hours actually spent. The naked-LLM path always resolves to
+  They do **not** form a confidence ranking: customer confirmation can be
+  commercially authoritative yet causally weak. Observation proves that something
+  happened rather than what produced it, while configuration establishes an approved rate
+  rather than hours actually spent. The LLM-only path always resolves to
   `MODEL_ESTIMATED_DEMO` and **cannot** promote itself to any observed,
-  customer-confirmed, associational, or impact label — enforced structurally, and proven
+  customer-confirmed, associational or impact label. This is enforced structurally and proven
   by adversarial fixtures rather than asserted. Exact spellings and the resolution rule
   are in [`references/job-declaration.md`](skills/revenium/references/job-declaration.md).
 - **Six economic mechanisms** (`economic_mechanism`) in place of the previous
   hours-times-rate assumption: labor substitution, augmentation or capacity expansion,
-  quality or decision improvement, risk avoidance, newly enabled work, and incremental
+  quality or decision improvement, risk avoidance, newly enabled work and incremental
   revenue. The evaluator may select three of them; the other three are operator-declared
   (see Known limitations).
 - **Net value across supplied costs** (`net_value`). A new `costs` config block, keyed by
-  job type, subtracts `human_review`, `rework_or_error`, `handoff`, and
+  job type, subtracts `human_review`, `rework_or_error`, `handoff` and
   `training_or_change` from the estimated value. A supplied `0` and an absent category are
-  different things and both are explicit in the record. There is no fleet-wide default —
+  different things and both are explicit in the record. There is no fleet-wide default;
   an unconfigured job type nets nothing.
 - **Explicit zero and unknown denominators.** AI cost is never silently substituted when
   the claim concerns total workflow investment; no ratio is emitted.
 - **Double-counting controls** (`double_counting_group`) so one outcome cannot be fully
   credited to several jobs, or claimed twice across overlapping mechanisms.
-- **Zero and negative work stays visible.** Failed, cancelled, abandoned, and unclassified
+- **Zero and negative work stays visible.** Failed, cancelled, abandoned and unclassified
   jobs receive no positive value by default while retaining their metered and allocated
   cost, so negative net value remains legible instead of disappearing.
 - **Bounded low/base/high estimates** in preference to false precision. Reversed or
@@ -109,7 +150,7 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 - **Append-only corrections.** `correct-assessment.sh` writes a `kind:"correction"` line
   locally and calls `revenium jobs outcome-update` server-side. The original assessment is
   preserved; nothing is destructively replaced. Operator-only, never run from cron.
-- **Provenance that survives deferral and retry.** Model, prompt, taxonomy, policy, and
+- **Provenance that survives deferral and retry.** Model, prompt, taxonomy, policy and
   schema versions persist through a failed job creation and its retry, so a later
   taxonomy or prompt change never silently rewrites history.
 - **The deciding model is recorded** separately from `evaluator`/`evaluator_version`,
@@ -120,27 +161,27 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 
 ### Added — boundaries, reporting, and privacy
 
-- **Six pluggable boundaries as real contracts** — classification, output/outcome
+- **Six pluggable boundaries as real contracts**: classification, output/outcome
   assessment, economic valuation, evidence resolution and reportability, cohort impact
-  (contract only), and Revenium reporting — selected through a `boundaries` config object.
+  (contract only) and Revenium reporting, selected through a `boundaries` config object.
   A non-LLM implementation can be added behind any of them without masquerading as an LLM
   evaluator. The contracts are host-agnostic, so the core can later be extracted.
-- **`ImpactStudyResult` as a contract only** — fields for study identity, estimand,
-  identification method, effect interval, assumptions, and validity scope. No estimators
+- **`ImpactStudyResult` as a contract only**: fields for study identity, estimand,
+  identification method, effect interval, assumptions and validity scope. No estimators
   and no experiment orchestration ship here.
 - **`experimentalReportEstimates`**, a second literal-boolean gate independent of
   `enabled`. Left off, an estimate is computed and recorded locally but its value is
-  withheld from Revenium — the outcome and provenance still report
+  withheld from Revenium; the outcome and provenance still report
   (`reportability_status: "candidate"`). Turned on, the value ships as well
   (`reportability_status: "reportable"`). The resolver decides this, never the evaluator.
-- **A bounded `--metadata` envelope** with a byte ceiling, tier-ordered shedding, and a
+- **A bounded `--metadata` envelope** with a byte ceiling, tier-ordered shedding and a
   `metadata_truncated` marker when a tier actually drops keys. An over-ceiling payload
   never ships unmarked, and base metering never breaks on a field the API does not know.
 - **Inference-locality provenance.** A derived address class and provider are recorded;
   the raw `base_url` is consumed and discarded, never persisted or transmitted. The docs
-  state plainly that this records where inference was **configured** to go, not where data
+  state that this records where inference was **configured** to go, not where data
   stayed.
-- **No raw prompt or transcript text** reaches any marker, ledger, queue, log, or
+- **No raw prompt or transcript text** reaches any marker, ledger, queue, log or
   `--metadata` field, proven by a dynamically enumerated canary sweep whose
   vacuous-pass guard is itself proven binding by a negative control.
 
@@ -148,26 +189,26 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 
 - **One cross-boundary precedence rule for `evidence_class`.** A configured boundary's
   registration-time declaration now reaches the persisted record, resolved by a single
-  function (`_evidence_class_precedence`) that both record sites call — one *rule* site,
+  function (`_evidence_class_precedence`) that both record sites call. This defines one rule,
   not one per boundary. It walks four boundaries in fixed priority order: evidence,
   valuation, classification, evaluator.
-- **A declaration must be non-forced to count as a vote, not merely non-empty.** The
-  built-in default registrant on every boundary declares the same constant the naked-LLM
+- **A declaration must be non-forced to affect resolution, not merely non-empty.** The
+  built-in default registrant on every boundary declares the same constant the LLM-only
   path already forces (`MODEL_ESTIMATED_DEMO`), so a literal first-non-empty walk would
   have stopped at the highest-priority boundary on 100% of installs and masked every
   lower one. A declaration equal to that constant is therefore indistinguishable from
-  silence and casts no vote. All four fixture-declared classes are reachable as a result:
+  no declaration and does not affect resolution. All four fixture-declared classes are reachable as a result:
   `CUSTOMER_CONFIRMED`, `CUSTOMER_CONFIGURED`, `ACTIVITY_MEASURED`, `OUTCOME_OBSERVED`.
 - **`evidence_class_authority`**, a new provenance-family `--metadata` key naming *which*
-  boundary determined the class — `evidence`, `valuation`, `classification`, or
-  `evaluator`. With three-plus boundaries in the walk, "a declaration won" is not the
-  question an auditor asks; "which one" is. Conditional-emit as usual: absent from the
+  boundary determined the class: `evidence`, `valuation`, `classification` or
+  `evaluator`. With three-plus boundaries in the walk, the record must identify
+  which declaration determined the class. Conditional-emit as usual: absent from the
   record means absent from the envelope, and a value outside the four-word enum is not
   forwarded. A `kind:"correction"` record carries neither this key nor `evidence_class`,
   because an operator override does not re-run the walk and so has no authority to name.
 - **The causal-impact labels stay unobtainable from configuration.**
   `_DECLARABLE_EVIDENCE_CLASSES` narrows what a registrant may declare to six labels,
-  excluding `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT` and `EXPERIMENTAL_IMPACT` — a
+  excluding `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT` and `EXPERIMENTAL_IMPACT`; a
   config-installed boundary cannot mark a record with a causal-impact label that no
   experiment backs, even from trusted code.
 - **Boundary lookups are scoped to the profile that owns the session.** In multiplexed
@@ -180,20 +221,20 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
   guarantee held structurally because the function took one parameter; the widened
   signature takes four, so an ast-walk guard now proves no parameter carries evaluator
   output and that no call-site argument derives from raw model output. Adversarial fixtures
-  drive a hostile evaluator response through the real construction path — including one
-  that names the walk's own parameters as attack keys — and the record is unchanged.
+  drive a hostile evaluator response through the real construction path (including one
+  that names the walk's own parameters as attack keys) and the record is unchanged.
 - **[Evidence-class precedence and declaration authority](docs/evidence-class-precedence.md)**
-  records the implemented rule, the reachability amendment, and a written verdict for each
+  records the implemented rule, the reachability amendment and a written verdict for each
   of the four pre-committed falsifiers.
 
 ### Added — documentation and guards
 
-- **[Claim distinctions and evidence boundaries](docs/claim-distinctions-and-evidence-boundaries.md)** —
+- **[Claim distinctions and evidence boundaries](docs/claim-distinctions-and-evidence-boundaries.md)**:
   output vs. outcome vs. valuation vs. impact vs. ROI, the results chain, the
-  product-truth boundary, correction and audit behaviour, abstention and negative value,
+  product-truth boundary, correction and audit behaviour, abstention and negative value
   and what this work deliberately does not ship.
-- **A prohibited-claim-language guard** (`test_no_prohibited_claim_language_left`) in the
-  shape of the existing legacy-name guards, scanning the whole shipped tree rather than
+- **A prohibited-claim-language guard** (`test_no_prohibited_claim_language_left`) using the
+  same pattern as the existing legacy-name guards, scanning the whole shipped tree rather than
   Markdown alone, so an overreaching claim cannot ship in a code comment or a log string.
 - **Two source-derived documentation guards** pinning the documented envelope key
   inventory and byte ceiling to the reporter's live constants, so the docs cannot drift
@@ -201,22 +242,22 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 
 ### Known limitations
 
-- `quality_decision_improvement`, `risk_avoidance`, and `incremental_revenue` are
+- `quality_decision_improvement`, `risk_avoidance` and `incremental_revenue` are
   representable and forward correctly on the wire, but nothing can currently select them:
-  no config key, no CLI flag, and `correct-assessment.sh` does not set a mechanism. A
+  no config key or CLI flag selects them and `correct-assessment.sh` does not set a mechanism. A
   study reference is the intended producer.
 - When a configured `boundaries.valuation` or `boundaries.evidence` implementation
   declares its own `evidence_class`, the persisted record still shows the evaluator's
-  class. The effect is conservative — `MODEL_ESTIMATED_DEMO` is the weakest label, so the
-  record under-claims — and no promotion path is opened. Resolving it needs a
+  class. The effect is conservative (`MODEL_ESTIMATED_DEMO` is the weakest label, so the
+  record under-claims) and no promotion path is opened. Resolving it needs a
   cross-boundary precedence rule.
-- `revenium jobs roi` surfaces no provenance, so the evidence label and assumptions are
+- `revenium jobs roi` shows no provenance, so the evidence label and assumptions are
   retained in the bounded metadata envelope and locally, not shown in that view. Use
   `revenium jobs outcome-history` to read them back.
 - This round has not been exercised against a live tenant. The end-to-end proof is a
   fixture harness driving the real classifier and reporter with a stubbed model response.
 - Whether a Revenium-side guardrail counter actually increases for an ingested auxiliary
-  row inside a rule's scope is **not demonstrated by this release** — the proof shipped
+  row inside a rule's scope is **not demonstrated by this release**; the proof shipped
   here establishes that an auxiliary row is emitted carrying the same session-resolved
   dimensions as its session's main-loop completion; the server-side counting half remains
   to be confirmed separately against a live tenant.
@@ -229,21 +270,21 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
   with `--operation-type AUX` and a `--task-type` from a fixed six-label `aux_*`
   vocabulary (`aux_approval`, `aux_title_generation`, `aux_compression`, `aux_vision`,
   `aux_web_extract`, `aux_session_search`). Compression, title generation, approval,
-  vision, web extraction, and session search were previously reported nowhere. **Not a
-  new cron stage — the cron still runs six.**
+  vision, web extraction and session search were previously reported nowhere. **Not a
+  new cron stage; the cron still runs six.**
 - **On by default, with an off switch.** `REVENIUM_AUX_METERING=disabled` in the state env
   file, or `auxMetering: "disabled"` in `config.json` (env wins), ships no auxiliary rows
   and writes no auxiliary ledger; main-loop metering is then byte-identical to before. An
   install whose Hermes build has no `session_model_usage` table is byte-identical by
   construction and needs no setting.
-- **A permanent step-up in reported spend against unchanged traffic**, measured
-  fleet-wide at 0.4598% of cost — with the near-zero-denominator outlier caveat, the
-  re-runnable sizing SQL, and the guardrail implications in
+- **A permanent increase in reported spend for unchanged traffic**, measured
+  fleet-wide at 0.4598% of cost, with the near-zero-denominator outlier caveat, the
+  re-runnable sizing SQL and the guardrail implications in
   [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 - **The first tick after upgrading is a one-time historical catch-up**: the counters are
   cumulative and `revenium-aux.ledger` starts empty, so that tick reports each identity's
   whole accumulated pre-upgrade auxiliary usage into the current guardrail window.
-  Deliberate, and warned about once per install by the reporter itself.
+  The reporter warns about this deliberate behavior once per install.
 - **A fourth ledger**, `revenium-aux.ledger`, with its own key domain and per-column
   cumulative subtraction. Like the other three it is never pruned automatically.
 - **An unrecognised `session_model_usage.task` value ships as `aux_unclassified`** rather
@@ -251,26 +292,26 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
   addition never silently loses spend.
 - **`billing_provider` of the literal `auto` is now resolved through model-name
   inference** on both the main-loop and auxiliary emit paths, from one shared function.
-  This is **global** — provider-scoped counting changes for main-loop rows too — and rows
+  This is **global**: provider-scoped counting changes for main-loop rows too. Rows
   Revenium already ingested carrying `auto` are not back-filled.
 - **`diagnose.sh` gained a read-only `10. AUXILIARY USAGE PASS` section** (`--tick`
   renumbered 10 to 11), reporting tunable resolution and its source, table presence,
   auxiliary-vs-mirror row and cost counts side by side, dominant task values, the
-  `aux-taxonomy.json` label count, and any fired `.aux-warn` sentinels.
+  `aux-taxonomy.json` label count and any fired `.aux-warn` sentinels.
 
 ### Added — LLM outcome evaluation (initial)
 - Opt-in, off-by-default **LLM outcome evaluation** (`llmOutcomeEvaluation` in
   `config.json`): on a `SUCCESS` job arc, estimates the job's economic value via one
   bounded LLM call on the user's own provider. The result is an unverified model
-  estimate — Revenium combines it with metered cost into the displayed ROI. Fails
+  estimate; Revenium combines it with metered cost into the displayed ROI. Fails
   closed: a missing or malformed config metres exactly as before.
 - The evaluation-outcome log taxonomy now distinguishes `invalid` and `timed-out` from
-  `abstained`, in addition to the pre-existing `evaluated`, `deferred`, and `reported` —
+  `abstained`, in addition to the pre-existing `evaluated`, `deferred` and `reported`:
   six words in total, split across two log destinations (in-process on the
   `revenium_classifier` logger for four of them, the cron's `revenium-metering.log` for
   the other two).
 - `diagnose.sh` section reporting, per profile, whether LLM outcome evaluation is
-  enabled, which evaluator is selected, and the two cron-side taxonomy counts.
+  enabled, which evaluator is selected and the two cron-side taxonomy counts.
 - The pre-existing unbounded deferred/wedged job-outcome logger is now rate-limited to
   once per `(outcome_id, reason)`, with a per-tick backlog aggregate line when the
   count is non-zero.
@@ -280,12 +321,12 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 - **Subscriber identity resolution.** A session's actor is resolved into a namespaced
   subscriber key, giving Revenium a stable identifier beneath agent and session that
   persists for the same subscriber across sessions. ([#135])
-- **`--subscriber-id` carried to all four `meter completion` sites** — the per-marker
-  split path, the markerless path, the event path, and the auxiliary-usage pass — so no
+- **`--subscriber-id` carried to all four `meter completion` sites** (the per-marker
+  split path, the markerless path, the event path and the auxiliary-usage pass), so no
   metered completion ships unattributed once resolution succeeds. Agentic job records
   (`jobs create` / `jobs outcome`) and tool events do not carry a subscriber key in this
   release; subscriber attribution is scoped to metered completions only. ([#136])
-- **Email, obfuscation, and name legibility** (SUB-06, SUB-09). The new
+- **Email, obfuscation and name legibility** (SUB-06, SUB-09). The new
   `skills/revenium/scripts/subscriber-names.sh` resolves subscriber-facing names, legible
   where an operator allows it and obfuscated where they don't, documented in
   [Subscriber attribution](docs/subscriber-attribution.md). ([#137])
@@ -300,7 +341,7 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
 - **Per-job outcome metrics**, appended from the assessment sidecars via the new
   `outcome-metrics-report.sh`. A `404` on the append is treated as a deferral rather than
   a failure, and the behaviour is documented for operators. ([#131], [#133], [#134])
-- **`costs-status.sh`** — a read-only report of which classified job types have no
+- **`costs-status.sh`**: a read-only report of which classified job types have no
   configured cost. ([#109])
 - **`inferred_role` is now constrained to the operator's own rate-card vocabulary**,
   rather than a model-chosen label the rate card cannot match. ([#140])
@@ -319,7 +360,7 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
   and letting the same rule re-fire within one session. ([#128])
 - SKILL.md declared a `required_credential_files` path that could never resolve, which made
   the skill report `setup_needed` and caused Hermes' cron preflight to refuse any job
-  attaching it as `[blocked_config:silent]` — silently, every fire. Hermes joins declared
+  attaching it as `[blocked_config:silent]`. This happened on every run. Hermes joins declared
   paths onto HERMES_HOME and does not expand `~`, so `~/.config/revenium/config.yaml`
   resolved to `~/.hermes/~/.config/...`; a containment guard then rejects anything outside
   HERMES_HOME by design. The scripts read the CLI config directly and never needed the
@@ -337,19 +378,19 @@ documented in [Auxiliary usage migration](docs/migration-auxiliary-usage.md).
   CLI 1.4.0. Capability-gated, so an older CLI is unaffected. ([#81], [#82])
 - `LICENSE` (MIT), backing the `license: MIT` that `SKILL.md` had declared in frontmatter
   since the first commit. ([#83])
-- `CONTRIBUTING.md`, issue and pull-request templates, and a CI workflow running the test
+- `CONTRIBUTING.md`, issue and pull-request templates and a CI workflow running the test
   suite on every pull request. ([#83])
 - `CHANGELOG.md`. ([#84])
-- [`docs/plugin-interface.md`](docs/plugin-interface.md) — what the Hermes plugin surface
+- [`docs/plugin-interface.md`](docs/plugin-interface.md): what the Hermes plugin surface
   does, measured against a live install. Shipped code depends on it: `api_event_spool.py`
   parses the payload contract it records. ([#85])
 
 ### Changed
 - `README.md` split from 646 lines into a landing page plus seven guides under
   [`docs/`](docs/), and corrected to say that the working parts are a plugin, three shell
-  hooks and a cron — `SKILL.md` itself is only a halt-check backstop. ([#83], [#84])
-- Multi-profile guidance corrected: upgrades must re-name profiles, the restart target is
-  often not the gateway, and `rsync --delete` is no longer suggested. ([#78])
+  hooks and a cron; `SKILL.md` itself is only a halt-check backstop. ([#83], [#84])
+- Multi-profile guidance corrected: upgrades must re-name profiles. The restart target is
+  often not the gateway and `rsync --delete` is no longer suggested. ([#78])
 
 ### Removed
 - The planning and engineering-evidence trees are no longer tracked. `.planning/` had been
@@ -367,7 +408,7 @@ Fixes the chain of silent failures that made a fresh install look successful whi
 classifying nothing.
 
 ### Added
-- `diagnose.sh` — one read-only report covering every stage of the pipeline, ordered by how
+- `diagnose.sh`: one read-only report covering every stage of the pipeline, ordered by how
   often each stage is the cause. ([#75], [#76])
 
 ### Fixed
@@ -376,12 +417,12 @@ classifying nothing.
   a file that never arrived. ([#73])
 - `install.sh` confirms the whole `revenium` CLI config on every interactive run, api-url
   included, with current values as defaults. A stale api-url used to survive unseen and
-  surface later as an opaque `HTTP 403`. ([#74])
+  appear later as an unexplained `HTTP 403`. ([#74])
 - `plugin-status.sh` no longer reports a false all-clear on hosts whose sessions never
-  end — it had been structurally blind to the outage it exists to catch. ([#76])
+  end; it had not detected the outage it was meant to catch. ([#76])
 - `guardrail-status.json` is scoped to this install's rules, and duplicate rule names no
   longer collapse two rules onto one ruleId. ([#76])
-- `bootstrap.sh --update` refreshes an existing install instead of latching onto whatever
+- `bootstrap.sh --update` refreshes an existing install instead of retaining whatever
   `scripts/` arrived the first time. ([#77])
 
 ## [v1.5] — 2026-08-20
@@ -391,13 +432,13 @@ apportioning a session's token delta across markers.
 
 ### Added
 - Event-driven metering on the `post_api_request` hook. `api_event_spool.py` appends a
-  19-key record per API call with no network, no LLM, and no sqlite in the hot path;
+  19-key record per API call with no network, no LLM and no sqlite in the hot path;
   `api-event-report.sh` ships each as its own row, keyed on the provider's
   `api_request_id`. Defaults to shadow mode, shipping nothing, until switched to live.
 - Durable, atomically-claimed session ownership records (`owners/<sid>`), which decide
   which path bills a session, with mode-aware takeover for the event-owned/mode-revert
   hazard.
-- `drain-status.sh` — a staleness-aware drain gate with a per-session legacy carve-out, so
+- `drain-status.sh`: a staleness-aware drain gate with a per-session legacy carve-out, so
   profiles converge on their own after `REVENIUM_LEGACY_COMPLETIONS=disabled`.
 - `prune-markers.sh` for marker garbage collection, and `resolve-markers-dir.py` for
   per-session state resolution under a multiplexed gateway.
@@ -413,11 +454,11 @@ apportioning a session's token delta across markers.
 ### Added
 - `--trace-type` auto-populated with the root agentic-job type, pinned per-trace and
   capability-gated for `revenium` CLI ≥ 1.2.1, so an older CLI is unaffected.
-- `install.sh` — a native one-command installer.
+- `install.sh`: a native one-command installer.
 
 ### Fixed
 - Trailing task markers now bind to the nearest preceding job.
-- Setup hardening: `--reconfigure` / `--interactive` re-run gates, idempotent budget rules,
+- Setup hardening: `--reconfigure` / `--interactive` re-run gates, idempotent budget rules
   and an `ensure_path` return-0 fix on fresh hosts.
 
 ## [v1.4] — 2026-05-29
@@ -427,25 +468,25 @@ so Revenium rolls delegated activity up under a single trace and job instead of 
 it per child session.
 
 ### Added
-- **Trace inheritance** — `hermes-report.sh` and `tool-event-report.sh` ship
+- **Trace inheritance**: `hermes-report.sh` and `tool-event-report.sh` ship
   `--trace-id <root_sid>` for subagent sessions. Top-level sessions are unchanged from v1.3.
-- **Job inheritance** — a subagent's `--agentic-job-id` is replaced with the root's job id.
+- **Job inheritance**: a subagent's `--agentic-job-id` is replaced with the root's job id.
   `jobs create` and `jobs outcome` are suppressed for subagents, leaving the root's ledger
   entry as the single create/outcome.
-- **Marker inheritance** — `classifier.py` emits root identifiers in subagent markers.
+- **Marker inheritance**: `classifier.py` emits root identifiers in subagent markers.
 - `scripts/get-root-session-id.py` and a `common.sh` wrapper, walking
   `state.db.sessions.parent_session_id` with a `max_depth=10` circular guard and failing
   open on a missing or locked database.
 - Golden-argv compatibility fixtures pinning the wire shape of `meter completion`,
-  `meter tool-event`, `jobs create`, and `jobs outcome`.
+  `meter tool-event`, `jobs create` and `jobs outcome`.
 
 ## [v1.3.1] — 2026-05-28
 
 ### Fixed
-- `setup-local.sh` preflight: refuses to install when the `revenium` CLI, `sqlite3`, or
+- `setup-local.sh` preflight: refuses to install when the `revenium` CLI, `sqlite3` or
   `python3` is missing, exiting before touching anything rather than leaving a silently
   non-functional install.
-- Scanner compatibility — substituted a variable for a literal config path in comments and
+- Scanner compatibility: substituted a variable for a literal config path in comments and
   prose, and collapsed verification snippets into `hooks-status.sh`. Runnable code
   unchanged; verdict `DANGEROUS → SAFE`.
 
@@ -456,9 +497,9 @@ it per child session.
 ## [v1.3] — 2026-05-28
 
 Budget enforcement moved off polling `revenium alerts budget` and onto first-class
-`revenium guardrails` budget rules, with two-stage warn/hard thresholds. A clean break, with
-no coexistence flag, and invisible auto-migration of every existing `alertId` install on the
-first cron tick. The v1.0–v1.2 metering surface flows through unchanged.
+`revenium guardrails` budget rules, with two-stage warn/hard thresholds. There is no coexistence flag.
+Every existing `alertId` install auto-migrates on the
+first cron tick. The v1.0–v1.2 metering behavior remains unchanged.
 
 ### Added
 - `guardrail-check.sh` replaces `budget-check.sh` as the second cron stage, writing per-rule
@@ -473,7 +514,7 @@ first cron tick. The v1.0–v1.2 metering surface flows through unchanged.
   when the API call fails.
 - Shadow mode honoured end to end: shadow rules are excluded from halt derivation, and each
   breach transition gets its own one-shot `[shadow]`-prefixed notification.
-- `clear-halt.sh` became ruleId-aware — `--rule-id` clears one rule, bare clears all.
+- `clear-halt.sh` became ruleId-aware: `--rule-id` clears one rule; bare clears all.
 
 ### Removed
 - `budget-check.sh` and `budget-status.json`.
@@ -483,15 +524,15 @@ first cron tick. The v1.0–v1.2 metering surface flows through unchanged.
 Every Hermes tool call is metered to Revenium.
 
 ### Added
-- `post_tool_call.sh` — a fail-open hook capturing a 7-key JSONL record per tool call, with
+- `post_tool_call.sh`: a fail-open hook capturing a 7-key JSONL record per tool call, with
   no network call in the agent's hot path.
-- `tool-event-report.sh` — a cron stage shipping events through `revenium meter tool-event`,
+- `tool-event-report.sh`: a cron stage shipping events through `revenium meter tool-event`,
   idempotent on `TOOL:<sid>:<tool_call_id>`.
 
 ## [v1.1] — 2026-05-18
 
-Discrete task arcs are tracked as Revenium agentic jobs — each created, its AI transactions
-linked, and its outcome reported exactly once.
+Discrete task arcs are tracked as Revenium agentic jobs: each created, its AI transactions
+linked and its outcome reported exactly once.
 
 ### Added
 - An additive `kind:"job"` marker schema with a separate `revenium-jobs.ledger`.

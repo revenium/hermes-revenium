@@ -68,7 +68,7 @@ any other content.
 
 ## Guardrail Check Procedure
 
-**MANDATORY — execute before EVERY response, EVERY tool call, EVERY operation.**
+**MANDATORY: execute before EVERY response, EVERY tool call, EVERY operation.**
 
 The guardrail status is maintained by a background cron job that checks Revenium
 every minute and writes the result to `~/.hermes/state/revenium/guardrail-status.json`.
@@ -84,7 +84,7 @@ Read this local file. Do NOT call the Revenium API directly.
 3. **Evaluate:**
 
    **If `halted` is `true`:** Follow the HALT CHECK backstop above. Output ONLY the
-   halt message using `haltedRule` fields, and stop.
+   halt message using `haltedRule` fields and stop.
 
    **If `halted` is `false`:** Proceed. Do NOT mention the guardrail status to the user.
 
@@ -99,7 +99,7 @@ This skill stores content under `~/.hermes/skills/revenium/` and mutable runtime
 
 ## When to Use
 
-Use this skill when you want Hermes to:
+Use this skill to:
 
 - enforce a spending budget before costly operations
 - meter usage from `~/.hermes/state.db` into Revenium
@@ -109,29 +109,29 @@ Use this skill when you want Hermes to:
 
 ## Runtime State
 
-This skill stores mutable runtime state in:
+Runtime state files:
 
-- `~/.hermes/state/revenium/config.json` — alert ID, organization, autonomous flag, notification target
-- `~/.hermes/state/revenium/guardrail-status.json` — last cron snapshot of Revenium guardrail rule state
-- `~/.hermes/state/revenium/revenium-hermes.ledger` — idempotency ledger for metered transactions
-- `~/.hermes/state/revenium/revenium-metering.log` — cron log
+- `~/.hermes/state/revenium/config.json`: alert ID, organization, autonomous flag, notification target
+- `~/.hermes/state/revenium/guardrail-status.json`: last cron snapshot of Revenium guardrail rule state
+- `~/.hermes/state/revenium/revenium-hermes.ledger`: idempotency ledger for metered transactions
+- `~/.hermes/state/revenium/revenium-metering.log`: cron log
 
 Skill content (scripts, references) lives at `~/.hermes/skills/revenium/`. Bundled scripts are addressable via `${HERMES_SKILL_DIR}/scripts/`.
 
 ## Setup
 
-At the start of any operation, check: does `~/.hermes/state/revenium/config.json` exist AND contain a non-empty `ruleIds` array?
+At the start of any operation, check whether `~/.hermes/state/revenium/config.json` exists AND contains a non-empty `ruleIds` array.
 
 - **If YES** and the user has NOT requested reconfiguration: setup is complete. Proceed to the budget check. Do NOT re-run setup.
-- **If NO** (file missing, or file exists but `ruleIds` is absent or an empty array): you MUST run the Setup Flow below before proceeding. Do NOT execute any operations until setup is complete.
+- **If NO** (file missing or file exists but `ruleIds` is absent or an empty array): you MUST run the Setup Flow below before proceeding. Do NOT execute any operations until setup is complete.
 
 `config.json` may carry a legacy `alertId` field from a v1.2 install. Auto-migration deprecates and orphans that field, so ignore it for the setup-detection gate. The cron pipeline auto-migrates legacy installs on the next tick. See `docs/migration-guardrails.md` for the migration contract.
 
 ### Setup Flow
 
-Follow these steps in order. If any step fails, STOP and explain the failure. Do NOT prompt the user for budget details yourself, and do NOT write any IDs into `config.json` yourself.
+Follow these steps in order. If any step fails, STOP and explain the failure. Do NOT prompt the user for budget details yourself and do NOT write any IDs into `config.json` yourself.
 
-0. **Bootstrap the runtime files if they are missing.** `hermes skills install revenium/hermes-revenium/skills/revenium` ships `SKILL.md` and only the support files named here as bundle-relative paths: `references/bootstrap.sh`, `references/setup.md`, `references/task-classification.md`, `references/job-declaration.md`, and `references/troubleshooting.md`. Hermes does not allow `plugins/` in a skill bundle, and the command does not ship `scripts/`. If `~/.hermes/skills/revenium/scripts/install.sh` does not exist, run the bootstrap. It clones the repo, installs `scripts/` and `plugins/`, then hands off to the installer:
+0. **Bootstrap the runtime files if they are missing.** `hermes skills install revenium/hermes-revenium/skills/revenium` ships `SKILL.md` and only the support files named here as bundle-relative paths: `references/bootstrap.sh`, `references/setup.md`, `references/task-classification.md`, `references/job-declaration.md` and `references/troubleshooting.md`. Hermes does not allow `plugins/` in a skill bundle and the command does not ship `scripts/`. If `~/.hermes/skills/revenium/scripts/install.sh` does not exist, run the bootstrap. It clones the repo, installs `scripts/` and `plugins/`, then hands off to the installer:
    ```
    bash ~/.hermes/skills/revenium/references/bootstrap.sh
    ```
@@ -142,7 +142,7 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    ```
    If `scripts/` is already present, the bootstrap skips the fetch. Pass `--update` to replace an existing install with the latest version; host-only scripts are preserved.
 
-   `install.sh` performs the setup below: credentials, plugin, hooks, guardrails, cron, and restart. For multiple profiles, add `--all-profiles` or `--profile <name>`. You can also run the steps manually.
+   `install.sh` performs the setup below: credentials, plugin, hooks, guardrails, cron and restart. For multiple profiles, add `--all-profiles` or `--profile <name>`. You can also run the steps manually.
 
 1. **Verify the Revenium CLI is configured.** Run:
    ```
@@ -171,7 +171,7 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    ```
    bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
    ```
-   The script prompts the operator for budget hard-limit, period, organization name, autonomous mode + notification channel/target, and optional per-task-type rules drawn from the live `task-taxonomy.json`. On success, it creates the Revenium guardrails budget rules via `revenium guardrails budget-rules create` and writes the resulting `ruleIds` array into `~/.hermes/state/revenium/config.json`. Do NOT prompt the user for budget details or write IDs into `config.json`; the script handles both.
+   The script prompts the operator for budget hard-limit, period, organization name, autonomous mode + notification channel/target and optional per-task-type rules drawn from the live `task-taxonomy.json`. On success, it creates the Revenium guardrails budget rules via `revenium guardrails budget-rules create` and writes the resulting `ruleIds` array into `~/.hermes/state/revenium/config.json`. Do NOT prompt the user for budget details or write IDs into `config.json`; the script handles both.
 
    Capture the exit code and act on it:
    - **Exit 0, final output line `Created N rule(s). config.json updated. ruleIds=[...]`**: succeeded. Proceed to step 4.
@@ -188,7 +188,7 @@ Follow these steps in order. If any step fails, STOP and explain the failure. Do
    ```
    bash ~/.hermes/skills/revenium/scripts/install-hooks.sh
    ```
-   This registers the `pre_llm_call`, `pre_tool_call`, and `post_tool_call` revenium shell hooks in the Hermes hook configuration. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
+   This registers the `pre_llm_call`, `pre_tool_call` and `post_tool_call` revenium shell hooks in the Hermes hook configuration. The hooks are registered but inert until the user approves them on the next `hermes chat` invocation.
 
 5. **Approve hooks on first `hermes chat`**. Hermes shows an approval prompt the first time each hook fires. The hooks are inert until approved.
 
@@ -229,8 +229,8 @@ When the user invokes `/revenium`:
 
 ## References
 
-- `references/setup.md` — setup, reset, and reconfigure flows
-- `references/troubleshooting.md` — failure modes and operator fixes
+- `references/setup.md`: setup, reset and reconfigure flows
+- `references/troubleshooting.md`: failure modes and operator fixes
 
 ## Verification
 
@@ -256,13 +256,13 @@ cat ~/.hermes/state/revenium/guardrail-status.json  # expect rules[] populated
 
 ## FINAL ACTION — TASK CLASSIFICATION
 
-**MANDATORY — NON-NEGOTIABLE. Execute before EVERY yield back to the user on a substantive turn.** Skipping causes the cron pipeline to record `unclassified` attribution.
+**MANDATORY. NON-NEGOTIABLE. Execute before EVERY yield back to the user on a substantive turn.** Skipping causes the cron pipeline to record `unclassified` attribution.
 
-Classify the turn if you called any non-read-only tool, produced > 200 words, or answered a multi-step reasoning question. Skip only when your entire response is ≤ 2 sentences AND you called zero tools.
+Classify the turn if you called any non-read-only tool, produced > 200 words or answered a multi-step reasoning question. Skip only when your entire response is ≤ 2 sentences AND you called zero tools.
 
 When the current session is a subagent (delegated via `delegate_task` from a root session), markers MUST carry the root delegator's `trace_id` and `agentic_job_id` so analytics roll subagent spend up under the root's arc. The code-side classifier plugin handles this automatically by walking `state.db.sessions.parent_session_id` at marker-write time; if you write a backstop marker yourself, use the root session's id, not the current subagent's id.
 
-See `references/task-classification.md` for the trigger rules, the `write_marker` snippet, the blocklist, and worked examples.
+See `references/task-classification.md` for the trigger rules, the `write_marker` snippet, the blocklist and worked examples.
 
 ## FINAL ACTION — JOB DECLARATION
 
@@ -292,8 +292,8 @@ outcome-value assessment contract. `references/config-schema.md` documents the
 
 Before you yield any response, answer these three questions. If any answer is NO, take the corrective action before sending.
 
-1. **Have I read `~/.hermes/state/revenium/guardrail-status.json` during THIS turn?** If NO — read it now, before responding. Every turn requires a fresh read; a prior turn's read does not count. Do not trust memory, context, or a summarized earlier result.
+1. **Have I read `~/.hermes/state/revenium/guardrail-status.json` during THIS turn?** If NO, read it now, before responding. Every turn requires a fresh read; a prior turn's read does not count. Do not trust memory, context or a summarized earlier result.
 
-2. **Is `halted` true in the file I just read?** If YES — the HALT CHECK section at the top of this file overrides EVERYTHING below it including both FINAL ACTION sections (TASK CLASSIFICATION and JOB DECLARATION). Their "MANDATORY" imperatives do NOT apply while halted. The only permitted action is the mandated CANCELLED marker write (if an arc was in progress) followed by the verbatim halt string from the HALT CHECK block. Nothing else.
+2. **Is `halted` true in the file I just read?** If YES, the HALT CHECK section at the top of this file overrides EVERYTHING below it including both FINAL ACTION sections (TASK CLASSIFICATION and JOB DECLARATION). Their "MANDATORY" imperatives do NOT apply while halted. The only permitted action is the mandated CANCELLED marker write (if an arc was in progress) followed by the verbatim halt string from the HALT CHECK block. Nothing else.
 
-3. **Did I complete the TASK CLASSIFICATION FINAL ACTION (and a job marker backstop if I had explicit reason to believe the automatic classifier path failed)? If NO — write the missing task marker first before sending the response.**
+3. **Did I complete the TASK CLASSIFICATION FINAL ACTION (and a job marker backstop if I had explicit reason to believe the automatic classifier path failed)? If NO, write the missing task marker first before sending the response.**
