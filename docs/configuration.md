@@ -164,7 +164,8 @@ different model. Completions already shipped keep the name they shipped with.
 | Variable | Default | Purpose |
 |---|---|---|
 | `REVENIUM_CRON_SETTLE_SECONDS` | `600` | How long to wait for a session's classification before metering it anyway. Must exceed worst-case job-inference latency: metering early orphans the completion from its job permanently. |
-| `REVENIUM_JOBS_STALE_SECONDS` | `600` | When an open job arc is considered stale. |
+| `REVENIUM_JOBS_STALE_SECONDS` | `600` | When an open job arc is considered stale. Also bounds two job-link guards: how long a subagent's completions wait for their root job's create before shipping without the job link, and how recently a job may have closed for an auxiliary row to still link to it. |
+| `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` | `86400` | How long a `CANCELLED` job outcome is held back while its session is still open (`ended_at` unset). `CANCELLED` is the classifier's "uncertain" verdict, so it is not reported mid-session. After this much idle time (from `last_activity_at` when Hermes records it, otherwise from the session start) the session counts as abandoned and the outcome is reported. `0` turns the hold off. |
 | `REVENIUM_MARKER_RETENTION_DAYS` | `30` | Age at which `prune-markers.sh` will remove a marker file. |
 | `REVENIUM_CRON_LOOP_COUNT` | `1` | Iterations per cron tick, for sub-minute cadence. `install-cron.sh --interval-seconds` sets this. |
 | `REVENIUM_CRON_LOOP_SLEEP_SECONDS` | `0` | Pause between those iterations. |

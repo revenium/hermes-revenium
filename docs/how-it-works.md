@@ -137,6 +137,18 @@ are immutable and never re-sent) with idempotency held in
 `~/.hermes/state/revenium/revenium-jobs.ledger`. The AI transactions belonging to a job are
 linked back through `--agentic-job-id`.
 
+The classifier infers a session's jobs once, from the first completed turn, so its first
+verdict can be premature. `CANCELLED` is its "uncertain" verdict, and an arc whose work is
+still running (a subagent mid-flight) comes out `CANCELLED`. A `CANCELLED` job is therefore
+re-checked on every later turn, against the transcript as it then stands, with one small
+status-only model call per turn however many jobs are open. When the status moves, the
+classifier appends a second marker for the same job id (never a new id), and the reporter
+reports the latest marker for each id. A `SUCCESS` found this way is evaluated like any other
+`SUCCESS`. `SUCCESS` and `FAILED` are never re-judged, and neither is the `CANCELLED` a
+guardrail halt writes. A `CANCELLED` outcome is held while its session is open, so a
+re-judge that lands before the session ends replaces the verdict; one that lands after the
+`CANCELLED` outcome was reported cannot, because outcomes are immutable.
+
 Every outcome also carries a `--metadata` blob holding the deployment `source`, taken from
 the session's source column. `FAILED` arcs add a `failure_reason`: a short plain-text cause
 inferred by the classifier. `SUCCESS` and `CANCELLED` arcs carry source alone.

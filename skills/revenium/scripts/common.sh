@@ -101,6 +101,16 @@ JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"
 # Phase 10 (D-07): staleness threshold for wedged-job warn. Env-overridable.
 REVENIUM_JOBS_STALE_SECONDS="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+# Job-lifecycle guard (2026-10-09 phantom-jobs fix): a CANCELLED job verdict is
+# the classifier's "I am not sure" catch-all, and the plugin writes it from a
+# mid-session hook a couple of minutes after the session starts. The reporter
+# therefore does not act on it while the session is still open
+# (state.db sessions.ended_at IS NULL). A session that never gets an
+# ended_at (Hermes died, the user walked away) must not leave its job PENDING
+# forever, so the deferral lapses once the session has been idle this long
+# (measured from sessions.last_activity_at when Hermes records it, else
+# started_at). Default one day. Env-overridable.
+REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS="${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS:-86400}"
 # BUG-1 (agentic-job ↔ transaction association race): the reporter defers a
 # session's completions until either the classifier plugin's .ready sentinel
 # lands (authoritative gate) OR the session ages past this settle window

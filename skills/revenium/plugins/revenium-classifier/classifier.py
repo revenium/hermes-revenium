@@ -557,6 +557,163 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
     )
 
 
+# classifier-premature-cancel: the CANCELLED re-judge (see
+# _rejudge_cancelled_jobs). The agentic_job_id prefix pre_tool_call.sh gives the
+# CANCELLED marker it writes on a guardrail halt -- a real cancellation, never
+# re-judged. hermes-report.sh tests the same prefix (`guardrail-halt-*`); the
+# duplication is the repo's deliberate plugin/shell split.
+HALT_JOB_ID_PREFIX = "guardrail-halt-"
+# Bound on how many CANCELLED jobs one re-judge call covers. Job inference can
+# return several arcs for a session, but a session with more than a handful of
+# simultaneously-unconfirmed arcs is not one whose extra jobs a single status
+# prompt should be asked to track.
+REJUDGE_MAX_JOBS = 8
+# Per-session rotation offset for re-judge candidates, so a session with more
+# than REJUDGE_MAX_JOBS CANCELLED jobs re-checks a different window on each
+# trigger instead of the same first eight forever (first-pass inference, and a
+# registered classification implementation, can return any number of jobs).
+# In-process only: a Hermes restart starts the rotation over, which still
+# reaches every job within ceil(n / REJUDGE_MAX_JOBS) triggers. Cleared rather
+# than grown past _REJUDGE_ROTATION_MAX_SESSIONS entries.
+_REJUDGE_ROTATION: dict = {}
+_REJUDGE_ROTATION_MAX_SESSIONS = 1024
+# The transcript budget for a re-judge. Deliberately the same 6000 chars
+# _build_job_inference_prompt and the evaluator slice to, but applied at READ
+# time through _read_session_transcript's head+tail sampler rather than as a
+# head-only slice afterwards: the evidence that settles a CANCELLED verdict is
+# at the END of the session.
+_REJUDGE_TRANSCRIPT_CHARS = 6000
+# Same output budget and timeout as _infer_jobs_via_llm's array response (a
+# verdict per job is far smaller than a job, so this is generous, not tight).
+_REJUDGE_MAX_TOKENS = 512
+_REJUDGE_TIMEOUT_SECONDS = 20.0
+
+
+def _build_rejudge_prompt(transcript: str, jobs: list) -> str:
+    """Build the status-only re-judge prompt for already-known jobs.
+
+    Unlike _build_job_inference_prompt, this asks nothing about identity: no
+    agentic_job_id, no job_name, no job_type, no taxonomy. The arcs are listed by
+    number and the model answers per number, so it can neither rename a job nor
+    mint a new one, and the response needs no id echoed back to be matched.
+
+    The status guidance is the first pass's, restated for a model that is now
+    looking at a later transcript: SUCCESS still needs checkable evidence, and
+    CANCELLED stays the answer for "unfinished or inconclusive", so a re-judge
+    that finds nothing new changes nothing.
+
+    An over-long transcript is cut to its head and its TAIL, never head-only.
+    """
+    arcs = []
+    for number, job in enumerate(jobs, start=1):
+        name = _clamp_assessment_text(job.get("job_name") or "", 80) or "(unnamed)"
+        job_type = _clamp_assessment_text(job.get("job_type") or "", 48)
+        arcs.append(f"  {number}. {name} (type: {job_type})")
+    arcs_block = "\n".join(arcs)
+
+    text = transcript or ""
+    if len(text) > _REJUDGE_TRANSCRIPT_CHARS:
+        marker = "\n... [transcript truncated — middle omitted] ...\n"
+        budget = max(0, _REJUDGE_TRANSCRIPT_CHARS - len(marker))
+        head = budget // 3
+        text = text[:head] + marker + text[len(text) - (budget - head):]
+
+    return (
+        "You are re-checking task arcs from a Hermes AI agent session. Each arc "
+        "below was judged earlier, while the session was still in progress, and "
+        "could not be confirmed as finished at that point. Judge each one again "
+        "against the session transcript as it stands now. The arcs are fixed: do "
+        "not rename, merge or add any. Decide only each arc's status.\n\n"
+        f"Arcs to re-check:\n{arcs_block}\n\n"
+        "Output ONLY a JSON array with one object per arc. Each object must have:\n"
+        "  - index: the arc's number from the list above\n"
+        "  - status: one of SUCCESS, FAILED, or CANCELLED\n"
+        "  - failure_reason: ONLY when status is FAILED, a brief (max ~200 char) "
+        "plain-text explanation of what went wrong. OMIT this field otherwise.\n\n"
+        "Status guidance:\n"
+        "  SUCCESS: only when the transcript now shows clear evidence the goal "
+        "was achieved, such as a verified result or a delivered artifact. Work "
+        "done by delegated subagents counts.\n"
+        "  FAILED: only when there is explicit evidence of failure. Always "
+        "include failure_reason.\n"
+        "  CANCELLED: the work is still unfinished, was abandoned, or the "
+        "evidence is not conclusive.\n\n"
+        f"Session transcript:\n{text}\n\n"
+        "JSON array:"
+    )
+
+
+def _parse_rejudge_verdicts(raw: str, count: int) -> dict:
+    """Parse a re-judge response into {arc_number: {"status", "failure_reason"}}.
+
+    Fail-safe in the direction that changes nothing: anything not a clean,
+    in-range, recognised verdict is dropped, and a dropped verdict leaves its job
+    CANCELLED. The first valid verdict for a number wins. failure_reason is kept
+    only for FAILED, clamped by serialized bytes with the IFS characters stripped
+    -- the same treatment _validate_job gives a first-pass reason.
+    """
+    verdicts: dict = {}
+    for item in _parse_job_array(raw):
+        index = item.get("index")
+        if isinstance(index, str) and index.strip().isdigit():
+            index = int(index.strip())
+        if isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if not 1 <= index <= count or index in verdicts:
+            continue
+        status = item.get("status")
+        if not isinstance(status, str):
+            continue
+        status = status.strip().upper()
+        if status not in {"SUCCESS", "FAILED", "CANCELLED"}:
+            continue
+        reason = ""
+        if status == "FAILED":
+            reason = _clamp_assessment_text(
+                item.get("failure_reason", ""), FAILURE_REASON_CLAMP_BYTES)
+        verdicts[index] = {"status": status, "failure_reason": reason}
+    return verdicts
+
+
+async def _rejudge_status_via_llm(transcript: str, jobs: list) -> dict:
+    """One status-only LLM call covering every job in `jobs`; {} on any failure.
+
+    Mirror of _infer_jobs_via_llm's call, and for the same reason NO `task=`
+    kwarg: the call stays on the user's configured provider and model (ROI-07).
+    Returns {} -- never raises -- when call_llm is unavailable, the call fails or
+    the response is unusable, so the caller simply leaves every job CANCELLED.
+    """
+    if call_llm is None or not jobs:
+        return {}
+    try:
+        prompt = _build_rejudge_prompt(transcript, jobs)
+        response = await asyncio.to_thread(
+            call_llm,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You re-check whether Hermes agent task arcs have now "
+                        "finished. Output only a JSON array."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.0,
+            max_tokens=_REJUDGE_MAX_TOKENS,
+            timeout=_REJUDGE_TIMEOUT_SECONDS,
+        )
+        # Extract content; tolerate openai SDK response shape variations.
+        try:
+            raw = response.choices[0].message.content
+        except AttributeError:
+            raw = response["choices"][0]["message"]["content"]
+        return _parse_rejudge_verdicts(raw or "", len(jobs))
+    except Exception as exc:
+        logger.warning("revenium-classifier job re-judge LLM call failed: %s", exc)
+        return {}
+
+
 # Phase 37: the evaluator call's own budgets. NOT inherited from the job path.
 # Originally sized from 37-RESEARCH.md at ~149 tokens worst-case (basis 200,
 # inferred_role 60) under the phase-36 clamps, with 256 as ~1.7x margin. That
@@ -3997,7 +4154,11 @@ def _sidecar_filename_component(raw_job_id) -> str:
     return value
 
 
-def _write_job_assessment(record: dict, paths: "_Paths | None" = None) -> "Path | None":
+def _write_job_assessment(
+    record: dict,
+    paths: "_Paths | None" = None,
+    refuse_if_corrected: bool = False,
+) -> "Path | None":
     """Atomic O_APPEND + fcntl.LOCK_EX append of one JobAssessment sidecar
     line to <job_assessments_dir>/<sanitized_job_id>.jsonl.
 
@@ -4007,6 +4168,13 @@ def _write_job_assessment(record: dict, paths: "_Paths | None" = None) -> "Path 
     is worse written than not written, because it looks like data. Never
     raises; the D-12 call site wraps this in its own try/except so a sidecar
     write failure never prevents _write_job_marker from still running.
+
+    `refuse_if_corrected=True` (the CANCELLED re-judge) also returns None,
+    writing nothing, when an operator `kind:"correction"` line is already in the
+    sidecar. The check runs under the same LOCK_EX correct-assessment.sh takes,
+    so a correction filed while the evaluator call was in flight is still seen:
+    the reporter reads the sidecar last-match-wins, and a model estimate
+    appended after a correction would replace the operator's figure.
     """
     p = paths or _module_paths()
     p.job_assessments_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -4020,8 +4188,22 @@ def _write_job_assessment(record: dict, paths: "_Paths | None" = None) -> "Path 
             SIDECAR_LINE_MAX_BYTES, record.get("agentic_job_id", ""),
         )
         return None
-    with open(sidecar_path, "ab", buffering=0) as f:
+    with open(sidecar_path, "a+b" if refuse_if_corrected else "ab", buffering=0) as f:
         fcntl.flock(f, fcntl.LOCK_EX)
+        if refuse_if_corrected:
+            f.seek(0)
+            for existing in f.read().decode("utf-8", errors="replace").splitlines():
+                try:
+                    rec = json.loads(existing)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") == "correction":
+                    logger.info(
+                        "revenium-classifier: operator correction present, "
+                        "re-judge assessment not written for job=%s",
+                        record.get("agentic_job_id", ""),
+                    )
+                    return None
         f.write(line.encode("utf-8"))
     return sidecar_path
 
@@ -5202,6 +5384,350 @@ async def _attach_assessment(
         )
 
 
+async def _persist_job_verdict(
+    valid: dict,
+    transcript: str,
+    session_id: str,
+    p: "_Paths",
+    write_assessment: bool = True,
+    refuse_if_corrected: bool = False,
+) -> None:
+    """Attach the assessment (or abstention record) for one validated job, write
+    its sidecar line, then append its kind:"job" marker.
+
+    The ONE place a job verdict reaches disk, shared by first-pass job
+    inference (run_classification_async Step 7) and the CANCELLED re-judge
+    (_rejudge_cancelled_jobs), so a re-judged SUCCESS is evaluated, sidecar'd
+    and marked exactly as a first-pass SUCCESS is -- the ROI-09 guard order, the
+    feature-off byte-identity and the sidecar-before-marker order below all hold
+    on both paths by construction rather than by two copies kept in step.
+
+    `write_assessment=False` skips the evaluation / abstention step (and so the
+    sidecar line it would produce) but still appends the marker. Only the
+    re-judge passes it, when an operator correction already sits in the job's
+    sidecar: the reporter reads the sidecar last-match-wins, so a model estimate
+    appended after a correction would supersede it. That pre-check is only an
+    economy (it skips the evaluator call); the re-judge also passes
+    `refuse_if_corrected=True`, which repeats the check under the sidecar lock at
+    write time, closing the window in which an operator files a correction
+    while the evaluator is running.
+
+    Raises whatever its collaborators raise; both callers wrap it in their own
+    try/except so one job's failure never abandons the others (D-04).
+    """
+    # Phase 37 (ROI-07/ROI-09). Guard ORDER is
+    # load-bearing: status first, then the gate,
+    # then evaluator resolution. ROI-09 says a
+    # FAILED or CANCELLED arc is never evaluated,
+    # and the cheapest way to guarantee that is to
+    # never reach the code that could call out.
+    if (
+        write_assessment
+        and valid["status"] == "SUCCESS"
+        and _llm_evaluation_enabled(paths=p)
+    ):
+        # Phase 44 (EGV-16, D-12/D-13): session_id
+        # is the group id. At both call sites
+        # root_sid == session_id is already true
+        # by construction -- the `root_sid ==
+        # session_id` gate in
+        # run_classification_async's Step 7 has
+        # asserted it before either first-pass
+        # inference or the CANCELLED re-judge is
+        # reached -- so sourcing the id from
+        # either name yields the same value;
+        # session_id is used because it is the
+        # parameter already in scope and needs no
+        # second resolution. Do not widen the
+        # gate to "fix" this.
+        await _attach_assessment(
+            valid, transcript, p,
+            double_counting_group=session_id,
+        )
+    elif (
+        write_assessment
+        and valid["status"] != "SUCCESS"
+        and _llm_evaluation_enabled(paths=p)
+    ):
+        # Phase 44 (EGV-17, D-14): a FAILED,
+        # CANCELLED or otherwise non-SUCCESS job
+        # now gets its own abstention sidecar
+        # record -- built DIRECTLY, never
+        # through _attach_assessment. Written as
+        # "not SUCCESS" rather than an explicit
+        # FAILED-or-CANCELLED membership test so
+        # a status word introduced later is
+        # covered by default, rather than
+        # silently falling through to no record
+        # at all -- the failure mode this branch
+        # exists to close.
+        #
+        # ROI-09 constraint (stated here, not
+        # just above): this branch must NEVER
+        # call _attach_assessment and must NEVER
+        # resolve or import the evaluator
+        # registry. Routing a non-SUCCESS arc
+        # through _attach_assessment would break
+        # ROI-09's guarantee even though the LLM
+        # call would only be reached
+        # conditionally -- the cheapest way to
+        # guarantee "never evaluated" is to never
+        # reach the code that could call out.
+        #
+        # evaluator_version is deliberately left
+        # empty rather than resolved from the
+        # registry: resolving it is a pure
+        # lookup with no I/O, but importing the
+        # evaluators module from a path that by
+        # definition never evaluates weakens the
+        # "never reach the code that could call
+        # out" property for no provenance gain --
+        # abstention_reason already makes the
+        # record's nature legible.
+        #
+        # The _llm_evaluation_enabled gate here
+        # is load-bearing for backward
+        # compatibility: with the feature off,
+        # today no assessment sidecar record is
+        # written for any job at any status, and
+        # a feature-off install must behave
+        # byte-identically. Do not drop this
+        # condition to "always write an
+        # abstention record".
+        _non_success_cfg = _llm_evaluation_config(paths=p)
+        _non_success_evaluator = (
+            _non_success_cfg.get("evaluator") or "llm"
+        )
+        # Phase 46 (EGV-21, D-06/D-07): this
+        # branch never calls _attach_assessment
+        # (see the comment block above), so
+        # locality is resolved directly here
+        # rather than inherited from that
+        # function's own pre-bound pair -- same
+        # fail-open call, same profile-scoped
+        # `p`, same reasoning: a fact about the
+        # configured endpoint, available
+        # regardless of evaluation status.
+        _non_success_provider, _non_success_class = (
+            _resolve_inference_locality(p)
+        )
+        valid["_assessment_record"] = _build_job_assessment(
+            valid, None, None, _non_success_cfg,
+            _non_success_evaluator, "",
+            abstention_reason="not_evaluated_non_success",
+            double_counting_group=session_id,
+            inference_provider=_non_success_provider,
+            inference_address_class=_non_success_class,
+            paths=p,
+        )
+    # Phase 42 (D-12): sidecar FIRST, then the job
+    # marker. A crash between the two appends
+    # leaves an orphan sidecar record that
+    # nothing reads -- harmless, and the prune
+    # pass reclaims it on mtime. The reverse
+    # order would lose the assessment's value
+    # permanently on the same crash (the marker
+    # would then be reported status-only, D-10).
+    # Own try/except: a sidecar write failure
+    # must never prevent _write_job_marker from
+    # still running below.
+    _assessment_record = valid.pop("_assessment_record", None)
+    if isinstance(_assessment_record, dict) and _assessment_record:
+        try:
+            if refuse_if_corrected:
+                await asyncio.to_thread(
+                    _write_job_assessment, _assessment_record, p,
+                    refuse_if_corrected=True,
+                )
+            else:
+                await asyncio.to_thread(
+                    _write_job_assessment, _assessment_record, p
+                )
+        except Exception as exc:
+            logger.warning(
+                "revenium-classifier: sidecar assessment write "
+                "failed for job=%s: %s",
+                valid.get("agentic_job_id", ""), exc,
+            )
+    await asyncio.to_thread(_write_job_marker, session_id, valid, p)
+
+
+def _latest_job_markers(sid: str, paths: "_Paths | None" = None) -> list:
+    """Return the LATEST kind:"job" record per agentic_job_id for `sid`, in the
+    order each id was first seen. Fail-open: [] on a missing or unreadable file.
+
+    "Latest" is the greatest marker `ts`, a tie going to the later line in the
+    file -- the rule hermes-report.sh's outcome stage applies to the same
+    markers (_reduce_job_outcome_queue), so the classifier and the reporter
+    agree on which record is a job's current verdict. A job can carry more than
+    one record once a CANCELLED verdict has been re-judged: the re-judge appends
+    rather than rewrites, because the marker file is append-only and the
+    reporter and the sidecar are both written to be read last-match-wins.
+
+    A record with no usable `ts` ranks as 0.0 (oldest). Same tolerant per-line
+    parse as _job_marker_exists: a torn or non-object line is skipped.
+    """
+    marker_path = (paths or _module_paths()).markers_dir / f"{sid}.jsonl"
+    if not marker_path.is_file():
+        return []
+    try:
+        lines = marker_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    latest: dict = {}
+    order: list = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("kind") != "job":
+            continue
+        aid = rec.get("agentic_job_id")
+        if not isinstance(aid, str) or not aid:
+            continue
+        ts = rec.get("ts")
+        ts = float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else 0.0
+        held = latest.get(aid)
+        if held is None:
+            order.append(aid)
+            latest[aid] = (ts, rec)
+        elif ts >= held[0]:
+            latest[aid] = (ts, rec)
+    return [latest[aid][1] for aid in order]
+
+
+def _sidecar_has_correction(job_id: str, paths: "_Paths | None" = None) -> bool:
+    """True when an operator `kind:"correction"` line already sits in this job's
+    assessment sidecar. Fail-open to False (a missing or unreadable sidecar has
+    no correction to protect).
+
+    The reporter reads the sidecar last-match-wins, deliberately, so that a
+    correction filed later supersedes the original record. The same rule means
+    a model estimate appended AFTER a correction would supersede the operator's
+    figure; the CANCELLED re-judge checks this before it writes one.
+    """
+    p = paths or _module_paths()
+    sidecar_path = p.job_assessments_dir / f"{_sidecar_filename_component(job_id)}.jsonl"
+    try:
+        with sidecar_path.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("kind") == "correction":
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+async def _rejudge_cancelled_jobs(session_id: str, paths: "_Paths") -> None:
+    """Re-judge the status of this root session's CANCELLED jobs against the
+    transcript as it now stands, appending a new marker for each one whose
+    status moved.
+
+    Why this exists: first-pass job inference runs from post_llm_call, i.e.
+    mid-session, and the job prompt makes CANCELLED the "uncertain" catch-all,
+    so an arc that was merely still running (a subagent mid-flight) was written
+    CANCELLED seconds in. _job_marker_exists then latched that verdict for the
+    life of the session. A CANCELLED arc is never evaluated (ROI-09), so the job
+    shipped with no value. The session-end hooks cannot be relied on as the
+    re-judge point -- on_session_end fires only from _session_expiry_watcher and
+    a desktop session may close without either hook firing -- so every trigger
+    re-checks.
+
+    Rules, each pinned by tests/test_classifier_premature_cancel.py:
+      * Only a job whose LATEST record is CANCELLED is a candidate. SUCCESS and
+        FAILED are evidence-backed verdicts and stay latched; once a re-judge
+        moves the status off CANCELLED the job drops out on the next trigger, so
+        the cost ends with the uncertainty.
+      * The guardrail-halt cancel (agentic_job_id guardrail-halt-*, written by
+        pre_tool_call.sh) is a real cancellation, not a guess, and is never
+        re-judged. The prefix is the same test hermes-report.sh applies.
+      * The job's agentic_job_id, job_name and job_type are carried over
+        UNCHANGED. _validate_job's entropy suffix is deliberately not applied: a
+        new id would be a new Revenium job.
+      * One status-only LLM call per trigger however many candidates there are
+        (at most REJUDGE_MAX_JOBS, in one prompt), and none when the transcript
+        is empty. When there are more, the window rotates across triggers
+        (_REJUDGE_ROTATION) so every job is eventually re-checked. A verdict that is still CANCELLED, unparseable or missing
+        appends nothing.
+      * A moved status is persisted through _persist_job_verdict -- the very
+        path first-pass inference uses -- so a re-judged SUCCESS is evaluated,
+        gets its valued sidecar record and then its marker exactly as a
+        first-pass SUCCESS does. The caller has already applied the root-session
+        and _guardrail_halted gates.
+
+    Never raises (D-04): this runs inside run_classification_async's Step 7.
+    """
+    try:
+        candidates = []
+        for rec in _latest_job_markers(session_id, paths=paths):
+            status = rec.get("status")
+            job_id = rec.get("agentic_job_id")
+            job_type = rec.get("job_type")
+            if not isinstance(status, str) or status.strip().upper() != "CANCELLED":
+                continue
+            if job_id.startswith(HALT_JOB_ID_PREFIX):
+                continue
+            # A marker whose job_type no longer matches the label grammar was
+            # not written by this classifier; there is nothing sound to carry
+            # forward into a new marker for it.
+            if not isinstance(job_type, str) or not LABEL_RE.match(job_type):
+                continue
+            candidates.append(rec)
+        if not candidates:
+            return
+        if len(candidates) > REJUDGE_MAX_JOBS:
+            offset = _REJUDGE_ROTATION.get(session_id, 0) % len(candidates)
+            candidates = (candidates[offset:] + candidates[:offset])[:REJUDGE_MAX_JOBS]
+            if len(_REJUDGE_ROTATION) >= _REJUDGE_ROTATION_MAX_SESSIONS:
+                _REJUDGE_ROTATION.clear()
+            _REJUDGE_ROTATION[session_id] = offset + REJUDGE_MAX_JOBS
+
+        # A budget below the 8000-char default so no downstream cut is needed:
+        # _build_job_inference_prompt re-slices head-only to 6000, which would
+        # throw away exactly the completion evidence a re-judge exists to see.
+        transcript = _read_session_transcript(
+            session_id, max_chars=_REJUDGE_TRANSCRIPT_CHARS, paths=paths,
+        )
+        if not transcript:
+            return
+
+        verdicts = await _rejudge_status_via_llm(transcript, candidates)
+        for index, rec in enumerate(candidates, start=1):
+            verdict = verdicts.get(index)
+            if not verdict or verdict["status"] == "CANCELLED":
+                continue
+            try:
+                job_name = rec.get("job_name")
+                valid = {
+                    "agentic_job_id": rec["agentic_job_id"],
+                    "job_name": job_name if isinstance(job_name, str) else "",
+                    "job_type": rec["job_type"],
+                    "status": verdict["status"],
+                    "failure_reason": verdict["failure_reason"],
+                }
+                await _persist_job_verdict(
+                    valid, transcript, session_id, paths,
+                    write_assessment=not _sidecar_has_correction(
+                        valid["agentic_job_id"], paths=paths),
+                    refuse_if_corrected=True,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "revenium-classifier: dropping one job re-judge for sid=%s: %s",
+                    session_id, exc,
+                )
+    except Exception as exc:
+        logger.warning(
+            "revenium-classifier job re-judge failed for sid=%s: %s",
+            session_id, exc,
+        )
+
+
 async def run_classification_async(
     session_id: str,
     model: "str | None" = None,
@@ -5225,6 +5751,13 @@ async def run_classification_async(
     unconditionally afterward so that job markers are produced on the
     dominant self-classify code path. Step 7 carries its own three
     idempotency gates (root_sid, _guardrail_halted, _job_marker_exists).
+
+    _job_marker_exists latches FIRST-PASS job inference: a session's jobs are
+    inferred once. It does not latch the verdict. A root session that already
+    has a job marker is routed to _rejudge_cancelled_jobs instead, which
+    re-checks the status of any job whose latest record is still CANCELLED --
+    the "uncertain" catch-all a mid-session first pass writes for an arc that
+    was simply unfinished.
     """
     if not session_id:
         return
@@ -5333,6 +5866,13 @@ async def run_classification_async(
         # Three early skip gates: root-session only, not guardrail-halted, no existing job marker.
         # Wrapped in its own try/except so a job-path failure never disturbs the task marker
         # already written above (D-04 never-raise invariant, T-13-08).
+        #
+        # A session that already HAS a job marker is not skipped outright: the
+        # `elif` below hands it to _rejudge_cancelled_jobs, which re-judges only
+        # a job still CANCELLED (see that function for why the first verdict
+        # cannot be final). Same root-session and not-halted gates; the branch
+        # is reached only when the marker exists, because the `if` above took
+        # every case where it did not.
         try:
             if (
                 root_sid == session_id  # skip subagent sessions (T-13-06)
@@ -5389,130 +5929,7 @@ async def run_classification_async(
                         try:
                             valid = _validate_job(job)
                             if valid:
-                                # Phase 37 (ROI-07/ROI-09). Guard ORDER is
-                                # load-bearing: status first, then the gate,
-                                # then evaluator resolution. ROI-09 says a
-                                # FAILED or CANCELLED arc is never evaluated,
-                                # and the cheapest way to guarantee that is to
-                                # never reach the code that could call out.
-                                if (
-                                    valid["status"] == "SUCCESS"
-                                    and _llm_evaluation_enabled(paths=p)
-                                ):
-                                    # Phase 44 (EGV-16, D-12/D-13): session_id
-                                    # is the group id. At this call site
-                                    # root_sid == session_id is already true
-                                    # by construction -- the enclosing `if
-                                    # root_sid == session_id` gate above has
-                                    # asserted it -- so sourcing the id from
-                                    # either name yields the same value;
-                                    # session_id is used because it is the
-                                    # parameter already in scope and needs no
-                                    # second resolution. Do not widen the
-                                    # gate to "fix" this.
-                                    await _attach_assessment(
-                                        valid, transcript, p,
-                                        double_counting_group=session_id,
-                                    )
-                                elif (
-                                    valid["status"] != "SUCCESS"
-                                    and _llm_evaluation_enabled(paths=p)
-                                ):
-                                    # Phase 44 (EGV-17, D-14): a FAILED,
-                                    # CANCELLED or otherwise non-SUCCESS job
-                                    # now gets its own abstention sidecar
-                                    # record -- built DIRECTLY, never
-                                    # through _attach_assessment. Written as
-                                    # "not SUCCESS" rather than an explicit
-                                    # FAILED-or-CANCELLED membership test so
-                                    # a status word introduced later is
-                                    # covered by default, rather than
-                                    # silently falling through to no record
-                                    # at all -- the failure mode this branch
-                                    # exists to close.
-                                    #
-                                    # ROI-09 constraint (stated here, not
-                                    # just above): this branch must NEVER
-                                    # call _attach_assessment and must NEVER
-                                    # resolve or import the evaluator
-                                    # registry. Routing a non-SUCCESS arc
-                                    # through _attach_assessment would break
-                                    # ROI-09's guarantee even though the LLM
-                                    # call would only be reached
-                                    # conditionally -- the cheapest way to
-                                    # guarantee "never evaluated" is to never
-                                    # reach the code that could call out.
-                                    #
-                                    # evaluator_version is deliberately left
-                                    # empty rather than resolved from the
-                                    # registry: resolving it is a pure
-                                    # lookup with no I/O, but importing the
-                                    # evaluators module from a path that by
-                                    # definition never evaluates weakens the
-                                    # "never reach the code that could call
-                                    # out" property for no provenance gain --
-                                    # abstention_reason already makes the
-                                    # record's nature legible.
-                                    #
-                                    # The _llm_evaluation_enabled gate here
-                                    # is load-bearing for backward
-                                    # compatibility: with the feature off,
-                                    # today no assessment sidecar record is
-                                    # written for any job at any status, and
-                                    # a feature-off install must behave
-                                    # byte-identically. Do not drop this
-                                    # condition to "always write an
-                                    # abstention record".
-                                    _non_success_cfg = _llm_evaluation_config(paths=p)
-                                    _non_success_evaluator = (
-                                        _non_success_cfg.get("evaluator") or "llm"
-                                    )
-                                    # Phase 46 (EGV-21, D-06/D-07): this
-                                    # branch never calls _attach_assessment
-                                    # (see the comment block above), so
-                                    # locality is resolved directly here
-                                    # rather than inherited from that
-                                    # function's own pre-bound pair -- same
-                                    # fail-open call, same profile-scoped
-                                    # `p`, same reasoning: a fact about the
-                                    # configured endpoint, available
-                                    # regardless of evaluation status.
-                                    _non_success_provider, _non_success_class = (
-                                        _resolve_inference_locality(p)
-                                    )
-                                    valid["_assessment_record"] = _build_job_assessment(
-                                        valid, None, None, _non_success_cfg,
-                                        _non_success_evaluator, "",
-                                        abstention_reason="not_evaluated_non_success",
-                                        double_counting_group=session_id,
-                                        inference_provider=_non_success_provider,
-                                        inference_address_class=_non_success_class,
-                                        paths=p,
-                                    )
-                                # Phase 42 (D-12): sidecar FIRST, then the job
-                                # marker. A crash between the two appends
-                                # leaves an orphan sidecar record that
-                                # nothing reads -- harmless, and the prune
-                                # pass reclaims it on mtime. The reverse
-                                # order would lose the assessment's value
-                                # permanently on the same crash (the marker
-                                # would then be reported status-only, D-10).
-                                # Own try/except: a sidecar write failure
-                                # must never prevent _write_job_marker from
-                                # still running below.
-                                _assessment_record = valid.pop("_assessment_record", None)
-                                if isinstance(_assessment_record, dict) and _assessment_record:
-                                    try:
-                                        await asyncio.to_thread(
-                                            _write_job_assessment, _assessment_record, p
-                                        )
-                                    except Exception as exc:
-                                        logger.warning(
-                                            "revenium-classifier: sidecar assessment write "
-                                            "failed for job=%s: %s",
-                                            valid.get("agentic_job_id", ""), exc,
-                                        )
-                                await asyncio.to_thread(_write_job_marker, session_id, valid, p)
+                                await _persist_job_verdict(valid, transcript, session_id, p)
                                 _persist_job_type_to_taxonomy(valid["job_type"], paths=p)
                         except Exception as exc:
                             logger.warning(
@@ -5520,6 +5937,8 @@ async def run_classification_async(
                                 session_id,
                                 exc,
                             )
+            elif root_sid == session_id and not _guardrail_halted(paths=p):
+                await _rejudge_cancelled_jobs(session_id, p)
         except Exception as exc:
             logger.warning(
                 "revenium-classifier job inference failed for sid=%s: %s",
