@@ -61,6 +61,7 @@ import statistics
 import sys
 import time
 import urllib.parse
+import uuid
 from collections import Counter, namedtuple
 from fractions import Fraction
 from pathlib import Path
@@ -594,18 +595,22 @@ async def replay_call(c, job, transcript, cfg, arm, stage, evaluator_version):
         _CALL_CTX.reset(token)
 
 
-async def run_calls(c, calls, concurrency, evaluator_version):
+async def run_calls(c, calls, concurrency, evaluator_version, on_start=None):
     """Run `calls`, a list of `(job, transcript, cfg, arm, stage)`, with at
-    most `concurrency` in flight. Returns the records in call order."""
+    most `concurrency` in flight. Returns the records in call order.
+    `on_start(index)` runs just before call `index` reaches the model."""
     semaphore = asyncio.Semaphore(max(1, int(concurrency)))
 
-    async def one(spec):
+    async def one(index, spec):
         job, transcript, cfg, arm, stage = spec
         async with semaphore:
+            if on_start is not None:
+                on_start(index)
             return await replay_call(
                 c, job, transcript, cfg, arm, stage, evaluator_version)
 
-    return list(await asyncio.gather(*(one(spec) for spec in calls)))
+    return list(await asyncio.gather(
+        *(one(index, spec) for index, spec in enumerate(calls))))
 
 
 # ---------------------------------------------------------------------------
@@ -1054,6 +1059,7 @@ EXCLUSION_STEPS = (
 POOL_ENTRY_KEYS = ("arc", "agentic_job_id", "sid", "job_name", "job_type",
                    "ts", "transcript_sha256")
 RUN_MODEL_FILE = "run-model.json"
+ATTEMPTS_FILE = "attempts.jsonl"
 FENCE_CHECKS = ("sidecar_marker_lines", "ledger_lines",
                 "state_db_model_rows", "agent_log_instrument")
 INSTRUMENT_NEEDLE = "rejected assessment, confidence outside [0,1]"
@@ -1663,6 +1669,38 @@ def effective_records(records):
     return effective, attempts
 
 
+def _attempts_path(out_dir):
+    return out_dir / ATTEMPTS_FILE
+
+
+def _append_attempt_line(out_dir, line):
+    with open(_attempts_path(out_dir), "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(line, sort_keys=True) + "\n")
+
+
+def unfinished_attempts(out_dir):
+    """How many reserved calls never got a record. Such a call may have been
+    billed, so it counts as spent. A torn line is skipped: a reservation is
+    written before its call, so a torn one made no call."""
+    path = _attempts_path(out_dir)
+    if not path.exists():
+        return 0
+    reserved, finished = set(), set()
+    with open(path, encoding="utf-8") as handle:
+        for text in handle:
+            try:
+                line = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(line, dict):
+                continue
+            if "done" in line:
+                finished.add(line["done"])
+            elif "id" in line:
+                reserved.add(line["id"])
+    return len(reserved - finished)
+
+
 def _real_callable(args, real_call_llm):
     return real_call_llm or resolve_call_llm(args.hermes_agent_dir)
 
@@ -1696,20 +1734,32 @@ def _verify_transcripts(c, entries):
 
 def _run_specs(c, specs, out_dir, concurrency, evaluator_version, transcripts):
     """Run `specs` (`(entry, arm, stage)`), appending each record as its
-    chunk finishes so a crash loses at most one chunk. `transcripts` is the
-    verified `{arc: text}` map; no transcript is read here."""
+    chunk finishes so a crash loses at most one chunk. Each call is reserved
+    in the attempts file before it is made, so a crash that loses a chunk's
+    records still leaves those calls counted. `transcripts` is the verified
+    `{arc: text}` map; no transcript is read here."""
     cfg = c._llm_evaluation_config()
     chunk = max(1, int(concurrency)) * 4
     done = 0
     for start in range(0, len(specs), chunk):
-        batch = []
-        for entry, arm, stage in specs[start:start + chunk]:
+        chunk_specs = specs[start:start + chunk]
+        batch, ids = [], {}
+        for entry, arm, stage in chunk_specs:
             batch.append((_job_for(entry), transcripts[entry["arc"]], cfg,
                           arm, stage))
+
+        def reserve(index, chunk_specs=chunk_specs, ids=ids):
+            entry, arm, stage = chunk_specs[index]
+            ids[index] = uuid.uuid4().hex
+            _append_attempt_line(out_dir, {
+                "id": ids[index], "arc": entry["arc"], "arm": arm,
+                "stage": _stage_label(stage)})
+
         records = asyncio.run(run_calls(
-            c, batch, concurrency, evaluator_version))
-        for rec in records:
+            c, batch, concurrency, evaluator_version, on_start=reserve))
+        for index, rec in enumerate(records):
             append_record(str(_calls_path(out_dir)), rec)
+            _append_attempt_line(out_dir, {"done": ids[index]})
         done += len(records)
     return done
 
@@ -1783,10 +1833,12 @@ def _cmd_run(args, paths, out_dir, real_call_llm):
     stage = STAGE_NUMBER[args.stage]
     first = [(e, arm, stage) for e in pool for arm in arms
              if (e["arc"], arm) not in attempts]
-    completed = len(records)
+    unfinished = unfinished_attempts(out_dir)
+    completed = len(records) + unfinished
     if completed + len(first) > args.max_calls:
-        print("run: refused, %d recorded + %d planned exceeds --max-calls %d"
-              % (completed, len(first), args.max_calls))
+        print("run: refused, %d recorded + %d unfinished + %d planned "
+              "exceeds --max-calls %d"
+              % (len(records), unfinished, len(first), args.max_calls))
         return EXIT_BUDGET
     remaining = args.max_calls - completed - len(first)
     retries = [

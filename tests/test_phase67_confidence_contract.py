@@ -2785,6 +2785,122 @@ class HostPlumbingTests(_HostCase):
         self.assertTrue(state.exists())
 
 
+class _Killed(BaseException):
+    """Stands in for a SIGKILL: not an Exception, so no handler absorbs it."""
+
+
+class AttemptReservationTests(_HostCase):
+    """P2-4: a call is reserved before it is made, and an unfinished
+    reservation counts against `--max-calls` on resume."""
+
+    def _gate(self, model, max_calls):
+        return _host_main(
+            self.argv('run', '--stage', 'gate', '--max-calls', str(max_calls),
+                      '--concurrency', '1'), model)
+
+    def attempts(self):
+        path = self.out / 'attempts.jsonl'
+        return harness.read_records(str(path)) if path.exists() else []
+
+    def _kill_before_records_are_saved(self, max_calls):
+        """Run the gate stage so every call of the first chunk is billed and
+        the process dies before any record of that chunk is written."""
+        original = harness.append_record
+
+        def killed(path, record):
+            raise _Killed()
+
+        harness.append_record = killed
+        try:
+            with self.assertRaises(_Killed):
+                self._gate(_ScriptedModel(), max_calls)
+        finally:
+            harness.append_record = original
+
+    def test_the_reservation_exists_before_the_model_is_called(self):
+        self.census()
+        seen = []
+        outer = self
+
+        class _Watching(_ScriptedModel):
+            def __call__(self, **kw):
+                seen.append(len(outer.attempts()))
+                return super().__call__(**kw)
+
+        self.assertEqual(self._gate(_Watching(), 96)[0], 0)
+        self.assertEqual(len(seen), 96)
+        for n, reserved in enumerate(seen, start=1):
+            self.assertGreaterEqual(reserved, n)
+
+    def test_a_kill_mid_chunk_leaves_billed_calls_counted_on_resume(self):
+        self.census()
+        self._kill_before_records_are_saved(96)
+        self.assertFalse((self.out / 'calls.jsonl').exists())
+        model = _ScriptedModel()
+        code, _out = self._gate(model, 96)
+        self.assertEqual(code, 3)
+        self.assertEqual(model.calls, [])
+
+    def test_a_resume_with_headroom_for_the_lost_calls_proceeds(self):
+        self.census()
+        self._kill_before_records_are_saved(100)
+        lost = len([a for a in self.attempts() if 'done' not in a])
+        self.assertGreater(lost, 0)
+        model = _ScriptedModel()
+        self.assertEqual(self._gate(model, 96 + lost)[0], 0)
+        self.assertEqual(len(model.calls), 96)
+        self.assertEqual(len(self.records()), 96)
+
+    def test_a_finished_run_leaves_nothing_unfinished(self):
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+        self.assertEqual(harness.unfinished_attempts(self.out), 0)
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+
+    def test_a_results_dir_with_no_attempts_file_budgets_as_before(self):
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+        (self.out / 'attempts.jsonl').unlink()
+        model = _ScriptedModel()
+        self.assertEqual(self._gate(model, 96)[0], 0)
+        self.assertEqual(model.calls, [])
+
+    def test_a_torn_last_attempt_line_is_ignored(self):
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+        with open(self.out / 'attempts.jsonl', 'a') as handle:
+            handle.write('{"id": "tor')
+        self.assertEqual(harness.unfinished_attempts(self.out), 0)
+
+    def test_report_ignores_the_reservations(self):
+        self.census()
+        self._kill_before_records_are_saved(200)
+        self.assertEqual(self._gate(_always_supplying_model(), 200)[0], 0)
+        code, _out = _host_main(self.argv('report'))
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.records()), 96)
+        for rec in self.records():
+            self.assertTrue(set(rec) <= harness.PER_CALL_RECORD_KEYS)
+
+    def test_the_attempts_file_holds_no_identifier(self):
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+        text = (self.out / 'attempts.jsonl').read_text()
+        for sentinel in SENTINELS + ('sess-',):
+            self.assertNotIn(sentinel, text)
+        for i in range(_IDX_DRIFT + 1):
+            self.assertNotIn(_host_job(i), text)
+            self.assertNotIn(_host_sid(i), text)
+
+    def test_a_smoke_call_is_reserved_too(self):
+        self.census()
+        self.assertEqual(
+            _host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        self.assertEqual(
+            len([a for a in self.attempts() if 'done' not in a]), 1)
+        self.assertEqual(harness.unfinished_attempts(self.out), 0)
+
+
 class ReportEligibilityTests(_HostCase):
     """P1-1: `report` shows each gate and the next step once stage 1 is
     complete and stage 2 is eligible, and writes no report.json until the
