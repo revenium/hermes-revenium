@@ -3008,6 +3008,35 @@ def cmd_gate(args):
     return EXIT_OK
 
 
+def _stale_census(out_dir, census, agent):
+    """The reason the saved census is not this run's, or None. The agent is
+    read from census-private.json because census.json may not name it."""
+    try:
+        private = json.loads((out_dir / "census-private.json").read_text())
+    except (OSError, ValueError):
+        return "census-private.json is unreadable"
+    if private.get("slice_agent") != agent:
+        return "census.json was taken for a different agent"
+    if census.get("manifest_sha256") != sha256_file(out_dir / "MANIFEST.json"):
+        return "census.json was taken from a different pull"
+    return None
+
+
+def _stale_gate(gate, sessions, pull, records, agent):
+    """The reason the saved gate is not what the current judge records and
+    agent give, or None. The gate is recomputed at the threshold it recorded;
+    the pre-registration itself was checked when `gate` ran."""
+    try:
+        fresh = evaluate_gate(sessions, _slice_total(pull, agent),
+                              Fraction(str(gate["threshold"])))
+    except (KeyError, ValueError, ZeroDivisionError):
+        return "gate-result.json has no usable threshold"
+    if gate.get("evaluated") != bool(records) \
+            or any(gate.get(key) != value for key, value in fresh.items()):
+        return "gate-result.json differs from the current judge records"
+    return None
+
+
 def cmd_report(args):
     out_dir, manifest, agent = _load_pull_context(args)
     if out_dir is None:
@@ -3019,10 +3048,18 @@ def cmd_report(args):
         print(f"usage: run census and gate first ({type(exc).__name__})",
               file=sys.stderr)
         return EXIT_USAGE
+    stale = _stale_census(out_dir, census, agent)
+    if stale:
+        print(f"drift: {stale}; rerun census", file=sys.stderr)
+        return EXIT_DRIFT
     try:
         sessions, pull, records = judged_sessions(out_dir, manifest, agent)
     except DriftError as exc:
         print(f"drift: {exc}", file=sys.stderr)
+        return EXIT_DRIFT
+    stale = _stale_gate(gate, sessions, pull, records, agent)
+    if stale:
+        print(f"drift: {stale}; rerun gate", file=sys.stderr)
         return EXIT_DRIFT
     summary = summarize(sessions, _slice_total(pull, agent))
     multi = dict(summary["multi_job"], sessions=census["multi_job"]["sessions"])

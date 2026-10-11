@@ -361,6 +361,89 @@ class JudgeTracerTests(unittest.TestCase):
                          (self.out / 'gate-result.json').read_bytes())
 
 
+class StaleSavedOutputTests(unittest.TestCase):
+    """`report` publishes the saved census and gate beside answers it reads
+    fresh, so it must refuse any saved output the current inputs no longer
+    reproduce."""
+
+    def setUp(self):
+        self.tmp = _scratch_root()
+        self.addCleanup(_cleanup, self.tmp)
+        self.out = Path(self.tmp) / 'pulled'
+        host = judge_host(self.tmp)
+        self.assertEqual(_run_main(host.pull_argv(self.out))[0], 0)
+        self.prereg = prereg_file(Path(self.tmp) / 'prereg-gate.json')
+        self.stub = stub_file(Path(self.tmp) / 'stub.json',
+                              {'default': verdict_text(['J1'] * 4 + ['J2'] * 2)})
+
+    def _census(self, *extra):
+        return _run_main(['census', '--out-dir', str(self.out), *extra])[0]
+
+    def _judge(self):
+        rc, _o, err = _run_main(['judge', '--out-dir', str(self.out),
+                                 '--transport', self.stub])
+        self.assertEqual(rc, 0, err)
+
+    def _gate(self):
+        with gate_patch():
+            rc, _o, err = _run_main(['gate', '--out-dir', str(self.out),
+                                     '--prereg', self.prereg])
+        self.assertEqual(rc, 0, err)
+
+    def _report(self, *extra):
+        return _run_main(['report', '--out-dir', str(self.out), *extra])
+
+    def _refused(self, result):
+        rc, _o, err = result
+        self.assertEqual(rc, H.EXIT_DRIFT, err)
+        self.assertIn('rerun', err)
+        self.assertFalse((self.out / 'report.json').exists())
+
+    def _edit(self, name, **changes):
+        path = self.out / name
+        value = json.loads(path.read_text())
+        value.update(changes)
+        path.write_text(json.dumps(value))
+
+    def test_matching_saved_outputs_are_published(self):
+        self.assertEqual(self._census(), 0)
+        self._judge()
+        self._gate()
+        self.assertEqual(self._report()[0], 0)
+
+    def test_a_judge_run_after_the_gate_refuses_the_report(self):
+        self.assertEqual(self._census(), 0)
+        self._gate()
+        self._judge()
+        self._refused(self._report())
+
+    def test_an_edited_gate_figure_refuses_the_report(self):
+        self.assertEqual(self._census(), 0)
+        self._judge()
+        self._gate()
+        self._edit('gate-result.json', named_lower='0', opens=False)
+        self._refused(self._report())
+
+    def test_a_different_agent_refuses_the_report(self):
+        self.assertEqual(self._census(), 0)
+        self._judge()
+        self._gate()
+        self._refused(self._report('--agent', 'SomeoneElse'))
+
+    def test_a_census_taken_for_another_agent_refuses_the_report(self):
+        self.assertEqual(self._census('--agent', 'SomeoneElse'), 0)
+        self._judge()
+        self._gate()
+        self._refused(self._report())
+
+    def test_a_census_of_another_manifest_refuses_the_report(self):
+        self.assertEqual(self._census(), 0)
+        self._judge()
+        self._gate()
+        self._edit('census.json', manifest_sha256='0' * 64)
+        self._refused(self._report())
+
+
 class PromptTests(unittest.TestCase):
     TURNS = [
         {'i': 1, 'messages': [{'role': 'user', 'content': 'do the parser'},
