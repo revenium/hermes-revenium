@@ -16,8 +16,8 @@ Cause: `hermes skills install` ships `SKILL.md` plus only the support files
 `SKILL.md` names as bundle-relative paths, from an allowlist of directories that
 excludes `plugins/` entirely. It never ships `scripts/` or `plugins/`.
 
-Fix: run the bootstrap. It clones the repo, adds the missing directories, and
-hands off to the installer):
+Run the bootstrap. It clones the repo, adds the missing directories and
+hands off to the installer:
 
 ```sh
 bash ~/.hermes/skills/revenium/references/bootstrap.sh
@@ -91,7 +91,7 @@ bash ~/.hermes/skills/revenium/scripts/install-cron.sh --all-profiles   # fleet
 ```
 
 Metering-only installs (no classifier plugin, no job markers) can safely set a
-small value via `REVENIUM_CRON_SETTLE_SECONDS` in the profile's env — there is no
+small value via `REVENIUM_CRON_SETTLE_SECONDS` in the profile's env because there is no
 job inference to wait for.
 
 ---
@@ -100,7 +100,7 @@ job inference to wait for.
 
 Cause: hooks are inert until consented. A headless or gateway-served
 profile never shows the interactive approval prompt. Set `hooks_auto_accept` or
-`pre_llm_call`, `pre_tool_call`, and `post_tool_call` will never fire.
+`pre_llm_call`, `pre_tool_call` and `post_tool_call` will never fire.
 
 Diagnose:
 
@@ -179,7 +179,7 @@ ls -1 ~/.hermes/profiles/gtm/state/revenium/markers/ | head       # profile's ow
 ls -1 ~/.hermes/state/revenium/markers/ | head                    # default home (should NOT hold agent:gtm:* files)
 ```
 
-If markers for a namespaced session are in the default home, the plugin is stale
+If markers for a namespaced session are in the default home, the plugin is stale.
 Re-install it and restart the gateway:
 
 ```sh
@@ -239,4 +239,4 @@ tail -n 40 ~/.hermes/state/revenium/revenium-metering.log   # what does the repo
 ```
 
 The reporter fails open (logs a `warn` and exits 0) when a tool or the DB is
-missing, so the log is the source of truth for why a tick did nothing.
+missing, so check the log to see why a tick did nothing.

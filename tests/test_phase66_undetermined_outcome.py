@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys as _sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -107,15 +108,32 @@ def _flag_set(argv):
     return {tok for tok in argv if tok.startswith('--')}
 
 
-def _run_one_outcome(test, sid, job_id, status, job_type='code_review',
-                     failure_reason='', source='test', sidecar=None,
-                     script_path=None):
+def _run_one_outcome(test, sid, job_id, status, **kwargs):
     """Drive hermes-report.sh for one job arc; return the parsed
-    `jobs outcome` argv. Copied from
-    TestPhase38ReporterPath._run_one_outcome with three changes: job_type is
-    a parameter, failure_reason is written whatever the status, and the
-    script under test is a parameter (so a copied skill tree can isolate one
-    outcome-queue producer)."""
+    `jobs outcome` argv, asserting exactly one was sent."""
+    outcome_inv, output = _run_outcomes(test, sid, job_id, status, **kwargs)
+    test.assertEqual(
+        len(outcome_inv), 1,
+        f'expected exactly 1 "jobs outcome" invocation, got {len(outcome_inv)}: '
+        f'{outcome_inv!r}\nOutput: {output}'
+    )
+    return outcome_inv[0]
+
+
+def _run_outcomes(test, sid, job_id, status, job_type='code_review',
+                  failure_reason='', source='test', sidecar=None,
+                  script_path=None, started_at=1715514000.0,
+                  ended_at=1715514000.0, later_markers=(), ready=False):
+    """Drive hermes-report.sh for one job arc; return (every parsed
+    `jobs outcome` argv, script output). Copied from
+    TestPhase38ReporterPath._run_one_outcome with these changes: job_type is
+    a parameter, failure_reason is written whatever the status, the script
+    under test is a parameter (so a copied skill tree can isolate one
+    outcome-queue producer), the session's start/end are parameters and
+    `ready` touches the plugin's settle sentinel (so a fresh, open session
+    clears the settle gate and reaches the #152 open-session hold),
+    `later_markers` appends re-judge markers for the same job after the first
+    one, and the returned output includes the metering log."""
     tmpdir = tempfile.mkdtemp(prefix='gsd-phase66-')
     try:
         hermes_home = os.path.join(tmpdir, 'hh')
@@ -146,8 +164,8 @@ def _run_one_outcome(test, sid, job_id, status, job_type='code_review',
             'reasoning': 0,
             'estimated_cost': '0',
             'api_calls': 1,
-            'started_at': 1715514000.0,
-            'ended_at': 1715514000.0,
+            'started_at': started_at,
+            'ended_at': ended_at,
             'billing_provider': 'anthropic',
         }])
 
@@ -177,6 +195,12 @@ def _run_one_outcome(test, sid, job_id, status, job_type='code_review',
         with open(os.path.join(markers_dir, f'{sid}.jsonl'), 'w') as f:
             f.write(json.dumps(task_marker, separators=(',', ':')) + '\n')
             f.write(json.dumps(job_marker, separators=(',', ':')) + '\n')
+            for later in later_markers:
+                f.write(json.dumps({**job_marker, **later}, separators=(',', ':')) + '\n')
+        if ready:
+            ready_dir = os.path.join(markers_dir, '.ready')
+            os.makedirs(ready_dir, exist_ok=True)
+            Path(ready_dir, sid).touch()
 
         if sidecar is not None:
             records = sidecar if isinstance(sidecar, list) else [sidecar]
@@ -214,13 +238,11 @@ def _run_one_outcome(test, sid, job_id, status, job_type='code_review',
                     argv = shlex.split(line)
                     if len(argv) >= 2 and argv[0] == 'jobs' and argv[1] == 'outcome':
                         outcome_inv.append(argv)
-
-        test.assertEqual(
-            len(outcome_inv), 1,
-            f'expected exactly 1 "jobs outcome" invocation, got {len(outcome_inv)}: '
-            f'{outcome_inv!r}\nOutput: {output}'
-        )
-        return outcome_inv[0]
+        metering_log = os.path.join(state_dir, 'revenium-metering.log')
+        if os.path.exists(metering_log):
+            with open(metering_log) as f:
+                output += f.read()
+        return outcome_inv, output
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -478,6 +500,42 @@ class GenuineCancelUnchangedTests(unittest.TestCase):
         self.assertEqual(json.loads(_metadata_value(argv)), {
             'source': 'test', 'failure_reason': '3 assertions failed'})
 
+
+
+class OpenSessionHoldCompositionTests(unittest.TestCase):
+    """The label composes with #152's CANCELLED handling: the open-session
+    hold runs first, so an undetermined CANCELLED is never labelled while its
+    session can still re-judge it; the queue reducer keeps field 7, so a
+    re-judged arc ships its latest verdict without the label; and a halt
+    cancel is neither held nor labelled."""
+
+    def test_cancelled_in_an_open_session_is_held_not_labelled(self):
+        outcomes, output = _run_outcomes(
+            self, 'p66-sid-030', 'p66-undetermined-030', 'CANCELLED',
+            started_at=time.time(), ended_at=None, ready=True)
+        self.assertEqual(outcomes, [], f'held CANCELLED was reported: {output}')
+        self.assertIn('outcome held while session open: id=p66-undetermined-030', output)
+
+    def test_cancelled_released_by_the_idle_cap_ships_labelled(self):
+        reason = _reason_constant()
+        self.assertIsNotNone(reason)
+        argv = _run_one_outcome(
+            self, 'p66-sid-031', 'p66-undetermined-031', 'CANCELLED', ended_at=None)
+        self.assertEqual(json.loads(_metadata_value(argv)), {
+            'source': 'test', 'failure_reason': reason, 'outcome_basis': 'undetermined'})
+
+    def test_halt_cancel_in_an_open_session_ships_source_only(self):
+        argv = _run_one_outcome(
+            self, 'p66-sid-032', 'guardrail-halt-ab32', 'CANCELLED', job_type='interrupted',
+            started_at=time.time(), ended_at=None, ready=True)
+        self.assertEqual(json.loads(_metadata_value(argv)), {'source': 'test'})
+
+    def test_rejudged_success_supersedes_the_cancelled_and_carries_no_label(self):
+        argv = _run_one_outcome(
+            self, 'p66-sid-033', 'p66-rejudged-033', 'CANCELLED',
+            later_markers=({'ts': 1715516003.0, 'status': 'SUCCESS'},))
+        self.assertEqual(argv[argv.index('--result') + 1], 'SUCCESS')
+        self.assertEqual(json.loads(_metadata_value(argv)), {'source': 'test'})
 
 
 # ---------------------------------------------------------------------------

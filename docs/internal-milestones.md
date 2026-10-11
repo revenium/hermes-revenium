@@ -14,33 +14,33 @@ unrelated shipped product tag.
 
 ## Evidence-Graded Agentic Job Value and ROI — shipped 2026-08-28
 
-**Phases:** 41–47 · **Plans:** 40 · **PRs:** #93–#102 · **Range:** `c241a29`..`37fb6f6`
-**Closeout type:** `override_closeout` · **Requirements:** 25 of 27 complete, 2 partial
+**Phases:** 41–47 · Plans: 40 · PRs: #93–#102 · Range: `c241a29`..`37fb6f6`
+**Closeout type:** `override_closeout` · Requirements: 25 of 27 complete, 2 partial
 **Not tagged**, by the milestone's own instruction.
 
 ### What this milestone was for
 
 The experimental naked-LLM job-value path presented an estimate as a return
-figure. It collapsed prediction, valuation, and return into one economic
+figure. It collapsed prediction, valuation and return into one economic
 mechanism with one forced evidence label.
 
 The work separated the claims. Each now has its own representation, evidence
-label, and gate:
+label and gate:
 
 | Claim | Question it answers |
 |---|---|
 | Prediction / classification | What kind of job was performed? |
 | Output | What artifact or state change was produced? |
-| Outcome | Was it accepted, used, sustained, reversed, or followed downstream? |
+| Outcome | Was it accepted, used, sustained, reversed or followed downstream? |
 | Valuation | What is that outcome worth under explicit assumptions? |
 | Impact | What changed *because of* agent use, against a counterfactual? |
 | Return | Incremental monetized benefit net of incremental cost, over a declared basis |
 
 The model may classify jobs, assess outputs and outcomes,
-identify economic mechanisms, and propose valuation assumptions. It must never be
+identify economic mechanisms and propose valuation assumptions. It must never be
 *able* to claim it established causation. Where a requirement could be satisfied
 by policy or by construction, construction was chosen. The previous milestone's
-`evidence_class` was safe only because a single value existed, and that safety
+`evidence_class` was safe only because a single value existed and that safety
 disappears the moment there are nine.
 
 ### What shipped
@@ -49,17 +49,17 @@ disappears the moment there are nine.
   confirmation may be commercially authoritative yet causally weak; observation
   proves occurrence, not cause; configuration establishes an approved rate, not
   hours actually spent. The naked-LLM path emits `MODEL_ESTIMATED_DEMO` and is
-  **structurally unable** to promote past it — proven by adversarial fixture,
+  structurally unable to promote past it: proven by adversarial fixture,
   not asserted by convention.
 
 - **Six mechanism-typed economic claims** replacing `estimated_hours_saved ×
   assumed_loaded_rate`, with net value across all supplied costs, explicit
-  zero and unknown denominators, double-counting controls, and zero and negative
+  zero and unknown denominators, double-counting controls and zero and negative
   work staying visible rather than disappearing.
 
 - **A versioned sidecar carrier.** The assessment moved from the 1024-byte marker
   line, already 70% consumed by six fields, to a job-id-keyed JSONL under
-  `${STATE_DIR}/job-assessments/`. The choice used measured sizes, and none of
+  `${STATE_DIR}/job-assessments/`. The choice used measured sizes and none of
   the stated falsification conditions occurred.
 
 - **Provenance that survives.** Model, prompt, taxonomy, policy and schema
@@ -71,28 +71,28 @@ disappears the moment there are nine.
   appended `kind:"correction"` sidecar lines as the local complete history. The
   original assessment is never destructively replaced.
 
-- **Six pluggable boundaries as real contracts** — classification, output/outcome
+- **Six pluggable boundaries as real contracts**: classification, output/outcome
   assessment, economic valuation, evidence resolution and reportability, cohort
-  impact (contract only), and Revenium reporting. Host-agnostic, so the core can
+  impact (contract only) and Revenium reporting. Host-agnostic, so the core can
   later be extracted to `revenium-task-classifier`. Proven extensible by non-LLM
   fixtures each declaring a distinct, non-masquerading evidence class; no fixture
   makes a model call.
 
-- **`ImpactStudyResult` as a contract only** — fields, no estimators, no
-  experiment orchestration, and no import edge toward Hermes.
+- **`ImpactStudyResult` as a contract only**: fields, no estimators, no
+  experiment orchestration and no import edge toward Hermes.
 
 - **A bounded safety envelope.** A byte-clamped metadata ceiling, a
   dynamically-enumerated canary sweep with a *binding* vacuous-pass guard
-  (proven binding by a negative control), honest inference-locality disclosure,
+  (proven binding by a negative control), bounded inference-locality disclosure
   and byte-identical feature-off behaviour.
 
 - **CI-enforced language.** `tests/test_repository.py::test_no_prohibited_claim_language_left`
-  scans the whole shipped tree — not just Markdown — in the shape of the existing
+  scans the whole shipped tree (not just Markdown) in the shape of the existing
   legacy-name guards. Confirmed non-vacuous by injection probe.
 
 - **An end-to-end harness** driving the real classifier and reporter from
   transcript through segmented job, structured assessment, `MODEL_ESTIMATED_DEMO`
-  valuation, reportability resolution, and safe job outcome metadata.
+  valuation, reportability resolution and safe job outcome metadata.
 
 Test code totals roughly 2.6 times the shipped code (+17,423 test lines against
 +6,662 plugin and shell lines). Adversarial cases test the safety property.
@@ -101,7 +101,7 @@ Test code totals roughly 2.6 times the shipped code (+17,423 test lines against
 
 The successor phase's context document records and re-defers both gaps.
 
-**EGV-02 — cross-boundary evidence-class precedence is undecided.** A configured
+**EGV-02: cross-boundary evidence-class precedence is undecided.** A configured
 boundary's declared `evidence_class` does not reach the persisted record;
 `_declared_evidence_class` resolves against the evaluators registry only. When
 `boundaries.valuation` or `boundaries.evidence` names a fixture declaring
@@ -110,44 +110,43 @@ evaluator's class. Found by external review on PR #100 and confirmed against
 source.
 
 The error is in the safe direction. `MODEL_ESTIMATED_DEMO` is the weakest label,
-so the record under-claims rather than over-claims, and the
+so the record under-claims rather than over-claims and the
 promotion-blocking architecture is not breached. It was deferred rather than
 patched because closing it requires a genuinely new precedence rule (which class
-wins when evaluator, valuation and evidence each declare one), and because any
+wins when evaluator, valuation and evidence each declare one) and because any
 rule that lets a boundary declaration *raise* the recorded class is structurally
-the promotion path this milestone closed — sourced from trusted configuration
+the promotion path this milestone closed: sourced from trusted configuration
 rather than model output, but the same mechanism. That belongs in a design
 discussion, not a patch.
 
-**Superseded 2026-08-29 (Phase 48) —** a registration-time declaration by
+**Superseded 2026-08-29 (Phase 48):** a registration-time declaration by
 trusted code and untrusted model output are two different threat models, not
 the same mechanism reached from a different source. The paragraph above
 concludes that any rule letting a boundary declaration raise the recorded
-class is structurally the promotion path this milestone closed — "sourced
+class is structurally the promotion path this milestone closed: "sourced
 from trusted configuration rather than model output, but the same
 mechanism." That final clause is what the corrected understanding disagrees
 with. Trust attaches to the registrant's own in-repo top-level
 `register(...)` call, written by the same code that defines `fn`, at import
-time — not to `config.json`'s `boundaries` object, which selects *which*
+time, not to `config.json`'s `boundaries` object, which selects *which*
 registrant is active (`_boundary_impl_name`, `classifier.py:2860`) and never
 authors a class. `classifier.py:1160`'s threat-model argument is the record
 that stands. Phase 48 changes no runtime behaviour: a configured boundary's
-declared class still does not reach the persisted record, and
-`_declared_evidence_class` still resolves the evaluators registry alone —
-the correction is to the *reasoning* that made EGV-02 look unclosable, not
+declared class still does not reach the persisted record and
+`_declared_evidence_class` still resolves the evaluators registry alone: the correction is to the *reasoning* that made EGV-02 look unclosable, not
 to the *facts* of the gap. See `docs/evidence-class-precedence.md`,
 particularly `## The reconciliation verdict` and `## The precedence rule`,
 which together make EGV-02 closeable in Phase 50 rather than a permanent
 won't-fix; see `## The won't-fix trigger` for the conditions under which it
 would still close unbuilt.
 
-**EGV-05 — the operator-declared mechanisms had no producer.** As recorded at
+**EGV-05: the operator-declared mechanisms had no producer.** As recorded at
 the close of phases 41-47 this was true of all three:
 `quality_decision_improvement`, `risk_avoidance` and `incremental_revenue` were
 declared and would forward on the wire, but nothing could set them. Two
-producers have since landed — `correct-assessment.sh --mechanism` (Phase 51)
+producers have since landed (`correct-assessment.sh --mechanism` (Phase 51)
 and a valuation registrant declaring one at registration (Phase 54, where the
-shipped `revenueCard` fixture declares `incremental_revenue`) — so the
+shipped `revenueCard` fixture declares `incremental_revenue`)) so the
 statement above stands only for `quality_decision_improvement` and
 `risk_avoidance`, whose intended producer remains a study reference
 (`studyId`/`studyVersion`). The evaluator still cannot select any of the three,
@@ -162,7 +161,7 @@ which is deliberate rather than outstanding.
 
 - **`revenium jobs roi` still surfaces no provenance.** Server API changes were a
   declared non-goal, so "reportable" means retained in a bounded metadata
-  envelope or held locally — never *visible in Revenium's return view*.
+  envelope or held locally: never *visible in Revenium's return view*.
 
 - **Whether real sessions cluster near the value bounds is still unmeasured**,
   carried forward from the previous milestone.
@@ -188,7 +187,7 @@ which is deliberate rather than outstanding.
 
 ### Archive pointers
 
-The full roadmap, requirements traceability, and phase artifacts are in the
+The full roadmap, requirements traceability and phase artifacts are in the
 gitignored planning tree:
 
 - `.planning/milestones/ROADMAP-evidence-graded-value.md`

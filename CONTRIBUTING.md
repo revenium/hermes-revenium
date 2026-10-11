@@ -6,16 +6,16 @@ project: field-developed, best-effort software. Issues and PRs are welcome.
 
 ## What this repo is
 
-A distribution package for one Hermes Agent skill. There is no build step and no
+This repo distributes one Hermes Agent skill. It has no build step or
 application runtime. The product is `skills/revenium/`; everything else is packaging,
-docs, and tests.
+docs and tests.
 
 Read [`CLAUDE.md`](CLAUDE.md) before changing anything under `skills/`. It documents the
-architecture, conventions, test-suite invariants, and why each invariant exists.
+architecture, conventions and test-suite invariants, including why each invariant exists.
 
 ## Getting set up
 
-You need `bash`, `python3`, `sqlite3`, and the
+You need `bash`, `python3`, `sqlite3` and the
 [`revenium` CLI](https://github.com/revenium/revenium-cli). There is nothing to install
 from this repo: no `package.json`, no `requirements.txt`, no lockfile.
 
@@ -49,17 +49,17 @@ calling script. `test_runtime_paths_are_hermes_native` fails the build otherwise
 
 Metering must stay idempotent. Re-running the cron can never double-report. The
 append-only ledgers and the deterministic `--transaction-id` guarantee that together;
-changes to session identity, splitting, or ledger writes must preserve it.
+changes to session identity, splitting or ledger writes must preserve it.
 
 Wire shape is pinned by golden fixtures. `tests/fixtures/compat/*.golden.json` pin the
-exact argv of `meter completion`, `meter tool-event`, `jobs create`, and `jobs outcome`.
+exact argv of `meter completion`, `meter tool-event`, `jobs create` and `jobs outcome`.
 Changing argv means changing a golden, deliberately, in the same commit.
 
 New CLI flags must be capability-probed and fail open. Use `supports_flag` from
 `common.sh`, so an older `revenium` CLI keeps metering exactly as it did before the flag
 existed.
 
-Every in-session code path fails open. For a missing or corrupt status file, bad JSON, or
+Every in-session code path fails open. For a missing or corrupt status file, bad JSON or
 any other error, the answer is "not halted". A broken skill degrades to no enforcement, never
 to a blocked agent.
 
@@ -82,16 +82,15 @@ Every new script in `skills/revenium/scripts/` must:
 
 ## Hermes' plugin surface
 
-[`docs/plugin-interface.md`](docs/plugin-interface.md) records what that surface
-does, based on live measurements. Read it before changing the classifier or the event
-spool. It carries the payload contract
+[`docs/plugin-interface.md`](docs/plugin-interface.md) records the measured plugin behavior. Read it before changing the classifier or the event
+spool. It documents the payload contract
 `api_event_spool.py` parses, a negative result that forbids moving live halt state
-into a prompt section, two dead ends not worth chasing, and the reason
+into a prompt section, two rejected approaches and the reason
 `tests/test_phase29_no_session_reset_change.py` exists.
 
 ## Style
 
-There is no linter or formatter. Match the neighbouring file.
+Match the neighbouring file; this repo has no linter or formatter.
 
 - 2-space indent in Bash, 4-space in Python. LF endings, trailing newline.
 - Quote and brace every expansion: `"${STATE_DIR}"`, `"${cmd[@]}"`.
@@ -106,8 +105,7 @@ There is no linter or formatter. Match the neighbouring file.
 
 Operator documentation lives in [`docs/`](docs/). Reference material that ships inside the
 skill bundle and is read at runtime lives in `skills/revenium/references/`. `docs/` links
-to it rather than restating it, because restating it is how the two fell out of sync
-before.
+to it rather than duplicating it. Previous copies fell out of sync.
 
 Two tests police vocabulary: one greps every shipped text file for the product names this
 skill was forked from, and one fails on any `budget-check` / `budget-status` reference under

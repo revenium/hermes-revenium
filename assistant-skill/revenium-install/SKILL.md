@@ -14,18 +14,16 @@ license: MIT
 
 # revenium-install
 
-This runbook installs and operates the `hermes-revenium` metering
-skill. Every action is a POSIX shell command that runs the skill's own scripts
-under `~/.hermes/skills/revenium/scripts/`. It contains no assistant-specific tool calls.
-
-This skill selects the existing script to run and explains how to verify the
-result. The shell scripts perform every mutation.
+Use this runbook to install and operate the `hermes-revenium` metering
+skill. Run the skill's POSIX shell scripts under
+`~/.hermes/skills/revenium/scripts/` and verify each result. The scripts perform
+every mutation; this runbook contains no assistant-specific tool calls.
 
 ## When to use
 
 - Installing Revenium metering on a host (single profile) or a fleet
   (`~/.hermes/profiles/*`).
-- Verifying that an install meters completions, agentic jobs, tool-events, and
+- Verifying that an install meters completions, agentic jobs, tool-events and
   budget guardrails.
 - Diagnosing a broken or partial install. Route symptoms through
   [`references/decision-tree.md`](references/decision-tree.md).
@@ -66,7 +64,7 @@ git clone --depth 1 https://github.com/revenium/hermes-revenium.git /tmp/hermes-
 ### 2. Run the installer
 
 `install.sh` is idempotent. It configures credentials, the classifier plugin,
-shell hooks, a guardrail rule, the per-minute cron, and the gateway restart.
+shell hooks, a guardrail rule, the per-minute cron and the gateway restart.
 
 ```sh
 # Single host, interactive budget prompt:
@@ -84,14 +82,14 @@ bash ~/.hermes/skills/revenium/scripts/install.sh --all-profiles
 bash ~/.hermes/skills/revenium/scripts/install.sh --profile gtm --profile qa
 ```
 
-Key flags (full list: `install.sh --help`):
+Flags (full list: `install.sh --help`):
 
-- `--all-profiles` / `--profile <name>` — fleet install (per-profile plugin,
-  hooks with `hooks_auto_accept`, and a unique cron marker).
-- `--organization-name <name>` — the **ORGANIZATION** dimension (a company/
+- `--all-profiles` / `--profile <name>`: fleet install (per-profile plugin,
+  hooks with `hooks_auto_accept` and a unique cron marker).
+- `--organization-name <name>`: the **ORGANIZATION** dimension (a company/
   product, e.g. `tableforone`). **Not** the agent. Persisted even with
   `--skip-guardrails`.
-- `--hard-limit N --period P` — non-interactive budget rule.
+- `--hard-limit N --period P`: non-interactive budget rule.
 - `--non-interactive`, `--shadow-mode`, `--skip-guardrails`, `--skip-cron`,
   `--no-restart`.
 
@@ -138,7 +136,7 @@ transactions.
 
 ## Troubleshoot
 
-Route the symptom through **[`references/decision-tree.md`](references/decision-tree.md)**.
+Find the symptom in [`references/decision-tree.md`](references/decision-tree.md).
 It maps each known failure mode (no job transactions, `teamId is required`, inert
 hooks, orphaned cron, `unclassified` spend, one-profile-only metering, multiplex
 markers in the wrong home) to the exact remediation command.

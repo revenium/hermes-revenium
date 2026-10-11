@@ -3,7 +3,7 @@
 This guide documents the v1.3 upgrade from polling-style `revenium alerts budget`
 enforcement to `revenium guardrails` budget rules. It covers the `config.json`
 schema change, automatic migration on the next cron tick, preserved and orphaned
-state, and manual recovery. For most operators, cron performs the migration after
+state and manual recovery. For most operators, cron performs the migration after
 the skill upgrade.
 
 ## What changed
@@ -14,11 +14,11 @@ use camelCase consistent with the rest of the file.
 
 | Field | Type | Status |
 |-------|------|--------|
-| `ruleIds` | array of strings | Active (v1.3) — IDs of Revenium guardrail rules |
-| `alertId` | string | Deprecated (v1.2) — orphaned after auto-migration; preserved for reference |
+| `ruleIds` | array of strings | Active (v1.3): IDs of Revenium guardrail rules |
+| `alertId` | string | Deprecated (v1.2): orphaned after auto-migration; preserved for reference |
 
-The remaining fields — `autonomousMode`, `notifyChannel`, `notifyTarget`, and
-`organizationName` — survive unchanged through the migration. For the complete
+The remaining fields (`autonomousMode`, `notifyChannel`, `notifyTarget` and
+`organizationName`) survive unchanged through the migration. For the complete
 field-by-field schema including types and constraints, see
 `skills/revenium/references/config-schema.md`.
 
@@ -40,7 +40,7 @@ migration script does the following:
 3. Creates an equivalent team-wide `TOTAL_COST` budget rule via
    `revenium guardrails budget-rules create`.
 4. Writes `ruleIds: [<new-rule-id>]` into `config.json` atomically (write-temp-
-   then-rename), preserving every other field — including the legacy `alertId`
+   then-rename), preserving every other field, including the legacy `alertId`
    orphan.
 5. Emits a single `deprecation:` info line in
    `~/.hermes/state/revenium/revenium-metering.log`:
@@ -77,7 +77,7 @@ REVENIUM_MIGRATE_SHADOW_MODE=true
 ```
 
 Cron sources that env file before invoking the migration stage, so `setup-guardrails.sh`
-sees the override and creates the new rule in shadow mode (observe-only — no blocking).
+sees the override and creates the new rule in shadow mode (observe-only: no blocking).
 
 Once you have validated the v1.3 path against your real traffic, clear the
 `REVENIUM_MIGRATE_SHADOW_MODE` line from `~/.hermes/state/revenium/env`, then
@@ -164,15 +164,15 @@ After migration completes, the legacy `alertId` line remains in `config.json`. I
    ```
    The status file's `rules[]` array should be non-empty and the newest cron-log line should show `HALT_TRANSITION=false` (or `=true` if a budget is already over).
 
-2. **Confirm enforcement is live.** Either trigger a known warn or block scenario, or wait until the next real budget event. This step is optional but recommended before deleting the legacy alert.
+2. **Confirm enforcement is live.** Either trigger a known warn or block scenario or wait until the next real budget event. This step is optional but recommended before deleting the legacy alert.
 
 3. **Delete the legacy alert in the Revenium UI.** Alerts → Budget → find the alert whose id matches `config.json::alertId` → delete.
 
-4. **Optionally remove the orphan `alertId` key from `config.json`.** No shipping script exists for this — run the one-liner manually:
+4. **Optionally remove the orphan `alertId` key from `config.json`.** No shipping script exists for this: run the one-liner manually:
    ```bash
    python3 -c "import json, pathlib; p = pathlib.Path('~/.hermes/state/revenium/config.json').expanduser(); d = json.loads(p.read_text()); d.pop('alertId', None); p.write_text(json.dumps(d, indent=2) + '\n')"
    ```
-   The `setup-guardrails.sh` script intentionally does not auto-remove `alertId` — orphan keys are an operator-driven cleanup (Phase 18 D-09: "alertId is orphaned, never auto-deleted").
+   The `setup-guardrails.sh` script intentionally does not auto-remove `alertId`: orphan keys are an operator-driven cleanup (Phase 18 D-09: "alertId is orphaned, never auto-deleted").
 
 ## What you'll see after a successful migration
 
@@ -242,22 +242,21 @@ Failure classes and their behavior:
 - **`revenium guardrails budget-rules create` failed**: same loud path as above.
   The legacy alert on Revenium is preserved; no half-state is written.
 
-- **Legacy `alertId` references an alert that was deleted upstream**: special-cased
-  — see section 5 (Manual recovery) below.
+- **Legacy `alertId` references an alert that was deleted upstream**: special-cased, see section 5 (Manual recovery) below.
 
 **Where to look:**
 
-- `~/.hermes/state/revenium/revenium-metering.log` — every migration cron tick
+- `~/.hermes/state/revenium/revenium-metering.log`: every migration cron tick
   logs at least one line (`info` on success, `warn` if CLI is too old, `error` on
   a real failure). This is the first place to check.
 
-- `~/.hermes/state/revenium/migration-notify-state` — the notify-once gate file.
+- `~/.hermes/state/revenium/migration-notify-state`: the notify-once gate file.
   Its presence means "the operator has been notified about the most recent failure
   class." Its content is a 16-character SHA-256 hash that uniquely identifies the
   failure class. Delete the file to force a fresh notification on the next failure.
 
 - Your configured Hermes messaging channel (`notifyChannel` + `notifyTarget` in
-  `config.json`) — one notification per failure class is sent there. If those
+  `config.json`): one notification per failure class is sent there. If those
   fields are not set, the notification falls back to a `warn` line in the log.
 
 ## Manual recovery: the deleted-upstream-alert case
@@ -269,7 +268,7 @@ error: Legacy alertId <id> not found in Revenium alerts budget list — it was d
 ```
 
 Your configured notification channel also receives a one-time message with the same
-text. `config.json` is NOT modified — the orphan `alertId` is left in place because
+text. `config.json` is NOT modified: the orphan `alertId` is left in place because
 the script will not silently mutate operator-owned config when the upstream alert is
 gone.
 
@@ -281,19 +280,19 @@ gone.
    revenium alerts budget list --output json | python3 -m json.tool
    ```
 
-   Grep for the orphaned `alertId` value — if it is absent from the output, the
+   Grep for the orphaned `alertId` value: if it is absent from the output, the
    alert was deleted upstream as expected.
 
-2. Re-run `/revenium setup` inside a Hermes session, or invoke the script directly:
+2. Re-run `/revenium setup` inside a Hermes session or invoke the script directly:
 
    ```bash
    bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
    ```
 
    The script collects fresh budget args (hard-limit, period, autonomous mode,
-   notify channel and target), creates a new guardrails rule, and writes `ruleIds`
-   into `config.json`. The orphan `alertId` line is still preserved — manually
-   edit `config.json` to remove it once the new path is verified, or leave it
+   notify channel and target), creates a new guardrails rule and writes `ruleIds`
+   into `config.json`. The orphan `alertId` line is still preserved: manually
+   edit `config.json` to remove it once the new path is verified or leave it
    (it is inert after migration).
 
 3. Verify the new rule exists and has the expected limits:
@@ -302,7 +301,7 @@ gone.
    revenium guardrails budget-rules list --output json | python3 -m json.tool
    ```
 
-   The new rule should appear with the expected `hardLimit`, `windowType`, and a
+   The new rule should appear with the expected `hardLimit`, `windowType` and a
    status that is not shadow-mode (unless you chose shadow-mode during setup).
    Enforcement against the new rule begins on the next cron tick.
 
@@ -322,9 +321,9 @@ place, regardless of whether the caller is an operator running `--interactive` o
 the cron pipeline running `--from-alert <id> --auto`.
 
 **Three modes, one code path.** The script supports three flag-driven modes: default
-(all args from CLI flags), `--interactive` (operator prompts for missing args), and
+(all args from CLI flags), `--interactive` (operator prompts for missing args) and
 `--from-alert <id> --auto` (cron migration). All three converge on the same
-`create_rule` and `write_rule_ids_to_config` helpers — setup and migration share
+`create_rule` and `write_rule_ids_to_config` helpers: setup and migration share
 a code path by design.
 
 **Idempotency.** The `ruleIds`-presence check in `config.json` is the durable signal
@@ -343,4 +342,4 @@ action.
 
 **State paths.** Every path lives in `skills/revenium/scripts/common.sh` as the
 single source of truth. The new v1.3 paths introduced for this feature are
-`GUARDRAIL_STATUS_FILE`, `RULES_LOCK_FILE`, and `MIGRATION_NOTIFY_FILE`.
+`GUARDRAIL_STATUS_FILE`, `RULES_LOCK_FILE` and `MIGRATION_NOTIFY_FILE`.

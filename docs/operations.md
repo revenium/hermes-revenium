@@ -9,7 +9,7 @@ default home. See [the fleet guide](fleet.md).
 ## Start here
 
 `diagnose.sh` is the read-only triage report for credentials, cron, ledgers, the settle gate,
-plugin and hook state, the auxiliary usage pass (section 10), and a per-profile summary in
+plugin and hook state, the auxiliary usage pass (section 10) and a per-profile summary in
 one pass. Run it before reading anything else:
 
 ```bash
@@ -25,8 +25,8 @@ stages are each safe to run alone.
 | Command | What it does |
 |---|---|
 | `cron.sh` | One full tick: plugin health, completion metering, guardrails, tool events, API events, drain status |
-| `hermes-report.sh` | Completion metering only — reads `state.db`, splits deltas across markers |
-| `guardrail-check.sh` | Guardrail evaluation only — refreshes `guardrail-status.json` |
+| `hermes-report.sh` | Completion metering only: reads `state.db`, splits deltas across markers |
+| `guardrail-check.sh` | Guardrail evaluation only: refreshes `guardrail-status.json` |
 | `tool-event-report.sh` | Ship unledgered tool events |
 | `api-event-report.sh` | Ship unledgered API events (the event-metering path) |
 | `drain-status.sh` | Maintain the cutover drain gate |
@@ -41,12 +41,12 @@ registered, `2` registered but inert.
 | Command | What it does |
 |---|---|
 | `clear-halt.sh` | Clear an active halt. `--rule-id <id>` clears one rule. Only this command clears a halt; nothing clears it automatically. |
-| `prune-markers.sh` | Remove marker files older than 30 days, eligible job-assessment sidecars older than `REVENIUM_ASSESSMENT_RETENTION_DAYS` (default 90 days), and the `.warn`, `.fallback-warn`, `.outcome-warn`, and `.probe-warn` sentinels. Locked assessment corrections are skipped. `.aux-warn` is not pruned because it contains only the `notice-step-up` file and one file per unrecognized `task`, so it is bounded by the auxiliary vocabulary rather than traffic. `--dry-run` previews the result. Run this command periodically; cron does not run it. |
+| `prune-markers.sh` | Remove marker files older than 30 days, eligible job-assessment sidecars older than `REVENIUM_ASSESSMENT_RETENTION_DAYS` (default 90 days) and the `.warn`, `.fallback-warn`, `.outcome-warn` and `.probe-warn` sentinels. Locked assessment corrections are skipped. `.aux-warn` is not pruned because it contains only the `notice-step-up` file and one file per unrecognized `task`, so it is bounded by the auxiliary vocabulary rather than traffic. `--dry-run` previews the result. Run this command periodically; cron does not run it. |
 | `install-cron.sh` / `uninstall-cron.sh` | Manage the per-minute crontab entry |
 | `install-hooks.sh` / `uninstall-hooks.sh` | Manage the three shell hooks in `config.yaml` |
 | `install-plugin.sh` | Copy the classifier into `~/.hermes/plugins/` and restart the gateway |
 | `setup-guardrails.sh` | Create the budget rules |
-| `correct-assessment.sh` | Append a correction to a job's value assessment. Requires `--job-id`, `--value`, `--currency`, and `--reason`; `--value-low` and `--value-high` are optional and default to equal bounds. The command adds a line to the local sidecar and a remote revision through `revenium jobs outcome-update`; the original remains byte-identical and readable. `--dry-run` previews without writing. Cron does not run this operator-only command. It exits non-zero if the `revenium` CLI lacks `jobs outcome-update`. |
+| `correct-assessment.sh` | Append a correction to a job's value assessment. Requires `--job-id`, `--value`, `--currency` and `--reason`; `--value-low` and `--value-high` are optional and default to equal bounds. The command adds a line to the local sidecar and a remote revision through `revenium jobs outcome-update`; the original remains byte-identical and readable. `--dry-run` previews without writing. Cron does not run this operator-only command. It exits non-zero if the `revenium` CLI lacks `jobs outcome-update`. |
 
 A halt clear buys one tick. If the rule is still breached, the next tick re-halts.
 
@@ -83,7 +83,7 @@ More failure modes are in
 
 The repo ships stdlib `unittest` checks covering the expected file inventory, frontmatter
 shape, runtime path conventions, shell syntax, marker and taxonomy schemas, split
-conservation, and the golden argv fixtures:
+conservation and the golden argv fixtures:
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v

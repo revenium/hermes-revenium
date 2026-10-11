@@ -65,6 +65,7 @@ from tests._compat_helpers import (
     load_golden,
     ROOT,
     SCRIPTS_DIR,
+    seed_parent_session_ids,
 )
 
 PLUGIN_DIR = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
@@ -234,6 +235,9 @@ class TestPhase46FeatureOff(unittest.TestCase):
             'started_at': 1715514000.0, 'ended_at': 1715514000.0,
             'billing_provider': 'anthropic',
         }])
+        # Production hosts carry parent_session_id (research F4); D-17 attributes a
+        # resolved owner only on positive root evidence.
+        seed_parent_session_ids(state_db, {sid: None})
 
         if write_marker:
             task_marker = {

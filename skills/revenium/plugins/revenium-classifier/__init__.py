@@ -261,6 +261,13 @@ def _on_post_llm_call(
     subsequent turn in the same session short-circuits on Task 1's
     permanent latch and costs only a marker-file read.
 
+    One exception (classifier-premature-cancel): while a root session's job
+    is still CANCELLED -- the "uncertain" verdict a mid-session first pass
+    writes for an unfinished arc -- each later turn also pays ONE status-only
+    re-judge call on this same completion path (classifier.
+    _rejudge_cancelled_jobs). It ends the moment the job leaves CANCELLED, and
+    a session whose jobs are all SUCCESS or FAILED never pays it.
+
     D-04 belt: any exception raised by the underlying pipeline is caught and
     logged here; we never propagate so the plugin manager does not mark the
     plugin unhealthy.

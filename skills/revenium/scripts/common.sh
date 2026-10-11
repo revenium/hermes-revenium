@@ -39,6 +39,12 @@ FALLBACK_WARN_FLAGS_DIR="${REVENIUM_FALLBACK_WARN_FLAGS_DIR:-${MARKERS_DIR}/.fal
 # "unsupported" (fail open), but warns once so the condition is visible
 # instead of silently stripping a dimension off every row in the tick.
 # Created lazily by its writer, deliberately absent from the eager mkdir -p.
+#
+# Second key family (Phase 68 D-17): schema capabilities of state.db, one flag
+# per absent column, named `sessions-<column>-absent`. Today there is exactly
+# one, `sessions-parent_session_id-absent`, written when the positive-root gate
+# withholds a job id on a host whose `sessions` table has no such column. The
+# probe family above is keyed `<subcommand>-<flag>`; the two cannot collide.
 PROBE_WARN_FLAGS_DIR="${REVENIUM_PROBE_WARN_FLAGS_DIR:-${MARKERS_DIR}/.probe-warn}"
 
 # Fourth sentinel directory in the same family as WARN_FLAGS_DIR,
@@ -101,6 +107,16 @@ JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"
 # Phase 10 (D-07): staleness threshold for wedged-job warn. Env-overridable.
 REVENIUM_JOBS_STALE_SECONDS="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+# Job-lifecycle guard (2026-10-09 phantom-jobs fix): a CANCELLED job verdict is
+# the classifier's "I am not sure" catch-all, and the plugin writes it from a
+# mid-session hook a couple of minutes after the session starts. The reporter
+# therefore does not act on it while the session is still open
+# (state.db sessions.ended_at IS NULL). A session that never gets an
+# ended_at (Hermes died, the user walked away) must not leave its job PENDING
+# forever, so the deferral lapses once the session has been idle this long
+# (measured from sessions.last_activity_at when Hermes records it, else
+# started_at). Default one day. Env-overridable.
+REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS="${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS:-86400}"
 # BUG-1 (agentic-job ↔ transaction association race): the reporter defers a
 # session's completions until either the classifier plugin's .ready sentinel
 # lands (authoritative gate) OR the session ages past this settle window
@@ -866,6 +882,47 @@ build_root_sid_map() {
   return 0
 }
 
+# Phase 68 (D-17): POSITIVE evidence that a session is a root -- its `sessions`
+# row exists AND its `parent_session_id` IS NULL. The bash twin of
+# api-event-report.sh's `_is_confirmed_root`, and used only at SHIP sites
+# (hermes-report.sh's per-marker --agentic-job-id and the auxiliary cache),
+# never at a jobs-create site: `get_root_session_id` fails open, so
+# `root_sid == sid` cannot tell "root" from "could not tell", and a fail-closed
+# gate at a create site would mean no job at all.
+#
+# Three outcomes, because a ship site must not treat "could not ask" as "not a
+# root": the completion's ledger line is written after the CLI call, so a job
+# id withheld on a transient error is lost for good.
+#   0  confirmed root: the row exists and parent_session_id IS NULL.
+#   1  confirmed NOT a root: a non-NULL parent, no row, a sessions table with
+#      no parent_session_id column (a schema fact, not a fault), an empty id,
+#      or an id carrying a single quote. The id is interpolated into the SQL
+#      string, and sessions.id is a Hermes-generated token that never
+#      legitimately holds one (T-68-03).
+#   2  could not tell: no sqlite3, state.db missing or unreadable, or sqlite3
+#      exited non-zero for any reason other than the missing column (busy,
+#      locked, killed). Callers defer and retry next tick; they never memoise
+#      it.
+# The 3s busy timeout rides a -cmd so a writer's brief lock is waited out
+# rather than surfacing as rc 2. stderr is folded into the capture to tell
+# "no such column" from a real fault. Nothing runs at source time; this file
+# is sourced by the in-session hooks on every call.
+session_is_confirmed_root() {
+  local sid="${1:-}" answer rc
+  [[ -z "${sid}" ]] && return 1
+  [[ "${sid}" == *"'"* ]] && return 1
+  [[ -f "${STATE_DB}" && -r "${STATE_DB}" ]] || return 2
+  command -v sqlite3 >/dev/null 2>&1 || return 2
+  answer="$(sqlite3 -readonly -cmd '.timeout 3000' "${STATE_DB}" "SELECT parent_session_id IS NULL FROM sessions WHERE id='${sid}';" 2>&1)"
+  rc=$?
+  if (( rc != 0 )); then
+    [[ "${answer}" == *"no such column"* ]] && return 1
+    return 2
+  fi
+  [[ "${answer}" == "1" ]] && return 0
+  return 1
+}
+
 # Phase 61 (SUB-01..04/D-02): memoised schema-capability probe for the
 # identity column. common.sh is sourced by the three in-session hooks on
 # every LLM/tool call, so nothing runs at source time — only
@@ -896,6 +953,38 @@ sessions_has_user_id() {
     fi
   fi
   [[ "${_SESSIONS_HAS_USER_ID_MEMO}" == "yes" ]]
+}
+
+# Phase 68 (D-17): memoised schema-capability probe for
+# `sessions.parent_session_id`, built exactly like sessions_has_user_id above
+# (anchored here-string `grep -qx`, never `| grep -q`). Three outcomes:
+#   0  the column is present.
+#   1  a successful PRAGMA returned columns and this is not one of them.
+#   2  could not tell: the PRAGMA failed, state.db is missing, or the capture
+#      was empty (a locked database, or no sessions table).
+# Only 0 and 1 are memoised. Its only caller picks the wording of a
+# once-per-host warn (hermes-report.sh `_parent_column_absent_warn_once`), and
+# that warn writes a permanent sentinel, so caching a transient failure as
+# "absent" would assert a false schema claim on a host that has the column and
+# then suppress the real warning forever. The database is opened -readonly so
+# the probe can never create it. Nothing runs at source time.
+_SESSIONS_HAS_PARENT_SESSION_ID_MEMO=""
+sessions_has_parent_session_id() {
+  if [[ -z "${_SESSIONS_HAS_PARENT_SESSION_ID_MEMO}" ]]; then
+    local pragma rc cols
+    [[ -f "${STATE_DB}" && -r "${STATE_DB}" ]] || return 2
+    pragma="$(sqlite3 -readonly -cmd '.timeout 3000' "${STATE_DB}" "PRAGMA table_info(sessions);" 2>/dev/null)"
+    rc=$?
+    (( rc == 0 )) && [[ -n "${pragma}" ]] || return 2
+    cols="$(cut -d'|' -f2 <<< "${pragma}")"
+    if grep -qx 'parent_session_id' <<< "${cols}"; then
+      _SESSIONS_HAS_PARENT_SESSION_ID_MEMO="yes"
+    else
+      _SESSIONS_HAS_PARENT_SESSION_ID_MEMO="no"
+    fi
+  fi
+  [[ "${_SESSIONS_HAS_PARENT_SESSION_ID_MEMO}" == "yes" ]] && return 0
+  return 1
 }
 
 # Phase 61 (SUB-01/SUB-02/SUB-04/D-03/D-05/D-06/D-07): resolve a session's

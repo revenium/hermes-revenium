@@ -29,6 +29,7 @@ from tests._compat_helpers import (
     load_golden,
     run_script,
     SCRIPTS_DIR,
+    seed_parent_session_ids,
 )
 
 
@@ -79,6 +80,9 @@ class TestCompatMeterCompletion(unittest.TestCase):
                 'ended_at': 1715514000.0,
                 'billing_provider': 'anthropic',
             }])
+            # Production hosts carry parent_session_id (research F4); D-17
+            # attributes a resolved owner only on positive root evidence.
+            seed_parent_session_ids(state_db, {'compat-sid-001': None})
 
             # --- Write ONE task marker + ONE job marker ---
             # Per D-11/D-12: a task marker gets owning_job_id from the first job

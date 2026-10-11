@@ -6,7 +6,7 @@ live tenant on 2026-08-29.
 
 **Verdict: accepted.** Five payloads were sent. All five were accepted and all
 five were echoed back byte-exact. There was no rejection, no server-side
-truncation, and no indeterminate result.
+truncation and no indeterminate result.
 
 Phase 52 may plan against envelope acceptance as a confirmed fact, within the
 limits recorded under "What this does not establish" below.
@@ -25,7 +25,7 @@ exists. An arm counted as accepted only when the server returned the row and
 echoed the payload.
 
 The shed algorithm was not reimplemented for this run. `_METADATA_CEILING_BYTES`,
-`_VALUE_FAMILY_META_KEYS`, `_PROVENANCE_FAMILY_META_KEYS`, and the two-tier pop
+`_VALUE_FAMILY_META_KEYS`, `_PROVENANCE_FAMILY_META_KEYS` and the two-tier pop
 loop were taken verbatim from `skills/revenium/scripts/hermes-report.sh`
 (`:3619-3640` and `:3948-3962`), so the behaviour measured is the behaviour
 that ships.
@@ -44,17 +44,17 @@ Arms A, B, C1 and C2 were sent between `2026-08-29T15:21:22Z` and
 `2026-08-29T15:21:23Z`. Arm C1b was sent at `2026-08-29T15:22:17Z`. The
 read-back gate that preceded them ran at `2026-08-29T15:14:06Z`.
 
-**Arm A — under the ceiling.** All twelve keys and the sentinel value came
+**Arm A: under the ceiling.** All twelve keys and the sentinel value came
 back. `metadata_truncated` was correctly absent.
 
-**Arm B — tier 1 only.** Driven over the ceiling by a value-family key. The
-value family was removed, and `metadata_truncated: true` was returned *by the
+**Arm B: tier 1 only.** Driven over the ceiling by a value-family key. The
+value family was removed and `metadata_truncated: true` was returned *by the
 server*, not merely computed locally.
 
-**Arm C1b — both tiers.** `assumptions` (tier 1) and `study_id` (tier 2) were
+**Arm C1b: both tiers.** `assumptions` (tier 1) and `study_id` (tier 2) were
 both removed and three keys survived, with the marker set.
 
-**Arm C2 — the regression check.** Driven over the ceiling by `source`, a key
+**Arm C2: the regression check.** Driven over the ceiling by `source`, a key
 in neither shed family, so both pop loops removed nothing. The marker stayed
 absent, which is what the current implementation requires. An earlier version
 set the marker unconditionally in this situation, producing a false signal on a
@@ -78,9 +78,9 @@ C1 remains in this record so the table preserves the mis-sized arm.
 
 ## The 4096-byte ceiling is a client-side choice
 
-Arm C2 was accepted at 4350 bytes — larger than the client's own
-`_METADATA_CEILING_BYTES = 4096` — and echoed back byte-exact. The client had
-no keys it was permitted to shed, so it sent an over-ceiling payload, and the
+Arm C2 was accepted at 4350 bytes (larger than the client's own
+`_METADATA_CEILING_BYTES = 4096`) and echoed back byte-exact. The client had
+no keys it was permitted to shed, so it sent an over-ceiling payload and the
 server took it.
 
 The ceiling is a conservative client-side choice, not an API limit.
@@ -88,19 +88,19 @@ The ceiling is a conservative client-side choice, not an API limit.
 This run does not establish the server's actual limit. 4350 bytes is a
 lower bound on what it accepts and nothing more. It was deliberately not probed
 further: locating the true limit is work for whoever proposes changing the
-constant, and an unprobed bound recorded honestly is more useful than a guess.
+constant so this record leaves the upper bound unmeasured.
 
 ## What this does not establish
 
 1. **Nothing about pricing.** Cost is $0 on this pre-prod tenant by decision.
    Envelope acceptance was verified; cost derivation was not. BACK-2676 remains
    the prerequisite for a real production tenant.
-2. **One environment.** A single host, a single pre-prod tenant, and CLI 1.5.0
+2. **One environment.** A single host, a single pre-prod tenant and CLI 1.5.0
    only. The operator workstation runs 1.4.0; read-verb availability has
    differed across CLI versions in this project before.
 3. **No server byte limit.** See above.
 4. **Acceptance is not persistence forever.** Each arm was read back once
-   within roughly a minute of the write, and re-read independently about
+   within roughly a minute of the write and re-read independently about
    fourteen minutes later with identical byte counts, key counts, marker
    states and sentinels. That is a second observation, not a durability
    guarantee over days.
@@ -108,7 +108,7 @@ constant, and an unprobed bound recorded honestly is more useful than a guess.
 ## Environment
 
 - Host: the multiplex test VM, a clean box with no shared tenant. Chosen over
-  the shared sandbox, where probe rows would land in another party's data, and
+  the shared sandbox, where probe rows would land in another party's data and
   over the live diagnosis host, which serves real traffic.
 - CLI: `revenium` 1.5.0, installed from `revenium/tap/revenium` via linuxbrew
   to `/home/linuxbrew/.linuxbrew/bin/revenium`.
@@ -116,7 +116,7 @@ constant, and an unprobed bound recorded honestly is more useful than a guess.
   appears in this document.
 
 The host carried a
-test double at `~/.local/bin/revenium` — a script that exits 0 for the calls
+test double at `~/.local/bin/revenium`: a script that exits 0 for the calls
 `hermes-report.sh` makes and performs no network I/O. Pointed at a live probe
 it would have returned success for every arm while contacting nothing.
 
@@ -135,7 +135,7 @@ that the arms above were not answered by the stub.
 
 Six throwaway jobs on the pre-prod tenant: one read-back gate
 (`p49-gate-20260829-151406`) and five arms (`p49-armA`, `p49-armB`, `p49-armC1`,
-`p49-armC2`, all suffixed `-20260829-152122`, and `p49-armC1b-20260829-152217`).
+`p49-armC2`, all suffixed `-20260829-152122` and `p49-armC1b-20260829-152217`).
 
 They are left in place as the evidence behind this record. `revenium jobs
 delete` exists should they need removing.

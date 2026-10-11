@@ -1,6 +1,6 @@
 # Revenium Skill Setup
 
-Run `setup-guardrails.sh --interactive` for fresh installs and reconfiguration. The script collects all operator input, calls `revenium guardrails budget-rules create`, and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Pass `--shadow-mode` to create rules in shadow mode (evaluate without blocking real traffic); the default is enforcing.
+Run `setup-guardrails.sh --interactive` for fresh installs and reconfiguration. The script collects all operator input, calls `revenium guardrails budget-rules create` and writes `ruleIds` into `~/.hermes/state/revenium/config.json`. Pass `--shadow-mode` to create rules in shadow mode (evaluate without blocking real traffic); the default is enforcing.
 
 ## Initial setup
 
@@ -17,7 +17,7 @@ Run `setup-guardrails.sh --interactive` for fresh installs and reconfiguration. 
    ```bash
    bash ~/.hermes/skills/revenium/scripts/setup-guardrails.sh --interactive
    ```
-   The script prompts for budget hard-limit, period, organization name, autonomous mode and notification channel/target, and optional per-task-type rules from the live `task-taxonomy.json`. On success it writes `ruleIds` into `~/.hermes/state/revenium/config.json`.
+   The script prompts for budget hard-limit, period, organization name, autonomous mode, notification channel/target and optional per-task-type rules from the live `task-taxonomy.json`. On success it writes `ruleIds` into `~/.hermes/state/revenium/config.json`.
 
 4. **Install the metering cron AND budget-halt hooks:**
    ```bash
@@ -41,16 +41,16 @@ Supported dimensions: AGENT, MODEL, PROVIDER, ORGANIZATION, CREDENTIAL, PRODUCT,
 
 ## Reconfigure flow
 
-Re-run `setup-guardrails.sh --interactive`. The script detects existing `ruleIds`, prints the current rules via `revenium guardrails budget-rules list`, and prompts `[r]ecreate / [c]ancel`. The recreate path deletes every listed rule via `revenium guardrails budget-rules delete <id> --yes` and runs the fresh-install prompts. The cancel path exits 0 without changes. Note that hard-limit and period cannot be updated in place (the Revenium CLI's `budget-rules update` only supports `--name`); the recreate flow is the supported path for changing limits or periods.
+Re-run `setup-guardrails.sh --interactive`. The script detects existing `ruleIds`, prints the current rules via `revenium guardrails budget-rules list` and prompts `[r]ecreate / [c]ancel`. The recreate path deletes every listed rule via `revenium guardrails budget-rules delete <id> --yes` and runs the fresh-install prompts. The cancel path exits 0 without changes. Hard-limit and period cannot be updated in place (the Revenium CLI's `budget-rules update` only supports `--name`); the recreate flow is the supported path for changing limits or periods.
 
 ## Auto-migration (legacy alertId installs)
 
-The next cron tick auto-migrates hosts upgrading from a v1.2 install that has only `alertId` in `config.json` and no `ruleIds`. The common case requires no operator action. `docs/migration-guardrails.md` defines the full contract: changes, automatic actions, enforcement-posture preservation, failure behavior, manual recovery, and contributor notes.
+The next cron tick auto-migrates hosts upgrading from a v1.2 install that has only `alertId` in `config.json` and no `ruleIds`. The common case requires no operator action. `docs/migration-guardrails.md` defines the full contract: changes, automatic actions, enforcement-posture preservation, failure behavior, manual recovery and contributor notes.
 
 ## Multi-profile / fleet installs
 
 A Hermes **profile** is a separate Hermes home directory with its own `config.yaml`,
-`.env`, `SOUL.md`, sessions, skills, cron jobs, and `state.db` under
+`.env`, `SOUL.md`, sessions, skills, cron jobs and `state.db` under
 `~/.hermes/profiles/<name>/`. The default profile uses `~/.hermes/` directly
 (see the Hermes user guide `user-guide/profiles.md`; enumerate with
 `hermes profile list` or by scanning `~/.hermes/profiles/*/`).
@@ -85,10 +85,10 @@ into that profile's crontab env or the per-state `env` file.
 This is the **AGENT** dimension (`--agent` argv). It is **not** the same as the
 **ORGANIZATION** dimension. `organizationName` in `config.json` is the
 ORGANIZATION (a company/product like `tableforone`) and is threaded through
-completions, tool-events, **and** `revenium jobs create` so a job and its
+completions, tool-events **and** `revenium jobs create` so a job and its
 transactions never land in different orgs. **Do not** set `organizationName` to
 an agent or profile name; that pollutes the ORGANIZATION dimension. The cron logs
-a `WARN` if `organizationName` looks like an agent name (`Hermes`, `Hermes-<x>`,
+a `WARN` if `organizationName` looks like an agent name (`Hermes`, `Hermes-<x>`
 or the configured agent).
 
 Set the ORGANIZATION in any of three ways:
@@ -105,7 +105,7 @@ the per-profile distinction is the AGENT, not the org.
 
 ### Squad grouping across the fleet (`REVENIUM_SQUAD_NAME`)
 
-The **SQUAD** dimension is a different grouping than AGENT, and it is meant to
+The **SQUAD** dimension is a different grouping than AGENT and it is meant to
 **span** agents rather than mirror them. `--squad-id` is the root session id;
 it groups one root session with every subagent it dispatches into a single
 *execution*. The squad *name* is what the Revenium platform groups those
@@ -116,9 +116,8 @@ executions into: a fleet or team identity, not a single agent's identity.
 back through the root session's marker-derived agent name to
 `REVENIUM_AGENT_NAME`). A fleet install gives each profile a distinct
 `Hermes-<profile>` agent name (see Per-agent attribution above), so every
-profile becomes its own single-agent squad, so the SQUAD dimension ends up
-duplicating the AGENT dimension instead of adding a fleet-level view on top
-of it.
+profile becomes its own single-agent squad. The SQUAD dimension then
+duplicates the AGENT dimension instead of grouping the fleet.
 
 **Resolution order:** the operator override (`REVENIUM_SQUAD_NAME`) first,
 then the root session's marker-derived agent name, then
@@ -174,7 +173,7 @@ rather than an error on older installs.
 
 Each profile gets a **unique** crontab marker
 `# hermes-revenium-metering-<profile>` that bakes that profile's `HERMES_HOME`,
-`REVENIUM_STATE_DIR`, `REVENIUM_AGENT_NAME`, and `REVENIUM_CRON_SETTLE_SECONDS`.
+`REVENIUM_STATE_DIR`, `REVENIUM_AGENT_NAME` and `REVENIUM_CRON_SETTLE_SECONDS`.
 Installing a second profile never overwrites the first. `uninstall-cron.sh`
 removes **all** metering lines (every profile) and leaves foreign crontab lines
 untouched. Orphaned metering lines (whose `cron.sh` target no longer exists after
@@ -184,7 +183,7 @@ a `~/.hermes` reset) are reconciled automatically on the next `install-cron.sh`.
 
 The reporter defers a session's completions until the classifier plugin's
 `.ready` sentinel lands (the **authoritative** gate, which the plugin writes only
-*after* it has written the `kind:"job"` marker), or until the session ages past
+*after* it has written the `kind:"job"` marker) or until the session ages past
 `REVENIUM_CRON_SETTLE_SECONDS`. This age-fallback exists only for installs with
 **no** classifier plugin (no sentinel ever arrives).
 
@@ -192,7 +191,7 @@ The default is **600 seconds**. It **must exceed worst-case job-inference
 latency**. The classifier's job-inference LLM call can take ~200s under
 concurrent multi-profile load. If the window is shorter than that latency, the
 age-fallback meters and ledgers a session's completions *before* the job marker
-exists, and per-muid dedup then permanently **orphans** them from the job created
+exists and per-muid dedup then permanently **orphans** them from the job created
 a tick later (`revenium jobs transactions <id>` shows "No transactions found").
 Metering-only installs (no classifier plugin, no job markers) can safely lower it
 because there is nothing to wait for.
@@ -231,10 +230,10 @@ GUARDRAIL share is overstated when work turns are much larger than classificatio
 
 The cron emits two S2 telemetry log lines per session per tick to make this visible to operators. They are written through the standard log helpers in `~/.hermes/state/revenium/revenium-metering.log`:
 
-- `INFO: S2: window=<n>, mean_per_marker=<delta_total // n>` — every tick a session has at least one marker. Reports how many markers shared the session-delta this minute and the floor-divided per-marker share of the total token delta.
-- `WARN: S2: classification-dominated window, attribution may be lossy` — fires when `n == 2` AND at least one marker has `operation_type == GUARDRAIL`. This is the canonical mixed-window signature where the equal-split overstates GUARDRAIL share the most.
+- `INFO: S2: window=<n>, mean_per_marker=<delta_total // n>`: every tick a session has at least one marker. Reports how many markers shared the session-delta this minute and the floor-divided per-marker share of the total token delta.
+- `WARN: S2: classification-dominated window, attribution may be lossy`: fires when `n == 2` AND at least one marker has `operation_type == GUARDRAIL`. This is the canonical mixed-window signature where the equal-split overstates GUARDRAIL share the most.
 
-Attribution is driven entirely by the `task_type` and `operation_type` fields the agent writes into each marker line (per the Phase 2 marker schema; see `references/task-taxonomy.md`). The cron does not infer task types from prompts or model output. Every marker the agent emits maps to exactly one `revenium meter completion` call with those fields passed through verbatim. When a session window has zero markers (legacy install, missing marker file, all lines unparseable), the cron falls through to a single call with `--task-type unclassified` and `--operation-type CHAT` (Phase 4 / WIRE-01 — Revenium server-side default for absent `operationType` is `CHAT`, verified by the D-22 research gate, so emitting it explicitly is idempotent for existing dashboards and budgets).
+Attribution is driven entirely by the `task_type` and `operation_type` fields the agent writes into each marker line (per the Phase 2 marker schema; see `references/task-taxonomy.md`). The cron does not infer task types from prompts or model output. Every marker the agent emits maps to exactly one `revenium meter completion` call with those fields passed through verbatim. When a session window has zero markers (legacy install, missing marker file, all lines unparseable), the cron falls through to a single call with `--task-type unclassified` and `--operation-type CHAT` (Phase 4 / WIRE-01: Revenium server-side default for absent `operationType` is `CHAT`, verified by the D-22 research gate, so emitting it explicitly is idempotent for existing dashboards and budgets).
 
 This description supersedes any earlier "self-cancels over many windows" mention in older planning notes. The bias is one-directional (GUARDRAIL is overstated, never understated) and does NOT average out across ticks.
 
@@ -242,17 +241,17 @@ When markers carry different `agent` or `trace_id` values across a session, each
 
 ## Mechanical classification hook
 
-Phase 6 ships an in-process Hermes lifecycle plugin at `~/.hermes/plugins/revenium-classifier/` that classifies every `run_conversation()` session end and writes the GUARDRAIL + CHAT marker pair the cron consumes. The plugin registers itself for the `on_session_end` event from the `hermes_cli` plugin bus, which fires for **every** session source — gateway-served (Telegram/Discord/Slack/WhatsApp/Webhook), CLI one-shot (`hermes chat -q`), interactive `hermes chat`, ACP integrations, and gateway-internal cron-ticker sessions. This is the mechanical floor — it fires regardless of whether the agent self-classifies via the FINAL ACTION block in `SKILL.md`. Both pathways write to the same `~/.hermes/state/revenium/markers/<sid>.jsonl`; the plugin tail-checks for a recent agent-written pair (within 30 seconds) before writing to avoid duplicates.
+Phase 6 ships an in-process Hermes lifecycle plugin at `~/.hermes/plugins/revenium-classifier/` that classifies every `run_conversation()` session end and writes the GUARDRAIL + CHAT marker pair the cron consumes. The plugin registers itself for the `on_session_end` event from the `hermes_cli` plugin bus, which fires for **every** session source: gateway-served (Telegram/Discord/Slack/WhatsApp/Webhook), CLI one-shot (`hermes chat -q`), interactive `hermes chat`, ACP integrations and gateway-internal cron-ticker sessions. It fires regardless of whether the agent self-classifies via the FINAL ACTION block in `SKILL.md`. Both pathways write to the same `~/.hermes/state/revenium/markers/<sid>.jsonl`; the plugin tail-checks for a recent agent-written pair (within 30 seconds) before writing to avoid duplicates.
 
-Subagent sessions (where `state.db.sessions.parent_session_id` is non-null) inherit the root user-facing session's `task_type` — one classification per user-request lineage, no per-subagent LLM call. The plugin also gates its LLM call on `guardrail-status.json::halted`; if the budget is halted, the plugin writes `task_type: unclassified` and emits a `WARN` log line instead of spending against the halted budget.
+Subagent sessions (where `state.db.sessions.parent_session_id` is non-null) inherit the root user-facing session's `task_type`, with one classification per user-request lineage and no per-subagent LLM call. The plugin also gates its LLM call on `guardrail-status.json::halted`; if the budget is halted, the plugin writes `task_type: unclassified` and emits a `WARN` log line instead of spending against the halted budget.
 
-The plugin is installed by `install.sh` into `~/.hermes/plugins/revenium-classifier/`, and the same script idempotently adds `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration. **`hermes skills install` does NOT relocate the `plugins/` subdirectory** — operators installing via that path must additionally copy `~/.hermes/skills/revenium/plugins/revenium-classifier/` to `~/.hermes/plugins/revenium-classifier/` themselves AND add `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration.
+The plugin is installed by `install.sh` into `~/.hermes/plugins/revenium-classifier/` and the same script idempotently adds `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration. **`hermes skills install` does NOT relocate the `plugins/` subdirectory**. Operators installing via that path must additionally copy `~/.hermes/skills/revenium/plugins/revenium-classifier/` to `~/.hermes/plugins/revenium-classifier/` themselves AND add `revenium-classifier` to the `plugins.enabled` list in the Hermes configuration.
 
 After installing or updating the plugin, **run `hermes gateway restart`**. The plugin manager loads plugins once at agent startup; there is no file-watch reload.
 
-To verify the plugin loaded, inspect the Hermes plugin-manager startup log for the plugin-load line (reference shape — same form Hermes uses for bundled plugins such as `hermes-agent/plugins/disk-cleanup/`).
+To verify the plugin loaded, inspect the Hermes plugin-manager startup log for the plugin-load line (reference shape, same form Hermes uses for bundled plugins such as `hermes-agent/plugins/disk-cleanup/`).
 
-Or a direct filesystem check:
+You can also check the installed files directly:
 
 ```
 test -f ~/.hermes/plugins/revenium-classifier/plugin.yaml
@@ -260,7 +259,7 @@ test -f ~/.hermes/plugins/revenium-classifier/__init__.py
 test -f ~/.hermes/plugins/revenium-classifier/classifier.py
 ```
 
-**Do NOT** use `hermes hooks list` or `hermes hooks test` to verify — that CLI is for shell hooks declared under the `hooks:` block of the Hermes configuration (a different subsystem). The `on_session_end` plugin and `hermes hooks` shell hooks share the word "hook" but are wired separately.
+**Do NOT** use `hermes hooks list` or `hermes hooks test` to verify. That CLI is for shell hooks declared under the `hooks:` block of the Hermes configuration (a different subsystem). The `on_session_end` plugin and `hermes hooks` shell hooks share the word "hook" but are wired separately.
 
 _Migration note (from earlier 06-01 implementation):_ if you previously installed the `agent:end` gateway hook into `~/.hermes/hooks/revenium-classifier/`, you may delete that directory manually after running the new setup. The gateway will load it but it produces no markers (the `on_session_end` plugin supersedes it); it is harmless but stale.
 
@@ -268,9 +267,9 @@ _Migration note (from earlier 06-01 implementation):_ if you previously installe
 
 The skill accumulates one JSONL marker file per Hermes session under `~/.hermes/state/revenium/markers/`. On long-running hosts these files grow without bound. `prune-markers.sh` removes stale marker files using the ledger as the authoritative staleness source (D-26): the script reads the latest `HERMES:<sid>:…:<unix_ts>:…` ledger row per session and removes the marker file if that timestamp is older than the retention threshold. For orphan markers with no ledger entry, file modification time is used instead. The same pass also removes a session's `markers/.ready/<sid>` sentinel once its marker half is gone and the sentinel itself is past the retention window.
 
-Default retention is 30 days, configurable via `REVENIUM_MARKER_RETENTION_DAYS` (declared in `common.sh`, D-27). The script is **not** wired into the per-minute cron — it is an operator-invoked maintenance action (D-28). Every deletion (and dry-run candidate) is logged via `info` to `${LOG_FILE}` so the operator can audit (D-29).
+Default retention is 30 days, configurable via `REVENIUM_MARKER_RETENTION_DAYS` (declared in `common.sh`, D-27). The script is **not** wired into the per-minute cron; it is an operator-invoked maintenance action (D-28). Every deletion (and dry-run candidate) is logged via `info` to `${LOG_FILE}` so the operator can audit (D-29).
 
-An orphan `.ready` sentinel — one with no corresponding marker file — is indistinguishable on disk from a real classifier drop: the sentinel is the only signal that the classifier plugin ever ran for that session. Left unpruned alongside years of marker pruning, that imbalance grows without bound and turns normal retention into a false defect signal (a host with thousands of orphans past the window can read as a systemic classification failure when it is really just accumulated, already-metered history). Pruning the sentinel once its marker is gone and it is itself past the window keeps the on-disk shape honest: a `.ready`-without-marker sentinel inside the retention window stays visible as the genuine defect signal it is.
+An orphan `.ready` sentinel (one with no corresponding marker file) is indistinguishable on disk from a classifier drop. It is the only evidence that the classifier ran for that session. If marker pruning leaves old sentinels behind, already-metered history can look like widespread classification failure. Prune a sentinel only after its marker is gone and the sentinel itself is past the retention window. A `.ready`-without-marker sentinel inside that window remains visible for investigation.
 
 ### How to run
 

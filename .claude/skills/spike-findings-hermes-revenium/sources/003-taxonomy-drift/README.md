@@ -17,11 +17,11 @@ Retargeted after spike 002. The original framing ("do independent hosts fragment
 vocabulary?") was answered in passing by 002: they do, but only through a cold-start window,
 because a vocabulary containing an apt label converges 8/8.
 
-The question actually worth money is the one left over:
+The remaining question concerns cross-host fragmentation:
 
 **Given** three hosts classifying the same stream of work, **when** each keeps its own
 taxonomy versus when all three share one, **then** how much does cross-host fragmentation
-differ — and does sharing actually fix it?
+differ, and does sharing actually fix it?
 
 This matters because `PROJECT.md` names taxonomy fragmentation as the failure condition for
 the whole feature: *"If the taxonomy fragments (`code_review` vs `code-review` vs
@@ -30,13 +30,13 @@ the whole feature: *"If the taxonomy fragments (`code_review` vs `code-review` v
 ## Method
 
 Five work items covering four distinct underlying activities. Two of them (`flaky-1`,
-`flaky-2`) are **the same activity described in different words** — a deliberate probe for
+`flaky-2`) are **the same activity described in different words**, a deliberate probe for
 whether the vocabulary collapses synonyms.
 
-- **ARM INDEPENDENT** — three hosts, three separate `InMemoryTaxonomy` stores, all seeded with
-  the same four generic labels (`research`, `analysis`, `code_review`, `generation` — the seed
+- **ARM INDEPENDENT**: three hosts, three separate `InMemoryTaxonomy` stores, all seeded with
+  the same four generic labels (`research`, `analysis`, `code_review`, `generation`: the seed
   the repo actually ships).
-- **ARM SHARED** — three hosts, one store between them. This is what a served vocabulary looks
+- **ARM SHARED**: three hosts, one store between them. This is what a served vocabulary looks
   like from the classifier's side.
 
 Metrics: distinct labels per work item (3 = total disagreement, 1 = consensus); fragmentation
@@ -58,34 +58,34 @@ Raw arms land in `fragmentation_result.json` (and `_run1` / `_run2` for the repl
 because the shared arm's whole mechanism is "an earlier host mints, a later host reuses".
 
 **2. Independent vocabularies fragment almost completely.** Mean 2.8 distinct labels per work
-item, against a ceiling of 3. Fragmentation ratio 3.25 — thirteen labels for four activities.
+item, against a ceiling of 3. Fragmentation ratio 3.25: thirteen labels for four activities.
 
 **3. A shared vocabulary measurably helps, but does not solve it.** Run 1: mean 2.8 → 1.8,
-fragmentation 3.25 → 2.0, with two of five items at full 3/3 consensus (`perf-1`, `flaky-2`) —
+fragmentation 3.25 → 2.0, with two of five items at full 3/3 consensus (`perf-1`, `flaky-2`). These were
 exactly the items where an earlier host had already minted an apt label for a later host to
 find. Run 2 reproduced the direction more strongly (1.4, three items at consensus).
 
 **4. Third surprise: the classifier emits inapt labels verbatim, not just fragmented ones.**
-`flaky-1` — a CI flakiness investigation — came back as `sql_query_debug` (Hermes) and
+`flaky-1` (a CI flakiness investigation) came back as `sql_query_debug` (Hermes) and
 `code_review` (LiteLLM).
 
 > **CORRECTION (quick task 260815-r39):** this step originally called both "seeded generic
-> labels". `code_review` is one. `sql_query_debug` is **not in the seed** — it is one of the five
+> labels". `code_review` is one. `sql_query_debug` is **not in the seed**; it is one of the five
 > hardcoded *"Good examples"* in the prompt string (`classifier.py:787`), as is `prod_log_triage`
 > below. The model copied its own few-shot examples. Two attractors, and the prompt's is the more
 > vivid one. The prompt explicitly says *"AVOID bland catch-all labels like generation, analysis,
 review, task when a more specific label fits"*, and the model did it anyway. The seed
-vocabulary is not a neutral starting point — it is an attractor, and a bad one.
+vocabulary is not a neutral starting point; it encourages reuse of unsuitable labels.
 
 **5. Cold-start labels are permanent.** In the shared arm the synonym pair still failed to
 collapse for 2 of 3 hosts, but the reason is ordering: `flaky-1` was classified while the
 vocabulary was still cold, and nothing retroactively repairs a label already minted and
 already attached to metered rows. A shared vocabulary prevents *future* divergence; it cannot
-heal the window before the right label existed.
+repair labels emitted before the right label existed.
 
 ## Results
 
-**Verdict: VALIDATED — sharing helps materially (2.8 → 1.6 labels per item across two runs),
+**Verdict: VALIDATED. Sharing helps materially (2.8 → 1.6 labels per item across two runs),
 but seeding quality dominates, and cold-start labels are unrecoverable.**
 
 ### Both runs
@@ -95,7 +95,7 @@ but seeding quality dominates, and cold-start labels are unrecoverable.**
 | INDEPENDENT | 2.8 | 2.8 | 3.25 | 2.75 |
 | SHARED | 1.8 | **1.4** | 2.00 | **1.50** |
 
-The independent arm reproduced *exactly* — 2.8 mean, per-item spread `[3,3,2,3,3]` in both runs.
+The independent arm reproduced *exactly*: 2.8 mean, per-item spread `[3,3,2,3,3]` in both runs.
 Three hosts with their own vocabularies essentially never agree. The shared arm improved on
 replication (2/5 items at full consensus in run 1, **3/5 in run 2**), which is consistent with
 the mechanism: consensus depends on an earlier host having minted something apt for a later
@@ -115,7 +115,7 @@ Run 2's shared arm, for comparison with run 1 below:
 ```
 
 **`flaky-1` drew `sql_query_debug` in both runs, from multiple hosts.** That is a reproducible
-misclassification, not sampling noise — but it is a *prompt example* being copied, not a seed
+misclassification, not sampling noise, but it is a *prompt example* being copied, not a seed
 label being reused. See the correction in trail step 4.
 
 ### Run 1 detail
@@ -139,9 +139,9 @@ SHARED
 ```
 
 Two anomalies worth keeping: `sec-1` produced `prod_log_triage` from one host (a *prompt
-example*, not a seed label — see the trail step 4 correction), and one shared-arm classification
+example*, not a seed label; see the trail step 4 correction), and one shared-arm classification
 returned `unclassified`
-— i.e. the raw model output failed `LABEL_RE` or hit the blocklist and was correctly rejected.
+because the raw model output failed `LABEL_RE` or hit the blocklist and was correctly rejected.
 
 ### What this means for the original question
 
@@ -153,15 +153,15 @@ Ranked by leverage, from these numbers:
 2. **Share the vocabulary across hosts.** Worth ~1.2 labels per work item (2.8 → 1.6). This
    is the argument for a taxonomy *service*, and it is independent of whether the classifier
    code is shared.
-3. **Share the code.** Cheap and safe (spike 001), 80–91% reuse (spike 002) — but on this
+3. **Share the code.** Cheap and safe (spike 001), 80–91% reuse (spike 002), but on this
    evidence it is the *least* important of the three for the outcome the project cares about.
 
 ### Limits
 
-- One work stream, one model, 2 replicates per arm. Directional, not a benchmark — though
+- One work stream, one model, 2 replicates per arm. Directional, not a benchmark, though
   the independent arm reproduced exactly, which raises confidence in that half.
 - Same temperature confound as 002: `claude -p` cannot pass `temperature=0`.
-- The shared arm simulates a service with an in-process store — it measures the *vocabulary*
+- The shared arm simulates a service with an in-process store; it measures the *vocabulary*
   effect, not the operational cost of running one (see spike 004 for the hop).
 - Host order is fixed, which advantages whichever host classifies first. A production system
   has no such ordering guarantee.

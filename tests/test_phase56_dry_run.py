@@ -56,6 +56,7 @@ from tests._compat_helpers import (
     build_state_db,
     run_script,
     SCRIPTS_DIR,
+    seed_parent_session_ids,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -265,6 +266,9 @@ class _DryRunReporterMixin:
             'started_at': 1715514000.0, 'ended_at': 1715514000.0,
             'billing_provider': 'anthropic',
         }])
+        # Production hosts carry parent_session_id (research F4); D-17 attributes a
+        # resolved owner only on positive root evidence.
+        seed_parent_session_ids(state_db, {sid: None})
         if aux_rows is not None:
             build_session_model_usage(state_db, aux_rows)
 
