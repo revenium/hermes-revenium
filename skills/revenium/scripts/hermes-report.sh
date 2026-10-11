@@ -984,6 +984,32 @@ _aux_warn_once() {
   fi
 }
 
+# Phase 68 (D-17, T-68-05): called wherever the positive-root gate WITHHELD a
+# job id. When the reason is a `sessions` table with no `parent_session_id`
+# column, every root on the host is unconfirmable, so every job is created and
+# then never attributed -- $0 jobs, silently, until Hermes is upgraded. Say so
+# once per host through a PROBE_WARN_FLAGS_DIR sentinel. A host that HAS the
+# column never gets this line (its withholds are individual sessions with
+# unprovable ancestry, not a schema gap), and a host where nothing was withheld
+# never reaches here at all. Never returns non-zero: a read-only state dir
+# degrades to an un-gated warn on this call only.
+_parent_column_absent_warn_once() {
+  # Only a probe that SAW the schema and found the column missing may warn:
+  # rc 2 (could not tell) neither logs nor writes the sentinel, which would
+  # otherwise make a transient fault permanent on a host that has the column.
+  local probe_rc=0
+  sessions_has_parent_session_id || probe_rc=$?
+  if [[ "${probe_rc}" -ne 1 ]]; then
+    return 0
+  fi
+  local flag_path="${PROBE_WARN_FLAGS_DIR}/sessions-parent_session_id-absent"
+  if [[ ! -e "${flag_path}" ]]; then
+    mkdir -p "${PROBE_WARN_FLAGS_DIR}" 2>/dev/null && touch "${flag_path}" 2>/dev/null
+    warn "state.db has no sessions.parent_session_id column, so root sessions cannot be confirmed: completions omit --agentic-job-id (jobs are still created and will show \$0 until Hermes is upgraded)"
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Job-lifecycle guards (phantom-jobs fix, 2026-10-09)
 #
@@ -1090,6 +1116,45 @@ _job_outcome_log_once() {
     "${level}" "${message}"
   fi
   return 0
+}
+
+# Resolves the caller's per-session `root_confirmed` memo ("true"/"false") from
+# session_is_confirmed_root. It assigns the caller's local by name (bash
+# dynamic scope) because a `$(...)` capture would pay a fork per call and the
+# memo is what keeps the gate to one query per session. Returns 2 and leaves
+# the memo empty when the gate could not tell, so a transient sqlite fault is
+# retried by the next call or tick instead of being cached as "not a root".
+_resolve_root_gate() {
+  [[ -n "${root_confirmed}" ]] && return 0
+  local gate_rc=0
+  session_is_confirmed_root "$1" || gate_rc=$?
+  case "${gate_rc}" in
+    0) root_confirmed="true" ;;
+    1) root_confirmed="false" ;;
+    *) return 2 ;;
+  esac
+  return 0
+}
+
+# Records a session as deferred by the root gate, once however many ship sites
+# defer it. Updates main()'s root_gate_deferred_* locals by name (dynamic scope)
+# for the same fork-avoidance reason as _resolve_root_gate.
+_note_root_gate_deferral() {
+  if [[ "${root_gate_deferred_sids}" != *$'\n'"$1"$'\n'* ]]; then
+    root_gate_deferred_sids+="$1"$'\n'
+    root_gate_deferred_count=$((root_gate_deferred_count + 1))
+  fi
+}
+
+# True when any row of the pipe-delimited split output names an owning job
+# (field 12). The per-marker ship site uses it to run the root gate before
+# anything ships, so a session that must be deferred has shipped no marker.
+_split_rows_have_owner() {
+  local _muid _t _op _di _do _cr _cw _tot _cost _agent _trace _owner _rest
+  while IFS='|' read -r _muid _t _op _di _do _cr _cw _tot _cost _agent _trace _owner _rest; do
+    [[ -n "${_owner}" ]] && return 0
+  done <<< "$1"
+  return 1
 }
 
 # How long subagent completions have been held, CONTINUOUSLY, waiting on this
@@ -1290,7 +1355,7 @@ for job_id in order:
 # zero-valued summary line) — this function must never be able to cost the
 # auxiliary pass the context it already had.
 _supplement_aux_session_ctx() {
-  local existing_ctx="$1"
+  local existing_ctx="$1" deferred_sids="${2:-}"
   local recovered=0 not_owned=0 unresolvable=0
 
   # Step 1: the sids that need supplementing -- session_model_usage sids
@@ -1355,6 +1420,11 @@ PY
   local owned_sids="" sid markers_dir
   while IFS= read -r sid; do
     [[ -z "${sid}" ]] && continue
+    # Deferred by the root gate (CR-01): recovering it here would ship its
+    # auxiliary rows with an empty job id, the loss the deferral exists to avoid.
+    if [[ -n "${deferred_sids}" ]] && grep -qxF "${sid}" <<< "${deferred_sids}"; then
+      continue
+    fi
     markers_dir="$(resolve_markers_dir "${sid}")"
     [[ -z "${markers_dir}" ]] && markers_dir="${MARKERS_DIR}"
     if [[ "${markers_dir}" != "${MARKERS_DIR}" ]]; then
@@ -1543,7 +1613,7 @@ PY
 # call and ~150 lines of root/trace/job resolution the session loop already
 # performed once per session).
 report_auxiliary_usage() {
-  local session_ctx="$1"
+  local session_ctx="$1" deferred_sids="${2:-}"
   # Phase 59 Plan 03 (D-17): declared here, at the top, so `set -u` is
   # satisfied on every path out of this function, including the disabled
   # and lock-timeout early returns below where they are never assigned.
@@ -1627,7 +1697,7 @@ PY
   # header comment above -- so it is parsed out here and stripped before
   # session_ctx reaches the emit query below.
   local _supplement_raw _supplement_summary
-  _supplement_raw="$(_supplement_aux_session_ctx "${session_ctx}")"
+  _supplement_raw="$(_supplement_aux_session_ctx "${session_ctx}" "${deferred_sids}")"
   _supplement_summary="$(grep '^SUPPLEMENT_SUMMARY|' <<< "${_supplement_raw}" | tail -1)"
   if [[ -n "${_supplement_summary}" ]]; then
     local _supplement_label
@@ -2469,6 +2539,13 @@ PY
   # root_aid resolution). Same fed-by-herestring, survives-in-this-shell
   # discipline as attribution_rows immediately above.
   local aux_session_ctx=""
+  # Sessions whose root gate could not read state.db this tick (CR-01). The
+  # leading newline lets a whole-line `*$'\n'sid$'\n'*` match dedupe a session
+  # deferred by both ship sites; the count feeds ONE warn after the loop.
+  local root_gate_deferred_sids=$'\n' root_gate_deferred_count=0
+  # Subset deferred at the auxiliary cache; report_auxiliary_usage must not
+  # let the supplement recover these with an empty job id.
+  local aux_deferred_sids=""
   # quick-260813-wnz (LOG-01/D-02): fed by a herestring (`done <<< "${sessions}"`
   # at the loop's close below), NOT a pipe -- the loop body therefore runs in
   # THIS shell, so a counter incremented inside it survives to the aggregate
@@ -2641,25 +2718,22 @@ PY
     # never expand to empty under set -uo pipefail).
     [[ -z "${root_sid}" ]] && root_sid="${sid}"
 
-    # ROOTNESS IS FAIL-OPEN HERE, DELIBERATELY -- and this file's three
-    # job-identity sites rely on that. Recorded 2026-09-17 alongside the
-    # OPPOSITE choice made in api-event-report.sh (`_is_confirmed_root`), so
-    # the asymmetry reads as intentional rather than as drift.
+    # Phase 68 (D-17): per-session memo for session_is_confirmed_root. Empty
+    # means "not asked yet"; resolved lazily, only when a resolved owner or an
+    # auxiliary job id is about to be used, so a session with no job marker
+    # never pays the query and a session with several markers pays it once.
+    local root_confirmed=""
+
+    # ROOTNESS: FAIL-OPEN FOR CREATION, POSITIVE EVIDENCE FOR ATTRIBUTION.
+    # (Phase 68, D-17. This block replaces the 2026-09-17 note that called
+    # rootness fail-open at every job-identity site; that is no longer true at
+    # the two SHIP sites, and the old reasoning below is rewritten, not kept.)
     #
-    # THE LOAD-BEARING REASON, which does not depend on enumerating how the
-    # walk can be wrong: in THIS file, creation and attribution are driven by
-    # the SAME `root_sid == sid` test. So however a subagent comes to look like
-    # a root, the misidentification is SELF-CONSISTENT -- it creates the job
-    # and then points at it. The worst outcome is a spurious subagent job (a
-    # JOB-02 policy deviation), never a dangling reference.
-    #
-    # The EVENT path has no such symmetry: it ATTRIBUTES without ever CREATING,
-    # so the same misidentification points at a row JOB-02 suppressed -- an
-    # orphan. That asymmetry, not the walk's failure modes, is why the two
-    # files gate differently.
-    #
-    # For completeness, `root_sid == sid` can mean "root" OR any of:
-    #   - no state.db, sqlite OperationalError, or any other exception
+    # `root_sid == sid` cannot tell "root" from "could not tell".
+    # get-root-session-id.py fails open, so `root_sid == sid` can mean "root" OR
+    # any of:
+    #   - no state.db, sqlite OperationalError (including a `sessions` table
+    #     with no parent_session_id column), or any other exception
     #     (`return sid`);
     #   - no row for THIS session on the first hop (`return current` while
     #     current is still sid);
@@ -2671,24 +2745,36 @@ PY
     # returns an ancestor id -- `root_sid != sid`, which suppresses creation and
     # attribution together and so needs no defending.
     #
-    # main()'s session list is SELECTed FROM that same sessions table, so the
-    # first-hop no-row case cannot arise for the session being processed. The
-    # rest require a missing/unreadable db or corrupt cyclic ancestry, and are
-    # covered by the self-consistency argument above rather than excluded.
+    # CREATION stays fail-open, for the reason that has not changed: a
+    # fail-closed gate at a jobs-create site means NO JOB AT ALL, not merely a
+    # missing dimension. It would need `sessions.parent_session_id`, which is
+    # NOT universal -- this repo's own default test schema
+    # (_compat_helpers.build_state_db) omits it -- and on such a host ROI would
+    # stop entirely. DO NOT copy the confirmed-root gate onto the jobs-create
+    # sites below.
     #
-    # DO NOT "harmonize" the two by copying `_is_confirmed_root` onto the
-    # jobs-create sites below. That gate fails CLOSED, and closed at a CREATE
-    # site means NO JOB AT ALL -- not merely a missing dimension. It needs
-    # `sessions.parent_session_id`, which is NOT universal: this repo's own
-    # default test schema (_compat_helpers.build_state_db) omits it, and
-    # get-root-session-id.py catches OperationalError for exactly that case.
-    # On such a host the change would silently stop ROI entirely -- and there
-    # subagent handling is already globally wrong (squad-role, trace rollup,
-    # markers resolution), so tightening the job sites alone would fix nothing.
+    # ATTRIBUTION now requires POSITIVE root evidence (Phase 68, D-17): the
+    # per-marker --agentic-job-id site and the auxiliary cache ship a resolved
+    # owner for a root session only when session_is_confirmed_root says the
+    # session's `sessions` row exists AND its parent_session_id IS NULL -- the
+    # same evidence as api-event-report.sh's `_is_confirmed_root`. Every other
+    # outcome omits --agentic-job-id and its name/type siblings and still ships
+    # the completion (D-15; the PR #126 rule: withhold the dimension, never the
+    # event). Creation and attribution used to be self-consistent -- a
+    # misidentified subagent created a job and then pointed at it. They are no
+    # longer symmetric, and the worst case moves from "a spurious subagent job
+    # with its spend attributed" to "a job created and its id withheld": a $0
+    # job, never a wrong attribution. A host whose `sessions` table lacks
+    # parent_session_id gets one warn per host (_parent_column_absent_warn_once),
+    # because every root there is unconfirmable and its jobs will show $0.
     #
-    # Measured on the fleet 2026-09-17: all 10 profiles HAVE the column and
-    # every session row resolves, so this branch only ever runs in its correct
-    # form there.
+    # Why now: the legacy path is the one Jupi meters through, and D-17 ships
+    # whether or not the Phase 68 resolver fix gate opens. It is inert where the
+    # evidence exists. Measured on the fleet 2026-09-17: all 10 profiles HAVE the
+    # column and every session row resolves. Measured on Jupi 2026-10-08: column
+    # present, 9,769 sessions (9,439 NULL parent, 330 with a parent), 0 cyclic,
+    # so 0 sessions flip and the wire is byte-identical there. The census
+    # (Phase 68 D-18) re-measures it.
 
     # Phase 61 (SUB-01/SUB-02/D-03/D-05): resolve THIS session's OWN identity
     # once, mirroring root_sid's once-per-iteration resolution immediately
@@ -3266,9 +3352,34 @@ PY
       local _aux_ctx_root_sid="${root_sid//[|$'\n'$'\r']/_}"
       local _aux_ctx_root_agent_name="${root_agent_name//[|$'\n'$'\r']/_}"
       local _aux_ctx_aux_job_id="${aux_job_id//[|$'\n'$'\r']/_}"
-      local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
-      local _aux_ctx_subscriber_key="${subscriber_key//[|$'\n'$'\r']/_}"
-      aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}|${_aux_ctx_subscriber_key}"$'\n'
+      # Phase 68 (D-17): scope parity with the main-loop row. A root session
+      # whose rootness is not positively confirmed ships its main completions
+      # WITHOUT --agentic-job-id (per-marker ship site), so its auxiliary rows
+      # must omit it too or the two would land in different rule scopes. Only
+      # a root (root_sid == sid) is gated; a subagent's aux_job_id is its
+      # ROOT's id and keeps the Phase 22/29 rule. Resolved through the same
+      # per-session memo the ship site uses, so the query is paid once.
+      #
+      # A gate that could not read state.db (CR-01) defers the session's
+      # auxiliary rows instead: they stay out of the cache, and out of the
+      # supplement via aux_deferred_sids, so the next tick ships them with the
+      # right job id rather than shipping now without one.
+      local _aux_gate_deferred="false"
+      if [[ "${AUX_METERING_ENABLED}" == "true" && "${root_sid}" == "${sid}" && -n "${_aux_ctx_aux_job_id}" ]]; then
+        if ! _resolve_root_gate "${sid}"; then
+          _aux_gate_deferred="true"
+          aux_deferred_sids+="${sid}"$'\n'
+          _note_root_gate_deferral "${sid}"
+        elif [[ "${root_confirmed}" != "true" ]]; then
+          _aux_ctx_aux_job_id=""
+          _parent_column_absent_warn_once
+        fi
+      fi
+      if [[ "${_aux_gate_deferred}" != "true" ]]; then
+        local _aux_ctx_source="${source//[|$'\n'$'\r']/_}"
+        local _aux_ctx_subscriber_key="${subscriber_key//[|$'\n'$'\r']/_}"
+        aux_session_ctx+="${_aux_ctx_sid}|${_aux_ctx_root_sid}|${_aux_ctx_root_agent_name}|${root_trace_type:-}|${_aux_ctx_aux_job_id}|${_aux_ctx_source}|${_aux_ctx_subscriber_key}"$'\n'
+      fi
     fi
 
     # Phase 9 (WR-02 fix): standalone job-only marker scan — token-independent.
@@ -4565,6 +4676,18 @@ PY
         continue
       fi
 
+      # Phase 68 CR-01: settle the root gate BEFORE any marker ships. A gate
+      # that could not read state.db defers the whole session -- nothing ships
+      # and no ledger line is written -- because a completion shipped without
+      # its job id is ledgered and never re-shipped. The next tick retries.
+      if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${root_sid}" == "${sid}" ]] \
+        && _split_rows_have_owner "${split_rows}" \
+        && ! _resolve_root_gate "${sid}"; then
+        _note_root_gate_deferral "${sid}"
+        ((skipped_count++)) || true
+        continue
+      fi
+
       local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
       local m_owning_job_id m_owning_job_name m_owning_job_type
       while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id m_owning_job_name m_owning_job_type; do
@@ -4627,17 +4750,25 @@ PY
         #   orphan-reference a non-existent Revenium job row since JOB-02
         #   suppresses the create). Next cron tick retries idempotently.
         if [[ "${JOBS_CLI_CAPABLE}" == "true" ]]; then
-          # `root_sid == sid` is fail-open (root, or we could not tell) and is
-          # deliberately NOT the event path's `_is_confirmed_root` gate -- see the
-          # note at root_sid's resolution for why that is correct here, and why
-          # copying that gate onto this site would silently stop ROI on some hosts.
+          # Phase 68 (D-17): `root_sid == sid` alone is "root, or we could not
+          # tell", so a resolved owner ships here only with POSITIVE root
+          # evidence (session_is_confirmed_root, memoised in root_confirmed).
+          # Unconfirmed: omit --agentic-job-id and its name/type siblings, ship
+          # the completion anyway (D-15). Creation is NOT gated -- see the note
+          # at root_sid's resolution for why, and for the whole contract.
           if [[ "${root_sid}" == "${sid}" && -n "${m_owning_job_id}" ]]; then
-            cmd+=(--agentic-job-id "${m_owning_job_id}")
-            if [[ -n "${m_owning_job_name}" ]]; then
-              cmd+=(--agentic-job-name "${m_owning_job_name}")
-            fi
-            if [[ -n "${m_owning_job_type}" ]]; then
-              cmd+=(--agentic-job-type "${m_owning_job_type}")
+            # root_confirmed was resolved before this loop (see the gate ahead
+            # of it), so a session that could not be confirmed never got here.
+            if [[ "${root_confirmed}" == "true" ]]; then
+              cmd+=(--agentic-job-id "${m_owning_job_id}")
+              if [[ -n "${m_owning_job_name}" ]]; then
+                cmd+=(--agentic-job-name "${m_owning_job_name}")
+              fi
+              if [[ -n "${m_owning_job_type}" ]]; then
+                cmd+=(--agentic-job-type "${m_owning_job_type}")
+              fi
+            else
+              _parent_column_absent_warn_once
             fi
           elif [[ "${root_sid}" != "${sid}" && -n "${root_aid}" ]]; then
             cmd+=(--agentic-job-id "${root_aid}")
@@ -4942,6 +5073,12 @@ PY
     fi
     fi # LEGACY_COMPLETIONS_SKIP + session_event_owned guard (Phase 32 Plan 03 C-11/D-13; quick-260817-tfe OWN-01)
   done <<< "${sessions}"
+
+  # One line per tick, not per session or marker: the deferral repeats every
+  # tick for as long as state.db stays unreadable to the gate.
+  if [[ "${root_gate_deferred_count}" -gt 0 ]]; then
+    warn "root gate could not read state.db for ${root_gate_deferred_count} session(s); their completions and auxiliary rows with a job id are deferred to the next tick"
+  fi
 
   # The map is a per-tick scratch file, not state: drop it and unexport, so the
   # post-loop stages below (outcome reporting, the auxiliary pass) resolve any
@@ -6398,7 +6535,7 @@ PY
   # tick could write already exists, so aux rows can reach --agentic-job-id)
   # and before the cost-reconciliation block below, so an aux query or emit
   # failure structurally cannot reach main-loop rows.
-  report_auxiliary_usage "${aux_session_ctx}"
+  report_auxiliary_usage "${aux_session_ctx}" "${aux_deferred_sids}"
 
   # Phase 44 Plan 04 (EGV-17/D-15): one per-tick reconciliation line naming
   # the classified/unclassified/unallocated cost totals, built by

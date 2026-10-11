@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from tests._compat_helpers import jobs_create_help_lines
+from tests._compat_helpers import jobs_create_help_lines, seed_parent_session_ids
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / 'skills' / 'revenium'
@@ -395,6 +395,14 @@ class RepositoryTests(unittest.TestCase):
             # are both gitignored, so a tracked docs/ file plus this pin is the
             # only durable home.
             ROOT / 'docs' / 'confidence-omission-experiment.md',
+            # Phase 68 (TRU-05) — the tracked job-completion attribution record:
+            # the denominator correction for the "3.2%" (a marker count, not an
+            # attribution rate), the legacy reporter's positive-root gate, and
+            # the pre-registered fix gate and judge protocol, committed before
+            # the measurement they govern. `.planning/` and `docs/internal/`
+            # are both gitignored, so a tracked docs/ file plus this pin is the
+            # only durable home.
+            ROOT / 'docs' / 'job-completion-attribution.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -7998,6 +8006,10 @@ exit 0
                 'ended_at': 1715515020.0,
                 'billing_provider': 'anthropic',
             }])
+            # Production hosts carry parent_session_id (research F4); D-17 attributes a
+            # resolved owner only on positive root evidence. Seeded through the shared
+            # helper because this test's inline build_state_db is column-absent.
+            seed_parent_session_ids(state_db, {sid: None})
             write_markers(task_count=2, include_job=True)
 
             rc1, meter_inv1, jobs_inv1, out1 = run_cron(base_env, meter_log, jobs_log)
@@ -8242,6 +8254,10 @@ exit 0
                 'ended_at': 1715516100.0,
                 'billing_provider': 'anthropic',
             }])
+            # Production hosts carry parent_session_id (research F4); D-17 attributes a
+            # resolved owner only on positive root evidence. Seeded through the shared
+            # helper because this test's inline build_state_db is column-absent.
+            seed_parent_session_ids(state_db, {sid: None})
 
             # Write n_tasks task markers followed by one job marker.
             markers_file = os.path.join(markers_dir, f'{sid}.jsonl')

@@ -55,6 +55,10 @@ matters.
   absorbed a whole session's $4.03 while a sibling job in the same session
   got $0). The cost-weighted attribution rate is a different number and was
   not measured here; Phase 68 should establish it before sizing the gap.
+  Phase 68 (2026-10) measured it: 96.36% cost-weighted on the
+  `agent == Jupiter` slice over the 30 days to 2026-10-09, with the
+  correctness and zero-cost breakdowns, in
+  [job-completion-attribution.md](job-completion-attribution.md).
   See "### The verdict" under TRU-01 below for the evidence.
 - **TRU-06 / Phase 69:** `TRU-06 is a FIXABLE DEFECT` is WITHDRAWN here, not
   restated more softly. Round 1 reasoned that the session id shape itself
@@ -404,6 +408,11 @@ asymmetry directly: those two gates are "Deliberately NOT applied to the
 marker's own agentic_job_id above." It is not measured or sized here and no
 fix is proposed; it is recorded as a finding this diagnosis surfaced, for
 whichever phase picks up TRU-05.
+
+Phase 68 (2026-10) gave the legacy reporter the event path's positive-root gate
+(D-17) at its ship sites; the marker's own subagent-id branch is unchanged. The
+measurement and the gate's reach are in
+[job-completion-attribution.md](job-completion-attribution.md).
 
 ### What this does not establish
 

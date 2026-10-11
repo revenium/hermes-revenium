@@ -55,6 +55,7 @@ from tests._compat_helpers import (
     build_state_db,
     run_script,
     SCRIPTS_DIR,
+    seed_parent_session_ids,
 )
 
 ROOT_SID = 'lc-root-sid-0001'
@@ -97,18 +98,13 @@ class _LifecycleHarness(unittest.TestCase):
         os.makedirs(bin_dir)
 
         build_state_db(state_db, sessions)
-        if parents:
-            conn = sqlite3.connect(state_db)
-            try:
-                conn.execute('ALTER TABLE sessions ADD COLUMN parent_session_id TEXT')
-                for child, parent in parents.items():
-                    conn.execute(
-                        'UPDATE sessions SET parent_session_id = ? WHERE id = ?',
-                        (parent, child),
-                    )
-                conn.commit()
-            finally:
-                conn.close()
+        # Every measured install has sessions.parent_session_id, and without
+        # it the phase-68 root gate cannot confirm a root, so its job link is
+        # withheld for a reason unrelated to the lifecycle guards under test.
+        seed_parent_session_ids(
+            state_db,
+            {s['id']: (parents or {}).get(s['id']) for s in sessions},
+        )
         if aux_rows:
             build_session_model_usage(state_db, aux_rows)
         build_shim(os.path.join(bin_dir, 'revenium'))
