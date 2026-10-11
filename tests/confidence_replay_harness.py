@@ -240,6 +240,9 @@ PER_CALL_RECORD_KEYS = frozenset({
     "value_kind", "conf_value", "conf_like_key", "conf_in_text", "mechanism",
     "finish_reason", "completion_tokens", "served_model", "call_error", "ts",
 })
+# Written by the host runner only, and read by the budget alone. Optional so
+# records saved before it existed stay valid; the gates never look at it.
+OPTIONAL_RECORD_KEYS = frozenset({"reservation"})
 
 # Production writers the harness must never reference. Checked by AST.
 FORBIDDEN_WRITERS = frozenset({
@@ -618,8 +621,9 @@ async def run_calls(c, calls, concurrency, evaluator_version, on_start=None):
 # ---------------------------------------------------------------------------
 def append_record(path, record):
     """Append one whitelisted record to a JSONL file. A key outside
-    `PER_CALL_RECORD_KEYS` is refused before anything is written."""
-    extra = sorted(set(record) - PER_CALL_RECORD_KEYS)
+    `PER_CALL_RECORD_KEYS` or `OPTIONAL_RECORD_KEYS` is refused before
+    anything is written."""
+    extra = sorted(set(record) - PER_CALL_RECORD_KEYS - OPTIONAL_RECORD_KEYS)
     if extra:
         raise ValueError(f"record keys outside the whitelist: {extra}")
     with open(path, "a", encoding="utf-8") as handle:
@@ -1036,7 +1040,7 @@ def report_to_json(report):
 # only in `pool.json` (mode 0600) and `fence-snapshot.json` (arc keys only).
 # Everything printed, and `census.json`, `calls.jsonl` and `report.json`, hold
 # counts and opaque arc keys. `run-model.json` holds only the provider and
-# model names the run is bound to.
+# model names the run is bound to; `run-inputs.json` holds only digests.
 # ---------------------------------------------------------------------------
 HostPaths = namedtuple("HostPaths", [
     "hermes_home", "state_dir", "sidecar_dir", "markers_dir", "state_db",
@@ -1059,6 +1063,7 @@ EXCLUSION_STEPS = (
 POOL_ENTRY_KEYS = ("arc", "agentic_job_id", "sid", "job_name", "job_type",
                    "ts", "transcript_sha256")
 RUN_MODEL_FILE = "run-model.json"
+RUN_INPUTS_FILE = "run-inputs.json"
 ATTEMPTS_FILE = "attempts.jsonl"
 FENCE_CHECKS = ("sidecar_marker_lines", "ledger_lines",
                 "state_db_model_rows", "agent_log_instrument")
@@ -1647,6 +1652,56 @@ def _bind_run_model(out_dir, provider, model):
         _write_json(path, {"model": model, "provider": provider})
 
 
+def _run_inputs(c, plugin_dir):
+    """The digests a run is bound to, and the config they were taken from.
+
+    The config is returned so the calls use the object that was checked, not a
+    second read that a concurrent edit could change.
+    """
+    cfg = c._llm_evaluation_config()
+    canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False, default=str)
+    inputs = {
+        "config_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "classifier_sha256": _sha256_file(Path(plugin_dir) / "classifier.py"),
+        "evaluator_version": str(getattr(c, "LLM_EVALUATOR_VERSION", "")),
+    }
+    return inputs, cfg
+
+
+_INPUT_LABELS = (("config_sha256", "evaluator config"),
+                 ("classifier_sha256", "classifier"),
+                 ("evaluator_version", "classifier"))
+
+
+def _drifted_inputs(out_dir, inputs):
+    """The names of the bound inputs that differ from `inputs`, in a fixed
+    order, or an empty list when none do or nothing is bound yet. A binding
+    that is not a JSON object counts as every input differing."""
+    path = out_dir / RUN_INPUTS_FILE
+    if not path.exists():
+        return []
+    try:
+        bound = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        bound = None
+    if not isinstance(bound, dict):
+        bound = {}
+    names = []
+    for key, label in _INPUT_LABELS:
+        if bound.get(key) != inputs[key] and label not in names:
+            names.append(label)
+    return names
+
+
+def _bind_run_inputs(out_dir, inputs):
+    """Write the binding when there is none yet; same discipline as
+    `_bind_run_model`."""
+    path = out_dir / RUN_INPUTS_FILE
+    if not path.exists():
+        _write_json(path, inputs)
+
+
 def _calls_path(out_dir):
     return out_dir / "calls.jsonl"
 
@@ -1681,11 +1736,15 @@ def _append_attempt_line(out_dir, line):
 def unfinished_attempts(out_dir):
     """How many reserved calls never got a record. Such a call may have been
     billed, so it counts as spent. A torn line is skipped: a reservation is
-    written before its call, so a torn one made no call."""
+    written before its call, so a torn one made no call. A reservation whose
+    id is on a saved record is finished even without a done line, so a crash
+    between the two counts that call once, through the record."""
     path = _attempts_path(out_dir)
     if not path.exists():
         return 0
-    reserved, finished = set(), set()
+    reserved = set()
+    finished = {rec["reservation"] for rec in _read_calls(out_dir)
+                if isinstance(rec.get("reservation"), str)}
     with open(path, encoding="utf-8") as handle:
         for text in handle:
             try:
@@ -1732,13 +1791,14 @@ def _verify_transcripts(c, entries):
     return texts, drifted
 
 
-def _run_specs(c, specs, out_dir, concurrency, evaluator_version, transcripts):
+def _run_specs(c, specs, out_dir, concurrency, evaluator_version, transcripts,
+               cfg):
     """Run `specs` (`(entry, arm, stage)`), appending each record as its
     chunk finishes so a crash loses at most one chunk. Each call is reserved
     in the attempts file before it is made, so a crash that loses a chunk's
     records still leaves those calls counted. `transcripts` is the verified
-    `{arc: text}` map; no transcript is read here."""
-    cfg = c._llm_evaluation_config()
+    `{arc: text}` map and `cfg` the checked evaluator config; neither is
+    re-read here."""
     chunk = max(1, int(concurrency)) * 4
     done = 0
     for start in range(0, len(specs), chunk):
@@ -1758,7 +1818,8 @@ def _run_specs(c, specs, out_dir, concurrency, evaluator_version, transcripts):
         records = asyncio.run(run_calls(
             c, batch, concurrency, evaluator_version, on_start=reserve))
         for index, rec in enumerate(records):
-            append_record(str(_calls_path(out_dir)), rec)
+            append_record(str(_calls_path(out_dir)),
+                          dict(rec, reservation=ids[index]))
             _append_attempt_line(out_dir, {"done": ids[index]})
         done += len(records)
     return done
@@ -1783,17 +1844,24 @@ def _cmd_smoke(args, paths, out_dir, real_call_llm):
         print("smoke: call_llm did not resolve")
         return EXIT_NO_CALLABLE
     c = load_plugin_package(args.plugin_dir)
+    inputs, cfg = _run_inputs(c, args.plugin_dir)
+    changed = _drifted_inputs(out_dir, inputs)
+    if changed:
+        print("smoke: refused, %s changed since this run began; no call made"
+              % " and ".join(changed))
+        return EXIT_DRIFT
     transcripts, drifted = _verify_transcripts(c, [pool[0]])
     if drifted:
         print("smoke: refused, %d pool arc(s) changed since census; no call "
               "made" % drifted)
         return EXIT_DRIFT
     _bind_run_model(out_dir, *bound)
+    _bind_run_inputs(out_dir, inputs)
     install_replay_hooks(c, call_llm, *bound)
     try:
         done = _run_specs(
             c, [(pool[0], SMOKE_ARM, SMOKE_STAGE)], out_dir, 1,
-            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), transcripts)
+            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), transcripts, cfg)
     finally:
         restore_replay_hooks(c)
     [rec] = _read_calls(out_dir)[-1:]
@@ -1855,17 +1923,24 @@ def _cmd_run(args, paths, out_dir, real_call_llm):
         print("run: call_llm did not resolve")
         return EXIT_NO_CALLABLE
     c = load_plugin_package(args.plugin_dir)
+    inputs, cfg = _run_inputs(c, args.plugin_dir)
+    changed = _drifted_inputs(out_dir, inputs)
+    if changed:
+        print("run: refused, %s changed since this run began; no call made"
+              % " and ".join(changed))
+        return EXIT_DRIFT
     transcripts, drifted = _verify_transcripts(c, [e for e, _a, _s in specs])
     if drifted:
         print("run: refused, %d pool arc(s) changed since census; no call "
               "made" % drifted)
         return EXIT_DRIFT
     _bind_run_model(out_dir, *bound)
+    _bind_run_inputs(out_dir, inputs)
     install_replay_hooks(c, call_llm, *bound)
     try:
         done = _run_specs(
             c, specs, out_dir, args.concurrency,
-            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), transcripts)
+            str(getattr(c, "LLM_EVALUATOR_VERSION", "")), transcripts, cfg)
     finally:
         restore_replay_hooks(c)
     print("run: stage=%s calls=%d first=%d retries=%d" % (

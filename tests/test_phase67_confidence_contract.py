@@ -2595,7 +2595,8 @@ class HostPlumbingTests(_HostCase):
         self.assertEqual(len({(r['arc'], r['arm']) for r in records}), 96)
         self.assertEqual({r['stage'] for r in records}, {1})
         for rec in records:
-            self.assertTrue(set(rec) <= harness.PER_CALL_RECORD_KEYS)
+            self.assertTrue(set(rec) <= (harness.PER_CALL_RECORD_KEYS
+                                         | harness.OPTIONAL_RECORD_KEYS))
 
     def test_a_second_identical_run_makes_zero_calls(self):
         self.census()
@@ -2880,7 +2881,8 @@ class AttemptReservationTests(_HostCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(self.records()), 96)
         for rec in self.records():
-            self.assertTrue(set(rec) <= harness.PER_CALL_RECORD_KEYS)
+            self.assertTrue(set(rec) <= (harness.PER_CALL_RECORD_KEYS
+                                         | harness.OPTIONAL_RECORD_KEYS))
 
     def test_the_attempts_file_holds_no_identifier(self):
         self.census()
@@ -2899,6 +2901,64 @@ class AttemptReservationTests(_HostCase):
         self.assertEqual(
             len([a for a in self.attempts() if 'done' not in a]), 1)
         self.assertEqual(harness.unfinished_attempts(self.out), 0)
+
+    def _kill_after_the_first_record_is_saved(self, max_calls):
+        """The first record of the chunk reaches calls.jsonl and the process
+        dies before that call's done line."""
+        original = harness._append_attempt_line
+
+        def killed(out_dir, line):
+            if 'done' in line:
+                raise _Killed()
+            original(out_dir, line)
+
+        harness._append_attempt_line = killed
+        try:
+            with self.assertRaises(_Killed):
+                self._gate(_ScriptedModel(), max_calls)
+        finally:
+            harness._append_attempt_line = original
+
+    def test_every_saved_record_carries_its_reservation_id(self):
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+        reserved = {a['id'] for a in self.attempts() if 'id' in a}
+        saved = [rec['reservation'] for rec in self.records()]
+        self.assertEqual(len(saved), 96)
+        self.assertEqual(len(set(saved)), 96)
+        self.assertEqual(set(saved), reserved)
+
+    def test_a_call_saved_but_not_marked_done_counts_once(self):
+        self.census()
+        self._kill_after_the_first_record_is_saved(100)
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(len([a for a in self.attempts() if 'id' in a]), 4)
+        self.assertEqual(harness.unfinished_attempts(self.out), 3)
+
+    def test_the_resume_budget_counts_that_call_once(self):
+        self.census()
+        self._kill_after_the_first_record_is_saved(100)
+        # 1 recorded + 3 unfinished + 95 planned.
+        model = _ScriptedModel()
+        code, out = self._gate(model, 98)
+        self.assertEqual(code, 3)
+        self.assertIn('1 recorded + 3 unfinished + 95 planned', out)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(self._gate(model, 99)[0], 0)
+        self.assertEqual(len(model.calls), 95)
+
+    def test_records_without_a_reservation_id_still_resume(self):
+        self.census()
+        self.assertEqual(self._gate(_always_supplying_model(), 96)[0], 0)
+        legacy = [{k: v for k, v in rec.items() if k != 'reservation'}
+                  for rec in self.records()]
+        (self.out / 'calls.jsonl').write_text(
+            ''.join(json.dumps(rec, sort_keys=True) + '\n' for rec in legacy))
+        self.assertEqual(harness.unfinished_attempts(self.out), 0)
+        model = _ScriptedModel()
+        self.assertEqual(self._gate(model, 96)[0], 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(_host_main(self.argv('report'))[0], 0)
 
 
 class ReportEligibilityTests(_HostCase):
@@ -3156,6 +3216,175 @@ class RunModelBindingTests(_HostCase):
         data = json.loads((self.out / 'run-model.json').read_text())
         self.assertEqual(set(data), {'model', 'provider'})
 
+
+
+class RunInputsBindingTests(_HostCase):
+    """P1: the evaluator config and the classifier a run starts with are
+    bound per out-dir, so a later stage or a resume cannot change the inputs
+    relative to the saved A1 results."""
+
+    FILE = 'run-inputs.json'
+
+    def _gate(self, model, *extra, plugin_dir=None):
+        argv = self.argv('run', '--stage', 'gate', '--max-calls', '100',
+                         '--concurrency', '1', *extra)
+        if plugin_dir is not None:
+            argv[argv.index('--plugin-dir') + 1] = str(plugin_dir)
+        return _host_main(argv, model)
+
+    def _config_path(self):
+        return self.home / 'state' / 'revenium' / 'config.json'
+
+    def _edit_config(self, edit):
+        data = json.loads(self._config_path().read_text())
+        edit(data['llmOutcomeEvaluation'])
+        self._config_path().write_text(json.dumps(data))
+
+    def _bound(self):
+        return json.loads((self.out / self.FILE).read_text())
+
+    def _plugin_copy(self):
+        copy = Path(self._tmp) / 'plugin-copy'
+        shutil.copytree(PLUGIN_DIR, copy,
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        return copy
+
+    def _smoke_then_refuse_check(self, edit):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        edit()
+        model = _ScriptedModel()
+        code, out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+        return out
+
+    def test_the_first_call_binds_the_config_and_the_classifier(self):
+        self.census()
+        self.assertFalse((self.out / self.FILE).exists())
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        data = self._bound()
+        self.assertEqual(set(data), {
+            'config_sha256', 'classifier_sha256', 'evaluator_version'})
+        self.assertRegex(data['config_sha256'], r'^[0-9a-f]{64}$')
+        self.assertRegex(data['classifier_sha256'], r'^[0-9a-f]{64}$')
+
+    def test_unchanged_inputs_run_normally_and_rebind_nothing(self):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        before = (self.out / self.FILE).read_text()
+        model = _ScriptedModel()
+        self.assertEqual(self._gate(model)[0], 0)
+        self.assertEqual(len(model.calls), 96)
+        self.assertEqual((self.out / self.FILE).read_text(), before)
+
+    def test_reordering_the_config_keys_is_not_a_change(self):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        data = json.loads(self._config_path().read_text())
+        reordered = dict(reversed(list(data['llmOutcomeEvaluation'].items())))
+        self._config_path().write_text(
+            json.dumps({'llmOutcomeEvaluation': reordered}))
+        self.assertEqual(self._gate(_ScriptedModel())[0], 0)
+
+    def test_a_changed_max_hours_is_refused_with_zero_calls(self):
+        out = self._smoke_then_refuse_check(
+            lambda: self._edit_config(
+                lambda cfg: cfg.update(maxHoursSaved=41)))
+        self.assertIn('evaluator config changed since this run began; '
+                      'no call made', out)
+
+    def test_a_changed_rate_card_is_refused_with_zero_calls(self):
+        self._smoke_then_refuse_check(
+            lambda: self._edit_config(
+                lambda cfg: cfg['rateCard'].update({'Alpha Role': 101.0})))
+
+    def test_a_removed_rate_card_is_refused_with_zero_calls(self):
+        self._smoke_then_refuse_check(
+            lambda: self._edit_config(lambda cfg: cfg.pop('rateCard')))
+
+    def test_a_changed_classifier_is_refused_with_zero_calls(self):
+        self.census()
+        plugin = self._plugin_copy()
+        argv = self.argv('smoke')
+        argv[argv.index('--plugin-dir') + 1] = str(plugin)
+        self.assertEqual(_host_main(argv, _ScriptedModel())[0], 0)
+        with open(plugin / 'classifier.py', 'a') as handle:
+            handle.write('\n# changed after the run began\n')
+        model = _ScriptedModel()
+        code, out = self._gate(model, plugin_dir=plugin)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+        self.assertIn('classifier changed since this run began; no call made',
+                      out)
+
+    def test_smoke_is_refused_too(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model())[0], 0)
+        self._edit_config(lambda cfg: cfg.update(maxLoadedRate=501))
+        (self.out / 'calls.jsonl').write_text('')
+        model = _ScriptedModel()
+        code, _out = _host_main(self.argv('smoke'), model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_a_candidates_run_is_refused_when_the_config_changed(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model())[0], 0)
+        self._edit_config(lambda cfg: cfg.update(currency='EUR'))
+        model = _omitting_model()
+        code, _out = _host_main(self.argv(
+            'run', '--stage', 'candidates', '--max-calls', '224',
+            '--concurrency', '1'), model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_a_refused_invocation_leaves_the_binding_alone(self):
+        self._smoke_then_refuse_check(
+            lambda: self._edit_config(
+                lambda cfg: cfg.update(maxHoursSaved=41)))
+        before = self._bound()
+        self._gate(_ScriptedModel())
+        self.assertEqual(self._bound(), before)
+
+    def test_a_malformed_binding_is_a_refusal(self):
+        self.census()
+        (self.out / self.FILE).write_text('["not", "an", "object"]')
+        model = _ScriptedModel()
+        code, _out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_an_out_dir_with_no_binding_binds_on_its_first_call(self):
+        # A results dir from before this binding existed has a run-model.json
+        # and records but no run-inputs.json: it binds now and runs as before.
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel())[0], 0)
+        (self.out / self.FILE).unlink()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        self.assertTrue((self.out / self.FILE).exists())
+
+    def test_a_refused_first_invocation_never_binds(self):
+        self.census()
+        code, _out = _host_main(self.argv(
+            'run', '--stage', 'gate', '--max-calls', '1',
+            '--concurrency', '1'), _ScriptedModel())
+        self.assertEqual(code, 3)
+        self.assertFalse((self.out / self.FILE).exists())
+
+    def test_report_still_judges_after_the_config_changed(self):
+        self.census()
+        self.assertEqual(self._gate(_always_supplying_model())[0], 0)
+        self._edit_config(lambda cfg: cfg.update(maxHoursSaved=41))
+        self.assertEqual(_host_main(self.argv('report'))[0], 0)
+        self.assertTrue((self.out / 'report.json').exists())
+
+    def test_the_binding_holds_digests_and_no_config_text(self):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        text = (self.out / self.FILE).read_text()
+        for sentinel in ('Alpha Role', 'Beta Role', 'USD', 'maxHoursSaved'):
+            self.assertNotIn(sentinel, text)
 
 
 def _transcript_digest(home, sid):
@@ -3930,6 +4159,22 @@ class AmendmentRecordTests(unittest.TestCase):
         flat = ' '.join(section.split())
         self.assertIn('attempts.jsonl', flat)
         self.assertIn('counts as spent against `--max-calls`', flat)
+
+    def test_the_amendments_section_counts_a_saved_call_once(self):
+        section = _doc_section(
+            self.text, '## Harness amendments after the replay', level='## ')
+        flat = ' '.join(section.split())
+        self.assertIn('the id of its reservation', flat)
+        self.assertIn('counts that call once', flat)
+        self.assertIn('ignore the `reservation` field', flat)
+
+    def test_the_amendments_section_names_the_input_binding(self):
+        section = _doc_section(
+            self.text, '## Harness amendments after the replay', level='## ')
+        flat = ' '.join(section.split())
+        self.assertIn('run-inputs.json', flat)
+        self.assertIn('digest of `classifier.py`', flat)
+        self.assertIn('makes no call and exits `7`', flat)
 
     def test_the_rerun_recipe_runs_each_run_step_twice_before_report(self):
         section = _doc_section(
