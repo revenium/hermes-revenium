@@ -1,22 +1,22 @@
 # Classifier Extraction
 
-How to lift the task/job classification core out of the Hermes plugin into a reusable library
-without changing Hermes' behavior — and how to prove you didn't.
+How to extract the task/job classification core from the Hermes plugin into a reusable library
+without changing Hermes' behavior, with tests to verify equivalence.
 
 ## Requirements
 
 From the `portable-task-classifier` idea in `.planning/spikes/MANIFEST.md`:
 
 - Extraction must be **behavior-preserving for Hermes**, not a rewrite. The 324-test suite is
-  the bar, run against the real plugin file.
-- The library imports **stdlib only** — no Hermes, no `agent.auxiliary_client`, no provider SDK.
+  required to pass against the real plugin file.
+- The library imports **stdlib only**: no Hermes, no `agent.auxiliary_client`, no provider SDK.
   Hosts inject the model client.
 - The log channel is part of the host contract, not an implementation detail.
   `tests/test_phase28_classifier_reject_log.py` pins the `revenium_classifier` logger and the
   lazy-`%r` rendering (T-28-07). Hosts inject their logger.
 - Exactly four injection points: model client, taxonomy store, logger, host name.
 - Any future extraction must be validated by grafting the **real** plugin file and running the
-  full suite — 5 of 7 seams are invisible to an in-process `sys.path` graft.
+  full suite; 5 of 7 seams are invisible to an in-process `sys.path` graft.
 
 ## How to Build It
 
@@ -34,7 +34,7 @@ portable: 282 lines (27.4%)  —  ~251 lines / ~24% once you discount a sync
 ```
 
 Portable: prompt construction, `LABEL_RE`/blocklist validation, job-dict normalization, job-array
-parsing, `_muid`, and the two LLM-invoking orchestrators.
+parsing, `_muid` and the two LLM-invoking orchestrators.
 
 Not portable (and don't try): session-DB transcript reads, `_walk_to_root_session`, multiplex
 profile path resolution (`_paths_for_session`), atomic marker writes, dedupe gates
@@ -67,7 +67,7 @@ validate_job(job, logger=plugin_logger)   # the CHANNEL is contract, see What to
 
 The client contract is OpenAI-shaped: it is called with keyword args and its result is read as
 `response.choices[0].message.content`, falling back to `response["choices"][0]["message"]["content"]`.
-A host whose client differs writes a ~25-line shim — see
+A host whose client differs writes a ~25-line shim; see
 `sources/002-host-fit/clients.py`.
 
 ### 4. Wire the plugin to delegate
@@ -131,11 +131,11 @@ red. All 7 died:
 - **Do not trust a green mutation sweep without checking the harness.** The first sweep here
   reported all five mutants surviving; the cause was the harness failing to replicate
   `sys.path.append(PLUGIN_DIR)`, so the repo's `_setup_plugin_env` inserted the real plugin
-  ahead of the mutant. A green mutation result is a claim about your harness first.
+  ahead of the mutant. Verify that the harness actually loads each mutant before interpreting the result.
 - **Do not run an in-place graft in a shared checkout without a lock.** The graft window
   (~3 min per full-suite run) makes every other reader of the tree see a patched file. It
   silently contaminated one measurement in this very session (an AST analysis that parsed a
-  grafted file — duplicate function rows were the tell) and can give a concurrent session
+  grafted file; duplicate function rows revealed the problem) and can give a concurrent session
   phantom test failures.
 - **Do not "unify" the two `--transaction-id` shapes.** Marker-split path uses
   `${sid}-${total_tokens}-${muid}`; markerless uses `${sid}-${total_tokens}`. Both are pinned by
@@ -145,9 +145,9 @@ red. All 7 died:
 
 ## Constraints
 
-- Stdlib only. The repo has no `package.json`, `requirements.txt`, or `pyproject.toml`, and
+- Stdlib only. The repo has no `package.json`, `requirements.txt` or `pyproject.toml`, and
   `test_repository.py` polices what ships.
-- The plugin's `run_classification_async` must never raise — every error path is caught and
+- The plugin's `run_classification_async` must never raise; every error path is caught and
   logged with `logger.warning`. Extraction must preserve that.
 - `agent.auxiliary_client.call_llm` is imported lazily behind `try/except ImportError` so the
   module stays importable where Hermes' venv is absent. Keep that.

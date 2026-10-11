@@ -615,3 +615,27 @@ class NoJobMarkerUnchangedTests(EventPathOwningJobIdBase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RejudgedJobMarkerIsNotABoundaryTests(EventPathOwningJobIdBase):
+    """Greptile P1 on #152. A CANCELLED re-judge appends a second marker for an
+    EXISTING job id at the end of the file. It updates that job's status; it
+    must not become a new ownership boundary, or a task marker that sits
+    between job B and the re-judge of job A moves from B to A."""
+
+    def test_a_task_after_job_b_stays_with_b_when_job_a_is_rejudged(self):
+        sid = 'evt-root-rejudge'
+        flags, out = self._run_case(
+            sid,
+            [
+                _job_marker(sid, 'job_a_1111', 1000010.0, status='CANCELLED'),
+                _job_marker(sid, 'job_b_2222', 1000020.0),
+                _task_marker(sid, 'the_task', 1000100.0),
+                _job_marker(sid, 'job_a_1111', 1000200.0, status='SUCCESS'),
+            ],
+            [_event_record(sid, f'{sid}:t1:api:1', 1000150.0, 1000150.5)],
+            sessions=[(sid, None)],
+        )
+        self.assertEqual(len(flags), 1, out)
+        self.assertEqual(flags[0].get('--agentic-job-id'), 'job_b_2222')
+

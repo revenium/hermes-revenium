@@ -1140,6 +1140,23 @@ class ResolverEquivalenceTests(unittest.TestCase):
         self.assertEqual(replay['jobs'][0]['pos'], 3)
         self.assertEqual(replay['tasks'][0]['owner'], 'a_b_c')
 
+    def test_a_rejudge_marker_is_not_a_second_job_or_boundary(self):
+        def job(job_id):
+            return {'kind': 'job', 'agentic_job_id': job_id,
+                    'job_type': 't', 'status': 'S'}
+
+        def task(muid):
+            return {'muid': muid, 'ts': 1, 'sid': 's',
+                    'task_type': 'code_review', 'operation_type': 'CHAT'}
+
+        path = Path(self.tmp) / 'rejudge.jsonl'
+        _write_jsonl(path, [job('A'), job('B'), task('m1'), job('A')])
+        replay = H.replay_marker_file(path)
+        self.assertEqual(replay['shape'], 'JJTJ')
+        self.assertEqual(replay['job_count'], 2)
+        self.assertEqual([j['pos'] for j in replay['jobs']], [1, 2])
+        self.assertEqual(replay['tasks'][0]['owner'], 'B')
+
 
 class ShapeCensusTests(_Scratch):
     def test_shapes_and_jobs_per_file_are_counted(self):

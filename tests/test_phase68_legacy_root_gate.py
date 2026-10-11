@@ -248,9 +248,7 @@ class LegacyRootGateTests(_GateBase):
         )
         assert_argv_is_golden_argv_order(self, argv, _golden_minus_job_flags())
 
-    def test_subagent_branch_is_unchanged(self):
-        """A child whose root carries a job marker ships the ROOT's job id and
-        no name/type siblings, exactly as before the gate."""
+    def _subagent_run(self, root_create_ledgered):
         fx = self._build(
             [_session('compat-root-001', tokens=False), _session(CHILD_SID)],
             parents={'compat-root-001': None, CHILD_SID: 'compat-root-001'},
@@ -259,13 +257,29 @@ class LegacyRootGateTests(_GateBase):
                 CHILD_SID: [_task_marker(CHILD_SID, 'compat-muid-child')],
             },
         )
+        if root_create_ledgered:
+            with open(os.path.join(fx['state_dir'], 'revenium-jobs.ledger'), 'w') as f:
+                f.write('JOB:root-job-777:created:1715515002\n')
         res = self._tick(fx)
         self.assertEqual(res['rc'], 0, res['output'])
         self.assertEqual(len(res['meter']), 1, f"{res['meter']!r}\n{res['output']}")
-        flags = argv_to_flags(res['meter'][0])
+        return argv_to_flags(res['meter'][0])
+
+    def test_subagent_branch_is_unchanged(self):
+        """A child whose root's job create is ledgered ships the ROOT's job id
+        and no name/type siblings, exactly as before the gate."""
+        flags = self._subagent_run(root_create_ledgered=True)
         self.assertEqual(flags.get('--agentic-job-id'), 'root-job-777')
         self.assertNotIn('--agentic-job-name', flags)
         self.assertNotIn('--agentic-job-type', flags)
+
+    def test_subagent_ships_unlinked_when_its_roots_create_never_ran(self):
+        """#152 RC-2 composes with the gate: a link to a job Revenium has not
+        created would mint it nameless, so past the hold the child ships
+        without the id."""
+        flags = self._subagent_run(root_create_ledgered=False)
+        for flag in _JOB_FLAGS:
+            self.assertNotIn(flag, flags)
 
     def test_jobs_create_is_unchanged_for_a_column_absent_root(self):
         """The gate sits at the ship sites only. A fail-closed create would mean

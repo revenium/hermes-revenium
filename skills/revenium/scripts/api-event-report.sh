@@ -1443,7 +1443,12 @@ if join_mode == "join" and markers_file and os.path.isfile(markers_file):
                     # muid/task_type/operation_type and would fail it.
                     if m.get("kind") == "job":
                         job_id = _clean(m.get("agentic_job_id") or "", 128)
-                        if job_id:
+                        # Only the FIRST marker per id is an ownership boundary.
+                        # A CANCELLED re-judge appends a second marker for the
+                        # same id at the end of the file; counting it would move
+                        # later task markers onto that job. Mirrors
+                        # hermes-report.sh's pass -- the two must agree.
+                        if job_id and all(jp[1] != job_id for jp in job_positions):
                             job_positions.append((
                                 file_pos,
                                 job_id,

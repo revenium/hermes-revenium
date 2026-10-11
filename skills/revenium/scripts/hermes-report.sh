@@ -1010,6 +1010,114 @@ _parent_column_absent_warn_once() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# Job-lifecycle guards (phantom-jobs fix, 2026-10-09)
+#
+# Three defects shared one shape -- the reporter referenced or closed a
+# Revenium job without checking the local ledger / session state that already
+# says whether doing so is safe:
+#
+#   RC-1  an auxiliary row carried --agentic-job-id for a job that was long
+#         closed (151 September jobs reappeared as nameless PENDING rows on the
+#         first post-upgrade backfill). Revenium creates a job for any id it
+#         has not seen, so a LINK to a job that is not live is a CREATE.
+#   RC-2  a subagent's completion carried its root's job id before the root's
+#         `jobs create` ran (the session query is ORDER BY started_at DESC, so a
+#         child is always visited before its root). Revenium created the job
+#         nameless; the later create 409'd, which is treated as success, so the
+#         name and type were lost for good.
+#   RC-3  a CANCELLED verdict -- the classifier's uncertainty catch-all, written
+#         mid-session -- closed jobs whose session was still open.
+#
+# All helpers below fail in the direction that cannot mint a job or close one
+# early, except _open_session_defers_cancelled, which fails OPEN (reports) when
+# session state cannot be read, because a job that is never closed is the
+# worse failure for a reporter.
+# ---------------------------------------------------------------------------
+
+# The ledger's own spelling of a job id: jobs create writes the id with
+# ':' ' ' and tab replaced by '_' (the same transform every producer in this
+# file applies), so a lookup must apply it too or it misses the line.
+_job_ledger_id() {
+  local raw="$1"
+  raw="${raw//:/_}"
+  raw="${raw// /_}"
+  raw="${raw//$'\t'/_}"
+  raw="${raw//$'\n'/_}"
+  raw="${raw//$'\r'/_}"
+  printf '%s' "${raw}"
+}
+
+# 0 when JOB:<id>:created: is in the jobs ledger, i.e. Revenium is known to
+# hold a job record for the id (with the name and type the create carried).
+# Fixed-string match: an id is a cleaned slug with no ':' in it, so
+# "JOB:<id>:created:" can only occur at the start of a ledger line, and -F means
+# a '.', '[' or '*' in an id cannot make the lookup match the wrong line (the
+# older regex-based gates elsewhere in this file share that weakness).
+_job_create_ledgered() {
+  local ledger_id
+  ledger_id="$(_job_ledger_id "$1")"
+  [[ -n "${ledger_id}" ]] || return 1
+  # grep exits 2 for an unreadable/missing ledger; both that and "no match"
+  # mean "no create on record".
+  grep -qF -- "JOB:${ledger_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null || return 1
+  return 0
+}
+
+# 0 when an auxiliary row may carry --agentic-job-id for this job: the create
+# is ledgered AND the job is either still open or was closed within the last
+# REVENIUM_JOBS_STALE_SECONDS. The recent-close allowance is what keeps the
+# normal flow intact -- create, outcome and the auxiliary pass all happen in
+# one tick, so a job is routinely closed seconds before its aux row ships
+# (tests/test_phase55_aux_proofs.py and test_phase56_dry_run.py pin that link).
+# Anything older is withheld: the spend still ships, just unlinked.
+#
+# A malformed outcome timestamp is treated as "old" (withhold). The cost of a
+# wrongly withheld link is a little unattributed spend; the cost of a wrongly
+# attached one is a phantom job.
+_job_linkable_for_aux() {
+  local ledger_id
+  ledger_id="$(_job_ledger_id "$1")"
+  [[ -n "${ledger_id}" ]] || return 1
+  grep -qF -- "JOB:${ledger_id}:created:" "${JOBS_LEDGER_FILE}" 2>/dev/null || return 1
+
+  local outcome_line
+  outcome_line="$(grep -F -- "JOB:${ledger_id}:outcome:" "${JOBS_LEDGER_FILE}" 2>/dev/null | tail -1)"
+  [[ -n "${outcome_line}" ]] || return 0
+
+  # JOB:<id>:outcome:<ts>:<status> -- the id carries no ':' (see
+  # _job_ledger_id), so the timestamp is always field 4.
+  local outcome_ts
+  outcome_ts="$(printf '%s\n' "${outcome_line}" | cut -d: -f4)"
+  outcome_ts="${outcome_ts%%.*}"
+  [[ "${outcome_ts}" =~ ^[0-9]{1,12}$ ]] || return 1
+
+  local grace="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+  [[ "${grace}" =~ ^[0-9]{1,9}$ ]] || grace=600
+  local now_s
+  now_s="$(date +%s)"
+  [[ "${now_s}" =~ ^[0-9]{1,12}$ ]] || return 1
+  # 10# so a zero-padded value is read as decimal, not (invalid) octal.
+  [[ $(( 10#${now_s} - 10#${outcome_ts} )) -le $(( 10#${grace} )) ]]
+}
+
+# One log line per (job, reason), bounded by OUTCOME_WARN_FLAGS_DIR -- the
+# same sentinel directory (and key shape) the outcome stage uses, so this is
+# not a new state path. `level` is info for an expected, self-resolving hold
+# and warn for a condition an operator should look at. Never returns non-zero:
+# a failed flag write degrades to a noisier log, not a crashed reporter.
+_job_outcome_log_once() {
+  local raw_id="$1" reason="$2" level="$3" message="$4"
+  local flag_id="${raw_id//[^A-Za-z0-9_:.-]/_}"
+  flag_id="${flag_id:0:100}"
+  local flag_path="${OUTCOME_WARN_FLAGS_DIR}/${flag_id}__${reason}.flag"
+  if [[ ! -e "${flag_path}" ]]; then
+    mkdir -p "${OUTCOME_WARN_FLAGS_DIR}" 2>/dev/null && touch "${flag_path}" 2>/dev/null
+    "${level}" "${message}"
+  fi
+  return 0
+}
+
 # Resolves the caller's per-session `root_confirmed` memo ("true"/"false") from
 # session_is_confirmed_root. It assigns the caller's local by name (bash
 # dynamic scope) because a `$(...)` capture would pay a fork per call and the
@@ -1047,6 +1155,178 @@ _split_rows_have_owner() {
     [[ -n "${_owner}" ]] && return 0
   done <<< "$1"
   return 1
+}
+
+# How long subagent completions have been held, CONTINUOUSLY, waiting on this
+# root job's create. Prints seconds (0 on a first or restarted hold). The state
+# is a two-line flag in OUTCOME_WARN_FLAGS_DIR (no new state path): line 1 is
+# when the current hold began, line 2 when a child was last held. Each tick is
+# a fresh process, so this file is the only way the wait can be bounded across
+# ticks.
+#
+# "Continuously" is the point. Children are visited BEFORE their root, so on the
+# tick where the budget runs out the root has not yet had its retry; if ticks
+# stopped for a while (machine asleep, cron paused, a long outage) a plain
+# wall-clock budget would expire the instant they resumed and ship the child
+# unlinked in the same tick the root's create succeeds. So the budget counts
+# only time during which holds were actually being renewed: if the last hold
+# is further back than a gap (half the budget, at least 120s), the hold has
+# been interrupted, the root has not had its turns in the meantime, and the
+# clock restarts. A create that fails on every tick renews the hold on every
+# tick and still expires after the budget.
+#
+# Returns non-zero when the state cannot be persisted (read-only state dir):
+# the caller then ships unlinked, because a bound that cannot be remembered is
+# a hold that never ends, and stranding spend is the worse failure. A garbled or
+# future-dated flag is treated as no flag.
+_job_child_hold_age() {
+  local raw_id="$1" budget="$2"
+  local flag_id="${raw_id//[^A-Za-z0-9_:.-]/_}"
+  flag_id="${flag_id:0:100}"
+  local flag_path="${OUTCOME_WARN_FLAGS_DIR}/${flag_id}__child-hold-since.flag"
+
+  local now_s
+  now_s="$(date +%s)"
+  [[ "${now_s}" =~ ^[0-9]{1,12}$ ]] || return 1
+  now_s=$(( 10#${now_s} ))
+
+  [[ "${budget}" =~ ^[0-9]{1,9}$ ]] || budget=600
+  local gap=$(( 10#${budget} / 2 ))
+  [[ "${gap}" -ge 120 ]] || gap=120
+
+  local began="" renewed=""
+  if [[ -f "${flag_path}" ]]; then
+    { { IFS= read -r began; IFS= read -r renewed; } < "${flag_path}"; } 2>/dev/null
+  fi
+  if [[ "${began}" =~ ^[0-9]{1,12}$ && "${renewed}" =~ ^[0-9]{1,12}$ ]]; then
+    began=$(( 10#${began} ))
+    renewed=$(( 10#${renewed} ))
+    if [[ "${began}" -gt "${now_s}" || "${renewed}" -gt "${now_s}" || $(( now_s - renewed )) -gt "${gap}" ]]; then
+      began="${now_s}"
+    fi
+  else
+    began="${now_s}"
+  fi
+
+  mkdir -p "${OUTCOME_WARN_FLAGS_DIR}" 2>/dev/null || return 1
+  { printf '%s\n%s\n' "${began}" "${now_s}" > "${flag_path}"; } 2>/dev/null || return 1
+  printf '%s' $(( now_s - began ))
+}
+
+# 0 = DEFER: the session is still open (sessions.ended_at IS NULL) and has not
+# been idle for REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS, or the database is
+# momentarily locked. 1 = report now: the session has ended, has been
+# abandoned, is not in this database, or its state could not be read for any
+# reason other than contention (fail open -- see the block comment above).
+# REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS=0 switches the deferral off.
+#
+# sessions.last_activity_at is used for the idle clock when Hermes records it;
+# older Hermes installs fall back to started_at. The column probe is memoized
+# per run in a global (this function is called in the current shell, not a
+# subshell, so the memo survives).
+_SESSIONS_ACTIVITY_COL=""
+_open_session_defers_cancelled() {
+  local sid="$1"
+  [[ -n "${sid}" && -f "${STATE_DB}" ]] || return 1
+
+  local max_idle="${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS:-86400}"
+  [[ "${max_idle}" =~ ^[0-9]+$ ]] || max_idle=86400
+
+  # Only a probe that READ the schema is memoized. A locked database must not
+  # pin started_at for the rest of the run: the verdict query below waits out
+  # the lock and would then judge a long session that is still active as idle
+  # and ship its CANCELLED permanently. Contention defers, like the verdict
+  # query's; any other probe failure fails open.
+  if [[ -z "${_SESSIONS_ACTIVITY_COL}" ]]; then
+    local probe probe_rc
+    probe="$(sqlite3 -cmd ".timeout 1500" "${STATE_DB}" "PRAGMA table_info(sessions);" 2>&1)" && probe_rc=0 || probe_rc=$?
+    if [[ "${probe_rc}" -ne 0 ]]; then
+      case "${probe}" in
+        *[Ll]ocked*|*[Bb]usy*) return 0 ;;
+        *) return 1 ;;
+      esac
+    fi
+    if [[ "${probe}" == *'|last_activity_at|'* ]]; then
+      _SESSIONS_ACTIVITY_COL="COALESCE(last_activity_at, started_at)"
+    else
+      _SESSIONS_ACTIVITY_COL="started_at"
+    fi
+  fi
+
+  # Double the single quotes held in a DB-sourced id before it enters SQL.
+  # Held in a variable: the quoting of a literal quote inside ${var//pat/rep}
+  # differs between bash 3.2 and 4+.
+  local q="'"
+  local sid_sql="${sid//${q}/${q}${q}}"
+  local verdict verdict_rc
+  verdict="$(sqlite3 -cmd ".timeout 1500" "${STATE_DB}" "
+    SELECT CASE
+             WHEN ended_at IS NULL
+              AND (CAST(strftime('%s', 'now') AS REAL) - ${_SESSIONS_ACTIVITY_COL}) < ${max_idle}
+             THEN 'defer' ELSE 'report' END
+    FROM sessions WHERE id = '${sid_sql}' LIMIT 1;
+  " 2>&1)" && verdict_rc=0 || verdict_rc=$?
+  if [[ "${verdict_rc}" -ne 0 ]]; then
+    # A reported outcome cannot be taken back and a deferred one costs one tick,
+    # so lock contention (the database was readable moments ago -- this stage
+    # is only reached after the main query succeeded) defers. Any other failure
+    # fails open, as documented above.
+    case "${verdict}" in
+      *[Ll]ocked*|*[Bb]usy*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  [[ "${verdict}" == *defer* ]]
+}
+
+# Reads job_outcome_queue entries from stdin, one per line
+# ("id|status|source|marker_ts|failure_reason|sid"), and writes ONE entry per
+# job id: the one with the greatest marker_ts, a tie going to the later line.
+# Ids come out in the order they were first seen.
+#
+# Why (classifier-premature-cancel, 2026-10-10): a job can carry more than one
+# marker. The classifier writes CANCELLED -- its "uncertain" verdict -- seconds
+# into a session, and appends a later marker for the SAME id when it re-judges
+# the arc as SUCCESS or FAILED. The two queue producers do not agree about
+# duplicates (the pre-guard scan pushes every marker line; the in-loop stage
+# pushes one per id), and the outcome stage reports and ledgers the first entry
+# it reaches for an id, so without this the superseded CANCELLED was shipped and
+# the SUCCESS never was. Reducing the queue itself, rather than either
+# producer, covers both of them, and a marker appended between their two reads.
+#
+# A marker_ts that does not parse, or is not finite, ranks as 0 (oldest) rather
+# than failing the entry. On any failure of the interpreter itself the caller
+# keeps the queue as it was, so the worst case is the behaviour before this
+# existed. No single-quote may appear in the program: it is the shell quoting.
+_reduce_job_outcome_queue() {
+  python3 -c '
+import math
+import sys
+
+best = {}
+order = []
+for raw in sys.stdin.read().splitlines():
+    if not raw:
+        continue
+    parts = raw.split("|")
+    job_id = parts[0]
+    if not job_id:
+        continue
+    try:
+        ts = float(parts[3]) if len(parts) > 3 else 0.0
+    except ValueError:
+        ts = 0.0
+    if not math.isfinite(ts):
+        ts = 0.0
+    held = best.get(job_id)
+    if held is None:
+        order.append(job_id)
+        best[job_id] = (ts, raw)
+    elif ts >= held[0]:
+        best[job_id] = (ts, raw)
+for job_id in order:
+    print(best[job_id][1])
+'
 }
 
 # Phase 59 Plan 03 (D-17, folded todo aux-pass-silently-drops-zero-token-
@@ -1747,6 +2027,10 @@ PY
   # -- correct, but the exact per-record subshell cost D-08 forbids.
   local _aux_attr_skill_memo_key="" _aux_attr_ticket_memo_sid="" _aux_attr_skill_name="" _aux_attr_skill_trigger=""
   local _aux_attr_skill_source="" _aux_attr_skill_marketplace="" _aux_attr_ticket_id=""
+  # RC-1: single-slot memo for the job-link decision below, plus the count of
+  # rows whose link was withheld (reported once, after the loop). Declared
+  # OUTSIDE the loop for the same reason as the memos above.
+  local _aux_job_link_memo_id="" _aux_job_link_memo_ok="false" _aux_job_link_withheld_count=0
   while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified \
     d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total \
     req_time resp_time dur_ms orig_sid digest \
@@ -1870,8 +2154,33 @@ PY
     if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
       cmd+=(--trace-type "${ctx_root_trace:-uncategorized}")
     fi
+    # RC-1 (phantom-jobs fix, 2026-10-09): the link is only attached to a job
+    # that is LIVE -- its create is in the jobs ledger and it is either still
+    # open or was closed moments ago. This pass backfills every session's
+    # cumulative auxiliary usage on the first tick after an upgrade (deliberate,
+    # see CLAUDE.md), and each row used to carry its session's historical job id
+    # unconditionally. Revenium creates a job for any id it has not seen, so
+    # 151 long-closed September jobs reappeared as nameless PENDING rows. The
+    # spend still ships, just without the link. Nothing here touches the aux
+    # ledger key or --transaction-id, so idempotency is unchanged.
+    #
+    # Memoized on the job id: one session's rows arrive contiguously (the emit
+    # query's ORDER BY leads with session_id), and a job's ledger state cannot
+    # change between two rows of the same pass.
     if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${ctx_aux_job}" ]]; then
-      cmd+=(--agentic-job-id "${ctx_aux_job}")
+      if [[ "${ctx_aux_job}" != "${_aux_job_link_memo_id}" ]]; then
+        _aux_job_link_memo_id="${ctx_aux_job}"
+        if _job_linkable_for_aux "${ctx_aux_job}"; then
+          _aux_job_link_memo_ok="true"
+        else
+          _aux_job_link_memo_ok="false"
+        fi
+      fi
+      if [[ "${_aux_job_link_memo_ok}" == "true" ]]; then
+        cmd+=(--agentic-job-id "${ctx_aux_job}")
+      else
+        ((_aux_job_link_withheld_count++)) || true
+      fi
     fi
     if [[ "${SQUAD_CLI_CAPABLE}" == "true" ]]; then
       cmd+=(--squad-id "${ctx_root_sid}")
@@ -1989,6 +2298,13 @@ PY
       warn "Aux failed: session=${orig_sid} label=${label} exit=${cmd_exit} output=${cmd_output}"
     fi
   done <<< "${aux_query_output}"
+
+  # RC-1: one aggregate line, only when something was withheld, so a normal
+  # tick adds nothing to the log. On the first tick after an upgrade this is
+  # the number of historical rows shipped without a link to a closed job.
+  if [[ "${_aux_job_link_withheld_count}" -gt 0 ]]; then
+    info "Aux job link withheld on ${_aux_job_link_withheld_count} row(s): the session's job is closed or was never created, so linking would make Revenium create a nameless job — spend was still reported, unlinked"
+  fi
 
   exec 8>&-
 }
@@ -2920,7 +3236,7 @@ PY
     # equal). This gives the aux row the session's own latest kind:"job"
     # agentic_job_id for a root session, and the root's for a subagent — the
     # Phase 22/29 rule honoured, not re-invented.
-    local resolved_aid=""
+    local resolved_aid="" resolved_aid_ts=""
     if [[ -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then
       resolved_aid=$(
         ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null || true
@@ -2934,6 +3250,7 @@ else:
     marker_path = Path(markers_dir) / f"{root_sid}.jsonl"
     if marker_path.exists():
         latest_aid = ""
+        latest_ts = None
         try:
             with open(marker_path, 'r', encoding='utf-8') as fh:
                 for line in fh:
@@ -2953,12 +3270,29 @@ else:
                             for _bad in ('|', '\n', '\r', ':'):
                                 aid = aid.replace(_bad, '_')
                             latest_aid = aid
+                            latest_ts = rec.get('ts')
             if latest_aid:
                 print(latest_aid)
+                # RC-2: the marker ts, as a SECOND line. The caller keeps only
+                # the first line as the job id, so this is invisible to it; the
+                # per-marker emit gate reads the second to tell a root whose
+                # create is merely pending from one that has had ample time
+                # and never will.
+                if isinstance(latest_ts, (int, float)) and not isinstance(latest_ts, bool):
+                    try:
+                        print(int(latest_ts))
+                    except (ValueError, OverflowError):
+                        pass
         except OSError:
             pass
 PY
       )
+      # The heredoc's optional SECOND line is the job marker ts (RC-2); the
+      # job id is the first line only, exactly as before.
+      if [[ "${resolved_aid}" == *$'\n'* ]]; then
+        resolved_aid_ts="${resolved_aid#*$'\n'}"
+        resolved_aid_ts="${resolved_aid_ts%%$'\n'*}"
+      fi
       # Strip any trailing newline/whitespace the heredoc emitted.
       resolved_aid="${resolved_aid%%$'\n'*}"
     fi
@@ -3756,6 +4090,12 @@ jobs_by_id = {}
 # valid job markers seen in the file, used for deferred owning_job_id resolution.
 # Resolved over the full file regardless of the prior-ledger emission cutoff (D-12).
 job_positions = []
+# classifier-premature-cancel: a re-judged job gets a SECOND marker with the same
+# id, appended at the end of the file. It updates the job's status (jobs_by_id,
+# last line wins) but must not become a new ownership boundary: with markers
+# job A, job B, task T, re-judge of A, a boundary at the re-judge would hand T
+# to A instead of B. So only the FIRST marker per id enters job_positions.
+_job_position_ids = set()
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
 markers = []
@@ -3809,12 +4149,14 @@ if marker_path.is_file():
                         # order (D-12). job_name/job_type ride along so the deferred
                         # resolution pass can stamp --agentic-job-name / --agentic-job-type
                         # onto each owned task marker's meter completion call.
-                        job_positions.append((
-                            _file_pos,
-                            clean_id,
-                            m.get('job_name', '') or '',
-                            m.get('job_type', '') or '',
-                        ))
+                        if clean_id not in _job_position_ids:
+                            _job_position_ids.add(clean_id)
+                            job_positions.append((
+                                _file_pos,
+                                clean_id,
+                                m.get('job_name', '') or '',
+                                m.get('job_type', '') or '',
+                            ))
                         jobs_by_id[job_id] = m  # D-12: last line wins
                     continue  # never reaches task-marker collector
                 elif kind is not None:
@@ -3862,8 +4204,10 @@ if marker_path.is_file():
 # Fallback (TRACE-FIX 2026-06-25): a task marker with NO later job marker is NOT
 # orphaned — it is attributed to the NEAREST PRECEDING job marker instead. The
 # pure "first job after" rule assumed every arc closes with its own job marker
-# below it, but the classifier's _job_marker_exists gate writes at most ONE job
-# marker per session, written EARLY (after the first arc). In long-lived
+# below it, but the classifier's _job_marker_exists gate infers jobs at most ONCE
+# per session, written EARLY (after the first arc). (A later CANCELLED re-judge
+# can append a second marker for the SAME job id; only the first marker per id
+# is a position above, so that changes no task marker's owner.) In long-lived
 # multi-turn sessions (daily pipeline, Slack gateway) the remaining task markers
 # accumulate BELOW that single early job marker and were silently dropped to
 # owning_job_id = None — shipping ~95% of completions with no --agentic-job-id,
@@ -4181,6 +4525,80 @@ PY
     # per-muid dedupe happens INSIDE the T04 marker reader via parse_prior_state.
     if [[ "${n_markers}" -gt 0 ]]; then
       # === Per-marker emission (CRON-01..06) ===
+
+      # RC-2 (phantom-jobs fix, 2026-10-09): a completion that carries
+      # --agentic-job-id X must not reach Revenium before `jobs create` for X
+      # has run. Revenium creates a job it has not seen, nameless; the later
+      # create then 409s, which is treated as success, so the name and type are
+      # lost permanently. The session query is ORDER BY started_at DESC, so a
+      # subagent (always started after its root) is visited BEFORE the root
+      # whose iteration performs the create -- the race was systematic, not a
+      # timing accident. api-event-report.sh documents and gates the identical
+      # race for the event path.
+      #
+      # The gate is session-level on purpose: every marker of one session
+      # shares the same root_aid, so holding the whole session keeps the ledger
+      # consistent (no half-reported delta). Nothing is written when held; the
+      # next tick recomputes the same delta and retries, by which time the
+      # root's iteration has created the job.
+      #
+      # The hold is BOUNDED, because spend must never be stranded behind a
+      # create that is not going to happen. After REVENIUM_JOBS_STALE_SECONDS
+      # the completion ships WITHOUT the job link: unlinked spend is not
+      # re-linked later, but it is still counted, whereas a phantom job whose
+      # name is gone cannot be repaired from here. What the bound is measured
+      # from depends on whether the root is going to run its create:
+      #   - root is in this tick's session set: it creates when its own
+      #     iteration comes round, so wait, counting the time during which
+      #     holds were continuously renewed (_job_child_hold_age, persisted --
+      #     this is what ends the wait if the create fails on every tick, and
+      #     what keeps a gap between ticks from expiring it before the root has
+      #     had its retry);
+      #   - root is NOT in the set (zero tokens so the session query never
+      #     returns it, or still inside the settle window): nothing will create
+      #     the job this tick, so count from the root's job marker instead, for
+      #     at least the settle window. A marker with no usable ts cannot prove
+      #     it is recent and takes the unlinked path.
+      #
+      # The root's OWN completions are not gated here: they carry
+      # --agentic-job-name/--agentic-job-type with the id, so even a failed
+      # create cannot leave them nameless.
+      if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${root_sid}" != "${sid}" && -n "${root_aid}" ]] \
+         && ! _job_create_ledgered "${root_aid}"; then
+        local root_job_wait_limit="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+        [[ "${root_job_wait_limit}" =~ ^[0-9]{1,9}$ ]] || root_job_wait_limit=600
+        root_job_wait_limit=$(( 10#${root_job_wait_limit} ))
+        local root_job_age=""
+        case $'\n'"${sessions}" in
+          *$'\n'"${root_sid}|"*)
+            root_job_age="$(_job_child_hold_age "${root_aid}" "${root_job_wait_limit}")" || root_job_age=""
+            ;;
+          *)
+            # Nothing will create the job this tick. The wait must at least
+            # cover the settle window the root could still be inside.
+            local root_settle="${REVENIUM_CRON_SETTLE_SECONDS:-600}"
+            if [[ "${root_settle}" =~ ^[0-9]{1,9}$ && $(( 10#${root_settle} )) -gt "${root_job_wait_limit}" ]]; then
+              root_job_wait_limit=$(( 10#${root_settle} ))
+            fi
+            if [[ "${resolved_aid_ts}" =~ ^[0-9]{1,12}$ ]]; then
+              root_job_age=$(( $(date +%s) - 10#${resolved_aid_ts} ))
+            fi
+            ;;
+        esac
+        # A negative age (a marker ts from the future: clock step, wrong unit)
+        # proves nothing about recency, so it is unusable, not "very recent".
+        [[ "${root_job_age}" =~ ^[0-9]+$ ]] || root_job_age=""
+        if [[ -n "${root_job_age}" && "${root_job_age}" -lt "${root_job_wait_limit}" ]]; then
+          _job_outcome_log_once "${root_aid}" "child-hold" info \
+            "Subagent completions held: root job ${root_aid} has no confirmed create yet (session=${sid}); retried next tick, nothing ledgered"
+          ((skipped_count++)) || true
+          continue
+        fi
+        _job_outcome_log_once "${root_aid}" "child-unlinked" warn \
+          "Subagent completions shipping WITHOUT --agentic-job-id: root job ${root_aid} still has no confirmed create after ${root_job_age:-unknown}s (session=${sid}); linking now would make Revenium create it nameless"
+        root_aid=""
+      fi
+
       local markers_json
       markers_json=$(echo "${marker_output}" | sed -n 's/^MARKERS_JSON=//p' | head -1)
       local delta_fields_json
@@ -4692,6 +5110,24 @@ PY
     # rolling-upgrade diagnostic reason word -- never a value source.
     local outcome_assessment_dir outcome_value outcome_currency outcome_markers_dir
     local outcome_assessment_json outcome_reason
+
+    # Latest marker per job id wins (classifier-premature-cancel, 2026-10-10).
+    # See _reduce_job_outcome_queue for the failure this closes: a re-judged job
+    # has two markers and the first queue entry, the superseded CANCELLED, was
+    # being reported and ledgered. One entry per id, and nothing to reduce when
+    # there is only one entry. If the reduction cannot run, the queue is kept
+    # exactly as it was.
+    if [[ "${#job_outcome_queue[@]}" -gt 1 ]]; then
+      local _reduced_entry
+      local _reduced_queue=()
+      while IFS= read -r _reduced_entry; do
+        [[ -n "${_reduced_entry}" ]] && _reduced_queue+=("${_reduced_entry}")
+      done < <(printf '%s\n' "${job_outcome_queue[@]}" | _reduce_job_outcome_queue 2>/dev/null)
+      if [[ "${#_reduced_queue[@]}" -gt 0 ]]; then
+        job_outcome_queue=("${_reduced_queue[@]}")
+      fi
+    fi
+
     for _entry in "${job_outcome_queue[@]}"; do
       IFS='|' read -r outcome_id outcome_status_raw outcome_source outcome_marker_ts outcome_failure_reason outcome_sid <<< "${_entry}"
       [[ -z "${outcome_id}" ]] && continue
@@ -4779,6 +5215,31 @@ except Exception:
           continue
           ;;
       esac
+
+      # RC-3 (phantom-jobs fix, 2026-10-09): do not act on a CANCELLED verdict
+      # while its session is still open. CANCELLED is the classifier's
+      # "uncertain" catch-all (classifier.py's job prompt says so in as many
+      # words) and the plugin writes it from a mid-session hook a couple of
+      # minutes after the session starts, when an unfinished arc is simply
+      # indistinguishable from an abandoned one. Reporting it closed four
+      # jobs whose sessions were still running.
+      #
+      # Deferred, not dropped: nothing is ledgered, the queue entry is rebuilt
+      # every tick, and the outcome goes out once the session ends -- or has
+      # been idle past REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS, so a session
+      # that never gets an ended_at cannot leave its job PENDING forever.
+      #
+      # Unaffected: SUCCESS and FAILED (evidence-backed verdicts), and the
+      # guardrail-halt cancel, which pre_tool_call.sh writes deliberately,
+      # mid-session, as a real cancellation rather than a guess. Session state
+      # that cannot be read fails open (report), see
+      # _open_session_defers_cancelled.
+      if [[ "${outcome_status}" == "CANCELLED" && "${outcome_id}" != guardrail-halt-* ]] \
+         && _open_session_defers_cancelled "${outcome_sid}"; then
+        _job_outcome_log_once "${outcome_id}" "open-session-deferred" info \
+          "outcome held while session open: id=${outcome_id} — CANCELLED is the classifier's uncertainty verdict and session ${outcome_sid} is still open; reported once it ends or has been idle ${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS:-86400}s"
+        continue
+      fi
 
       # Phase 42 (C-01/C-04/D-10): resolve an accepted assessment. The
       # assessment is re-read from the job-assessments SIDECAR, never from

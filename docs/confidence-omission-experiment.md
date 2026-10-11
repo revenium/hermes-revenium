@@ -598,6 +598,11 @@ order:
    only when the report says stage 2 is eligible, then `report` again
 8. `confidence_replay_harness.py fence --check --since-epoch <start> --out-dir <dir> --hermes-home ~/.hermes`
 
+`run` plans its retries before it makes any new call, so a transport error from
+an invocation is retried by the next one. Run steps 5 and 7 a second time
+before each `report`. The second invocation makes only the retries, within the
+budget that remains, and a third makes no call.
+
 Take the cap from the formula under "Spend cap", and ask the operator before
 spending on their provider account. Delete the pool file (`pool.json`, the only
 file that holds job names) from the run directory when finished.
@@ -653,6 +658,15 @@ makes calls writes it. Later invocations read it back, and a conflicting
 resolves to `z-ai/glm-5.2`, the model the environment section records, so G0
 compared against the same model as before. These checks extend G0 past the
 pre-registered text.
+
+**The budget counts unfinished calls.** `run` writes a reservation to
+`attempts.jsonl` in the run directory before each model call, and a done line
+once that call's record is saved. A process killed mid-chunk leaves calls that
+may have been billed but have no record. On resume each unfinished reservation
+counts as spent against `--max-calls`, so those calls are not repeated for
+free. The file holds only an arm, a stage label, the pseudonymous arc key and
+a random id. `report` and the gates never read it. A run directory with no
+`attempts.jsonl` budgets as before.
 
 **Operator notes for a re-run.** A `pool.json` written before this amendment is
 refused with exit `7`, so run `census` into a fresh `--out-dir`. Exit `7` after

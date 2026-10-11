@@ -1213,8 +1213,13 @@ def replay_marker_file(path):
                     job_id = record.get("agentic_job_id")
                     if (isinstance(job_id, str) and job_id
                             and all(k in record for k in JOB_REQUIRED)):
-                        jobs.append({"pos": position,
-                                     "id": _clean_job_id(job_id)})
+                        clean_id = _clean_job_id(job_id)
+                        # A CANCELLED re-judge appends a second marker for the
+                        # same id; both reporters keep only the first as an
+                        # ownership boundary, so a repeat is neither a
+                        # position nor a second job here either.
+                        if all(j["id"] != clean_id for j in jobs):
+                            jobs.append({"pos": position, "id": clean_id})
                         order.append("J")
                     continue
                 if kind is not None:
