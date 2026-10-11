@@ -677,6 +677,12 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # all above the event site (+36): 1896->1932. Pure shift again; count
         # and values unchanged.
         #
+        # Phase 66 (undetermined CANCELLED label): three hunks sit between
+        # the aux site and the marker-split site -- the queue-producer comment
+        # (+2, +1) and the in-loop outcome-queue push gaining job_type (+4) --
+        # so the two main() sites shift by +7: 4175->4182, 4394->4401. The aux
+        # site (1783) and api-event-report.sh are untouched. Pure shift; count
+        # and values unchanged. Verified against `git diff -U0`.
         # Re-measured again (Phase 68 D-17 task 1, same convention): the
         # `root_confirmed` per-session memo declaration (6 lines with its
         # comment) was added after `root_sid`'s resolution, above both main()
@@ -744,11 +750,18 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # 1783/4175/4394 base, giving 2137, 4716, 4943. api-event-report.sh
         # carries only #152's +5: 1937. Re-measured with
         # `grep -n -- '--operation-type'` on the merged file. Pure shift.
+        # Merge of phase-66 with main (#149, #151, #152): phase 66's three
+        # hunks all sit between the aux site and the per-marker site, so its
+        # +7 adds to main's shifts at the two main() sites only: 4716->4723,
+        # 4943->4950. The aux site (2137) and api-event-report.sh (1937) carry
+        # main's shifts alone. Re-measured with `grep -n -- '--operation-type'`
+        # on the merged file. Pure shift; the COUNT (4) and the emitted VALUE
+        # expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2137),
-            ('hermes-report.sh', 4716),
-            ('hermes-report.sh', 4943),
+            ('hermes-report.sh', 4723),
+            ('hermes-report.sh', 4950),
             ('api-event-report.sh', 1937),
         }
         self.assertEqual(
