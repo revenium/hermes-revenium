@@ -3217,6 +3217,176 @@ class RunModelBindingTests(_HostCase):
         self.assertEqual(set(data), {'model', 'provider'})
 
 
+
+class RunInputsBindingTests(_HostCase):
+    """P1: the evaluator config and the classifier a run starts with are
+    bound per out-dir, so a later stage or a resume cannot change the inputs
+    relative to the saved A1 results."""
+
+    FILE = 'run-inputs.json'
+
+    def _gate(self, model, *extra, plugin_dir=None):
+        argv = self.argv('run', '--stage', 'gate', '--max-calls', '100',
+                         '--concurrency', '1', *extra)
+        if plugin_dir is not None:
+            argv[argv.index('--plugin-dir') + 1] = str(plugin_dir)
+        return _host_main(argv, model)
+
+    def _config_path(self):
+        return self.home / 'state' / 'revenium' / 'config.json'
+
+    def _edit_config(self, edit):
+        data = json.loads(self._config_path().read_text())
+        edit(data['llmOutcomeEvaluation'])
+        self._config_path().write_text(json.dumps(data))
+
+    def _bound(self):
+        return json.loads((self.out / self.FILE).read_text())
+
+    def _plugin_copy(self):
+        copy = Path(self._tmp) / 'plugin-copy'
+        shutil.copytree(PLUGIN_DIR, copy,
+                        ignore=shutil.ignore_patterns('__pycache__'))
+        return copy
+
+    def _smoke_then_refuse_check(self, edit):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        edit()
+        model = _ScriptedModel()
+        code, out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+        return out
+
+    def test_the_first_call_binds_the_config_and_the_classifier(self):
+        self.census()
+        self.assertFalse((self.out / self.FILE).exists())
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        data = self._bound()
+        self.assertEqual(set(data), {
+            'config_sha256', 'classifier_sha256', 'evaluator_version'})
+        self.assertRegex(data['config_sha256'], r'^[0-9a-f]{64}$')
+        self.assertRegex(data['classifier_sha256'], r'^[0-9a-f]{64}$')
+
+    def test_unchanged_inputs_run_normally_and_rebind_nothing(self):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        before = (self.out / self.FILE).read_text()
+        model = _ScriptedModel()
+        self.assertEqual(self._gate(model)[0], 0)
+        self.assertEqual(len(model.calls), 96)
+        self.assertEqual((self.out / self.FILE).read_text(), before)
+
+    def test_reordering_the_config_keys_is_not_a_change(self):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        data = json.loads(self._config_path().read_text())
+        reordered = dict(reversed(list(data['llmOutcomeEvaluation'].items())))
+        self._config_path().write_text(
+            json.dumps({'llmOutcomeEvaluation': reordered}))
+        self.assertEqual(self._gate(_ScriptedModel())[0], 0)
+
+    def test_a_changed_max_hours_is_refused_with_zero_calls(self):
+        out = self._smoke_then_refuse_check(
+            lambda: self._edit_config(
+                lambda cfg: cfg.update(maxHoursSaved=41)))
+        self.assertIn('evaluator config changed since this run began; '
+                      'no call made', out)
+
+    def test_a_changed_rate_card_is_refused_with_zero_calls(self):
+        self._smoke_then_refuse_check(
+            lambda: self._edit_config(
+                lambda cfg: cfg['rateCard'].update({'Alpha Role': 101.0})))
+
+    def test_a_removed_rate_card_is_refused_with_zero_calls(self):
+        self._smoke_then_refuse_check(
+            lambda: self._edit_config(lambda cfg: cfg.pop('rateCard')))
+
+    def test_a_changed_classifier_is_refused_with_zero_calls(self):
+        self.census()
+        plugin = self._plugin_copy()
+        argv = self.argv('smoke')
+        argv[argv.index('--plugin-dir') + 1] = str(plugin)
+        self.assertEqual(_host_main(argv, _ScriptedModel())[0], 0)
+        with open(plugin / 'classifier.py', 'a') as handle:
+            handle.write('\n# changed after the run began\n')
+        model = _ScriptedModel()
+        code, out = self._gate(model, plugin_dir=plugin)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+        self.assertIn('classifier changed since this run began; no call made',
+                      out)
+
+    def test_smoke_is_refused_too(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model())[0], 0)
+        self._edit_config(lambda cfg: cfg.update(maxLoadedRate=501))
+        (self.out / 'calls.jsonl').write_text('')
+        model = _ScriptedModel()
+        code, _out = _host_main(self.argv('smoke'), model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_a_candidates_run_is_refused_when_the_config_changed(self):
+        self.census()
+        self.assertEqual(self._gate(_omitting_model())[0], 0)
+        self._edit_config(lambda cfg: cfg.update(currency='EUR'))
+        model = _omitting_model()
+        code, _out = _host_main(self.argv(
+            'run', '--stage', 'candidates', '--max-calls', '224',
+            '--concurrency', '1'), model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_a_refused_invocation_leaves_the_binding_alone(self):
+        self._smoke_then_refuse_check(
+            lambda: self._edit_config(
+                lambda cfg: cfg.update(maxHoursSaved=41)))
+        before = self._bound()
+        self._gate(_ScriptedModel())
+        self.assertEqual(self._bound(), before)
+
+    def test_a_malformed_binding_is_a_refusal(self):
+        self.census()
+        (self.out / self.FILE).write_text('["not", "an", "object"]')
+        model = _ScriptedModel()
+        code, _out = self._gate(model)
+        self.assertEqual(code, 7)
+        self.assertEqual(model.calls, [])
+
+    def test_an_out_dir_with_no_binding_binds_on_its_first_call(self):
+        # A results dir from before this binding existed has a run-model.json
+        # and records but no run-inputs.json: it binds now and runs as before.
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel())[0], 0)
+        (self.out / self.FILE).unlink()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        self.assertTrue((self.out / self.FILE).exists())
+
+    def test_a_refused_first_invocation_never_binds(self):
+        self.census()
+        code, _out = _host_main(self.argv(
+            'run', '--stage', 'gate', '--max-calls', '1',
+            '--concurrency', '1'), _ScriptedModel())
+        self.assertEqual(code, 3)
+        self.assertFalse((self.out / self.FILE).exists())
+
+    def test_report_still_judges_after_the_config_changed(self):
+        self.census()
+        self.assertEqual(self._gate(_always_supplying_model())[0], 0)
+        self._edit_config(lambda cfg: cfg.update(maxHoursSaved=41))
+        self.assertEqual(_host_main(self.argv('report'))[0], 0)
+        self.assertTrue((self.out / 'report.json').exists())
+
+    def test_the_binding_holds_digests_and_no_config_text(self):
+        self.census()
+        self.assertEqual(_host_main(self.argv('smoke'), _ScriptedModel())[0], 0)
+        text = (self.out / self.FILE).read_text()
+        for sentinel in ('Alpha Role', 'Beta Role', 'USD', 'maxHoursSaved'):
+            self.assertNotIn(sentinel, text)
+
+
 def _transcript_digest(home, sid):
     """sha256 of the transcript the classifier reads for `sid`, loaded the
     way the harness loads it."""
