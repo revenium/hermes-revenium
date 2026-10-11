@@ -88,7 +88,9 @@ reporter the same rule, at the ship sites only:
   unreadable or locked, or sqlite fails for any other reason.
 - The per-marker `meter completion` block passes the three job flags only for a
   confirmed root. The auxiliary-usage cache follows its session's main row, so
-  an auxiliary row never carries a job its main row withholds.
+  an auxiliary row never carries a job its main row withholds. The reverse does
+  not hold: an auxiliary row can drop a job its main row carries (see the
+  phantom-jobs fix below).
 - A session confirmed not to be a root omits the job id and still ships the
   completion: withhold the dimension, never the event. That spend is
   unattributed.
@@ -96,13 +98,20 @@ reporter the same rule, at the ship sites only:
   later tick asks again and the job id is not lost. The tick logs one aggregate
   warn however many sessions are affected. That spend is delayed, not
   unattributed.
-- A confirmed root ships argv byte-identical to before; the golden fixtures are
-  unchanged. A session confirmed not to be a root ships the same argv minus the
+- A confirmed root's own completions ship argv byte-identical to before; the
+  golden fixtures are unchanged. A session confirmed not to be a root ships the same argv minus the
   three job flags, with the same `--transaction-id`, so nothing double-reports.
 - A host whose `sessions` table has no `parent_session_id` column gets one warn
   per host, and its jobs still exist but show $0 cost.
 - The `jobs create` sites are deliberately not gated: creation stays fail-open.
 - The change ships whatever the fix gate below decides.
+- It composes with the separate phantom-jobs fix (PR #152, commit `d84d294`),
+  which merged into this branch. A subagent's completion carries its root's job
+  only once that job's `jobs create` is in the jobs ledger; until then it waits,
+  and if the create never ran it ships without the job. An auxiliary row carries
+  a job only if the job was created and is open or closed within
+  `REVENIUM_JOBS_STALE_SECONDS`. Both checks apply on top of the root gate, never
+  instead of it.
 
 On the reference host the gate was checked read-only on 2026-10-08 before it was
 written: the column is present, 9,769 sessions, none cyclic, so it flips no
@@ -505,7 +514,8 @@ The gate opens on part (b). Part (b) is false, so the gate is **CLOSED**.
 
 The measured misattribution did not clear the pre-registered gate: 0.02% of the
 slice's dollars against a threshold of 1.00%. As registered, no correctness fix
-ships in Phase 68, and the marker schema and the classifier are unchanged.
+ships in Phase 68, and Phase 68 changes neither the marker schema nor the
+classifier. (The separate phantom-jobs fix does change the classifier.)
 
 The file-position resolver stays as it was. It carries the nearest-preceding
 fallback from the commit named above, which is itself a nearest-match: a task
