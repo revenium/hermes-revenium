@@ -664,9 +664,20 @@ pre-registered text.
 once that call's record is saved. A process killed mid-chunk leaves calls that
 may have been billed but have no record. On resume each unfinished reservation
 counts as spent against `--max-calls`, so those calls are not repeated for
-free. The file holds only an arm, a stage label, the pseudonymous arc key and
-a random id. `report` and the gates never read it. A run directory with no
+free. Each saved record carries the id of its reservation, and a reservation
+whose id is on a saved record is finished. A crash between saving the record
+and writing the done line therefore counts that call once. The file holds only
+an arm, a stage label, the pseudonymous arc key and a random id. `report` and
+the gates never read it, and they ignore the `reservation` field on a record.
+Records saved without the field still parse. A run directory with no
 `attempts.jsonl` budgets as before.
+
+**The evaluator config and classifier are bound to the run.** The first `smoke`
+or `run` that makes calls writes `run-inputs.json`, which holds a digest of the
+evaluator config, a digest of `classifier.py` and the evaluator version, and no
+config text. A later `smoke` or `run` whose config or classifier differs prints
+which one changed, makes no call and exits `7`. `report` does not check it. A
+run directory with no `run-inputs.json` binds on its next call that makes calls.
 
 **Operator notes for a re-run.** A `pool.json` written before this amendment is
 refused with exit `7`, so run `census` into a fresh `--out-dir`. Exit `7` after

@@ -4160,6 +4160,22 @@ class AmendmentRecordTests(unittest.TestCase):
         self.assertIn('attempts.jsonl', flat)
         self.assertIn('counts as spent against `--max-calls`', flat)
 
+    def test_the_amendments_section_counts_a_saved_call_once(self):
+        section = _doc_section(
+            self.text, '## Harness amendments after the replay', level='## ')
+        flat = ' '.join(section.split())
+        self.assertIn('the id of its reservation', flat)
+        self.assertIn('counts that call once', flat)
+        self.assertIn('ignore the `reservation` field', flat)
+
+    def test_the_amendments_section_names_the_input_binding(self):
+        section = _doc_section(
+            self.text, '## Harness amendments after the replay', level='## ')
+        flat = ' '.join(section.split())
+        self.assertIn('run-inputs.json', flat)
+        self.assertIn('digest of `classifier.py`', flat)
+        self.assertIn('makes no call and exits `7`', flat)
+
     def test_the_rerun_recipe_runs_each_run_step_twice_before_report(self):
         section = _doc_section(
             self.text, '## For Phase 70', level='## ')
