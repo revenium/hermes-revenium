@@ -83,7 +83,7 @@ AGGREGATE_KEYS = frozenset({
     "window", "pulled_at", "coverage", "coverage_rows", "paging", "shapes",
     "jobs_per_file", "resolver_rules", "multi_job", "single_job", "zero_job",
     "unjoined", "zero_cost_jobs", "ambiguous_root", "counterfactual",
-    "local_cost", "harness_sha256", "manifest_sha256",
+    "local_cost", "host_wide", "harness_sha256", "manifest_sha256",
     "correctness", "agreement", "buckets", "gate", "judges", "prompt_sha256",
 })
 # The keys only `report` fills (plan 04); `census` alone never carries them.
@@ -1406,21 +1406,30 @@ class Pull:
 
 
 _LEGACY_TXN_RE = re.compile(r"(\d+)(?:-(.+))?")
+# `aux-<sid>-<total>-<digest>`, from the right: the session id may itself hold
+# `-`, but the total is digits and the digest is the reporter's twelve
+# lowercase hex characters, so the right-hand split is unique.
+_AUX_TXN_RE = re.compile(r"aux-(.+)-\d+-[0-9a-f]{12}")
 
 
 def join_rows(rows, known_sids):
     """Join Revenium rows to a pulled session by `transactionId`.
 
-    A legacy id is `<sid>-<total>` or `<sid>-<total>-<muid>` and an event id
-    is `event:<api_request_id>` whose id starts with the session id. The
-    longest known session id that prefixes the id wins. Returns
+    A legacy id is `<sid>-<total>` or `<sid>-<total>-<muid>`, an event id is
+    `event:<api_request_id>` whose id starts with the session id, and an
+    auxiliary id is `aux-<sid>-<total>-<digest>`. The longest known session
+    id that prefixes the id wins. An auxiliary row joins its session with no
+    muid: its digest names a model and task, never a task marker. Returns
     (joined, unjoined) with joined as [(row, sid, muid_or_None)]."""
     joined, unjoined = [], []
     for row in rows:
         txn = row.get("transactionId")
         match = None
         if isinstance(txn, str):
-            if txn.startswith("event:"):
+            aux = _AUX_TXN_RE.fullmatch(txn)
+            if aux and aux.group(1) in known_sids:
+                match = (aux.group(1), None)
+            elif txn.startswith("event:"):
                 body = txn[len("event:"):]
                 for index in [i for i, c in enumerate(body) if c == ":"][::-1]:
                     if body[:index] in known_sids:
@@ -1544,13 +1553,13 @@ def _bucket(pull, by_sid, sids):
             "local_cost": decimal_text(local)}
 
 
-def resolver_rule_census(pull, joined):
+def resolver_rule_census(markers, joined):
     """Task markers and sliced dollars bound by each resolver rule."""
     rules = {r: {"markers": 0, "rows": 0, "cost": Decimal(0)}
              for r in ("forward", "fallback", "none")}
     rules["no_marker"] = {"markers": 0, "rows": 0, "cost": Decimal(0)}
     by_muid = {}
-    for sid, replay in pull.markers.items():
+    for sid, replay in markers.items():
         for task in replay["tasks"]:
             rules[task["rule"]]["markers"] += 1
             by_muid[(sid, str(task["muid"]))] = task["rule"]
@@ -1678,24 +1687,57 @@ def opaque_labels(markers):
     return labels
 
 
+def measured_population(pull, agent):
+    """The sessions the measurement is about: those with a completion row in
+    the agent slice. The pull fetched the rows by the window, so a row's
+    presence is the window test. A marker file the host merely retained, or
+    one only another agent spent through, contributes no dollars to any
+    figure and must not be counted or judged.
+
+    Returns (sliced, joined, unjoined, by_sid, markers) with `markers` the
+    pulled replays restricted to that population."""
+    sliced = slice_rows(pull.completions, agent)
+    joined, unjoined = join_rows(sliced, set(pull.sessions) | set(pull.markers))
+    by_sid = _group_dollars(joined)
+    markers = {sid: replay for sid, replay in pull.markers.items()
+               if sid in by_sid}
+    return sliced, joined, unjoined, by_sid, markers
+
+
+def _host_wide(pull):
+    """The marker and session counts of the whole pull, whoever spent
+    through them. Kept apart from the measured population on purpose."""
+    shapes = shape_census(pull.markers)
+    by_count = {"multi_job_files": 0, "single_job_files": 0,
+                "zero_job_files": 0}
+    for replay in pull.markers.values():
+        count = replay["job_count"]
+        key = ("multi_job_files" if count >= 2 else
+               "single_job_files" if count == 1 else "zero_job_files")
+        by_count[key] += 1
+    return {"marker_files": len(pull.markers), **by_count,
+            "markerless_sessions": sum(
+                1 for sid in pull.sessions if sid not in pull.markers),
+            "shapes": shapes["shapes"],
+            "jobs_per_file": shapes["jobs_per_file"]}
+
+
 def build_census(out_dir, manifest, agent):
     """Every aggregate the record publishes from one pull. Returns
     (aggregate, private): `aggregate` holds counts and exact dollars only,
-    sliced by `agent`; identifying material goes to `private`."""
+    sliced by `agent` and counted over its measured population; identifying
+    material goes to `private`."""
     pull = Pull(out_dir, manifest)
     cov = coverage(pull.completions, agent)
-    sliced = slice_rows(pull.completions, agent)
-    known = set(pull.sessions) | set(pull.markers)
-    joined, unjoined = join_rows(sliced, known)
-    by_sid = _group_dollars(joined)
+    sliced, joined, unjoined, by_sid, markers = measured_population(
+        pull, agent)
 
-    shapes = shape_census(pull.markers)
-    multi = sorted(s for s, r in pull.markers.items() if r["job_count"] >= 2)
-    single = sorted(s for s, r in pull.markers.items()
-                    if r["job_count"] == 1)
-    zero_files = sorted(s for s, r in pull.markers.items()
-                        if r["job_count"] == 0)
-    markerless = sorted(s for s in pull.sessions if s not in pull.markers)
+    shapes = shape_census(markers)
+    multi = sorted(s for s, r in markers.items() if r["job_count"] >= 2)
+    single = sorted(s for s, r in markers.items() if r["job_count"] == 1)
+    zero_files = sorted(s for s, r in markers.items() if r["job_count"] == 0)
+    markerless = sorted(s for s in pull.sessions
+                        if s in by_sid and s not in pull.markers)
 
     ambiguous_stats, ambiguous, legacy_root = ambiguous_roots(pull)
     ambiguous_rows = _attributed(
@@ -1729,7 +1771,7 @@ def build_census(out_dir, manifest, agent):
         "paging": manifest["paging"],
         "shapes": shapes["shapes"],
         "jobs_per_file": shapes["jobs_per_file"],
-        "resolver_rules": resolver_rule_census(pull, joined),
+        "resolver_rules": resolver_rule_census(markers, joined),
         "multi_job": _bucket(pull, by_sid, multi),
         "single_job": dict(_bucket(pull, by_sid, single),
                            testable_by_judge=False),
@@ -1743,12 +1785,13 @@ def build_census(out_dir, manifest, agent):
                                           legacy_root),
         "local_cost": {"sessions": local_sessions,
                        "cost": decimal_text(local_total)},
+        "host_wide": _host_wide(pull),
         "harness_sha256": sha256_file(Path(__file__)),
         "manifest_sha256": sha256_file(Path(out_dir) / "MANIFEST.json"),
     }
     private = {"host_label": manifest.get("host_label"),
                "slice_agent": agent,
-               "multi_job_labels": opaque_labels(pull.markers)}
+               "multi_job_labels": opaque_labels(markers)}
     return aggregate, private
 
 
@@ -2790,10 +2833,9 @@ def build_judge_sessions(out_dir, manifest, agent):
     rows attributed to each job, and whether the marker binding names a
     resolver cause."""
     pull = Pull(out_dir, manifest)
-    labelled = opaque_labels(pull.markers)
-    sliced = slice_rows(pull.completions, agent)
-    joined, _unjoined = join_rows(sliced, set(pull.sessions) | set(pull.markers))
-    by_sid = _group_dollars(joined)
+    _sliced, _joined, _unjoined, by_sid, markers = measured_population(
+        pull, agent)
+    labelled = opaque_labels(markers)
     sessions = []
     for label in sorted(labelled, key=_label_order):
         sid = labelled[label]["sid"]

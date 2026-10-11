@@ -140,8 +140,12 @@ def judge_host(tmp, with_spool=True, extra_single=True):
         write_spool(host, SID)
     rows = [{'agent': SLICE, 'agenticJobId': first, 'transactionId':
              f'{SID}-1000-m0', 'totalCost': 8.0}]
+    if extra_single:
+        rows.append({'agent': SLICE, 'agenticJobId': 'job_solo_9f9f',
+                     'transactionId': f'{OTHER_SID}-15-o0', 'totalCost': 1.0})
     rows.append({'agent': SLICE, 'agenticJobId': None,
-                 'transactionId': 'filler-1-1', 'totalCost': 286.22})
+                 'transactionId': 'filler-1-1',
+                 'totalCost': 286.22 if not extra_single else 285.22})
     host.write_pages('completions', [rows, []])
     host.write_pages('jobs', [[]])
     return host

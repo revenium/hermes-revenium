@@ -10,6 +10,7 @@ Nothing here touches a real host, a real tenant, or the network.
 """
 import calendar
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -1165,6 +1166,7 @@ class ShapeCensusTests(_Scratch):
                            ('s4', 'JTT')):
             lay.marker_file(sid, shape)
             lay.session(sid)
+            lay.row(sid, 0.1)
         agg, _priv = lay.census()
         self.assertEqual(agg['shapes'],
                          {'JTT': 1, 'TT': 1, 'TTJ': 1, 'TTJJ': 1})
@@ -1199,6 +1201,7 @@ class ShapeCensusTests(_Scratch):
         lay.row('o1', 4.0, job='jo')
         lay.marker_file('z1', 'TT')
         lay.session('z1', cost=0.5)
+        lay.row('z1', 0.5)
         lay.session('nomark', cost=0.25)
         lay.row('nomark', 1.0)
         agg, _p = lay.census()
@@ -1467,6 +1470,160 @@ class CounterfactualTests(_Scratch):
         self.assertEqual(cf['after_m1']['fraction'], '0/1')
         self.assertEqual(Decimal(cf['after_m1']['delta_cost_from_before']),
                          Decimal(2))
+
+def aux_txn(sid, total, task='compression'):
+    """The reporter's auxiliary transaction id, built the way
+    `report_auxiliary_usage` builds it: a twelve-hex digest of the row's
+    identity, after the session id and the cumulative token total."""
+    digest = hashlib.sha256(
+        f'{sid}|m|p|u|mode|{task}'.encode('utf-8')).hexdigest()[:12]
+    return f'aux-{sid}-{total}-{digest}'
+
+
+class AuxTransactionJoinTests(_Scratch):
+    def test_an_aux_id_joins_to_its_session_and_never_carries_a_muid(self):
+        known = {'abc', 'abc-def', 's-12', 'solo'}
+        rows = [{'transactionId': aux_txn('abc', 100)},
+                {'transactionId': aux_txn('abc-def', 7)},
+                {'transactionId': aux_txn('s-12', 5)},
+                {'transactionId': aux_txn('solo', 0)}]
+        joined, unjoined = H.join_rows(rows, known)
+        self.assertEqual(unjoined, [])
+        self.assertEqual([(s, m) for _r, s, m in joined],
+                         [('abc', None), ('abc-def', None), ('s-12', None),
+                          ('solo', None)])
+
+    def test_a_session_id_ending_in_digits_is_split_from_the_right(self):
+        known = {'s', 's-12'}
+        joined, _u = H.join_rows([{'transactionId': aux_txn('s-12', 5)}], known)
+        self.assertEqual([(s, m) for _r, s, m in joined], [('s-12', None)])
+
+    def test_a_malformed_or_unknown_aux_id_stays_unjoined(self):
+        known = {'abc'}
+        good = aux_txn('abc', 100)
+        rows = [{'transactionId': good[:-1]},                    # 11 hex
+                {'transactionId': good[:-1] + 'g'},              # not hex
+                {'transactionId': good.replace('-100-', '-1x0-')},
+                {'transactionId': aux_txn('ghost', 100)},
+                {'transactionId': 'aux-abc-100'}]
+        joined, unjoined = H.join_rows(rows, known)
+        self.assertEqual(joined, [])
+        self.assertEqual(len(unjoined), len(rows))
+
+    def test_a_legacy_id_whose_session_id_starts_with_aux_still_joins(self):
+        known = {'aux-x'}
+        joined, _u = H.join_rows(
+            [{'transactionId': 'aux-x-100-m1'},
+             {'transactionId': 'aux-x-100'}], known)
+        self.assertEqual([(s, m) for _r, s, m in joined],
+                         [('aux-x', 'm1'), ('aux-x', None)])
+
+    def test_aux_dollars_reach_the_session_bucket_not_unjoined(self):
+        lay = Layout(self.tmp)
+        muids, _jobs = lay.marker_file('m1', 'TTJJ', jobs=['ja', 'jb'])
+        lay.session('m1', cost=2.0)
+        lay.row('m1', 3.0, job='ja', muid=muids[0])
+        lay.row('m1', 0.5, job='ja', txn=aux_txn('m1', 1500))
+        agg, _p = lay.census()
+        self.assertEqual(agg['unjoined']['rows'], 0)
+        self.assertEqual(agg['multi_job']['rows'], 2)
+        self.assertEqual(Decimal(agg['multi_job']['cost']), Decimal('3.5'))
+        self.assertEqual(Decimal(agg['multi_job']['cost_attributed']),
+                         Decimal('3.5'))
+        rules = agg['resolver_rules']
+        self.assertEqual(rules['no_marker']['rows'], 1)
+        self.assertEqual(Decimal(rules['no_marker']['cost']), Decimal('0.5'))
+
+    def test_the_judge_correctness_check_sees_the_aux_row(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('m1', 'TTJJ', jobs=['ja', 'jb'])
+        lay.session('m1')
+        lay.row('m1', 3.0, job='ja')
+        lay.row('m1', 0.5, job='jb', txn=aux_txn('m1', 1500))
+        manifest = lay.finish()
+        sessions, _pull = H.build_judge_sessions(lay.out, manifest, SLICE)
+        self.assertEqual(sessions[0]['dollars_by_label'],
+                         {'J1': Decimal(3), 'J2': Decimal('0.5')})
+
+
+class MeasuredPopulationTests(_Scratch):
+    """The census and the judge measure the sessions that have completion
+    rows in the agent slice. Marker files the pull merely retained, or that
+    only another agent spent through, are not that population."""
+
+    def _lay(self):
+        lay = Layout(self.tmp)
+        lay.marker_file('mm', 'TTJJ')                 # measured, multi-job
+        lay.session('mm')
+        lay.row('mm', 2.0, job='j1')
+        lay.marker_file('ms', 'TTJ')                  # measured, single-job
+        lay.session('ms')
+        lay.row('ms', 1.0, job='j2')
+        lay.marker_file('mz', 'TT')                   # measured, zero-job
+        lay.session('mz')
+        lay.row('mz', 0.5)
+        lay.session('mk')                             # measured, markerless
+        lay.row('mk', 0.25)
+        lay.marker_file('rm', 'TTJJ')                 # retained, no rows
+        lay.session('rm', started=OUT_WIN)
+        lay.marker_file('om', 'TTJJ')                 # another agent only
+        lay.session('om')
+        lay.row('om', 9.0, job='jo', agent='Other')
+        lay.marker_file('rs', 'TTJ')
+        lay.marker_file('rz', 'TT')
+        lay.session('rk')                             # retained markerless
+        return lay
+
+    def test_session_counts_cover_only_sessions_with_sliced_rows(self):
+        agg, _p = self._lay().census()
+        self.assertEqual(agg['multi_job']['sessions'], 1)
+        self.assertEqual(agg['single_job']['sessions'], 1)
+        self.assertEqual(agg['zero_job']['marker_files']['sessions'], 1)
+        self.assertEqual(agg['zero_job']['markerless_sessions']['sessions'], 1)
+        self.assertEqual(agg['shapes'], {'TT': 1, 'TTJ': 1, 'TTJJ': 1})
+        self.assertEqual({int(k): v for k, v in agg['jobs_per_file'].items()},
+                         {0: 1, 1: 1, 2: 1})
+        self.assertEqual(
+            sum(r['markers'] for r in agg['resolver_rules'].values()), 6)
+
+    def test_the_whole_host_counts_are_kept_under_their_own_name(self):
+        agg, _p = self._lay().census()
+        host = agg['host_wide']
+        self.assertEqual(host['marker_files'], 7)
+        self.assertEqual(host['multi_job_files'], 3)
+        self.assertEqual(host['single_job_files'], 2)
+        self.assertEqual(host['zero_job_files'], 2)
+        self.assertEqual(host['markerless_sessions'], 2)
+        self.assertEqual(host['shapes'],
+                         {'TT': 2, 'TTJ': 2, 'TTJJ': 3})
+        self.assertIn('host_wide', H.AGGREGATE_KEYS)
+
+    def test_the_private_labels_name_only_the_measured_multi_job_sessions(self):
+        _agg, priv = self._lay().census()
+        self.assertEqual({v['sid'] for v in priv['multi_job_labels'].values()},
+                         {'mm'})
+
+    def test_the_judge_sessions_exclude_retained_and_other_agent_files(self):
+        lay = self._lay()
+        manifest = lay.finish()
+        sessions, _pull = H.build_judge_sessions(lay.out, manifest, SLICE)
+        self.assertEqual([s['sid'] for s in sessions], ['mm'])
+        self.assertEqual([s['label'] for s in sessions], ['S1'])
+
+    def test_the_census_and_the_judge_label_the_same_session_alike(self):
+        lay = self._lay()
+        agg_priv = lay.census()[1]['multi_job_labels']
+        sessions, _pull = H.build_judge_sessions(
+            lay.out, json.loads((lay.out / 'MANIFEST.json').read_text()),
+            SLICE)
+        self.assertEqual({k: v['sid'] for k, v in agg_priv.items()},
+                         {s['label']: s['sid'] for s in sessions})
+
+    def test_the_published_coverage_figures_do_not_move(self):
+        agg, _p = self._lay().census()
+        self.assertEqual(agg['coverage']['rows_total'], 4)
+        self.assertEqual(Decimal(agg['coverage']['cost_total']),
+                         Decimal('3.75'))
 
 
 if __name__ == '__main__':
