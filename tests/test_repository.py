@@ -387,6 +387,14 @@ class RepositoryTests(unittest.TestCase):
             # first, which is gitignored, so this pin is what keeps the
             # record's provenance durable alongside the record itself.
             ROOT / 'docs' / 'reconciliation-review-and-security-record.md',
+            # Phase 67 (TRU-03) — the tracked confidence-omission record: the
+            # retained baseline for the evaluator's missing `confidence`, split
+            # from role misses by log-line pairing, and the replay that
+            # measures prompt changes against it. Phase 70 (TRU-07) reads the
+            # record's recipe and baseline. `.planning/` and `docs/internal/`
+            # are both gitignored, so a tracked docs/ file plus this pin is the
+            # only durable home.
+            ROOT / 'docs' / 'confidence-omission-experiment.md',
             ROOT / 'install.sh',
             SKILL / 'SKILL.md',
             SKILL / 'references' / 'setup.md',
@@ -689,6 +697,16 @@ class RepositoryTests(unittest.TestCase):
             # and the shape-only guard over docs/upgrading.md's closing
             # section. Same pin rationale as its siblings above.
             ROOT / 'tests' / 'test_phase60_feature_off_closeout.py',
+            # Phase 67 (TRU-03) -- the confidence contract guards: the
+            # instrument pin (the exact log string Phase 70 greps), the AST
+            # fence against every silent workaround for a missing
+            # `confidence`, and the SC3 pins against the phase-start commit.
+            # Deleting this module must turn the suite red.
+            ROOT / 'tests' / 'test_phase67_confidence_contract.py',
+            # Phase 67 (TRU-03) on-host replay harness; operator-invoked,
+            # deliberately not `test_`-prefixed; Phase 70 re-runs it on a
+            # model change.
+            ROOT / 'tests' / 'confidence_replay_harness.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

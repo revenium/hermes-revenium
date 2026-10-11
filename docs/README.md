@@ -86,6 +86,12 @@ This Hermes skill bundle uses a plugin, three shell hooks and a cron for runtime
   (including the two that changed a forward disposition), the threat
   register, three accepted risks of which two remain open and the
   read-only evidence that producing the record did not disturb the host.
+- [Confidence-omission experiment](confidence-omission-experiment.md):
+  the retained baseline for the evaluator's missing `confidence` (TRU-03),
+  split from role misses by log-line pairing, and an on-host replay that
+  measures prompt changes against it. The deployed prompt omits on 0 of 300
+  replayed arcs, where the prompt without its role list omits on 133, so no
+  further prompt change ships.
 - [ROI read-surface ask](roi-read-surface-ask.md): the tracked, standing
   ask to the Revenium API team for `evidence_class`/`evaluator`/`confidence`
   on `jobs roi` and the Phase 53 gate this skill shipped instead of waiting
