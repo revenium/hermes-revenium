@@ -320,11 +320,15 @@ pulls ran in the order the protocol fixes, markers first because they expire:
 - **Harness:** sha256
   `ef36df70946786c40182b2ad2c71db24acd7c68bce9aa8b7629cad168090152f` at the read.
   The pre-registration commit is `5d2107bcfa72131302eca531ba598da31a6b2e3b`,
-  and the harness was byte-identical to it for the whole measurement. One later
-  change touched only the redaction audit (commit `d9458a8`): it made the
-  audit's deny-list match skip words the repository already publishes. Gate,
-  judge and census code is unchanged, and re-running `gate` and `report` on the
-  same read reproduced the recorded outputs exactly.
+  and the harness was byte-identical to it for the whole measurement. Later
+  changes came from review, after the read. The redaction audit skips words the
+  repository already publishes (`d9458a8`). The upper bound counts untested
+  dollars in full, agreement counts each turn once, a saved judge call is bound
+  to its rendered prompt and model, `pull` refuses a non-empty output directory,
+  a re-judge marker is not a second job, and `report` refuses a saved census or
+  gate that the current inputs no longer reproduce. None of them touches the
+  gate's quantity, threshold or comparator, and re-running `gate` and `report`
+  on the same read reproduced the recorded outputs exactly.
 - **Production classifier:** the host default at the read, `z-ai/glm-5.3-flash`
   through OpenRouter, taken from the pull's `prod_model` answer.
 - **Judges:** `anthropic/claude-opus-5.5` (A) and `openai/gpt-5.5` (B). Each
@@ -564,6 +568,8 @@ read after the deploy window and compare like with like:
 2. `census`, which also writes the deny-list.
 3. `estimate`, then `judge --transport openrouter` with `OPENROUTER_API_KEY`
    exported in that shell and never written to a file, then `gate` and `report`.
+   `report` exits 7 if the judge ran again after `gate`, or if the census was
+   taken for another agent; rerun `gate` or `census` first.
 4. `audit <doc> --denylist <out-dir>/denylist.json` before any aggregate is
    written into a tracked file.
 
