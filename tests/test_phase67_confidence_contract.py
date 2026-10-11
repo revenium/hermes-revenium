@@ -3924,6 +3924,22 @@ class AmendmentRecordTests(unittest.TestCase):
         self.assertIn('exit `7`', flat)
         self.assertIn('`CLEARED \u2014 arm A1, already deployed`', flat)
 
+    def test_the_amendments_section_names_the_budget_reservation(self):
+        section = _doc_section(
+            self.text, '## Harness amendments after the replay', level='## ')
+        flat = ' '.join(section.split())
+        self.assertIn('attempts.jsonl', flat)
+        self.assertIn('counts as spent against `--max-calls`', flat)
+
+    def test_the_rerun_recipe_runs_each_run_step_twice_before_report(self):
+        section = _doc_section(
+            self.text, '## For Phase 70', level='## ')
+        flat = ' '.join(section.split())
+        self.assertIn('Run steps 5 and 7 a second time before each `report`',
+                      flat)
+        self.assertIn('a transport error from an invocation is retried by '
+                      'the next one', flat)
+
     def test_the_historical_harness_digest_stays_under_the_environment(self):
         environment = _doc_section(
             self.text, '## The environment', level='## ')
