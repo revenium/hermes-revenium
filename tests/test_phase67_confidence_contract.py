@@ -2595,7 +2595,8 @@ class HostPlumbingTests(_HostCase):
         self.assertEqual(len({(r['arc'], r['arm']) for r in records}), 96)
         self.assertEqual({r['stage'] for r in records}, {1})
         for rec in records:
-            self.assertTrue(set(rec) <= harness.PER_CALL_RECORD_KEYS)
+            self.assertTrue(set(rec) <= (harness.PER_CALL_RECORD_KEYS
+                                         | harness.OPTIONAL_RECORD_KEYS))
 
     def test_a_second_identical_run_makes_zero_calls(self):
         self.census()
@@ -2880,7 +2881,8 @@ class AttemptReservationTests(_HostCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(self.records()), 96)
         for rec in self.records():
-            self.assertTrue(set(rec) <= harness.PER_CALL_RECORD_KEYS)
+            self.assertTrue(set(rec) <= (harness.PER_CALL_RECORD_KEYS
+                                         | harness.OPTIONAL_RECORD_KEYS))
 
     def test_the_attempts_file_holds_no_identifier(self):
         self.census()
@@ -2899,6 +2901,64 @@ class AttemptReservationTests(_HostCase):
         self.assertEqual(
             len([a for a in self.attempts() if 'done' not in a]), 1)
         self.assertEqual(harness.unfinished_attempts(self.out), 0)
+
+    def _kill_after_the_first_record_is_saved(self, max_calls):
+        """The first record of the chunk reaches calls.jsonl and the process
+        dies before that call's done line."""
+        original = harness._append_attempt_line
+
+        def killed(out_dir, line):
+            if 'done' in line:
+                raise _Killed()
+            original(out_dir, line)
+
+        harness._append_attempt_line = killed
+        try:
+            with self.assertRaises(_Killed):
+                self._gate(_ScriptedModel(), max_calls)
+        finally:
+            harness._append_attempt_line = original
+
+    def test_every_saved_record_carries_its_reservation_id(self):
+        self.census()
+        self.assertEqual(self._gate(_ScriptedModel(), 96)[0], 0)
+        reserved = {a['id'] for a in self.attempts() if 'id' in a}
+        saved = [rec['reservation'] for rec in self.records()]
+        self.assertEqual(len(saved), 96)
+        self.assertEqual(len(set(saved)), 96)
+        self.assertEqual(set(saved), reserved)
+
+    def test_a_call_saved_but_not_marked_done_counts_once(self):
+        self.census()
+        self._kill_after_the_first_record_is_saved(100)
+        self.assertEqual(len(self.records()), 1)
+        self.assertEqual(len([a for a in self.attempts() if 'id' in a]), 4)
+        self.assertEqual(harness.unfinished_attempts(self.out), 3)
+
+    def test_the_resume_budget_counts_that_call_once(self):
+        self.census()
+        self._kill_after_the_first_record_is_saved(100)
+        # 1 recorded + 3 unfinished + 95 planned.
+        model = _ScriptedModel()
+        code, out = self._gate(model, 98)
+        self.assertEqual(code, 3)
+        self.assertIn('1 recorded + 3 unfinished + 95 planned', out)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(self._gate(model, 99)[0], 0)
+        self.assertEqual(len(model.calls), 95)
+
+    def test_records_without_a_reservation_id_still_resume(self):
+        self.census()
+        self.assertEqual(self._gate(_always_supplying_model(), 96)[0], 0)
+        legacy = [{k: v for k, v in rec.items() if k != 'reservation'}
+                  for rec in self.records()]
+        (self.out / 'calls.jsonl').write_text(
+            ''.join(json.dumps(rec, sort_keys=True) + '\n' for rec in legacy))
+        self.assertEqual(harness.unfinished_attempts(self.out), 0)
+        model = _ScriptedModel()
+        self.assertEqual(self._gate(model, 96)[0], 0)
+        self.assertEqual(model.calls, [])
+        self.assertEqual(_host_main(self.argv('report'))[0], 0)
 
 
 class ReportEligibilityTests(_HostCase):
@@ -3155,7 +3215,6 @@ class RunModelBindingTests(_HostCase):
         self.assertEqual(self._gate(_omitting_model())[0], 0)
         data = json.loads((self.out / 'run-model.json').read_text())
         self.assertEqual(set(data), {'model', 'provider'})
-
 
 
 def _transcript_digest(home, sid):

@@ -240,6 +240,9 @@ PER_CALL_RECORD_KEYS = frozenset({
     "value_kind", "conf_value", "conf_like_key", "conf_in_text", "mechanism",
     "finish_reason", "completion_tokens", "served_model", "call_error", "ts",
 })
+# Written by the host runner only, and read by the budget alone. Optional so
+# records saved before it existed stay valid; the gates never look at it.
+OPTIONAL_RECORD_KEYS = frozenset({"reservation"})
 
 # Production writers the harness must never reference. Checked by AST.
 FORBIDDEN_WRITERS = frozenset({
@@ -618,8 +621,9 @@ async def run_calls(c, calls, concurrency, evaluator_version, on_start=None):
 # ---------------------------------------------------------------------------
 def append_record(path, record):
     """Append one whitelisted record to a JSONL file. A key outside
-    `PER_CALL_RECORD_KEYS` is refused before anything is written."""
-    extra = sorted(set(record) - PER_CALL_RECORD_KEYS)
+    `PER_CALL_RECORD_KEYS` or `OPTIONAL_RECORD_KEYS` is refused before
+    anything is written."""
+    extra = sorted(set(record) - PER_CALL_RECORD_KEYS - OPTIONAL_RECORD_KEYS)
     if extra:
         raise ValueError(f"record keys outside the whitelist: {extra}")
     with open(path, "a", encoding="utf-8") as handle:
@@ -1681,11 +1685,15 @@ def _append_attempt_line(out_dir, line):
 def unfinished_attempts(out_dir):
     """How many reserved calls never got a record. Such a call may have been
     billed, so it counts as spent. A torn line is skipped: a reservation is
-    written before its call, so a torn one made no call."""
+    written before its call, so a torn one made no call. A reservation whose
+    id is on a saved record is finished even without a done line, so a crash
+    between the two counts that call once, through the record."""
     path = _attempts_path(out_dir)
     if not path.exists():
         return 0
-    reserved, finished = set(), set()
+    reserved = set()
+    finished = {rec["reservation"] for rec in _read_calls(out_dir)
+                if isinstance(rec.get("reservation"), str)}
     with open(path, encoding="utf-8") as handle:
         for text in handle:
             try:
@@ -1758,7 +1766,8 @@ def _run_specs(c, specs, out_dir, concurrency, evaluator_version, transcripts):
         records = asyncio.run(run_calls(
             c, batch, concurrency, evaluator_version, on_start=reserve))
         for index, rec in enumerate(records):
-            append_record(str(_calls_path(out_dir)), rec)
+            append_record(str(_calls_path(out_dir)),
+                          dict(rec, reservation=ids[index]))
             _append_attempt_line(out_dir, {"done": ids[index]})
         done += len(records)
     return done
