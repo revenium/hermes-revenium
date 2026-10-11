@@ -45,6 +45,7 @@ from tests._compat_helpers import (
     build_state_db,
     run_script,
     SCRIPTS_DIR,
+    seed_parent_session_ids,
 )
 from tests.test_phase55_aux_edges import _bump_aux_row
 from tests.test_phase55_auxiliary_metering import _AuxMeteringTestCase
@@ -583,6 +584,9 @@ class AuxScopeParityTests(_AuxMeteringTestCase):
             )],
         )
         _make_trace_type_capable(os.path.join(fixture['bin_dir'], 'revenium'))
+        # Production hosts carry parent_session_id (research F4); D-17 attributes a
+        # resolved owner only on positive root evidence.
+        seed_parent_session_ids(fixture['state_db'], {sid: None})
 
         markers_path = os.path.join(fixture['state_dir'], 'markers', f'{sid}.jsonl')
         with open(markers_path, 'w') as f:

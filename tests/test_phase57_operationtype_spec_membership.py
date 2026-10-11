@@ -676,6 +676,40 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # rewrite in the row loop (3) and the aliased provider branch (+6 net),
         # all above the event site (+36): 1896->1932. Pure shift again; count
         # and values unchanged.
+        #
+        # Re-measured again (Phase 68 D-17 task 1, same convention): the
+        # `root_confirmed` per-session memo declaration (6 lines with its
+        # comment) was added after `root_sid`'s resolution, above both main()
+        # sites: the per-marker site moved +6 (4175->4181). The positive-root
+        # gate (+8 lines) was added further down, between the per-marker
+        # site's `--operation-type` line and the markerless site, so the
+        # markerless site moved +14 (4394->4408). hermes-report.sh's aux site
+        # (1783) is above all of it and unmoved. Measured with
+        # `git diff -U0`. Pure shift; the COUNT (4) and the emitted VALUE
+        # expressions are unchanged.
+        # Re-measured again (Phase 68 D-17 task 2, same convention):
+        # `_parent_column_absent_warn_once` (21 lines with its comment) was added
+        # beside `_aux_warn_once`, ABOVE all three hermes-report.sh sites
+        # (+21 each), and the auxiliary-cache job-field gate (19 lines) sits
+        # above the two main() sites (+19), so: aux 1783->1804, per-marker
+        # 4181->4221, markerless 4408->4450 (the last also takes the +2 of the
+        # ship site's `else` branch). Measured from `git diff -U0`. Pure
+        # shift; the COUNT (4) and the emitted VALUE expressions are unchanged.
+        # Re-measured again (Phase 68 D-17 task 3, same convention): rewriting
+        # the rootness rationale at `root_sid`'s resolution (+3 net) and the
+        # per-marker ship-site comment (+2 net) moved the two main() sites:
+        # per-marker 4221->4224, markerless 4450->4455. The aux site (1804) is
+        # above both edits. Measured from `git diff -U0`. Pure shift; the COUNT
+        # (4) and the emitted VALUE expressions are unchanged.
+        # Re-measured again (Phase 68 CR-01, same convention): the root-gate
+        # helpers (+39) and the supplement's deferred-sid skip (+5) sit above
+        # all three hermes-report.sh sites, moving the aux site 1804->1848;
+        # the ship-site pre-gate (+12 before the per-marker loop, -4 inside
+        # it) and the aux-cache deferral move the main() sites 4224->4293 and
+        # 4455->4520. Measured from `git diff -U0`. Pure shift.
+        # Re-measured again (Phase 68 WR-02, same convention): the probe-rc
+        # handling in `_parent_column_absent_warn_once` (+5 net) sits above all
+        # three sites: 1848->1853, 4293->4298, 4520->4525. Pure shift.
         # Job-lifecycle guards (phantom-jobs fix, 2026-10-09): hermes-report.sh
         # gained a block of job-lifecycle helpers ABOVE report_auxiliary_usage
         # (and a three-variable memo declaration inside it), shifting the aux
@@ -703,11 +737,18 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # 1932->1937. Pure shift -- the COUNT (4) and the emitted VALUE
         # expressions are unchanged; re-measured with
         # `grep -n -- '--operation-type'`.
+        # Merge of phase-68 with #152 (both sides' blocks above): each side's
+        # insertions sit wholly above or wholly below the other's at every
+        # site, so the shifts add: phase 68 alone moved the three sites by
+        # +70/+123/+131 and #152 alone by +284/+418/+418 from the shared
+        # 1783/4175/4394 base, giving 2137, 4716, 4943. api-event-report.sh
+        # carries only #152's +5: 1937. Re-measured with
+        # `grep -n -- '--operation-type'` on the merged file. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2067),
-            ('hermes-report.sh', 4593),
-            ('hermes-report.sh', 4812),
+            ('hermes-report.sh', 2137),
+            ('hermes-report.sh', 4716),
+            ('hermes-report.sh', 4943),
             ('api-event-report.sh', 1937),
         }
         self.assertEqual(

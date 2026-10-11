@@ -1014,7 +1014,6 @@ class RejudgeEndToEndTests(lc._LifecycleHarness):
         fx = self._fixture([self._session(self.SID, ended_ago=None)])
         conn = sqlite3.connect(fx['state_db'])
         try:
-            conn.execute('ALTER TABLE sessions ADD COLUMN parent_session_id TEXT')
             conn.execute(
                 'CREATE TABLE messages (session_id TEXT, role TEXT, content TEXT, '
                 'tool_calls TEXT, timestamp INTEGER)')

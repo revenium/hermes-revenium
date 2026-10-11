@@ -29,6 +29,7 @@ from tests._compat_helpers import (
     load_golden,
     run_script,
     SCRIPTS_DIR,
+    seed_parent_session_ids,
 )
 
 _OLD_TS = 1715514000.0
@@ -242,6 +243,9 @@ class Phase29SquadCapabilityGateTestCase(unittest.TestCase):
             'api_calls': 1, 'started_at': 1715514000.0, 'ended_at': 1715514000.0,
             'billing_provider': 'anthropic',
         }])
+        # Production hosts carry parent_session_id (research F4); D-17 attributes a
+        # resolved owner only on positive root evidence.
+        seed_parent_session_ids(self.state_db, {sid: None})
         # squad_capable=False here is the whole point of this test: the
         # installed CLI predates v1.3.0's squad flags.
         build_shim(self.shim, squad_capable=False)

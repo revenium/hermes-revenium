@@ -49,6 +49,7 @@ from tests._compat_helpers import (
     build_state_db,
     load_golden,
     run_script,
+    seed_parent_session_ids,
     FIXTURES_DIR,
     SCRIPTS_DIR,
 )
@@ -127,6 +128,9 @@ def _build_and_run(tmpdir, create_profile_home):
         'ended_at': 1715514000.0,
         'billing_provider': 'anthropic',
     }])
+    # Production hosts carry parent_session_id (research F4); D-17 attributes a
+    # resolved owner only on positive root evidence.
+    seed_parent_session_ids(state_db, {'compat-sid-001': None})
 
     # The ONE change: add profile_name locally, to THIS test's own database
     # file, after build_state_db has already returned. Every other compat
