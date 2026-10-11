@@ -299,6 +299,32 @@ excluded); an exact id and every id or address shape is always a hit.
 
 ## The environment
 
+**Erratum: the measured population.** The first version of this record counted
+sessions host-wide: every marker file in the pull, including sessions outside
+the 30-day window and sessions that belong to another agent. Review found this.
+The measured population is now the sessions that have completion rows in the
+`agent == Jupiter` slice. The host-wide counts are kept separately, in the
+census output, and are not used here.
+
+Every dollar figure, the coverage, the bounds and the CLOSED verdict are
+unchanged. Only counts of sessions and turns moved:
+
+| Count | First read | Corrected |
+|-------|------------|-----------|
+| Multi-job sessions | 6 | 5 |
+| Single-job sessions | 936 | 586 |
+| Sessions with a marker file but no job marker | 17 | 11 |
+| Sessions with no marker file | 8,816 | 2 |
+| Agreed turns | 14 | 7 |
+| Unstable turns | 1 | 0 |
+
+The judge spend is also unchanged, because the calls were made: 24 recorded
+calls and $2.013762. Four of those calls judged a session that had no
+completion rows in the slice, which the corrected population excludes. The
+pre-registration section's "six multi-job sessions" is the count the author saw
+before the population was corrected; that section does not change after a
+result is seen, so it is left as written.
+
 One dated read of the reference host, taken on 2026-10-09 (UTC). The three
 pulls ran in the order the protocol fixes, markers first because they expire:
 
@@ -325,18 +351,25 @@ pulls ran in the order the protocol fixes, markers first because they expire:
   repository already publishes (`d9458a8`). The upper bound counts untested
   dollars in full, agreement counts each turn once, a saved judge call is bound
   to its rendered prompt and model, `pull` refuses a non-empty output directory,
-  a re-judge marker is not a second job, and `report` refuses a saved census or
-  gate that the current inputs no longer reproduce. None of them touches the
-  gate's quantity, threshold or comparator, and re-running `gate` and `report`
-  on the same read reproduced the recorded outputs exactly.
+  a re-judge marker is not a second job, `report` refuses a saved census or
+  gate that the current inputs no longer reproduce, and the census counts only
+  sessions that have completion rows in the slice. None of them touches the
+  gate's quantity, threshold or comparator. Re-running `gate` and `report` on
+  the same read with the changed harness (sha256
+  `a8e3e4d24bcbf3d47d0a436d52397f6a5840e445ced2dedb6eb3e693727f36b0`)
+  reproduces the dollar figures, the coverage, the bounds and the verdict
+  exactly. Session counts follow the corrected population; see the erratum
+  above.
 - **Production classifier:** the host default at the read, `z-ai/glm-5.3-flash`
   through OpenRouter, taken from the pull's `prod_model` answer.
 - **Judges:** `anthropic/claude-opus-5.5` (A) and `openai/gpt-5.5` (B). Each
   call's served model matched its pin. The prompt's sha256 is
   `4acb7380b5fce7657c3ff27eb0a9f51c5cefd9297bcd56585a75bd88c90cd785`.
 - **Spend:** 24 recorded calls against the approved 120, and $2.013762 of
-  recorded spend against the approved $25. Six multi-job sessions, two judges,
-  two orderings.
+  recorded spend against the approved $25. Six multi-job sessions were judged,
+  two judges, two orderings. Four of the 24 calls judged a session (`S6` in the
+  first read) that had no completion rows in the slice; the corrected
+  population excludes it, so five sessions are measured.
 
 ## Coverage, re-taken
 
@@ -374,30 +407,31 @@ coverage, sliced by session shape.
 
 | Shape | Sessions | Dollars | Misattributed, lower to upper | Share of the `agent == Jupiter` total |
 |-------|----------|---------|-------------------------------|----------------------------------------|
-| multi-job | 6 | $5.98 | $0.0557 to $0.0557 | 0.02% to 0.02% |
-| single-job | 936 | $221.82 | not testable | not testable |
+| multi-job | 5 | $5.98 | $0.0557 to $0.0557 | 0.02% to 0.02% |
+| single-job | 586 | $221.82 | not testable | not testable |
 
 The single-job row is not zero. A session with one job has one candidate, so
 re-inference cannot disagree with it; this method has nothing to say about
 whether that job is the right one, and the table does not pretend otherwise.
 
-In the multi-job population the lower and upper bounds coincide, because the
-one turn that was not agreed carries no dollars. The misattributed dollars are
-0.93% of the multi-job dollars.
+In the multi-job population the lower and upper bounds coincide, because every
+turn was agreed: no turn was disputed, unstable or invalid, so there are no
+untested dollars to widen the upper bound. The misattributed dollars are 0.93%
+of the multi-job dollars.
 
 **Agreement between the two judges.** Over the turns both judges answered
 stably the turn-weighted agreement rate is 100.00% and the dollar-weighted rate
-is 100.00%; Cohen's kappa is 1.0 on both weightings. That is 14 turns. A kappa of
-1.0 on 14 turns says the judges did not disagree here, not that they would
+is 100.00%; Cohen's kappa is 1.0 on both weightings. That is 7 turns. A kappa of
+1.0 on 7 turns says the judges did not disagree here, not that they would
 elsewhere.
 
 **Buckets, in turns and dollars.**
 
 | Bucket | Turns | Dollars |
 |--------|-------|---------|
-| agreed | 14 | $5.98 |
+| agreed | 7 | $5.98 |
 | disagree | 0 | $0.00 |
-| unstable | 1 | $0.00 |
+| unstable | 0 | $0.00 |
 | invalid | 0 | $0.00 |
 | served-model mismatch | 0 | $0.00 |
 
@@ -530,12 +564,12 @@ gate.
 
 D-17 shipped regardless of the verdict, as the gate's own rule says: the legacy
 root gate narrowed attribution rather than widening it. The limit is
-one host, one pass and six multi-job sessions; see the next section.
+one host, one pass and five multi-job sessions; see the next section.
 
 ## What this does not establish
 
 - No fleet host corroborates these figures; the read was not obtained.
-- Single-job sessions are untestable by re-inference. The 936 single-job
+- Single-job sessions are untestable by re-inference. The 586 single-job
   sessions and their $221.82 are correct by construction of the method and
   unmeasured by it.
 - A job the classifier never inferred is invisible. Dollars in a session where
@@ -546,7 +580,7 @@ one host, one pass and six multi-job sessions; see the next section.
 - The production model is the host default at the time of the read, not
   necessarily the model that classified each earlier session in the 30 days.
 - One host, one pass, one window. Nothing generalises to another host, another
-  month or another traffic shape, and the multi-job population is 6 sessions.
+  month or another traffic shape, and the multi-job population is 5 sessions.
 - The event path was not exercised on this host: its ledger is empty, so cause
   (b) is zero by construction and no event-path rate is measured.
 - The cost here is the platform's recorded cost; the host's own `state.db`

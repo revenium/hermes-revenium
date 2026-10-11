@@ -321,6 +321,22 @@ class ResultsShapeTests(unittest.TestCase):
         self.assertTrue(row[-1].startswith('MEASURED'), row[-1])
         self.assertIn('`agent == Jupiter`', row[-1])
 
+    def test_the_erratum_states_the_corrected_population_and_what_moved(self):
+        environment = _section(self.text, '## The environment')
+        lead = '**Erratum: the measured population.**'
+        self.assertIn(lead, environment)
+        erratum = environment.split(lead, 1)[1].split('One dated read', 1)[0]
+        flat = _flat(erratum)
+        for needle in ('host-wide', 'sessions that have completion rows',
+                       '`agent == Jupiter` slice', 'another agent',
+                       'Every dollar figure', 'CLOSED verdict',
+                       'are unchanged'):
+            self.assertIn(needle, flat)
+        moved = {r[0]: r[1:] for r in _table_rows(erratum)}
+        self.assertEqual(moved['Multi-job sessions'], ['6', '5'])
+        self.assertEqual(moved['Single-job sessions'], ['936', '586'])
+        self.assertEqual(moved['Agreed turns'], ['14', '7'])
+
     @unittest.skipUnless(SCRATCH_REPORT.is_file(),
                          'the gitignored measurement is not on this checkout')
     def test_published_figures_equal_the_reports_values(self):
