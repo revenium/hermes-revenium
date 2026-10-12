@@ -467,6 +467,7 @@ _emit_shadow_row() {
   SHADOW_LEGACY_LAST_TOTAL="${legacy_last_total_tokens}" \
   SHADOW_REPORT_FILE="${EVENT_SHADOW_REPORT_FILE}" \
   SHADOW_RUN_FILE="${_shadow_run_file:-}" \
+  SHADOW_MEMO_CAPTURE="${_shadow_memo_capture:-}" \
   python3 - <<'PY' 2>/dev/null || true
 import json
 import os
@@ -644,6 +645,190 @@ if run_file:
             f.write(line_out)
     except OSError:
         pass
+# Shadow memo: hand the exact row back to the caller, which may record it.
+capture = os.environ.get('SHADOW_MEMO_CAPTURE', '')
+if capture:
+    try:
+        with open(capture, 'w', encoding='utf-8') as f:
+            f.write(line_out)
+    except OSError:
+        pass
+PY
+}
+
+# ---------------------------------------------------------------------------
+# Shadow memo (EVENT_SHADOW_MEMO_FILE in common.sh says why it exists).
+#
+# In shadow mode every legacy-owned session is fully re-enriched on every tick
+# only to append a comparison row that comes out the same each time: about 8
+# python3 spawns per spool file, ~6 minutes per tick on a host with ~700 spool
+# files. The memo records the row a legacy-owned session produced, keyed on
+# everything that row is computed from: the spool file's bytes (size, mtime,
+# inode), the session's marker file and settle sentinel, its state.db row in
+# the env map, its HERMES: ledger line count and last total, the event ledger,
+# both scripts and the mode switches. On a hit the loop logs the same line,
+# bumps the same counters and appends the recorded row stamped with this
+# tick's time, without the spawns. Sigs are taken in the startup pass, before
+# the loop reads anything, so a file that changes mid-tick misses next tick.
+#
+# Shadow ships nothing, so a stale row could only mislead the comparison, never
+# bill; even so, every input the row depends on is in the key. Live mode never
+# consults the memo: there a legacy-owned session is skipped before any
+# enrichment, which is already cheap.
+# ---------------------------------------------------------------------------
+_shadow_memo_build_plan() {
+  local files_file="$1" plan_file="$2"
+  MEMO_FILE="${EVENT_SHADOW_MEMO_FILE}" \
+  FILES_FILE="${files_file}" \
+  PLAN_FILE="${plan_file}" \
+  ENV_MAP="${_env_map_file:-}" \
+  MEMO_LEDGER="${LEDGER_FILE}" \
+  MEMO_EVENT_LEDGER="${EVENT_LEDGER_FILE}" \
+  MEMO_MARKERS_DIR="${MARKERS_DIR}" \
+  MEMO_READY_DIR="${MARKERS_READY_DIR}" \
+  MEMO_SCRIPTS="${SCRIPT_DIR}/api-event-report.sh:${SCRIPT_DIR}/common.sh" \
+  MEMO_SWITCHES="v1|${EVENT_METERING_MODE:-}|${TRACE_TYPE_CLI_CAPABLE:-}|${SKILL_CLI_CAPABLE:-}|${TICKET_CLI_CAPABLE:-}|${SUBSCRIBER_CLI_CAPABLE:-}|${SUBSCRIBER_EMAIL_MODE:-}|${MARKERS_DIR}|${REVENIUM_CRON_SETTLE_SECONDS:-}|${REVENIUM_AGENT_NAME:-}" \
+  python3 - <<'PY' 2>/dev/null
+import hashlib, json, os, stat
+
+env = os.environ
+SEP = '\x1f'
+
+
+def sig(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return '-'
+    return '%o:%d:%d:%d' % (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns, st.st_ino)
+
+
+h = hashlib.sha1(env['MEMO_SWITCHES'].encode('utf-8', 'surrogateescape'))
+for p in env['MEMO_SCRIPTS'].split(':'):
+    with open(p, 'rb') as f:
+        h.update(b'\x00' + f.read())
+# Size and inode only: this script touches the event ledger every run, so its
+# mtime moves without its content changing; the ledger only ever grows.
+try:
+    _st = os.stat(env['MEMO_EVENT_LEDGER'])
+    h.update(b'\x00%d:%d' % (_st.st_size, _st.st_ino))
+except OSError:
+    h.update(b'\x00-')
+global_key = h.hexdigest()
+
+env_rows = {}
+try:
+    with open(env['ENV_MAP'], encoding='utf-8', errors='surrogateescape') as f:
+        for line in f:
+            env_rows.setdefault(line.split(SEP, 1)[0], line.rstrip('\n'))
+except OSError:
+    pass
+
+ledger = {}
+try:
+    with open(env['MEMO_LEDGER'], encoding='utf-8', errors='surrogateescape') as f:
+        for line in f:
+            if not line.startswith('HERMES:'):
+                continue
+            parts = line.rstrip('\n').split(':')
+            if len(parts) < 3:
+                continue
+            n, _ = ledger.get(parts[1], (0, ''))
+            ledger[parts[1]] = (n + 1, parts[2])
+except OSError:
+    pass
+
+records = {}
+try:
+    with open(env['MEMO_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        if json.loads(f.readline()).get('v') == 1:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    records[r['path']] = r
+                except Exception:
+                    continue
+except Exception:
+    records = {}
+
+markers_dir = env['MEMO_MARKERS_DIR']
+ready_dir = env['MEMO_READY_DIR']
+with open(env['FILES_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+    paths = [l.rstrip('\n') for l in f if l.rstrip('\n')]
+out = []
+for path in paths:
+    sid = os.path.basename(path)
+    if sid.endswith('.jsonl'):
+        sid = sid[:-len('.jsonl')]
+    n, last = ledger.get(sid, (0, ''))
+    material = SEP.join([
+        global_key, path, sig(path),
+        sig(os.path.join(markers_dir, sid + '.jsonl')),
+        '1' if os.path.exists(os.path.join(ready_dir, sid)) else '0',
+        env_rows.get(sid, ''), str(n), last,
+    ])
+    key = hashlib.sha1(material.encode('utf-8', 'surrogateescape')).hexdigest()
+    r = records.get(path)
+    if n > 0 and r and r.get('key') == key and r.get('sid') == sid:
+        out.append(SEP.join(['H', path, sid, r['platform'], str(r['dup']), r['row']]))
+    else:
+        out.append(SEP.join(['M', path, sid, key]))
+with open(env['PLAN_FILE'], 'w', encoding='utf-8', errors='surrogateescape') as f:
+    for line in out:
+        f.write(line + '\n')
+PY
+}
+
+# Writes the next memo: records that hit this tick, carried over, plus rows
+# recorded this tick. A spool file gone from this tick drops out.
+_shadow_memo_finalize() {
+  local hits_file="$1" new_file="$2"
+  MEMO_FILE="${EVENT_SHADOW_MEMO_FILE}" HITS_FILE="${hits_file}" NEW_FILE="${new_file}" \
+  python3 - <<'PY' 2>/dev/null
+import json, os, tempfile
+
+env = os.environ
+old = {}
+try:
+    with open(env['MEMO_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        f.readline()
+        for line in f:
+            try:
+                r = json.loads(line)
+                old[r['path']] = r
+            except Exception:
+                continue
+except OSError:
+    pass
+keep = {}
+try:
+    with open(env['HITS_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        for line in f:
+            path = line.rstrip('\n')
+            if path in old:
+                keep[path] = old[path]
+except OSError:
+    pass
+fields = ('path', 'sid', 'key', 'platform', 'dup', 'row')
+try:
+    with open(env['NEW_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        for line in f:
+            parts = line.rstrip('\n').split('\x1f')
+            if len(parts) != len(fields):
+                continue
+            r = dict(zip(fields, parts))
+            r['dup'] = int(r['dup'])
+            keep[r['path']] = r
+except (OSError, ValueError):
+    pass
+memo = env['MEMO_FILE']
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(memo) or '.', prefix='.event-shadow-memo.')
+with os.fdopen(fd, 'w', encoding='utf-8', errors='surrogateescape') as f:
+    f.write(json.dumps({'v': 1}) + '\n')
+    for r in keep.values():
+        f.write(json.dumps(r, ensure_ascii=True) + '\n')
+os.rename(tmp, memo)
+print(len(keep))
 PY
 }
 
@@ -904,7 +1089,66 @@ PY
     _shadow_run_file=$(mktemp 2>/dev/null || echo "/tmp/revenium-api-event-shadow-run.$$")
   fi
 
+  # Shadow memo (see _shadow_memo_build_plan): one plan line per spool file,
+  # in loop order, read by index at the top of every iteration before any
+  # `continue`, so it cannot fall out of step with event_files.
+  local shadow_memo_enabled="false" shadow_memo_idx=0 shadow_memo_hits=0 shadow_memo_tick_ts=""
+  local shadow_memo_plan=() _shadow_memo_files="" _shadow_memo_planf="" _shadow_memo_hitsf="" _shadow_memo_newf=""
+  _shadow_memo_capture=""
+  if [[ "${EVENT_METERING_MODE}" == "shadow" ]]; then
+    case "${REVENIUM_REPORTER_MEMO:-enabled}" in
+      disabled|off|false|0) ;;
+      *)
+        _shadow_memo_files="$(mktemp 2>/dev/null || true)"
+        _shadow_memo_planf="$(mktemp 2>/dev/null || true)"
+        _shadow_memo_hitsf="$(mktemp 2>/dev/null || true)"
+        _shadow_memo_newf="$(mktemp 2>/dev/null || true)"
+        _shadow_memo_capture="$(mktemp 2>/dev/null || true)"
+        if [[ -n "${_shadow_memo_files}" && -n "${_shadow_memo_planf}" && -n "${_shadow_memo_hitsf}" \
+              && -n "${_shadow_memo_newf}" && -n "${_shadow_memo_capture}" ]] \
+          && printf '%s\n' "${event_files[@]}" > "${_shadow_memo_files}" \
+          && _shadow_memo_build_plan "${_shadow_memo_files}" "${_shadow_memo_planf}"; then
+          local _shadow_memo_line
+          while IFS= read -r _shadow_memo_line; do
+            shadow_memo_plan+=("${_shadow_memo_line}")
+          done < "${_shadow_memo_planf}"
+          shadow_memo_tick_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          shadow_memo_enabled="true"
+        else
+          _shadow_memo_capture=""
+        fi
+        ;;
+    esac
+  fi
+
   for event_file in "${event_files[@]}"; do
+    # Shadow memo: consume this file's plan line first, unconditionally.
+    local shadow_memo_line="" sm_kind="" sm_path="" sm_sid="" sm_a="" sm_b="" sm_row=""
+    if [[ "${shadow_memo_enabled}" == "true" ]]; then
+      shadow_memo_line="${shadow_memo_plan[${shadow_memo_idx}]:-}"
+      ((shadow_memo_idx++)) || true
+      if [[ -n "${shadow_memo_line}" ]]; then
+        IFS=$'\x1f' read -r sm_kind sm_path sm_sid sm_a sm_b sm_row <<< "${shadow_memo_line}"
+      fi
+    fi
+    # Hit: this spool file produced a legacy-owned comparison row last tick
+    # and nothing that row is computed from has changed. Do what that pass
+    # did -- the same log line, the same counters, the same row (this tick's
+    # timestamp) -- without re-deriving it. For an H line sm_a is the
+    # platform and sm_b the duplicate-event count; for an M line sm_a is the
+    # key recorded if this pass turns out to be recordable.
+    if [[ "${sm_kind}" == "H" && "${sm_path}" == "${event_file}" && "${sm_b}" =~ ^[0-9]+$ ]]; then
+      ((legacy_skipped_sessions++)) || true
+      ((dup_skipped_events += sm_b)) || true
+      info "shadow: ${sm_sid} is legacy-owned (D-09) — computing would-be rows for comparison, shipping nothing"
+      printf '%s,"ts":"%s"}\n' "${sm_row}" "${shadow_memo_tick_ts}" >> "${EVENT_SHADOW_REPORT_FILE}" 2>/dev/null
+      [[ -n "${_shadow_run_file}" ]] && printf '%s,"ts":"%s"}\n' "${sm_row}" "${shadow_memo_tick_ts}" >> "${_shadow_run_file}"
+      ((shadow_memo_hits++)) || true
+      printf '%s\n' "${event_file}" >> "${_shadow_memo_hitsf}"
+      continue
+    fi
+    local sm_dup_start="${dup_skipped_events}"
+
     # --- Peek: one pass to learn this file's owning sid, event count, and
     # oldest event timestamp — cheap enough to do once per session file and
     # needed before any directory resolution below (which is keyed on sid).
@@ -2052,9 +2296,40 @@ PY
       # ${session_gate} is "shipped" unless a gate above moved it. A
       # legacy-owned session reaches here in shadow mode carrying fully
       # enriched rows and the gate that would have stopped it live.
+      [[ -n "${_shadow_memo_capture}" ]] && : > "${_shadow_memo_capture}"
       _emit_shadow_row "${sid}" "${session_gate}" "${platform}" "${rows}" "${session_legacy_owned}"
+      # Record only the legacy-owned full pass, only for the process-level
+      # markers dir the key was computed against, and only when the spool
+      # file's sid is the one its name (and therefore the key) assumed.
+      if [[ "${sm_kind}" == "M" && "${session_gate}" == "legacy_skip" && "${session_legacy_owned}" == "true" \
+            && "${sm_sid}" == "${sid}" && "${session_markers_dir}" == "${MARKERS_DIR}" \
+            && -n "${_shadow_memo_capture}" && -s "${_shadow_memo_capture}" ]]; then
+        local _sm_captured="" _sm_prefix=""
+        IFS= read -r _sm_captured < "${_shadow_memo_capture}" || true
+        _sm_prefix="${_sm_captured%,\"ts\":\"*\"\}}"
+        if [[ -n "${_sm_prefix}" && "${_sm_prefix}" != "${_sm_captured}" ]]; then
+          case "${_sm_prefix}${platform}${event_file}" in
+            *$'\x1f'*|*$'\r'*) ;;
+            *)
+              printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "${event_file}" "${sid}" "${sm_a}" \
+                "${platform}" "$((dup_skipped_events - sm_dup_start))" "${_sm_prefix}" >> "${_shadow_memo_newf}"
+              ;;
+          esac
+        fi
+      fi
     fi
   done
+
+  if [[ "${shadow_memo_enabled}" == "true" ]]; then
+    local _shadow_memo_kept
+    _shadow_memo_kept="$(_shadow_memo_finalize "${_shadow_memo_hitsf}" "${_shadow_memo_newf}")" || _shadow_memo_kept=""
+    if [[ "${shadow_memo_hits}" -gt 0 ]]; then
+      info "memo: reused ${shadow_memo_hits} unchanged shadow comparison row(s) (memo now holds ${_shadow_memo_kept:-?})"
+    fi
+  fi
+  rm -f "${_shadow_memo_files:-}" "${_shadow_memo_planf:-}" "${_shadow_memo_hitsf:-}" \
+    "${_shadow_memo_newf:-}" "${_shadow_memo_capture:-}" 2>/dev/null || true
+  _shadow_memo_capture=""
 
   if [[ "${EVENT_METERING_MODE}" == "shadow" && -n "${_shadow_run_file}" && -s "${_shadow_run_file}" ]]; then
     # C-10: one info line per distinct platform value (plus one for sessions

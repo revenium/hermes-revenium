@@ -341,6 +341,7 @@ protocol works.
 - `revenium-hermes.ledger`, `revenium-jobs.ledger`, `revenium-tool-events.ledger`, `revenium-aux.ledger`: four append-only idempotency ledgers.
 - `task-taxonomy.json`, `job-taxonomy.json`: the controlled vocabularies, seeded from the skill dir and grown by the classifier. `aux-taxonomy.json` is the asymmetric exception: a fixed six-label vocabulary that lives in the SKILL dir (never copied into `STATE_DIR`) and is never grown by the classifier.
 - `revenium-metering.log`: cron log, truncated in place by `rotate_log_if_needed`.
+- `reporter-memo.jsonl`, `event-shadow-memo.jsonl`: cross-tick no-op caches for `hermes-report.sh` and the shadow pass of `api-event-report.sh`. A session whose inputs (state.db row, marker/owner/spool files, scripts, switches, ledgers) are unchanged since it was last a pure no-op is skipped without its per-session python3 spawns. Safe to delete; `REVENIUM_REPORTER_MEMO=disabled` turns both off. Pinned by `tests/test_reporter_memo.py` and `tests/test_event_shadow_memo.py`.
 - `cron.lock`, `rules.lock`, `prune.lock`: flock targets.
 
 ### Platform requirements

@@ -11,6 +11,24 @@ this repository.
 
 ### Changed
 
+- The cron tick no longer re-derives every historical session every minute. `hermes-report.sh`
+  and the shadow pass of `api-event-report.sh` visited every session with tokens on every
+  tick, and a long-finished session cost 5–8 `python3` spawns per visit just to conclude there
+  was nothing to do. On a desktop host with ~1,200 sessions and ~700 spool files one tick ran
+  about 15 minutes, so the per-minute schedule skipped most minutes. Each script now keeps a
+  cross-tick cache (`reporter-memo.jsonl`, `event-shadow-memo.jsonl`) of sessions that were a
+  pure no-op, keyed on everything that no-op depended on: the session's state.db row, its
+  marker, owner and spool files, both scripts, the mode switches, and the ledgers not having
+  been replaced or truncated. Measured on a copy of that host's state: `hermes-report.sh` 200s
+  → 7s, `api-event-report.sh` 172s → 5s, with the log, every CLI call and every shadow row
+  identical to a full pass. A job marker on a token-stable session still reaches `jobs
+  create`, and an outcome that is still pending is never cached. Set
+  `REVENIUM_REPORTER_MEMO=disabled` to turn the caches off; deleting either file just costs
+  one full pass.
+- `tool-event-report.sh` reads every spool file in one `python3` pass instead of one per file.
+  Each per-file pass re-read the whole TOOL ledger to build its pre-filter, so 676 spool files
+  against a 3.2 MB ledger took 55s of every tick; it now takes about 1s. Rows, order and the
+  per-row ledger guard are unchanged, and a malformed line still ends only its own file.
 - `FAILED` and `CANCELLED` job outcomes now send `--outcome-type UNSUCCESSFUL`. They
   previously sent no outcome type, so Revenium left every failed or cancelled job's Outcome
   Type at `PENDING` indefinitely. `SUCCESS` still sends `CONVERTED`, and the value flags

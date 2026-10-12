@@ -298,6 +298,21 @@ OUTCOME_METRICS_LEDGER_FILE="${REVENIUM_OUTCOME_METRICS_LEDGER_FILE:-${STATE_DIR
 # rather than merely wasteful.
 OUTCOME_METRICS_LOCK_FILE="${REVENIUM_OUTCOME_METRICS_LOCK_FILE:-${STATE_DIR}/outcome-metrics.lock}"
 
+# Cross-tick no-op memo for the two per-session cron loops (hermes-report.sh
+# and api-event-report.sh). Each loop visits EVERY session with tokens on
+# EVERY tick, and a long-finished session costs 5-8 python3 spawns per visit
+# to arrive at "nothing to do" -- measured on a desktop host with ~1,900
+# historical sessions: ~6 min for hermes-report.sh and ~6 min for the shadow
+# pass of api-event-report.sh, so one cron tick ran ~15 min and the
+# per-minute schedule skipped 14 of every 15 minutes. A session recorded here
+# was a pure no-op last time, and is skipped only while every input that
+# no-op depended on is byte-identical (its state.db row, its marker and owner
+# files, the scripts themselves, the ledgers not truncated). It is a cache,
+# never a source of truth: deleting it, or setting REVENIUM_REPORTER_MEMO=
+# disabled, makes the next tick do the full pass exactly as before.
+REPORTER_MEMO_FILE="${REVENIUM_REPORTER_MEMO_FILE:-${STATE_DIR}/reporter-memo.jsonl}"
+EVENT_SHADOW_MEMO_FILE="${REVENIUM_EVENT_SHADOW_MEMO_FILE:-${STATE_DIR}/event-shadow-memo.jsonl}"
+
 # Bound per tick so a first run against a long backbook cannot blow the
 # minute. 0 disables the stage outright.
 REVENIUM_OUTCOME_METRICS_MAX_JOBS="${REVENIUM_OUTCOME_METRICS_MAX_JOBS:-25}"

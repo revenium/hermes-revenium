@@ -1027,15 +1027,25 @@ class StructuralInvariantTests(unittest.TestCase):
                 if os.path.isfile(os.path.join(tree.state_dir, f))
             }
             new_files = after - before
+            # reporter-memo.jsonl (2026-10-12) is the cross-tick no-op memo,
+            # declared in common.sh. It is allowed because it holds no
+            # identity: a memo hit rebuilds the aux context's subscriber field
+            # from THIS tick's resolution, so the record never stores one.
+            # Asserted below rather than assumed.
             allowed = {
                 'revenium-metering.log', 'revenium-hermes.ledger',
-                'revenium-jobs.ledger', 'aux.lock',
+                'revenium-jobs.ledger', 'aux.lock', 'reporter-memo.jsonl',
             }
             self.assertTrue(
                 new_files.issubset(allowed),
                 f'unexpected new file(s) directly under STATE_DIR: '
                 f'{new_files - allowed}'
             )
+            memo = os.path.join(tree.state_dir, 'reporter-memo.jsonl')
+            if os.path.exists(memo):
+                with open(memo, encoding='utf-8') as fh:
+                    self.assertNotIn('p61-actor-i', fh.read(),
+                                     'the memo must never hold a subscriber identity')
         finally:
             tree.cleanup()
 

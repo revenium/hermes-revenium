@@ -147,7 +147,16 @@ REAL_PYTHON3 = sys.executable
 # and this fixture's no-marker session resolves none, so it forks nothing
 # beyond this one startup spawn. quick-260814-e7c's per-session hot-path
 # guarantee remains untouched.
-NO_MARKER_SPAWN_CEILING = 19
+#
+# The reporter memo (2026-10-12) raises it to 21: _memo_build_plan and
+# _memo_finalize are one python3 heredoc each, once per tick, before and after
+# the session loop. They do not scale with session count; what they buy is the
+# opposite, the removal of every per-session spawn for a session whose inputs
+# have not changed since it was last a no-op (tests/test_reporter_memo.py).
+# This fixture's single session is on its first, cold tick, so it still pays
+# the per-session spawns AND the two memo spawns. With REVENIUM_REPORTER_MEMO=
+# disabled it spawns exactly 19, the pre-memo ceiling.
+NO_MARKER_SPAWN_CEILING = 21
 
 
 def _write_python_spawn_shim(bin_dir, spawn_log_path):

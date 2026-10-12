@@ -757,12 +757,20 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # main's shifts alone. Re-measured with `grep -n -- '--operation-type'`
         # on the merged file. Pure shift; the COUNT (4) and the emitted VALUE
         # expressions are unchanged.
+        # Reporter memo (2026-10-12): the memo helpers sit between the aux site
+        # and main(), and the per-session hit check, snapshot and record call
+        # sit above the two main() sites: +323 for both, 4723->5046,
+        # 4950->5273; the aux site (2137) does not move. api-event-report.sh
+        # gains the shadow-memo helpers, setup and per-file hit check above its
+        # one site: 1937->2181. Re-measured with `grep -n -- '--operation-type'`.
+        # Pure shift; the COUNT (4) and the emitted VALUE expressions are
+        # unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2137),
-            ('hermes-report.sh', 4723),
-            ('hermes-report.sh', 4950),
-            ('api-event-report.sh', 1937),
+            ('hermes-report.sh', 5046),
+            ('hermes-report.sh', 5273),
+            ('api-event-report.sh', 2181),
         }
         self.assertEqual(
             found_locations, expected_locations,
