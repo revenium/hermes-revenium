@@ -85,7 +85,7 @@ class _Base(unittest.TestCase):
         if append_status is None:
             append_arm = (
                 'if [ "$1" = "jobs" ] && [ "$2" = "outcome-metrics" ]; then\n'
-                f'  if [ "{throttle}" = "True" ]; then echo \'{{"error":"x","status":429}}\'; exit 1; fi\n'
+                f'  if [ "{throttle}" = "True" ]; then emit_err \'{{"error":"x","status":429}}\'; exit 1; fi\n'
                 '  cat > /dev/null\n'
                 '  echo "Appended entries to job $3."; exit 0\n'
                 'fi\n'
@@ -98,20 +98,32 @@ class _Base(unittest.TestCase):
             # introduced here.
             append_arm = (
                 'if [ "$1" = "jobs" ] && [ "$2" = "outcome-metrics" ]; then\n'
-                f'  if [ "{throttle}" = "True" ]; then echo \'{{"error":"x","status":429}}\'; exit 1; fi\n'
+                f'  if [ "{throttle}" = "True" ]; then emit_err \'{{"error":"x","status":429}}\'; exit 1; fi\n'
                 '  cat > /dev/null\n'
-                f'  echo \'{{"error":"x","status":{append_status}}}\'; exit {append_exit}\n'
+                f'  emit_err \'{{"error":"x","status":{append_status}}}\'; exit {append_exit}\n'
                 'fi\n'
             )
+        # Error bodies are JSON only when the caller passed `--output json`,
+        # exactly like the real CLI: without it the real CLI prints an
+        # ANSI-coloured box that json_field cannot parse. A stub that always
+        # answered in JSON is what let the append call ship without
+        # `--output json` while every 404/429 test stayed green.
         body = f'''#!/bin/bash
 echo "$*" >> "{log}"
+JSON_OUT=0
+case " $* " in *" --output json "*) JSON_OUT=1 ;; esac
+emit_err() {{
+  if [ "$JSON_OUT" = 1 ]; then echo "$1"
+  else printf '\033[38;5;196m╭────╮\033[m\033[38;5;196m│\033[m \033[38;5;196mError: Resource not found.\033[m\n'
+  fi
+}}
 if [ "$1" = "jobs" ] && [ "$2" = "--help" ]; then
   printf 'Manage Agentic Jobs\\n\\nAvailable Commands:\\n  create   Create\\n  outcome  Report\\n{verb_line}'
   exit 0
 fi
 if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "get" ]; then
-  if [ "{throttle}" = "True" ]; then echo '{{"error":"x","status":429}}'; exit 1; fi
-  if [ "{econ_404}" = "True" ]; then echo '{{"error":"Resource not found.","status":404}}'; exit 3; fi
+  if [ "{throttle}" = "True" ]; then emit_err '{{"error":"x","status":429}}'; exit 1; fi
+  if [ "{econ_404}" = "True" ]; then emit_err '{{"error":"Resource not found.","status":404}}'; exit 3; fi
   echo '{{"jobType":"t1","unitMetricKey":"{unit_key}","metrics":[{{"key":"estimated_value","type":"MONEY"}},{{"key":"hours_saved","type":"DURATION"}},{{"key":"assessment_confidence","type":"SCORE"}},{{"key":"{unit_key}","type":"COUNT"}}]}}'; exit 0
 fi
 if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "set" ]; then
