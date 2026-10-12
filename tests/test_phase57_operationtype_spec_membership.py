@@ -765,12 +765,18 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # one site: 1937->2181. Re-measured with `grep -n -- '--operation-type'`.
         # Pure shift; the COUNT (4) and the emitted VALUE expressions are
         # unchanged.
+        # Greptile review fixes on #154 (2026-10-12): the readability flag and
+        # the in-process markers-dir ownership check in both memo plan
+        # builders (+39 in hermes-report.sh above both main() sites, +41 in
+        # api-event-report.sh): 5046->5085, 5273->5312, 2181->2222. The aux
+        # site (2137) does not move. Pure shift, re-measured with
+        # `grep -n -- '--operation-type'`.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2137),
-            ('hermes-report.sh', 5046),
-            ('hermes-report.sh', 5273),
-            ('api-event-report.sh', 2181),
+            ('hermes-report.sh', 5085),
+            ('hermes-report.sh', 5312),
+            ('api-event-report.sh', 2222),
         }
         self.assertEqual(
             found_locations, expected_locations,

@@ -19,6 +19,7 @@ also have skipped:
 """
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -30,6 +31,9 @@ from tests.test_reporter_spawn_guards import (
     _seed_ledger_token_stable,
     _spawn_count,
 )
+
+
+SCRIPTS = Path(__file__).resolve().parents[1] / 'skills' / 'revenium' / 'scripts'
 
 
 def _memo_sids(state_dir):
@@ -151,6 +155,56 @@ class ReporterMemoTests(unittest.TestCase):
             self.assertEqual(0, r.returncode, r.stderr)
             self.assertNotIn('memo: skipped', Path(log_file).read_text(),
                              'a new ledger inode must invalidate every record')
+
+    def test_session_moved_to_another_profile_is_not_a_hit(self):
+        # Greptile #154: a hit skips resolve_markers_dir, and the state.db
+        # row the key covers does not carry profile_name. A session whose
+        # owning profile directory appears after it was cached must take the
+        # full pass, which routes it to that profile, not replay this one.
+        with tempfile.TemporaryDirectory(prefix='gsd-memo-profile-') as tmp:
+            (scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
+             invocations_log, spawn_log, env) = self._fixture(tmp)
+            # The fixture's script tree omits the resolver; without it both the
+            # wrapper and the memo fall back to this profile's dir.
+            shutil.copy(str(SCRIPTS / 'resolve-markers-dir.py'), scripts_dir)
+            conn = sqlite3.connect(os.path.join(tmp, 'state.db'))
+            conn.execute('ALTER TABLE sessions ADD COLUMN profile_name TEXT')
+            conn.execute("UPDATE sessions SET profile_name = 'other' WHERE id = 'sess-memo'")
+            conn.commit()
+            conn.close()
+            _tick(scripts_dir, env, spawn_log)
+            _tick(scripts_dir, env, spawn_log)
+            self.assertIn('memo: skipped 1', Path(log_file).read_text(),
+                          'precondition: while the profile dir is absent the session is ours')
+            os.makedirs(os.path.join(tmp, 'profiles', 'other'))
+            open(log_file, 'w').close()
+            r, _ = _tick(scripts_dir, env, spawn_log)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertNotIn('memo: skipped', Path(log_file).read_text(),
+                             'a session now owned by another profile must not hit')
+            self.assertNotIn('sess-memo', _memo_sids(state_dir) or [])
+
+    def test_unreadable_marker_is_never_cached(self):
+        # Greptile #154: a marker that exists but cannot be read makes the job
+        # precheck see no jobs. Caching that conclusion would mean restoring
+        # read permission never re-runs jobs create.
+        with tempfile.TemporaryDirectory(prefix='gsd-memo-unreadable-') as tmp:
+            (scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
+             invocations_log, spawn_log, env) = self._fixture(tmp, marker_mode='job',
+                                                              marker_job_id='job-locked')
+            marker = os.path.join(state_dir, 'markers', 'sess-memo.jsonl')
+            os.chmod(marker, 0)
+            try:
+                if os.access(marker, os.R_OK):
+                    self.skipTest('running with privileges that ignore file modes')
+                _tick(scripts_dir, env, spawn_log)
+                self.assertNotIn('sess-memo', _memo_sids(state_dir) or [])
+            finally:
+                os.chmod(marker, 0o644)
+            r, _ = _tick(scripts_dir, env, spawn_log)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertIn('JOB:job-locked:created:', Path(jobs_ledger_file).read_text(),
+                          'once readable again, the job must be created')
 
     def test_disabled_switch_writes_no_memo(self):
         with tempfile.TemporaryDirectory(prefix='gsd-memo-off-') as tmp:

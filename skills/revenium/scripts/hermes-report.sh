@@ -2355,6 +2355,8 @@ _memo_build_plan() {
   MEMO_LEDGER="${LEDGER_FILE}" \
   MEMO_JOBS_LEDGER="${JOBS_LEDGER_FILE}" \
   MEMO_SCRIPTS="${SCRIPT_DIR}/hermes-report.sh:${SCRIPT_DIR}/common.sh" \
+  MEMO_RESOLVER="${SCRIPT_DIR}/resolve-markers-dir.py" \
+  MEMO_ALIASES="${REVENIUM_MODEL_ALIASES:-}" \
   MEMO_SWITCHES="v1|${LEGACY_COMPLETIONS_SKIP:-}|${OWNERSHIP_PROTOCOL_ACTIVE:-}|${JOBS_CLI_CAPABLE:-}|${TRACE_TYPE_CLI_CAPABLE:-}|${AUX_METERING_ENABLED:-}|${EVENT_PATH_LIVE:-}|${SUBSCRIBER_EMAIL_MODE:-}|${MARKERS_DIR}|${OWNERS_DIR}|${REVENIUM_AGENT_NAME:-}|${REVENIUM_SQUAD_NAME:-}" \
   python3 - <<'PY' 2>/dev/null
 import hashlib, json, os, stat
@@ -2363,11 +2365,42 @@ env = os.environ
 
 
 def sig(path):
+    # Full mode, not just the file type: a chmod that makes an unreadable
+    # marker readable again must change the sig. A regular file that exists
+    # but cannot be read is flagged '!': its reader failed open, so whatever
+    # the pass concluded from it must never be cached.
     try:
         st = os.lstat(path)
     except OSError:
         return '-'
-    return '%o:%d:%d:%d' % (stat.S_IFMT(st.st_mode), st.st_size, st.st_mtime_ns, st.st_ino)
+    flag = '!' if stat.S_ISREG(st.st_mode) and not os.access(path, os.R_OK) else ''
+    return '%s%o:%d:%d:%d' % (flag, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ino)
+
+
+# The same resolver the loop shells out to per session, loaded once. A hit
+# skips that resolution, so it is only allowed while the session (and its
+# root) still resolve to this process's own markers dir; a session that now
+# belongs to another profile takes the full pass. A resolver that is absent or
+# fails to load answers exactly as common.sh's resolve_markers_dir wrapper does
+# when its python3 call fails: the process-level markers dir.
+_resolver = None
+try:
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        'revenium_resolve_markers_dir', env['MEMO_RESOLVER'])
+    _resolver = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_resolver)
+except Exception:
+    _resolver = None
+
+
+def owned_here(*sids):
+    if _resolver is None:
+        return True
+    try:
+        return all(_resolver.resolve_markers_dir(s) == env['MEMO_MARKERS_DIR'] for s in sids if s)
+    except Exception:
+        return True
 
 
 def ledger_state(path):
@@ -2379,6 +2412,7 @@ def ledger_state(path):
 
 
 h = hashlib.sha1(env['MEMO_SWITCHES'].encode('utf-8', 'surrogateescape'))
+h.update(b'\x00' + env.get('MEMO_ALIASES', '').encode('utf-8', 'surrogateescape'))
 for p in env['MEMO_SCRIPTS'].split(':'):
     with open(p, 'rb') as f:
         h.update(b'\x00' + f.read())
@@ -2451,6 +2485,11 @@ for row in rows:
         sig(os.path.join(markers_dir, (root or sid) + '.jsonl')),
         sig(os.path.join(owners_dir, owner_name)),
     ])
+    # N: take the full pass and do not record it either -- an unreadable
+    # marker or owner file, or a session this profile does not own.
+    if '!' in sigs or not owned_here(sid, root):
+        out.append(SEP.join(['N', sid]))
+        continue
     r = records.get(sid)
     if r and r.get('key') == key and r.get('sigs') == sigs and r.get('root') == root and root:
         out.append(SEP.join(['H', sid, key, sigs, root, r['supp'], str(r['fb']), str(r['ab']),

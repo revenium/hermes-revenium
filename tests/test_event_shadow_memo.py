@@ -86,6 +86,18 @@ class EventShadowMemoTests(ShadowReadoutTestBase):
         self.assertEqual(2, rows[1]['legacy_ledger_lines'])
         self.assertEqual(300, rows[1]['legacy_last_total_tokens'])
 
+    def test_changed_model_aliases_recompute_the_row(self):
+        # Greptile #154: enrichment reads REVENIUM_MODEL_ALIASES to choose the
+        # reported model and provider, so a new alias must not replay a row
+        # computed without it.
+        sd = self._tree()
+        self._tick()
+        self._tick({'REVENIUM_MODEL_ALIASES': 'claude-sonnet-4-6=openai/gpt-x'})
+        self.assertNotIn('memo: reused', self._log_text(sd))
+        rows = self._shadow_rows(sd)
+        self.assertNotEqual(rows[0]['provider_event'], rows[1]['provider_event'],
+                            'the aliased provider must reach the second row')
+
     def test_disabled_switch_writes_no_memo(self):
         sd = self._tree()
         self._tick({'REVENIUM_REPORTER_MEMO': 'disabled'})
