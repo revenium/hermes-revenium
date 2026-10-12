@@ -39,6 +39,12 @@ this repository.
 
 ### Fixed
 
+- The outcome-metrics stage no longer reports a brand-new job's transient 404 as a failure.
+  The append call (and the economics `set`) now pass `--output json`. Without it the CLI
+  printed its error as a coloured box rather than a JSON body, so the not-found and
+  throttle checks never matched and the not-yet-queryable 404 logged `append failed` with
+  `failed=1`. It now counts as `deferred`/`not_found` and retries next tick, as intended.
+  Nothing was lost: every affected job appended on a later tick.
 - `install-plugin.sh` no longer corrupts a `config.yaml` whose `plugins.enabled` items sit at
   the key's own indentation (`  enabled:` / `  - a`, PyYAML's default dump style). It
   inserted the plugin two spaces deeper. The file stopped parsing and Hermes refused to

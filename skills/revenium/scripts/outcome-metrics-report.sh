@@ -85,6 +85,14 @@ PY
 # A caller branching on exit status cannot tell "slow down, retry next tick"
 # from "this failed permanently", and the difference decides whether we
 # defer or give up.
+#
+# The body is JSON only when the call passes `--output json`. Without it the
+# CLI prints its error as an ANSI-coloured box, json_field finds nothing, and
+# both this helper and is_job_not_yet_queryable silently never match. Every
+# call whose output reaches either helper must pass `--output json` (live
+# evidence from ent: the append call omitted it, so every brand-new job's
+# transient 404 logged as `append failed` and counted failed=1, then appended
+# cleanly on a later tick).
 # ---------------------------------------------------------------------------
 is_throttled() {
   [[ "$(json_field "${1}" status)" == "429" ]]
@@ -219,7 +227,7 @@ print(json.dumps({
 PY
 
   local set_out
-  set_out="$(revenium jobs types economics set "${job_type}" --file "${doc}" 2>&1)"
+  set_out="$(revenium jobs types economics set "${job_type}" --file "${doc}" --output json 2>&1)"
   local rc=$?
   rm -f "${doc}" 2>/dev/null
   if is_throttled "${set_out}"; then
@@ -556,7 +564,7 @@ PY
     fi
 
     local out
-    out="$(printf '%s' "${entries_json}" | revenium jobs outcome-metrics "${jid}" --file - 2>&1)"
+    out="$(printf '%s' "${entries_json}" | revenium jobs outcome-metrics "${jid}" --file - --output json 2>&1)"
     local rc=$?
     if is_throttled "${out}"; then
       # Throttled is NOT a failure: no ledger line, so the next tick retries.
