@@ -384,7 +384,13 @@ The classifier (`plugins/revenium-classifier/classifier.py`) writes exactly
 two marker `operation_type` values: `GUARDRAIL` and `CHAT`. Both are members
 of the 17-value enum, so sites 2 and 4 above never emit an off-enum value
 today. `api-event-report.sh` additionally filters `GUARDRAIL` markers out of
-its own event stream and falls back to `CHAT` for anything it does emit: narrower than the marker path's own pass-through. No runtime enum validator
+its own event stream and falls back to `CHAT` for anything it does emit: narrower than the marker path's own pass-through.
+Since the classification-pair collapse, `hermes-report.sh`'s marker path agrees
+in the common case: a `GUARDRAIL` marker directly followed by its `CHAT` twin is
+absorbed into the `CHAT` row, so a classification ships one `--operation-type
+CHAT` completion. A `GUARDRAIL` marker with no such twin still passes through
+verbatim, so this site stays audited, not guarded, and its allowed-value set is
+unchanged. No runtime enum validator
 is added on any of these four sites this phase; D-03 is explicit that this
 is an audited-not-guarded hazard, because the hazard is not currently live
 (the classifier's own output vocabulary is a strict subset of the enum).

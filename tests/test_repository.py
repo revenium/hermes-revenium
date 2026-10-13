@@ -6319,8 +6319,12 @@ exit 0
                 }
                 rc, invocations, output = run_cron(base_env, invocations_log)
                 self.assertEqual(rc, 0, f'positive sub-case cron exit {rc}: {output}')
-                self.assertEqual(len(invocations), 2,
-                                 f'positive sub-case expected 2 invocations (GUARDRAIL+CHAT), got {len(invocations)}: {output}')
+                # The GUARDRAIL+CHAT pair is ONE classification and ships ONE
+                # CHAT completion (collapse_classification_pairs); the CHAT
+                # marker's agent/trace_id are what must reach the wire.
+                self.assertEqual(len(invocations), 1,
+                                 f'positive sub-case expected 1 invocation (GUARDRAIL+CHAT pair collapsed to one CHAT row), got {len(invocations)}: {output}')
+                self.assertEqual(argv_to_flags(invocations[0]).get('--operation-type'), 'CHAT')
                 for argv in invocations:
                     flags = argv_to_flags(argv)
                     self.assertEqual(flags.get('--agent'), 'revenium-skill',
@@ -6384,8 +6388,9 @@ exit 0
                 }
                 rc, invocations, output = run_cron(base_env, invocations_log)
                 self.assertEqual(rc, 0, f'fallback sub-case cron exit {rc}: {output}')
-                self.assertEqual(len(invocations), 2,
-                                 f'fallback sub-case expected 2 invocations (GUARDRAIL+CHAT), got {len(invocations)}: {output}')
+                self.assertEqual(len(invocations), 1,
+                                 f'fallback sub-case expected 1 invocation (GUARDRAIL+CHAT pair collapsed to one CHAT row), got {len(invocations)}: {output}')
+                self.assertEqual(argv_to_flags(invocations[0]).get('--operation-type'), 'CHAT')
                 for argv in invocations:
                     flags = argv_to_flags(argv)
                     self.assertEqual(flags.get('--agent'), 'Hermes',
@@ -6584,8 +6589,10 @@ exit 0
 
                     rc, invocations, output = run_cron(base_env, invocations_log)
                     self.assertEqual(rc, 0, f'{label}: cron exit {rc}: {output}')
-                    self.assertEqual(len(invocations), 2,
-                                     f'{label}: expected 2 invocations (GUARDRAIL+CHAT), '
+                    # One classification (GUARDRAIL+CHAT pair) = one completion;
+                    # the provider mapping under test is unchanged by the collapse.
+                    self.assertEqual(len(invocations), 1,
+                                     f'{label}: expected 1 invocation (GUARDRAIL+CHAT pair collapsed to one CHAT row), '
                                      f'got {len(invocations)}: {output}')
 
                     for argv in invocations:
@@ -6934,8 +6941,12 @@ exit 0
             }
             rc, invocations, output = run_cron(base_env, invocations_log)
             self.assertEqual(rc, 0, f'cron exit {rc}: {output}')
-            self.assertEqual(len(invocations), 2,
-                             f'expected 2 invocations (GUARDRAIL+CHAT) post-sanitization, got {len(invocations)}: {output}')
+            # The pathological pair is still ONE classification: it collapses to
+            # one CHAT row, and that single row must round-trip the sanitized
+            # agent/trace_id through the pipe-delimited split row (whose last
+            # field is now the absorbed-muid list) without desync.
+            self.assertEqual(len(invocations), 1,
+                             f'expected 1 invocation (GUARDRAIL+CHAT pair collapsed) post-sanitization, got {len(invocations)}: {output}')
             for argv in invocations:
                 flags = argv_to_flags(argv)
                 self.assertEqual(flags.get('--agent'), 'bad_value',

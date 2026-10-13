@@ -153,6 +153,16 @@ TRACE_TYPE_CLI_CAPABLE=false
 if supports_flag "meter completion" "--trace-type"; then
   TRACE_TYPE_CLI_CAPABLE=true
 fi
+# --trace-name: identical posture and the same independent probe as
+# hermes-report.sh (see the note there). The Revenium trace list shows every
+# trace as "Unnamed trace" without it. A negative probe is a live configuration
+# and fails open silently, so an older CLI's argv is unchanged. Only
+# --trace-name is mirrored on this path; --parent-transaction-id is not (see the
+# per-record emit site for why).
+TRACE_NAME_CLI_CAPABLE=false
+if supports_flag "meter completion" "--trace-name"; then
+  TRACE_NAME_CLI_CAPABLE=true
+fi
 
 SQUAD_CLI_CAPABLE=false
 if supports_flag "meter completion" "--squad-id"; then
@@ -689,7 +699,7 @@ _shadow_memo_build_plan() {
   MEMO_SCRIPTS="${SCRIPT_DIR}/api-event-report.sh:${SCRIPT_DIR}/common.sh" \
   MEMO_RESOLVER="${SCRIPT_DIR}/resolve-markers-dir.py" \
   MEMO_ALIASES="${REVENIUM_MODEL_ALIASES:-}" \
-  MEMO_SWITCHES="v1|${EVENT_METERING_MODE:-}|${TRACE_TYPE_CLI_CAPABLE:-}|${SKILL_CLI_CAPABLE:-}|${TICKET_CLI_CAPABLE:-}|${SUBSCRIBER_CLI_CAPABLE:-}|${SUBSCRIBER_EMAIL_MODE:-}|${MARKERS_DIR}|${REVENIUM_CRON_SETTLE_SECONDS:-}|${REVENIUM_AGENT_NAME:-}" \
+  MEMO_SWITCHES="v1|${EVENT_METERING_MODE:-}|${TRACE_TYPE_CLI_CAPABLE:-}|${TRACE_NAME_CLI_CAPABLE:-}|${SKILL_CLI_CAPABLE:-}|${TICKET_CLI_CAPABLE:-}|${SUBSCRIBER_CLI_CAPABLE:-}|${SUBSCRIBER_EMAIL_MODE:-}|${MARKERS_DIR}|${REVENIUM_CRON_SETTLE_SECONDS:-}|${REVENIUM_AGENT_NAME:-}" \
   python3 - <<'PY' 2>/dev/null
 import hashlib, json, os, stat
 
@@ -1442,6 +1452,22 @@ PY
       root_trace_type="${root_trace_type//[^A-Za-z0-9_-]/_}"
       root_trace_type="${root_trace_type:0:128}"
       [[ -z "${root_trace_type}" ]] && root_trace_type="uncategorized"
+    fi
+
+    # --trace-name, resolved ONCE per session from the ROOT's marker file by the
+    # same helper the legacy reporter uses, so a session's legacy and event rows
+    # carry one name. Absent (not empty) when the trace has nothing to name it
+    # by, and when the CLI lacks the flag.
+    local root_trace_name=""
+    if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" ]]; then
+      local name_markers_dir
+      if [[ "${root_sid}" == "${sid}" ]]; then
+        name_markers_dir="${session_markers_dir}"
+      else
+        name_markers_dir="$(resolve_markers_dir "${root_sid}")"
+        [[ -z "${name_markers_dir}" ]] && name_markers_dir="${MARKERS_DIR}"
+      fi
+      root_trace_name="$(resolve_trace_name_at "${name_markers_dir}/${root_sid}.jsonl")"
     fi
 
     local source_env=""
@@ -2241,6 +2267,18 @@ PY
       fi
       if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
         cmd+=(--trace-type "${root_trace_type:-uncategorized}")
+      fi
+      # Directly after --trace-type, as in hermes-report.sh. Never enters
+      # --transaction-id ("event:<api_request_id>") or the event ledger line.
+      #
+      # No --parent-transaction-id here, deliberately: the legacy reporter links
+      # an auxiliary or subagent row to a main-loop transaction it can rebuild
+      # from its own ledger, but this path's rows are per API call with no such
+      # session-level anchor, and a guess would draw a wrong edge, which is
+      # worse than none. A session owned by this path simply ships its
+      # auxiliary rows unlinked.
+      if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" && -n "${root_trace_name}" ]]; then
+        cmd+=(--trace-name "${root_trace_name}")
       fi
       if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${agentic_job_id_r}" ]]; then
         cmd+=(--agentic-job-id "${agentic_job_id_r}")

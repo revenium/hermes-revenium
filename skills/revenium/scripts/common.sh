@@ -1428,6 +1428,33 @@ resolve_spool_dir() {
   python3 "${SKILL_DIR}/scripts/resolve-markers-dir.py" "${sid}" "api-events" 2>/dev/null || printf '%s\n' "${EVENT_SPOOL_DIR}"
 }
 
+# --trace-name for the trace whose ROOT session's marker file is `$1` (a path):
+# prints one cleaned line, or nothing. The rule (latest job marker's job_name,
+# else the first marker's task_type) lives in split_strategies.resolve_trace_name
+# so the legacy reporter's main loop, its auxiliary pass and the event reporter
+# cannot disagree about a trace's name. Production usage:
+#   trace_name="$(resolve_trace_name_at "${root_markers_dir}/${root_sid}.jsonl")"
+# Fail-open and silent: a missing file, a missing python3 or any error prints
+# nothing, and every caller then omits --trace-name.
+resolve_trace_name_at() {
+  local markers_path="${1:-}"
+  [[ -n "${markers_path}" && -f "${markers_path}" ]] || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  SCRIPTS_PATH="${SKILL_DIR}/scripts" MARKERS_PATH="${markers_path}" python3 - <<'PY' 2>/dev/null || true
+import os
+import sys
+
+try:
+    sys.path.insert(0, os.environ['SCRIPTS_PATH'])
+    from split_strategies import resolve_trace_name
+    name = resolve_trace_name(os.environ['MARKERS_PATH'])
+    if name and '\n' not in name and '\r' not in name:
+        print(name)
+except Exception:
+    pass
+PY
+}
+
 # Phase 42 (D-15): resolve the job-assessments sidecar directory that OWNS a
 # given session identifier -- same per-session, per-profile resolution as
 # resolve_spool_dir above, generalized onto a third subdirectory.

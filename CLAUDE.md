@@ -98,7 +98,7 @@ flowchart TB
         HR["hermes-report.sh<br/>delta split + meter<br/>+ auxiliary usage post-loop pass"]
         GC["guardrail-check.sh<br/>rule state + halt transition"]
         TER["tool-event-report.sh"]
-        SPLIT["split_strategies.equal_split<br/>conservation invariant"]
+        SPLIT["split_strategies<br/>pair collapse, equal_split (conservation invariant),<br/>trace name, parent transaction id"]
         CS --> MIG & PS & HR & GC & TER
         HR -.->|imports| SPLIT
     end
@@ -129,7 +129,7 @@ flowchart TB
 
     HR --> DB
     HR --> MK & RDY & LED & JLED & PST & CFG & ALED
-    HR -->|"jobs create/outcome + meter completion<br/>--task-type --trace-type --agentic-job-id --squad-name"| RCLI
+    HR -->|"jobs create/outcome + meter completion<br/>--task-type --trace-type --trace-name --parent-transaction-id<br/>--agentic-job-id --squad-name"| RCLI
     HR -->|"auxiliary pass: meter completion --operation-type AUX --task-type aux_*"| RCLI
     GC --> CFG
     GC -->|"enforcement-rules get + budget-rules list"| RCLI
@@ -168,9 +168,13 @@ The plugin signals completion by touching `markers/.ready/<sid>`. `hermes-report
 
 `hermes-report.sh` reports **deltas**, not totals. On each run it queries `state.db` for sessions with non-zero tokens, diffs against the last ledger line for that session, scales `input/output/cache_read/cache_write/cost` by `(curr - prev) / curr` and skips sessions whose totals haven't grown.
 
-The delta is then split across that session's unreported markers via `split_strategies.equal_split`, whose conservation invariant (per-field sums equal the input exactly, integers byte-exact and cost `Decimal`-exact) is asserted by `tests/test_repository.py::test_split_strategies_conservation`. Each split ships as its own `revenium meter completion` with `--task-type` / `--operation-type` and, when the CLI supports them, `--trace-type`, `--agentic-job-id` and the squad flags. Capability for each flag family is probed once per tick and fails open: an older CLI meters exactly as it did before the flag existed.
+The delta is then split across that session's unreported *classifications* via `split_strategies.equal_split`, whose conservation invariant (per-field sums equal the input exactly, integers byte-exact and cost `Decimal`-exact) is asserted by `tests/test_repository.py::test_split_strategies_conservation`. Each split ships as its own `revenium meter completion` with `--task-type` / `--operation-type` and, when the CLI supports them, `--trace-type`, `--trace-name`, `--parent-transaction-id`, `--agentic-job-id` and the squad flags. Capability for each flag family is probed once per tick and fails open: an older CLI meters exactly as it did before the flag existed.
 
-Ledger lines are `HERMES:<session_id>:<total_tokens>:<unix_ts>:<muid>`; a markerless session gets a synthetic `muid`. Both the marker-split and markerless paths write a line only after a successful CLI call. `--transaction-id` is `${sid}-${total_tokens}-${muid}` on the per-marker path and `${sid}-${total_tokens}` on the markerless path. Do not "unify" these; the golden fixtures in `tests/fixtures/compat/` pin both wire shapes.
+**A `GUARDRAIL`+`CHAT` marker pair is one classification, so it ships one completion.** The classifier writes every classification as a `GUARDRAIL` marker directly followed by a `CHAT` marker; the reporter used to split the delta across both and ship two half-cost rows that each carried the same `--request-duration`, which the Revenium trace timeline rendered as duplicates. The marker reader now calls `split_strategies.collapse_classification_pairs`, which folds an adjacent, both-unreported `GUARDRAIL`+`CHAT` pair (same `sid`, `task_type`, `trace_id`, `agentic_job_id`, `agent`) into the `CHAT` marker. The row ships `--operation-type CHAT`, the type the event path (contract C-5a) and the markerless path already ship; nothing in the skill filters on a `GUARDRAIL` row (budget-rule filter dimensions have no operation type). Three exceptions keep it conservative: a `GUARDRAIL` marker with no `CHAT` twin passes through verbatim; one whose `CHAT` twin is already ledgered (the old pair scheme's partial failure) ships alone, relabelled `CHAT`; and a `GUARDRAIL` muid that is not ledger-safe is never absorbed. The classifier still writes the pair, and `api-event-report.sh` still drops `GUARDRAIL` markers itself; do not change either to match.
+
+Ledger lines are `HERMES:<session_id>:<total_tokens>:<unix_ts>:<muid>`; a markerless session gets a synthetic `muid`. Both the marker-split and markerless paths write a line only after a successful CLI call. A collapsed pair's absorbed `GUARDRAIL` muid is ledgered by the same call that shipped the `CHAT` row, as its own line, **before** the shipped muid: the absorbed line keeps the "one line per consumed muid" rule (without it the next tick would see the `GUARDRAIL` marker as unreported and ship it again), and putting the shipped muid last means the newest line for a session always names a transaction that really went out. `--transaction-id` is `${sid}-${total_tokens}-${muid}` on the per-marker path (the shipped muid, i.e. the `CHAT` one) and `${sid}-${total_tokens}` on the markerless path. Do not "unify" these; the golden fixtures in `tests/fixtures/compat/` pin both wire shapes.
+
+**Trace names and parent links.** `--trace-name` comes from the trace's *root* session marker file through `split_strategies.resolve_trace_name` (latest job marker's `job_name`, ignoring a `guardrail-halt-*` job; else the first marker's `task_type`), so every row in a trace, including auxiliary rows and subagents', carries one name; a trace with nothing to name it by sends none and the markerless wire shape is unchanged. `--parent-transaction-id` is rebuilt from the ledger by `split_strategies.latest_transaction_id` (last line wins; markerless and v1 lines name `${sid}-${total_tokens}`): an auxiliary row links to its own session's newest main-loop transaction (else its root's), a subagent's completion to its root's newest. A subagent is visited before its root, so a root with nothing shipped yet leaves the child unlinked; unlike RC-2's job hold it does **not** wait, because a missing edge is cosmetic and a held completion delays budget visibility. Neither flag enters `--transaction-id`, a ledger key or the memo. `aux_session_ctx` is deliberately not widened to carry the name (its width is a three-producer contract and the memo-replay producer has no name to give); the auxiliary pass reads the root's marker file itself.
 
 Agentic jobs use a second ledger, `revenium-jobs.ledger`, with `JOB:<id>:created:<ts>` and `JOB:<id>:outcome:<ts>:<status>` lines. Creation is treated as successful on 2xx *or* 409, and the outcome stage refuses to fire until it sees the matching `created` line.
 
@@ -512,7 +516,7 @@ The tables below complement the component and data-flow diagram under "Architect
 ### Data flow
 **Classification (in-session).** Session ends or a turn completes → plugin hook → transcript read from `state.db` → auxiliary LLM → label validated against the taxonomy → `GUARDRAIL` + `CHAT` marker pair written under one lock → `.ready/<sid>` sentinel touched.
 
-**Metering (per minute).** `cron.sh` takes `cron.lock` → `hermes-report.sh` reads `state.db` and the ledger → sessions without a `.ready` sentinel and younger than the settle window are deferred → the delta is split across markers → jobs are created/closed and completions metered → ledger lines appended on success only → a post-loop auxiliary-usage pass ships `session_model_usage` rows the same way, into `revenium-aux.ledger`.
+**Metering (per minute).** `cron.sh` takes `cron.lock` → `hermes-report.sh` reads `state.db` and the ledger → sessions without a `.ready` sentinel and younger than the settle window are deferred → the delta is split across classifications (a `GUARDRAIL`+`CHAT` marker pair counts as one) → jobs are created/closed and completions metered → ledger lines appended on success only → a post-loop auxiliary-usage pass ships `session_model_usage` rows the same way, into `revenium-aux.ledger`.
 
 **Guardrails (per minute).** `guardrail-check.sh` polls the rules → writes `guardrail-status.json` atomically → on a new ok→block transition under autonomous mode, fetches the enforcement event and notifies through Hermes messaging.
 

@@ -481,7 +481,11 @@ class GuardPermanenceTests(unittest.TestCase):
         (
             'H2',
             'if [[ -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then',
-            "ROOT_SID=\"${root_sid}\" MARKERS_DIR=\"${root_markers_dir}\" python3 - <<'PY' 2>/dev/null\nimport json, os\nfrom pathlib import Path\nroot_sid = os.environ.get('ROOT_SID', '')\nmarkers_dir = os.environ.get('MARKERS_DIR', '')\nlatest_type",
+            # --trace-name rides this heredoc (it already reads the root marker
+            # file for --trace-type), so it gained two env assignments on a
+            # continuation line -- and, with them, no extra python3 spawn per
+            # session. The anchor is the heredoc's new opening, nothing else.
+            "ROOT_SID=\"${root_sid}\" MARKERS_DIR=\"${root_markers_dir}\" \\\n          SCRIPT_DIR=\"${SCRIPT_DIR}\" WANT_TRACE_NAME=\"${TRACE_NAME_CLI_CAPABLE}\" python3 - <<'PY' 2>/dev/null\nimport json, os\nfrom pathlib import Path\nroot_sid = os.environ.get('ROOT_SID', '')\nmarkers_dir = os.environ.get('MARKERS_DIR', '')\nlatest_type",
             2000,
         ),
         (
@@ -557,7 +561,15 @@ class GuardPermanenceTests(unittest.TestCase):
         token filter never iterated, so a multiplexed host cannot cache -- and
         therefore double-ship -- a session another profile owns (T-55-06).
         Reusing this helper rather than reimplementing the rule is what keeps
-        the two paths from diverging."""
+        the two paths from diverging.
+
+        The --trace-name work legitimately adds a fifth: the auxiliary pass
+        carries only a ROOT SESSION ID (aux_session_ctx is a fixed-width,
+        three-producer contract and is deliberately not widened), so to name an
+        auxiliary row's trace it must find that root's marker file, and a
+        multiplexed gateway keeps each profile's markers in that profile's
+        home. Resolving through this helper is what keeps the auxiliary row's
+        name identical to the main-loop row's."""
         src = HERMES_REPORT.read_text(encoding='utf-8')
         self.assertIn('root_markers_dir="${session_markers_dir}"', src)
         # Count INVOCATIONS, not bare mentions: this file's conventions
@@ -567,10 +579,11 @@ class GuardPermanenceTests(unittest.TestCase):
         # invariant this test's own docstring states, and still fails if a
         # call site is added or removed.
         self.assertEqual(
-            src.count('$(resolve_markers_dir '), 4,
-            'exactly four resolve_markers_dir call sites must remain '
-            '(T-28-34\'s original two, Phase 38\'s outcome-stage read, and '
-            'Phase 59-03\'s auxiliary ownership gate)',
+            src.count('$(resolve_markers_dir '), 5,
+            'exactly five resolve_markers_dir call sites must remain '
+            '(T-28-34\'s original two, Phase 38\'s outcome-stage read, '
+            'Phase 59-03\'s auxiliary ownership gate, and the auxiliary '
+            'row\'s --trace-name root lookup)',
         )
 
 

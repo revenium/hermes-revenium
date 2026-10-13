@@ -42,6 +42,27 @@ this repository.
   reason rides in `--metadata` until a CLI release exposes the server's `outcomeReason`
   field (V2-13).
 
+- A classification now ships one completion, not two. The classifier writes every
+  classification as a `GUARDRAIL` marker followed by a `CHAT` marker, and the reporter
+  equal-split the session delta across both: two half-cost rows that each carried the full
+  session `--request-duration`, which the Revenium trace timeline showed as two near-identical
+  rows (one ent trace: two $0.070 / 1.11 min rows for one 49,796-token session). The reporter
+  now folds an adjacent, both-unreported `GUARDRAIL`+`CHAT` pair that agree on session,
+  task type, trace, job and agent into the `CHAT` marker and ships one `--operation-type CHAT`
+  completion carrying the whole delta. The `CHAT` type matches what the event path and the
+  markerless path already ship. Nothing in the skill reads a `GUARDRAIL` row back from
+  Revenium: budget-rule filters scope on agent, model, provider, organization, credential,
+  product, subscriber and task type, never operation type, and the per-field token and cost
+  sums are unchanged, so budget counters and halts behave as before. A dashboard you built
+  yourself on `operationType = GUARDRAIL` will stop receiving new rows. Idempotency is
+  preserved: the absorbed `GUARDRAIL` muid is ledgered by the same call (its own line, before
+  the shipped muid's), so it is never reported again, and a session already half-reported
+  under the old scheme finishes correctly (a `CHAT` whose `GUARDRAIL` twin is already
+  ledgered ships alone; a `GUARDRAIL` whose `CHAT` twin is already ledgered ships alone as
+  `CHAT`). A `GUARDRAIL` marker with no `CHAT` twin passes through unchanged. The S2
+  `window=` figure counts classifications, so it reads half what it used to for the same
+  session. No change to the classifier or its markers.
+
 ### Added
 
 - `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's
@@ -54,6 +75,25 @@ this repository.
 - `REVENIUM_MODEL_ALIASES` maps a gateway's model alias (e.g. LiteLLM's `model-default`) to
   the model it serves, so completions metered behind a gateway carry a model and provider
   Revenium can price. See [Configuration](docs/configuration.md#model-aliases).
+
+- Traces are named. Every Revenium trace read "Unnamed trace" because the reporter never sent
+  `--trace-name`. It now sends the trace's root session's latest job name (a guardrail-halt
+  job never counts), else the first task type, on main-loop, markerless, subagent and
+  auxiliary rows alike, so every row in a trace carries the same name. A trace with nothing
+  to name it by sends none. Sent only when the installed `revenium` CLI advertises the flag
+  (probed with `supports_flag`, independent of `--trace-type`); an older CLI meters exactly
+  as before. The event path (`api-event-report.sh`) names its traces the same way.
+- The trace dependency graph is connected. Nothing sent `--parent-transaction-id`, so every
+  auxiliary and subagent row was an orphan node. An auxiliary row now links to the main-loop
+  transaction its own session most recently shipped (its root's, for an auxiliary-only
+  session), and a subagent's completion to its root's most recent one. The id is rebuilt from
+  the ledger, so it names a transaction Revenium already accepted. A subagent is visited
+  before its root, so on the first tick that sees both the child ships unlinked rather than
+  waiting: a missing edge is cosmetic and holding the completion would delay budget
+  visibility. Sent only when the CLI advertises the flag; neither new flag enters a
+  transaction id, a ledger key or the reporter memo. The event path does not send
+  `--parent-transaction-id`: its rows are per API call with no session-level anchor to link
+  to, and a guessed edge would be worse than none.
 
 ### Fixed
 

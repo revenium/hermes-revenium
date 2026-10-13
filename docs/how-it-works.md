@@ -28,9 +28,14 @@ The cron runs seven stages under one lock: `plugin-status.sh`, `hermes-report.sh
 `outcome-metrics-report.sh` and `drain-status.sh`.
 
 `hermes-report.sh` is the token reporter. It reads token deltas from `~/.hermes/state.db`
-and ships one `revenium meter completion` per marker. Each completion carries
-`--task-type` and `--operation-type` from the task taxonomy; markers that own a job also
-carry `--agentic-job-id`.
+and ships one `revenium meter completion` per classification. The classifier writes each
+classification as a `GUARDRAIL` marker followed by a `CHAT` marker; the reporter folds that
+pair into one completion (`--operation-type CHAT`) carrying the whole delta, rather than two
+half-cost rows. Each completion carries `--task-type` and `--operation-type` from the task
+taxonomy; markers that own a job also carry `--agentic-job-id`. On a CLI that supports them
+it also carries `--trace-name` (the root session's job name, else its first task type) and,
+for auxiliary and subagent rows, `--parent-transaction-id`, so the trace is named and its
+dependency graph is connected.
 
 It reports deltas, not totals. Ledger lines look like
 `HERMES:<session_id>:<total_tokens>:<unix_ts>:<muid>` and a session whose
