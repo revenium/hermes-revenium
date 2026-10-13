@@ -77,8 +77,13 @@ this repository.
   Revenium can price. See [Configuration](docs/configuration.md#model-aliases).
 
 - Traces are named. Every Revenium trace read "Unnamed trace" because the reporter never sent
-  `--trace-name`. It now sends the trace's root session's latest job name (a guardrail-halt
-  job never counts), else the first task type, on main-loop, markerless, subagent and
+  `--trace-name`. It now sends the title Hermes gave the trace's root session; with no title
+  (or a Hermes without the column), the root's latest job name (a guardrail-halt job never
+  counts), else its first task type. The title comes first because Revenium names a trace
+  from the first row that carries a name, and the title exists within a second of the
+  session starting while the classifier's markers land minutes later: on ent a root's first
+  six rows shipped before its markers and the trace stayed unnamed. Sent on main-loop,
+  markerless, subagent and
   auxiliary rows alike, so every row in a trace carries the same name. A trace with nothing
   to name it by sends none. Sent only when the installed `revenium` CLI advertises the flag
   (probed with `supports_flag`, independent of `--trace-type`); an older CLI meters exactly

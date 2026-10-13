@@ -1467,7 +1467,7 @@ PY
         name_markers_dir="$(resolve_markers_dir "${root_sid}")"
         [[ -z "${name_markers_dir}" ]] && name_markers_dir="${MARKERS_DIR}"
       fi
-      root_trace_name="$(resolve_trace_name_at "${name_markers_dir}/${root_sid}.jsonl")"
+      root_trace_name="$(resolve_trace_name_at "${name_markers_dir}/${root_sid}.jsonl" "${root_sid}")"
     fi
 
     local source_env=""

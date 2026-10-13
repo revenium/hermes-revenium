@@ -2231,7 +2231,7 @@ PY
         local _aux_root_markers_dir
         _aux_root_markers_dir="$(resolve_markers_dir "${ctx_root_sid}")"
         [[ -z "${_aux_root_markers_dir}" ]] && _aux_root_markers_dir="${MARKERS_DIR}"
-        _aux_trace_name="$(resolve_trace_name_at "${_aux_root_markers_dir}/${ctx_root_sid}.jsonl")"
+        _aux_trace_name="$(resolve_trace_name_at "${_aux_root_markers_dir}/${ctx_root_sid}.jsonl" "${ctx_root_sid}")"
       fi
       [[ -n "${_aux_trace_name}" ]] && cmd+=(--trace-name "${_aux_trace_name}")
     fi
@@ -3707,7 +3707,14 @@ PY
     # A CLI that has --trace-name but not --trace-type never ran the heredoc
     # above, so resolve the name on its own. Unreachable on every current CLI.
     if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" && "${TRACE_TYPE_CLI_CAPABLE}" != "true" ]]; then
-      root_trace_name="$(resolve_trace_name_at "${root_markers_dir}/${root_sid}.jsonl")"
+      root_trace_name="$(resolve_trace_name_at "${root_markers_dir}/${root_sid}.jsonl" "${root_sid}")"
+    elif [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" ]]; then
+      # The root's Hermes title outranks the marker-derived name above, and
+      # covers the session the classifier has not reached yet (no marker file,
+      # so the heredoc never ran). See resolve_session_title in common.sh.
+      local root_title
+      root_title="$(resolve_session_title "${root_sid}")"
+      [[ -n "${root_title}" ]] && root_trace_name="${root_title}"
     fi
 
     # Phase 22 (JOB-01 / D-02): resolve root_aid ONCE per session for subagent

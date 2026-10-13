@@ -791,11 +791,13 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # its --trace-name probe (+10) and per-session resolution (+16) above its
         # one site: 2222->2248 (+26). Pure shift; the COUNT (4) and the emitted
         # VALUE expressions are unchanged.
+        # Trace name from the session title (2026-10-13): +7 in hermes-report.sh
+        # above both main() sites: 5286->5293, 5546->5553. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2203),
-            ('hermes-report.sh', 5286),
-            ('hermes-report.sh', 5546),
+            ('hermes-report.sh', 5293),
+            ('hermes-report.sh', 5553),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

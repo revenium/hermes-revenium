@@ -651,6 +651,93 @@ class TraceNameTests(_Harness):
         self.assertEqual(by_task['research']['--trace-id'], root)
 
 
+class TraceNameFromSessionTitleTests(_Harness):
+    """The root session's Hermes title names the trace, ahead of the markers.
+
+    Live on ent (2026-10-13): Revenium names a trace from the first row that
+    carries a name. Root 20261013_095316_286968's first six rows shipped at
+    14:00-14:05, before the classifier wrote its markers (14:08), so they had
+    no name, and the trace stayed "Unnamed trace" although every later row
+    carried the job name. Hermes titles a session about a second after it
+    starts, so the title is there for the very first row.
+    """
+
+    TITLE = 'Create portfolio management proof of concept'
+
+    def _titles(self, titles):
+        import sqlite3
+        conn = sqlite3.connect(self.state_db)
+        conn.execute('ALTER TABLE sessions ADD COLUMN title TEXT')
+        for sid, title in titles.items():
+            conn.execute('UPDATE sessions SET title = ? WHERE id = ?', (title, sid))
+        conn.commit()
+        conn.close()
+
+    def test_unclassified_root_row_is_named_by_the_title(self):
+        # The ent shape: no marker file yet, so nothing else can name it.
+        self.make_db([_session(ENT_SID, 49000, 796)])
+        self._titles({ENT_SID: self.TITLE})
+        self.make_shim(trace_name_capable=True, trace_type_capable=True)
+        run = self.tick()
+        self.assertEqual(len(run['flags']), 1, run['argv'])
+        self.assertEqual(run['flags'][0]['--task-type'], 'unclassified')
+        self.assertEqual(run['flags'][0].get('--trace-name'), self.TITLE)
+
+    def test_title_outranks_the_job_name_so_a_trace_keeps_one_name(self):
+        for trace_type_capable in (True, False):
+            with self.subTest(trace_type_capable=trace_type_capable):
+                self.setUp()
+                self.make_db([_session(ENT_SID, 49000, 796)])
+                self._titles({ENT_SID: self.TITLE})
+                self.write_markers(ENT_SID, _pair(ENT_SID, ENT_G_MUID, ENT_C_MUID, 'planning',
+                                                  1715515000.0)
+                                   + [_job(ENT_SID, 'job-ent-1', ENT_JOB_NAME)])
+                self.make_shim(trace_name_capable=True, trace_type_capable=trace_type_capable)
+                self.assertEqual(self.tick()['flags'][0].get('--trace-name'), self.TITLE)
+
+    def test_subagent_rows_carry_the_roots_title_not_their_own(self):
+        root, child = 'root-sid', 'child-sid'
+        self.make_db([_session(root, 100, 50), _child(child, 60, 40)], parents={child: root})
+        self._titles({root: self.TITLE, child: 'Subagent: read the workbooks'})
+        self.make_shim(trace_name_capable=True, trace_type_capable=True)
+        names = {f.get('--trace-name') for f in self.tick()['flags']}
+        self.assertEqual(names, {self.TITLE})
+
+    def test_aux_row_carries_the_title(self):
+        self.make_db([_session(ENT_SID, 49000, 796)],
+                     aux_rows=[dict(ParentTransactionIdTests.AUX)])
+        self._titles({ENT_SID: self.TITLE})
+        self.make_shim(trace_name_capable=True, trace_type_capable=True)
+        aux = self.aux_rows(self.tick()['flags'])
+        self.assertEqual(len(aux), 1)
+        self.assertEqual(aux[0].get('--trace-name'), self.TITLE)
+
+    def test_empty_title_falls_back_to_the_markers(self):
+        self.make_db([_session(ENT_SID, 49000, 796)])
+        self._titles({ENT_SID: '   '})
+        self.write_markers(ENT_SID, _pair(ENT_SID, ENT_G_MUID, ENT_C_MUID, 'planning',
+                                          1715515000.0)
+                           + [_job(ENT_SID, 'job-ent-1', ENT_JOB_NAME)])
+        self.make_shim(trace_name_capable=True, trace_type_capable=True)
+        self.assertEqual(self.tick()['flags'][0].get('--trace-name'), ENT_JOB_NAME)
+
+    def test_title_is_one_bounded_line(self):
+        self.make_db([_session(ENT_SID, 49000, 796)])
+        self._titles({ENT_SID: 'Line one\nline two\t' + 'x' * 300})
+        self.make_shim(trace_name_capable=True, trace_type_capable=True)
+        name = self.tick()['flags'][0].get('--trace-name')
+        self.assertNotIn('\n', name)
+        self.assertNotIn('\t', name)
+        self.assertTrue(name.startswith('Line one line two'), name)
+        self.assertLessEqual(len(name), 128)
+
+    def test_older_cli_sends_no_title(self):
+        self.make_db([_session(ENT_SID, 49000, 796)])
+        self._titles({ENT_SID: self.TITLE})
+        self.make_shim()
+        self.assertNotIn('--trace-name', self.tick()['flags'][0])
+
+
 class ResolveTraceNameUnitTests(unittest.TestCase):
 
     def _resolve(self, records_or_text):

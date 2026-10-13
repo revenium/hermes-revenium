@@ -1437,7 +1437,17 @@ resolve_spool_dir() {
 # Fail-open and silent: a missing file, a missing python3 or any error prints
 # nothing, and every caller then omits --trace-name.
 resolve_trace_name_at() {
-  local markers_path="${1:-}"
+  local markers_path="${1:-}" root_sid="${2:-}"
+  # The root session's Hermes title wins when it exists (see
+  # resolve_session_title for why); the markers are the fallback.
+  if [[ -n "${root_sid}" ]]; then
+    local title
+    title="$(resolve_session_title "${root_sid}")"
+    if [[ -n "${title}" ]]; then
+      printf '%s\n' "${title}"
+      return 0
+    fi
+  fi
   [[ -n "${markers_path}" && -f "${markers_path}" ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
   SCRIPTS_PATH="${SKILL_DIR}/scripts" MARKERS_PATH="${markers_path}" python3 - <<'PY' 2>/dev/null || true
@@ -1453,6 +1463,36 @@ try:
 except Exception:
     pass
 PY
+}
+
+# The title Hermes gave a session (sessions.title in STATE_DB), as a trace
+# name: one line, at most 128 characters, or nothing.
+#
+# Why the title and not the classifier's job name: Revenium names a trace from
+# the first transaction that carries a name. Hermes titles a session within
+# about a second of its start; the classifier writes its markers only after
+# the first turn completes. On ent (2026-10-13) a root session's first six
+# rows shipped at 14:00-14:05, the classifier markers landed at 14:08, and the
+# trace stayed "Unnamed" although every later row carried the job name. The
+# title is there before the first row can ship, so every row names the trace
+# the same way.
+#
+# sqlite3 CLI, not python3: this runs once per metered root session and must
+# not add an interpreter spawn (tests/test_reporter_spawn_guards.py). The id
+# is checked against the session-id charset before it is interpolated, so it
+# can never close the SQL string literal. Fail-open and silent: no sqlite3, a
+# Hermes without the column, a locked db or no title all print nothing.
+resolve_session_title() {
+  local sid="${1:-}"
+  [[ -n "${sid}" && "${sid}" != *[!A-Za-z0-9_:.-]* ]] || return 0
+  [[ -n "${STATE_DB:-}" && -f "${STATE_DB}" ]] || return 0
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  local title
+  title="$(sqlite3 -readonly -cmd ".timeout 1500" "${STATE_DB}" \
+    "SELECT substr(trim(replace(replace(replace(title, char(10), ' '), char(13), ' '), char(9), ' ')), 1, 128)
+       FROM sessions WHERE id = '${sid}' LIMIT 1;" 2>/dev/null | tr -d '\000-\037\177' | head -1)" || true
+  [[ -n "${title}" ]] && printf '%s\n' "${title}"
+  return 0
 }
 
 # Phase 42 (D-15): resolve the job-assessments sidecar directory that OWNS a

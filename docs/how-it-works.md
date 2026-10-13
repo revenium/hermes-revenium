@@ -33,7 +33,7 @@ classification as a `GUARDRAIL` marker followed by a `CHAT` marker; the reporter
 pair into one completion (`--operation-type CHAT`) carrying the whole delta, rather than two
 half-cost rows. Each completion carries `--task-type` and `--operation-type` from the task
 taxonomy; markers that own a job also carry `--agentic-job-id`. On a CLI that supports them
-it also carries `--trace-name` (the root session's job name, else its first task type) and,
+it also carries `--trace-name` (the root session's Hermes title, else its job name, else its first task type) and,
 for auxiliary and subagent rows, `--parent-transaction-id`, so the trace is named and its
 dependency graph is connected.
 
