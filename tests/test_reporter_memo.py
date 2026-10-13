@@ -142,19 +142,38 @@ class ReporterMemoTests(unittest.TestCase):
             self.assertIn('JOB:job-open:outcome:', Path(jobs_ledger_file).read_text(),
                           'a pending outcome must be re-queued on every tick')
 
-    def test_replaced_ledger_drops_the_memo(self):
+    def _assert_rewrite_drops_the_memo(self, rewrite):
         with tempfile.TemporaryDirectory(prefix='gsd-memo-ledger-') as tmp:
             (scripts_dir, state_dir, log_file, ledger_file, jobs_ledger_file,
              invocations_log, spawn_log, env) = self._fixture(tmp)
             _tick(scripts_dir, env, spawn_log)
+            _tick(scripts_dir, env, spawn_log)
+            self.assertIn('memo: skipped 1', Path(log_file).read_text(),
+                          'precondition: the unchanged ledger is a hit')
+            # A different, no-shorter ledger: only the head can tell it apart.
             content = Path(ledger_file).read_text()
-            os.remove(ledger_file)
-            Path(ledger_file).write_text(content)
+            rewrite(ledger_file, 'HERMES:sess-other:1:1700000000.000\n' + content)
             open(log_file, 'w').close()
             r, _ = _tick(scripts_dir, env, spawn_log)
             self.assertEqual(0, r.returncode, r.stderr)
             self.assertNotIn('memo: skipped', Path(log_file).read_text(),
-                             'a new ledger inode must invalidate every record')
+                             'a rewritten ledger must invalidate every record')
+
+    def test_replaced_ledger_drops_the_memo(self):
+        def replace(path, text):
+            os.remove(path)
+            Path(path).write_text(text)
+        self._assert_rewrite_drops_the_memo(replace)
+
+    def test_ledger_rewritten_on_the_same_inode_drops_the_memo(self):
+        # Linux reuses an unlinked inode for the next file created, so CI saw
+        # delete-and-recreate keep the inode. Writing in place pins that
+        # shape on every platform.
+        def rewrite_in_place(path, text):
+            with open(path, 'r+') as f:
+                f.write(text)
+                f.truncate()
+        self._assert_rewrite_drops_the_memo(rewrite_in_place)
 
     def test_session_moved_to_another_profile_is_not_a_hit(self):
         # Greptile #154: a hit skips resolve_markers_dir, and the state.db

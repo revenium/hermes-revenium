@@ -771,11 +771,15 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # api-event-report.sh): 5046->5085, 5273->5312, 2181->2222. The aux
         # site (2137) does not move. Pure shift, re-measured with
         # `grep -n -- '--operation-type'`.
+        # Linux CI fix on #154 (2026-10-12): the memo's ledger-head
+        # fingerprint (+19 in hermes-report.sh above both main() sites):
+        # 5085->5104, 5312->5331. The aux site (2137) and api-event-report.sh
+        # (2222) do not move. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2137),
-            ('hermes-report.sh', 5085),
-            ('hermes-report.sh', 5312),
+            ('hermes-report.sh', 5104),
+            ('hermes-report.sh', 5331),
             ('api-event-report.sh', 2222),
         }
         self.assertEqual(

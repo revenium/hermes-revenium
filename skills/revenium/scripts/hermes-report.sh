@@ -2403,12 +2403,27 @@ def owned_here(*sids):
         return True
 
 
+# An append-only ledger never rewrites its head, so a hash of its first bytes
+# catches a rewrite the inode cannot: Linux hands a just-unlinked inode
+# straight to the next file created, so delete-and-recreate keeps the number.
+LEDGER_HEAD = 4096
+
+
+def ledger_head(path, n):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha1(f.read(n)).hexdigest()
+    except OSError:
+        return ''
+
+
 def ledger_state(path):
     try:
         st = os.stat(path)
-        return [st.st_ino, st.st_size]
     except OSError:
-        return [0, 0]
+        return [0, 0, 0, '']
+    n = min(st.st_size, LEDGER_HEAD)
+    return [st.st_ino, st.st_size, n, ledger_head(path, n)]
 
 
 h = hashlib.sha1(env['MEMO_SWITCHES'].encode('utf-8', 'surrogateescape'))
@@ -2441,8 +2456,9 @@ try:
 except OSError:
     pass
 
-# A ledger that was replaced (new inode) or shrank (truncated, rotated) no
-# longer says what it said when a record was written: drop every record.
+# A ledger that was replaced (new inode or new head) or shrank (truncated,
+# rotated) no longer says what it said when a record was written: drop every
+# record.
 ledgers = {'ledger': ledger_state(env['MEMO_LEDGER']),
            'jobs': ledger_state(env['MEMO_JOBS_LEDGER'])}
 records = {}
@@ -2450,9 +2466,12 @@ try:
     with open(env['MEMO_FILE'], encoding='utf-8', errors='surrogateescape') as f:
         header = json.loads(f.readline())
         ok = header.get('v') == 1
-        for name, (ino, size) in ledgers.items():
-            old = header.get(name) or [0, 0]
-            if old[0] != ino or size < old[1]:
+        for name, (ino, size, _n, _head) in ledgers.items():
+            old = header.get(name)
+            if (not isinstance(old, list) or len(old) != 4 or old[0] != ino
+                    or size < old[1]
+                    or ledger_head(env['MEMO_LEDGER' if name == 'ledger'
+                                       else 'MEMO_JOBS_LEDGER'], old[2]) != old[3]):
                 ok = False
         if ok:
             for line in f:
