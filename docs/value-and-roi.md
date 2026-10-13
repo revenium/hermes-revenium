@@ -777,8 +777,11 @@ fails.
 
 ### double_counting_group
 
-Several jobs inferred from one session's transcript carry the same
+Several jobs of one session carry the same
 `double_counting_group` id, so a consumer can see they must not be summed naively.
+First-pass inference now writes one job per classification (extra arcs the model reports
+fold into that job's name), so this covers sessions classified before that rule and any
+session where a second job reached the marker file another way.
 
 It groups only same-session, multi-job records. It does not resolve
 cross-session or root-plus-subagent

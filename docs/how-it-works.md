@@ -142,8 +142,14 @@ are immutable and never re-sent) with idempotency held in
 `~/.hermes/state/revenium/revenium-jobs.ledger`. The AI transactions belonging to a job are
 linked back through `--agentic-job-id`.
 
-The classifier infers a session's jobs once, from the first completed turn, so its first
-verdict can be premature. `CANCELLED` is its "uncertain" verdict, and an arc whose work is
+The classifier infers a session's job once, from the first completed turn, and writes at most
+one job per classification. When the model reports several arcs for the transcript, the first
+becomes the job and the others are named in its job name (`Scan X (also: Update the radar
+skill)`). A second job could never own any spend: the reporter attributes a completion to the
+first job marker after its task marker, and the session's one classification is written before
+any job, so a second job reached Revenium with no traces and no cost. The job's status never
+claims more than every arc supports, so it is `SUCCESS` only when every arc was a clear
+`SUCCESS`. The first verdict can be premature. `CANCELLED` is its "uncertain" verdict, and an arc whose work is
 still running (a subagent mid-flight) comes out `CANCELLED`. A `CANCELLED` job is therefore
 re-checked on every later turn, against the transcript as it then stands, with one small
 status-only model call per turn however many jobs are open. When the status moves, the

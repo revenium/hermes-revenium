@@ -606,7 +606,12 @@ def _build_rejudge_prompt(transcript: str, jobs: list) -> str:
     """
     arcs = []
     for number, job in enumerate(jobs, start=1):
-        name = _clamp_assessment_text(job.get("job_name") or "", 80) or "(unnamed)"
+        # JOB_FOLD_NAME_MAX_BYTES, not a tighter cut: a job that absorbed other
+        # arcs carries them in its name (_fold_job_name), and this prompt is how
+        # the re-judge learns what the job covers. An 80-byte cut sliced the
+        # folded names mid-word and dropped the arcs that were folded in.
+        name = _clamp_assessment_text(
+            job.get("job_name") or "", JOB_FOLD_NAME_MAX_BYTES) or "(unnamed)"
         job_type = _clamp_assessment_text(job.get("job_type") or "", 48)
         arcs.append(f"  {number}. {name} (type: {job_type})")
     arcs_block = "\n".join(arcs)
@@ -1757,6 +1762,117 @@ def _clamp_assessment_text(value, limit: int) -> str:
         else:
             hi = mid - 1
     return value[:lo]
+
+
+# One classification, one job. The folded job name's budget, in serialized
+# bytes (the same unit as _clamp_assessment_text, for the same reason: marker
+# lines are written ensure_ascii=True). A real single-job marker with a full
+# assessment measured 759 bytes against the 1024-byte MARK-02 budget with a
+# 53-character name, so 120 bytes of name leaves the assessed marker inside it.
+JOB_FOLD_NAME_MAX_BYTES = 120
+# Each folded-in arc's own name is clamped to this before it is joined in, so
+# one verbose arc cannot crowd out the others.
+_JOB_FOLD_EXTRA_NAME_MAX_BYTES = 60
+
+
+def _serialized_byte_len(value: str) -> int:
+    """Length of `value` as _write_job_marker will serialize it (ensure_ascii),
+    quotes excluded. The measure _clamp_assessment_text clamps by."""
+    return len(json.dumps(value, ensure_ascii=True).encode("utf-8")) - 2
+
+
+def _fold_job_name(primary: dict, extras: list) -> str:
+    """Name for a job that absorbed `extras`, built from the primary's name.
+
+    "Primary name (also: second arc; third arc)". Trailing extras are dropped
+    whole, never cut mid-name, until the result fits JOB_FOLD_NAME_MAX_BYTES; if
+    not even one fits, the count alone is appended ("Primary name (+2 more)").
+    If the primary's own name leaves no room for any suffix, it is returned
+    unchanged: folding must never make a name worse than the one the model gave
+    it, and must never truncate it.
+
+    The extras' names are the model's free text, so each goes through
+    _clamp_assessment_text, which strips the `|`, newline and carriage return
+    that would shift the reporter's IFS='|' job rows.
+    """
+    base = primary.get("job_name") or ""
+    if not isinstance(base, str):
+        base = ""
+    base = base.strip() or str(primary.get("job_type") or "").replace("_", " ")
+    names = []
+    # A model that restates one arc twice reports the same name twice; naming
+    # it twice in the job would be noise, so a name already present (the
+    # primary's included, compared case-insensitively) is not repeated.
+    seen = {base.casefold()}
+    for extra in extras:
+        name = extra.get("job_name") if isinstance(extra, dict) else ""
+        if not isinstance(name, str) or not name.strip():
+            name = str((extra or {}).get("job_type") or "").replace("_", " ")
+        name = _clamp_assessment_text(name, _JOB_FOLD_EXTRA_NAME_MAX_BYTES)
+        if name and name.casefold() not in seen:
+            seen.add(name.casefold())
+            names.append(name)
+    if not names:
+        return primary.get("job_name") or ""
+    for keep in range(len(names), -1, -1):
+        left_out = len(names) - keep
+        if keep:
+            tail = "; ".join(names[:keep])
+            if left_out:
+                tail += "; +%d more" % left_out
+            candidate = "%s (also: %s)" % (base, tail)
+        else:
+            candidate = "%s (+%d more)" % (base, left_out)
+        if _serialized_byte_len(candidate) <= JOB_FOLD_NAME_MAX_BYTES:
+            return candidate
+    return primary.get("job_name") or ""
+
+
+def _fold_jobs_into_one(valid_jobs: list) -> list:
+    """Reduce the validated jobs of ONE classification to at most one.
+
+    Why: the reporter attributes spend positionally. A task marker belongs to
+    the first job marker after it (else the nearest one before it). First-pass
+    job inference runs once per root session, after that session's single
+    classification has been written, so every task marker already sits above
+    every job marker and binds to job #1. Jobs #2..N own nothing: Revenium gets
+    a job with no traces, no cost and, when SUCCESS, an evaluator that has
+    nothing of its own to value. Phase 68 measured it (5 of 8 zero-cost jobs on
+    the reference host were exactly this). The fix is at the producer: a
+    classification yields one job, and the work the model split off folds into
+    it.
+
+    The primary is the FIRST job the model reported. The single classification
+    describes the session's opening request, and the model lists arcs in
+    transcript order, so the first arc is the one that classification covers.
+    The primary keeps its agentic_job_id, job_type and failure_reason; the
+    others' names are carried in the job name (see _fold_job_name), which is
+    also what the evaluator and the CANCELLED re-judge are shown, so both judge
+    the whole of what the job covers.
+
+    Status never claims more than the evidence for every arc supports. The job
+    takes the primary's status, except that a SUCCESS primary with any sibling
+    that was not a clear SUCCESS becomes CANCELLED: SUCCESS is only for "clear
+    evidence the goal was achieved", and CANCELLED is the uncertainty bucket the
+    re-judge revisits as the transcript grows. A non-SUCCESS primary stays as it
+    is (a CANCELLED primary is never promoted by a sibling's SUCCESS).
+
+    A list of zero or one job is returned as is, so the common single-job
+    verdict is byte-identical to before this existed. Pure: no I/O, and the
+    input jobs are not mutated.
+    """
+    if len(valid_jobs) <= 1:
+        return valid_jobs
+    primary = valid_jobs[0]
+    extras = valid_jobs[1:]
+    folded = dict(primary)
+    folded["job_name"] = _fold_job_name(primary, extras)
+    if primary.get("status") == "SUCCESS" and any(
+        extra.get("status") != "SUCCESS" for extra in extras
+    ):
+        folded["status"] = "CANCELLED"
+        folded["failure_reason"] = ""
+    return [folded]
 
 
 # ROI-04/ROI-05: the frozen assessment contract. Chosen at the 36-01 checkpoint
@@ -5873,6 +5989,15 @@ async def run_classification_async(
         # cannot be final). Same root-session and not-halted gates; the branch
         # is reached only when the marker exists, because the `if` above took
         # every case where it did not.
+        #
+        # First-pass inference writes AT MOST ONE job per classification: the
+        # model may report several arcs, and _fold_jobs_into_one folds them
+        # into the first. The reporter's ownership rule is positional, and the
+        # session's one task pair is already in the file above every job, so a
+        # second job could never own a completion (docs/job-completion-
+        # attribution.md, "Zero-cost jobs by cause"). The CANCELLED re-judge
+        # below never mints a job, so this is the only place a session's jobs
+        # are created.
         try:
             if (
                 root_sid == session_id  # skip subagent sessions (T-13-06)
@@ -5925,12 +6050,45 @@ async def run_classification_async(
                                 job_impl_name,
                             )
                         jobs = await _infer_jobs_via_llm(transcript, job_labels)
+                    valid_jobs = []
                     for job in jobs:
                         try:
                             valid = _validate_job(job)
                             if valid:
-                                await _persist_job_verdict(valid, transcript, session_id, p)
-                                _persist_job_type_to_taxonomy(valid["job_type"], paths=p)
+                                valid_jobs.append(valid)
+                        except Exception as exc:
+                            logger.warning(
+                                "revenium-classifier: dropping one job for sid=%s: %s",
+                                session_id,
+                                exc,
+                            )
+                    # One classification, one job (see _fold_jobs_into_one).
+                    # Applied here, after BOTH the built-in and any registered
+                    # boundary implementation have answered, so the invariant
+                    # does not depend on which one produced the list. A fold
+                    # failure falls back to the first job alone: the invariant
+                    # is the thing that must hold, the folded name is polish.
+                    try:
+                        persist_jobs = _fold_jobs_into_one(valid_jobs)
+                    except Exception as exc:
+                        logger.warning(
+                            "revenium-classifier: job fold failed for sid=%s, "
+                            "keeping the first job only: %s",
+                            session_id,
+                            exc,
+                        )
+                        persist_jobs = valid_jobs[:1]
+                    if len(valid_jobs) > 1:
+                        logger.info(
+                            "revenium-classifier: folded %d inferred arcs into one "
+                            "job for sid=%s",
+                            len(valid_jobs),
+                            session_id,
+                        )
+                    for valid in persist_jobs:
+                        try:
+                            await _persist_job_verdict(valid, transcript, session_id, p)
+                            _persist_job_type_to_taxonomy(valid["job_type"], paths=p)
                         except Exception as exc:
                             logger.warning(
                                 "revenium-classifier: dropping one job for sid=%s: %s",

@@ -13624,11 +13624,21 @@ exit 0
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-    def test_revenium_classifier_job_multi_arc(self):
-        """Task 2 RED: multi-arc session produces N kind:"job" markers, all after the task pair.
+    def test_revenium_classifier_job_multi_arc_folds_into_one_job(self):
+        """A multi-arc session produces ONE kind:"job" marker, after the task pair.
+
+        This test used to pin the opposite (Phase 13: N markers for N arcs). That
+        was the defect behind the ent-profile job with "No traces found": the
+        reporter binds a task marker to the first job marker after it, the
+        session's one GUARDRAIL+CHAT pair is already in the file above every job,
+        so arcs 2..N could never own a completion and reached Revenium as
+        zero-cost jobs. The model may still report several arcs; they now fold
+        into the first (classifier._fold_jobs_into_one). The full contract is
+        pinned in tests/test_classifier_one_job_per_classification.py.
 
         Test 1: a multi-goal transcript with call_llm returning a 2-job array writes
-        exactly 2 kind:"job" markers, both positioned after the single GUARDRAIL+CHAT pair.
+        exactly 1 kind:"job" marker, positioned after the single GUARDRAIL+CHAT pair,
+        carrying the first arc's identity and both arcs' names.
         """
         import asyncio
         import importlib
@@ -13679,13 +13689,14 @@ exit 0
             lines = marker_path.read_text().splitlines()
             recs = [json.loads(l) for l in lines]
 
-            # Must have exactly 2 task records + 2 job records = 4 total
+            # Must have exactly 2 task records + 1 job record = 3 total: two
+            # reported arcs, one classification, one job.
             job_recs = [r for r in recs if r.get("kind") == "job"]
             task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
-            self.assertEqual(len(job_recs), 2, f"expected 2 job records, got {len(job_recs)}")
+            self.assertEqual(len(job_recs), 1, f"expected 1 job record, got {len(job_recs)}")
             self.assertEqual(len(task_recs), 2, f"expected 2 task records, got {len(task_recs)}")
 
-            # Both job markers must appear AFTER the GUARDRAIL and CHAT records
+            # The job marker must appear AFTER the GUARDRAIL and CHAT records
             guardrail_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "GUARDRAIL")
             chat_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "CHAT")
             job_indices = [i for i, r in enumerate(recs) if r.get("kind") == "job"]
@@ -13693,9 +13704,13 @@ exit 0
                 self.assertGreater(ji, guardrail_idx, "job marker must come after GUARDRAIL")
                 self.assertGreater(ji, chat_idx, "job marker must come after CHAT")
 
-            # The two job records must have distinct agentic_job_ids
-            job_ids = [r.get("agentic_job_id") for r in job_recs]
-            self.assertEqual(len(set(job_ids)), 2, f"job IDs must be distinct: {job_ids}")
+            # The surviving job is the FIRST arc (id, type), and its name carries
+            # the second arc so the folded work stays visible.
+            [job] = job_recs
+            self.assertRegex(job.get("agentic_job_id"), r"^fix_auth_a1b2_[0-9a-f]{4}$")
+            self.assertEqual(job.get("job_type"), "bug_fix")
+            self.assertIn("Fix auth bug", job.get("job_name"))
+            self.assertIn("Refactor DB layer", job.get("job_name"))
 
             # assertNotIn('task', kwargs) for the job inference call
             # (Step 7 call_llm must not use task= kwarg per Pitfall 8 / A3)

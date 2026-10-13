@@ -102,6 +102,23 @@ this repository.
 
 ### Fixed
 
+- A classification now yields one job, not one per arc the model reported. The reporter
+  attributes a completion to the first job marker after its task marker, and a session's one
+  classification is written before any job, so every completion bound to job #1 and any
+  further job owned nothing: Revenium showed it with "No traces found for this job", no total
+  cost and no value (one ent session wrote a CANCELLED scan job and a SUCCESS skill-update job
+  from a single classification; the second never had a trace). The classifier now keeps the
+  first valid job's id, type and failure reason and names the other arcs in its job name
+  (`Scan X (also: Update the radar skill)`, at most 120 serialized bytes, trailing names
+  dropped whole). Its status never claims more than every arc supports: a `SUCCESS` first arc
+  with a sibling that was not a clear `SUCCESS` becomes `CANCELLED`, which the re-judge
+  revisits, and a `CANCELLED` or `FAILED` first arc is never promoted. This also stops the
+  sibling's separate evaluator call, which had nothing of its own to value. It applies to the
+  built-in model path and to a registered classification implementation alike. A single-arc
+  verdict is untouched. Forward only: a session already written with several jobs keeps them
+  (its `CANCELLED` jobs are still re-judged), and the reporter still creates a Revenium job for
+  every job marker in a file. The re-judge prompt now shows a job name up to 120 bytes rather
+  than 80, so a folded name is not cut mid-word.
 - The outcome-metrics stage no longer reports a brand-new job's transient 404 as a failure.
   The append call (and the economics `set`) now pass `--output json`. Without it the CLI
   printed its error as a coloured box rather than a JSON body, so the not-found and
