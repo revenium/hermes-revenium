@@ -757,12 +757,30 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # main's shifts alone. Re-measured with `grep -n -- '--operation-type'`
         # on the merged file. Pure shift; the COUNT (4) and the emitted VALUE
         # expressions are unchanged.
+        # Reporter memo (2026-10-12): the memo helpers sit between the aux site
+        # and main(), and the per-session hit check, snapshot and record call
+        # sit above the two main() sites: +323 for both, 4723->5046,
+        # 4950->5273; the aux site (2137) does not move. api-event-report.sh
+        # gains the shadow-memo helpers, setup and per-file hit check above its
+        # one site: 1937->2181. Re-measured with `grep -n -- '--operation-type'`.
+        # Pure shift; the COUNT (4) and the emitted VALUE expressions are
+        # unchanged.
+        # Greptile review fixes on #154 (2026-10-12): the readability flag and
+        # the in-process markers-dir ownership check in both memo plan
+        # builders (+39 in hermes-report.sh above both main() sites, +41 in
+        # api-event-report.sh): 5046->5085, 5273->5312, 2181->2222. The aux
+        # site (2137) does not move. Pure shift, re-measured with
+        # `grep -n -- '--operation-type'`.
+        # Linux CI fix on #154 (2026-10-12): the memo's ledger-head
+        # fingerprint (+19 in hermes-report.sh above both main() sites):
+        # 5085->5104, 5312->5331. The aux site (2137) and api-event-report.sh
+        # (2222) do not move. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2137),
-            ('hermes-report.sh', 4723),
-            ('hermes-report.sh', 4950),
-            ('api-event-report.sh', 1937),
+            ('hermes-report.sh', 5104),
+            ('hermes-report.sh', 5331),
+            ('api-event-report.sh', 2222),
         }
         self.assertEqual(
             found_locations, expected_locations,

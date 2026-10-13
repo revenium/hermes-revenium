@@ -42,20 +42,24 @@ main() {
   local reported_count=0
   local skipped_count=0
 
-  for event_file in "${TOOL_EVENTS_DIR}"/*.jsonl; do
-    [[ -f "${event_file}" ]] || continue
-
-    local rows
-    rows=$(
-      EVENT_FILE="${event_file}" LEDGER_FILE="${TOOL_EVENTS_LEDGER_FILE}" python3 - <<'PY' 2>/dev/null || true
+  # One python3 pass over EVERY spool file, not one per file. Each per-file
+  # pass re-read the whole TOOL ledger to build its pre-filter set: measured
+  # on a live profile (2026-10-12), 676 spool files x a 3.2 MB ledger was 55s
+  # of a tick that shipped nothing. Files are visited in sorted order, the
+  # order the shell glob used; the rows and the per-row guard below are
+  # unchanged.
+  local rows
+  rows=$(
+    TOOL_EVENTS_DIR="${TOOL_EVENTS_DIR}" LEDGER_FILE="${TOOL_EVENTS_LEDGER_FILE}" python3 - <<'PY' 2>/dev/null || true
+import glob
 import json
 import os
-import sys
 from datetime import datetime, timezone
 
-event_file = os.environ.get("EVENT_FILE", "")
-if not event_file:
-    sys.exit(0)
+event_files = sorted(
+    p for p in glob.glob(os.path.join(glob.escape(os.environ.get("TOOL_EVENTS_DIR", "")), "*.jsonl"))
+    if os.path.isfile(p)
+)
 
 # Ledger pre-filter. Measured on a live profile (2026-10-10): ~40k ledgered
 # records and one get_root_session_id python+state.db spawn per row before the
@@ -76,64 +80,66 @@ except OSError:
     pass
 skipped = 0
 
-try:
-    with open(event_file, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            # 4 KB cap — mirrors marker reader (T-15-03 defense)
-            if len(line) > 4096:
-                continue
-            try:
-                r = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if not isinstance(r, dict):
-                continue
-            sid = r.get("sid") or ""
-            tool_call_id = r.get("tool_call_id") or ""
-            tool = r.get("tool") or "unknown"
-            if not sid or not tool_call_id:
-                continue
-            ts_float = r.get("ts") or 0.0
-            duration_ms = int(r.get("duration_ms") or 0)
-            success = r.get("success")
-            # D-03 parity: None treated as True (default success)
-            if success is None:
-                success = True
-            error = r.get("error") or ""
-            try:
-                ts_iso = datetime.fromtimestamp(float(ts_float), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            except Exception:
-                ts_iso = ""
-            if not ts_iso:
-                continue
-            # Pipe-sanitize all string fields (WR-01 mirror; T-15-01/T-15-02 tamper mitigations)
-            # Colon included to protect ledger key integrity (Pitfall 2 / T-15-02)
-            for _bad in ("|", "\n", "\r", ":"):
-                sid = sid.replace(_bad, "_")
-                tool = tool.replace(_bad, "_")
-                tool_call_id = tool_call_id.replace(_bad, "_")
-                error = error.replace(_bad, "_")
-            if (sid, tool_call_id) in ledgered:
-                skipped += 1
-                continue
-            success_flag = "1" if success else "0"
-            print(f"{sid}|{tool_call_id}|{tool}|{ts_iso}|{duration_ms}|{success_flag}|{error}")
-except OSError:
-    pass
+for event_file in event_files:
+    try:
+        with open(event_file, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                # 4 KB cap — mirrors marker reader (T-15-03 defense)
+                if len(line) > 4096:
+                    continue
+                try:
+                    r = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(r, dict):
+                    continue
+                sid = r.get("sid") or ""
+                tool_call_id = r.get("tool_call_id") or ""
+                tool = r.get("tool") or "unknown"
+                if not sid or not tool_call_id:
+                    continue
+                ts_float = r.get("ts") or 0.0
+                duration_ms = int(r.get("duration_ms") or 0)
+                success = r.get("success")
+                # D-03 parity: None treated as True (default success)
+                if success is None:
+                    success = True
+                error = r.get("error") or ""
+                try:
+                    ts_iso = datetime.fromtimestamp(float(ts_float), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                except Exception:
+                    ts_iso = ""
+                if not ts_iso:
+                    continue
+                # Pipe-sanitize all string fields (WR-01 mirror; T-15-01/T-15-02 tamper mitigations)
+                # Colon included to protect ledger key integrity (Pitfall 2 / T-15-02)
+                for _bad in ("|", "\n", "\r", ":"):
+                    sid = sid.replace(_bad, "_")
+                    tool = tool.replace(_bad, "_")
+                    tool_call_id = tool_call_id.replace(_bad, "_")
+                    error = error.replace(_bad, "_")
+                if (sid, tool_call_id) in ledgered:
+                    skipped += 1
+                    continue
+                success_flag = "1" if success else "0"
+                print(f"{sid}|{tool_call_id}|{tool}|{ts_iso}|{duration_ms}|{success_flag}|{error}")
+    except Exception:
+        # Not just OSError: a line that raises (a non-numeric duration_ms)
+        # used to end only its own file's interpreter, keeping the rows already
+        # printed. One interpreter now serves every file, so the same failure
+        # is contained to the same file here.
+        pass
 # Sentinel row carrying the pre-filtered count, always the last line. Hermes
 # session ids never take the form "__skipped__", so the bash loop treats that
 # sid as the sentinel rather than as an event.
 print(f"__skipped__|{skipped}")
 PY
-    )
+  )
 
-    if [[ -z "${rows}" ]]; then
-      continue
-    fi
-
+  if [[ -n "${rows}" ]]; then
     local sid tcid tool ts_iso dur success_flag error_msg
     while IFS='|' read -r sid tcid tool ts_iso dur success_flag error_msg; do
       [[ -z "${sid}" || -z "${tcid}" ]] && continue
@@ -206,7 +212,7 @@ PY
         warn "Failed: sid=${sid} tcid=${tcid} exit=${cmd_exit} output=${cmd_output}"
       fi
     done <<< "${rows}"
-  done
+  fi
 
   info "=== Done. Reported ${reported_count}, skipped ${skipped_count}. ==="
 }

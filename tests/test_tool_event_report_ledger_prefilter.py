@@ -21,15 +21,16 @@ REPORTER = SKILL / 'scripts' / 'tool-event-report.sh'
 
 class ToolEventLedgerPrefilterTests(unittest.TestCase):
 
-    def _run(self, records, ledger_lines):
+    def _run(self, records, ledger_lines, files=None):
         tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmpdir, True)
         state_dir = os.path.join(tmpdir, 'state', 'revenium')
         tool_events_dir = os.path.join(state_dir, 'tool-events')
         os.makedirs(tool_events_dir)
-        with open(os.path.join(tool_events_dir, 'sess_abc.jsonl'), 'w') as f:
-            for r in records:
-                f.write(json.dumps(r) + '\n')
+        for name, recs in (files or {'sess_abc.jsonl': records}).items():
+            with open(os.path.join(tool_events_dir, name), 'w') as f:
+                for r in recs:
+                    f.write(json.dumps(r) + '\n')
         ledger_path = os.path.join(state_dir, 'revenium-tool-events.ledger')
         with open(ledger_path, 'w') as f:
             f.writelines(line + '\n' for line in ledger_lines)
@@ -108,6 +109,39 @@ class ToolEventLedgerPrefilterTests(unittest.TestCase):
         self.assertEqual(len(meter_calls), 1, meter_calls)
         self.assertEqual(len([l for l in ledger_after if l.startswith('TOOL:sess_abc:toolu_dup:')]), 1)
         self.assertIn('Reported 1, skipped 1', log)
+
+    def test_spool_files_share_one_python_pass(self):
+        # Regression for 2026-10-12: one interpreter per spool file, each
+        # re-reading the whole TOOL ledger, cost 55s a tick on 676 files.
+        files = {f'sess_{i:02d}.jsonl': [self._record(f'toolu_{i:02d}')] for i in range(20)}
+        ledger = [f'TOOL:sess_abc:toolu_{i:02d}:1747700000.0' for i in range(20)]
+        files = {name: [dict(recs[0], sid='sess_abc')] for name, recs in files.items()}
+
+        meter_calls, python_calls, _, log = self._run([], ledger, files=files)
+
+        heredoc_passes = [c for c in python_calls if c == '-']
+        self.assertEqual(len(heredoc_passes), 1,
+                         f'all spool files must be read in one pass; got {len(heredoc_passes)}')
+        self.assertEqual(meter_calls, [])
+        self.assertIn('Reported 0, skipped 20', log)
+
+    def test_a_file_that_raises_does_not_stop_the_files_after_it(self):
+        # A non-numeric duration_ms raises inside the pass. It used to end only
+        # its own file's interpreter; with one pass for every file it must
+        # still end only its own file.
+        bad = dict(self._record('toolu_bad'), duration_ms='not-a-number')
+        files = {
+            'a_bad.jsonl': [self._record('toolu_a1'), bad, self._record('toolu_a2')],
+            'b_good.jsonl': [self._record('toolu_b1')],
+        }
+
+        meter_calls, _, ledger_after, _ = self._run([], [], files=files)
+
+        shipped = [l.split(':')[2] for l in ledger_after]
+        self.assertIn('toolu_a1', shipped, 'rows before the bad line still ship')
+        self.assertNotIn('toolu_a2', shipped, 'the rest of the bad file is dropped, as before')
+        self.assertIn('toolu_b1', shipped, 'a later file must not be dropped with it')
+        self.assertEqual(len(meter_calls), 2, meter_calls)
 
 
 if __name__ == '__main__':

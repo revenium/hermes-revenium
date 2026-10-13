@@ -2309,6 +2309,318 @@ PY
   exec 8>&-
 }
 
+# ---------------------------------------------------------------------------
+# Cross-tick no-op memo (REPORTER_MEMO_FILE in common.sh says why it exists).
+#
+# The per-session loop re-derives, every tick, the same answer for every
+# long-finished session: root agent, trace type, job id, owner claim, job
+# precheck -- one python3 spawn each -- and then reaches the ledger skip
+# ("HERMES:<sid>:<total>: already present"). The memo records a session that
+# reached that skip as a PURE no-op, together with a fingerprint of every input
+# the no-op depended on, and on a later tick skips the expensive half of the
+# iteration while the fingerprint still matches.
+#
+# The fingerprint is deliberately not "tokens unchanged" (the approach
+# tests/test_reporter_spawn_guards.py's WR-02 test forbids): a token-stable
+# session whose marker file gains a job marker must still reach jobs create,
+# and it does, because the marker file's size/mtime/inode is in the
+# fingerprint. The key covers the whole state.db row, both scripts' bytes, the
+# per-tick switches and plugin health; the file sigs cover the session's own
+# marker file, its root's marker file and its owner record. Sigs are taken in
+# the startup pass, BEFORE the loop reads anything, so a file that changes
+# mid-tick is recorded with its older sig and simply misses next tick.
+#
+# A session is recorded only when its iteration had no effect beyond counters
+# and its aux context line: no job created, no outcome left pending in the
+# queue, no ownership change, no root-gate deferral, process-level markers
+# dir. A hit replays exactly that: the counters, the aux context line (rebuilt
+# from this tick's source and subscriber key, which the loop still resolves
+# before the memo check, so no raw identity is ever written to the memo), and
+# skipped_count. Truncating or replacing either ledger invalidates the whole
+# memo, because "already reported" is only true while the ledger says so.
+#
+# Fail-safe in both directions: any error building the plan disables the memo
+# for the tick (full pass), and a missing or corrupt memo file is a miss.
+# ---------------------------------------------------------------------------
+_memo_build_plan() {
+  local sessions_file="$1" plan_file="$2"
+  MEMO_FILE="${REPORTER_MEMO_FILE}" \
+  SESSIONS_FILE="${sessions_file}" \
+  PLAN_FILE="${plan_file}" \
+  ROOT_MAP="${ROOT_SID_MAP_FILE:-}" \
+  MEMO_MARKERS_DIR="${MARKERS_DIR}" \
+  MEMO_OWNERS_DIR="${OWNERS_DIR}" \
+  MEMO_PLUGIN_STATUS="${PLUGIN_STATUS_FILE}" \
+  MEMO_CONFIG="${CONFIG_FILE}" \
+  MEMO_LEDGER="${LEDGER_FILE}" \
+  MEMO_JOBS_LEDGER="${JOBS_LEDGER_FILE}" \
+  MEMO_SCRIPTS="${SCRIPT_DIR}/hermes-report.sh:${SCRIPT_DIR}/common.sh" \
+  MEMO_RESOLVER="${SCRIPT_DIR}/resolve-markers-dir.py" \
+  MEMO_ALIASES="${REVENIUM_MODEL_ALIASES:-}" \
+  MEMO_SWITCHES="v1|${LEGACY_COMPLETIONS_SKIP:-}|${OWNERSHIP_PROTOCOL_ACTIVE:-}|${JOBS_CLI_CAPABLE:-}|${TRACE_TYPE_CLI_CAPABLE:-}|${AUX_METERING_ENABLED:-}|${EVENT_PATH_LIVE:-}|${SUBSCRIBER_EMAIL_MODE:-}|${MARKERS_DIR}|${OWNERS_DIR}|${REVENIUM_AGENT_NAME:-}|${REVENIUM_SQUAD_NAME:-}" \
+  python3 - <<'PY' 2>/dev/null
+import hashlib, json, os, stat
+
+env = os.environ
+
+
+def sig(path):
+    # Full mode, not just the file type: a chmod that makes an unreadable
+    # marker readable again must change the sig. A regular file that exists
+    # but cannot be read is flagged '!': its reader failed open, so whatever
+    # the pass concluded from it must never be cached.
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return '-'
+    flag = '!' if stat.S_ISREG(st.st_mode) and not os.access(path, os.R_OK) else ''
+    return '%s%o:%d:%d:%d' % (flag, st.st_mode, st.st_size, st.st_mtime_ns, st.st_ino)
+
+
+# The same resolver the loop shells out to per session, loaded once. A hit
+# skips that resolution, so it is only allowed while the session (and its
+# root) still resolve to this process's own markers dir; a session that now
+# belongs to another profile takes the full pass. A resolver that is absent or
+# fails to load answers exactly as common.sh's resolve_markers_dir wrapper does
+# when its python3 call fails: the process-level markers dir.
+_resolver = None
+try:
+    import importlib.util
+    _spec = importlib.util.spec_from_file_location(
+        'revenium_resolve_markers_dir', env['MEMO_RESOLVER'])
+    _resolver = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_resolver)
+except Exception:
+    _resolver = None
+
+
+def owned_here(*sids):
+    if _resolver is None:
+        return True
+    try:
+        return all(_resolver.resolve_markers_dir(s) == env['MEMO_MARKERS_DIR'] for s in sids if s)
+    except Exception:
+        return True
+
+
+# An append-only ledger never rewrites its head, so a hash of its first bytes
+# catches a rewrite the inode cannot: Linux hands a just-unlinked inode
+# straight to the next file created, so delete-and-recreate keeps the number.
+LEDGER_HEAD = 4096
+
+
+def ledger_head(path, n):
+    try:
+        with open(path, 'rb') as f:
+            return hashlib.sha1(f.read(n)).hexdigest()
+    except OSError:
+        return ''
+
+
+def ledger_state(path):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return [0, 0, 0, '']
+    n = min(st.st_size, LEDGER_HEAD)
+    return [st.st_ino, st.st_size, n, ledger_head(path, n)]
+
+
+h = hashlib.sha1(env['MEMO_SWITCHES'].encode('utf-8', 'surrogateescape'))
+h.update(b'\x00' + env.get('MEMO_ALIASES', '').encode('utf-8', 'surrogateescape'))
+for p in env['MEMO_SCRIPTS'].split(':'):
+    with open(p, 'rb') as f:
+        h.update(b'\x00' + f.read())
+healthy = 'true'
+try:
+    with open(env['MEMO_PLUGIN_STATUS'], encoding='utf-8') as f:
+        healthy = 'true' if json.load(f).get('healthy', True) else 'false'
+except Exception:
+    pass
+h.update(b'\x00' + healthy.encode())
+# Content, not mtime: a rewrite that changes nothing must not drop the memo.
+try:
+    with open(env['MEMO_CONFIG'], 'rb') as f:
+        h.update(b'\x00' + hashlib.sha1(f.read()).hexdigest().encode())
+except OSError:
+    h.update(b'\x00-')
+global_key = h.hexdigest()
+
+roots = {}
+try:
+    with open(env['ROOT_MAP'], encoding='utf-8', errors='surrogateescape') as f:
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) >= 2 and parts[0]:
+                roots[parts[0]] = parts[1]
+except OSError:
+    pass
+
+# A ledger that was replaced (new inode or new head) or shrank (truncated,
+# rotated) no longer says what it said when a record was written: drop every
+# record.
+ledgers = {'ledger': ledger_state(env['MEMO_LEDGER']),
+           'jobs': ledger_state(env['MEMO_JOBS_LEDGER'])}
+records = {}
+try:
+    with open(env['MEMO_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        header = json.loads(f.readline())
+        ok = header.get('v') == 1
+        for name, (ino, size, _n, _head) in ledgers.items():
+            old = header.get(name)
+            if (not isinstance(old, list) or len(old) != 4 or old[0] != ino
+                    or size < old[1]
+                    or ledger_head(env['MEMO_LEDGER' if name == 'ledger'
+                                       else 'MEMO_JOBS_LEDGER'], old[2]) != old[3]):
+                ok = False
+        if ok:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                    records[r['sid']] = r
+                except Exception:
+                    continue
+except Exception:
+    records = {}
+
+markers_dir = env['MEMO_MARKERS_DIR']
+owners_dir = env['MEMO_OWNERS_DIR']
+SEP = '\x1f'
+with open(env['SESSIONS_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+    rows = f.read().split('\n')
+if rows and rows[-1] == '':
+    rows.pop()
+out = []
+for row in rows:
+    sid = row.split('|', 1)[0]
+    if not sid:
+        out.append('M')
+        continue
+    root = roots.get(sid, '')
+    key = hashlib.sha1((global_key + SEP + row).encode('utf-8', 'surrogateescape')).hexdigest()
+    owner_name = sid.replace('/', '_').replace('\x00', '_')[:200]
+    sigs = ','.join([
+        sig(os.path.join(markers_dir, sid + '.jsonl')),
+        sig(os.path.join(markers_dir, (root or sid) + '.jsonl')),
+        sig(os.path.join(owners_dir, owner_name)),
+    ])
+    # N: take the full pass and do not record it either -- an unreadable
+    # marker or owner file, or a session this profile does not own.
+    if '!' in sigs or not owned_here(sid, root):
+        out.append(SEP.join(['N', sid]))
+        continue
+    r = records.get(sid)
+    if r and r.get('key') == key and r.get('sigs') == sigs and r.get('root') == root and root:
+        out.append(SEP.join(['H', sid, key, sigs, root, r['supp'], str(r['fb']), str(r['ab']),
+                             r['aux'], r['agent'], r['trace'], r['auxjob']]))
+    else:
+        out.append(SEP.join(['M', sid, key, sigs, root]))
+with open(env['PLAN_FILE'], 'w', encoding='utf-8', errors='surrogateescape') as f:
+    f.write(json.dumps(ledgers) + '\n')
+    for line in out:
+        f.write(line + '\n')
+PY
+}
+
+# Writes the next memo: every record that hit this tick, carried over
+# unchanged, plus every no-op recorded this tick. A session absent from this
+# tick's list drops out, so the file never outgrows the session set.
+_memo_finalize() {
+  local plan_file="$1" hits_file="$2" new_file="$3"
+  MEMO_FILE="${REPORTER_MEMO_FILE}" \
+  PLAN_FILE="${plan_file}" \
+  HITS_FILE="${hits_file}" \
+  NEW_FILE="${new_file}" \
+  python3 - <<'PY' 2>/dev/null
+import json, os, tempfile
+
+env = os.environ
+with open(env['PLAN_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+    ledgers = json.loads(f.readline())
+old = {}
+try:
+    with open(env['MEMO_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        f.readline()
+        for line in f:
+            try:
+                r = json.loads(line)
+                old[r['sid']] = r
+            except Exception:
+                continue
+except OSError:
+    pass
+keep = {}
+try:
+    with open(env['HITS_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        for line in f:
+            sid = line.rstrip('\n')
+            if sid in old:
+                keep[sid] = old[sid]
+except OSError:
+    pass
+fields = ('sid', 'key', 'sigs', 'root', 'supp', 'fb', 'ab', 'aux', 'agent', 'trace', 'auxjob')
+try:
+    with open(env['NEW_FILE'], encoding='utf-8', errors='surrogateescape') as f:
+        for line in f:
+            parts = line.rstrip('\n').split('\x1f')
+            if len(parts) != len(fields):
+                continue
+            r = dict(zip(fields, parts))
+            r['fb'] = int(r['fb'])
+            r['ab'] = int(r['ab'])
+            keep[r['sid']] = r
+except (OSError, ValueError):
+    pass
+memo = env['MEMO_FILE']
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(memo) or '.', prefix='.reporter-memo.')
+with os.fdopen(fd, 'w', encoding='utf-8', errors='surrogateescape') as f:
+    f.write(json.dumps(dict(v=1, **ledgers)) + '\n')
+    for r in keep.values():
+        f.write(json.dumps(r, ensure_ascii=True) + '\n')
+# os.rename, not os.replace: same atomic swap on POSIX, and this script keeps
+# os.replace confined to the ownership takeover (test_a24 pins that).
+os.rename(tmp, memo)
+print(len(keep))
+PY
+}
+
+# Called from the ledger skip with the loop's locals in (dynamic) scope.
+# Records the session only when this iteration was a pure no-op; any doubt
+# returns without recording, which costs nothing but a full pass next tick.
+_memo_record_noop() {
+  # Marker and owner sigs were taken for the process-level dirs only.
+  [[ "${session_markers_dir}" == "${MARKERS_DIR}" && "${root_markers_dir}" == "${MARKERS_DIR}" ]] || return 0
+  [[ -n "${memo_root}" && "${memo_root}" == "${root_sid}" ]] || return 0
+  # No ownership change, takeover, event-path skip or root-gate deferral.
+  [[ "${claim_unavailable_count}:${event_owned_skip_count}:${takeover_count}:${takeover_unavailable_count}:${root_gate_deferred_count}:${#aux_deferred_sids}" == "${memo_s_other}" ]] || return 0
+  # Every outcome this iteration queued must already be ledgered. A pending
+  # one (a CANCELLED held while its session is open, an outcome waiting on
+  # its create) has to be re-queued every tick until it lands, and a job the
+  # precheck just created has no outcome yet, so either keeps it out.
+  local _i _id
+  _i="${memo_s_q}"
+  while [[ "${_i}" -lt "${#job_outcome_queue[@]}" ]]; do
+    _id="${job_outcome_queue[${_i}]%%|*}"
+    grep -q "^JOB:${_id}:outcome:" "${JOBS_LEDGER_FILE}" 2>/dev/null || return 0
+    ((_i++)) || true
+  done
+  local _aux="0" _agent="" _trace="" _auxjob=""
+  if [[ "${#aux_session_ctx}" -gt "${memo_s_aux}" ]]; then
+    _aux="1"
+    _agent="${_aux_ctx_root_agent_name:-}"
+    _trace="${root_trace_type:-}"
+    _auxjob="${_aux_ctx_aux_job_id:-}"
+  fi
+  local _f
+  for _f in "${sid}" "${_agent}" "${_trace}" "${_auxjob}"; do
+    case "${_f}" in *$'\x1f'*|*$'\n'*|*$'\r'*) return 0 ;; esac
+  done
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' \
+    "${sid}" "${memo_key}" "${memo_sigs}" "${root_sid}" "${sid_legacy_retained}" \
+    "$((fallback_tick_count - memo_s_fb))" "$((claim_abstained_count - memo_s_ab))" \
+    "${_aux}" "${_agent}" "${_trace}" "${_auxjob}" >> "${memo_new_file}"
+}
+
 main() {
   info "=== Hermes Metering Reporter starting ==="
 
@@ -2671,13 +2983,47 @@ PY
   else
     chmod 600 "${subscriber_map_file}" 2>/dev/null || true
   fi
-  trap 'rm -f "${root_sid_map_file:-}" "${subscriber_map_file:-}" 2>/dev/null' EXIT INT TERM
+  trap 'rm -f "${root_sid_map_file:-}" "${subscriber_map_file:-}" "${memo_plan_file:-}" "${memo_hits_file:-}" "${memo_new_file:-}" 2>/dev/null' EXIT INT TERM
   printf '%s\n' "${sessions}" | cut -d'|' -f1 \
     | build_root_sid_map "${root_sid_map_file}"
   export ROOT_SID_MAP_FILE="${root_sid_map_file}"
   build_subscriber_map "${subscriber_map_file}"
 
+  # Cross-tick no-op memo (see _memo_build_plan). The plan holds one line per
+  # line of ${sessions}, in loop order, read by index at the top of every
+  # iteration -- before any `continue` -- so it can never fall out of step.
+  # File-scoped, not `local`, for the same reason as root_sid_map_file: the
+  # EXIT trap that removes them outlives main().
+  local memo_enabled="false" memo_idx=0 memo_hit_count=0 memo_ledgers_line=""
+  local memo_plan=()
+  memo_plan_file="" memo_hits_file="" memo_new_file=""
+  case "${REVENIUM_REPORTER_MEMO:-enabled}" in
+    disabled|off|false|0) ;;
+    *)
+      memo_plan_file="$(mktemp 2>/dev/null || true)"
+      memo_hits_file="$(mktemp 2>/dev/null || true)"
+      memo_new_file="$(mktemp 2>/dev/null || true)"
+      if [[ -n "${memo_plan_file}" && -n "${memo_hits_file}" && -n "${memo_new_file}" ]] \
+        && printf '%s\n' "${sessions}" > "${memo_new_file}" \
+        && _memo_build_plan "${memo_new_file}" "${memo_plan_file}"; then
+        : > "${memo_new_file}"
+        local _memo_plan_line
+        { IFS= read -r memo_ledgers_line
+          while IFS= read -r _memo_plan_line; do memo_plan+=("${_memo_plan_line}"); done
+        } < "${memo_plan_file}"
+        memo_enabled="true"
+      fi
+      ;;
+  esac
+
   while IFS='|' read -r sid model source input_tokens output_tokens       cache_read cache_write reasoning_tokens estimated_cost       api_calls started_at ended_at billing_provider user_id; do
+
+    # Memo: consume this iteration's plan line first, unconditionally.
+    local memo_line=""
+    if [[ "${memo_enabled}" == "true" ]]; then
+      memo_line="${memo_plan[${memo_idx}]:-}"
+      ((memo_idx++)) || true
+    fi
 
     local total_tokens=$((input_tokens + output_tokens))
     if [[ "${total_tokens}" -eq 0 ]]; then
@@ -2904,6 +3250,40 @@ PY
     if [[ -n "${subscriber_key}" ]]; then
       subscriber_log_suffix=" subscriber=$(mask_subscriber_email_for_log "${subscriber_key}")"
     fi
+
+    # Memo hit: last tick this exact session (same state.db row, same marker
+    # and owner files, same scripts and switches) was a pure no-op that ended
+    # at the ledger skip below. Replay what that no-op left behind and skip
+    # the per-session python3 spawns. Placed after the subscriber block so the
+    # aux context line is rebuilt from THIS tick's identity, never from disk.
+    local memo_kind="" memo_sid="" memo_key="" memo_sigs="" memo_root="" memo_supp=""
+    local memo_fb=0 memo_ab=0 memo_aux="" memo_agent="" memo_trace="" memo_auxjob=""
+    if [[ -n "${memo_line}" ]]; then
+      IFS=$'\x1f' read -r memo_kind memo_sid memo_key memo_sigs memo_root memo_supp \
+        memo_fb memo_ab memo_aux memo_agent memo_trace memo_auxjob <<< "${memo_line}"
+    fi
+    if [[ "${memo_kind}" == "H" && "${memo_sid}" == "${sid}" && "${memo_root}" == "${root_sid}" \
+          && "${memo_supp}" == "${sid_legacy_retained}" \
+          && "${memo_fb}" =~ ^[0-9]+$ && "${memo_ab}" =~ ^[0-9]+$ ]]; then
+      ((fallback_tick_count += memo_fb)) || true
+      ((claim_abstained_count += memo_ab)) || true
+      if [[ "${memo_aux}" == "1" ]]; then
+        local _memo_ctx_sid="${sid//[|$'\n'$'\r']/_}"
+        local _memo_ctx_root_sid="${root_sid//[|$'\n'$'\r']/_}"
+        local _memo_ctx_source="${source//[|$'\n'$'\r']/_}"
+        local _memo_ctx_subscriber_key="${subscriber_key//[|$'\n'$'\r']/_}"
+        aux_session_ctx+="${_memo_ctx_sid}|${_memo_ctx_root_sid}|${memo_agent}|${memo_trace}|${memo_auxjob}|${_memo_ctx_source}|${_memo_ctx_subscriber_key}"$'\n'
+      fi
+      ((skipped_count++)) || true
+      ((memo_hit_count++)) || true
+      printf '%s\n' "${sid}" >> "${memo_hits_file}"
+      continue
+    fi
+    # Miss: snapshot what the iteration may change, so the ledger skip below
+    # can tell a pure no-op (recordable) from an iteration that did work.
+    local memo_s_fb="${fallback_tick_count}" memo_s_ab="${claim_abstained_count}"
+    local memo_s_other="${claim_unavailable_count}:${event_owned_skip_count}:${takeover_count}:${takeover_unavailable_count}:${root_gate_deferred_count}:${#aux_deferred_sids}"
+    local memo_s_aux="${#aux_session_ctx}" memo_s_q="${#job_outcome_queue[@]}"
 
     # Phase 28 (TRACE-03): resolve, once per session-loop iteration, the
     # markers directory that OWNS the current session and the one that owns
@@ -3883,6 +4263,7 @@ PY
     local ledger_key="HERMES:${sid}:${total_tokens}"
     if grep -q "^HERMES:${sid}:${total_tokens}:" "${LEDGER_FILE}" 2>/dev/null; then
       ((skipped_count++)) || true
+      [[ "${memo_kind}" == "M" ]] && _memo_record_noop
       continue
     fi
 
@@ -5080,6 +5461,15 @@ PY
     fi
     fi # LEGACY_COMPLETIONS_SKIP + session_event_owned guard (Phase 32 Plan 03 C-11/D-13; quick-260817-tfe OWN-01)
   done <<< "${sessions}"
+
+  if [[ "${memo_enabled}" == "true" ]]; then
+    local _memo_kept
+    _memo_kept="$(_memo_finalize "${memo_plan_file}" "${memo_hits_file}" "${memo_new_file}")" || _memo_kept=""
+    if [[ "${memo_hit_count}" -gt 0 ]]; then
+      info "memo: skipped ${memo_hit_count} unchanged session(s) without re-deriving them (memo now holds ${_memo_kept:-?})"
+    fi
+  fi
+  rm -f "${memo_plan_file:-}" "${memo_hits_file:-}" "${memo_new_file:-}" 2>/dev/null
 
   # One line per tick, not per session or marker: the deferral repeats every
   # tick for as long as state.db stays unreadable to the gate.
