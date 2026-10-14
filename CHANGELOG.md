@@ -137,6 +137,17 @@ this repository.
   `job re-judge for sid=... checked N job(s), verdicts: ...`; an answer with no usable
   verdict logs a warning carrying the model's escaped, shortened words; the fold line lists
   the per-arc statuses. A `CANCELLED` outcome already shipped is still final.
+- A session is no longer labelled `unclassified` for good because the task-label model call
+  failed once (`ent`, 2026-10-14, session `20261014_165924_2f9664`: the provider's stream
+  produced nothing for 10 seconds, Hermes' retries hit a connection error, and the session's
+  completion shipped `task_type=unclassified` while the job call seven seconds later
+  succeeded; 5 of ~258 sessions on that host in two weeks). A failed call (an exception or a
+  timeout) now writes no marker and skips job inference for that trigger, so the next one (a
+  later turn, `on_session_end`, `on_session_finalize`) classifies the session and infers its
+  job together; a job written without a task marker above it would own no completion. A
+  label the model answered but the validator rejects still writes `unclassified` once, and a
+  session no trigger can classify still ships as `unclassified`. The label call's timeout
+  rises from 10 to 20 seconds, the job call's budget.
 - A job's final answer is no longer cut to 500 characters before the classifier judges it
   (`ent`, 2026-10-14, the same two-goal run after the fix above: the re-judge said `FAILED`,
   "only two announcements, and the second link is truncated", about an answer that had all

@@ -155,6 +155,8 @@ Two dimensions have separate defaults in `common.sh`: `REVENIUM_AGENT_NAME` (the
 
 The `revenium-classifier` plugin (`skills/revenium/plugins/revenium-classifier/`) registers four Hermes hooks: `on_session_end`, `on_session_finalize`, `post_llm_call` and `post_api_request` (added in Phase 32 for the per-API-call event spool). This lets it classify every session shape (gateway-served, CLI, interactive, ACP, cron). `classifier.py` reads the session transcript from `state.db`, asks an auxiliary LLM for a `task_type` (and, for agentic work, a job), validates the label against `LABEL_RE` plus `TRIVIAL_BLOCKLIST`, persists new labels into `task-taxonomy.json` / `job-taxonomy.json` and writes a `GUARDRAIL` + `CHAT` marker pair to `markers/<sid>.jsonl` under a single `fcntl.LOCK_EX`. Marker records carry `{muid, ts, sid, task_type, operation_type, trace_id}` plus `agentic_job_id` for subagent sessions.
 
+A failed task-label model call (exception or timeout, `CLASSIFY_CALL_FAILED`) writes no marker and skips job inference for that trigger, because `_session_already_classified` latches on any pair, `unclassified` included, so writing one on a transient provider error lost the label for the session's lifetime; the next trigger retries both. A label the model answered but `_validate_label` rejects still writes `unclassified` once.
+
 Two invariants:
 
 - **`run_classification_async` must never raise.** Every error path is caught and logged with `logger.warning`. An uncaught exception silently drops a turn's classification.

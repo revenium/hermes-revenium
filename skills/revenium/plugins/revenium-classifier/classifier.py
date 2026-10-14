@@ -66,6 +66,23 @@ SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF
 # if they match LABEL_RE. The validator falls through to "unclassified".
 TRIVIAL_BLOCKLIST = {"ack", "acknowledgment", "greeting", "confirmation", "hello", "thanks"}
 
+# What _classify_via_llm returns when the model CALL failed (an exception or a
+# timeout), as opposed to a model that answered with a label the validator
+# rejects. It cannot pass LABEL_RE, so a caller that misses the check still
+# validates it to "unclassified"; run_classification_async checks for it and
+# writes nothing, so a later trigger retries (see _CLASSIFY_TIMEOUT_SECONDS).
+CLASSIFY_CALL_FAILED = "<classify-call-failed>"
+
+# The task-label call's timeout. It was 10 s; on ent (2026-10-14, session
+# 20261014_165924_2f9664) the provider's stream produced nothing for 10 s,
+# Hermes' two retries hit a connection error and the session was written
+# "unclassified" for good, while the job call (20 s) succeeded seven seconds
+# later. 20 s is the job call's budget. A failed call now ends around 23 s
+# (Hermes adds ~3 s of retry back-off), inside Hermes' 30 s cap on the bounded
+# post_llm_call / on_session_end hooks; a hook that does overrun is abandoned,
+# not killed, so the classification still finishes on its worker.
+_CLASSIFY_TIMEOUT_SECONDS = 20.0
+
 logger = logging.getLogger("revenium_classifier")
 
 # BUG-4 (multiplex correctness): in the opt-in gateway.multiplex_profiles mode a
@@ -4611,7 +4628,9 @@ def _session_already_classified(sid: str, paths: "_Paths | None" = None) -> bool
 
     The literal value "unclassified" counts as classified. A trivial opening
     turn (TRIVIAL_BLOCKLIST membership, see _validate_label) and an active
-    guardrail halt both yield "unclassified". Excluding that value from the
+    guardrail halt both yield "unclassified". A FAILED model call does not:
+    it writes nothing (CLASSIFY_CALL_FAILED), so this latch never closes on a
+    transient provider error. Excluding that value from the
     latch would make a session whose first turn was "hi" pay a fresh
     auxiliary-LLM inference on every subsequent turn until a substantive one
     arrived — spend scaling with turn count, which is exactly what HOOK-03
@@ -5138,7 +5157,7 @@ async def _classify_via_llm(context: dict, response_preview: str,
             ],
             temperature=0.0,
             max_tokens=64,
-            timeout=10.0,
+            timeout=_CLASSIFY_TIMEOUT_SECONDS,
         )
         # Extract content; tolerate openai SDK response shape variations.
         try:
@@ -5149,7 +5168,7 @@ async def _classify_via_llm(context: dict, response_preview: str,
         return (raw or "").strip()
     except Exception as exc:
         logger.warning("revenium-classifier LLM call failed: %s", exc)
-        return "unclassified"
+        return CLASSIFY_CALL_FAILED
 
 
 def _validate_label(label: str) -> str:
@@ -6103,6 +6122,24 @@ async def run_classification_async(
                     {"message": user_msg}, asst_resp or "", paths=p,
                     labels=task_labels,
                 )
+            if raw_label == CLASSIFY_CALL_FAILED:
+                # The model call failed (exception or timeout); the model gave
+                # no answer to validate. Write nothing: "unclassified" would
+                # latch the session for its lifetime (see
+                # _session_already_classified), so a transient provider error
+                # cost it its label for good. With no pair written, the next
+                # trigger (a later post_llm_call, on_session_end,
+                # on_session_finalize) classifies again. Job inference is
+                # skipped too: a job marker with no task marker above it owns
+                # no completion (the reporter binds task markers to jobs by
+                # position), so it waits for the retry that writes both. If
+                # every trigger fails, the session ships markerless as
+                # "unclassified", the same label the old path wrote.
+                logger.warning(
+                    "revenium-classifier: task_type call failed for sid=%s, "
+                    "writing nothing so a later trigger retries", session_id,
+                )
+                return
             task_type = _validate_label(raw_label)
 
             # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).

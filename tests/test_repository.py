@@ -4434,11 +4434,11 @@ exit 0
                     model=context.get('model'),
                     platform=context.get('platform'),
                 ))
-            # Marker file SHOULD exist with task_type=unclassified (LLM failure fallthrough)
+            # A failed model CALL writes nothing (CLASSIFY_CALL_FAILED), so a
+            # later trigger retries instead of latching "unclassified" for the
+            # session's lifetime (ent, 2026-10-14). It still must not raise.
             marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
-            self.assertTrue(marker_path.is_file())
-            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
-            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+            self.assertFalse(marker_path.is_file())
 
             # Case B — _write_marker_pair raises (filesystem-level catastrophic failure)
             shutil.rmtree(handler.MARKERS_DIR, ignore_errors=True)

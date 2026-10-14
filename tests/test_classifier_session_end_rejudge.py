@@ -657,5 +657,103 @@ class FinalAnswerIsReadWholeTests(_Harness):
         self.assertNotIn('m' * 6000, prompt)
 
 
+
+# ---------------------------------------------------------------------------
+# 5. A failed task-label call is retried, not latched (ent, 2026-10-14,
+#    20261014_165924_2f9664: the label call timed out, the session was written
+#    "unclassified" for good, and the job call seven seconds later succeeded)
+# ---------------------------------------------------------------------------
+
+JOB_SUCCESS = json.dumps([{'agentic_job_id': 'recent_ai_cost_announcements',
+                           'job_name': 'Research recent AI cost announcements',
+                           'job_type': 'research', 'status': 'SUCCESS'}])
+
+
+class FailedLabelCallIsRetriedTests(_Harness):
+
+    def _task_markers(self):
+        return [r for r in _read_jsonl(self._marker_path()) if r.get('kind') != 'job']
+
+    def test_a_failed_label_call_writes_nothing_and_skips_job_inference(self):
+        self._load()
+        with _capture(logging.WARNING) as records:
+            calls = self._fire('_on_post_llm_call', [TimeoutError('no output within 20s')])
+        self.assertEqual(len(calls.prompts), 1, 'no job-inference call after a failed label call')
+        self.assertEqual(_read_jsonl(self._marker_path()), [], 'no task pair, no job marker')
+        self.assertTrue(any('writing nothing so a later trigger retries' in r.getMessage()
+                            for r in records))
+
+    def test_the_next_trigger_classifies_and_infers_the_job(self):
+        """The incident's sequence with the fix: post_llm_call's label call
+        fails, on_session_end retries and writes the real label, then the job."""
+        self._load()
+        self._fire('_on_post_llm_call', [ConnectionError('Connection error.')])
+        ended = self._fire('_on_session_end', [_resp('llm_spend_research_note'), _resp(JOB_SUCCESS)])
+        self.assertEqual(len(ended.prompts), 2)
+        self.assertEqual([r['task_type'] for r in self._task_markers()],
+                         ['llm_spend_research_note'] * 2)
+        [job] = self._job_markers()
+        self.assertEqual(job['status'], 'SUCCESS')
+        lines = _read_jsonl(self._marker_path())
+        self.assertNotEqual(lines[0].get('kind'), 'job', 'the task pair sits above the job')
+        self.assertTrue(self._sentinel())
+
+    def test_every_trigger_failing_leaves_the_session_markerless(self):
+        """If no trigger ever reaches the model the session ships markerless,
+        which the reporter labels "unclassified": the old outcome, not a worse one."""
+        self._load()
+        for hook in ('_on_post_llm_call', '_on_session_end', '_on_session_finalize'):
+            self._fire(hook, [ConnectionError('Connection error.')])
+        self.assertEqual(_read_jsonl(self._marker_path()), [])
+        self.assertTrue(self._sentinel(), 'the session-end hooks still release the reporter')
+
+    def test_an_invalid_label_still_writes_unclassified_and_latches(self):
+        """Only a failed CALL is retried. A model that answered with a label the
+        validator rejects keeps today's behaviour: "unclassified", once."""
+        self._load()
+        self._fire('_on_post_llm_call', [_resp('Hello there!'), _resp('[]')])
+        self.assertEqual([r['task_type'] for r in self._task_markers()], ['unclassified'] * 2)
+        again = self._fire('_on_session_end', [_resp('[]')])
+        self.assertEqual(len(again.prompts), 1, 'no second label call: the session is latched')
+        self.assertEqual(len(self._task_markers()), 2)
+
+    def test_the_failure_sentinel_can_never_be_written_as_a_label(self):
+        _pkg, c = self._load()
+        self.assertIsNone(c.LABEL_RE.match(c.CLASSIFY_CALL_FAILED))
+        self.assertEqual(c._validate_label(c.CLASSIFY_CALL_FAILED), 'unclassified')
+
+    def test_the_label_call_gets_the_job_calls_twenty_second_budget(self):
+        _pkg, c = self._load()
+        seen = {}
+
+        def fake(**kwargs):
+            seen.update(kwargs)
+            return _resp('code_review')
+
+        import asyncio
+        with mock.patch.object(c, 'call_llm', side_effect=fake):
+            out = asyncio.run(c._classify_via_llm({'message': 'm'}, 'r', labels=[]))
+        self.assertEqual(out, 'code_review')
+        self.assertEqual(seen['timeout'], 20.0)
+        self.assertEqual(c._CLASSIFY_TIMEOUT_SECONDS, 20.0)
+
+    def test_classify_via_llm_reports_a_failed_call_distinctly(self):
+        _pkg, c = self._load()
+        import asyncio
+        with mock.patch.object(c, 'call_llm', side_effect=RuntimeError('down')):
+            out = asyncio.run(c._classify_via_llm({'message': 'm'}, 'r', labels=[]))
+        self.assertEqual(out, c.CLASSIFY_CALL_FAILED)
+
+    def test_no_llm_client_still_writes_unclassified(self):
+        """call_llm is None means Hermes has no auxiliary client at all: a
+        standing condition, not a transient one, so it keeps writing
+        "unclassified" rather than retrying on every turn."""
+        _pkg, c = self._load()
+        import asyncio
+        with mock.patch.object(c, 'call_llm', None):
+            out = asyncio.run(c._classify_via_llm({'message': 'm'}, 'r', labels=[]))
+        self.assertEqual(out, 'unclassified')
+
+
 if __name__ == '__main__':
     unittest.main()
