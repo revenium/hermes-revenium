@@ -14,17 +14,21 @@ value. The ent session wrote `revenium_x_intelligence_scan_9736` and
 with the first.
 
 The fix is at the producer. `_fold_jobs_into_one` reduces the validated jobs to
-the FIRST one, which keeps its id and type; the other arcs' names ride in its
-job name, and its status never claims more than every arc supports (a SUCCESS
-primary with a sibling that was not a clear SUCCESS becomes CANCELLED, which
-the re-judge revisits). Nothing in the reporter or the marker schema changes.
+the FIRST one, which keeps its id, type and status; the other arcs' names ride in
+its job name. The job's status is the primary arc's, whatever the siblings came
+back as (diagnosed on `ent`, 2026-10-14: an earlier rule demoted a SUCCESS
+primary to CANCELLED when any sibling was not a clear SUCCESS, so one
+unconfirmed side task kept a finished job from being valued). Nothing in the
+reporter or the marker schema changes.
 
 Pinned here:
-  * the fold itself (identity, name budget, status matrix, purity);
+  * the fold itself (identity, name budget, status = the primary's, purity);
   * Step 7 end to end: the built-in LLM path AND a registered classification
     boundary implementation both yield one marker, one taxonomy entry and one
     evaluator call;
-  * the re-judge sees the folded job as one arc;
+  * the fold log line carries the per-arc statuses (nothing else records them);
+  * the re-judge sees the folded job as one arc, and is told its status is the
+    main goal's, so it cannot hold the job back on a folded-in goal;
   * the whole chain with the REAL reporter: one `jobs create`, every shipped
     completion linked to that one job.
 
@@ -234,27 +238,31 @@ class FoldJobsUnitTests(unittest.TestCase):
         self.c._fold_jobs_into_one(jobs)
         self.assertEqual(jobs, before)
 
-    def test_status_never_claims_more_than_every_arc_supports(self):
-        table = [
-            # (primary, siblings) -> expected status
-            (('SUCCESS',), ('SUCCESS',), 'SUCCESS'),
-            (('SUCCESS',), ('SUCCESS', 'SUCCESS'), 'SUCCESS'),
-            (('SUCCESS',), ('CANCELLED',), 'CANCELLED'),
-            (('SUCCESS',), ('FAILED',), 'CANCELLED'),
-            (('SUCCESS',), ('SUCCESS', 'CANCELLED'), 'CANCELLED'),
-            (('CANCELLED',), ('SUCCESS',), 'CANCELLED'),
-            (('CANCELLED',), ('FAILED',), 'CANCELLED'),
-            (('FAILED',), ('SUCCESS',), 'FAILED'),
-            (('FAILED',), ('CANCELLED',), 'FAILED'),
-        ]
-        for (primary,), siblings, expected in table:
-            with self.subTest(primary=primary, siblings=siblings):
-                jobs = [_valid('p', primary, failure_reason='primary broke'
-                               if primary == 'FAILED' else '')]
-                jobs += [_valid('s%d' % i, s, failure_reason='sibling broke'
-                                if s == 'FAILED' else '') for i, s in enumerate(siblings)]
-                [folded] = self.c._fold_jobs_into_one(jobs)
-                self.assertEqual(folded['status'], expected)
+    def test_the_job_takes_the_primarys_status_whatever_the_siblings_are(self):
+        """The folded-in arcs own cost and add a name; they never vote on the
+        status. Every primary x sibling combination keeps the primary's."""
+        for primary in ('SUCCESS', 'CANCELLED', 'FAILED'):
+            for siblings in (('SUCCESS',), ('CANCELLED',), ('FAILED',),
+                             ('SUCCESS', 'CANCELLED'), ('FAILED', 'FAILED', 'SUCCESS')):
+                with self.subTest(primary=primary, siblings=siblings):
+                    jobs = [_valid('p', primary, failure_reason='primary broke'
+                                   if primary == 'FAILED' else '')]
+                    jobs += [_valid('s%d' % i, s, failure_reason='sibling broke'
+                                    if s == 'FAILED' else '') for i, s in enumerate(siblings)]
+                    [folded] = self.c._fold_jobs_into_one(jobs)
+                    self.assertEqual(folded['status'], primary)
+
+    def test_a_success_primary_is_not_demoted_by_an_unconfirmed_sibling(self):
+        """The incident rule, inverted. A SUCCESS primary with a CANCELLED or
+        FAILED sibling used to become CANCELLED (never evaluated, so no value)."""
+        for sibling in ('CANCELLED', 'FAILED'):
+            with self.subTest(sibling=sibling):
+                [folded] = self.c._fold_jobs_into_one([
+                    _valid('p', 'SUCCESS', name='Main goal'),
+                    _valid('s', sibling, name='Side task',
+                           failure_reason='side task broke' if sibling == 'FAILED' else '')])
+                self.assertEqual(folded['status'], 'SUCCESS')
+                self.assertEqual(folded['job_name'], 'Main goal (also: Side task)')
 
     def test_a_failed_primary_keeps_its_own_reason(self):
         [folded] = self.c._fold_jobs_into_one([
@@ -262,14 +270,19 @@ class FoldJobsUnitTests(unittest.TestCase):
         self.assertEqual(folded['status'], 'FAILED')
         self.assertEqual(folded['failure_reason'], 'tests failed')
 
-    def test_a_demoted_success_carries_no_failure_reason(self):
-        """A sibling's FAILED reason must not leak onto a CANCELLED job: the
-        reporter ships a CANCELLED arc's own fixed explanation, and
-        _validate_job's rule is that only a FAILED arc has a reason."""
-        [folded] = self.c._fold_jobs_into_one([
-            _valid('p', 'SUCCESS'), _valid('s', 'FAILED', failure_reason='sibling broke')])
-        self.assertEqual(folded['status'], 'CANCELLED')
-        self.assertEqual(folded['failure_reason'], '')
+    def test_a_siblings_failure_reason_is_not_carried_onto_the_job(self):
+        """A sibling's FAILED reason must not leak onto a job that is not FAILED:
+        the reporter ships a SUCCESS or CANCELLED arc's own fixed explanation, and
+        _validate_job's rule is that only a FAILED arc has a reason. The sibling
+        is still named in the job name."""
+        for primary in ('SUCCESS', 'CANCELLED'):
+            with self.subTest(primary=primary):
+                [folded] = self.c._fold_jobs_into_one([
+                    _valid('p', primary, name='Main goal'),
+                    _valid('s', 'FAILED', name='Side task', failure_reason='sibling broke')])
+                self.assertEqual(folded['status'], primary)
+                self.assertEqual(folded['failure_reason'], '')
+                self.assertIn('Side task', folded['job_name'])
 
     def test_the_folded_name_never_exceeds_its_budget(self):
         budget = self.c.JOB_FOLD_NAME_MAX_BYTES
@@ -458,18 +471,49 @@ class OneClassificationOneJobTests(_Harness):
         self.assertEqual(sidecar[0]['double_counting_group'], self.SID)
         self.assertIn('assessment', job)
 
-    def test_a_success_primary_with_an_unconfirmed_sibling_is_not_valued(self):
-        """SUCCESS is for clear evidence of the whole job. The demoted CANCELLED
-        is never evaluated (ROI-09) and the re-judge settles it later."""
+    def test_a_success_primary_with_an_unconfirmed_sibling_is_valued_once(self):
+        """The job is the primary's: SUCCESS with one evaluator call and one
+        valued sidecar record, the sibling only named in the job name. (It used
+        to be demoted to CANCELLED, which is never evaluated, and shipped with
+        no value.)"""
         c = self._load()
         self._first_pass(c, [_arc('first_report', 'SUCCESS'),
                              _arc('second_report', 'CANCELLED')])
+        [job] = self._job_markers()
+        self.assertEqual(job['status'], 'SUCCESS')
+        self.assertEqual(job['job_name'], 'First report (also: Second report)')
+        self.assertEqual(self.evaluated, [job['agentic_job_id']])
+        self.assertIn('assessment', job)
+        [record] = self._sidecar_records()
+        self.assertEqual(record['execution_status'], 'SUCCESS')
+        self.assertEqual(record['abstention_reason'], '')
+        self.assertEqual(record['value_base'], 100.0)
+
+    def test_a_cancelled_primary_stays_cancelled_whatever_the_sibling_says(self):
+        """The mirror: a sibling's SUCCESS never promotes a primary the model
+        was not sure of. It is not evaluated; the re-judge settles it later."""
+        c = self._load()
+        self._first_pass(c, [_arc('first_report', 'CANCELLED'),
+                             _arc('second_report', 'SUCCESS')])
         [job] = self._job_markers()
         self.assertEqual(job['status'], 'CANCELLED')
         self.assertEqual(self.evaluated, [])
         self.assertNotIn('assessment', job)
         [record] = self._sidecar_records()
         self.assertEqual(record['abstention_reason'], 'not_evaluated_non_success')
+
+    def test_the_fold_log_line_carries_the_per_arc_statuses(self):
+        """The fold takes the primary's status, so 'what did the model say for
+        each arc' is the first question about a surprising job status, and no
+        other record holds it (the ent incident could not be settled without it)."""
+        c = self._load()
+        with self.assertLogs('revenium_classifier', level='INFO') as logs:
+            self._first_pass(c, [_arc('first_report', 'SUCCESS'),
+                                 _arc('second_report', 'CANCELLED'),
+                                 _arc('third_report', 'FAILED')])
+        [line] = [m for m in logs.output if 'folded' in m]
+        self.assertIn('folded 3 inferred arcs (statuses SUCCESS,CANCELLED,FAILED) '
+                      'into one job (status SUCCESS)', line)
 
     def test_only_the_surviving_jobs_type_enters_the_job_taxonomy(self):
         """A type that labels no job is vocabulary noise."""
@@ -548,9 +592,13 @@ class OneClassificationOneJobTests(_Harness):
         infer.assert_not_called()
         self.assertEqual(len(self._job_markers()), 1)
 
-    def test_the_rejudge_sees_the_folded_job_as_one_arc_covering_both(self):
-        """The folded name is what the re-judge shows the model, so it judges the
-        whole of what the job covers; it moves ONE job and mints no id."""
+    def test_the_rejudge_sees_the_folded_job_as_one_arc_with_a_main_goal(self):
+        """The folded name is what the re-judge shows the model, so it can see
+        everything the job covers; and it is told the job's status is its MAIN
+        goal's, so a folded-in goal it cannot verify does not hold a finished job
+        at CANCELLED (the fold gives the job the primary's status, and the
+        re-judge is the other writer of that status). It moves ONE job and mints
+        no id."""
         c = self._load()
         self._first_pass(c, [SCAN_CANCELLED, UPDATE_SUCCESS])
         [first] = self._job_markers()
@@ -567,14 +615,78 @@ class OneClassificationOneJobTests(_Harness):
             asyncio.run(c.run_classification_async(
                 session_id=self.SID, message='m', response='r'))
 
-        arcs_block = prompts[0].split('Arcs to re-check:')[1].split('Output ONLY')[0]
+        arcs_block = prompts[0].split('Arcs to re-check:')[1].split('An arc whose name')[0]
         self.assertEqual(arcs_block.count('(type:'), 1, arcs_block)
         self.assertIn('Scan X for Revenium', arcs_block)
         self.assertIn('Update the X intelligence radar skill', arcs_block)
+        self.assertIn('Decide such an arc\'s status from its main goal alone', prompts[0])
         after = self._job_markers()
         self.assertEqual([r['status'] for r in after], ['CANCELLED', 'SUCCESS'])
         self.assertEqual({r['agentic_job_id'] for r in after}, {first['agentic_job_id']})
         self.assertEqual(self.evaluated, [first['agentic_job_id']])
+
+
+class FoldedNameDetectionTests(unittest.TestCase):
+    """`_is_folded_job_name` recognises exactly the suffixes `_fold_job_name`
+    writes, and the re-judge prompt carries its main-goal instruction only for
+    such a name (a plain job's prompt is unchanged)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.c, _ = _load_classifier({
+            'HERMES_HOME': tempfile.mkdtemp(prefix='gsd-onejob-names-'),
+        })
+
+    @classmethod
+    def tearDownClass(cls):
+        _restore_env()
+
+    def test_every_suffix_the_fold_writes_is_recognised(self):
+        c = self.c
+        for names in (
+            [_valid('p', name='Main goal'), _valid('s', name='Side task')],
+            [_valid('p', name='Main goal'), _valid('a', name='A'), _valid('b', name='B')],
+            [_valid('p', name='P' * (c.JOB_FOLD_NAME_MAX_BYTES - 15)),
+             _valid('a', name='S' * 50), _valid('b', name='T' * 50)],  # "(+2 more)" only
+            [_valid('p', name='Main goal')] + [
+                _valid('e%d' % i, name='Extra arc number %d ' % i + 'x' * 40) for i in range(4)],
+        ):
+            [folded] = c._fold_jobs_into_one(names)
+            with self.subTest(name=folded['job_name']):
+                self.assertTrue(c._is_folded_job_name(folded['job_name']), folded['job_name'])
+
+    def test_a_plain_or_unchanged_name_is_not_folded(self):
+        c = self.c
+        for name in ('Main goal', '', None, 42, 'Main goal (also:', 'Main goal (also: x',
+                     'Fix the (also: shown) label in the footer, then more'):
+            with self.subTest(name=name):
+                self.assertFalse(c._is_folded_job_name(name))
+        # A fold that leaves the name alone (duplicate names) is not folded either.
+        [same] = c._fold_jobs_into_one([_valid('p', name='Scan X'), _valid('s', name='scan x')])
+        self.assertFalse(c._is_folded_job_name(same['job_name']))
+
+    def test_the_main_goal_instruction_appears_only_for_a_folded_arc(self):
+        c = self.c
+        plain = c._build_rejudge_prompt(TRANSCRIPT, [{
+            'job_name': 'Scan X', 'job_type': 'research'}])
+        folded = c._build_rejudge_prompt(TRANSCRIPT, [{
+            'job_name': 'Scan X (also: Update the skill)', 'job_type': 'research'}])
+        self.assertNotIn('main goal', plain)
+        self.assertIn('Decide such an arc\'s status from its main goal alone', folded)
+        # The instruction sits between the arc list and the output spec; nothing
+        # else in the prompt moves.
+        self.assertEqual(
+            folded.replace(folded[folded.index('An arc whose name'):folded.index('Output ONLY')], '')
+                  .replace('Scan X (also: Update the skill)', 'Scan X'),
+            plain)
+
+    def test_one_folded_arc_among_plain_ones_adds_the_instruction_once(self):
+        prompt = self.c._build_rejudge_prompt(TRANSCRIPT, [
+            {'job_name': 'Plain job', 'job_type': 'research'},
+            {'job_name': 'Main (+3 more)', 'job_type': 'research'},
+            {'job_name': 'Another (also: x)', 'job_type': 'research'},
+        ])
+        self.assertEqual(prompt.count('Decide such an arc\'s status from its main goal alone'), 1)
 
 
 # ---------------------------------------------------------------------------

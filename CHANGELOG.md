@@ -110,15 +110,33 @@ this repository.
   from a single classification; the second never had a trace). The classifier now keeps the
   first valid job's id, type and failure reason and names the other arcs in its job name
   (`Scan X (also: Update the radar skill)`, at most 120 serialized bytes, trailing names
-  dropped whole). Its status never claims more than every arc supports: a `SUCCESS` first arc
-  with a sibling that was not a clear `SUCCESS` becomes `CANCELLED`, which the re-judge
-  revisits, and a `CANCELLED` or `FAILED` first arc is never promoted. This also stops the
-  sibling's separate evaluator call, which had nothing of its own to value. It applies to the
+  dropped whole). Its status is the first arc's: a sibling that was not a clear `SUCCESS`
+  does not demote it, and a sibling's `SUCCESS` never promotes a `CANCELLED` or `FAILED`
+  first arc. This also stops the sibling's separate evaluator call, which had nothing of its
+  own to value. It applies to the
   built-in model path and to a registered classification implementation alike. A single-arc
   verdict is untouched. Forward only: a session already written with several jobs keeps them
   (its `CANCELLED` jobs are still re-judged), and the reporter still creates a Revenium job for
   every job marker in a file. The re-judge prompt now shows a job name up to 120 bytes rather
   than 80, so a folded name is not cut mid-word.
+- A job is no longer written `CANCELLED` for work that finished, and a re-judge that finds
+  nothing is no longer silent (diagnosed on the `ent` profile, 2026-10-14: a one-shot run that
+  finished a research task and a writing task shipped its one folded job `CANCELLED`, with no
+  value, and the log held no re-judge line). The session-end hooks were not at fault: both
+  `on_session_end` and `on_session_finalize` ran in that session and each made the re-judge's
+  model call, but a re-judge that moved nothing logged nothing, so that looked like neither
+  having run. Three changes. The job-inference prompt cut the transcript with
+  `transcript[:6000]`, so a transcript over 6000 characters lost its last stretch, the final
+  answer included (7958 characters in the incident, its 977-character answer gone), and the
+  model, whose uncertain verdict is `CANCELLED`, said so; on that host 186 of 271 long
+  sessions were `CANCELLED` at first pass against 10 of 28 short ones. The prompt now keeps
+  the head and the tail, as the re-judge already did (a transcript within 6000 characters is
+  untouched). A folded job no longer drops to `CANCELLED` because another arc was not a clear
+  `SUCCESS`: it keeps the first arc's status, and the re-judge prompt says a folded job's
+  status is its main goal's. And every re-judge now logs
+  `job re-judge for sid=... checked N job(s), verdicts: ...`; an answer with no usable
+  verdict logs a warning carrying the model's escaped, shortened words; the fold line lists
+  the per-arc statuses. A `CANCELLED` outcome already shipped is still final.
 - The outcome-metrics stage no longer reports a brand-new job's transient 404 as a failure.
   The append call (and the economics `set`) now pass `--output json`. Without it the CLI
   printed its error as a coloured box rather than a JSON body, so the not-found and

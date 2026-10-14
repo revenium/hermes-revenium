@@ -780,8 +780,10 @@ fails.
 Several jobs of one session carry the same
 `double_counting_group` id, so a consumer can see they must not be summed naively.
 First-pass inference now writes one job per classification (extra arcs the model reports
-fold into that job's name), so this covers sessions classified before that rule and any
-session where a second job reached the marker file another way.
+fold into that job's name, and the job keeps the first arc's status, so an unconfirmed side
+arc no longer holds a finished job at `CANCELLED` and so out of evaluation), so this covers
+sessions classified before that rule and any session where a second job reached the marker
+file another way.
 
 It groups only same-session, multi-job records. It does not resolve
 cross-session or root-plus-subagent
@@ -1235,7 +1237,7 @@ reporter re-reads the sidecar at outcome time and reports status-only when it fi
 | Symptom | Likely cause | Check |
 |---|---|---|
 | `diagnose.sh` shows `enabled=false` after you edited the config | You edited a different profile's `config.json` or wrote `"true"` / `1` instead of a literal `true` | `python3 -c 'import json;print(json.load(open("<profile>/state/revenium/config.json"))["llmOutcomeEvaluation"])'` |
-| Jobs appear, but never any value | Every arc is `CANCELLED`, not `SUCCESS`; the job-declaration bar requires self-verification. A `CANCELLED` verdict is re-judged on later turns, so an arc whose work finished after the first verdict should gain a `SUCCESS` marker for the same job id; one already reported as `CANCELLED` stays that way | Grep markers for `"status":"SUCCESS"`; the job id appears twice in the marker file when a re-judge moved it |
+| Jobs appear, but never any value | Every arc is `CANCELLED`, not `SUCCESS`; the job-declaration bar requires self-verification. A `CANCELLED` verdict is re-judged on later turns and at session end (`on_session_end`, `on_session_finalize`), so an arc whose work finished after the first verdict should gain a `SUCCESS` marker for the same job id; one already reported as `CANCELLED` stays that way | Grep markers for `"status":"SUCCESS"`; the job id appears twice in the marker file when a re-judge moved it. `grep 'job re-judge' agent.log` shows each re-judge and its verdicts (`verdicts: none` plus a warning means the model's answer held no usable verdict), and `folded N inferred arcs (statuses ...)` shows what the model said per arc |
 | `evaluator=INVALID(not-a-string)` | `evaluator` is set to a non-string | Fix the config; the runtime skips rather than falling back |
 | Outcome reports with no value flags | `reportability_status: "candidate"`; `experimentalReportEstimates` is not literally `true` | Read the sidecar's `reportability_status` |
 | Outcome reports with no value flags and the sidecar has none either | The evaluator abstained | Read the record's `abstention_reason` ([§6](#6-validation-and-abstention)) |

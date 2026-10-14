@@ -266,7 +266,10 @@ def _on_post_llm_call(
     writes for an unfinished arc -- each later turn also pays ONE status-only
     re-judge call on this same completion path (classifier.
     _rejudge_cancelled_jobs). It ends the moment the job leaves CANCELLED, and
-    a session whose jobs are all SUCCESS or FAILED never pays it.
+    a session whose jobs are all SUCCESS or FAILED never pays it. The
+    session-end callbacks above are two more triggers of the same re-check
+    (they pay it after the user already has their response), so a session that
+    ends CANCELLED has been re-judged against its complete transcript.
 
     D-04 belt: any exception raised by the underlying pipeline is caught and
     logged here; we never propagate so the plugin manager does not mark the
