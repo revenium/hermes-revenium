@@ -137,6 +137,14 @@ this repository.
   `job re-judge for sid=... checked N job(s), verdicts: ...`; an answer with no usable
   verdict logs a warning carrying the model's escaped, shortened words; the fold line lists
   the per-arc statuses. A `CANCELLED` outcome already shipped is still final.
+- A job's final answer is no longer cut to 500 characters before the classifier judges it
+  (`ent`, 2026-10-14, the same two-goal run after the fix above: the re-judge said `FAILED`,
+  "only two announcements, and the second link is truncated", about an answer that had all
+  three with full links). The transcript reader cut every message to 500 characters, so a
+  result delivered in one longer message lost its end in every prompt that read it. The
+  session's last assistant message now keeps up to 2500 characters; every other message
+  stays at 500, and the prompt budgets are unchanged. The value evaluator's transcript is
+  also clipped head and tail now, like the job and re-judge prompts, instead of head-only.
 - The outcome-metrics stage no longer reports a brand-new job's transient 404 as a failure.
   The append call (and the economics `set`) now pass `--output json`. Without it the CLI
   printed its error as a coloured box rather than a JSON body, so the not-found and

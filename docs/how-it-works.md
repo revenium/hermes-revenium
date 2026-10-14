@@ -175,7 +175,10 @@ re-judge that moved nothing used to leave no trace. Both the first inference and
 re-judge read an over-long transcript from both ends, a third from the start and the rest
 from the end, because the evidence that a goal was achieved is the final answer; the first
 inference used to cut the transcript at its first 6000 characters, so it never saw how the
-session ended and answered `CANCELLED` for most long sessions.
+session ended and answered `CANCELLED` for most long sessions. Each message in the transcript
+is cut to 500 characters except the session's last answer, which keeps up to 2500: a result
+delivered in one message (a three-bullet research summary, say) was otherwise cut mid-list,
+and the re-judge read the cut as an incomplete delivery and answered `FAILED`.
 
 Every outcome also carries a `--metadata` blob holding the deployment `source`, taken from
 the session's source column. `FAILED` arcs add a `failure_reason`: a short plain-text cause

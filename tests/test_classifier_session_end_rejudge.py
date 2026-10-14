@@ -574,5 +574,88 @@ class FirstPassSeesTheEndTests(_Harness):
         self.assertEqual(out, c._TRANSCRIPT_ELISION_MARKER)
 
 
+
+# ---------------------------------------------------------------------------
+# 4. The last answer is read whole (ent, 2026-10-14, 20261014_153448_cd754a)
+# ---------------------------------------------------------------------------
+
+# Shaped like the incident's final answer: three linked bullets in ~1000
+# characters, the third bullet past character 500.
+THREE_BULLETS = (
+    'Research - three most recent verified announcements: '
+    + ''.join('- BULLET_%d %s https://example.com/post-%d ' % (n, 'detail ' * 40, n)
+              for n in (1, 2, 3))
+)
+
+
+class FinalAnswerIsReadWholeTests(_Harness):
+    """The reader cut every message to 500 characters, the delivered answer
+    included, so a re-judge saw two of three bullets and a half link and said
+    FAILED. The last assistant message now keeps _FINAL_ASSISTANT_MSG_CHARS."""
+
+    _state_db = FirstPassSeesTheEndTests._state_db
+
+    def _rows(self, final=THREE_BULLETS, filler=13):
+        rows = [('user', OPENING_REQUEST)]
+        rows += [('assistant', 'EARLY_ASSISTANT ' + 'e' * 900)]
+        rows += [('tool', ('tool result %02d ' % n) + 'x' * 600) for n in range(filler)]
+        rows.append(('assistant', final))
+        return rows
+
+    def test_fixture_puts_the_third_bullet_past_the_per_message_cap(self):
+        self.assertGreater(THREE_BULLETS.index('BULLET_3'), 500)
+        self.assertLess(len(THREE_BULLETS), 2500)
+
+    def test_the_reader_keeps_the_whole_last_answer(self):
+        _pkg, c = self._load()
+        self._state_db(self._rows())
+        text = c._read_session_transcript(self.SID)
+        self.assertIn('assistant: ' + THREE_BULLETS, text)
+
+    def test_only_the_last_assistant_message_gets_the_larger_cap(self):
+        _pkg, c = self._load()
+        self._state_db(self._rows(filler=2))
+        text = c._read_session_transcript(self.SID)
+        self.assertIn('assistant: EARLY_ASSISTANT ' + 'e' * (500 - 16) + '\n', text)
+        self.assertNotIn('e' * 501, text)
+        for line in text.split('\n'):
+            if line.startswith('tool: '):
+                self.assertLessEqual(len(line), len('tool: ') + 500)
+
+    def test_the_last_answer_is_still_bounded(self):
+        _pkg, c = self._load()
+        self._state_db(self._rows(final='F' * 9000, filler=0))
+        text = c._read_session_transcript(self.SID)
+        self.assertIn('assistant: ' + 'F' * c._FINAL_ASSISTANT_MSG_CHARS, text)
+        self.assertNotIn('F' * (c._FINAL_ASSISTANT_MSG_CHARS + 1), text)
+
+    def test_the_rejudge_budget_keeps_the_whole_last_answer(self):
+        """The re-judge reads at 6000 through the head+tail sampler; a long
+        session must still hand it all three bullets."""
+        _pkg, c = self._load()
+        self._state_db(self._rows(filler=30))
+        text = c._read_session_transcript(self.SID, max_chars=c._REJUDGE_TRANSCRIPT_CHARS)
+        self.assertIn('transcript truncated', text)
+        self.assertLessEqual(len(text), c._REJUDGE_TRANSCRIPT_CHARS)
+        self.assertIn(THREE_BULLETS, c._build_rejudge_prompt(text, [
+            {'agentic_job_id': 'j_1', 'job_name': 'Research', 'job_type': 'research'}]))
+
+    def test_the_first_pass_prompt_keeps_the_whole_last_answer(self):
+        _pkg, c = self._load()
+        self._state_db(self._rows(filler=30))
+        prompt = c._build_job_inference_prompt(c._read_session_transcript(self.SID), [])
+        self.assertIn('BULLET_3', prompt)
+        self.assertIn(THREE_BULLETS, prompt)
+
+    def test_the_evaluator_prompt_keeps_the_end_of_the_session(self):
+        _pkg, c = self._load()
+        transcript = 'user: OPENING\n' + 'm' * 9000 + '\nassistant: ' + THREE_BULLETS
+        prompt = c._build_outcome_evaluation_prompt(
+            {'job_type': 'research', 'job_name': 'Research'}, transcript, {})
+        self.assertIn('OPENING', prompt)
+        self.assertIn(THREE_BULLETS, prompt)
+        self.assertNotIn('m' * 6000, prompt)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -438,17 +438,34 @@ def _read_session_messages(sid: str, paths: "_Paths | None" = None) -> "tuple[st
 # Phase 13 job-path helpers — mirror the task-path above, don't merge (D-01).
 # ---------------------------------------------------------------------------
 
+# How much of the session's LAST assistant message a transcript keeps. Every
+# other message is cut to `per_msg_cap` (500); the last answer is where a
+# session reports what it delivered, and cutting it to 500 hid the delivery
+# itself. On ent (2026-10-14, session 20261014_153448_cd754a) a research arc
+# answered with three linked bullets in ~1000 characters; the 500-char cut
+# left two bullets and half a link, and the re-judge, reading exactly that,
+# said FAILED: "only two announcements, and the second link is truncated".
+# 2500 fits the head+tail samplers below with room to spare: the reader's
+# tail share is at least half its budget (>= 2975 of 6000) and
+# _clip_head_tail's is two thirds (>= 3966 of 6000), so the whole last answer
+# survives every downstream cut when it is the session's final line.
+_FINAL_ASSISTANT_MSG_CHARS = 2500
+
+
 def _read_session_transcript(
     sid: str,
     max_chars: int = 8000,
     per_msg_cap: int = 500,
     paths: "_Paths | None" = None,
+    final_answer_cap: int = _FINAL_ASSISTANT_MSG_CHARS,
 ) -> str:
     """Return a chronologically-ordered (timestamp ASC) transcript for `sid`.
 
     Mirrors _read_session_messages with two deliberate deviations:
     - ORDER BY timestamp ASC (arc progression for the LLM, not latest-pair-first)
-    - Per-message content capped to `per_msg_cap` chars.
+    - Per-message content capped to `per_msg_cap` chars, except the LAST
+      assistant message, capped to `final_answer_cap` (see
+      _FINAL_ASSISTANT_MSG_CHARS): it carries the delivered result.
 
     When the full transcript fits within `max_chars` it is returned whole. When it
     exceeds the budget, return a HEAD + TAIL sample joined by an explicit elision
@@ -473,7 +490,15 @@ def _read_session_transcript(
                 " ORDER BY timestamp ASC",
                 (sid,),
             )
-            lines = [f"{row[0]}: {(row[1] or '')[:per_msg_cap]}" for row in cursor]
+            rows = [(row[0], row[1] or "") for row in cursor]
+            last_answer = max(
+                (i for i, (role, _c) in enumerate(rows) if role == "assistant"),
+                default=-1,
+            )
+            lines = [
+                f"{role}: {content[:max(per_msg_cap, final_answer_cap) if i == last_answer else per_msg_cap]}"
+                for i, (role, content) in enumerate(rows)
+            ]
         finally:
             conn.close()
         if not lines:
@@ -619,9 +644,8 @@ _REJUDGE_ROTATION_MAX_SESSIONS = 1024
 # _build_job_inference_prompt and the evaluator use, but applied at READ time
 # through _read_session_transcript's head+tail sampler rather than as a cut
 # afterwards: the evidence that settles a CANCELLED verdict is at the END of the
-# session. (_build_job_inference_prompt now clips head+tail too, via
-# _clip_head_tail; the evaluator's _EVAL_TRANSCRIPT_LIMIT cut is still
-# head-only.)
+# session. (_build_job_inference_prompt and the evaluator's
+# _EVAL_TRANSCRIPT_LIMIT cut now clip head+tail too, via _clip_head_tail.)
 _REJUDGE_TRANSCRIPT_CHARS = 6000
 # Same output budget and timeout as _infer_jobs_via_llm's array response (a
 # verdict per job is far smaller than a job, so this is generous, not tight).
@@ -1202,7 +1226,9 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     currency = cfg.get("currency", "USD")
     max_hours = cfg.get("maxHoursSaved", DEFAULT_MAX_HOURS_SAVED)
     max_rate = cfg.get("maxLoadedRate", DEFAULT_MAX_LOADED_RATE)
-    transcript_preview = (transcript or "")[:_EVAL_TRANSCRIPT_LIMIT]
+    # Head+tail, like the job and re-judge prompts: the value of an arc is
+    # in what it delivered, and that is at the end of the session.
+    transcript_preview = _clip_head_tail(transcript or "", _EVAL_TRANSCRIPT_LIMIT)
     job_type = (job or {}).get("job_type", "")
     job_name = (job or {}).get("job_name", "")
     role_vocabulary = _rate_card_role_vocabulary(cfg)

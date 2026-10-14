@@ -84,7 +84,11 @@ class PromptTests(unittest.TestCase):
         self.assertIn('output exactly: null', p)
         self.assertNotIn('estimated_value', p,
                          'asking for a total invites a number that is discarded')
-        self.assertEqual(6000, p.count('X'), 'transcript must be capped')
+        # Capped head+tail (_clip_head_tail): the transcript plus its elision
+        # marker fill the 6000-char budget exactly.
+        self.assertEqual(6000 - len(self.c._TRANSCRIPT_ELISION_MARKER), p.count('X'),
+                         'transcript must be capped')
+        self.assertIn(self.c._TRANSCRIPT_ELISION_MARKER, p)
         self.assertIn('40', p)
         self.assertIn('500', p)
 
@@ -478,7 +482,7 @@ class CallCountTests(unittest.TestCase):
         c, _ = _load()
         p = c._build_outcome_evaluation_prompt({'job_type': 'x', 'job_name': 'y'},
                                                'Z' * 50000, {})
-        self.assertEqual(6000, p.count('Z'))
+        self.assertEqual(6000 - len(c._TRANSCRIPT_ELISION_MARKER), p.count('Z'))
 
 
 if __name__ == '__main__':
