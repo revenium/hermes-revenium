@@ -4434,11 +4434,11 @@ exit 0
                     model=context.get('model'),
                     platform=context.get('platform'),
                 ))
-            # Marker file SHOULD exist with task_type=unclassified (LLM failure fallthrough)
+            # A failed model CALL writes nothing (CLASSIFY_CALL_FAILED), so a
+            # later trigger retries instead of latching "unclassified" for the
+            # session's lifetime (ent, 2026-10-14). It still must not raise.
             marker_path = handler.MARKERS_DIR / f"{sid}.jsonl"
-            self.assertTrue(marker_path.is_file())
-            recs = [json.loads(l) for l in marker_path.read_text().splitlines()]
-            self.assertEqual({r['task_type'] for r in recs}, {'unclassified'})
+            self.assertFalse(marker_path.is_file())
 
             # Case B — _write_marker_pair raises (filesystem-level catastrophic failure)
             shutil.rmtree(handler.MARKERS_DIR, ignore_errors=True)
@@ -6319,8 +6319,12 @@ exit 0
                 }
                 rc, invocations, output = run_cron(base_env, invocations_log)
                 self.assertEqual(rc, 0, f'positive sub-case cron exit {rc}: {output}')
-                self.assertEqual(len(invocations), 2,
-                                 f'positive sub-case expected 2 invocations (GUARDRAIL+CHAT), got {len(invocations)}: {output}')
+                # The GUARDRAIL+CHAT pair is ONE classification and ships ONE
+                # CHAT completion (collapse_classification_pairs); the CHAT
+                # marker's agent/trace_id are what must reach the wire.
+                self.assertEqual(len(invocations), 1,
+                                 f'positive sub-case expected 1 invocation (GUARDRAIL+CHAT pair collapsed to one CHAT row), got {len(invocations)}: {output}')
+                self.assertEqual(argv_to_flags(invocations[0]).get('--operation-type'), 'CHAT')
                 for argv in invocations:
                     flags = argv_to_flags(argv)
                     self.assertEqual(flags.get('--agent'), 'revenium-skill',
@@ -6384,8 +6388,9 @@ exit 0
                 }
                 rc, invocations, output = run_cron(base_env, invocations_log)
                 self.assertEqual(rc, 0, f'fallback sub-case cron exit {rc}: {output}')
-                self.assertEqual(len(invocations), 2,
-                                 f'fallback sub-case expected 2 invocations (GUARDRAIL+CHAT), got {len(invocations)}: {output}')
+                self.assertEqual(len(invocations), 1,
+                                 f'fallback sub-case expected 1 invocation (GUARDRAIL+CHAT pair collapsed to one CHAT row), got {len(invocations)}: {output}')
+                self.assertEqual(argv_to_flags(invocations[0]).get('--operation-type'), 'CHAT')
                 for argv in invocations:
                     flags = argv_to_flags(argv)
                     self.assertEqual(flags.get('--agent'), 'Hermes',
@@ -6584,8 +6589,10 @@ exit 0
 
                     rc, invocations, output = run_cron(base_env, invocations_log)
                     self.assertEqual(rc, 0, f'{label}: cron exit {rc}: {output}')
-                    self.assertEqual(len(invocations), 2,
-                                     f'{label}: expected 2 invocations (GUARDRAIL+CHAT), '
+                    # One classification (GUARDRAIL+CHAT pair) = one completion;
+                    # the provider mapping under test is unchanged by the collapse.
+                    self.assertEqual(len(invocations), 1,
+                                     f'{label}: expected 1 invocation (GUARDRAIL+CHAT pair collapsed to one CHAT row), '
                                      f'got {len(invocations)}: {output}')
 
                     for argv in invocations:
@@ -6934,8 +6941,12 @@ exit 0
             }
             rc, invocations, output = run_cron(base_env, invocations_log)
             self.assertEqual(rc, 0, f'cron exit {rc}: {output}')
-            self.assertEqual(len(invocations), 2,
-                             f'expected 2 invocations (GUARDRAIL+CHAT) post-sanitization, got {len(invocations)}: {output}')
+            # The pathological pair is still ONE classification: it collapses to
+            # one CHAT row, and that single row must round-trip the sanitized
+            # agent/trace_id through the pipe-delimited split row (whose last
+            # field is now the absorbed-muid list) without desync.
+            self.assertEqual(len(invocations), 1,
+                             f'expected 1 invocation (GUARDRAIL+CHAT pair collapsed) post-sanitization, got {len(invocations)}: {output}')
             for argv in invocations:
                 flags = argv_to_flags(argv)
                 self.assertEqual(flags.get('--agent'), 'bad_value',
@@ -13613,11 +13624,21 @@ exit 0
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-    def test_revenium_classifier_job_multi_arc(self):
-        """Task 2 RED: multi-arc session produces N kind:"job" markers, all after the task pair.
+    def test_revenium_classifier_job_multi_arc_folds_into_one_job(self):
+        """A multi-arc session produces ONE kind:"job" marker, after the task pair.
+
+        This test used to pin the opposite (Phase 13: N markers for N arcs). That
+        was the defect behind the ent-profile job with "No traces found": the
+        reporter binds a task marker to the first job marker after it, the
+        session's one GUARDRAIL+CHAT pair is already in the file above every job,
+        so arcs 2..N could never own a completion and reached Revenium as
+        zero-cost jobs. The model may still report several arcs; they now fold
+        into the first (classifier._fold_jobs_into_one). The full contract is
+        pinned in tests/test_classifier_one_job_per_classification.py.
 
         Test 1: a multi-goal transcript with call_llm returning a 2-job array writes
-        exactly 2 kind:"job" markers, both positioned after the single GUARDRAIL+CHAT pair.
+        exactly 1 kind:"job" marker, positioned after the single GUARDRAIL+CHAT pair,
+        carrying the first arc's identity and both arcs' names.
         """
         import asyncio
         import importlib
@@ -13668,13 +13689,14 @@ exit 0
             lines = marker_path.read_text().splitlines()
             recs = [json.loads(l) for l in lines]
 
-            # Must have exactly 2 task records + 2 job records = 4 total
+            # Must have exactly 2 task records + 1 job record = 3 total: two
+            # reported arcs, one classification, one job.
             job_recs = [r for r in recs if r.get("kind") == "job"]
             task_recs = [r for r in recs if r.get("operation_type") in ("GUARDRAIL", "CHAT")]
-            self.assertEqual(len(job_recs), 2, f"expected 2 job records, got {len(job_recs)}")
+            self.assertEqual(len(job_recs), 1, f"expected 1 job record, got {len(job_recs)}")
             self.assertEqual(len(task_recs), 2, f"expected 2 task records, got {len(task_recs)}")
 
-            # Both job markers must appear AFTER the GUARDRAIL and CHAT records
+            # The job marker must appear AFTER the GUARDRAIL and CHAT records
             guardrail_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "GUARDRAIL")
             chat_idx = next(i for i, r in enumerate(recs) if r.get("operation_type") == "CHAT")
             job_indices = [i for i, r in enumerate(recs) if r.get("kind") == "job"]
@@ -13682,9 +13704,13 @@ exit 0
                 self.assertGreater(ji, guardrail_idx, "job marker must come after GUARDRAIL")
                 self.assertGreater(ji, chat_idx, "job marker must come after CHAT")
 
-            # The two job records must have distinct agentic_job_ids
-            job_ids = [r.get("agentic_job_id") for r in job_recs]
-            self.assertEqual(len(set(job_ids)), 2, f"job IDs must be distinct: {job_ids}")
+            # The surviving job is the FIRST arc (id, type), and its name carries
+            # the second arc so the folded work stays visible.
+            [job] = job_recs
+            self.assertRegex(job.get("agentic_job_id"), r"^fix_auth_a1b2_[0-9a-f]{4}$")
+            self.assertEqual(job.get("job_type"), "bug_fix")
+            self.assertIn("Fix auth bug", job.get("job_name"))
+            self.assertIn("Refactor DB layer", job.get("job_name"))
 
             # assertNotIn('task', kwargs) for the job inference call
             # (Step 7 call_llm must not use task= kwarg per Pitfall 8 / A3)

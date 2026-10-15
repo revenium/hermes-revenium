@@ -775,12 +775,34 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # fingerprint (+19 in hermes-report.sh above both main() sites):
         # 5085->5104, 5312->5331. The aux site (2137) and api-event-report.sh
         # (2222) do not move. Pure shift.
+        # Trace naming, classification-pair collapse and the dependency graph
+        # (2026-10-13), measured from `git diff -U0` and re-confirmed with
+        # `grep -n -- '--operation-type'`. hermes-report.sh: the two capability
+        # probes (+21), the trace-name / parent-transaction helpers (+38) and the
+        # aux loop's two memo declarations (+7) all sit ABOVE the aux site, so
+        # it moves 2137->2203 (+66). The aux loop's own --trace-name /
+        # --parent-transaction-id block (+32) sits below that line but above both
+        # main() sites, which also carry the root-marker heredoc and name
+        # resolution, the reader's pair collapse, the per-session parent
+        # lookup, the split row's absorbed-muid field and the ledger writes:
+        # per-marker 5104->5286 (+182), markerless 5331->5546 (+215; it also
+        # sits below the per-marker emit-site appends and the ledger-write
+        # comment block). api-event-report.sh gains
+        # its --trace-name probe (+10) and per-session resolution (+16) above its
+        # one site: 2222->2248 (+26). Pure shift; the COUNT (4) and the emitted
+        # VALUE expressions are unchanged.
+        # Trace name from the session title (2026-10-13): +7 in hermes-report.sh
+        # above both main() sites: 5286->5293, 5546->5553. Pure shift.
+        # PR #155 review fixes (2026-10-14): the per-tick parent-lookup cache
+        # (+27 above the aux site and both main() sites), its call (+1 above
+        # both main() sites) and the one-append ledger write (+4 above the
+        # markerless site): 2203->2230, 5293->5321, 5553->5585. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2137),
-            ('hermes-report.sh', 5104),
-            ('hermes-report.sh', 5331),
-            ('api-event-report.sh', 2222),
+            ('hermes-report.sh', 2230),
+            ('hermes-report.sh', 5321),
+            ('hermes-report.sh', 5585),
+            ('api-event-report.sh', 2248),
         }
         self.assertEqual(
             found_locations, expected_locations,

@@ -226,9 +226,9 @@ still expecting the pre-this-change shape): `staleSecondsConfigured`,
 
 - One row per API call, not one row per session-delta split. The
   legacy path splits a session's periodic token delta across its
-  unreported markers (a GUARDRAIL/CHAT pair per classification window);
-  the event path ships one row per call, carrying that call's own usage
-  under a single `CHAT` operation type. Reason: the call itself, not a
+  unreported classifications (a GUARDRAIL/CHAT marker pair counts as one
+  and ships as a single `CHAT` row); the event path ships one row per call,
+  carrying that call's own usage under a single `CHAT` operation type. Reason: the call itself, not a
   cron-tick reconstruction, is now the unit of metering.
 - No client-supplied cost. The event path never sends `--total-cost`;
   the spooled record carries no cost field and Revenium prices the row
@@ -489,9 +489,11 @@ resolves on the next tick, confirmed to involve no duplicate event records).
 **The three predicted systematic deltas are confirmed on real traffic, with no
 surprises beyond them:**
 
-- Row count and operation type. The legacy path's session-delta pair
-  (one `GUARDRAIL` row, one `CHAT` row, tokens split via `equal_split`) is
-  replaced by one `CHAT` row per API call. Observed 1–23 event rows per
+- Row count and operation type. At the time of this measurement the legacy
+  path shipped a session-delta pair (one `GUARDRAIL` row, one `CHAT` row,
+  tokens split via `equal_split`); the legacy path has since collapsed that
+  pair into one `CHAT` row, and the event path replaces it with one `CHAT` row
+  per API call. Observed 1–23 event rows per
   session against the legacy path's fixed two, with exact token conservation
   on every session where a clean comparison was possible.
 - Cost. The event path never sent `--total-cost` on any observed row, as

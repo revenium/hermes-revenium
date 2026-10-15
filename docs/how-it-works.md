@@ -28,9 +28,14 @@ The cron runs seven stages under one lock: `plugin-status.sh`, `hermes-report.sh
 `outcome-metrics-report.sh` and `drain-status.sh`.
 
 `hermes-report.sh` is the token reporter. It reads token deltas from `~/.hermes/state.db`
-and ships one `revenium meter completion` per marker. Each completion carries
-`--task-type` and `--operation-type` from the task taxonomy; markers that own a job also
-carry `--agentic-job-id`.
+and ships one `revenium meter completion` per classification. The classifier writes each
+classification as a `GUARDRAIL` marker followed by a `CHAT` marker; the reporter folds that
+pair into one completion (`--operation-type CHAT`) carrying the whole delta, rather than two
+half-cost rows. Each completion carries `--task-type` and `--operation-type` from the task
+taxonomy; markers that own a job also carry `--agentic-job-id`. On a CLI that supports them
+it also carries `--trace-name` (the root session's Hermes title, else its job name, else its first task type) and,
+for auxiliary and subagent rows, `--parent-transaction-id`, so the trace is named and its
+dependency graph is connected.
 
 It reports deltas, not totals. Ledger lines look like
 `HERMES:<session_id>:<total_tokens>:<unix_ts>:<muid>` and a session whose
@@ -137,17 +142,43 @@ are immutable and never re-sent) with idempotency held in
 `~/.hermes/state/revenium/revenium-jobs.ledger`. The AI transactions belonging to a job are
 linked back through `--agentic-job-id`.
 
-The classifier infers a session's jobs once, from the first completed turn, so its first
-verdict can be premature. `CANCELLED` is its "uncertain" verdict, and an arc whose work is
-still running (a subagent mid-flight) comes out `CANCELLED`. A `CANCELLED` job is therefore
-re-checked on every later turn, against the transcript as it then stands, with one small
-status-only model call per turn however many jobs are open. When the status moves, the
-classifier appends a second marker for the same job id (never a new id), and the reporter
-reports the latest marker for each id. A `SUCCESS` found this way is evaluated like any other
-`SUCCESS`. `SUCCESS` and `FAILED` are never re-judged, and neither is the `CANCELLED` a
-guardrail halt writes. A `CANCELLED` outcome is held while its session is open, so a
+The classifier infers a session's job once, from the first completed turn, and writes at most
+one job per classification. When the model reports several arcs for the transcript, the first
+becomes the job and the others are named in its job name (`Scan X (also: Update the radar
+skill)`). A second job could never own any spend: the reporter attributes a completion to the
+first job marker after its task marker, and the session's one classification is written before
+any job, so a second job reached Revenium with no traces and no cost. The job's status is the
+first arc's, whatever the other arcs came back as: the folded-in arcs give the job a name and
+an owner for their cost, but they do not vote on its status, so an unconfirmed side task does
+not hold a finished job at `CANCELLED`. (An earlier rule made the job `SUCCESS` only when
+every arc was a clear `SUCCESS`; a finished job with one unconfirmed side task then shipped
+`CANCELLED`, which is never evaluated, so it had no value.) The first verdict can be
+premature. `CANCELLED` is its "uncertain" verdict, and an arc whose work is still running (a
+subagent mid-flight) comes out `CANCELLED`. A `CANCELLED` job is therefore re-checked on every
+later turn, against the transcript as it then stands, with one small status-only model call
+per turn however many jobs are open. When the status moves, the classifier appends a second
+marker for the same job id (never a new id), and the reporter reports the latest marker for
+each id. A `SUCCESS` found this way is evaluated like any other `SUCCESS`. `SUCCESS` and
+`FAILED` are never re-judged, and neither is the `CANCELLED` a guardrail halt writes. A
+re-check on a folded job is told that the job's status is its main goal's, so a goal that was
+folded in cannot hold it back. A `CANCELLED` outcome is held while its session is open, so a
 re-judge that lands before the session ends replaces the verdict; one that lands after the
 `CANCELLED` outcome was reported cannot, because outcomes are immutable.
+
+The session's end is a re-check too. A one-shot `hermes chat -Q` run fires `on_session_end`
+after the turn and `on_session_finalize` once the transcript is flushed, and each re-judges a
+job that is still `CANCELLED` against the complete transcript, so a session ends `CANCELLED`
+only after a re-judge that saw its whole ending. Every re-judge logs one line,
+`job re-judge for sid=... checked N job(s), verdicts: 1=CANCELLED`, and an answer from which
+no verdict could be read logs a warning with the model's (escaped, shortened) words; a
+re-judge that moved nothing used to leave no trace. Both the first inference and the
+re-judge read an over-long transcript from both ends, a third from the start and the rest
+from the end, because the evidence that a goal was achieved is the final answer; the first
+inference used to cut the transcript at its first 6000 characters, so it never saw how the
+session ended and answered `CANCELLED` for most long sessions. Each message in the transcript
+is cut to 500 characters except the session's last answer, which keeps up to 2500: a result
+delivered in one message (a three-bullet research summary, say) was otherwise cut mid-list,
+and the re-judge read the cut as an incomplete delivery and answered `FAILED`.
 
 Every outcome also carries a `--metadata` blob holding the deployment `source`, taken from
 the session's source column. `FAILED` arcs add a `failure_reason`: a short plain-text cause

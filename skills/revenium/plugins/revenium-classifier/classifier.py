@@ -66,6 +66,39 @@ SUPPORTED_CURRENCIES = frozenset({"USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF
 # if they match LABEL_RE. The validator falls through to "unclassified".
 TRIVIAL_BLOCKLIST = {"ack", "acknowledgment", "greeting", "confirmation", "hello", "thanks"}
 
+# What _classify_via_llm returns when the model CALL failed (an exception or a
+# timeout), as opposed to a model that answered with a label the validator
+# rejects. It cannot pass LABEL_RE, so a caller that misses the check still
+# validates it to "unclassified"; run_classification_async checks for it and
+# writes nothing, so a later trigger retries (see _CLASSIFY_TIMEOUT_SECONDS).
+CLASSIFY_CALL_FAILED = "<classify-call-failed>"
+
+# The task-label call's timeout. It was 10 s; on ent (2026-10-14, session
+# 20261014_165924_2f9664) the provider's stream produced nothing for 10 s,
+# Hermes' two retries hit a connection error and the session was written
+# "unclassified" for good, while the job call (20 s) succeeded seven seconds
+# later. 20 s is the job call's budget. A failed call now ends around 23 s
+# (Hermes adds ~3 s of retry back-off), inside Hermes' 30 s cap on the bounded
+# post_llm_call / on_session_end hooks; a hook that does overrun is abandoned,
+# not killed, so the classification still finishes on its worker.
+_CLASSIFY_TIMEOUT_SECONDS = 20.0
+
+# How many failed task-label calls a session gets before the session-end hooks
+# release the reporter anyway. A failed call writes no marker so a later
+# trigger can retry, but on_session_end used to touch markers/.ready/<sid>
+# regardless, and a cron tick landing before on_session_finalize's retry
+# shipped the session markerless ("unclassified", no job) -- spend a
+# successful retry could not re-attribute, because the reporter never re-ships
+# a ledgered token total. So a session-end hook WITHHOLDS the sentinel after a
+# failed call until the session has failed this many times; then it releases
+# it (the old outcome: the session ships as "unclassified"). Without a
+# sentinel the reporter still releases the session once it ages past
+# REVENIUM_CRON_SETTLE_SECONDS, so a withheld sentinel delays, never strands.
+# Counted in-process (a restart starts over, which only allows one more try).
+LABEL_CALL_MAX_FAILURES = 2
+_LABEL_CALL_FAILURES: dict = {}
+_LABEL_CALL_FAILURES_MAX_SESSIONS = 1024
+
 logger = logging.getLogger("revenium_classifier")
 
 # BUG-4 (multiplex correctness): in the opt-in gateway.multiplex_profiles mode a
@@ -438,17 +471,34 @@ def _read_session_messages(sid: str, paths: "_Paths | None" = None) -> "tuple[st
 # Phase 13 job-path helpers — mirror the task-path above, don't merge (D-01).
 # ---------------------------------------------------------------------------
 
+# How much of the session's LAST assistant message a transcript keeps. Every
+# other message is cut to `per_msg_cap` (500); the last answer is where a
+# session reports what it delivered, and cutting it to 500 hid the delivery
+# itself. On ent (2026-10-14, session 20261014_153448_cd754a) a research arc
+# answered with three linked bullets in ~1000 characters; the 500-char cut
+# left two bullets and half a link, and the re-judge, reading exactly that,
+# said FAILED: "only two announcements, and the second link is truncated".
+# 2500 fits the head+tail samplers below with room to spare: the reader's
+# tail share is at least half its budget (>= 2975 of 6000) and
+# _clip_head_tail's is two thirds (>= 3966 of 6000), so the whole last answer
+# survives every downstream cut when it is the session's final line.
+_FINAL_ASSISTANT_MSG_CHARS = 2500
+
+
 def _read_session_transcript(
     sid: str,
     max_chars: int = 8000,
     per_msg_cap: int = 500,
     paths: "_Paths | None" = None,
+    final_answer_cap: int = _FINAL_ASSISTANT_MSG_CHARS,
 ) -> str:
     """Return a chronologically-ordered (timestamp ASC) transcript for `sid`.
 
     Mirrors _read_session_messages with two deliberate deviations:
     - ORDER BY timestamp ASC (arc progression for the LLM, not latest-pair-first)
-    - Per-message content capped to `per_msg_cap` chars.
+    - Per-message content capped to `per_msg_cap` chars, except the LAST
+      assistant message, capped to `final_answer_cap` (see
+      _FINAL_ASSISTANT_MSG_CHARS): it carries the delivered result.
 
     When the full transcript fits within `max_chars` it is returned whole. When it
     exceeds the budget, return a HEAD + TAIL sample joined by an explicit elision
@@ -473,7 +523,18 @@ def _read_session_transcript(
                 " ORDER BY timestamp ASC",
                 (sid,),
             )
-            lines = [f"{row[0]}: {(row[1] or '')[:per_msg_cap]}" for row in cursor]
+            # Capped while reading: nothing past the larger cap can reach a
+            # line, so a long tool result is not held whole in memory.
+            keep = max(per_msg_cap, final_answer_cap)
+            rows = [(row[0], (row[1] or "")[:keep]) for row in cursor]
+            last_answer = max(
+                (i for i, (role, _c) in enumerate(rows) if role == "assistant"),
+                default=-1,
+            )
+            lines = [
+                f"{role}: {content[:max(per_msg_cap, final_answer_cap) if i == last_answer else per_msg_cap]}"
+                for i, (role, content) in enumerate(rows)
+            ]
         finally:
             conn.close()
         if not lines:
@@ -511,6 +572,42 @@ def _read_session_transcript(
         return ""
 
 
+# The transcript budget of the first-pass job-inference prompt. The prompt gets
+# at most this many characters of the (already <= 8000-char) transcript.
+_JOB_PROMPT_TRANSCRIPT_CHARS = 6000
+_TRANSCRIPT_ELISION_MARKER = "\n... [transcript truncated — middle omitted] ...\n"
+
+
+def _clip_head_tail(text: str, limit: int) -> str:
+    """Return `text` cut to at most `limit` characters, keeping its HEAD and its
+    TAIL with an explicit elision marker between them; unchanged when it fits.
+
+    One third of the room goes to the head (the opening request) and the rest to
+    the tail (the closing outcome): the evidence that settles whether a goal was
+    achieved is at the END of a session, so the tail gets the larger share.
+
+    Why a shared helper: the first-pass job prompt used to cut with a bare
+    `transcript[:6000]`. _read_session_transcript hands it up to 8000 characters
+    that it has already sampled head+tail (or, when the whole transcript fits
+    8000, unsampled), so a head-only re-slice threw away the last 2000 -- the
+    final answer and the last tool results -- and the model judged an arc it had
+    not seen the end of. CANCELLED is that prompt's "uncertain" catch-all, so it
+    said CANCELLED. _build_rejudge_prompt already clipped this way; both now call
+    the same function.
+    """
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    budget = max(0, limit - len(_TRANSCRIPT_ELISION_MARKER))
+    head = budget // 3
+    tail = budget - head
+    return (
+        text[:head]
+        + _TRANSCRIPT_ELISION_MARKER
+        + (text[len(text) - tail:] if tail else "")
+    )
+
+
 def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
     """Build the job-inference prompt — mirror of _build_classification_prompt.
 
@@ -521,11 +618,13 @@ def _build_job_inference_prompt(transcript: str, job_labels: list) -> str:
       is the uncertainty-bias catch-all per Phase 8 DECLARE-05).
     - LLM emits the business label; code appends secrets.token_hex(2) suffix in
       Plan 02's _validate_job step (documented here; not applied in this helper).
+    - A transcript over the prompt budget is clipped head+tail, never head-only
+      (see _clip_head_tail): the model must see how the session ended.
     """
     labels_block = ", ".join(job_labels) if job_labels else "(no existing labels yet)"
     if len(labels_block) > 1024:
         labels_block = labels_block[:1024] + " ... [truncated]"
-    transcript_preview = (transcript or "")[:6000]
+    transcript_preview = _clip_head_tail(transcript or "", _JOB_PROMPT_TRANSCRIPT_CHARS)
     return (
         "You are analyzing a Hermes AI agent session to identify the discrete task arcs "
         "completed by the agent. A task arc is a goal-directed sequence of turns with a "
@@ -578,15 +677,18 @@ REJUDGE_MAX_JOBS = 8
 _REJUDGE_ROTATION: dict = {}
 _REJUDGE_ROTATION_MAX_SESSIONS = 1024
 # The transcript budget for a re-judge. Deliberately the same 6000 chars
-# _build_job_inference_prompt and the evaluator slice to, but applied at READ
-# time through _read_session_transcript's head+tail sampler rather than as a
-# head-only slice afterwards: the evidence that settles a CANCELLED verdict is
-# at the END of the session.
+# _build_job_inference_prompt and the evaluator use, but applied at READ time
+# through _read_session_transcript's head+tail sampler rather than as a cut
+# afterwards: the evidence that settles a CANCELLED verdict is at the END of the
+# session. (_build_job_inference_prompt and the evaluator's
+# _EVAL_TRANSCRIPT_LIMIT cut now clip head+tail too, via _clip_head_tail.)
 _REJUDGE_TRANSCRIPT_CHARS = 6000
 # Same output budget and timeout as _infer_jobs_via_llm's array response (a
 # verdict per job is far smaller than a job, so this is generous, not tight).
 _REJUDGE_MAX_TOKENS = 512
 _REJUDGE_TIMEOUT_SECONDS = 20.0
+# How much of an unusable re-judge answer is logged (see _rejudge_status_via_llm).
+_REJUDGE_LOG_RAW_CHARS = 200
 
 
 def _build_rejudge_prompt(transcript: str, jobs: list) -> str:
@@ -603,20 +705,41 @@ def _build_rejudge_prompt(transcript: str, jobs: list) -> str:
     that finds nothing new changes nothing.
 
     An over-long transcript is cut to its head and its TAIL, never head-only.
+
+    A job that absorbed other arcs (_fold_job_name) carries them in its name
+    after its main goal: "Main goal (also: other goal)" or "Main goal (+2
+    more)". Its status is the MAIN goal's (_fold_jobs_into_one), so when any
+    arc is named that way the prompt says so: otherwise a model asked to
+    confirm "the arc" reads the whole name as the goal and holds a finished main
+    goal at CANCELLED because it cannot verify a goal that was folded in only
+    to keep its cost in one job.
     """
     arcs = []
+    folded = False
     for number, job in enumerate(jobs, start=1):
-        name = _clamp_assessment_text(job.get("job_name") or "", 80) or "(unnamed)"
+        # JOB_FOLD_NAME_MAX_BYTES, not a tighter cut: a job that absorbed other
+        # arcs carries them in its name (_fold_job_name), and this prompt is how
+        # the re-judge learns what the job covers. An 80-byte cut sliced the
+        # folded names mid-word and dropped the arcs that were folded in.
+        name = _clamp_assessment_text(
+            job.get("job_name") or "", JOB_FOLD_NAME_MAX_BYTES) or "(unnamed)"
         job_type = _clamp_assessment_text(job.get("job_type") or "", 48)
         arcs.append(f"  {number}. {name} (type: {job_type})")
+        if _is_folded_job_name(name):
+            folded = True
     arcs_block = "\n".join(arcs)
 
-    text = transcript or ""
-    if len(text) > _REJUDGE_TRANSCRIPT_CHARS:
-        marker = "\n... [transcript truncated — middle omitted] ...\n"
-        budget = max(0, _REJUDGE_TRANSCRIPT_CHARS - len(marker))
-        head = budget // 3
-        text = text[:head] + marker + text[len(text) - (budget - head):]
+    text = _clip_head_tail(transcript or "", _REJUDGE_TRANSCRIPT_CHARS)
+
+    folded_block = ""
+    if folded:
+        folded_block = (
+            "An arc whose name ends in \"(also: ...)\" or \"(+N more)\" has one "
+            "main goal, the words before that suffix. The goals listed after "
+            "\"also\" were folded into it only so their cost stays in one job. "
+            "Decide such an arc's status from its main goal alone: an unfinished, "
+            "unconfirmed or failed folded-in goal must not hold it back.\n\n"
+        )
 
     return (
         "You are re-checking task arcs from a Hermes AI agent session. Each arc "
@@ -625,6 +748,7 @@ def _build_rejudge_prompt(transcript: str, jobs: list) -> str:
         "against the session transcript as it stands now. The arcs are fixed: do "
         "not rename, merge or add any. Decide only each arc's status.\n\n"
         f"Arcs to re-check:\n{arcs_block}\n\n"
+        f"{folded_block}"
         "Output ONLY a JSON array with one object per arc. Each object must have:\n"
         "  - index: the arc's number from the list above\n"
         "  - status: one of SUCCESS, FAILED, or CANCELLED\n"
@@ -708,7 +832,30 @@ async def _rejudge_status_via_llm(transcript: str, jobs: list) -> dict:
             raw = response.choices[0].message.content
         except AttributeError:
             raw = response["choices"][0]["message"]["content"]
-        return _parse_rejudge_verdicts(raw or "", len(jobs))
+        verdicts = _parse_rejudge_verdicts(raw or "", len(jobs))
+        if not verdicts:
+            # An unusable answer used to vanish: no verdict, so no change and
+            # no trace, which made "the re-judge ran and the model said no" and
+            # "the re-judge never ran" look the same in the log (the ent
+            # incident, 2026-10-14). The model's own words, cut short and %r
+            # (T-28-07: the text is untrusted, a newline must not forge a
+            # second record), are what a person needs to tell them apart.
+            # finish_reason tells an empty answer that stopped on its own from
+            # one cut off at max_tokens (a reasoning model can spend the whole
+            # budget thinking); only a plain string is logged.
+            try:
+                finish = response.choices[0].finish_reason
+            except Exception:
+                finish = None
+            logger.warning(
+                "revenium-classifier: job re-judge response had no usable "
+                "verdict for %d arc(s) (finish_reason=%s): %r",
+                len(jobs),
+                finish[:32] if isinstance(finish, str) else "unknown",
+                raw[:_REJUDGE_LOG_RAW_CHARS] if isinstance(raw, str)
+                else type(raw).__name__,
+            )
+        return verdicts
     except Exception as exc:
         logger.warning("revenium-classifier job re-judge LLM call failed: %s", exc)
         return {}
@@ -1115,7 +1262,9 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     currency = cfg.get("currency", "USD")
     max_hours = cfg.get("maxHoursSaved", DEFAULT_MAX_HOURS_SAVED)
     max_rate = cfg.get("maxLoadedRate", DEFAULT_MAX_LOADED_RATE)
-    transcript_preview = (transcript or "")[:_EVAL_TRANSCRIPT_LIMIT]
+    # Head+tail, like the job and re-judge prompts: the value of an arc is
+    # in what it delivered, and that is at the end of the session.
+    transcript_preview = _clip_head_tail(transcript or "", _EVAL_TRANSCRIPT_LIMIT)
     job_type = (job or {}).get("job_type", "")
     job_name = (job or {}).get("job_name", "")
     role_vocabulary = _rate_card_role_vocabulary(cfg)
@@ -1757,6 +1906,124 @@ def _clamp_assessment_text(value, limit: int) -> str:
         else:
             hi = mid - 1
     return value[:lo]
+
+
+# One classification, one job. The folded job name's budget, in serialized
+# bytes (the same unit as _clamp_assessment_text, for the same reason: marker
+# lines are written ensure_ascii=True). A real single-job marker with a full
+# assessment measured 759 bytes against the 1024-byte MARK-02 budget with a
+# 53-character name, so 120 bytes of name leaves the assessed marker inside it.
+JOB_FOLD_NAME_MAX_BYTES = 120
+# Each folded-in arc's own name is clamped to this before it is joined in, so
+# one verbose arc cannot crowd out the others.
+_JOB_FOLD_EXTRA_NAME_MAX_BYTES = 60
+
+
+def _serialized_byte_len(value: str) -> int:
+    """Length of `value` as _write_job_marker will serialize it (ensure_ascii),
+    quotes excluded. The measure _clamp_assessment_text clamps by."""
+    return len(json.dumps(value, ensure_ascii=True).encode("utf-8")) - 2
+
+
+# The suffix _fold_job_name appends: "Main goal (also: a; b)" or "Main goal (+2
+# more)". A name the fold left unchanged (no room, or only duplicate names) has
+# neither, and that is correct: such a job names nothing but its main goal.
+_FOLDED_JOB_NAME_RE = re.compile(r"\((?:also: .*|\+\d+ more)\)\s*$")
+
+
+def _is_folded_job_name(name) -> bool:
+    """True when `name` carries the suffix _fold_job_name writes."""
+    return isinstance(name, str) and bool(_FOLDED_JOB_NAME_RE.search(name))
+
+
+def _fold_job_name(primary: dict, extras: list) -> str:
+    """Name for a job that absorbed `extras`, built from the primary's name.
+
+    "Primary name (also: second arc; third arc)". Trailing extras are dropped
+    whole, never cut mid-name, until the result fits JOB_FOLD_NAME_MAX_BYTES; if
+    not even one fits, the count alone is appended ("Primary name (+2 more)").
+    If the primary's own name leaves no room for any suffix, it is returned
+    unchanged: folding must never make a name worse than the one the model gave
+    it, and must never truncate it.
+
+    The extras' names are the model's free text, so each goes through
+    _clamp_assessment_text, which strips the `|`, newline and carriage return
+    that would shift the reporter's IFS='|' job rows.
+    """
+    base = primary.get("job_name") or ""
+    if not isinstance(base, str):
+        base = ""
+    base = base.strip() or str(primary.get("job_type") or "").replace("_", " ")
+    names = []
+    # A model that restates one arc twice reports the same name twice; naming
+    # it twice in the job would be noise, so a name already present (the
+    # primary's included, compared case-insensitively) is not repeated.
+    seen = {base.casefold()}
+    for extra in extras:
+        name = extra.get("job_name") if isinstance(extra, dict) else ""
+        if not isinstance(name, str) or not name.strip():
+            name = str((extra or {}).get("job_type") or "").replace("_", " ")
+        name = _clamp_assessment_text(name, _JOB_FOLD_EXTRA_NAME_MAX_BYTES)
+        if name and name.casefold() not in seen:
+            seen.add(name.casefold())
+            names.append(name)
+    if not names:
+        return primary.get("job_name") or ""
+    for keep in range(len(names), -1, -1):
+        left_out = len(names) - keep
+        if keep:
+            tail = "; ".join(names[:keep])
+            if left_out:
+                tail += "; +%d more" % left_out
+            candidate = "%s (also: %s)" % (base, tail)
+        else:
+            candidate = "%s (+%d more)" % (base, left_out)
+        if _serialized_byte_len(candidate) <= JOB_FOLD_NAME_MAX_BYTES:
+            return candidate
+    return primary.get("job_name") or ""
+
+
+def _fold_jobs_into_one(valid_jobs: list) -> list:
+    """Reduce the validated jobs of ONE classification to at most one.
+
+    Why: the reporter attributes spend positionally. A task marker belongs to
+    the first job marker after it (else the nearest one before it). First-pass
+    job inference runs once per root session, after that session's single
+    classification has been written, so every task marker already sits above
+    every job marker and binds to job #1. Jobs #2..N own nothing: Revenium gets
+    a job with no traces, no cost and, when SUCCESS, an evaluator that has
+    nothing of its own to value. Phase 68 measured it (5 of 8 zero-cost jobs on
+    the reference host were exactly this). The fix is at the producer: a
+    classification yields one job, and the work the model split off folds into
+    it.
+
+    The primary is the FIRST job the model reported. The single classification
+    describes the session's opening request, and the model lists arcs in
+    transcript order, so the first arc is the one that classification covers.
+    The primary keeps its agentic_job_id, job_type, status and failure_reason;
+    the others' names are carried in the job name (see _fold_job_name), which is
+    also what the evaluator and the CANCELLED re-judge are shown.
+
+    The job's status is the PRIMARY's, whatever the siblings came back as. The
+    folded-in arcs are there so their cost has an owner and their names stay
+    visible, not to veto the work the job is named for: a SUCCESS primary with a
+    CANCELLED or FAILED sibling stays SUCCESS (an earlier rule demoted it to
+    CANCELLED, so one unconfirmed side task kept a finished job from ever being
+    valued), and a CANCELLED or FAILED primary is never promoted by a sibling's
+    SUCCESS. A sibling's failure_reason is dropped with the sibling: the marker
+    carries a reason only for a FAILED job, and the job is not FAILED.
+
+    A list of zero or one job is returned as is, so the common single-job
+    verdict is byte-identical to before this existed. Pure: no I/O, and the
+    input jobs are not mutated.
+    """
+    if len(valid_jobs) <= 1:
+        return valid_jobs
+    primary = valid_jobs[0]
+    extras = valid_jobs[1:]
+    folded = dict(primary)
+    folded["job_name"] = _fold_job_name(primary, extras)
+    return [folded]
 
 
 # ROI-04/ROI-05: the frozen assessment contract. Chosen at the 36-01 checkpoint
@@ -4380,7 +4647,9 @@ def _session_already_classified(sid: str, paths: "_Paths | None" = None) -> bool
 
     The literal value "unclassified" counts as classified. A trivial opening
     turn (TRIVIAL_BLOCKLIST membership, see _validate_label) and an active
-    guardrail halt both yield "unclassified". Excluding that value from the
+    guardrail halt both yield "unclassified". A FAILED model call does not:
+    it writes nothing (CLASSIFY_CALL_FAILED), so this latch never closes on a
+    transient provider error. Excluding that value from the
     latch would make a session whose first turn was "hi" pay a fresh
     auxiliary-LLM inference on every subsequent turn until a substantive one
     arrived — spend scaling with turn count, which is exactly what HOOK-03
@@ -4907,7 +5176,7 @@ async def _classify_via_llm(context: dict, response_preview: str,
             ],
             temperature=0.0,
             max_tokens=64,
-            timeout=10.0,
+            timeout=_CLASSIFY_TIMEOUT_SECONDS,
         )
         # Extract content; tolerate openai SDK response shape variations.
         try:
@@ -4918,7 +5187,7 @@ async def _classify_via_llm(context: dict, response_preview: str,
         return (raw or "").strip()
     except Exception as exc:
         logger.warning("revenium-classifier LLM call failed: %s", exc)
-        return "unclassified"
+        return CLASSIFY_CALL_FAILED
 
 
 def _validate_label(label: str) -> str:
@@ -5636,7 +5905,11 @@ async def _rejudge_cancelled_jobs(session_id: str, paths: "_Paths") -> None:
     shipped with no value. The session-end hooks cannot be relied on as the
     re-judge point -- on_session_end fires only from _session_expiry_watcher and
     a desktop session may close without either hook firing -- so every trigger
-    re-checks.
+    re-checks. When they DO fire (a one-shot `hermes chat -Q` run fires
+    on_session_end after the turn and on_session_finalize after the transcript is
+    flushed) each is one more trigger, so a session that ends still CANCELLED has
+    been re-judged against its complete transcript at least once, and the log
+    line below says what that re-judge found.
 
     Rules, each pinned by tests/test_classifier_premature_cancel.py:
       * Only a job whose LATEST record is CANCELLED is a candidate. SUCCESS and
@@ -5688,8 +5961,9 @@ async def _rejudge_cancelled_jobs(session_id: str, paths: "_Paths") -> None:
             _REJUDGE_ROTATION[session_id] = offset + REJUDGE_MAX_JOBS
 
         # A budget below the 8000-char default so no downstream cut is needed:
-        # _build_job_inference_prompt re-slices head-only to 6000, which would
-        # throw away exactly the completion evidence a re-judge exists to see.
+        # _build_rejudge_prompt then has nothing to clip, and the sampled tail
+        # (the completion evidence a re-judge exists to see) reaches the model
+        # exactly as _read_session_transcript chose it.
         transcript = _read_session_transcript(
             session_id, max_chars=_REJUDGE_TRANSCRIPT_CHARS, paths=paths,
         )
@@ -5697,6 +5971,18 @@ async def _rejudge_cancelled_jobs(session_id: str, paths: "_Paths") -> None:
             return
 
         verdicts = await _rejudge_status_via_llm(transcript, candidates)
+        # One line per call, whatever it found. A re-judge that moves nothing
+        # used to leave no trace, so an operator could not tell it from one that
+        # never ran. The statuses are _parse_rejudge_verdicts' enum-checked
+        # words; the arc numbers are ints it range-checked.
+        logger.info(
+            "revenium-classifier: job re-judge for sid=%s checked %d job(s), "
+            "verdicts: %s",
+            session_id,
+            len(candidates),
+            ",".join("%d=%s" % (i, v["status"]) for i, v in sorted(verdicts.items()))
+            or "none",
+        )
         for index, rec in enumerate(candidates, start=1):
             verdict = verdicts.get(index)
             if not verdict or verdict["status"] == "CANCELLED":
@@ -5855,6 +6141,33 @@ async def run_classification_async(
                     {"message": user_msg}, asst_resp or "", paths=p,
                     labels=task_labels,
                 )
+            if raw_label == CLASSIFY_CALL_FAILED:
+                # The model call failed (exception or timeout); the model gave
+                # no answer to validate. Write nothing: "unclassified" would
+                # latch the session for its lifetime (see
+                # _session_already_classified), so a transient provider error
+                # cost it its label for good. With no pair written, the next
+                # trigger (a later post_llm_call, on_session_end,
+                # on_session_finalize) classifies again. Job inference is
+                # skipped too: a job marker with no task marker above it owns
+                # no completion (the reporter binds task markers to jobs by
+                # position), so it waits for the retry that writes both. If
+                # every trigger fails, the session ships markerless as
+                # "unclassified", the same label the old path wrote.
+                if len(_LABEL_CALL_FAILURES) >= _LABEL_CALL_FAILURES_MAX_SESSIONS:
+                    _LABEL_CALL_FAILURES.clear()
+                failures = _LABEL_CALL_FAILURES.get(session_id, 0) + 1
+                _LABEL_CALL_FAILURES[session_id] = failures
+                logger.warning(
+                    "revenium-classifier: task_type call failed for sid=%s, "
+                    "writing nothing so a later trigger retries (failure %d of %d)",
+                    session_id, failures, LABEL_CALL_MAX_FAILURES,
+                )
+                # False tells a session-end hook to withhold the reporter's
+                # sentinel (see LABEL_CALL_MAX_FAILURES); once the bound is hit
+                # the session is released as it always was.
+                return failures >= LABEL_CALL_MAX_FAILURES
+            _LABEL_CALL_FAILURES.pop(session_id, None)
             task_type = _validate_label(raw_label)
 
             # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
@@ -5873,6 +6186,15 @@ async def run_classification_async(
         # cannot be final). Same root-session and not-halted gates; the branch
         # is reached only when the marker exists, because the `if` above took
         # every case where it did not.
+        #
+        # First-pass inference writes AT MOST ONE job per classification: the
+        # model may report several arcs, and _fold_jobs_into_one folds them
+        # into the first. The reporter's ownership rule is positional, and the
+        # session's one task pair is already in the file above every job, so a
+        # second job could never own a completion (docs/job-completion-
+        # attribution.md, "Zero-cost jobs by cause"). The CANCELLED re-judge
+        # below never mints a job, so this is the only place a session's jobs
+        # are created.
         try:
             if (
                 root_sid == session_id  # skip subagent sessions (T-13-06)
@@ -5925,12 +6247,52 @@ async def run_classification_async(
                                 job_impl_name,
                             )
                         jobs = await _infer_jobs_via_llm(transcript, job_labels)
+                    valid_jobs = []
                     for job in jobs:
                         try:
                             valid = _validate_job(job)
                             if valid:
-                                await _persist_job_verdict(valid, transcript, session_id, p)
-                                _persist_job_type_to_taxonomy(valid["job_type"], paths=p)
+                                valid_jobs.append(valid)
+                        except Exception as exc:
+                            logger.warning(
+                                "revenium-classifier: dropping one job for sid=%s: %s",
+                                session_id,
+                                exc,
+                            )
+                    # One classification, one job (see _fold_jobs_into_one).
+                    # Applied here, after BOTH the built-in and any registered
+                    # boundary implementation have answered, so the invariant
+                    # does not depend on which one produced the list. A fold
+                    # failure falls back to the first job alone: the invariant
+                    # is the thing that must hold, the folded name is polish.
+                    try:
+                        persist_jobs = _fold_jobs_into_one(valid_jobs)
+                    except Exception as exc:
+                        logger.warning(
+                            "revenium-classifier: job fold failed for sid=%s, "
+                            "keeping the first job only: %s",
+                            session_id,
+                            exc,
+                        )
+                        persist_jobs = valid_jobs[:1]
+                    if len(valid_jobs) > 1:
+                        # The statuses go in the line: the fold takes the
+                        # primary's, so "what did the model say per arc" is the
+                        # first thing anyone asks about a surprising job status,
+                        # and nothing else records it. Both are _validate_job's
+                        # enum-checked words, safe to log as they are.
+                        logger.info(
+                            "revenium-classifier: folded %d inferred arcs "
+                            "(statuses %s) into one job (status %s) for sid=%s",
+                            len(valid_jobs),
+                            ",".join(str(j.get("status")) for j in valid_jobs),
+                            persist_jobs[0].get("status") if persist_jobs else "none",
+                            session_id,
+                        )
+                    for valid in persist_jobs:
+                        try:
+                            await _persist_job_verdict(valid, transcript, session_id, p)
+                            _persist_job_type_to_taxonomy(valid["job_type"], paths=p)
                         except Exception as exc:
                             logger.warning(
                                 "revenium-classifier: dropping one job for sid=%s: %s",
@@ -5959,7 +6321,7 @@ def run_classification(
     platform: "str | None" = None,
     message: "str | None" = None,
     response: "str | None" = None,
-) -> None:
+) -> bool:
     """Synchronous convenience wrapper. Drives run_classification_async via
     asyncio.run(). The plugin entrypoint (`_on_session_end`) is synchronous per
     the Hermes plugin contract, so this wrapper bridges the sync→async gap.
@@ -5967,9 +6329,13 @@ def run_classification(
     D-04 belt at the sync boundary: any exception escaping asyncio.run is
     caught here and logged via logger.warning. The plugin entrypoint stays
     clean and never sees a propagating exception.
+
+    Returns whether a session-end hook may release the reporter (touch
+    markers/.ready/<sid>): False only after a failed task-label call that a
+    later trigger should retry first (LABEL_CALL_MAX_FAILURES).
     """
     try:
-        asyncio.run(
+        released = asyncio.run(
             run_classification_async(
                 session_id=session_id,
                 model=model,
@@ -5984,3 +6350,7 @@ def run_classification(
             session_id,
             exc,
         )
+        return True
+    # Only a failed task-label call under LABEL_CALL_MAX_FAILURES returns
+    # False; every other path returns None, which releases the reporter.
+    return released is not False

@@ -42,6 +42,27 @@ this repository.
   reason rides in `--metadata` until a CLI release exposes the server's `outcomeReason`
   field (V2-13).
 
+- A classification now ships one completion, not two. The classifier writes every
+  classification as a `GUARDRAIL` marker followed by a `CHAT` marker, and the reporter
+  equal-split the session delta across both: two half-cost rows that each carried the full
+  session `--request-duration`, which the Revenium trace timeline showed as two near-identical
+  rows (one ent trace: two $0.070 / 1.11 min rows for one 49,796-token session). The reporter
+  now folds an adjacent, both-unreported `GUARDRAIL`+`CHAT` pair that agree on session,
+  task type, trace, job and agent into the `CHAT` marker and ships one `--operation-type CHAT`
+  completion carrying the whole delta. The `CHAT` type matches what the event path and the
+  markerless path already ship. Nothing in the skill reads a `GUARDRAIL` row back from
+  Revenium: budget-rule filters scope on agent, model, provider, organization, credential,
+  product, subscriber and task type, never operation type, and the per-field token and cost
+  sums are unchanged, so budget counters and halts behave as before. A dashboard you built
+  yourself on `operationType = GUARDRAIL` will stop receiving new rows. Idempotency is
+  preserved: the absorbed `GUARDRAIL` muid is ledgered by the same call (its own line, before
+  the shipped muid's), so it is never reported again, and a session already half-reported
+  under the old scheme finishes correctly (a `CHAT` whose `GUARDRAIL` twin is already
+  ledgered ships alone; a `GUARDRAIL` whose `CHAT` twin is already ledgered ships alone as
+  `CHAT`). A `GUARDRAIL` marker with no `CHAT` twin passes through unchanged. The S2
+  `window=` figure counts classifications, so it reads half what it used to for the same
+  session. No change to the classifier or its markers.
+
 ### Added
 
 - `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's
@@ -55,8 +76,96 @@ this repository.
   the model it serves, so completions metered behind a gateway carry a model and provider
   Revenium can price. See [Configuration](docs/configuration.md#model-aliases).
 
+- Traces are named. Every Revenium trace read "Unnamed trace" because the reporter never sent
+  `--trace-name`. It now sends the title Hermes gave the trace's root session; with no title
+  (or a Hermes without the column), the root's latest job name (a guardrail-halt job never
+  counts), else its first task type. The title comes first because Revenium names a trace
+  from the first row that carries a name, and the title exists within a second of the
+  session starting while the classifier's markers land minutes later: on ent a root's first
+  six rows shipped before its markers and the trace stayed unnamed. Sent on main-loop,
+  markerless, subagent and
+  auxiliary rows alike, so every row in a trace carries the same name. A trace with nothing
+  to name it by sends none. Sent only when the installed `revenium` CLI advertises the flag
+  (probed with `supports_flag`, independent of `--trace-type`); an older CLI meters exactly
+  as before. The event path (`api-event-report.sh`) names its traces the same way.
+- The trace dependency graph is connected. Nothing sent `--parent-transaction-id`, so every
+  auxiliary and subagent row was an orphan node. An auxiliary row now links to the main-loop
+  transaction its own session most recently shipped (its root's, for an auxiliary-only
+  session), and a subagent's completion to its root's most recent one. The id is rebuilt from
+  the ledger, so it names a transaction Revenium already accepted. A subagent is visited
+  before its root, so on the first tick that sees both the child ships unlinked rather than
+  waiting: a missing edge is cosmetic and holding the completion would delay budget
+  visibility. Sent only when the CLI advertises the flag; neither new flag enters a
+  transaction id, a ledger key or the reporter memo. The event path does not send
+  `--parent-transaction-id`: its rows are per API call with no session-level anchor to link
+  to, and a guessed edge would be worse than none.
+
 ### Fixed
 
+- A classification now yields one job, not one per arc the model reported. The reporter
+  attributes a completion to the first job marker after its task marker, and a session's one
+  classification is written before any job, so every completion bound to job #1 and any
+  further job owned nothing: Revenium showed it with "No traces found for this job", no total
+  cost and no value (one ent session wrote a CANCELLED scan job and a SUCCESS skill-update job
+  from a single classification; the second never had a trace). The classifier now keeps the
+  first valid job's id, type and failure reason and names the other arcs in its job name
+  (`Scan X (also: Update the radar skill)`, at most 120 serialized bytes, trailing names
+  dropped whole). Its status is the first arc's: a sibling that was not a clear `SUCCESS`
+  does not demote it, and a sibling's `SUCCESS` never promotes a `CANCELLED` or `FAILED`
+  first arc. This also stops the sibling's separate evaluator call, which had nothing of its
+  own to value. It applies to the
+  built-in model path and to a registered classification implementation alike. A single-arc
+  verdict is untouched. Forward only: a session already written with several jobs keeps them
+  (its `CANCELLED` jobs are still re-judged), and the reporter still creates a Revenium job for
+  every job marker in a file. The re-judge prompt now shows a job name up to 120 bytes rather
+  than 80, so a folded name is not cut mid-word.
+- A job is no longer written `CANCELLED` for work that finished, and a re-judge that finds
+  nothing is no longer silent (diagnosed on the `ent` profile, 2026-10-14: a one-shot run that
+  finished a research task and a writing task shipped its one folded job `CANCELLED`, with no
+  value, and the log held no re-judge line). The session-end hooks were not at fault: both
+  `on_session_end` and `on_session_finalize` ran in that session and each made the re-judge's
+  model call, but a re-judge that moved nothing logged nothing, so that looked like neither
+  having run. Three changes. The job-inference prompt cut the transcript with
+  `transcript[:6000]`, so a transcript over 6000 characters lost its last stretch, the final
+  answer included (7958 characters in the incident, its 977-character answer gone), and the
+  model, whose uncertain verdict is `CANCELLED`, said so; on that host 186 of 271 long
+  sessions were `CANCELLED` at first pass against 10 of 28 short ones. The prompt now keeps
+  the head and the tail, as the re-judge already did (a transcript within 6000 characters is
+  untouched). A folded job no longer drops to `CANCELLED` because another arc was not a clear
+  `SUCCESS`: it keeps the first arc's status, and the re-judge prompt says a folded job's
+  status is its main goal's. And every re-judge now logs
+  `job re-judge for sid=... checked N job(s), verdicts: ...`; an answer with no usable
+  verdict logs a warning carrying the model's escaped, shortened words; the fold line lists
+  the per-arc statuses. A `CANCELLED` outcome already shipped is still final.
+- A session is no longer labelled `unclassified` for good because the task-label model call
+  failed once (`ent`, 2026-10-14, session `20261014_165924_2f9664`: the provider's stream
+  produced nothing for 10 seconds, Hermes' retries hit a connection error, and the session's
+  completion shipped `task_type=unclassified` while the job call seven seconds later
+  succeeded; 5 of ~258 sessions on that host in two weeks). A failed call (an exception or a
+  timeout) now writes no marker and skips job inference for that trigger, so the next one (a
+  later turn, `on_session_end`, `on_session_finalize`) classifies the session and infers its
+  job together; a job written without a task marker above it would own no completion. A
+  label the model answered but the validator rejects still writes `unclassified` once, and a
+  session no trigger can classify still ships as `unclassified`. The label call's timeout
+  rises from 10 to 20 seconds, the job call's budget.
+  The session-end hooks hold the reporter's `.ready` sentinel back after such a failure, so a
+  cron tick between `on_session_end` and `on_session_finalize` cannot ship the session before
+  the retry; a second failure releases it, and the settle window still releases a session
+  that no hook does.
+- The reporter writes a collapsed pair's ledger lines (the absorbed `GUARDRAIL` muid, then
+  the shipped `CHAT` muid) in one append. Two appends could be split by a crash, leaving the
+  absorbed muid newest, and a later subagent or auxiliary row would name a transaction that
+  never went out as its `--parent-transaction-id`. Adjacent subagents of one root now share
+  one parent lookup per tick instead of each starting `python3` to scan the ledger, and the
+  transcript reader caps each message as it reads it rather than holding whole tool results.
+- A job's final answer is no longer cut to 500 characters before the classifier judges it
+  (`ent`, 2026-10-14, the same two-goal run after the fix above: the re-judge said `FAILED`,
+  "only two announcements, and the second link is truncated", about an answer that had all
+  three with full links). The transcript reader cut every message to 500 characters, so a
+  result delivered in one longer message lost its end in every prompt that read it. The
+  session's last assistant message now keeps up to 2500 characters; every other message
+  stays at 500, and the prompt budgets are unchanged. The value evaluator's transcript is
+  also clipped head and tail now, like the job and re-judge prompts, instead of head-only.
 - The outcome-metrics stage no longer reports a brand-new job's transient 404 as a failure.
   The append call (and the economics `set`) now pass `--output json`. Without it the CLI
   printed its error as a coloured box rather than a JSON body, so the not-found and

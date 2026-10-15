@@ -83,6 +83,27 @@ if supports_flag "meter completion" "--trace-type"; then
   TRACE_TYPE_CLI_CAPABLE=true
 fi
 
+# Trace naming and the dependency graph (newer `revenium meter completion` flags).
+# Two independent probes, never one riding on the other or on --trace-type
+# above: the flags reached the CLI separately, and supports_flag's own header
+# records what wrongly assuming "supported" costs -- the CLI rejects the
+# unknown flag and the WHOLE meter call fails, not one dimension. A negative
+# probe is a LIVE configuration (an older CLI), so it fails open SILENTLY and
+# the argv is byte-identical to what the golden fixtures pin. Resolved via
+# `if`, never `VAR=$(supports_flag ...)`, which would swallow the exit status.
+#   --trace-name            names the trace; without it the Revenium trace list
+#                           shows every trace as "Unnamed trace".
+#   --parent-transaction-id draws the edge in the trace dependency graph; without
+#                           it every auxiliary and subagent row is an orphan node.
+TRACE_NAME_CLI_CAPABLE=false
+if supports_flag "meter completion" "--trace-name"; then
+  TRACE_NAME_CLI_CAPABLE=true
+fi
+PARENT_TXN_CLI_CAPABLE=false
+if supports_flag "meter completion" "--parent-transaction-id"; then
+  PARENT_TXN_CLI_CAPABLE=true
+fi
+
 # Phase 29 (SQUAD-04): capability gate for the v1.3.0 squad flags
 # (--squad-id/--squad-name/--squad-role). Uses supports_flag (Phase 26,
 # common.sh) rather than the raw `grep -q` idiom the two probes above still
@@ -1007,6 +1028,71 @@ _parent_column_absent_warn_once() {
     mkdir -p "${PROBE_WARN_FLAGS_DIR}" 2>/dev/null && touch "${flag_path}" 2>/dev/null
     warn "state.db has no sessions.parent_session_id column, so root sessions cannot be confirmed: completions omit --agentic-job-id (jobs are still created and will show \$0 until Hermes is upgraded)"
   fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Trace naming and the dependency graph (--trace-name / --parent-transaction-id)
+#
+# Both helpers print one value or nothing, never fail the caller, and are only
+# called behind their capability probe, so an older CLI pays no spawn and sees
+# no new argv. The logic itself lives in split_strategies.py (one implementation
+# for the main loop, the auxiliary pass and the tests). The trace-name half is
+# `resolve_trace_name_at` in common.sh, shared with the event reporter; the main
+# loop gets the same answer for free from the root-marker heredoc it already
+# runs for --trace-type, and calls the helper only for a CLI that has
+# --trace-name but not --trace-type.
+# ---------------------------------------------------------------------------
+
+# The wire transaction id of the most recent main-loop completion shipped for
+# session `$1`, or nothing -- the --parent-transaction-id a child row sends.
+# Rebuilt from the ledger (a line exists only after its CLI call succeeded), so
+# it names a transaction Revenium has accepted; a parent that has not shipped
+# yet resolves to nothing and the child ships unlinked rather than waiting (see
+# the note at the subagent emit site: a hold here would delay spend, and the
+# missing edge is cosmetic).
+_latest_txn_id() {
+  local sid="$1"
+  [[ -n "${sid}" && -s "${LEDGER_FILE}" ]] || return 0
+  SCRIPT_DIR="${SCRIPT_DIR}" LEDGER_PATH="${LEDGER_FILE}" SID="${sid}" python3 - <<'PY' 2>/dev/null || true
+import os
+import sys
+
+try:
+    sys.path.insert(0, os.environ['SCRIPT_DIR'])
+    from split_strategies import latest_transaction_id
+    txn = latest_transaction_id(os.environ['LEDGER_PATH'], os.environ['SID'])
+    if txn and '\n' not in txn and '\r' not in txn:
+        print(txn)
+except Exception:
+    pass
+PY
+}
+
+# A one-entry, per-tick cache in front of _latest_txn_id for the session loop.
+# Each lookup is a python3 spawn plus a full ledger scan, and sessions are
+# visited ORDER BY started_at DESC, so a root's subagents sit next to each
+# other and all ask for the same root. The entry is forgotten whenever this
+# tick appends a main-ledger line for that session (_txn_memo_forget at both
+# append sites), so a cached id is never older than the ledger. One entry, not
+# a map: Bash 3.2 has no associative arrays, and siblings are adjacent.
+# Call it directly and read _TXN_MEMO_VALUE: inside $( ) it would run in a
+# subshell and the cache would never survive the call.
+_TXN_MEMO_SID=""
+_TXN_MEMO_VALUE=""
+_latest_txn_id_cached() {
+  local sid="$1"
+  if [[ -z "${sid}" ]]; then
+    _TXN_MEMO_VALUE=""
+    return 0
+  fi
+  [[ "${sid}" == "${_TXN_MEMO_SID}" ]] && return 0
+  _TXN_MEMO_VALUE="$(_latest_txn_id "${sid}")"
+  _TXN_MEMO_SID="${sid}"
+  return 0
+}
+_txn_memo_forget() {
+  [[ "${1:-}" == "${_TXN_MEMO_SID}" ]] && _TXN_MEMO_SID="" && _TXN_MEMO_VALUE=""
   return 0
 }
 
@@ -2031,6 +2117,13 @@ PY
   # rows whose link was withheld (reported once, after the loop). Declared
   # OUTSIDE the loop for the same reason as the memos above.
   local _aux_job_link_memo_id="" _aux_job_link_memo_ok="false" _aux_job_link_withheld_count=0
+  # --trace-name / --parent-transaction-id memos, single-slot like the others.
+  # The trace name is a property of the ROOT session (so keyed on it); the
+  # parent transaction is a property of the aux row's own session (keyed on
+  # that). Resolved lazily, so an install whose CLI lacks the flags, or a tick
+  # with no auxiliary rows, spawns nothing.
+  local _aux_trace_name_memo_root="" _aux_trace_name=""
+  local _aux_parent_memo_sid="" _aux_parent_txn=""
   while IFS='|' read -r s_sid s_model s_billing s_base_url s_mode s_task label is_unclassified \
     d_apic d_in d_out d_cr d_cw d_cost cum_group cum_total \
     req_time resp_time dur_ms orig_sid digest \
@@ -2153,6 +2246,38 @@ PY
     fi
     if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
       cmd+=(--trace-type "${ctx_root_trace:-uncategorized}")
+    fi
+    # The auxiliary row belongs to its session's trace, so it carries the same
+    # --trace-name the session's main-loop rows do. aux_session_ctx is NOT
+    # widened to carry it (its width is a three-producer lockstep contract and
+    # its memo-replay producer has no name to give); the root's marker file is
+    # read instead, through the same resolve_trace_name the main loop uses.
+    if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" && -n "${ctx_root_sid}" ]]; then
+      if [[ "${ctx_root_sid}" != "${_aux_trace_name_memo_root}" ]]; then
+        _aux_trace_name_memo_root="${ctx_root_sid}"
+        local _aux_root_markers_dir
+        _aux_root_markers_dir="$(resolve_markers_dir "${ctx_root_sid}")"
+        [[ -z "${_aux_root_markers_dir}" ]] && _aux_root_markers_dir="${MARKERS_DIR}"
+        _aux_trace_name="$(resolve_trace_name_at "${_aux_root_markers_dir}/${ctx_root_sid}.jsonl" "${ctx_root_sid}")"
+      fi
+      [[ -n "${_aux_trace_name}" ]] && cmd+=(--trace-name "${_aux_trace_name}")
+    fi
+    # Parent edge for the dependency graph: the main-loop transaction this
+    # session most recently shipped -- the call whose turn spawned the
+    # background LLM call. This pass runs after the session loop, so this
+    # tick's own main rows are already ledgered and the newest line is the one
+    # to link to. A session with no main-loop row of its own (an auxiliary-only
+    # session the supplement recovered) falls back to its root's, and one with
+    # neither ships unlinked. Never enters --transaction-id or AUX_LEDGER_FILE.
+    if [[ "${PARENT_TXN_CLI_CAPABLE}" == "true" ]]; then
+      if [[ "${orig_sid}" != "${_aux_parent_memo_sid}" ]]; then
+        _aux_parent_memo_sid="${orig_sid}"
+        _aux_parent_txn="$(_latest_txn_id "${orig_sid}")"
+        if [[ -z "${_aux_parent_txn}" && -n "${ctx_root_sid}" && "${ctx_root_sid}" != "${orig_sid}" ]]; then
+          _aux_parent_txn="$(_latest_txn_id "${ctx_root_sid}")"
+        fi
+      fi
+      [[ -n "${_aux_parent_txn}" ]] && cmd+=(--parent-transaction-id "${_aux_parent_txn}")
     fi
     # RC-1 (phantom-jobs fix, 2026-10-09): the link is only attached to a job
     # that is LIVE -- its create is in the jobs ledger and it is either still
@@ -3404,6 +3529,12 @@ PY
     # <context>; no new decision ID).
     local root_trace_type=""
     local marker_state=""
+    # --trace-name (see the TRACE_NAME_CLI_CAPABLE probe): the same ROOT
+    # delegator's marker file names the trace, so every completion in one trace
+    # carries one name. Resolved by split_strategies.resolve_trace_name, and --
+    # when --trace-type is also supported, which is every current CLI -- inside
+    # the heredoc below, so it costs no extra python3 spawn per session.
+    local root_trace_name=""
     if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
       # Phase 28 (TRACE-04/D-08): the heredoc now emits TWO KEY=value lines
       # rather than a single bare trace-type line, so the marker-read outcome
@@ -3427,7 +3558,8 @@ PY
       # marker_lookup_failed to no_job_classified.
       if [[ -e "${root_markers_dir}/${root_sid}.jsonl" ]]; then
         trace_type_output=$(
-          ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" python3 - <<'PY' 2>/dev/null
+          ROOT_SID="${root_sid}" MARKERS_DIR="${root_markers_dir}" \
+          SCRIPT_DIR="${SCRIPT_DIR}" WANT_TRACE_NAME="${TRACE_NAME_CLI_CAPABLE}" python3 - <<'PY' 2>/dev/null
 import json, os
 from pathlib import Path
 root_sid = os.environ.get('ROOT_SID', '')
@@ -3476,6 +3608,18 @@ if latest_type:
     marker_state = "found"
 print(f"TRACE_TYPE={latest_type}")
 print(f"MARKER_STATE={marker_state}")
+# --trace-name rides this heredoc (no second spawn). Gated on the capability so
+# an older CLI neither imports the module nor prints the key. resolve_trace_name
+# returns one cleaned line or "" and never raises; the outer guard is for the
+# import itself failing, which must cost the name and nothing else.
+if os.environ.get('WANT_TRACE_NAME') == 'true' and root_sid and markers_dir:
+    try:
+        import sys
+        sys.path.insert(0, os.environ.get('SCRIPT_DIR', ''))
+        from split_strategies import resolve_trace_name
+        print("TRACE_NAME=" + resolve_trace_name(str(Path(markers_dir) / f"{root_sid}.jsonl")))
+    except Exception:
+        pass
 PY
         ) || trace_type_output=""
 
@@ -3483,6 +3627,9 @@ PY
         # guardrail-check.sh uses for multi-value heredoc returns.
         root_trace_type=$(echo "${trace_type_output}" | sed -n 's/^TRACE_TYPE=//p' | head -1)
         marker_state=$(echo "${trace_type_output}" | sed -n 's/^MARKER_STATE=//p' | head -1)
+        if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" ]]; then
+          root_trace_name=$(echo "${trace_type_output}" | sed -n 's/^TRACE_NAME=//p' | head -1)
+        fi
       else
         root_trace_type=""
         marker_state="absent"
@@ -3582,6 +3729,19 @@ PY
           warn "trace-type fallback: reason=${fallback_reason} session=${safe_sid} root=${safe_root_sid}"
         fi
       fi
+    fi
+
+    # A CLI that has --trace-name but not --trace-type never ran the heredoc
+    # above, so resolve the name on its own. Unreachable on every current CLI.
+    if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" && "${TRACE_TYPE_CLI_CAPABLE}" != "true" ]]; then
+      root_trace_name="$(resolve_trace_name_at "${root_markers_dir}/${root_sid}.jsonl" "${root_sid}")"
+    elif [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" ]]; then
+      # The root's Hermes title outranks the marker-derived name above, and
+      # covers the session the classifier has not reached yet (no marker file,
+      # so the heredoc never ran). See resolve_session_title in common.sh.
+      local root_title
+      root_title="$(resolve_session_title "${root_sid}")"
+      [[ -n "${root_title}" ]] && root_trace_name="${root_title}"
     fi
 
     # Phase 22 (JOB-01 / D-02): resolve root_aid ONCE per session for subagent
@@ -4429,7 +4589,7 @@ from pathlib import Path
 
 try:
     sys.path.insert(0, os.environ['SCRIPT_DIR'])
-    from split_strategies import parse_prior_state
+    from split_strategies import collapse_classification_pairs, parse_prior_state
 except Exception as exc:
     # B6 / Pitfall A defense: if the helper can't be imported, fall through to
     # the legacy single-call path. The bash side sees READ_OK=false.
@@ -4483,6 +4643,12 @@ _job_position_ids = set()
 
 marker_path = Path(markers_dir) / f"{sid}.jsonl"
 markers = []
+# EVERY valid task marker in file order as (marker, eligible), eligible or not.
+# `markers` above is only the eligible ones (what the ledger and the filters
+# below leave to ship); the GUARDRAIL+CHAT pair collapse further down has to
+# judge adjacency over all of them, because a pair whose one half was already
+# ledgered is no longer a pair.
+all_tasks = []
 read_ok = True
 read_err = ""
 # Phase 9 (D-11): file-order position counter — incremented for every valid parsed
@@ -4555,21 +4721,25 @@ if marker_path.is_file():
                 # (COMPAT-03 / SC2) relies on this: muids 4-5 of a 5-marker batch
                 # whose tick crashed between calls 3 and 5 stay OUT of the set
                 # and are correctly re-emitted on the next tick.
+                eligible = True
                 if m['muid'] in prior_muids:
-                    continue
+                    eligible = False
                 # Secondary (v1-only) fallback: when no v2 muids exist yet for
                 # this sid (fresh upgrade, ledger has only v1 rows), use the
                 # ts cutoff to avoid mass-emitting any marker history that
                 # predates the upgrade. Once any v2 row exists, prior_muids is
                 # the complete record and the ts filter is harmful (it would
                 # skip un-emitted markers whose ts predates the latest v2 row).
-                if not prior_muids:
+                elif not prior_muids:
                     try:
                         if float(m['ts']) <= prior_ts:
-                            continue
+                            eligible = False
                     except (TypeError, ValueError):
-                        continue
-                if m.get('task_type') in FORBIDDEN:
+                        eligible = False
+                if eligible and m.get('task_type') in FORBIDDEN:
+                    eligible = False
+                all_tasks.append((m, eligible))
+                if not eligible:
                     continue
                 # Phase 9 (D-11): store file position in the marker dict for the
                 # deferred owning_job_id resolution pass below.
@@ -4624,6 +4794,20 @@ for marker in markers:
     marker['owning_job_id'] = owner
     marker['owning_job_name'] = owner_name
     marker['owning_job_type'] = owner_type
+
+# ONE completion per classification. The classifier writes every classification
+# as a GUARDRAIL marker immediately followed by a CHAT marker (same task_type,
+# trace and job). Splitting the session delta across both shipped two half-cost
+# rows that each carried the SAME request-duration, which the Revenium trace
+# timeline renders as two near-identical rows; the GUARDRAIL row was never a
+# separate piece of work -- the tokens are one stretch of chat. The pair is
+# folded into its CHAT marker (the row keeps operation_type CHAT, the type the
+# event path and the markerless path already ship), which carries
+# `absorbed_muids` so the emit loop ledgers the GUARDRAIL muid with the same
+# call. Done AFTER owner resolution on purpose: the survivor is resolved from
+# its own file position, exactly as it was when it shipped as a separate row.
+# Runs on the markers' own dicts, so the owner fields set above are kept.
+markers = collapse_classification_pairs(all_tasks)
 
 n = len(markers)
 # D-18 telemetry log lines — locked text, do NOT paraphrase. mean_per_marker
@@ -4904,6 +5088,31 @@ PY
     # here verbatim — the SAME local the takeover branch reads — so the two
     # consumer sites of the carve-out cannot drift.
     if [[ "${sid_legacy_suppressed}" != "true" && "${session_event_owned}" != "true" ]]; then
+    # --parent-transaction-id for a SUBAGENT session's completions: the
+    # transaction its root delegator most recently shipped. Resolved ONCE per
+    # session (both emit paths below read it) and only for a non-root session
+    # on a CLI that has the flag, so a top-level session pays nothing.
+    #
+    # The parent is the ROOT's latest transaction, not the immediate parent
+    # session's: this needs no extra state.db query, and for the usual depth-1
+    # delegation the two are the same. A deeper chain draws the edge to the root.
+    #
+    # ORDER. The session query is ORDER BY started_at DESC, so a child is visited
+    # before the root whose iteration ships this tick's root rows. The id comes
+    # from the ledger, which only holds transactions already accepted, so the
+    # link is to the root's most recent PRIOR shipment. A root with nothing
+    # shipped yet leaves this empty and the child ships unlinked. It does NOT
+    # wait the way RC-2 holds a child for its root's `jobs create`: that hold
+    # protects against corruption (a nameless phantom job), whereas a missing
+    # edge is cosmetic, and holding would delay the child's spend reaching
+    # Revenium budgets. In practice the root has shipped by the time a child
+    # finishes (the root is classified and metered every turn, a child ends
+    # later), so the miss is confined to the first tick that sees both.
+    local parent_txn_id=""
+    if [[ "${PARENT_TXN_CLI_CAPABLE}" == "true" && "${root_sid}" != "${sid}" ]]; then
+      _latest_txn_id_cached "${root_sid}"
+      parent_txn_id="${_TXN_MEMO_VALUE}"
+    fi
     # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
     # per-marker Revenium calls with extended transaction-id and per-call v2
     # ledger writes. Else fall through to the legacy single-call path (T06
@@ -5037,6 +5246,13 @@ try:
         m_owning_job_id = marker.get('owning_job_id') or ''
         m_owning_job_name = marker.get('owning_job_name') or ''
         m_owning_job_type = marker.get('owning_job_type') or ''
+        # GUARDRAIL muids this row absorbed (collapse_classification_pairs):
+        # comma-joined LAST field. Each was matched against a strict muid
+        # charset before it was accepted, so no ',' ':' or whitespace is
+        # possible; the replace below is the same belt as every other field.
+        m_absorbed = ','.join(
+            str(a) for a in (marker.get('absorbed_muids') or []) if isinstance(a, str)
+        )
         # WR-01: sanitize pipe-delimiters and control chars so future upstream writers
         # cannot corrupt the bash while-read IFS='|' parsing (D-34).
         for _bad in ('|', '\n', '\r'):
@@ -5045,10 +5261,11 @@ try:
             m_owning_job_id = m_owning_job_id.replace(_bad, '_')
             m_owning_job_name = m_owning_job_name.replace(_bad, '_')
             m_owning_job_type = m_owning_job_type.replace(_bad, '_')
+            m_absorbed = m_absorbed.replace(_bad, '_')
         print(f"{marker['muid']}|{marker['task_type']}|{marker['operation_type']}|"
               f"{split['input']}|{split['output']}|{split['cache_read']}|"
               f"{split['cache_write']}|{split['total']}|{split['cost']}|{m_agent}|{m_trace}|"
-              f"{m_owning_job_id}|{m_owning_job_name}|{m_owning_job_type}")
+              f"{m_owning_job_id}|{m_owning_job_name}|{m_owning_job_type}|{m_absorbed}")
 except Exception as exc:
     print(f"SPLIT_ERROR={exc}", file=sys.stderr)
     sys.exit(3)
@@ -5077,8 +5294,8 @@ PY
       fi
 
       local muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace
-      local m_owning_job_id m_owning_job_name m_owning_job_type
-      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id m_owning_job_name m_owning_job_type; do
+      local m_owning_job_id m_owning_job_name m_owning_job_type m_absorbed
+      while IFS='|' read -r muid t_type op_type d_in d_out d_cr d_cw d_tot d_cost m_agent m_trace m_owning_job_id m_owning_job_name m_owning_job_type m_absorbed; do
         [[ -z "${muid}" ]] && continue
 
         local cmd=(
@@ -5123,6 +5340,17 @@ PY
         # enters --transaction-id or the ledger line — idempotency is preserved.
         if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
           cmd+=(--trace-type "${root_trace_type:-uncategorized}")
+        fi
+        # --trace-name / --parent-transaction-id: both resolved once per
+        # session above, both absent (not empty) when unknown, so a markerless
+        # install, a trace with nothing to name it by and an older CLI all keep
+        # the exact argv the golden fixtures pin. Neither enters
+        # --transaction-id or the ledger line.
+        if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" && -n "${root_trace_name}" ]]; then
+          cmd+=(--trace-name "${root_trace_name}")
+        fi
+        if [[ "${PARENT_TXN_CLI_CAPABLE}" == "true" && -n "${parent_txn_id}" ]]; then
+          cmd+=(--parent-transaction-id "${parent_txn_id}")
         fi
         # Phase 22 (JOB-01 / D-02 / D-05): per-marker --agentic-job-id slot.
         # The CLI has exactly one --agentic-job-id field (verified via
@@ -5275,9 +5503,35 @@ PY
           # 5 carries EXACTLY ONE muid — never a CSV.
           local now_ts
           now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
-          echo "HERMES:${sid}:${total_tokens}:${now_ts}:${muid}" >> "${LEDGER_FILE}"
+          # A GUARDRAIL marker folded into this row (the classification pair
+          # collapse) is consumed by THIS call, so it is ledgered with it -- one
+          # line per muid, exactly as when it shipped as a row of its own. If it
+          # were not, the next tick would see it as unreported and ship it again
+          # as a lone GUARDRAIL row. Absorbed lines go FIRST and the shipped
+          # muid LAST, so the newest line for a session always names a
+          # transaction that really went out (latest_transaction_id reads it for
+          # --parent-transaction-id).
+          #
+          # All of a call's lines go out in ONE append (one write of well under
+          # a page to an O_APPEND file), so a crash leaves either none or all
+          # of them. Appended line by line, a crash between the absorbed and
+          # the shipped line left the absorbed muid newest: the next tick
+          # skips the unchanged total, and latest_transaction_id named the
+          # absorbed muid's transaction, which never went out, as every
+          # child's --parent-transaction-id. With no line at all the next tick
+          # recomputes the same delta and re-ships the same deterministic
+          # --transaction-id, which Revenium dedupes.
+          local ledger_lines="" absorbed_muid
+          if [[ -n "${m_absorbed}" ]]; then
+            for absorbed_muid in ${m_absorbed//,/ }; do
+              ledger_lines+="HERMES:${sid}:${total_tokens}:${now_ts}:${absorbed_muid}"$'\n'
+            done
+          fi
+          ledger_lines+="HERMES:${sid}:${total_tokens}:${now_ts}:${muid}"$'\n'
+          printf '%s' "${ledger_lines}" >> "${LEDGER_FILE}"
+          _txn_memo_forget "${sid}"
           ((reported_count++)) || true
-          info "Reported: session=${sid} muid=${muid} task_type=${t_type} op_type=${op_type} in=${d_in} out=${d_out}${subscriber_log_suffix}"
+          info "Reported: session=${sid} muid=${muid} task_type=${t_type} op_type=${op_type} in=${d_in} out=${d_out}${subscriber_log_suffix}${m_absorbed:+ absorbed=${m_absorbed}}"
           # Phase 44 Plan 04 (EGV-17): classified bucket -- attributed to a
           # real marker.
           attribution_rows+="classified|${d_in}|${d_out}|${d_cr}|${d_cw}|${d_tot}|${d_cost}"$'\n'
@@ -5348,6 +5602,15 @@ PY
       # this session-loop iteration. Never enters --transaction-id or the ledger.
       if [[ "${TRACE_TYPE_CLI_CAPABLE}" == "true" ]]; then
         cmd+=(--trace-type "${root_trace_type:-uncategorized}")
+      fi
+      # --trace-name / --parent-transaction-id: identical to the per-marker
+      # path above. A session with no marker file anywhere in its trace
+      # resolves no name and ships byte-identically to before.
+      if [[ "${TRACE_NAME_CLI_CAPABLE}" == "true" && -n "${root_trace_name}" ]]; then
+        cmd+=(--trace-name "${root_trace_name}")
+      fi
+      if [[ "${PARENT_TXN_CLI_CAPABLE}" == "true" && -n "${parent_txn_id}" ]]; then
+        cmd+=(--parent-transaction-id "${parent_txn_id}")
       fi
 
       # Phase 29 (SQUAD-01/02/03 / D-03/D-04): identical gated squad append
@@ -5447,6 +5710,7 @@ PY
         now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
         synthetic_muid="unclassified-${now_ts//./}"
         echo "HERMES:${sid}:${total_tokens}:${now_ts}:${synthetic_muid}" >> "${LEDGER_FILE}"
+        _txn_memo_forget "${sid}"
         ((reported_count++)) || true
         info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}${subscriber_log_suffix}"
         # Phase 44 Plan 04 (EGV-17): unclassified bucket -- the markerless path.

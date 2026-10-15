@@ -1188,6 +1188,14 @@ def replay_marker_file(path):
     non-trivial `task_type`. Returns the shape string (`T` per task marker,
     `J` per job marker in file order), the job list and, per task marker,
     its owner and the rule that bound it.
+
+    Every task marker appears in `tasks`, but the legacy reporter ships one
+    completion per classification: a GUARDRAIL marker directly followed by its
+    CHAT twin is folded into the twin's completion and has no row of its own.
+    The two sit side by side, so they always resolve to the same owner
+    (ResolverEquivalenceTests pins it). Marker counts taken from `tasks` are
+    therefore marker counts, not completion counts, for sessions metered after
+    that change.
     """
     position = 0
     order, jobs, tasks = [], [], []

@@ -1046,10 +1046,19 @@ def run_event_reporter(shape, sid):
 
 
 class ResolverEquivalenceTests(unittest.TestCase):
-    """`resolve_owner` returns, for every task marker, the `--agentic-job-id`
-    the legacy reporter ships and, for every CHAT marker, the one the event
-    reporter ships. Driven end to end on a confirmed-root session, so it
-    holds before and after plan 02's positive-root gate lands."""
+    """`resolve_owner` returns, for every task marker the legacy reporter ships
+    a completion for, the `--agentic-job-id` it ships and, for every CHAT
+    marker, the one the event reporter ships. Driven end to end on a
+    confirmed-root session, so it holds before and after plan 02's
+    positive-root gate lands.
+
+    The legacy reporter ships one completion per CLASSIFICATION, not per
+    marker: a GUARDRAIL marker directly followed by its CHAT twin is folded into
+    the CHAT marker's completion (hermes-report.sh, split_strategies.
+    collapse_classification_pairs). That marker is still a task marker in the
+    replay, but it has no completion of its own, so `_legacy_expected` leaves it
+    out -- and `test_a_folded_guardrail_marker_loses_no_job_attribution` pins
+    the property that makes leaving it out safe."""
 
     @classmethod
     def setUpClass(cls):
@@ -1071,12 +1080,44 @@ class ResolverEquivalenceTests(unittest.TestCase):
         return {t['muid']: t['owner'] for t in self.replay[shape]['tasks']
                 if not chat_only or t['operation_type'] == 'CHAT'}
 
+    def _folded_pairs(self, shape):
+        """[(guardrail_task, chat_task)] for every GUARDRAIL marker directly
+        followed by a CHAT marker: the two halves of one classification. Read
+        off the replay's own task list, independently of the reporter's code."""
+        tasks = self.replay[shape]['tasks']
+        return [(a, b) for a, b in zip(tasks, tasks[1:])
+                if a['operation_type'] == 'GUARDRAIL'
+                and b['operation_type'] == 'CHAT']
+
+    def _legacy_expected(self, shape):
+        folded = {g['muid'] for g, _c in self._folded_pairs(shape)}
+        return {muid: owner for muid, owner in self._expected(shape).items()
+                if muid not in folded}
+
     def test_legacy_reporter_ships_the_owner_the_replay_computes(self):
         for shape in SHAPES:
             with self.subTest(shape=shape):
-                expected = self._expected(shape)
+                expected = self._legacy_expected(shape)
                 self.assertEqual(set(self.legacy[shape]), set(expected))
                 self.assertEqual(self.legacy[shape], expected)
+
+    def test_a_folded_guardrail_marker_loses_no_job_attribution(self):
+        """The GUARDRAIL half of a classification is folded into its CHAT twin,
+        so it ships no completion of its own. That is attribution-neutral only
+        because the two sit side by side and so resolve to the SAME owner: the
+        job the folded marker would have carried is exactly the one its twin's
+        completion ships."""
+        folded_any = False
+        for shape in SHAPES:
+            for guardrail, chat in self._folded_pairs(shape):
+                folded_any = True
+                with self.subTest(shape=shape, folded=guardrail['muid']):
+                    self.assertEqual(guardrail['owner'], chat['owner'])
+                    self.assertNotIn(guardrail['muid'], self.legacy[shape])
+                    self.assertEqual(self.legacy[shape][chat['muid']],
+                                     guardrail['owner'])
+        self.assertTrue(folded_any, 'no shape folded a pair: the fixture no '
+                        'longer exercises the case this test pins')
 
     def test_event_reporter_ships_the_owner_the_replay_computes(self):
         for shape in SHAPES:

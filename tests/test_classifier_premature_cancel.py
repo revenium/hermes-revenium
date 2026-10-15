@@ -387,11 +387,30 @@ class CancelledVerdictIsRejudgedTests(_ClassifierHarness):
         self.assertEqual(llm.call_count, 0)
         self.assertEqual(len(self._job_markers()), 1)
 
+    def _seed_job_markers(self, jobs, sid=None):
+        """A session that already carries several jobs: one task pair, then a
+        marker per entry of `jobs` (the shape of every session classified before
+        first-pass inference was held to one job per classification, which is
+        still on disk and still re-judged). First-pass inference can no longer
+        produce this itself -- tests/test_classifier_one_job_per_classification.py
+        pins that -- so the file is written directly. Returns the job ids."""
+        sid = sid or self.SID
+        base = time.time() - 60
+        records = self._task_pair(sid, base)
+        for offset, (job_id, status, name, job_type) in enumerate(jobs, start=1):
+            records.append({
+                'kind': 'job', 'ts': base + offset, 'sid': sid,
+                'agentic_job_id': job_id, 'job_name': name,
+                'job_type': job_type, 'status': status,
+            })
+        self._seed_markers(records, sid=sid)
+        return [job[0] for job in jobs]
+
     def test_multiple_cancelled_jobs_share_one_call(self):
         c = self._load()
-        ids = self._first_pass(c, [
-            _job('first_report', name='First report'),
-            _job('second_report', name='Second report', job_type='research'),
+        ids = self._seed_job_markers([
+            ('first_report_ab12', 'CANCELLED', 'First report', 'documentation'),
+            ('second_report_cd34', 'CANCELLED', 'Second report', 'research'),
         ])
         self.assertEqual(len(ids), 2)
         llm = self._trigger(c, [_resp(_verdicts((1, 'SUCCESS'), (2, 'CANCELLED')))])
@@ -405,9 +424,9 @@ class CancelledVerdictIsRejudgedTests(_ClassifierHarness):
 
     def test_only_the_job_whose_latest_status_is_cancelled_is_a_candidate(self):
         c = self._load()
-        ids = self._first_pass(c, [
-            _job('done_job', status='SUCCESS', name='Done job'),
-            _job('open_job', name='Open job'),
+        ids = self._seed_job_markers([
+            ('done_job_ab12', 'SUCCESS', 'Done job', 'documentation'),
+            ('open_job_cd34', 'CANCELLED', 'Open job', 'documentation'),
         ])
         prompts = []
 

@@ -183,6 +183,43 @@ required *absence* in `forbidden_fields`: `--reasoning-tokens`, which neither
 the main-loop nor the auxiliary emit path ships; its appearance on either
 would be a silent parity break.
 
+## meter-completion-trace.golden.json and meter-completion-aux-trace.golden.json — trace naming, pair collapse, the dependency graph
+
+- **meter-completion-trace.golden.json** and **meter-completion-aux-trace.golden.json**:
+  a ninth and tenth fixture, added with the trace-naming / classification-pair
+  collapse / `--parent-transaction-id` change. Loaded by
+  `tests/test_trace_naming_dedup_parent.py::CapableCliWireShapeTests`, which
+  replays the ent session that motivated the change (`20261012_203603_5008d5`:
+  one `GUARDRAIL`+`CHAT` marker pair, a job marker, one auxiliary row) against a
+  shim that advertises `--trace-name`, `--trace-type` and
+  `--parent-transaction-id`.
+
+These are **additive**, per the process above: the change they pin is a new wire
+shape, so it gets new sibling fixtures rather than an edit to
+`meter-completion.golden.json` or `meter-completion-aux.golden.json`. Those two
+stay untouched and keep passing, because `build_shim()` advertises neither new
+flag by default: they are the standing proof that both flags fail open on an
+older CLI. Neither new fixture is part of the immutability contract or the v1.4
+umbrella suite.
+
+What they pin that the older goldens do not:
+
+- **One completion for the pair.** The main-loop fixture is a single
+  `--operation-type CHAT` row carrying the whole session delta (49000 in / 796 out
+  / `0.140000`), `--transaction-id` ending in the `CHAT` marker's muid. The old
+  shape was two half-cost rows, one `GUARDRAIL` and one `CHAT`, each carrying the
+  full `--request-duration`.
+- **`--trace-name`** (the root's latest job name), placed immediately after
+  `--trace-type`, identical on the main-loop and auxiliary rows. A markerless
+  session sends none, and `meter-completion-markerless.golden.json` still pins
+  that.
+- **`--parent-transaction-id`** on the auxiliary row only, equal to the main
+  row's `--transaction-id`. The test asserts that equality against the LIVE main
+  row; the literal in the auxiliary fixture is only a second witness. A root
+  session's own row lists the flag under `forbidden_fields`.
+
+Both carry `argv_order` with the `TIMESTAMP_SENTINEL` convention described below.
+
 ## `argv_order` — the exact-list guard, extended to three more goldens (Phase 62)
 
 `meter-completion-markerless.golden.json` has carried an `argv_order` key

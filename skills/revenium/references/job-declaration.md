@@ -13,7 +13,9 @@ the SKILL.md `## FINAL ACTION — JOB DECLARATION` section applies.
 
 **On a genuine pivot before the current arc was declared:** first write a `CANCELLED` job marker for the abandoned arc (prevents attribution leakage into the next job), then treat the new request as a fresh arc.
 
-**Granularity floor:** at minimum, one job per session. A single-goal session produces one job; a multi-goal session produces multiple.
+**Granularity: one job per classification.** A session has one classification, and first-pass inference writes at most one job for it. The classifier may report several arcs for a multi-goal transcript. It keeps the first as the job (its id, type, status and failure reason) and names the others in the job's `job_name`, for example `Fix auth bug (also: Refactor DB layer)`. A second job could never own any spend: the reporter binds a task marker to the first job marker after it, and the session's one task pair is already in the file above every job. Such a job reached Revenium with no traces and no cost.
+
+The folded job's status is the first arc's, whatever the other arcs came back as. The folded-in arcs give the job a name and an owner for their cost; they do not vote on its status, so an unconfirmed or failed side task does not hold a finished job at `CANCELLED` (which is never evaluated, so the job would have no value). A `CANCELLED` or `FAILED` first arc is never promoted by a sibling's `SUCCESS`, and a sibling's `failure_reason` is not carried: the marker has one only for a `FAILED` job. When the re-judge checks a folded job it is told the status is the main goal's. Sessions classified before this rule can still hold several jobs on disk, and their `CANCELLED` jobs are re-judged as before.
 
 ## Trigger (binary — no judgment calls)
 
@@ -233,9 +235,11 @@ alongside that marker.
 
 ### double_counting_group (EGV-16)
 
-Several jobs inferred from one session's transcript carry the same
-`double_counting_group` id, so a consumer can see they must not be summed
-naively. `double_counting_group` groups same-session, multi-job records only.
+Several jobs of one session carry the same `double_counting_group` id, so a
+consumer can see they must not be summed naively. First-pass inference now
+writes one job per classification, so this covers sessions classified before
+that rule and any session where a second job reached the file another way.
+`double_counting_group` groups same-session, multi-job records only.
 It does not resolve cross-session or root-plus-subagent attribution. Job
 inference runs only when the session is its own root
 (`root_sid == session_id`), so a subagent session never independently

@@ -1306,10 +1306,8 @@ class GroupIdTests(unittest.TestCase):
 
     PA-08 (scope, stated here verbatim in substance so a future reader
     extending this class does not write a cross-session assertion that
-    cannot pass): the group id groups jobs inferred from ONE session's
-    transcript ONLY, because _infer_jobs_via_llm returns a list and one
-    transcript can legitimately yield several jobs serving one outcome.
-    It does NOT group a subagent's jobs with its root's -- job inference
+    cannot pass): the group id groups jobs of ONE session only. It does
+    NOT group a subagent's jobs with its root's -- job inference
     (classifier.py Step 7) only runs when root_sid == session_id, so a
     subagent session never independently reaches job inference and
     therefore never produces a second assessment record to relate to a
@@ -1317,6 +1315,15 @@ class GroupIdTests(unittest.TestCase):
     case expecting two grouped records across sessions; no second record
     would exist to compare against, and the assertion would fail by
     construction under this phase's own scope.
+
+    How a session comes to hold several jobs changed after this phase:
+    first-pass inference used to persist every arc the model reported, and
+    now folds them into ONE job (classifier._fold_jobs_into_one; pinned by
+    tests/test_classifier_one_job_per_classification.py). Sessions
+    classified before that fold still carry several job markers on disk,
+    and their CANCELLED jobs are re-judged and valued independently, so the
+    several-jobs case this id exists for is driven through the re-judge
+    (`_run_legacy_multi_job_rejudge`), not through first-pass inference.
     """
 
     def tearDown(self):
@@ -1361,18 +1368,70 @@ class GroupIdTests(unittest.TestCase):
                     records.append(json.loads(line))
         return records
 
+    def _run_legacy_multi_job_rejudge(self, tmpdir, sid, job_ids):
+        """A session that already carries one CANCELLED job marker per id in
+        `job_ids` (what first-pass inference wrote before it was held to one
+        job per classification), re-judged to SUCCESS and valued by the real
+        run_classification_async -> _rejudge_cancelled_jobs ->
+        _persist_job_verdict chain. Returns every sidecar record on disk."""
+        state_dir = os.path.join(tmpdir, 'state')
+        os.makedirs(state_dir, exist_ok=True)
+        config_file = os.path.join(state_dir, 'config.json')
+        with open(config_file, 'w') as f:
+            json.dump({'llmOutcomeEvaluation': {
+                'enabled': True, 'evaluator': 'p44-group-stub', 'currency': 'USD',
+            }}, f)
+        env = {'REVENIUM_STATE_DIR': state_dir, 'REVENIUM_CONFIG_FILE': config_file}
+        c, ev = _load_classifier_package(env)
+        ev.register('p44-group-stub', lambda job, transcript, cfg: {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'engineer', 'estimated_hours_saved': 1.0,
+            'assumed_loaded_rate': 100.0, 'currency': 'USD',
+            'basis': 'stub', 'confidence': 0.6,
+        })
+
+        markers_dir = Path(state_dir) / 'markers'
+        markers_dir.mkdir(parents=True, exist_ok=True)
+        base = 1_700_000_000.0
+        records = [
+            {'muid': f'p44-muid-{op}', 'ts': base, 'sid': sid, 'task_type': 'code_review',
+             'operation_type': op, 'trace_id': sid}
+            for op in ('GUARDRAIL', 'CHAT')
+        ]
+        for offset, job_id in enumerate(job_ids, start=1):
+            records.append({
+                'kind': 'job', 'ts': base + offset, 'sid': sid, 'agentic_job_id': job_id,
+                'job_name': job_id, 'job_type': 'bug_fix', 'status': 'CANCELLED'})
+        (markers_dir / f'{sid}.jsonl').write_text(
+            ''.join(json.dumps(r, separators=(',', ':')) + '\n' for r in records))
+
+        verdicts = unittest.mock.MagicMock()
+        verdicts.choices = [unittest.mock.MagicMock()]
+        verdicts.choices[0].message.content = json.dumps(
+            [{'index': i, 'status': 'SUCCESS'} for i in range(1, len(job_ids) + 1)])
+        with unittest.mock.patch.object(c, 'call_llm', side_effect=[verdicts]), \
+             unittest.mock.patch.object(c, '_read_session_transcript',
+                                         return_value='user: fix\nassistant: done'):
+            asyncio.run(c.run_classification_async(
+                session_id=sid, message='fix the bug', response='fixed',
+            ))
+
+        out = []
+        for path in sorted((Path(state_dir) / 'job-assessments').glob('*.jsonl')):
+            for line in path.read_text().splitlines():
+                if line.strip():
+                    out.append(json.loads(line))
+        return out
+
     def test_two_jobs_from_one_session_share_the_group_id(self):
         tmpdir = tempfile.mkdtemp(prefix='gsd-phase44-group-')
         try:
             sid = 'p44-group-sid-001'
-            jobs = [
-                {'agentic_job_id': 'job-a', 'job_name': 'a',
-                 'job_type': 'bug_fix', 'status': 'SUCCESS'},
-                {'agentic_job_id': 'job-b', 'job_name': 'b',
-                 'job_type': 'bug_fix', 'status': 'SUCCESS'},
-            ]
-            records = self._run_jobs(tmpdir, sid, jobs)
+            records = self._run_legacy_multi_job_rejudge(
+                tmpdir, sid, ['job-a-ab12', 'job-b-cd34'])
             self.assertEqual(len(records), 2, records)
+            self.assertEqual(
+                {r['agentic_job_id'] for r in records}, {'job-a-ab12', 'job-b-cd34'})
             group_ids = {r['double_counting_group'] for r in records}
             self.assertEqual(
                 len(group_ids), 1,

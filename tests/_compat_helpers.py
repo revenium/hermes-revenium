@@ -228,7 +228,8 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
                 squad_capable=True, reasoning_tokens_capable=False,
                 skill_capable=False, outcome_value_capable=True,
                 jobs_org_capable=False, subscriber_capable=False,
-                subscriber_email_capable=False):
+                subscriber_email_capable=False, trace_name_capable=False,
+                parent_txn_capable=False, trace_type_capable=False):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -283,6 +284,20 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
     accepts --subscriber-email on `meter completion` -- independent of
     subscriber_capable, so a shim can model a CLI advertising
     --subscriber-id but NOT --subscriber-email (Run G, SUB-07).
+
+    trace_name_capable=False (default) omits the --trace-name help line, so
+    TRACE_NAME_CLI_CAPABLE resolves false and every existing caller keeps
+    exercising the argv the goldens pin -- which is also the standing proof
+    that the flag fails open on an older CLI. parent_txn_capable=False omits
+    --parent-transaction-id the same way. The two are independent probes in
+    the reporter, so a shim can advertise either without the other.
+
+    trace_type_capable=False (default) omits --trace-type, which is why none
+    of the goldens carry it. True advertises it: the reporter then resolves
+    --trace-name inside the root-marker heredoc it already runs for the trace
+    type, instead of the standalone fallback a CLI with --trace-name but no
+    --trace-type takes. Both resolutions must agree (tests/
+    test_trace_naming_dedup_parent.py pins that).
     """
     if squad_capable:
         squad_help_lines = (
@@ -343,6 +358,22 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         )
     else:
         subscriber_email_help_lines = ''
+    # --trace-name / --parent-transaction-id (trace naming and the dependency
+    # graph). Default False for the reason spelled out in the docstring. Placed
+    # BEFORE the --agentic-job-id echo for the same SIGPIPE-ordering reason as
+    # every other opt-in capability line above.
+    trace_name_help_lines = (
+        '      echo "--trace-name string                   Trace name"\n'
+        if trace_name_capable else ''
+    )
+    trace_type_help_lines = (
+        '      echo "--trace-type string                   Trace type classification"\n'
+        if trace_type_capable else ''
+    )
+    parent_txn_help_lines = (
+        '      echo "--parent-transaction-id string        Parent transaction identifier"\n'
+        if parent_txn_capable else ''
+    )
     # Phase 38 (CR-01/WR-03): v1.5 jobs-outcome value flags. Default True so
     # every existing caller keeps exercising the "flags ship" wire shape;
     # False models the older CLI CR-01's capability probe exists to protect.
@@ -384,7 +415,10 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         + reasoning_help_lines
         + skill_help_lines
         + subscriber_help_lines
-        + subscriber_email_help_lines +
+        + subscriber_email_help_lines
+        + trace_name_help_lines
+        + trace_type_help_lines
+        + parent_txn_help_lines +
         '      echo "--agentic-job-id  Agentic job instance identifier"\n'
         '      exit 0\n'
         '    fi\n'
