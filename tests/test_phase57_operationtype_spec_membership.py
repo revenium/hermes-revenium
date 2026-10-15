@@ -793,11 +793,15 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # VALUE expressions are unchanged.
         # Trace name from the session title (2026-10-13): +7 in hermes-report.sh
         # above both main() sites: 5286->5293, 5546->5553. Pure shift.
+        # PR #155 review fixes (2026-10-14): the per-tick parent-lookup cache
+        # (+27 above the aux site and both main() sites), its call (+1 above
+        # both main() sites) and the one-append ledger write (+4 above the
+        # markerless site): 2203->2230, 5293->5321, 5553->5585. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2203),
-            ('hermes-report.sh', 5293),
-            ('hermes-report.sh', 5553),
+            ('hermes-report.sh', 2230),
+            ('hermes-report.sh', 5321),
+            ('hermes-report.sh', 5585),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

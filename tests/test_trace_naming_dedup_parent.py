@@ -968,6 +968,98 @@ class SubagentParentTests(_Harness):
             self.assertNotIn('--parent-transaction-id', f)
 
 
+class SiblingSubagentsShareOneParentLookupTests(_Harness):
+    """PR #155 review: each child's --parent-transaction-id lookup spawned
+    python3 and scanned the whole ledger, and siblings asked for the same root
+    one after another. One lookup now serves adjacent siblings."""
+    ROOT = 'root-sid'
+
+    def test_two_siblings_link_to_the_same_root_transaction(self):
+        kids = ('child-a', 'child-b')
+        self.make_db([_session(self.ROOT, 100, 50)]
+                     + [_child(k, 60, 40, started_at=OLD_START + 10 + n)
+                        for n, k in enumerate(kids)],
+                     parents={k: self.ROOT for k in kids})
+        for k in kids:
+            self.write_markers(k, [_task(k, 'm-' + k, 'CHAT', 'research', 1715515010.0,
+                                         trace_id=self.ROOT)])
+        self.make_shim(parent_txn_capable=True)
+        self.seed_ledger(f'HERMES:{self.ROOT}:150:1715514500.000:r-old')
+        run = self.tick()
+        rows = [f for f in run['flags'] if f['--task-type'] == 'research']
+        self.assertEqual(len(rows), 2, run['argv'])
+        self.assertEqual({f.get('--parent-transaction-id') for f in rows},
+                         {f'{self.ROOT}-150-r-old'})
+
+
+class TxnMemoShellTests(unittest.TestCase):
+    """The cache helpers themselves, run under bash with _latest_txn_id
+    stubbed to count its calls (each real call is a python3 spawn)."""
+
+    def _helpers(self):
+        src = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
+        start = src.index('_TXN_MEMO_SID=""')
+        end = src.index('\n}\n', src.index('_txn_memo_forget() {')) + 3
+        return src[start:end]
+
+    def _run(self, body):
+        import subprocess
+        # The stub runs inside $( ) like the real one, so it counts its calls
+        # in a file: a shell variable set there would never reach the caller.
+        tmp = tempfile.mkdtemp(prefix='gsd-txn-memo-')
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        script = ('set -uo pipefail\nCF="$1"; : > "$CF"\n'
+                  '_latest_txn_id() { echo x >> "$CF"; '
+                  'echo "txn-$1-$(wc -l < "$CF" | tr -d " ")"; }\n'
+                  + self._helpers() + '\n'
+                  + body.replace('${CALLS}', '$(wc -l < "$CF" | tr -d " ")'))
+        out = subprocess.run(['bash', '-c', script, 'bash', os.path.join(tmp, 'calls')],
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.split()
+
+    def test_adjacent_lookups_of_one_root_spawn_once(self):
+        out = self._run('for i in 1 2 3; do _latest_txn_id_cached root; '
+                        'echo "${_TXN_MEMO_VALUE}"; done; echo "calls=${CALLS}"')
+        self.assertEqual(out, ['txn-root-1'] * 3 + ['calls=1'])
+
+    def test_a_ledger_append_for_the_root_forgets_it(self):
+        out = self._run('_latest_txn_id_cached root; _txn_memo_forget other; '
+                        '_latest_txn_id_cached root; echo "${_TXN_MEMO_VALUE}"; '
+                        '_txn_memo_forget root; _latest_txn_id_cached root; '
+                        'echo "${_TXN_MEMO_VALUE} calls=${CALLS}"')
+        self.assertEqual(out, ['txn-root-1', 'txn-root-2', 'calls=2'])
+
+    def test_a_different_root_is_looked_up(self):
+        out = self._run('_latest_txn_id_cached a; _latest_txn_id_cached b; '
+                        'echo "${_TXN_MEMO_VALUE} calls=${CALLS}"')
+        self.assertEqual(out, ['txn-b-2', 'calls=2'])
+
+    def test_every_main_ledger_append_forgets_its_session(self):
+        src = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
+        appends = [i for i in range(len(src))
+                   if src.startswith('>> "${LEDGER_FILE}"', i)]
+        self.assertEqual(len(appends), 2, 'one append site per emit path')
+        for i in appends:
+            nxt = src[i:src.index('\n', src.index('\n', i) + 1)]
+            self.assertIn('_txn_memo_forget "${sid}"', nxt)
+
+
+class CollapsedPairLedgerIsOneAppendTests(unittest.TestCase):
+    """PR #155 review: the absorbed GUARDRAIL line and the shipped CHAT line
+    were two appends, and a crash between them left the absorbed muid newest,
+    so latest_transaction_id named a transaction that never went out. They are
+    one append now."""
+
+    def test_the_per_marker_emit_writes_its_lines_in_one_append(self):
+        src = (SCRIPTS_DIR / 'hermes-report.sh').read_text()
+        start = src.index('local ledger_lines="" absorbed_muid')
+        block = src[start:src.index('_txn_memo_forget "${sid}"', start)]
+        self.assertEqual(block.count('>> "${LEDGER_FILE}"'), 1, block)
+        self.assertIn('printf \'%s\' "${ledger_lines}" >> "${LEDGER_FILE}"', block)
+        self.assertLess(block.index('absorbed_muid}"'), block.index(':${muid}"'),
+                        'absorbed lines first, the shipped muid last')
+
 # =============================================================================
 # All three together: the capable-CLI wire shape, pinned as its own fixture
 # =============================================================================

@@ -106,7 +106,11 @@ def _on_session_end(
     marker write, trivial-skip, inheritance, halt-unclassified), AND in the
     outer except handler (D-04 belt extension), we write a per-session
     sentinel at MARKERS_READY_DIR / session_id so the cron pipeline can
-    proceed without racing the LLM classifier.
+    proceed without racing the LLM classifier. The one exception: a failed
+    task-label call that a later trigger (on_session_finalize) should retry
+    first returns False, and the sentinel is withheld so the reporter cannot
+    ship the session markerless before the retry lands (bounded by
+    classifier.LABEL_CALL_MAX_FAILURES and the cron's settle window).
 
     **kwargs absorbs any additional fields a future Hermes version may add
     to the on_session_end payload, keeping the plugin forward-compatible.
@@ -114,14 +118,14 @@ def _on_session_end(
     try:
         if not session_id:
             return
-        run_classification(
+        if run_classification(
             session_id=session_id,
             model=model,
             platform=platform,
             message=None,
             response=None,
-        )
-        _write_sentinel(session_id)
+        ) is not False:
+            _write_sentinel(session_id)
     except Exception as exc:
         logger.warning(
             "revenium-classifier on_session_end failed for sid=%s completed=%s interrupted=%s: %s",
@@ -180,14 +184,14 @@ def _on_session_finalize(
     try:
         if not session_id:
             return
-        run_classification(
+        if run_classification(
             session_id=session_id,
             model=None,
             platform=platform,
             message=None,
             response=None,
-        )
-        _write_sentinel(session_id)
+        ) is not False:
+            _write_sentinel(session_id)
     except Exception as exc:
         logger.warning(
             "revenium-classifier on_session_finalize failed for sid=%s reason=%s: %s",

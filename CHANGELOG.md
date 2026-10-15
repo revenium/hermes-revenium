@@ -148,6 +148,16 @@ this repository.
   label the model answered but the validator rejects still writes `unclassified` once, and a
   session no trigger can classify still ships as `unclassified`. The label call's timeout
   rises from 10 to 20 seconds, the job call's budget.
+  The session-end hooks hold the reporter's `.ready` sentinel back after such a failure, so a
+  cron tick between `on_session_end` and `on_session_finalize` cannot ship the session before
+  the retry; a second failure releases it, and the settle window still releases a session
+  that no hook does.
+- The reporter writes a collapsed pair's ledger lines (the absorbed `GUARDRAIL` muid, then
+  the shipped `CHAT` muid) in one append. Two appends could be split by a crash, leaving the
+  absorbed muid newest, and a later subagent or auxiliary row would name a transaction that
+  never went out as its `--parent-transaction-id`. Adjacent subagents of one root now share
+  one parent lookup per tick instead of each starting `python3` to scan the ledger, and the
+  transcript reader caps each message as it reads it rather than holding whole tool results.
 - A job's final answer is no longer cut to 500 characters before the classifier judges it
   (`ent`, 2026-10-14, the same two-goal run after the fix above: the re-judge said `FAILED`,
   "only two announcements, and the second link is truncated", about an answer that had all

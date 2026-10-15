@@ -1069,6 +1069,33 @@ except Exception:
 PY
 }
 
+# A one-entry, per-tick cache in front of _latest_txn_id for the session loop.
+# Each lookup is a python3 spawn plus a full ledger scan, and sessions are
+# visited ORDER BY started_at DESC, so a root's subagents sit next to each
+# other and all ask for the same root. The entry is forgotten whenever this
+# tick appends a main-ledger line for that session (_txn_memo_forget at both
+# append sites), so a cached id is never older than the ledger. One entry, not
+# a map: Bash 3.2 has no associative arrays, and siblings are adjacent.
+# Call it directly and read _TXN_MEMO_VALUE: inside $( ) it would run in a
+# subshell and the cache would never survive the call.
+_TXN_MEMO_SID=""
+_TXN_MEMO_VALUE=""
+_latest_txn_id_cached() {
+  local sid="$1"
+  if [[ -z "${sid}" ]]; then
+    _TXN_MEMO_VALUE=""
+    return 0
+  fi
+  [[ "${sid}" == "${_TXN_MEMO_SID}" ]] && return 0
+  _TXN_MEMO_VALUE="$(_latest_txn_id "${sid}")"
+  _TXN_MEMO_SID="${sid}"
+  return 0
+}
+_txn_memo_forget() {
+  [[ "${1:-}" == "${_TXN_MEMO_SID}" ]] && _TXN_MEMO_SID="" && _TXN_MEMO_VALUE=""
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Job-lifecycle guards (phantom-jobs fix, 2026-10-09)
 #
@@ -5083,7 +5110,8 @@ PY
     # later), so the miss is confined to the first tick that sees both.
     local parent_txn_id=""
     if [[ "${PARENT_TXN_CLI_CAPABLE}" == "true" && "${root_sid}" != "${sid}" ]]; then
-      parent_txn_id="$(_latest_txn_id "${root_sid}")"
+      _latest_txn_id_cached "${root_sid}"
+      parent_txn_id="${_TXN_MEMO_VALUE}"
     fi
     # Phase 3 cutover (T05 / B3 / B4): if markers exist for this window, emit
     # per-marker Revenium calls with extended transaction-id and per-call v2
@@ -5484,20 +5512,24 @@ PY
           # transaction that really went out (latest_transaction_id reads it for
           # --parent-transaction-id).
           #
-          # Two crash windows, both safe. Before ANY line: the call succeeded
-          # and nothing is ledgered, so the next tick recomputes the same delta
-          # and re-ships the same deterministic --transaction-id, which Revenium
-          # dedupes. BETWEEN the lines: the session already has a line at this
-          # total, so the next tick skips it; once it grows, the unledgered
-          # shipped muid goes out alone against the NEW delta only, under a new
-          # transaction id. Nothing is reported twice and nothing is dropped.
+          # All of a call's lines go out in ONE append (one write of well under
+          # a page to an O_APPEND file), so a crash leaves either none or all
+          # of them. Appended line by line, a crash between the absorbed and
+          # the shipped line left the absorbed muid newest: the next tick
+          # skips the unchanged total, and latest_transaction_id named the
+          # absorbed muid's transaction, which never went out, as every
+          # child's --parent-transaction-id. With no line at all the next tick
+          # recomputes the same delta and re-ships the same deterministic
+          # --transaction-id, which Revenium dedupes.
+          local ledger_lines="" absorbed_muid
           if [[ -n "${m_absorbed}" ]]; then
-            local absorbed_muid
             for absorbed_muid in ${m_absorbed//,/ }; do
-              echo "HERMES:${sid}:${total_tokens}:${now_ts}:${absorbed_muid}" >> "${LEDGER_FILE}"
+              ledger_lines+="HERMES:${sid}:${total_tokens}:${now_ts}:${absorbed_muid}"$'\n'
             done
           fi
-          echo "HERMES:${sid}:${total_tokens}:${now_ts}:${muid}" >> "${LEDGER_FILE}"
+          ledger_lines+="HERMES:${sid}:${total_tokens}:${now_ts}:${muid}"$'\n'
+          printf '%s' "${ledger_lines}" >> "${LEDGER_FILE}"
+          _txn_memo_forget "${sid}"
           ((reported_count++)) || true
           info "Reported: session=${sid} muid=${muid} task_type=${t_type} op_type=${op_type} in=${d_in} out=${d_out}${subscriber_log_suffix}${m_absorbed:+ absorbed=${m_absorbed}}"
           # Phase 44 Plan 04 (EGV-17): classified bucket -- attributed to a
@@ -5678,6 +5710,7 @@ PY
         now_ts=$(python3 -c "import time; print(f'{time.time():.3f}')" 2>/dev/null || date +%s)
         synthetic_muid="unclassified-${now_ts//./}"
         echo "HERMES:${sid}:${total_tokens}:${now_ts}:${synthetic_muid}" >> "${LEDGER_FILE}"
+        _txn_memo_forget "${sid}"
         ((reported_count++)) || true
         info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}${subscriber_log_suffix}"
         # Phase 44 Plan 04 (EGV-17): unclassified bucket -- the markerless path.

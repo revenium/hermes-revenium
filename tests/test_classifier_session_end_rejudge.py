@@ -707,6 +707,48 @@ class FailedLabelCallIsRetriedTests(_Harness):
         self.assertEqual(_read_jsonl(self._marker_path()), [])
         self.assertTrue(self._sentinel(), 'the session-end hooks still release the reporter')
 
+    def test_session_end_withholds_the_sentinel_until_the_retry_lands(self):
+        """PR #155 review (P1): on_session_end used to touch .ready after a
+        failed label call, and a cron tick before on_session_finalize's retry
+        shipped the session markerless, spend the retry could not re-attribute.
+        The sentinel now waits for the retry."""
+        self._load()
+        self._fire('_on_session_end', [ConnectionError('Connection error.')])
+        self.assertFalse(self._sentinel(), 'the reporter must not be released yet')
+        self.assertEqual(_read_jsonl(self._marker_path()), [])
+        self._fire('_on_session_finalize', [_resp('llm_spend_research_note'), _resp(JOB_SUCCESS)])
+        self.assertTrue(self._sentinel())
+        self.assertEqual(len(self._task_markers()), 2)
+        self.assertEqual(len(self._job_markers()), 1)
+
+    def test_the_sentinel_is_released_after_the_failure_bound(self):
+        """Bounded: the second failed call releases the reporter, which ships the
+        session as "unclassified" -- the outcome before this change."""
+        _pkg, c = self._load()
+        self.assertEqual(c.LABEL_CALL_MAX_FAILURES, 2)
+        self._fire('_on_session_end', [ConnectionError('down')])
+        self.assertFalse(self._sentinel())
+        self._fire('_on_session_finalize', [ConnectionError('down')])
+        self.assertTrue(self._sentinel())
+        self.assertEqual(_read_jsonl(self._marker_path()), [])
+
+    def test_a_success_resets_the_failure_count(self):
+        _pkg, c = self._load()
+        self._fire('_on_post_llm_call', [ConnectionError('down')])
+        self.assertEqual(c._LABEL_CALL_FAILURES.get(self.SID), 1)
+        self._fire('_on_post_llm_call', [_resp('code_review'), _resp('[]')])
+        self.assertNotIn(self.SID, c._LABEL_CALL_FAILURES)
+
+    def test_run_classification_releases_on_every_other_outcome(self):
+        """Only a retryable failed call returns False; a crash in the pipeline
+        still releases the reporter, as the D-21 contract always did."""
+        _pkg, c = self._load()
+        with mock.patch.object(c, 'run_classification_async', side_effect=RuntimeError('x')):
+            self.assertTrue(c.run_classification(session_id=self.SID))
+        with mock.patch.object(c, 'call_llm', side_effect=[_resp('code_review'), _resp('[]')]), \
+             mock.patch.object(c, '_read_session_transcript', return_value=TRANSCRIPT):
+            self.assertTrue(c.run_classification(session_id=self.SID))
+
     def test_an_invalid_label_still_writes_unclassified_and_latches(self):
         """Only a failed CALL is retried. A model that answered with a label the
         validator rejects keeps today's behaviour: "unclassified", once."""

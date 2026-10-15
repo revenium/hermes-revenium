@@ -83,6 +83,22 @@ CLASSIFY_CALL_FAILED = "<classify-call-failed>"
 # not killed, so the classification still finishes on its worker.
 _CLASSIFY_TIMEOUT_SECONDS = 20.0
 
+# How many failed task-label calls a session gets before the session-end hooks
+# release the reporter anyway. A failed call writes no marker so a later
+# trigger can retry, but on_session_end used to touch markers/.ready/<sid>
+# regardless, and a cron tick landing before on_session_finalize's retry
+# shipped the session markerless ("unclassified", no job) -- spend a
+# successful retry could not re-attribute, because the reporter never re-ships
+# a ledgered token total. So a session-end hook WITHHOLDS the sentinel after a
+# failed call until the session has failed this many times; then it releases
+# it (the old outcome: the session ships as "unclassified"). Without a
+# sentinel the reporter still releases the session once it ages past
+# REVENIUM_CRON_SETTLE_SECONDS, so a withheld sentinel delays, never strands.
+# Counted in-process (a restart starts over, which only allows one more try).
+LABEL_CALL_MAX_FAILURES = 2
+_LABEL_CALL_FAILURES: dict = {}
+_LABEL_CALL_FAILURES_MAX_SESSIONS = 1024
+
 logger = logging.getLogger("revenium_classifier")
 
 # BUG-4 (multiplex correctness): in the opt-in gateway.multiplex_profiles mode a
@@ -507,7 +523,10 @@ def _read_session_transcript(
                 " ORDER BY timestamp ASC",
                 (sid,),
             )
-            rows = [(row[0], row[1] or "") for row in cursor]
+            # Capped while reading: nothing past the larger cap can reach a
+            # line, so a long tool result is not held whole in memory.
+            keep = max(per_msg_cap, final_answer_cap)
+            rows = [(row[0], (row[1] or "")[:keep]) for row in cursor]
             last_answer = max(
                 (i for i, (role, _c) in enumerate(rows) if role == "assistant"),
                 default=-1,
@@ -6135,11 +6154,20 @@ async def run_classification_async(
                 # position), so it waits for the retry that writes both. If
                 # every trigger fails, the session ships markerless as
                 # "unclassified", the same label the old path wrote.
+                if len(_LABEL_CALL_FAILURES) >= _LABEL_CALL_FAILURES_MAX_SESSIONS:
+                    _LABEL_CALL_FAILURES.clear()
+                failures = _LABEL_CALL_FAILURES.get(session_id, 0) + 1
+                _LABEL_CALL_FAILURES[session_id] = failures
                 logger.warning(
                     "revenium-classifier: task_type call failed for sid=%s, "
-                    "writing nothing so a later trigger retries", session_id,
+                    "writing nothing so a later trigger retries (failure %d of %d)",
+                    session_id, failures, LABEL_CALL_MAX_FAILURES,
                 )
-                return
+                # False tells a session-end hook to withhold the reporter's
+                # sentinel (see LABEL_CALL_MAX_FAILURES); once the bound is hit
+                # the session is released as it always was.
+                return failures >= LABEL_CALL_MAX_FAILURES
+            _LABEL_CALL_FAILURES.pop(session_id, None)
             task_type = _validate_label(raw_label)
 
             # Step 6 — atomic write of GUARDRAIL + CHAT pair (D-10, D-14 / HOOK-06).
@@ -6293,7 +6321,7 @@ def run_classification(
     platform: "str | None" = None,
     message: "str | None" = None,
     response: "str | None" = None,
-) -> None:
+) -> bool:
     """Synchronous convenience wrapper. Drives run_classification_async via
     asyncio.run(). The plugin entrypoint (`_on_session_end`) is synchronous per
     the Hermes plugin contract, so this wrapper bridges the sync→async gap.
@@ -6301,9 +6329,13 @@ def run_classification(
     D-04 belt at the sync boundary: any exception escaping asyncio.run is
     caught here and logged via logger.warning. The plugin entrypoint stays
     clean and never sees a propagating exception.
+
+    Returns whether a session-end hook may release the reporter (touch
+    markers/.ready/<sid>): False only after a failed task-label call that a
+    later trigger should retry first (LABEL_CALL_MAX_FAILURES).
     """
     try:
-        asyncio.run(
+        released = asyncio.run(
             run_classification_async(
                 session_id=session_id,
                 model=model,
@@ -6318,3 +6350,7 @@ def run_classification(
             session_id,
             exc,
         )
+        return True
+    # Only a failed task-label call under LABEL_CALL_MAX_FAILURES returns
+    # False; every other path returns None, which releases the reporter.
+    return released is not False
