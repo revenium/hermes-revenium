@@ -973,8 +973,17 @@ before building any work:
   `DURATION` and `assessment_confidence` as `SCORE`. Its `unitMetricKey` must name a declared
   `COUNT` metric. The stage adopts that key rather than assuming its own.
 - If the contract returns `404`, the stage creates one with those three metrics plus
-  `jobs_completed` as the `COUNT` unit. Its monetization category is `COST_AVOIDED`, its basis
-  is `EXPECTED` and `estimated_value` is the monetization metric.
+  `jobs_completed` as the `COUNT` unit. It declares no monetization rule. When a contract
+  declares a per-unit rate, Revenium computes the job's Value as rate x units and ignores the
+  job's reported `outcomeValue`; with no rate, Value falls back to `outcomeValue`.
+- Contracts created by earlier versions declared a 1.0 USD per-unit rate, which showed every
+  job's Value as $1.00 and skewed ROI. They keep it, because the stage only creates absent
+  contracts and never replaces one. To remove it, re-set the contract without the
+  `monetization` key with
+  `revenium jobs types economics set <type> --file <doc-without-monetization> --yes`.
+  `economics set` replaces the whole document, so the file must carry the full contract
+  (metrics, `unitMetricKey`, `unitLabel`), and `--yes` is required because the replace removes
+  a declared field.
 - The stage never passes `--yes` to `jobs types economics set`. A prompt for `--yes` means the
   replacement would remove part of an operator-managed contract, so cron leaves it alone.
 - An unreadable, throttled, missing or incompatible contract skips that job type for the
