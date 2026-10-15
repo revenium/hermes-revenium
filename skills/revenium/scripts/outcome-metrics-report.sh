@@ -220,9 +220,13 @@ print(json.dumps({
     # round-trip and a 400.
     "unitMetricKey": unit,
     "unitLabel": "Jobs completed",
-    "monetization": {"category": "COST_AVOIDED", "basis": "EXPECTED",
-                     "currency": "USD", "metricKey": "estimated_value",
-                     "valuePerUnit": 1.0},
+    # No monetization rule, on purpose. When a contract declares a per-unit
+    # rate, Revenium computes a job's Value as rate x units and ignores the
+    # outcomeValue this script reports, so the 1.0 USD rate declared here
+    # earlier showed every job at $1.00 and skewed ROI. With no rate, Value
+    # falls back to the job's outcomeValue. Contracts declared before this
+    # change keep their rate, because this script only ever creates absent
+    # contracts; the operator re-set is in CHANGELOG.md.
 }, indent=2))
 PY
 

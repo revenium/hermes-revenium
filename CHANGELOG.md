@@ -102,6 +102,15 @@ this repository.
 
 ### Fixed
 
+- The economics contract the outcome-metrics stage declares for a job type with none no longer
+  carries a monetization rule. The 1.0 USD per-unit rate made Revenium compute every job's
+  Value as rate x units = $1.00, ignoring the reported `outcomeValue` and skewing ROI (on ent,
+  removing it from the `research` contract made job `ai_agent_cost_announcements_f6eb` show
+  $95.62). The four metrics, `unitMetricKey` and `unitLabel` are unchanged, and validation of
+  existing contracts never required monetization. Forward only: contracts declared by older
+  versions keep the $1 rate, because the skill only creates absent contracts. Re-set each with
+  `revenium jobs types economics set <type> --file <doc-without-monetization> --yes`, a
+  whole-document replace.
 - A classification now yields one job, not one per arc the model reported. The reporter
   attributes a completion to the first job marker after its task marker, and a session's one
   classification is written before any job, so every completion bound to job #1 and any

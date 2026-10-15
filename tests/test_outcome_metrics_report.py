@@ -68,7 +68,7 @@ class _Base(unittest.TestCase):
 
     def _shim(self, bin_dir, *, has_verb=True, throttle=False, econ_404=True,
               log=None, unit_key='signal_events_processed', econ_metrics=None,
-              append_status=None, append_exit=3):
+              append_status=None, append_exit=3, econ_set_capture=None):
         """A stub `revenium`. `has_verb` controls whether `jobs --help` lists
         outcome-metrics; when it does NOT, the stub mimics cobra's real
         behaviour for an unknown subcommand: print the PARENT help, exit 0.
@@ -78,6 +78,11 @@ class _Base(unittest.TestCase):
         yet queryable, or a 500. Left at their defaults (`append_status=None`)
         the append arm is BYTE-IDENTICAL to before these parameters existed;
         only a caller that sets `append_status` gets the new branch.
+
+        `econ_set_capture` is a path: the `economics set` arm copies the
+        document named by `--file` there. The script deletes its mktemp doc
+        right after the set call, so only a copy taken during the call
+        survives. Left at None the arm is byte-identical to before.
         """
         log = log or os.path.join(bin_dir, 'calls.log')
         verb_line = ('  outcome-metrics     Append late per-job outcome metrics\n'
@@ -103,6 +108,23 @@ class _Base(unittest.TestCase):
                 f'  emit_err \'{{"error":"x","status":{append_status}}}\'; exit {append_exit}\n'
                 'fi\n'
             )
+        if econ_set_capture is None:
+            econ_set_arm = (
+                'if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "set" ]; then\n'
+                '  echo "Contract"; exit 0\n'
+                'fi\n'
+            )
+        else:
+            econ_set_arm = (
+                'if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "set" ]; then\n'
+                '  prev=""\n'
+                '  for a in "$@"; do\n'
+                f'    if [ "$prev" = "--file" ]; then cp "$a" "{econ_set_capture}"; fi\n'
+                '    prev="$a"\n'
+                '  done\n'
+                '  echo "Contract"; exit 0\n'
+                'fi\n'
+            )
         # Error bodies are JSON only when the caller passed `--output json`,
         # exactly like the real CLI: without it the real CLI prints an
         # ANSI-coloured box that json_field cannot parse. A stub that always
@@ -126,10 +148,7 @@ if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" =
   if [ "{econ_404}" = "True" ]; then emit_err '{{"error":"Resource not found.","status":404}}'; exit 3; fi
   echo '{{"jobType":"t1","unitMetricKey":"{unit_key}","metrics":[{{"key":"estimated_value","type":"MONEY"}},{{"key":"hours_saved","type":"DURATION"}},{{"key":"assessment_confidence","type":"SCORE"}},{{"key":"{unit_key}","type":"COUNT"}}]}}'; exit 0
 fi
-if [ "$1" = "jobs" ] && [ "$2" = "types" ] && [ "$3" = "economics" ] && [ "$4" = "set" ]; then
-  echo "Contract"; exit 0
-fi
-{append_arm}# Mimic cobra: unknown subcommand prints PARENT help and exits 0.
+{econ_set_arm}{append_arm}# Mimic cobra: unknown subcommand prints PARENT help and exits 0.
 echo "Manage Agentic Jobs"; exit 0
 '''
         p = os.path.join(bin_dir, 'revenium')
@@ -383,6 +402,75 @@ class DeclaredUnitKeyTests(_Base):
             self._run(env)
             keys = {l.split(':')[2] for l in self._ledger(state_dir)}
             self.assertIn('jobs_completed', keys, keys)
+
+
+class CreatedContractDocumentTests(_Base):
+    """The contract this stage declares must carry no per-unit monetization.
+
+    Revenium's job UI computes Value as Rate x units when the contract
+    declares a per-unit monetization rate. The 1.0 USD rate this stage used to
+    declare pinned every job at $1.00 (1.0 x one jobs_completed unit), ignored
+    the job's reported outcomeValue and skewed ROI. Verified live on ent:
+    removing monetization from the `research` contract made job
+    ai_agent_cost_announcements_f6eb show $95.62, its outcomeValue.
+    """
+
+    def test_created_contract_declares_no_monetization(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-om-nomon-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            cap = os.path.join(tmp, 'econ-set-doc.json')
+            log = self._shim(bin_dir, has_verb=True, econ_404=True,
+                             econ_set_capture=cap)
+            self._assessment(state_dir)
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            calls = Path(log).read_text()
+            self.assertEqual(
+                1, calls.count('jobs types economics set t1 --file'),
+                f'a 404 type must get exactly one contract declared; calls:\n{calls}',
+            )
+            self.assertTrue(os.path.exists(cap),
+                            'the shim captured no document: the capture is broken')
+            doc = json.loads(Path(cap).read_text())
+            self.assertNotIn(
+                'monetization', doc,
+                'a declared per-unit rate makes Revenium compute Value as '
+                'rate x units and ignore outcomeValue, pinning every job at $1',
+            )
+            self.assertEqual(
+                {'estimated_value': 'MONEY', 'hours_saved': 'DURATION',
+                 'assessment_confidence': 'SCORE', 'jobs_completed': 'COUNT'},
+                {m['key']: m['type'] for m in doc['metrics']},
+                'the four metrics must stay as declared',
+            )
+            self.assertEqual('jobs_completed', doc['unitMetricKey'])
+            self.assertEqual('Jobs completed', doc['unitLabel'])
+            keys = {l.split(':')[2] for l in self._ledger(state_dir)}
+            self.assertIn('jobs_completed', keys, keys)
+
+    def test_contract_without_monetization_passes_validation(self):
+        with tempfile.TemporaryDirectory(prefix='gsd-om-nomon2-') as tmp:
+            env, state_dir, bin_dir = self._env(tmp)
+            log = self._shim(bin_dir, has_verb=True, econ_404=False,
+                             unit_key='jobs_completed')
+            self._assessment(state_dir)
+            r = self._run(env)
+            self.assertEqual(0, r.returncode, r.stderr)
+            self.assertNotIn(
+                'economics set', Path(log).read_text(),
+                'an existing contract must never be replaced by cron',
+            )
+            led = self._ledger(state_dir)
+            self.assertTrue(
+                led and all(l.startswith('OM:job-1:') for l in led),
+                'validation must accept a contract that declares no monetization',
+            )
+            log_path = os.path.join(state_dir, 'revenium-metering.log')
+            text = Path(log_path).read_text() if os.path.exists(log_path) else ''
+            self.assertNotIn(
+                'outcome-metrics: skipping job_type=', text,
+                'a contract with no monetization must not be skipped',
+            )
 
 
 class LedgerKeyMatchesDeclaredKeyTests(_Base):
