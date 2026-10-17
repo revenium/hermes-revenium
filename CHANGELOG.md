@@ -24,8 +24,10 @@ this repository.
   shows the role's typical rate as a consistency anchor. That rate is a prompt hint only, never
   a priced card: it changes no `evidence_class`, reportability or value, and early guesses can
   reinforce themselves through it. A configured `rateCard`, a disabled evaluation and any
-  evaluator other than `llm` are unchanged. Existing installs pick up the seed on the next
-  `install.sh` or bootstrap run and otherwise learn from empty.
+  evaluator other than `llm` are unchanged. Existing installs need the updated classifier and
+  the seed: re-run `install.sh` from a fresh clone, or run bootstrap with `--update` (a plain
+  bootstrap run skips the fetch when the skill is already installed). Without the seed, the
+  card learns from empty.
 
 ### Changed
 

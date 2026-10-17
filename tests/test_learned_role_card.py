@@ -602,6 +602,29 @@ class CorruptAndContendedFileTests(_Harness):
         self.assertEqual(self.role_file.read_bytes(), before)
         self.assertTrue(any('lock contention' in line for line in logs.output), logs.output)
 
+    def test_lock_contention_returns_none_so_the_caller_keeps_its_own_pick(self):
+        import fcntl
+        c, _ev = self.load()
+        with open(self.lock_file, 'a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with self.assertLogs('revenium_classifier', level='WARNING'):
+                got = c._record_role_observation('Data Analyst', 'USD', 100.0, c._module_paths())
+        self.assertIsNone(got)
+
+    def test_the_spelling_chosen_under_the_lock_wins_over_a_stale_pre_lock_read(self):
+        # Greptile (PR #157): two sessions both read 'data analyst' as unseen;
+        # the other one lands 'Data Analyst' first. This session's pre-lock
+        # read is stale ({}), so its own pick is 'data analyst'; the locked
+        # read finds 'Data Analyst', and the assessment, marker, sidecar and
+        # wire must carry that spelling, not the stale pick.
+        self.write_roles({'Data Analyst': {}})
+        c, _ev = self.load()
+        with mock.patch.object(c, '_read_role_taxonomy', return_value={}):
+            _job, record, _prompt = self.evaluate(c, _payload(role='data analyst'))
+        self.assertEqual(record['assumptions']['inferred_role'], 'Data Analyst')
+        self.assertEqual(list(self.roles()), ['Data Analyst'])
+        self.assertEqual(self.roles()['Data Analyst']['count'], 1)
+
 
 class PromptBudgetTests(_Harness):
 

@@ -5552,11 +5552,19 @@ def _learned_role_card(
 
 def _record_role_observation(
     role: str, currency, rate, paths: "_Paths | None" = None,
-) -> None:
+) -> "str | None":
     """Persist one accepted role observation to role-taxonomy.json
     (quick-261017-kb1): insert the role when absent (up to
     _ROLE_TAXONOMY_MAX_ROLES), bump its count and last_seen_at, and push the
     assumed rate onto the per-currency window.
+
+    Returns the spelling canonicalized UNDER THE LOCK, or None when no locked
+    read happened (contention, I/O failure). The caller must prefer it over
+    its own pre-lock pick: two sessions can both read a role as unseen in
+    different capitalizations, and only the locked read sees the one that
+    landed first, so using the pre-lock pick let a marker, sidecar and wire
+    disagree with the card (Greptile, PR #157). Past the cap the canonical
+    spelling is still returned, just not stored.
 
     Mirrors _persist_label_to_taxonomy: a sidecar `<file>.lock` held with
     LOCK_EX | LOCK_NB, skipped with a warning on contention, a corrupt file
@@ -5576,7 +5584,7 @@ def _record_role_observation(
                         "revenium-classifier: role persist skipped, lock "
                         "contention for role=%r: %s", role, exc,
                     )
-                    return
+                    return None
                 try:
                     data = json.loads(taxonomy_file.read_text(encoding="utf-8"))
                 except Exception:
@@ -5593,7 +5601,7 @@ def _record_role_observation(
                         if isinstance(k, str) and _normalize_role(k) == k
                     )
                     if eligible >= _ROLE_TAXONOMY_MAX_ROLES:
-                        return
+                        return canonical
                 entry = roles.get(canonical)
                 if not isinstance(entry, dict):
                     entry = {}
@@ -5639,14 +5647,16 @@ def _record_role_observation(
                     except Exception:
                         pass
                     raise
+                return canonical
         except OSError as exc:
             logger.warning(
                 "revenium-classifier: role persist skipped for role=%r: %s",
                 role, exc,
             )
-            return
+            return None
     except Exception as exc:
         logger.warning("revenium-classifier: role persist failed for role=%r: %s", role, exc)
+    return None
 
 
 def _apply_learned_role(assessment: dict, paths: "_Paths | None" = None) -> None:
@@ -5674,12 +5684,16 @@ def _apply_learned_role(assessment: dict, paths: "_Paths | None" = None) -> None
                 )
             assumptions["inferred_role"] = ""
             return
+        # The pre-lock pick is only a fallback for when no locked read
+        # happens; the spelling chosen under the lock wins.
         canonical = _canonical_role(role, _read_role_taxonomy(paths))
         assumptions["inferred_role"] = canonical
-        _record_role_observation(
+        locked = _record_role_observation(
             canonical, assessment.get("currency"),
             assumptions.get("assumed_loaded_rate"), paths,
         )
+        if isinstance(locked, str) and locked:
+            assumptions["inferred_role"] = locked
     except Exception as exc:
         logger.warning("revenium-classifier: learned role handling failed: %s", exc)
 
