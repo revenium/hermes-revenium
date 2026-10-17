@@ -86,7 +86,7 @@ flowchart TB
         JLED["revenium-jobs.ledger"]
         TLED["revenium-tool-events.ledger"]
         ALED["revenium-aux.ledger"]
-        TAX["task-taxonomy.json<br/>job-taxonomy.json"]
+        TAX["task-taxonomy.json<br/>job-taxonomy.json<br/>role-taxonomy.json"]
         LOG["revenium-metering.log<br/>in-place rotation"]
         LOCKS["cron.lock, rules.lock, prune.lock"]
     end
@@ -345,7 +345,7 @@ protocol works.
 - `markers/<sid>.jsonl`, `markers/.ready/<sid>`, `markers/.warn/`, `markers/.fallback-warn/`, `markers/.probe-warn/`, `markers/.outcome-warn/`, `markers/.aux-warn/`: classification markers, the settle sentinel and five once-per-`(session, reason)` warn gates.
 - `tool-events/<sid>.jsonl`: captured tool calls.
 - `revenium-hermes.ledger`, `revenium-jobs.ledger`, `revenium-tool-events.ledger`, `revenium-aux.ledger`: four append-only idempotency ledgers.
-- `task-taxonomy.json`, `job-taxonomy.json`: the controlled vocabularies, seeded from the skill dir and grown by the classifier. `aux-taxonomy.json` is the asymmetric exception: a fixed six-label vocabulary that lives in the SKILL dir (never copied into `STATE_DIR`) and is never grown by the classifier.
+- `task-taxonomy.json`, `job-taxonomy.json`: the controlled vocabularies, seeded from the skill dir and grown by the classifier. `role-taxonomy.json` is the learned role card (quick-261017-kb1): seeded the same way, grown by the classifier and read only by the classifier. It feeds the built-in `llm` evaluator's prompt with known roles and per-currency typical rates as a consistency anchor (never a priced card, never a change to `evidence_class` or reportability); a configured `rateCard` disables it. `aux-taxonomy.json` is the asymmetric exception: a fixed six-label vocabulary that lives in the SKILL dir (never copied into `STATE_DIR`) and is never grown by the classifier.
 - `revenium-metering.log`: cron log, truncated in place by `rotate_log_if_needed`.
 - `reporter-memo.jsonl`, `event-shadow-memo.jsonl`: cross-tick no-op caches for `hermes-report.sh` and the shadow pass of `api-event-report.sh`. A session whose inputs (state.db row, marker/owner/spool files, scripts, switches, ledgers) are unchanged since it was last a pure no-op is skipped without its per-session python3 spawns. Safe to delete; `REVENIUM_REPORTER_MEMO=disabled` turns both off. Pinned by `tests/test_reporter_memo.py` and `tests/test_event_shadow_memo.py`.
 - `cron.lock`, `rules.lock`, `prune.lock`: flock targets.
@@ -407,6 +407,7 @@ protocol works.
 | `JOB_ASSESSMENTS_DIR` | `${STATE_DIR}/job-assessments` |
 | `TAXONOMY_FILE` | `${STATE_DIR}/task-taxonomy.json` |
 | `JOB_TAXONOMY_FILE` | `${STATE_DIR}/job-taxonomy.json` |
+| `ROLE_TAXONOMY_FILE` | `${STATE_DIR}/role-taxonomy.json` |
 | `AUX_TAXONOMY_FILE` | `${SKILL_DIR}/aux-taxonomy.json` (the only taxonomy path in this table outside `STATE_DIR`) |
 | `LOG_FILE` | `${STATE_DIR}/revenium-metering.log` |
 | `ENV_FILE` | `${STATE_DIR}/env` |

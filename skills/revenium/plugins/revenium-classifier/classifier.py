@@ -25,6 +25,7 @@ import os
 import re
 import secrets
 import sqlite3
+import statistics
 import time
 from pathlib import Path
 from urllib.parse import quote, unquote, urlsplit
@@ -44,6 +45,10 @@ MARKERS_DIR = Path(os.environ.get("REVENIUM_MARKERS_DIR", str(STATE_DIR / "marke
 MARKERS_READY_DIR = Path(os.environ.get("REVENIUM_MARKERS_READY_DIR", str(MARKERS_DIR / ".ready")))
 TAXONOMY_FILE = Path(os.environ.get("REVENIUM_TAXONOMY_FILE", str(STATE_DIR / "task-taxonomy.json")))
 JOB_TAXONOMY_FILE = Path(os.environ.get("REVENIUM_JOB_TAXONOMY_FILE", str(STATE_DIR / "job-taxonomy.json")))
+# quick-261017-kb1: the learned role card -- mirrors common.sh's
+# ROLE_TAXONOMY_FILE. Read and grown only by this module, seeded by the
+# installers.
+ROLE_TAXONOMY_FILE = Path(os.environ.get("REVENIUM_ROLE_TAXONOMY_FILE", str(STATE_DIR / "role-taxonomy.json")))
 # Phase 42 (D-15): the job-assessments sidecar directory -- mirrors
 # common.sh's JOB_ASSESSMENTS_DIR declaration, the second hand-maintained
 # mirror of that path (resolve-markers-dir.py's _SUBDIR_ENV_OVERRIDE is the
@@ -120,7 +125,12 @@ _Paths = namedtuple(
     "_Paths",
     "hermes_home state_dir markers_dir markers_ready_dir "
     "taxonomy_file job_taxonomy_file guardrail_status_file config_file state_db "
-    "job_assessments_dir",
+    "job_assessments_dir role_taxonomy_file",
+    # quick-261017-kb1: appended LAST with a default so tests that construct
+    # _Paths by keyword with the original ten fields keep working; readers
+    # go through _role_taxonomy_path, which falls back to
+    # state_dir / "role-taxonomy.json".
+    defaults=(None,),
 )
 
 # Phase 59 (D-18, paths-for-session-regex-may-never-match): profile values
@@ -156,7 +166,7 @@ def _module_paths() -> "_Paths":
     return _Paths(
         HERMES_HOME, STATE_DIR, MARKERS_DIR, MARKERS_READY_DIR,
         TAXONOMY_FILE, JOB_TAXONOMY_FILE, GUARDRAIL_STATUS_FILE, CONFIG_FILE,
-        STATE_DB, JOB_ASSESSMENTS_DIR,
+        STATE_DB, JOB_ASSESSMENTS_DIR, ROLE_TAXONOMY_FILE,
     )
 
 
@@ -389,6 +399,7 @@ def _paths_for_session(session_id: str) -> "_Paths":
             config_file=state_dir / "config.json",
             state_db=profile_home / "state.db",
             job_assessments_dir=state_dir / "job-assessments",
+            role_taxonomy_file=state_dir / "role-taxonomy.json",
         )
     except Exception:
         return _module_paths()
@@ -938,6 +949,57 @@ _INFERRED_ROLE_CLAMP = 60
 # have truncated the live card roughly 60% away.
 _ROLE_VOCABULARY_BUDGET_CHARS = 4096
 
+# quick-261017-kb1: the LEARNED role card -- a zero-configuration role
+# vocabulary for the built-in `llm` evaluator, mirroring the task-taxonomy
+# pattern. role-taxonomy.json is seeded at install, grown by this module, shown
+# to the evaluator as a reuse-verbatim-or-propose-new list, and annotated with
+# each role's typical observed rate as a CONSISTENCY ANCHOR in the prompt.
+#
+# Three decisions, recorded here because the next reader will ask:
+#
+# 1. New names, not LABEL_RE / TRIVIAL_BLOCKLIST. Those two are
+#    Phase 67 SC3 AST-pinned nodes (tests/test_phase67_confidence_contract.py)
+#    and describe snake_case task labels; a role is a human title ("Senior
+#    Software Engineer"), so it gets its own pattern and blocklist.
+# 2. A learned rate is a prompt anchor and NEVER an operator rateCard. It
+#    never enters config, _validate_assessment, the valuation boundary or
+#    reportability, so it cannot change evidence_class (it stays
+#    MODEL_ESTIMATED_DEMO, authority evaluator) or make a value reportable.
+#    An operator rateCard (#140) disables learned mode entirely.
+# 3. PROMPT_VERSION is NOT bumped. Its comment ties a bump to "the taxonomy
+#    shape, the job-inference prompt, or the outcome-evaluation policy"; it
+#    stayed 1 through two earlier evaluator-prompt changes (Phase 44 mechanism
+#    branches, #140 rate-card vocabulary); and it is an SC3-pinned node, so
+#    bumping it means deliberately moving the Phase 67 baseline that governs
+#    the confidence-omission comparisons. Analytics that need to tell
+#    learned-card prompts apart would have to move that baseline on purpose.
+ROLE_LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 _&/'.+#-]{1,59}$")
+ROLE_TRIVIAL_BLOCKLIST = frozenset({
+    "unknown", "none", "n/a", "na", "null", "other", "various", "ai",
+    "ai agent", "agent", "assistant", "ai assistant", "llm", "model", "bot",
+    "chatbot", "human", "person", "user", "anyone", "someone", "role",
+})
+_ROLE_TAXONOMY_MAX_ROLES = 200
+_ROLE_RATE_WINDOW = 20
+_ROLE_RATE_MIN_SAMPLES = 3
+_LEARNED_ROLE_PROMPT_BUDGET_CHARS = 2048
+
+# The reserved cfg key the learned card travels under, from _attach_assessment
+# to _build_outcome_evaluation_prompt (via the evaluator's cfg argument).
+_LEARNED_ROLE_CARD_KEY = "_revenium_learned_role_card"
+
+
+class _LearnedRoleCard:
+    """Module-private carrier for the rendered learned role vocabulary.
+
+    Mirrors _ServedModel's rationale: an INSTANCE of this class travels under
+    _LEARNED_ROLE_CARD_KEY because config.json (JSON) cannot construct one, so
+    an operator file cannot inject prompt text under that key.
+    """
+
+    def __init__(self, block: str) -> None:
+        self.block = block
+
 
 # Phase 39 (ROI-14): two module-private sentinels distinguishing a BROKEN
 # evaluator response from a DELIBERATE abstention (the documented `null`
@@ -1136,6 +1198,7 @@ def _rate_card_role_vocabulary(config: dict) -> str:
 def _mechanism_instruction_block(
     mechanism: str, max_hours: float, max_rate: float, currency: str,
     role_vocabulary_constrained: bool = False,
+    role_vocabulary_learned: bool = False,
 ) -> str:
     """Return the per-mechanism output-shape fragment for one member of
     EVALUATOR_MECHANISMS (D-02), or the empty string for anything else.
@@ -1166,7 +1229,14 @@ def _mechanism_instruction_block(
     `newly_enabled_work` branch below (which this flag does not touch at
     all) never sees it either.
 
-    Never raises: a pure function over five already-bounded/validated
+    `role_vocabulary_learned` (quick-261017-kb1, same keyword-with-default
+    shape): when True and the rate-card vocabulary is not in force, the two
+    counterfactual branches ask the model to copy a known role verbatim if
+    one fits and otherwise to give a new short role title. The list itself is
+    inserted once by `_build_outcome_evaluation_prompt`. `role_vocabulary_
+    constrained` keeps precedence; `newly_enabled_work` is untouched.
+
+    Never raises: a pure function over six already-bounded/validated
     arguments.
     """
     if mechanism in (
@@ -1180,6 +1250,13 @@ def _mechanism_instruction_block(
                 "adapt, abbreviate, or invent a role. Omit this field "
                 "entirely if none of them describes the human who would "
                 "otherwise have done this work\n"
+            )
+        elif role_vocabulary_learned:
+            role_line = (
+                "  - inferred_role: the human role that would otherwise "
+                "have done this work -- copy one of the known roles "
+                "listed below verbatim if one fits, otherwise give a new "
+                "short role title of a few words\n"
             )
         else:
             role_line = (
@@ -1257,6 +1334,16 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     BYTE-IDENTICAL to the pre-change prompt -- gated on `rateCard`'s
     presence, not on the active valuation boundary (DD-8), since
     `boundaries.valuation` is not plumbed into this config object.
+
+    quick-261017-kb1: a fifth, carrier-gated difference -- when `config`
+    carries a `_LearnedRoleCard` under `_LEARNED_ROLE_CARD_KEY` (only
+    `_attach_assessment` puts one there, only for the built-in `llm`
+    evaluator, only when no operator rateCard is configured) the two
+    counterfactual blocks ask for a known role verbatim or a new short title,
+    and the learned list (with typical rates where there are enough
+    observations) is inserted in the rate-card vocabulary's slot. The rate
+    card takes precedence over a carrier. Under `{}` or any config without a
+    carrier holding a non-empty block the output stays BYTE-IDENTICAL.
     """
     cfg = config if isinstance(config, dict) else {}
     currency = cfg.get("currency", "USD")
@@ -1268,6 +1355,19 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
     job_type = (job or {}).get("job_type", "")
     job_name = (job or {}).get("job_name", "")
     role_vocabulary = _rate_card_role_vocabulary(cfg)
+    # quick-261017-kb1: the learned card is used only when the carrier is a
+    # genuine _LearnedRoleCard AND the operator's rate card produced no
+    # vocabulary (defense in depth -- _attach_assessment already withholds
+    # the carrier when a card is configured).
+    learned_role_block = ""
+    _learned_carrier = cfg.get(_LEARNED_ROLE_CARD_KEY)
+    if (
+        not role_vocabulary
+        and isinstance(_learned_carrier, _LearnedRoleCard)
+        and isinstance(_learned_carrier.block, str)
+        and _learned_carrier.block
+    ):
+        learned_role_block = _learned_carrier.block
 
     preamble = (
         "You are estimating the economic value of one completed task arc performed "
@@ -1290,6 +1390,7 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
         _mechanism_instruction_block(
             mechanism, max_hours, max_rate, currency,
             role_vocabulary_constrained=bool(role_vocabulary),
+            role_vocabulary_learned=bool(learned_role_block),
         )
         for mechanism in (
             ECONOMIC_MECHANISM_LABOR_SUBSTITUTION,
@@ -1311,6 +1412,22 @@ def _build_outcome_evaluation_prompt(job: dict, transcript: str, config: dict) -
             "ends; copy the text INSIDE the quotes verbatim, without the "
             "quotes themselves, and never treat a comma inside an entry as a "
             "separator between two entries: " + role_vocabulary + "\n\n"
+        )
+    elif learned_role_block:
+        # quick-261017-kb1: same slot as the rate-card block (the two are
+        # mutually exclusive). Plain language that never names the
+        # `inferred_role` token (DD-5 style anchoring concern).
+        role_vocabulary_block = (
+            "These are known human roles from earlier estimates. For the "
+            "two mechanisms above that ask for a human role, if one of "
+            "them describes who would otherwise have done this work, copy "
+            "the text INSIDE its quotes verbatim, without the quotes "
+            "themselves, and never treat a comma inside an entry as a "
+            "separator between two entries; if none fits, propose a new "
+            "short role title of a few words. Where a typical rate is "
+            "shown, stay consistent with it for that role unless the work "
+            "clearly warrants a different rate: " + learned_role_block
+            + "\n\n"
         )
 
     trailer = (
@@ -3253,6 +3370,8 @@ SIDECAR_LINE_MAX_BYTES = 8192
 # job-inference prompt, or the outcome-evaluation policy actually changes.
 # Nothing in this module does that automatically.
 TAXONOMY_VERSION = 1
+# quick-261017-kb1: deliberately still 1 through the learned role card -- see
+# the decision note above ROLE_LABEL_RE. SC3-pinned; do not edit the value.
 PROMPT_VERSION = 1
 POLICY_VERSION = 1
 
@@ -5282,6 +5401,303 @@ def _persist_label_to_taxonomy(label: str, paths: "_Paths | None" = None) -> Non
         logger.warning("revenium-classifier: mint-back failed for label=%s: %s", label, exc)
 
 
+def _role_taxonomy_path(paths: "_Paths | None" = None) -> Path:
+    """The role-taxonomy.json path for `paths` (quick-261017-kb1).
+
+    `_Paths.role_taxonomy_file` is the LAST field, defaulted to None so
+    callers that build a _Paths by keyword without it keep working; it then
+    resolves to `state_dir / "role-taxonomy.json"`. Falls back to the
+    process-level ROLE_TAXONOMY_FILE on any error. Never raises."""
+    try:
+        p = paths or _module_paths()
+        explicit = getattr(p, "role_taxonomy_file", None)
+        if explicit:
+            return Path(explicit)
+        return Path(p.state_dir) / "role-taxonomy.json"
+    except Exception:
+        return ROLE_TAXONOMY_FILE
+
+
+def _normalize_role(value) -> str:
+    """Normalize one role title, or "" when it is not usable
+    (quick-261017-kb1). Collapses whitespace, clamps to the inferred_role
+    byte budget, and rejects anything failing ROLE_LABEL_RE or whose casefold
+    is in ROLE_TRIVIAL_BLOCKLIST. Never raises."""
+    try:
+        if not isinstance(value, str):
+            return ""
+        collapsed = " ".join(value.split())
+        role = _clamp_assessment_text(collapsed, _INFERRED_ROLE_CLAMP)
+        if not role or not ROLE_LABEL_RE.match(role):
+            return ""
+        if role.casefold() in ROLE_TRIVIAL_BLOCKLIST:
+            return ""
+        return role
+    except Exception:
+        return ""
+
+
+def _read_role_taxonomy(paths: "_Paths | None" = None) -> dict:
+    """The `roles` dict of role-taxonomy.json, or {} on any failure. Read-only."""
+    try:
+        data = json.loads(_role_taxonomy_path(paths).read_text(encoding="utf-8"))
+        roles = data.get("roles") if isinstance(data, dict) else None
+        return roles if isinstance(roles, dict) else {}
+    except Exception:
+        return {}
+
+
+def _canonical_role(role: str, roles: dict) -> str:
+    """The stored spelling of `role` (case-insensitive), else `role` itself.
+
+    Only keys that are themselves valid (`_normalize_role(key) == key`) can be
+    a canonical target, so a hand-edited ineligible key is never adopted."""
+    try:
+        folded = role.casefold()
+        for key in roles:
+            if (
+                isinstance(key, str)
+                and key.casefold() == folded
+                and _normalize_role(key) == key
+            ):
+                return key
+    except Exception:
+        pass
+    return role
+
+
+def _role_rate_annotation(entry, currency: str, max_rate: float) -> str:
+    """` (typical rate so far: N CUR/hour)` for one stored role, or "".
+
+    Shown only when this currency has at least _ROLE_RATE_MIN_SAMPLES
+    observations, a window at least that long, and a finite median in
+    (0, max_rate] that rounds to at least 1. Never raises."""
+    try:
+        rates = entry.get("rates") if isinstance(entry, dict) else None
+        bucket = rates.get(currency) if isinstance(rates, dict) else None
+        if not isinstance(bucket, dict):
+            return ""
+        count = bucket.get("count")
+        recent = bucket.get("recent")
+        if (
+            not isinstance(count, int) or isinstance(count, bool)
+            or count < _ROLE_RATE_MIN_SAMPLES
+            or not isinstance(recent, list)
+        ):
+            return ""
+        window = [x for x in (_finite_number(v) for v in recent) if x is not None and x > 0]
+        if len(window) < _ROLE_RATE_MIN_SAMPLES:
+            return ""
+        median = statistics.median(window)
+        if not math.isfinite(median) or not (0 < median <= max_rate):
+            return ""
+        shown = int(round(median))
+        if shown < 1:
+            return ""
+        return " (typical rate so far: %d %s/hour)" % (shown, currency)
+    except Exception:
+        return ""
+
+
+def _learned_role_card(
+    paths: "_Paths | None", currency: str, max_rate: float,
+) -> "_LearnedRoleCard | None":
+    """Render the learned role vocabulary for the evaluator prompt, or None
+    when nothing is eligible (quick-261017-kb1). Most-used first, each role
+    quoted, with a typical rate where there are enough observations in
+    `currency`. Accumulates within _LEARNED_ROLE_PROMPT_BUDGET_CHARS and stops
+    on an entry boundary; truncation is not logged (most-used-first ordering
+    makes it expected). Never raises."""
+    try:
+        roles = _read_role_taxonomy(paths)
+        eligible = [
+            k for k in roles
+            if isinstance(k, str) and _normalize_role(k) == k
+        ]
+        if not eligible:
+            return None
+
+        def _count(k):
+            e = roles.get(k)
+            c = e.get("count") if isinstance(e, dict) else 0
+            return c if isinstance(c, int) and not isinstance(c, bool) and c > 0 else 0
+
+        def _seen(k):
+            e = roles.get(k)
+            v = e.get("last_seen_at") if isinstance(e, dict) else ""
+            return v if isinstance(v, str) else ""
+
+        # count desc, then last_seen_at desc, then key asc: three stable passes.
+        ordered = sorted(eligible)
+        ordered.sort(key=_seen, reverse=True)
+        ordered.sort(key=_count, reverse=True)
+
+        sep = ", "
+        kept = []
+        length = 0
+        for key in ordered:
+            entry = '"' + key + '"' + _role_rate_annotation(
+                roles.get(key), currency, max_rate)
+            addition = len(entry) if not kept else len(sep) + len(entry)
+            if length + addition > _LEARNED_ROLE_PROMPT_BUDGET_CHARS:
+                break
+            kept.append(entry)
+            length += addition
+        if not kept:
+            return None
+        return _LearnedRoleCard(sep.join(kept))
+    except Exception:
+        return None
+
+
+def _record_role_observation(
+    role: str, currency, rate, paths: "_Paths | None" = None,
+) -> "str | None":
+    """Persist one accepted role observation to role-taxonomy.json
+    (quick-261017-kb1): insert the role when absent (up to
+    _ROLE_TAXONOMY_MAX_ROLES), bump its count and last_seen_at, and push the
+    assumed rate onto the per-currency window.
+
+    Returns the spelling canonicalized UNDER THE LOCK, or None when no locked
+    read happened (contention, I/O failure). The caller must prefer it over
+    its own pre-lock pick: two sessions can both read a role as unseen in
+    different capitalizations, and only the locked read sees the one that
+    landed first, so using the pre-lock pick let a marker, sidecar and wire
+    disagree with the card (Greptile, PR #157). Past the cap the canonical
+    spelling is still returned, just not stored.
+
+    Mirrors _persist_label_to_taxonomy: a sidecar `<file>.lock` held with
+    LOCK_EX | LOCK_NB, skipped with a warning on contention, a corrupt file
+    rebuilt as {"roles": {}}, tmp + replace. Fail-open; never raises."""
+    import datetime
+    try:
+        taxonomy_file = _role_taxonomy_path(paths)
+        taxonomy_file.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = taxonomy_file.parent / (taxonomy_file.name + ".lock")
+        tmp = taxonomy_file.parent / (taxonomy_file.name + ".tmp")
+        try:
+            with open(lock_path, "a") as lockfd:
+                try:
+                    fcntl.flock(lockfd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    logger.warning(
+                        "revenium-classifier: role persist skipped, lock "
+                        "contention for role=%r: %s", role, exc,
+                    )
+                    return None
+                try:
+                    data = json.loads(taxonomy_file.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {"roles": {}}
+                if not isinstance(data, dict):
+                    data = {"roles": {}}
+                roles = data.get("roles")
+                if not isinstance(roles, dict):
+                    roles = {}
+                canonical = _canonical_role(role, roles)
+                if canonical not in roles:
+                    eligible = sum(
+                        1 for k in roles
+                        if isinstance(k, str) and _normalize_role(k) == k
+                    )
+                    if eligible >= _ROLE_TAXONOMY_MAX_ROLES:
+                        return canonical
+                entry = roles.get(canonical)
+                if not isinstance(entry, dict):
+                    entry = {}
+                entry["last_seen_at"] = datetime.datetime.now(
+                    datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                prior = entry.get("count")
+                prior = prior if isinstance(prior, int) and not isinstance(prior, bool) and prior > 0 else 0
+                entry["count"] = prior + 1
+                rate_f = _finite_number(rate)
+                if (
+                    rate_f is not None and rate_f > 0
+                    and isinstance(currency, str) and currency
+                ):
+                    rates = entry.get("rates")
+                    if not isinstance(rates, dict):
+                        rates = {}
+                    bucket = rates.get(currency)
+                    if not isinstance(bucket, dict):
+                        bucket = {}
+                    n = bucket.get("count")
+                    n = n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
+                    recent = bucket.get("recent")
+                    recent = [
+                        float(x) for x in (_finite_number(v) for v in (recent if isinstance(recent, list) else []))
+                        if x is not None
+                    ]
+                    rates[currency] = {
+                        "count": n + 1,
+                        "recent": (recent + [float(rate_f)])[-_ROLE_RATE_WINDOW:],
+                    }
+                    entry["rates"] = rates
+                roles[canonical] = entry
+                data["roles"] = roles
+                try:
+                    tmp.write_text(
+                        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                        encoding="utf-8",
+                    )
+                    tmp.replace(taxonomy_file)
+                except Exception:
+                    try:
+                        tmp.unlink()
+                    except Exception:
+                        pass
+                    raise
+                return canonical
+        except OSError as exc:
+            logger.warning(
+                "revenium-classifier: role persist skipped for role=%r: %s",
+                role, exc,
+            )
+            return None
+    except Exception as exc:
+        logger.warning("revenium-classifier: role persist failed for role=%r: %s", role, exc)
+    return None
+
+
+def _apply_learned_role(assessment: dict, paths: "_Paths | None" = None) -> None:
+    """Normalize and canonicalize an accepted assessment's inferred_role, then
+    record the observation (quick-261017-kb1). Mutates
+    `assessment["assumptions"]["inferred_role"]` in place so the marker, the
+    sidecar and the wire all carry the canonical spelling.
+
+    Runs AFTER _validate_assessment (AST-pinned, untouched) and BEFORE the
+    sidecar record is built. A role that fails normalization is logged with
+    %r (T-28-07: model text, never %s or an f-string) and blanked; the
+    assessment and its value are still accepted. Past the 200-role cap the
+    normalized role is still used, just not persisted. Never raises."""
+    try:
+        assumptions = assessment.get("assumptions") if isinstance(assessment, dict) else None
+        if not isinstance(assumptions, dict):
+            return
+        original = assumptions.get("inferred_role")
+        role = _normalize_role(original)
+        if not role:
+            if isinstance(original, str) and original.strip():
+                logger.warning(
+                    "revenium-classifier: rejected inferred_role, failed "
+                    "validation: %r", original,
+                )
+            assumptions["inferred_role"] = ""
+            return
+        # The pre-lock pick is only a fallback for when no locked read
+        # happens; the spelling chosen under the lock wins.
+        canonical = _canonical_role(role, _read_role_taxonomy(paths))
+        assumptions["inferred_role"] = canonical
+        locked = _record_role_observation(
+            canonical, assessment.get("currency"),
+            assumptions.get("assumed_loaded_rate"), paths,
+        )
+        if isinstance(locked, str) and locked:
+            assumptions["inferred_role"] = locked
+    except Exception as exc:
+        logger.warning("revenium-classifier: learned role handling failed: %s", exc)
+
+
 def _muid() -> str:
     """13-char ms-timestamp prefix + 20-char random hex = 33 char lowercase hex."""
     return f"{int(time.time_ns() // 1_000_000):013x}" + secrets.token_hex(10)
@@ -5463,7 +5879,31 @@ async def _attach_assessment(
                 paths=paths,
             )
             return
-        raw = fn(valid, transcript, cfg)
+        # quick-261017-kb1: the learned role card. Applies only to the
+        # built-in `llm` evaluator and only when the operator configured no
+        # rateCard (#140 wins and stays byte-unchanged). The `name == "llm"`
+        # gate is NOT the registry-metadata coupling the "Special-casing llm
+        # dropped every other evaluator's version" comment below warns
+        # about: this is a prompt INPUT of the built-in prompt, so a
+        # third-party registrant is handed exactly the cfg it is handed
+        # today. `fn` alone gets a shallow copy carrying the card;
+        # _validate_assessment, _build_job_assessment and
+        # _ev.resolve_version keep the ORIGINAL cfg, so a learned rate can
+        # never reach config, the valuation boundary or reportability.
+        _rc = cfg.get("rateCard")
+        learning = name == "llm" and not (isinstance(_rc, dict) and _rc)
+        fn_cfg = cfg
+        if learning:
+            try:
+                _cur = cfg.get("currency")
+                _cur = _cur.upper() if isinstance(_cur, str) and _cur else "USD"
+                _max_rate = _finite_number(cfg.get("maxLoadedRate")) or DEFAULT_MAX_LOADED_RATE
+                _card = _learned_role_card(paths, _cur, _max_rate)
+                if _card is not None:
+                    fn_cfg = {**cfg, _LEARNED_ROLE_CARD_KEY: _card}
+            except Exception:
+                fn_cfg = cfg
+        raw = fn(valid, transcript, fn_cfg)
         if inspect.isawaitable(raw):
             raw = await raw
         # Phase 45 (EGV-08, D-10/D-12, PA-07): pop the reserved served-model
@@ -5569,6 +6009,11 @@ async def _attach_assessment(
             return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version, paths=paths)
         if assessment:
+            if learning:
+                # quick-261017-kb1: canonicalize the role and record the
+                # observation BEFORE the marker summary and the sidecar
+                # record are built, so all three carry the same spelling.
+                _apply_learned_role(assessment, paths)
             valid["assessment"] = assessment
             # Phase 42 (C-01/C-04/D-12): the sidecar record of record, built
             # here in the success branch and consumed once at the D-12 seam

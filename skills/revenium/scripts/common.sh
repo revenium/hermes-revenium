@@ -105,6 +105,9 @@ export REVENIUM_MODEL_ALIASES="${REVENIUM_MODEL_ALIASES:-}"
 # v1.1 job-tracking scaffolding (D-13): separate ledger for agentic jobs and forward-compat taxonomy path.
 JOBS_LEDGER_FILE="${REVENIUM_JOBS_LEDGER_FILE:-${STATE_DIR}/revenium-jobs.ledger}"
 JOB_TAXONOMY_FILE="${REVENIUM_JOB_TAXONOMY_FILE:-${STATE_DIR}/job-taxonomy.json}"
+# quick-261017-kb1: the learned role card -- read and grown only by the classifier
+# plugin, seeded by the installers. Not in the eager mkdir -p below.
+ROLE_TAXONOMY_FILE="${REVENIUM_ROLE_TAXONOMY_FILE:-${STATE_DIR}/role-taxonomy.json}"
 # Phase 10 (D-07): staleness threshold for wedged-job warn. Env-overridable.
 REVENIUM_JOBS_STALE_SECONDS="${REVENIUM_JOBS_STALE_SECONDS:-600}"
 # Job-lifecycle guard (2026-10-09 phantom-jobs fix): a CANCELLED job verdict is

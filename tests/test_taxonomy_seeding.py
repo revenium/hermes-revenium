@@ -50,6 +50,9 @@ class TaxonomySeedingTests(unittest.TestCase):
             self.assertRegex(
                 text, r'job-taxonomy\.json',
                 f'{installer.relative_to(ROOT)} must seed the runtime job taxonomy')
+            self.assertRegex(
+                text, r'role-taxonomy\.json',
+                f'{installer.relative_to(ROOT)} must seed the learned role card')
 
     def test_both_installers_refuse_to_overwrite_a_grown_taxonomy(self):
         """An existing taxonomy is a vocabulary the host GREW. Overwriting it would
@@ -70,13 +73,16 @@ class TaxonomySeedingTests(unittest.TestCase):
             skill.mkdir(); state.mkdir()
             (skill / 'task-taxonomy.json').write_text('{"labels": {"seeded_task": {}}}')
             (skill / 'job-taxonomy.json').write_text('{"labels": {"seeded_job": {}}}')
+            (skill / 'role-taxonomy.json').write_text('{"roles": {"Seeded Role": {}}}')
             script = (f'set -uo pipefail\nstep() {{ :; }}\nwarn() {{ :; }}\n'
                       f'SKILL_DIR="{skill}"\nTAXONOMY_FILE="{state}/task-taxonomy.json"\n'
-                      f'JOB_TAXONOMY_FILE="{state}/job-taxonomy.json"\n{block}\n')
+                      f'JOB_TAXONOMY_FILE="{state}/job-taxonomy.json"\n'
+                      f'ROLE_TAXONOMY_FILE="{state}/role-taxonomy.json"\n{block}\n')
             r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn('seeded_task', (state / 'task-taxonomy.json').read_text())
             self.assertIn('seeded_job', (state / 'job-taxonomy.json').read_text())
+            self.assertIn('Seeded Role', (state / 'role-taxonomy.json').read_text())
 
     def test_bundled_seed_block_never_clobbers_an_existing_taxonomy(self):
         """Run the SHIPPED block against a grown vocabulary: it must survive intact."""
@@ -86,17 +92,24 @@ class TaxonomySeedingTests(unittest.TestCase):
             skill.mkdir(); state.mkdir()
             (skill / 'task-taxonomy.json').write_text('{"labels": {"seeded_task": {}}}')
             (skill / 'job-taxonomy.json').write_text('{"labels": {"seeded_job": {}}}')
+            (skill / 'role-taxonomy.json').write_text('{"roles": {"Seeded Role": {}}}')
             grown = '{"labels": {"weekly_pr_review": {}, "prod_log_triage": {}}}'
             (state / 'task-taxonomy.json').write_text(grown)
+            # The learned role card is grown state too (roles, counts, typical rates).
+            grown_roles = '{"roles": {"Revenue Operations Lead": {"count": 7}}}'
+            (state / 'role-taxonomy.json').write_text(grown_roles)
             script = (f'set -uo pipefail\nstep() {{ :; }}\nwarn() {{ :; }}\n'
                       f'SKILL_DIR="{skill}"\nTAXONOMY_FILE="{state}/task-taxonomy.json"\n'
-                      f'JOB_TAXONOMY_FILE="{state}/job-taxonomy.json"\n{block}\n')
+                      f'JOB_TAXONOMY_FILE="{state}/job-taxonomy.json"\n'
+                      f'ROLE_TAXONOMY_FILE="{state}/role-taxonomy.json"\n{block}\n')
             r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual((state / 'task-taxonomy.json').read_text(), grown,
                              'a grown taxonomy must never be overwritten by the installer')
             # the absent one is still seeded in the same run
             self.assertIn('seeded_job', (state / 'job-taxonomy.json').read_text())
+            self.assertEqual((state / 'role-taxonomy.json').read_text(), grown_roles,
+                             'a grown role card must never be overwritten by the installer')
 
     def test_seeds_into_independently_overridden_directories(self):
         """Greptile P1 on #51: TAXONOMY_FILE and JOB_TAXONOMY_FILE are independently
@@ -113,9 +126,12 @@ class TaxonomySeedingTests(unittest.TestCase):
             # Two destinations, in two directories, NEITHER of which exists yet.
             task_dest = Path(tmp) / 'state-a' / 'task-taxonomy.json'
             job_dest = Path(tmp) / 'state-b' / 'nested' / 'job-taxonomy.json'
+            role_dest = Path(tmp) / 'state-c' / 'deeper' / 'nested' / 'role-taxonomy.json'
+            (skill / 'role-taxonomy.json').write_text('{"roles": {"Seeded Role": {}}}')
             script = (f'set -uo pipefail\nstep() {{ :; }}\nwarn() {{ echo "WARN $*"; }}\n'
                       f'SKILL_DIR="{skill}"\nTAXONOMY_FILE="{task_dest}"\n'
-                      f'JOB_TAXONOMY_FILE="{job_dest}"\n{block}\n')
+                      f'JOB_TAXONOMY_FILE="{job_dest}"\n'
+                      f'ROLE_TAXONOMY_FILE="{role_dest}"\n{block}\n')
             r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertTrue(task_dest.exists(), 'task taxonomy not seeded')
@@ -124,6 +140,11 @@ class TaxonomySeedingTests(unittest.TestCase):
                 'job taxonomy not seeded into its own directory — the second destination '
                 f'parent was never created. stdout={r.stdout!r} stderr={r.stderr!r}')
             self.assertIn('seeded_job', job_dest.read_text())
+            self.assertTrue(
+                role_dest.exists(),
+                'role taxonomy not seeded into its own directory. '
+                f'stdout={r.stdout!r} stderr={r.stderr!r}')
+            self.assertIn('Seeded Role', role_dest.read_text())
 
     def test_both_installers_prepare_each_seed_destination(self):
         """Trip-wire for the same defect in the root installer, which had it too."""
@@ -136,9 +157,22 @@ class TaxonomySeedingTests(unittest.TestCase):
             if installer is ROOT_INSTALLER:
                 self.assertIn('JOB_TAXONOMY_DEST', mkdirs,
                               'root install.sh must mkdir the job taxonomy parent too')
+                self.assertIn('ROLE_TAXONOMY_DEST', mkdirs,
+                              'root install.sh must mkdir the role taxonomy parent too')
             else:
                 self.assertIn('seed_dest', mkdirs,
                               'bundled install.sh must mkdir per destination inside the loop')
+
+    def test_bootstrap_copies_all_three_seeds_into_the_skill_dir(self):
+        """references/bootstrap.sh is the tap-install path: its seed loop must
+        name every seed the bundled installer later copies into the state dir,
+        or a tap install never gets the learned role card's seed."""
+        text = (ROOT / 'skills' / 'revenium' / 'references' / 'bootstrap.sh').read_text()
+        m = re.search(r'for seed in ([^;]+); do', text)
+        self.assertIsNotNone(m, 'bootstrap.sh seed loop moved')
+        seeds = m.group(1).split()
+        for name in ('task-taxonomy.json', 'job-taxonomy.json', 'role-taxonomy.json'):
+            self.assertIn(name, seeds)
 
     def test_bundled_seed_block_tolerates_a_missing_seed(self):
         """A skill dir without seeds must warn and continue, not abort the install."""
@@ -148,7 +182,8 @@ class TaxonomySeedingTests(unittest.TestCase):
             skill.mkdir(); state.mkdir()
             script = (f'set -uo pipefail\nstep() {{ :; }}\nwarn() {{ echo "WARN $*"; }}\n'
                       f'SKILL_DIR="{skill}"\nTAXONOMY_FILE="{state}/task-taxonomy.json"\n'
-                      f'JOB_TAXONOMY_FILE="{state}/job-taxonomy.json"\n{block}\n')
+                      f'JOB_TAXONOMY_FILE="{state}/job-taxonomy.json"\n'
+                      f'ROLE_TAXONOMY_FILE="{state}/role-taxonomy.json"\n{block}\n')
             r = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertFalse((state / 'task-taxonomy.json').exists())

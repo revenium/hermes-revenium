@@ -335,7 +335,10 @@ fi
 # label and re-open the cold-start window. Never overwrite.
 # ---------------------------------------------------------------------------
 step "Seeding runtime taxonomies"
-for seed_pair in "task-taxonomy.json:${TAXONOMY_FILE}" "job-taxonomy.json:${JOB_TAXONOMY_FILE}"; do
+# role-taxonomy.json (quick-261017-kb1) is the learned role card: the same
+# never-overwrite rule applies, because a grown file holds every role and typical
+# rate the host has learned.
+for seed_pair in "task-taxonomy.json:${TAXONOMY_FILE}" "job-taxonomy.json:${JOB_TAXONOMY_FILE}" "role-taxonomy.json:${ROLE_TAXONOMY_FILE}"; do
   seed_name="${seed_pair%%:*}"
   seed_dest="${seed_pair#*:}"
   seed_src="${SKILL_DIR}/${seed_name}"

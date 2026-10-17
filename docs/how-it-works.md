@@ -14,7 +14,7 @@ The components do not call each other. They communicate through files under
    writes marker files. Three shell hooks registered in `config.yaml`
    enforce guardrails and capture tool calls. None of this makes a network call.
 2. State files: `config.json`, `guardrail-status.json`, markers, ledgers and
-   taxonomies. Every process re-reads what it needs; there is no shared memory and no IPC.
+   taxonomies (task, job and role). Every process re-reads what it needs; there is no shared memory and no IPC.
 3. The cron pipeline: runs once a minute, out of process, under one lock. Only this
    component talks to Revenium.
 
@@ -204,7 +204,9 @@ capability is invented here.
   `net_value`, `assumptions`, `supplied_costs`, `cost_coverage`, `attribution_fraction`,
   `attribution_basis`. The economic estimate and its inputs. The attribution pair is in
   this family rather than the provenance one on purpose: the value family sheds first, so
-  an attribution recorded here can never outlive the value it documents.
+  an attribution recorded here can never outlive the value it documents. The assumptions
+  also carry the inferred role, the one piece of evaluator prose that reaches the wire, and
+  it is shed and stripped along with them.
 - **The provenance family**: `evaluator`, `evaluator_version`, `model`, `evidence_class`,
   `evidence_class_authority`, `reportability_status`, `study_id`, `study_version`,
   `confidence`, `economic_mechanism`, `double_counting_group`, `correction_sequence`,
