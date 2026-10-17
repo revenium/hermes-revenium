@@ -7018,6 +7018,30 @@ if assessment_raw:
                     assumptions['assumed_loaded_rate'] = float(rate_raw)
                 except (TypeError, ValueError):
                     pass
+            # quick-261017-kb1: forward the evaluator's inferred_role (and
+            # ONLY that field of its prose) so a Revenium row names the
+            # human role behind the value. quick-261017-kb1 narrows Phase 46
+            # D-04 for this one field; `basis`, `candidate_downstream_outcome`
+            # and `counterfactual_assumption` stay unforwarded.
+            #
+            # The value-family tier is INHERITED, not added: the role rides
+            # inside `assumptions`, which is already in _VALUE_OMIT_FAMILY
+            # (stripped on candidate, abstention and CF-2 refusal) and in
+            # _VALUE_FAMILY_META_KEYS (tier-1 shed). So neither tuple
+            # changes and the docs inventory guard is unaffected.
+            #
+            # 60 mirrors classifier.py's _INFERRED_ROLE_CLAMP (a
+            # serialized-byte clamp), so the slice is a no-op for a
+            # classifier-written role and only bounds a hand-edited sidecar.
+            # The producer already strips pipe, newline and CR, and
+            # json.dumps escapes anything a hand edit adds, so no second
+            # sanitiser is needed.
+            #
+            # APPENDED after assumed_loaded_rate so the golden changes by
+            # pure insertion.
+            role_raw = assumptions_raw.get('inferred_role')
+            if isinstance(role_raw, str) and role_raw.strip():
+                assumptions['inferred_role'] = role_raw[:60]
         if assumptions:
             meta['assumptions'] = assumptions
 

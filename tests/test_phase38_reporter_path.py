@@ -133,10 +133,21 @@ def _sidecar_record(job_id, **overrides):
         # cross-boundary precedence walk falls through to
         # _forced_evidence_class() with authority "evaluator".
         "evidence_class_authority": "evaluator",
+        # quick-261017-kb1: assumptions.inferred_role is the ONE evaluator
+        # prose field that now reaches the wire (inside `assumptions`, on a
+        # reportable record only). It is the first key, matching
+        # _validate_assessment's order. Fixture fidelity: classifier.py
+        # writes it on every record.
         "assumptions": {
+            "inferred_role": "senior software engineer",
             "estimated_hours_saved": 3.5,
             "assumed_loaded_rate": 150.0,
         },
+        # quick-261017-kb1 fixture fidelity: classifier.py's
+        # _build_job_assessment writes a top-level `basis` on every record.
+        # It stays in the fixture precisely so the tests can prove it stays
+        # local (never forwarded to --metadata).
+        "basis": "3.5 hours of senior engineer review time",
         # Phase 44 (EGV-05): classifier.py's _build_job_assessment populates
         # this key UNCONDITIONALLY on every record it builds, and plan 44-01
         # makes hermes-report.sh forward it, so a fixture without it pins a
@@ -460,8 +471,18 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(meta.get('confidence'), 0.8)
         self.assertEqual(
             meta.get('assumptions'),
-            {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+            {
+                'estimated_hours_saved': 3.5,
+                'assumed_loaded_rate': 150.0,
+                'inferred_role': 'senior software engineer',
+            },
         )
+        self.assertEqual(
+            list(meta['assumptions']),
+            ['estimated_hours_saved', 'assumed_loaded_rate', 'inferred_role'],
+        )
+        # quick-261017-kb1: basis stays local even on a reportable record.
+        self.assertNotIn('basis', meta)
         self.assertEqual(meta.get('value_low'), 446.25)
         self.assertEqual(meta.get('value_base'), 525.0)
         self.assertEqual(meta.get('value_high'), 603.75)
@@ -497,7 +518,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         # estimate this gate exists to withhold.
         for stripped_key in (
             'value_low', 'value_base', 'value_high', 'bounds_source',
-            'currency', 'estimated_value', 'assumptions',
+            'currency', 'estimated_value', 'assumptions', 'basis',
         ):
             self.assertNotIn(stripped_key, meta, f'{stripped_key!r} must not cross the wire on a candidate record')
         # D-05: provenance still ships even though the value did not.
@@ -538,10 +559,47 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(meta.get('bounds_source'), 'derived')
         self.assertEqual(
             meta.get('assumptions'),
-            {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
+            {
+                'estimated_hours_saved': 3.5,
+                'assumed_loaded_rate': 150.0,
+                'inferred_role': 'senior software engineer',
+            },
         )
+        self.assertNotIn('basis', meta)
         self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
         self.assertEqual(meta.get('reportability_status'), 'reportable')
+
+    def test_role_is_the_only_evaluator_prose_on_a_reportable_wire(self):
+        """quick-261017-kb1: on a REPORTABLE record the evaluator's
+        inferred_role rides inside `assumptions`; basis,
+        candidate_downstream_outcome and counterfactual_assumption never
+        reach the wire. BEHAVIOURAL, on real constructed argv."""
+        canary = TestPhase38Canary
+        sidecar = _sidecar_record(
+            'role43-job-001',
+            reportability_status='reportable',
+            evidence_class='CUSTOMER_CONFIGURED',
+            evidence_class_authority='valuation',
+        )
+        sidecar['basis'] = canary.EVALUATOR_BASIS_CANARY
+        sidecar['candidate_downstream_outcome'] = canary.EVALUATOR_OUTCOME_CANARY
+        sidecar['counterfactual_assumption'] = canary.EVALUATOR_COUNTERFACTUAL_CANARY
+        sidecar['assumptions']['inferred_role'] = canary.EVALUATOR_ROLE_CANARY
+        argv = self._run_one_outcome(
+            'role43-sid-001', 'role43-job-001', 'SUCCESS',
+            assessment=ASSESSMENT_FIXTURE, sidecar=sidecar,
+        )
+        meta = json.loads(self._metadata_value(argv))
+        self.assertEqual(
+            meta['assumptions']['inferred_role'], canary.EVALUATOR_ROLE_CANARY,
+        )
+        joined = '\n'.join(argv)
+        for other in (
+            canary.EVALUATOR_BASIS_CANARY,
+            canary.EVALUATOR_OUTCOME_CANARY,
+            canary.EVALUATOR_COUNTERFACTUAL_CANARY,
+        ):
+            self.assertNotIn(other, joined)
 
     def test_outcome_success_without_assessment_ships_neither_value_flag(self):
         argv = self._run_one_outcome('o38-sid-002', 'o38-job-002', 'SUCCESS')
@@ -1934,8 +1992,14 @@ class TestPhase38Canary(unittest.TestCase):
     # under it, so tier 2 never fires) -- the same measured numbers as that
     # class's own CR-01 retune, since this fixture forwards the identical
     # field set at the identical values (basis/candidate_downstream_outcome/
-    # counterfactual_assumption/assumptions.inferred_role below are never
-    # forwarded into --metadata at all, so they do not affect this count).
+    # counterfactual_assumption below are never forwarded into --metadata at
+    # all, so they do not affect this count).
+    #
+    # quick-261017-kb1: assumptions.inferred_role IS now forwarded, pre-drop,
+    # on this reportable record. That raises the pre-drop size (still over
+    # the ceiling) and the role rides inside `assumptions`, which tier 1
+    # sheds, so the post-drop figure is unchanged. Re-measure before quoting
+    # a new pre-drop number.
     # json.dumps' default ensure_ascii=True escapes one astral codepoint to
     # a 12-ASCII-byte \\uXXXX\\uXXXX surrogate pair, turning a 64-CHARACTER
     # slice into 768 wire bytes.
@@ -2644,7 +2708,15 @@ class TestPhase38Canary(unittest.TestCase):
         comments warn against. Also pins the exclusion STRUCTURALLY (the
         forwarder's literal record.get(...) keys contain none of the four
         prose field names) and proves the truncation marker itself is
-        VISIBLE to a sweep when a record actually exceeds the ceiling."""
+        VISIBLE to a sweep when a record actually exceeds the ceiling.
+
+        quick-261017-kb1 NARROWED this guard: "never" now covers `basis`,
+        `candidate_downstream_outcome` and `counterfactual_assumption`
+        unconditionally. `inferred_role` MAY reach the wire, but only inside
+        `assumptions` on a REPORTABLE record (see
+        test_role_is_the_only_evaluator_prose_on_a_reportable_wire). The
+        driven part below uses a `candidate` sidecar, so the role canary's
+        absence is attributable to the candidate strip, which is asserted."""
         prose_canaries = (
             self.EVALUATOR_BASIS_CANARY, self.EVALUATOR_ROLE_CANARY,
             self.EVALUATOR_OUTCOME_CANARY, self.EVALUATOR_COUNTERFACTUAL_CANARY,
@@ -2663,9 +2735,14 @@ class TestPhase38Canary(unittest.TestCase):
             '_extract_forwarder_record_keys could not find the outcome_metadata '
             'heredoc -- the anchor moved and this structural claim needs updating',
         )
+        # quick-261017-kb1: 'inferred_role' is no longer in this list. It is
+        # read out of `assumptions_raw`, never via a literal `record.get`
+        # key, so the literal-key check never covered it; its wire path is
+        # proven behaviourally by
+        # test_role_is_the_only_evaluator_prose_on_a_reportable_wire.
         for field in (
             'basis', 'candidate_downstream_outcome',
-            'counterfactual_assumption', 'inferred_role',
+            'counterfactual_assumption',
         ):
             self.assertNotIn(
                 field, keys,
@@ -2689,6 +2766,11 @@ class TestPhase38Canary(unittest.TestCase):
             )
             self.assertIsNotNone(sidecar_path)
             sidecar_text = sidecar_path.read_text()
+            # quick-261017-kb1: the ROLE canary's absence below is only
+            # attributable to the candidate strip if the record IS a
+            # candidate; pin that here.
+            sidecar_last = json.loads(sidecar_text.strip().splitlines()[-1])
+            self.assertEqual(sidecar_last.get('reportability_status'), 'candidate')
 
             # Test 1 (behavior 1): presence, IFS-clean, and clamped is
             # already proven per-field by
@@ -2844,8 +2926,11 @@ class TestPhase38Canary(unittest.TestCase):
             # tests/test_compat_jobs_outcome.py); basis/
             # candidate_downstream_outcome/counterfactual_assumption/
             # assumptions.inferred_role carry their OWN canaries raw --
-            # these four are never forwarded at all (Test 3 above), so
-            # this record does not need to run them through
+            # the first three are never forwarded at all (Test 3 above);
+            # quick-261017-kb1: the role IS forwarded pre-drop on this
+            # reportable record, then shed with the rest of `assumptions`
+            # at tier 1, so its canary is still absent from the final
+            # argv. This record does not need to run them through
             # _clamp_assessment_text; the earlier real-classifier-driven
             # scenario in this same test already proves clamping.
             record = {

@@ -810,5 +810,120 @@ class MetadataEnvelopeBudgetTests(unittest.TestCase):
         self.assertNotIn('metadata_truncated', family)
 
 
+class RoleForwarderTests(unittest.TestCase):
+    """quick-261017-kb1: the forwarder ships `assumptions.inferred_role`
+    (and only that piece of evaluator prose), proven against the REAL
+    outcome_metadata heredoc extracted live. Guarantee class: BEHAVIOURAL
+    for each case below; the producer-to-wire case (d) runs the real
+    classifier validators."""
+
+    def setUp(self):
+        self.script_text = HERMES_REPORT_SH.read_text()
+        self.body = _extract_outcome_metadata_heredoc(self.script_text)
+        self.assertIsNotNone(self.body, 'outcome_metadata heredoc anchor moved')
+
+    def tearDown(self):
+        _restore_env()
+
+    def _ship(self, assessment, status='SUCCESS', failure_reason=''):
+        env = _assessment_env(
+            assessment=assessment, source='prod', status=status,
+            failure_reason=failure_reason,
+        )
+        result = _run_forwarder(self.body, env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def _record(self, **assumption_overrides):
+        record = dict(_TYPICAL_ASSESSMENT)
+        record['assumptions'] = {
+            'inferred_role': 'Senior Software Engineer',
+            'estimated_hours_saved': 3.5,
+            'assumed_loaded_rate': 150.0,
+        }
+        record['assumptions'].update(assumption_overrides)
+        return record
+
+    def test_role_is_appended_after_hours_and_rate(self):
+        """(a) Order: the role is the LAST key of the forwarded assumptions."""
+        meta = json.loads(self._ship(self._record()))
+        self.assertEqual(
+            list(meta['assumptions']),
+            ['estimated_hours_saved', 'assumed_loaded_rate', 'inferred_role'],
+        )
+        self.assertEqual(meta['assumptions']['inferred_role'], 'Senior Software Engineer')
+
+    def test_overlong_hand_edited_role_ships_first_60_characters(self):
+        """(b) A hand-edited 100-char role is bounded at 60 characters."""
+        role = ''.join(chr(ord('a') + (i % 26)) for i in range(100))
+        meta = json.loads(self._ship(self._record(inferred_role=role)))
+        self.assertEqual(meta['assumptions']['inferred_role'], role[:60])
+
+    def test_blank_or_non_string_role_adds_no_key_but_hours_and_rate_ship(self):
+        """(c) '', whitespace, a number, None and a list add no role key."""
+        for bad in ('', '   ', 42, None, ['x']):
+            with self.subTest(bad=bad):
+                meta = json.loads(self._ship(self._record(inferred_role=bad)))
+                self.assertNotIn('inferred_role', meta['assumptions'])
+                self.assertEqual(meta['assumptions']['estimated_hours_saved'], 3.5)
+                self.assertEqual(meta['assumptions']['assumed_loaded_rate'], 150.0)
+
+    def test_producer_to_wire_role_is_sanitised_by_the_real_classifier(self):
+        """(d) The real _validate_assessment + _build_job_assessment turn
+        'a|b\\nc' into 'a b c', and the forwarder ships exactly that."""
+        mod, _ev = _load_classifier({})
+        raw = {
+            'economic_mechanism': 'labor_substitution',
+            'inferred_role': 'a|b\nc',
+            'estimated_hours_saved': 2.0,
+            'assumed_loaded_rate': 100.0,
+            'currency': 'USD',
+            'basis': 'basis text',
+            'confidence': 0.5,
+            'candidate_downstream_outcome': 'outcome text',
+            'counterfactual_assumption': 'counterfactual text',
+        }
+        assessment = mod._validate_assessment(raw, {}, 'llm', 'v1')
+        self.assertIsNotNone(assessment)
+        valid = {'agentic_job_id': 'kb1-role-job', 'job_type': 'code_review', 'status': 'SUCCESS'}
+        rec = mod._build_job_assessment(
+            valid, assessment, raw, {}, 'llm', 'v1',
+            double_counting_group='g', model='m')
+        self.assertIsNotNone(rec)
+        meta = json.loads(self._ship(rec))
+        self.assertEqual(meta['assumptions']['inferred_role'], 'a b c')
+
+    def test_basis_and_narrative_pair_never_reach_the_wire(self):
+        """(e) Top-level basis / candidate_downstream_outcome /
+        counterfactual_assumption strings are not forwarded and appear
+        nowhere in the output."""
+        record = self._record()
+        record['basis'] = 'KB1-BASIS-CANARY'
+        record['candidate_downstream_outcome'] = 'KB1-OUTCOME-CANARY'
+        record['counterfactual_assumption'] = 'KB1-CF-CANARY'
+        out = self._ship(record)
+        meta = json.loads(out)
+        for key in ('basis', 'candidate_downstream_outcome', 'counterfactual_assumption'):
+            self.assertNotIn(key, meta)
+        for canary in ('KB1-BASIS-CANARY', 'KB1-OUTCOME-CANARY', 'KB1-CF-CANARY'):
+            self.assertNotIn(canary, out)
+
+    def test_over_ceiling_record_sheds_the_role_with_the_rest_of_assumptions(self):
+        """(f) The role is inside `assumptions`, so tier 1 sheds it with the
+        value family; truncation is marked and provenance survives."""
+        record = _over_ceiling_assessment()
+        record['assumptions'] = dict(
+            record['assumptions'], inferred_role='Senior Software Engineer')
+        out = self._ship(
+            record, status='FAILED',
+            failure_reason='r' * _OVER_CEILING_FAILURE_REASON_LEN)
+        meta = json.loads(out)
+        self.assertNotIn('assumptions', meta)
+        self.assertNotIn('Senior Software Engineer', out)
+        self.assertIs(meta.get('metadata_truncated'), True)
+        for key in _KEPT_PROVENANCE_KEYS:
+            self.assertIn(key, meta)
+
+
 if __name__ == '__main__':
     unittest.main()
