@@ -86,7 +86,7 @@ if ${need_fetch}; then
   mkdir -p "${DEST}/scripts" "${DEST}/plugins"
   cp -R "${src}/scripts/." "${DEST}/scripts/"
   cp -R "${src}/plugins/." "${DEST}/plugins/"
-  for seed in task-taxonomy.json job-taxonomy.json; do
+  for seed in task-taxonomy.json job-taxonomy.json role-taxonomy.json; do
     [[ -f "${src}/${seed}" ]] && cp -f "${src}/${seed}" "${DEST}/${seed}"
   done
   # Drop any __pycache__ carried by cp -R so a stale .pyc can't shadow source.

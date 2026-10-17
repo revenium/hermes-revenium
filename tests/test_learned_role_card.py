@@ -456,5 +456,240 @@ class FailOpenTests(_Harness):
         self.assertFalse(Path(str(self.role_file) + '.tmp').exists(), 'no stray tmp file')
 
 
+class RoleNormalizationTests(_Harness):
+    """BEHAVIOURAL, on the real classifier helpers."""
+
+    def setUp(self):
+        super().setUp()
+        self.c, _ev = self.load()
+
+    def test_whitespace_is_collapsed(self):
+        self.assertEqual(
+            self.c._normalize_role('  Senior   Software\tEngineer \n'),
+            'Senior Software Engineer')
+
+    def test_a_100_character_role_is_clamped_to_60(self):
+        role = ''.join('abcdefghij'[i % 10] for i in range(100))
+        self.assertEqual(self.c._normalize_role(role), role[:60])
+
+    def test_label_regex_rejections(self):
+        for bad in ('Sales, Ops', 'Engineer (Senior)', '3D Artist', 'X', '', '   ',
+                    'Role\u2014Dash', 'a|b'):
+            with self.subTest(bad=bad):
+                # 'a|b' becomes 'a b' under the shared clamp, which is valid;
+                # everything else must be refused outright.
+                expected = 'a b' if bad == 'a|b' else ''
+                self.assertEqual(self.c._normalize_role(bad), expected)
+
+    def test_blocklist_hits_are_casefolded(self):
+        for bad in ('AI Agent', 'N/A', 'UNKNOWN', 'Chatbot', 'ai', 'Human', 'ROLE'):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.c._normalize_role(bad), '')
+
+    def test_non_strings_are_blank(self):
+        for bad in (None, 5, ['Data Analyst'], {'a': 1}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.c._normalize_role(bad), '')
+
+
+class CanonicalizationTests(_Harness):
+
+    def test_case_insensitive_match_returns_the_stored_spelling(self):
+        c, _ev = self.load()
+        roles = {'DevOps Engineer': {}, 'Data Analyst': {}}
+        self.assertEqual(c._canonical_role('devops engineer', roles), 'DevOps Engineer')
+        self.assertEqual(c._canonical_role('DATA ANALYST', roles), 'Data Analyst')
+        self.assertEqual(c._canonical_role('Brand New', roles), 'Brand New')
+
+    def test_an_ineligible_stored_key_is_never_a_canonical_target_or_shown(self):
+        c, _ev = self.load()
+        # Trailing space, double space, a pipe and an over-length key: none
+        # round-trips through _normalize_role unchanged.
+        roles = {
+            'Data Analyst ': {}, 'Data  Scientist': {}, 'bad|role': {},
+            'X' + 'y' * 70: {}, 'Recruiter': {},
+        }
+        self.assertEqual(c._canonical_role('data analyst', roles), 'data analyst')
+        self.assertEqual(c._canonical_role('data scientist', roles), 'data scientist')
+        self.write_roles(roles)
+        block = c._learned_role_card(c._module_paths(), 'USD', 500.0).block
+        self.assertEqual(block, '"Recruiter"')
+
+
+class RoleCapTests(_Harness):
+
+    def test_new_role_is_used_but_not_persisted_at_the_cap_and_existing_roles_still_learn(self):
+        self.write_roles({f'Role {i:03d}': {} for i in range(200)})
+        c, _ev = self.load()
+
+        _job, record, _prompt = self.evaluate(c, _payload(role='Brand New Title'))
+        self.assertEqual(record['assumptions']['inferred_role'], 'Brand New Title')
+        roles = self.roles()
+        self.assertEqual(len(roles), 200)
+        self.assertNotIn('Brand New Title', roles)
+
+        _job, record, _prompt = self.evaluate(c, _payload(role='role 007', rate=120.0), job_id='kb1-job-002')
+        self.assertEqual(record['assumptions']['inferred_role'], 'Role 007')
+        entry = self.roles()['Role 007']
+        self.assertEqual(entry['count'], 1)
+        self.assertEqual(entry['rates']['USD'], {'count': 1, 'recent': [120.0]})
+
+
+class RateWindowTests(_Harness):
+
+    def test_window_is_bounded_at_20_and_drops_the_oldest(self):
+        c, _ev = self.load()
+        paths = c._module_paths()
+        for i in range(25):
+            c._record_role_observation('Data Analyst', 'USD', 100.0 + i, paths)
+        entry = self.roles()['Data Analyst']
+        self.assertEqual(entry['count'], 25)
+        bucket = entry['rates']['USD']
+        self.assertEqual(bucket['count'], 25)
+        self.assertEqual(bucket['recent'], [100.0 + i for i in range(5, 25)])
+        self.assertEqual(len(bucket['recent']), 20)
+
+    def test_currencies_are_kept_apart(self):
+        c, _ev = self.load()
+        paths = c._module_paths()
+        for _ in range(3):
+            c._record_role_observation('Data Analyst', 'USD', 100.0, paths)
+            c._record_role_observation('Data Analyst', 'EUR', 90.0, paths)
+        usd = c._learned_role_card(paths, 'USD', 500.0).block
+        eur = c._learned_role_card(paths, 'EUR', 500.0).block
+        gbp = c._learned_role_card(paths, 'GBP', 500.0).block
+        self.assertEqual(usd, '"Data Analyst" (typical rate so far: 100 USD/hour)')
+        self.assertEqual(eur, '"Data Analyst" (typical rate so far: 90 EUR/hour)')
+        self.assertEqual(gbp, '"Data Analyst"')
+
+    def test_a_median_above_the_configured_maximum_is_not_shown(self):
+        c, _ev = self.load()
+        paths = c._module_paths()
+        for _ in range(3):
+            c._record_role_observation('Data Analyst', 'USD', 400.0, paths)
+        self.assertEqual(c._learned_role_card(paths, 'USD', 300.0).block, '"Data Analyst"')
+
+    def test_an_invalid_rate_still_counts_the_role_but_adds_no_rate(self):
+        c, _ev = self.load()
+        paths = c._module_paths()
+        for bad in (0, -5, float('nan'), None, 'abc'):
+            c._record_role_observation('Data Analyst', 'USD', bad, paths)
+        entry = self.roles()['Data Analyst']
+        self.assertEqual(entry['count'], 5)
+        self.assertNotIn('rates', entry)
+
+
+class CorruptAndContendedFileTests(_Harness):
+
+    def test_corrupt_json_shows_no_card_and_the_next_observation_rebuilds_it(self):
+        self.role_file.write_text('{not json')
+        c, _ev = self.load()
+        paths = c._module_paths()
+        self.assertIsNone(c._learned_role_card(paths, 'USD', 500.0))
+        _job, _record, prompt = self.evaluate(c, _payload(role='Data Analyst'))
+        self.assertNotIn('known human roles', prompt)
+        self.assertEqual(list(self.roles()), ['Data Analyst'])
+
+    def test_lock_contention_skips_with_a_warning_and_never_raises(self):
+        import fcntl
+        self.seed_real()
+        before = self.role_file.read_bytes()
+        c, _ev = self.load()
+        with open(self.lock_file, 'a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with self.assertLogs('revenium_classifier', level='WARNING') as logs:
+                c._record_role_observation('Data Analyst', 'USD', 100.0, c._module_paths())
+        self.assertEqual(self.role_file.read_bytes(), before)
+        self.assertTrue(any('lock contention' in line for line in logs.output), logs.output)
+
+
+class PromptBudgetTests(_Harness):
+
+    def test_an_oversized_card_truncates_on_an_entry_boundary_most_used_first(self):
+        roles = {}
+        for i in range(200):
+            roles[f'Principal Staff Engineer Of Distributed Systems {i:03d}'] = {
+                'count': i + 1, 'last_seen_at': '2026-10-01T00:00:00Z'}
+        self.write_roles(roles)
+        c, _ev = self.load()
+        block = c._learned_role_card(c._module_paths(), 'USD', 500.0).block
+        self.assertLessEqual(len(block), 2048)
+        parts = block.split(', ')
+        self.assertLess(len(parts), 200, 'the budget must have truncated')
+        for part in parts:
+            self.assertTrue(part.startswith('"') and part.endswith('"'), part)
+        self.assertEqual(parts[0], '"Principal Staff Engineer Of Distributed Systems 199"')
+        counts = [int(p.strip('"')[-3:]) for p in parts]
+        self.assertEqual(counts, sorted(counts, reverse=True))
+
+
+class NonLlmEvaluatorTests(_Harness):
+
+    def test_a_registered_evaluator_neither_reads_nor_writes_the_card_and_gets_a_clean_cfg(self):
+        self.seed_real()
+        before = self.role_file.read_bytes()
+        c, ev = self.load(dict(EVAL_BASE, evaluator='kb1-third-party'))
+        seen = {}
+
+        def third_party(job, transcript, cfg):
+            seen['cfg'] = dict(cfg)
+            return _payload(role='Senior Software Engineer')
+
+        ev.register('kb1-third-party', third_party)
+        job = {'agentic_job_id': 'kb1-tp', 'job_name': 'KB1', 'job_type': 'code_review',
+               'status': 'SUCCESS'}
+        asyncio.run(c._attach_assessment(job, TRANSCRIPT, c._module_paths()))
+        self.assertIn('assessment', job, 'the third-party assessment is still accepted')
+        self.assertNotIn(c._LEARNED_ROLE_CARD_KEY, seen['cfg'])
+        self.assertEqual(self.role_file.read_bytes(), before)
+        self.assertFalse(self.lock_file.exists())
+
+
+class PathResolutionTests(_Harness):
+
+    def test_profile_session_resolves_its_own_role_taxonomy(self):
+        c, _ev = self.load()
+        profile_home = Path(self.hermes_home) / 'profiles' / 'p1'
+        profile_home.mkdir(parents=True)
+        with mock.patch.object(c, '_profile_name_for_session', return_value='p1'):
+            paths = c._paths_for_session('any-session')
+        expected = profile_home / 'state' / 'revenium' / 'role-taxonomy.json'
+        self.assertEqual(Path(paths.role_taxonomy_file), expected)
+        self.assertEqual(c._role_taxonomy_path(paths), expected)
+
+    def test_paths_built_without_the_new_field_fall_back_to_the_state_dir(self):
+        c, _ev = self.load()
+        state = Path(self.state_dir)
+        paths = c._Paths(
+            hermes_home=Path(self.hermes_home), state_dir=state,
+            markers_dir=state / 'markers', markers_ready_dir=state / 'markers' / '.ready',
+            taxonomy_file=state / 'task-taxonomy.json',
+            job_taxonomy_file=state / 'job-taxonomy.json',
+            guardrail_status_file=state / 'guardrail-status.json',
+            config_file=state / 'config.json', state_db=Path(self.hermes_home) / 'state.db',
+            job_assessments_dir=state / 'job-assessments',
+        )
+        self.assertIsNone(paths.role_taxonomy_file)
+        self.assertEqual(c._role_taxonomy_path(paths), state / 'role-taxonomy.json')
+
+    def test_module_paths_carry_the_env_override(self):
+        c, _ev = self.load()
+        self.assertEqual(Path(c._module_paths().role_taxonomy_file), self.role_file)
+
+
+class SeedSchemaTests(_Harness):
+
+    def test_every_seed_key_is_a_valid_role_and_every_value_is_empty(self):
+        c, _ev = self.load()
+        data = json.loads(SEED_FILE.read_text())
+        self.assertEqual(list(data), ['roles'])
+        self.assertGreaterEqual(len(data['roles']), 20)
+        for key, value in data['roles'].items():
+            with self.subTest(role=key):
+                self.assertEqual(c._normalize_role(key), key)
+                self.assertEqual(value, {}, 'a seed carries no counts and no rates')
+        self.assertNotIn('Backend Engineer', data['roles'])
+
+
 if __name__ == '__main__':
     unittest.main()

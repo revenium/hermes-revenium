@@ -9,6 +9,24 @@ this repository.
 
 ## [Unreleased]
 
+### Added
+
+- The evaluator's inferred role now reaches Revenium, and a role learned over time keeps it
+  consistent. `jobs outcome --metadata` carries `assumptions.inferred_role` (60 characters at
+  most, after `assumed_loaded_rate`) on a reportable record only; a candidate record carries
+  no `assumptions`, so no role. `basis` and the narrative fields stay local. With no `rateCard`
+  configured, the built-in `llm` evaluator now sees a learned role card: `role-taxonomy.json`,
+  seeded with about 24 common roles and grown by the classifier. The prompt lists the known
+  roles most-used first and asks the model to copy one verbatim or propose a new short title.
+  The returned role is matched case-insensitively to a stored spelling, so `senior software
+  engineer` is always `Senior Software Engineer`; junk such as `n/a` or `AI agent` is blanked
+  and the card stops growing at 200 roles. After 3 observations in a currency the prompt also
+  shows the role's typical rate as a consistency anchor. That rate is a prompt hint only, never
+  a priced card: it changes no `evidence_class`, reportability or value, and early guesses can
+  reinforce themselves through it. A configured `rateCard`, a disabled evaluation and any
+  evaluator other than `llm` are unchanged. Existing installs pick up the seed on the next
+  `install.sh` or bootstrap run and otherwise learn from empty.
+
 ### Changed
 
 - The cron tick no longer re-derives every historical session every minute. `hermes-report.sh`

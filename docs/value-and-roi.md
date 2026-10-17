@@ -685,7 +685,8 @@ Two properties enforce this separation:
 - Withholding the two CLI flags alone does not withhold the value. `value_low`, `value_base`,
   `value_high`, `bounds_source`, `currency`, `estimated_value`, `assumptions` and
   `net_value` each have their own `--metadata` forwarder and `assumptions` alone carries
-  the hours and rate used to calculate the estimate. A non-reportable record is therefore
+  the hours and rate used to calculate the estimate, plus the inferred role. A
+  non-reportable record is therefore
   sanitized at the source: one shared stripper deletes the whole family before any
   forwarder runs.
 
@@ -729,7 +730,7 @@ abstained. A disabled-path marker is byte-identical to a pre-feature one.
 | `estimated_value` | Derived as `hours × rate`, 2 dp. A supplied value is discarded. |
 | `currency` | ISO 4217, from the supported set, must equal the configured currency. |
 | `basis` | Clamped to 200 chars. |
-| `assumptions.inferred_role` | Clamped to 60 chars. |
+| `assumptions.inferred_role` | Clamped to 60 chars. With no `rateCard`, normalized and matched to a spelling in the learned role card, which also shows the model each role's typical rate as a prompt anchor (never a priced card; see `config-schema.md`). |
 | `assumptions.estimated_hours_saved` | Finite, `0 < h ≤ maxHoursSaved`. |
 | `assumptions.assumed_loaded_rate` | Finite, `0 < r ≤ maxLoadedRate`. |
 | `confidence` | `[0, 1]`. |
@@ -891,15 +892,17 @@ included):
 ```json
 {"source":"test","value_low":446.25,"value_base":525.0,"value_high":603.75,
  "bounds_source":"derived","assessment_schema_version":1,"taxonomy_version":1,
- "prompt_version":1,"policy_version":1,"evidence_class":"MODEL_ESTIMATED_DEMO",
- "reportability_status":"reportable","economic_mechanism":"labor_substitution",
- "net_value":500.0,"supplied_costs":{"human_review":25.0},
+ "prompt_version":1,"policy_version":1,"evidence_class":"CUSTOMER_CONFIGURED",
+ "evidence_class_authority":"valuation","reportability_status":"reportable",
+ "economic_mechanism":"labor_substitution","net_value":500.0,
+ "supplied_costs":{"human_review":25.0},
  "cost_coverage":{"included":["human_review"],
                   "unknown":["rework_or_error","handoff","training_or_change"],
                   "excluded":["metered_ai_cost"]},
  "double_counting_group":"g38-sid-002","evaluator":"llm","evaluator_version":"v1",
  "model":"unknown","inference_provider":"openrouter","inference_address_class":"public",
- "confidence":0.8,"assumptions":{"estimated_hours_saved":3.5,"assumed_loaded_rate":150.0}}
+ "confidence":0.8,"assumptions":{"estimated_hours_saved":3.5,"assumed_loaded_rate":150.0,
+                "inferred_role":"senior software engineer"}}
 ```
 
 ### The byte ceiling and the two drop tiers

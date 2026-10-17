@@ -189,8 +189,8 @@ the hours assumption, though the record retains it as an evaluator assumption. D
 The card's role spellings also guide the evaluator's selection. When `rateCard` is
 present, the model is shown the card's own role spellings and told to pick
 one verbatim or omit the field, rather than inventing free-form phrasing an
-exact-match lookup would then miss. With no card configured, the evaluator's
-role stays free-form exactly as before. Case variants of one role (`"Backend
+exact-match lookup would then miss. With no card configured, the evaluator uses the
+**learned role card** instead (below). Case variants of one role (`"Backend
 Engineer"` vs `"BACKEND ENGINEER"`) are shown to the model once when they
 carry the same amount and in full when they do not. Either way, every
 variant stays priceable, because the lookup above is unchanged. The list
@@ -199,6 +199,38 @@ card order, with a logged warning naming how many roles were omitted.
 Operators control which roles survive truncation by ordering the card. A key the validator's own clamp would alter (over the
 length bound or carrying a pipe or newline) is never offered to the model,
 because the model could not return it successfully anyway.
+
+##### The learned role card (no `rateCard` configured)
+
+With no `rateCard`, the built-in `llm` evaluator is shown a learned vocabulary of roles,
+so a role is spelled the same way from one job to the next without any configuration.
+
+- **State file.** `role-taxonomy.json` (`ROLE_TAXONOMY_FILE` in `common.sh`) lives in the
+  state directory, is seeded at install from a curated list in the skill directory and
+  never overwritten once it has grown. Only the classifier plugin reads or writes it.
+  A host with no seed starts empty and grows it from the evaluator's own answers.
+- **Reuse or propose.** The prompt lists the known roles, quoted and ordered most-used
+  first, and tells the model to copy one verbatim if it fits and otherwise to propose a
+  new short role title. The list is bounded (about 2 KB) and truncates on a whole-entry
+  boundary.
+- **Canonical spelling.** The returned role is whitespace-collapsed, clamped to 60
+  characters and blanked if it fails the role pattern or the trivial-role blocklist (for
+  example `n/a`, `AI agent`). It is then matched case-insensitively to a stored spelling,
+  so `senior software engineer` becomes `Senior Software Engineer` on the marker, the
+  sidecar and the wire. A new valid role is added until the card holds 200 roles; past
+  that the role is still used but not stored.
+- **Typical rates.** Each accepted evaluation records its `assumed_loaded_rate` per
+  currency, keeping the 20 most recent. Once a role has 3 observations in the configured
+  currency, the prompt shows its median as `typical rate so far: N USD/hour`, so the
+  model prices the same role consistently. That anchor can reinforce early guesses; the
+  hours and rate bounds above still apply to every answer.
+- **Never a priced card.** A learned rate is a prompt anchor only. It never enters
+  `config.json`, the validator, the valuation boundary or reportability, and it never
+  changes `evidence_class` or `reportability_status`: a value stays
+  `MODEL_ESTIMATED_DEMO` unless an operator-configured boundary says otherwise.
+- **When it is off.** A configured `rateCard` disables the learned card entirely (no read,
+  no write). So does a disabled `llmOutcomeEvaluation` and any evaluator other than the
+  built-in `llm`.
 
 #### `revenueCard`
 

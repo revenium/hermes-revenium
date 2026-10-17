@@ -98,7 +98,7 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 | `estimated_value` | number | **Derived** as `estimated_hours_saved x assumed_loaded_rate`, rounded to 2dp. A value supplied by an evaluator is discarded. |
 | `currency` | string | ISO 4217, from an explicit supported set and must match the configured currency. |
 | `basis` | string | Clamped to 200 chars. |
-| `assumptions.inferred_role` | string | Clamped to 60 chars. |
+| `assumptions.inferred_role` | string | Clamped to 60 chars. With no `rateCard`, the built-in `llm` evaluator's answer is also normalized and matched case-insensitively to a stored spelling in the learned role card (`role-taxonomy.json`; see [`config-schema.md`](config-schema.md)). |
 | `assumptions.estimated_hours_saved` | number | Finite, `0 < h <= maxHoursSaved` (default 40). |
 | `assumptions.assumed_loaded_rate` | number | Finite, `0 < r <= maxLoadedRate` (default 500). |
 | `confidence` | number | `[0, 1]`. |
@@ -157,6 +157,11 @@ been since v1.5, byte-unchanged. A reader looking for `net_value`,
 `supplied_costs`, `cost_coverage`, `economic_mechanism` or
 `double_counting_group` on the marker line will not find them there; they
 live on the sidecar record `hermes-report.sh` reads to build `--metadata`.
+
+One field of that record does reach the wire: `assumptions.inferred_role` rides inside
+`assumptions` on a **reportable** record, after `assumed_loaded_rate`. A candidate record
+strips `assumptions`, and with it the role. `basis` and the two narrative fields
+(`candidate_downstream_outcome`, `counterfactual_assumption`) stay local.
 
 ### The six economic mechanisms (EGV-05)
 

@@ -98,6 +98,17 @@ else
   echo "Job taxonomy already exists at ${JOB_TAXONOMY_DEST}, not overwriting"
 fi
 
+# quick-261017-kb1: the learned role card seed. Independently overridable, so it
+# gets its own parent mkdir; never overwrites a file the classifier has grown.
+ROLE_TAXONOMY_DEST="${REVENIUM_ROLE_TAXONOMY_FILE:-${STATE_DIR_DEFAULT}/role-taxonomy.json}"
+mkdir -p "$(dirname "${ROLE_TAXONOMY_DEST}")"
+if [[ ! -f "${ROLE_TAXONOMY_DEST}" ]]; then
+  cp "${REPO_ROOT}/skills/revenium/role-taxonomy.json" "${ROLE_TAXONOMY_DEST}"
+  echo "Seeded ${ROLE_TAXONOMY_DEST}"
+else
+  echo "Role taxonomy already exists at ${ROLE_TAXONOMY_DEST}, not overwriting"
+fi
+
 echo "Copied skill bundle to ${TARGET_DIR}"
 echo ""
 
