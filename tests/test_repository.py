@@ -418,6 +418,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'references' / 'troubleshooting.md',
             SKILL / 'task-taxonomy.json',
             SKILL / 'job-taxonomy.json',          # Phase 8 — job-declaration seed
+            SKILL / 'role-taxonomy.json',         # quick-261017-kb1 — learned role card seed
             SKILL / 'references' / 'task-taxonomy.md',
             SKILL / 'references' / 'halt-survivability.md',
             SKILL / 'references' / 'task-classification.md',
@@ -2676,6 +2677,10 @@ exit 0
         self.assertIn('revenium-jobs.ledger', text)
         self.assertIn('JOB_TAXONOMY_FILE=', text)
         self.assertIn('job-taxonomy.json', text)
+        # quick-261017-kb1: the learned role card's state path, declared only in common.sh.
+        self.assertIn('ROLE_TAXONOMY_FILE=', text)
+        self.assertIn('role-taxonomy.json', text)
+        self.assertRegex(text, r'ROLE_TAXONOMY_FILE="\$\{REVENIUM_ROLE_TAXONOMY_FILE:-\$\{STATE_DIR\}/role-taxonomy\.json\}"')
         # Phase 12: hooks config path declared only in common.sh.
         self.assertIn('HOOKS_CONFIG_FILE=', text)
         self.assertIn('config.yaml', text)
