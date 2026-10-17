@@ -1,5 +1,5 @@
 """llmOutcomeEvaluation.reportModelEstimates -- the explicit opt-in that lets a
-MODEL_ESTIMATED_DEMO value onto the wire.
+MODEL_ESTIMATED value onto the wire.
 
 Phase 53 (ROI-01) withholds every model estimate's value at two enforcement
 points: classifier.py, which writes reportability_status, and hermes-report.sh,
@@ -24,7 +24,7 @@ from tests import test_phase38_reporter_path as p38
 from tests import test_phase53_reportable_class_gate as p53
 from tests import test_outcome_metrics_report as om
 
-MODEL = 'MODEL_ESTIMATED_DEMO'
+MODEL = 'MODEL_ESTIMATED'
 OPTED_IN = {'experimentalReportEstimates': True, 'reportModelEstimates': True}
 
 

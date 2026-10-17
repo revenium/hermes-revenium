@@ -1143,7 +1143,7 @@ class LabelTests(unittest.TestCase):
             set(self.mod.EVIDENCE_CLASSES),
             {
                 'ACTIVITY_MEASURED', 'OUTPUT_OBSERVED', 'OUTCOME_OBSERVED',
-                'MODEL_ESTIMATED_DEMO', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
+                'MODEL_ESTIMATED', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
                 'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
             },
         )

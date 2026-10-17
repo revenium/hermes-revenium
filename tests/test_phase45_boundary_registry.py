@@ -189,7 +189,7 @@ class SeamMigrationTests(unittest.TestCase):
     here would make this test's pass/fail depend on task ORDER within the
     plan rather than on what Task 2 alone changed. The equivalent guarantee
     for 'llm' (that classifier._declared_evidence_class('llm') resolves to
-    MODEL_ESTIMATED_DEMO) is Task 3's DeclaredEvidenceClassTests' job, and it
+    MODEL_ESTIMATED) is Task 3's DeclaredEvidenceClassTests' job, and it
     exercises the real production code path (_declared_evidence_class), not
     a raw registry lookup.
     """
@@ -209,12 +209,12 @@ class SeamMigrationTests(unittest.TestCase):
         self.assertEqual('output_assessment', reg.boundary)
 
     def test_stub_declares_the_masquerade_class(self):
-        self.assertEqual('MODEL_ESTIMATED_DEMO', self.ev.resolve_evidence_class('stub'))
+        self.assertEqual('MODEL_ESTIMATED', self.ev.resolve_evidence_class('stub'))
 
     def test_fixture_declares_outcome_observed_not_masquerade_class(self):
         got = self.ev.resolve_evidence_class('system_of_record_assessment_fixture')
         self.assertEqual('OUTCOME_OBSERVED', got)
-        self.assertNotEqual('MODEL_ESTIMATED_DEMO', got)
+        self.assertNotEqual('MODEL_ESTIMATED', got)
 
     def test_fixture_abstains_on_failed_and_cancelled(self):
         fixture = self.ev.resolve('system_of_record_assessment_fixture')
@@ -261,8 +261,8 @@ class DeclaredEvidenceClassTests(unittest.TestCase):
 
     # 1. Every path that worked before this phase is unchanged.
     def test_llm_and_stub_are_both_model_estimated_demo(self):
-        self.assertEqual('MODEL_ESTIMATED_DEMO', self.mod._declared_evidence_class('llm'))
-        self.assertEqual('MODEL_ESTIMATED_DEMO', self.mod._declared_evidence_class('stub'))
+        self.assertEqual('MODEL_ESTIMATED', self.mod._declared_evidence_class('llm'))
+        self.assertEqual('MODEL_ESTIMATED', self.mod._declared_evidence_class('stub'))
 
     # 2. The registered non-LLM fixture's own declaration reaches through.
     def test_fixture_is_outcome_observed(self):

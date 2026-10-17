@@ -86,7 +86,7 @@ this repository.
 ### Added
 
 - `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's
-  estimates (`MODEL_ESTIMATED_DEMO`) to Revenium. The evidence-class gate added in v1.8
+  estimates (`MODEL_ESTIMATED`) to Revenium. The evidence-class gate added in v1.8
   withheld every model estimate's value with no way to turn that off, so an install without
   rate cards, revenue cards or confirmations could never send a job value. The key must be
   a literal `true` and works only with `experimentalReportEstimates: true`; when it is off, nothing

@@ -52,7 +52,7 @@ plugin packages here. ROI-03 asks for the smallest seam that makes the boundary
 real; a discovery system is explicitly out of scope for this milestone. A future
 ONNX, deterministic-policy, vertical, or system-of-record evaluator registers
 itself the same way the stub does, and reports its OWN evidence class — it must
-never masquerade as MODEL_ESTIMATED_DEMO.
+never masquerade as MODEL_ESTIMATED.
 
 DEPENDENCY DIRECTION. This module must not import classifier.py. The dependency
 runs one way so evaluators.py stays importable where Hermes' venv is absent —
@@ -173,7 +173,7 @@ def _stub_evaluate(job: dict, transcript: str, config: dict) -> "dict | None":
 
 
 # Phase 45 (D-06 AMENDED): the stub is a fixed model-shaped estimate with no
-# observation behind it, so MODEL_ESTIMATED_DEMO is its honest evidence
+# observation behind it, so MODEL_ESTIMATED is its honest evidence
 # class. Pinning it explicitly here (rather than leaving it to default to "")
 # keeps every record the stub has ever produced byte-identical.
 register("stub", _stub_evaluate, STUB_VERSION, evidence_class=_br.MASQUERADE_CLASS)
@@ -185,7 +185,7 @@ register("stub", _stub_evaluate, STUB_VERSION, evidence_class=_br.MASQUERADE_CLA
 # this boundary, modelled on EGV-02's "system-of-record outcome adapter". Its
 # evidence is an OBSERVED outcome recorded in a system of record -- not a
 # model's estimate -- which is why it declares OUTCOME_OBSERVED at
-# registration and not MODEL_ESTIMATED_DEMO. No LLM call, no network call, no
+# registration and not MODEL_ESTIMATED. No LLM call, no network call, no
 # clock: it reads its numbers from `config` alone, the same abstention rule
 # `_stub_evaluate` already follows.
 

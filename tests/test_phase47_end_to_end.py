@@ -175,7 +175,7 @@ def _extract_forwarder_record_keys(script_text):
 
 
 # Task 2: which of the extracted forwarder keys can the naked-LLM VALUED
-# path (SUCCESS -> assessment -> MODEL_ESTIMATED_DEMO -> reportable)
+# path (SUCCESS -> assessment -> MODEL_ESTIMATED -> reportable)
 # structurally never produce.
 #
 # Determined EMPIRICALLY (per this plan's own instruction), not guessed:
@@ -607,7 +607,7 @@ class TestPhase47EndToEnd(unittest.TestCase):
     def test_valued_happy_path_withholds_value_but_keeps_provenance(self):
         """D-07 path 1: a SUCCESS arc, classified and evaluated by the REAL
         classifier with only call_llm stubbed, produces a job-assessment
-        sidecar that resolves to MODEL_ESTIMATED_DEMO / reportable, and a
+        sidecar that resolves to MODEL_ESTIMATED / reportable, and a
         REAL hermes-report.sh tick ships `--outcome-value` (the sidecar's
         OWN LOW bound, read off disk -- never a number retyped here) plus a
         provenance-bearing `--metadata` payload. Exactly one `jobs outcome`
@@ -638,7 +638,7 @@ class TestPhase47EndToEnd(unittest.TestCase):
         # inversion is the point rather than a regression.
         #
         # Before: the naked-LLM valued happy path shipped --outcome-value with
-        # evidence_class MODEL_ESTIMATED_DEMO. That is exactly the pairing the
+        # evidence_class MODEL_ESTIMATED. That is exactly the pairing the
         # class gate now refuses -- `revenium jobs roi` displays a value with no
         # provenance, so a model-estimated number there is indistinguishable
         # from a measured one.
@@ -654,7 +654,7 @@ class TestPhase47EndToEnd(unittest.TestCase):
         metadata_raw = _metadata_of(argv)
         self.assertIsNotNone(metadata_raw, argv)
         meta = json.loads(metadata_raw)
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO', meta)
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED', meta)
         self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
         # Provenance survives the withholding -- Phase 43's rule that
         # withholding the VALUE must not withhold the FACT that an estimate
@@ -937,14 +937,14 @@ class TestPhase47EndToEnd(unittest.TestCase):
         # one invocation, not suppressed).
         #
         # What Phase 53 changed is narrower: this arc's evidence_class is
-        # MODEL_ESTIMATED_DEMO (no valuation boundary is configured here), so
+        # MODEL_ESTIMATED (no valuation boundary is configured here), so
         # the value family is withheld from the WIRE. The negative number is
         # not clamped, not zeroed and not dropped -- it lives on the sidecar,
         # and the wire says plainly that an estimate happened and was withheld.
         # A reader can still tell this job from one that was never valued,
         # which is the substitution EGV-17 prevents.
         self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO', meta)
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED', meta)
         self.assertEqual(meta.get('evaluator'), 'llm', meta)
         for k in ('net_value', 'value_low', 'value_base', 'value_high',
                   'estimated_value'):

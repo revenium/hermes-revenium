@@ -114,7 +114,7 @@ metadata and documentation carry it and no further.
 
 ## Why a model-estimated value is a hypothesis
 
-The naked-LLM evaluation path always resolves to the `MODEL_ESTIMATED_DEMO` evidence class.
+The naked-LLM evaluation path always resolves to the `MODEL_ESTIMATED` evidence class.
 Four properties make that class a hypothesis rather than an established result:
 
 1. **The figure is derived, not asserted.** `estimated_value` is computed as
@@ -128,10 +128,10 @@ Four properties make that class a hypothesis rather than an established result:
    machine at all.** A computed value and a reportable value are two different gates and an
    evaluator's opinion about its own estimate never overrides the resolver's decision.
 
-What `MODEL_ESTIMATED_DEMO` means in full and the rule that a future non-LLM evaluator must
+What `MODEL_ESTIMATED` means in full and the rule that a future non-LLM evaluator must
 report its own, different evidence class rather than widening this one, is owned by
 [`references/job-declaration.md`](../skills/revenium/references/job-declaration.md)'s "What
-`MODEL_ESTIMATED_DEMO` means" section: read it there.
+`MODEL_ESTIMATED` means" section: read it there.
 
 ## The vocabulary this project uses
 
@@ -336,7 +336,7 @@ reference a study and nothing in this tree fills that slot and nothing reads it.
 
 **EGV-02: a later implementation fits without masquerading.** True today: all six pluggable
 boundaries exist as registries and each carries a non-LLM fixture that declares its own,
-own evidence class rather than borrowing the naked-LLM path's `MODEL_ESTIMATED_DEMO`.
+own evidence class rather than borrowing the naked-LLM path's `MODEL_ESTIMATED`.
 Not true today: a configured boundary's own declared class does not reach the persisted record.
 Resolution runs against the evaluators registry only, so an active valuation or evidence
 boundary's declared class is not what ends up on the sidecar. The recorded class therefore

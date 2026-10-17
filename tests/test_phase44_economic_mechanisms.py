@@ -416,7 +416,7 @@ def _mechanism_sidecar_record(job_id, economic_mechanism):
         'evaluator_version': 'v1',
         'confidence': 0.8,
         # Phase 53 (ROI-01): a value-shipping helper needs a class the gate
-        # permits. MODEL_ESTIMATED_DEMO + reportable is a pairing production
+        # permits. MODEL_ESTIMATED + reportable is a pairing production
         # can no longer emit -- the reporter strips the value family from it
         # while keeping provenance, which is exactly what this helper's
         # callers are NOT trying to exercise.
@@ -943,12 +943,12 @@ def _cost_sidecar_record(job_id, reportability_status='reportable',
     convention.
 
     Phase 53 (ROI-01): the default evidence_class moved from
-    MODEL_ESTIMATED_DEMO to CUSTOMER_CONFIGURED. This helper's whole
+    MODEL_ESTIMATED to CUSTOMER_CONFIGURED. This helper's whole
     purpose is driving a VALUE end to end, and after the class gate a
     model-estimated record can never carry one -- the old default paired
     reportable with a class that forbids it, describing a record
     production cannot emit. Tests here that specifically want the
-    withheld path pass evidence_class='MODEL_ESTIMATED_DEMO' explicitly.
+    withheld path pass evidence_class='MODEL_ESTIMATED' explicitly.
     """
     record = {
         'kind': 'job_assessment',
@@ -1681,7 +1681,7 @@ def _non_success_sidecar_record(job_id, execution_status='FAILED', **overrides):
         'evaluator': 'llm',
         'evaluator_version': 'v1',
         'confidence': 0.0,
-        'evidence_class': 'MODEL_ESTIMATED_DEMO',
+        'evidence_class': 'MODEL_ESTIMATED',
         'execution_status': execution_status,
         'abstention_reason': 'not_evaluated_non_success',
         'reportability_status': 'candidate',
@@ -2049,7 +2049,7 @@ class LiveShapeRegressionTests(unittest.TestCase):
 
         # Mechanism present, value present -- the live run's headline pairing.
         self.assertEqual(rec['estimated_value'], 250.0)
-        self.assertEqual(rec['evidence_class'], 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(rec['evidence_class'], 'MODEL_ESTIMATED')
         self.assertIn(rec['economic_mechanism'], mod.EVALUATOR_MECHANISMS)
         self.assertNotEqual(rec['economic_mechanism'], mod.ECONOMIC_MECHANISM_UNKNOWN)
 

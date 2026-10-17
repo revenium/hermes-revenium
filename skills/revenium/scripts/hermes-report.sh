@@ -6291,7 +6291,7 @@ else:
 # signal this branch is inverted, never as a test to adjust.
 _EVIDENCE_CLASSES = frozenset({
     'ACTIVITY_MEASURED', 'OUTPUT_OBSERVED', 'OUTCOME_OBSERVED',
-    'MODEL_ESTIMATED_DEMO', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
+    'MODEL_ESTIMATED', 'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
     'ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT',
 })
 
@@ -6325,7 +6325,7 @@ _REPORTABLE_EVIDENCE_CLASSES = frozenset({
     'CUSTOMER_CONFIGURED', 'CUSTOMER_CONFIRMED',
 })
 # llmOutcomeEvaluation.reportModelEstimates: the one explicit opt-in that also
-# admits MODEL_ESTIMATED_DEMO, mirroring classifier.py's
+# admits MODEL_ESTIMATED, mirroring classifier.py's
 # _model_estimates_opted_in -- it and experimentalReportEstimates must both be
 # the literal JSON true. Read here, per outcome, rather than in a spawn at
 # script start: this heredoc runs only when there is an outcome to report, so
@@ -6351,6 +6351,20 @@ _MODEL_ESTIMATES_OPTED_IN = _model_estimates_opted_in()
 # line, the same bypass CR-01 came in through. Treating absence as
 # permissible for every kind let exactly that record sail through with no
 # rejection at all.
+# quick-261017-nck (LD-4): the evidence class MODEL_ESTIMATED was written as
+# MODEL_ESTIMATED_DEMO before this change, so a sidecar already on disk may carry
+# the old label. Rewrite it in place BEFORE the CF-2 check below, so the
+# allow-list, the Phase 53 gate, the opt-in branch, ASSESSMENT_JSON and the
+# wire all see one label and the legacy record gains no power the new label
+# lacks. The isinstance guard keeps an unhashable value (a list) from raising
+# in the dict lookup; it falls through to the CF-2 rejection as before. Hand-
+# synced with the same dict in the outcome_metadata heredoc (a test pins them
+# equal). Deliberately not named *_EVIDENCE_CLASSES: the phase43 drift test's
+# fragment extractor reads that suffix.
+_LEGACY_EVIDENCE_CLASS_ALIASES = {'MODEL_ESTIMATED_DEMO': 'MODEL_ESTIMATED'}
+_legacy_ec = found.get('evidence_class', None)
+if isinstance(_legacy_ec, str) and _legacy_ec in _LEGACY_EVIDENCE_CLASS_ALIASES:
+    found['evidence_class'] = _LEGACY_EVIDENCE_CLASS_ALIASES[_legacy_ec]
 _raw_evidence_class = found.get('evidence_class', None)
 _evidence_class_missing = _raw_evidence_class is None
 if _evidence_class_missing and not _is_correction:
@@ -6384,9 +6398,9 @@ if _reject_evidence_class:
         _not_reportable_reason = 'evidence_class_unrecognized'
 elif not _evidence_class_missing and (
         _raw_evidence_class not in _REPORTABLE_EVIDENCE_CLASSES) and not (
-        _raw_evidence_class == 'MODEL_ESTIMATED_DEMO' and _MODEL_ESTIMATES_OPTED_IN):
+        _raw_evidence_class == 'MODEL_ESTIMATED' and _MODEL_ESTIMATES_OPTED_IN):
     # Phase 53 (ROI-01, D-01): a RECOGNIZED class that may not carry a value
-    # onto the wire -- MODEL_ESTIMATED_DEMO in practice. Distinct from the
+    # onto the wire -- MODEL_ESTIMATED in practice. Distinct from the
     # rejection branch above in one load-bearing way: `evidence_class` is
     # KEPT on the record, not popped.
     #

@@ -413,7 +413,7 @@ def _tracer_assessment_record(job_id, **overrides):
         # absent evidence_class on a job_assessment, which is what
         # surfaced the gap.
         #
-        # Phase 53 (ROI-01): the default moved from MODEL_ESTIMATED_DEMO to
+        # Phase 53 (ROI-01): the default moved from MODEL_ESTIMATED to
         # CUSTOMER_CONFIGURED, for the same reason the identical helpers in
         # tests/test_phase44_economic_mechanisms.py did. This helper's whole
         # job is driving a VALUE down the outcome path, and after the
@@ -547,7 +547,7 @@ class SidecarTracerTests(unittest.TestCase):
             'assumptions': {'inferred_role': 'x', 'estimated_hours_saved': 1.0,
                              'assumed_loaded_rate': 999.0},
             'confidence': 0.9, 'evaluator': 'llm', 'evaluator_version': 'v1',
-            'evidence_class': 'MODEL_ESTIMATED_DEMO',
+            'evidence_class': 'MODEL_ESTIMATED',
         }
         tmpdir, env, jobs_log = self._build_tree(
             sid, job_id, sidecar_lines=None, marker_assessment=marker_assessment,
@@ -1753,7 +1753,7 @@ class FailClosedTests(unittest.TestCase):
             'assumptions': {'inferred_role': 'x', 'estimated_hours_saved': 1.0,
                              'assumed_loaded_rate': 999.0},
             'confidence': 0.9, 'evaluator': 'llm', 'evaluator_version': 'v1',
-            'evidence_class': 'MODEL_ESTIMATED_DEMO',
+            'evidence_class': 'MODEL_ESTIMATED',
         }
         tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
             sid, job_id, sidecar_lines=None, marker_assessment=marker_assessment,

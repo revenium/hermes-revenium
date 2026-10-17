@@ -87,7 +87,7 @@ built ahead of it, all inert until a verb or flag ships:
   `evidence_class` this project produces is already mapped onto the two
   server `provenance` vocabularies the `economics`/`baselines` and
   `facts`/outcome-metrics surfaces use, including the one label
-  (`MODEL_ESTIMATED_DEMO`) that maps to neither.
+  (`MODEL_ESTIMATED`) that maps to neither.
 
 None of this is a Revenium commitment or an agreed roadmap item. It is
 what this project chose to do on its own side while waiting.

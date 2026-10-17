@@ -42,7 +42,7 @@ it correctly returns `"outcomeValue": null` and `"roi": null` for the same
 withheld record. This was observed against
 `implement_p53_ctrl_gcd_function_8404`, a real tenant row whose value the
 Phase 53 evidence-class gate correctly withheld (its `evidence_class` is
-the forced `MODEL_ESTIMATED_DEMO` constant, see "What this skill did about
+the forced `MODEL_ESTIMATED` constant, see "What this skill did about
 it" below).
 
 **Re-verified 2026-09-03, live, during Phase 56's induced-probe arm**
@@ -64,7 +64,7 @@ Rather than hold value reporting off until a server-side change lands, Phase
 allow-list is a code constant: five members, derived by subtraction from the
 six declarable evidence classes minus the one label whose basis is a model
 and nothing else: `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`,
-`CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`. `MODEL_ESTIMATED_DEMO` is
+`CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`. `MODEL_ESTIMATED` is
 deliberately refused, not because it ranks lower than the other five (EGV-10
 forbids treating these nine labels as a confidence ladder), but because it is
 the one label whose entire basis is a model's own output and the one surface

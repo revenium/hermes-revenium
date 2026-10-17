@@ -270,7 +270,7 @@ def resolve_declared_class(declared, allowed, default: str) -> str:
 # an operator-recorded customer confirmation makes an estimate reportable,
 # with no model call anywhere in the decision.
 #
-# It declares CUSTOMER_CONFIRMED, not MODEL_ESTIMATED_DEMO: the honest
+# It declares CUSTOMER_CONFIRMED, not MODEL_ESTIMATED: the honest
 # claim is that a customer confirmed the outcome, not that a model
 # estimated it. The honest limit of that claim, matching the vocabulary's
 # own definition: customer confirmation may be commercially authoritative

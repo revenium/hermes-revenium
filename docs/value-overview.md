@@ -69,7 +69,7 @@ job and computes the ratio on its side.
 | It is | An unverified model estimate, derived from two capped assumptions, recorded alongside those assumptions so anyone can see what produced it. |
 | It is not | A measurement, an observed outcome or a customer-confirmed one. Nothing downstream is watched to confirm the claimed benefit occurred. |
 | On the wire | The low end of the estimated range, not the midpoint. It understates by design. |
-| Labelled | Every record carries `evidence_class: MODEL_ESTIMATED_DEMO`, so an estimate stays distinguishable from a measurement after the fact. |
+| Labelled | Every record carries `evidence_class: MODEL_ESTIMATED`, so an estimate stays distinguishable from a measurement after the fact. |
 
 `revenium jobs roi` does not display the evidence label. An estimate appears there with
 the same weight as a measured figure. Readers need separate notice that the number is an
@@ -179,7 +179,7 @@ JSON does not support comments, so the annotations follow the example.
 |---|---|---|
 | `enabled` | `true` | Turns evaluation on. Must be a literal boolean. The string `"true"` or the number `1` leaves it off with no warning. Same for the key below. |
 | `experimentalReportEstimates` | `true` | Lets a value be reported. Set it to `false` (or omit it) to compute and store estimates locally while withholding the figure from the wire. See [Rolling it out](#rolling-it-out). |
-| `reportModelEstimates` | `true` | Needed for this evaluator's estimates in particular: every one is labelled `MODEL_ESTIMATED_DEMO`, which is withheld unless this is also `true`. Leave it off to report only customer-configured or measured values. `revenium jobs roi` shows a reported estimate with the same weight as a measurement. |
+| `reportModelEstimates` | `true` | Needed for this evaluator's estimates in particular: every one is labelled `MODEL_ESTIMATED`, which is withheld unless this is also `true`. Leave it off to report only customer-configured or measured values. `revenium jobs roi` shows a reported estimate with the same weight as a measurement. |
 | `evaluator` | `"llm"` | The default. Named explicitly here so the file documents itself. |
 | `currency` | `"USD"` | Must match what the evaluator returns or the assessment is rejected. Supported: `USD`, `EUR`, `GBP`, `CAD`, `AUD`, `JPY`, `CHF`. |
 
@@ -329,7 +329,7 @@ On the wire, alongside the job's outcome:
 
 ```json
 {"value_low":280.5,"value_base":330.0,"value_high":379.5,"bounds_source":"derived",
- "evidence_class":"MODEL_ESTIMATED_DEMO","reportability_status":"reportable",
+ "evidence_class":"MODEL_ESTIMATED","reportability_status":"reportable",
  "economic_mechanism":"labor_substitution","net_value":285.0,
  "supplied_costs":{"human_review":45.0,"handoff":0.0},
  "cost_coverage":{"included":["human_review","handoff"],"known_zero":["handoff"],

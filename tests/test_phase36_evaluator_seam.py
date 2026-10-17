@@ -212,7 +212,7 @@ class ValidateAssessmentTests(unittest.TestCase):
     def test_accepts_and_derives(self):
         got = self.mod._validate_assessment(self._raw(), {}, 'stub', '1')
         self.assertEqual(375.0, got['estimated_value'])
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got['evidence_class'])
         self.assertEqual(2.5, got['assumptions']['estimated_hours_saved'])
         self.assertEqual('stub', got['evaluator'])
 
@@ -227,7 +227,7 @@ class ValidateAssessmentTests(unittest.TestCase):
         """Provenance a model can assert is not provenance."""
         got = self.mod._validate_assessment(
             self._raw(evidence_class='CUSTOMER_CONFIRMED'), {}, 'stub', '1')
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got['evidence_class'])
 
     def test_bool_is_rejected_not_coerced(self):
         """isinstance(True, int) is True, so a naive check prices an hour of

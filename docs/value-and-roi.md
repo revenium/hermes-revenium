@@ -73,7 +73,7 @@ null.
 ## 2. What the number is, and is not
 
 The naked-LLM path always produces an unverified model estimate, labelled
-`MODEL_ESTIMATED_DEMO` in every record it writes.
+`MODEL_ESTIMATED` in every record it writes.
 
 | It is | It is not |
 |---|---|
@@ -128,7 +128,7 @@ Five live inside `llmOutcomeEvaluation` in
 |---|---|---|---|
 | `enabled` | inside `llmOutcomeEvaluation` | Whether evaluation happens at all | `false` |
 | `experimentalReportEstimates` | inside `llmOutcomeEvaluation` | Whether a computed value may leave the machine | `false` |
-| `reportModelEstimates` | inside `llmOutcomeEvaluation` | Whether a model estimate (`MODEL_ESTIMATED_DEMO`) may leave it too; effective only with the key above | `false` |
+| `reportModelEstimates` | inside `llmOutcomeEvaluation` | Whether a model estimate (`MODEL_ESTIMATED`) may leave it too; effective only with the key above | `false` |
 | `costs` | inside `llmOutcomeEvaluation` | Operator-supplied non-AI costs that net against the estimate | `{}` |
 | `studyId` / `studyVersion` | inside `llmOutcomeEvaluation` | A reference to an impact study; never changes an assessment's own evidence class | absent |
 | `boundaries` | top level, a sibling of `llmOutcomeEvaluation` | Which registered implementation serves each pluggable contract | built-ins |
@@ -344,14 +344,14 @@ evaluate(job: dict, transcript: str, config: dict) -> dict | None
 Returning `None` abstains. The registry
 lives in `evaluators.py`. Registration also declares the evaluator's own `version` and its
 own `evidence_class`, so a future non-LLM evaluator reports its actual class rather than
-borrowing `MODEL_ESTIMATED_DEMO`.
+borrowing `MODEL_ESTIMATED`.
 
 Three implementations ship today:
 
 | Name | Evidence class | Makes a model call? |
 |---|---|---|
-| `llm` (default) | `MODEL_ESTIMATED_DEMO` | yes |
-| `stub` | `MODEL_ESTIMATED_DEMO` | no; fixed 2.5 h at 150/h |
+| `llm` (default) | `MODEL_ESTIMATED` | yes |
+| `stub` | `MODEL_ESTIMATED` | no; fixed 2.5 h at 150/h |
 | `system_of_record_assessment_fixture` | `OUTCOME_OBSERVED` | no; reads hours/rate from `config["systemOfRecord"]` |
 
 ## 6. Validation and abstention
@@ -631,7 +631,7 @@ default.
 
 `evidence_class` is one of nine flat, unordered labels:
 
-`ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`, `MODEL_ESTIMATED_DEMO`,
+`ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`, `MODEL_ESTIMATED`,
 `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`, `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`,
 `EXPERIMENTAL_IMPACT`.
 
@@ -643,7 +643,7 @@ way, which is why the labels sit side by side rather than in rank order.
 
 The class is read from the resolved evaluator's registration-time declaration, not from
 evaluator output. A model cannot name its own evidence class. On the naked-LLM path that
-resolution always yields `MODEL_ESTIMATED_DEMO`.
+resolution always yields `MODEL_ESTIMATED`.
 
 The reporter then applies its own independent allow-list immediately before the value is
 emitted. A record carrying a class outside the nine has the field dropped *and* its whole
@@ -669,12 +669,12 @@ field and applies the evidence-class gate a second time before it sends.
 
 The evidence-class gate (Phase 53, ROI-01) admits `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`,
 `OUTCOME_OBSERVED`, `CUSTOMER_CONFIGURED` and `CUSTOMER_CONFIRMED`. Every estimate from the
-`llm` and `stub` evaluators is `MODEL_ESTIMATED_DEMO`, which the gate withholds unless
+`llm` and `stub` evaluators is `MODEL_ESTIMATED`, which the gate withholds unless
 `reportModelEstimates` is also literally `true`. That key exists for installs with no
 customer-supplied rates, revenue cards or confirmations, where the model's estimate is the
 only value. `revenium jobs roi` shows no evidence class, so a reported estimate appears there
 with the same weight as a measurement; `--metadata` still carries
-`evidence_class: MODEL_ESTIMATED_DEMO`.
+`evidence_class: MODEL_ESTIMATED`.
 
 Two properties enforce this separation:
 
@@ -721,7 +721,7 @@ abstained. A disabled-path marker is byte-identical to a pre-feature one.
    "confidence":0.6,
    "evaluator":"llm",
    "evaluator_version":"1",
-   "evidence_class":"MODEL_ESTIMATED_DEMO"
+   "evidence_class":"MODEL_ESTIMATED"
  }}
 ```
 
@@ -959,7 +959,7 @@ reportable `job_assessment` sidecar:
 `recordedAt` is the assessment's `job_ended_at`, falling back to its `ts`, rendered in UTC.
 Every entry uses the platform provenance value `DERIVED`. That value describes how the
 metric entry was produced; it does not replace or promote the assessment's
-`evidence_class`. A `MODEL_ESTIMATED_DEMO` assessment remains a model estimate.
+`evidence_class`. A `MODEL_ESTIMATED` assessment remains a model estimate.
 
 The stage processes only original records with `kind: "job_assessment"` and
 `reportability_status: "reportable"`. It does not read `candidate` assessments or operator

@@ -214,7 +214,7 @@ def _clamp_text(value, limit: int = NARRATIVE_CLAMP_BYTES) -> str:
 # at all. No model call, no network call, no clock: every decision is made
 # from the request's own text and the caller-supplied label list.
 #
-# It declares ACTIVITY_MEASURED, not MODEL_ESTIMATED_DEMO: it reports
+# It declares ACTIVITY_MEASURED, not MODEL_ESTIMATED: it reports
 # observed activity in the turn's own text -- which tokens of which
 # candidate label actually appear -- with no model estimate anywhere in the
 # derivation, so claiming the naked-LLM label would be a lie about where

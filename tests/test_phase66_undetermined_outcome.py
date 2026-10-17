@@ -286,7 +286,7 @@ def _non_success_sidecar_record(job_id, execution_status='FAILED', **overrides):
         'evaluator': 'llm',
         'evaluator_version': 'v1',
         'confidence': 0.0,
-        'evidence_class': 'MODEL_ESTIMATED_DEMO',
+        'evidence_class': 'MODEL_ESTIMATED',
         'execution_status': execution_status,
         'abstention_reason': 'not_evaluated_non_success',
         'reportability_status': 'candidate',
@@ -346,7 +346,7 @@ def _over_ceiling_assessment():
         },
         'evaluator': 'naked-llm-evaluator-name', 'evaluator_version': 'v1.0.0',
         'model': 'some-model-string-id',
-        'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+        'evidence_class': 'MODEL_ESTIMATED', 'reportability_status': 'reportable',
         'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
         'double_counting_group': 'g' * 64,
     }

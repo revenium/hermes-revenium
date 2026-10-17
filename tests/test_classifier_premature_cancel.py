@@ -165,7 +165,7 @@ EVAL_PAYLOAD = {
 }
 TRANSCRIPT = 'user: write the report\nassistant: delegating\ntool: subagent wrote and verified it'
 
-# The opt-ins under which a MODEL_ESTIMATED_DEMO value is reportable.
+# The opt-ins under which a MODEL_ESTIMATED value is reportable.
 EVAL_ON = {
     'enabled': True, 'evaluator': 'pcancel-stub', 'currency': 'USD',
     'experimentalReportEstimates': True, 'reportModelEstimates': True,

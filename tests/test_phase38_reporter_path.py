@@ -69,7 +69,7 @@ ASSESSMENT_FIXTURE = {
     "confidence": 0.8,
     "evaluator": "llm",
     "evaluator_version": "v1",
-    "evidence_class": "MODEL_ESTIMATED_DEMO",
+    "evidence_class": "MODEL_ESTIMATED",
 }
 
 
@@ -120,7 +120,7 @@ def _sidecar_record(job_id, **overrides):
         "evaluator": "llm",
         "evaluator_version": "v1",
         "confidence": 0.8,
-        "evidence_class": "MODEL_ESTIMATED_DEMO",
+        "evidence_class": "MODEL_ESTIMATED",
         # Phase 50 (DECL-05, D-04): classifier.py's _build_job_assessment
         # (and _validate_assessment) populate this key UNCONDITIONALLY on
         # every record they build, and this plan makes hermes-report.sh
@@ -128,7 +128,7 @@ def _sidecar_record(job_id, **overrides):
         # the same way every prior recurrence was: SidecarFixtureFidelityTests'
         # _sidecar_record() gains the fixture key, never a widened exemption
         # set. "evaluator" is the honest value for this fixture's own
-        # "MODEL_ESTIMATED_DEMO" evidence_class immediately above: no
+        # "MODEL_ESTIMATED" evidence_class immediately above: no
         # boundary votes on the default/unconfigured arm, so the
         # cross-boundary precedence walk falls through to
         # _forced_evidence_class() with authority "evaluator".
@@ -193,8 +193,8 @@ def _sidecar_record(job_id, **overrides):
         #
         # Phase 53 (ROI-01) CHANGED THIS DEFAULT from "reportable" to
         # "candidate", and the reason matters more than the value. This
-        # fixture's evidence_class is MODEL_ESTIMATED_DEMO (above), and after
-        # Phase 53's class gate a MODEL_ESTIMATED_DEMO record can NEVER be
+        # fixture's evidence_class is MODEL_ESTIMATED (above), and after
+        # Phase 53's class gate a MODEL_ESTIMATED record can NEVER be
         # reportable -- production resolves it to candidate. The old pairing
         # described a record production cannot emit, which is precisely what
         # FixtureFidelityTests exists to catch; it caught this one.
@@ -454,7 +454,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'o38-job-001',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -522,7 +522,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         ):
             self.assertNotIn(stripped_key, meta, f'{stripped_key!r} must not cross the wire on a candidate record')
         # D-05: provenance still ships even though the value did not.
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED')
         self.assertEqual(meta.get('evaluator'), 'llm')
         self.assertEqual(meta.get('evaluator_version'), 'v1')
         self.assertEqual(meta.get('model'), 'unknown')
@@ -545,7 +545,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'r43-job-001',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -794,7 +794,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
 
     def test_nominal_evidence_class_still_ships_unaffected_by_the_new_check(self):
         """Behavior 4, the accept-branch regression pin: the nominal
-        fixture's MODEL_ESTIMATED_DEMO still forwards both value flags and
+        fixture's MODEL_ESTIMATED still forwards both value flags and
         the label itself, unchanged by the new allow-list. Tests 3 and 4
         are not padding -- they are what stops Test 1 from being satisfied
         by an over-broad check that rejects everything, including absence
@@ -804,7 +804,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'ec43-job-004',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -834,7 +834,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'assessment-golden-job',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -1721,7 +1721,7 @@ class TestPhase38MultiTick(unittest.TestCase):
 
             # Phase 53 (ROI-01): this record is built by the REAL constructor
             # (_build_real_sidecar_record), so its evidence_class is the forced
-            # MODEL_ESTIMATED_DEMO of the naked-LLM path -- and the class gate
+            # MODEL_ESTIMATED of the naked-LLM path -- and the class gate
             # withholds the value family from the wire for exactly that class.
             #
             # D-08's meaning is UNCHANGED and still asserted, just one level in:

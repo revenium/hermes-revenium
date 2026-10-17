@@ -100,7 +100,7 @@ _TYPICAL_ASSESSMENT = {
     'assumptions': {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
     'evaluator': 'naked-llm-evaluator', 'evaluator_version': 'v1.0.0',
     'model': 'some-model-string-id',
-    'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+    'evidence_class': 'MODEL_ESTIMATED', 'reportability_status': 'reportable',
     'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
 }
 
@@ -133,7 +133,7 @@ def _over_ceiling_assessment():
         },
         'evaluator': 'naked-llm-evaluator-name', 'evaluator_version': 'v1.0.0',
         'model': 'some-model-string-id',
-        'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+        'evidence_class': 'MODEL_ESTIMATED', 'reportability_status': 'reportable',
         'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
         'double_counting_group': 'g' * 64,
     }

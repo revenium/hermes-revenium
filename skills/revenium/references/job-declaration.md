@@ -89,7 +89,7 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
    "confidence":0.6,
    "evaluator":"llm",
    "evaluator_version":"1",
-   "evidence_class":"MODEL_ESTIMATED_DEMO"
+   "evidence_class":"MODEL_ESTIMATED"
  }}
 ```
 
@@ -103,15 +103,15 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 | `assumptions.assumed_loaded_rate` | number | Finite, `0 < r <= maxLoadedRate` (default 500). |
 | `confidence` | number | `[0, 1]`. |
 | `evaluator`, `evaluator_version` | string | Recorded from the resolved evaluator, never read from its output. |
-| `evidence_class` | string | Resolved from the boundary registry for whichever evaluator ran, never read from its output. On the naked-LLM path that resolution always yields `MODEL_ESTIMATED_DEMO`. |
+| `evidence_class` | string | Resolved from the boundary registry for whichever evaluator ran, never read from its output. On the naked-LLM path that resolution always yields `MODEL_ESTIMATED`. |
 
 Every string field has `|`, newline and carriage return replaced with a space
 before persistence. The cron's job-outcome queue is `IFS='|'`-parsed and one
 pipe reaching that tuple shifts every following field.
 
-### What `MODEL_ESTIMATED_DEMO` means
+### What `MODEL_ESTIMATED` means
 
-`MODEL_ESTIMATED_DEMO` is an unverified model estimate. It is not measured, observed,
+`MODEL_ESTIMATED` is an unverified model estimate. It is not measured, observed,
 customer-confirmed or defensible ROI. Revenium computes a displayed ROI
 from this reported value and the metered cost; the value's quality is the
 model's and the feature is labelled experimental for that reason.
@@ -126,9 +126,9 @@ distinguishable after the fact.
 
 `evidence_class` is one of nine flat, unordered labels, never a confidence
 ladder: `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`,
-`MODEL_ESTIMATED_DEMO`, `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`,
+`MODEL_ESTIMATED`, `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`,
 `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`, `EXPERIMENTAL_IMPACT`. The
-naked-LLM path documented above always emits `MODEL_ESTIMATED_DEMO`; no label
+naked-LLM path documented above always emits `MODEL_ESTIMATED`; no label
 is ranked above or below another.
 
 ### Failed and cancelled arcs

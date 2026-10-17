@@ -103,7 +103,12 @@ logger = logging.getLogger("revenium_classifier.boundary_registry")
 # equal by tests/test_phase45_boundary_registry.py's SeamMigrationTests via
 # `resolve_evidence_class("stub")`, so drift between the two copies is
 # caught, not merely hoped against.
-MASQUERADE_CLASS = "MODEL_ESTIMATED_DEMO"
+MASQUERADE_CLASS = "MODEL_ESTIMATED"
+
+# The label this class carried before quick-261017-nck. An out-of-tree
+# registrant written against the old name still declares it, so register()
+# normalizes it to MASQUERADE_CLASS and every consumer sees one label.
+LEGACY_MASQUERADE_CLASS = "MODEL_ESTIMATED_DEMO"
 
 
 class BoundaryRegistry:
@@ -140,10 +145,13 @@ class BoundaryRegistry:
         the entry, and `registered()` still holds exactly one copy of that
         name.
         """
+        declared = str(evidence_class or "")
+        if declared == LEGACY_MASQUERADE_CLASS:
+            declared = MASQUERADE_CLASS
         self._entries[name] = {
             "fn": fn,
             "version": str(version or ""),
-            "evidence_class": str(evidence_class or ""),
+            "evidence_class": declared,
         }
 
     def resolve(self, name: str):
@@ -181,7 +189,7 @@ class BoundaryRegistry:
 def is_masquerading(registry: "BoundaryRegistry", name: str) -> bool:
     """True exactly when `name`'s declared evidence_class equals
     MASQUERADE_CLASS -- the executable form of D-06's "must never
-    masquerade as MODEL_ESTIMATED_DEMO" rule, so a future fixture that
+    masquerade as MODEL_ESTIMATED" rule, so a future fixture that
     dishonestly claims the forced-LLM label can be caught rather than
     trusted on the strength of a docstring alone.
 

@@ -75,7 +75,7 @@ to `CUSTOMER_DECLARED` when the field is omitted.
 | `ACTIVITY_MEASURED` | *not applicable* | No local path uses a keyword/token-overlap classification signal to set a job-type rate; this label characterizes what one session's transcript contained, never a per-type `hourlyRate` / `minutesPerUnit` assumption. | — |
 | `OUTPUT_OBSERVED` | *not applicable* | **[ASSUMED]** A self-verified output observation (`SUCCESS` / `FAILED` / `CANCELLED` inferred from the transcript) is a per-job signal, never a job-type rate. | — |
 | `OUTCOME_OBSERVED` | *not applicable* (borderline, see below) | The sole producer, `_system_of_record_assessment_fixture`, reads a single global `config["systemOfRecord"]` rate for one job's assessment; it never persists a job-type baseline record. | Flagged borderline: a system of record is exactly the kind of source `MEASURED` describes on this surface. If a future baseline-setting path reused this evidence kind to populate a real `POST .../baselines` call, `MEASURED` would be the value then: today no such path exists, so *not applicable* is the present-tense answer, not a permanent one. |
-| `MODEL_ESTIMATED_DEMO` | unmappable | None of `CUSTOMER_DECLARED` / `MEASURED` / `SIGNED_OFF` answers "no rate-obtaining process ran at all — a model invented an hours/rate pair"; each of the three names a real process that produced the rate. See [The hard case](#the-hard-case) (added by plan 58-02) for the full derivation. | This label names no server provenance value on either surface (D-01). |
+| `MODEL_ESTIMATED` | unmappable | None of `CUSTOMER_DECLARED` / `MEASURED` / `SIGNED_OFF` answers "no rate-obtaining process ran at all — a model invented an hours/rate pair"; each of the three names a real process that produced the rate. See [The hard case](#the-hard-case) (added by plan 58-02) for the full derivation. | This label names no server provenance value on either surface (D-01). |
 | `CUSTOMER_CONFIGURED` | `CUSTOMER_DECLARED` | The rate/revenue card is an operator-approved figure the operator declared into config, with no model call in the derivation (`valuation.py:324-336`): a direct kind-match to "customer declared". | `CUSTOMER_DECLARED` cannot distinguish a rate-card entry keyed by evaluator-inferred role from a revenue-card entry keyed strictly by an operator-bound `revenueCardKey` (never model-inferred): two different exposure profiles to model influence, collapsed into one value. |
 | `CUSTOMER_CONFIRMED` | *not applicable* | The sole producer, `_confirmation_workflow_evidence_fixture` (`evidence.py:283-317`), is keyed by `agentic_job_id` membership in a confirmations list: structurally per-*job*, never a job-*type* rate. This is the same structural reason `OUTCOME_OBSERVED` takes *not applicable* on this surface, not a comparison of the two claims' relative weight (D-08 forbids that question). | `SIGNED_OFF` is the value this row would take if a baseline-setting path ever consumed this evidence kind: a customer confirming an outcome is, in claim-kind terms, the closest analog to a stakeholder signing off on a baseline value. Note this is a surface-scoping fact, not a strength comparison: `SIGNED_OFF` exists only on the baselines vocabulary and `ATTESTED` (see Table B) only on the facts-and-metrics vocabulary. |
 | `ASSOCIATIONAL` | *not applicable* | **[ASSUMED]** A causal-impact estimate (even the weakest, correlational form) is not a job-type rate. | Real mapping supplied on the facts-and-outcome-metrics surface instead (see Table B). |
@@ -94,7 +94,7 @@ Targets `PeriodFactEntry.provenance` / `OutcomeMetricEntry.provenance` /
 | `ACTIVITY_MEASURED` | `MEASURED` | A deterministic token-overlap measurement of the transcript (`classification.py:209-221`): a real quantity was measured, no self-report, no derivation, no attestation. | See "The `MEASURED` collision" below: this row shares its value with `OUTPUT_OBSERVED` and `OUTCOME_OBSERVED` for a reason that is not a claim-kind mismatch. |
 | `OUTPUT_OBSERVED` | `MEASURED` | **[ASSUMED]** A direct, self-verified observation that the work product exists. | This is D-09's own named example of the `MEASURED` collision, stated in full below. |
 | `OUTCOME_OBSERVED` | `MEASURED` | An external system of record's recorded observation of the downstream outcome (`evaluators.py:182-188`): still an observation, not a derivation or a self-report. | Same `MEASURED` collision as `OUTPUT_OBSERVED`, stated once below rather than twice. |
-| `MODEL_ESTIMATED_DEMO` | unmappable | None of `MEASURED` / `SELF_REPORTED` / `DERIVED` / `ATTESTED` names "a model hypothesized a number with no real observation behind it"; each names a real quantity obtained some way. See [The hard case](#the-hard-case) (added by plan 58-02). | This label names no server provenance value on either surface (D-01). Supporting note: this surface's own schema *omits* the field to `SELF_REPORTED` by default: silence is not neutral, which is part of why an explicit *unmappable* entry matters more here, not less. |
+| `MODEL_ESTIMATED` | unmappable | None of `MEASURED` / `SELF_REPORTED` / `DERIVED` / `ATTESTED` names "a model hypothesized a number with no real observation behind it"; each names a real quantity obtained some way. See [The hard case](#the-hard-case) (added by plan 58-02). | This label names no server provenance value on either surface (D-01). Supporting note: this surface's own schema *omits* the field to `SELF_REPORTED` by default: silence is not neutral, which is part of why an explicit *unmappable* entry matters more here, not less. |
 | `CUSTOMER_CONFIGURED` | `SELF_REPORTED` | The operator or organization is the "reporter" of a pre-approved rate or amount: a real person's number, not a model's, matching `SELF_REPORTED`'s own definition. | `SELF_REPORTED` cannot distinguish a value fixed once in a rate card and applied mechanically on every subsequent record from an ad hoc figure typed in fresh for this one fact. |
 | `CUSTOMER_CONFIRMED` | `ATTESTED` | A stakeholder affirms or validates an existing figure after the fact (`evidence.py:266-278`): a confirmation act, which is exactly what `ATTESTED` names on this surface. Unlike Table A, `ATTESTED` exists here with no competing candidate, so this row is a clean match. | `ATTESTED` does not reveal *what* was attested to: a customer confirming an already-model-estimated figure is recorded identically to a customer confirming an independently-derived one; confirmation establishes agreement, not independent verification of magnitude. |
 | `ASSOCIATIONAL` | `DERIVED` | An impact estimate (even a bare correlational comparison with no adjustment for confounders) is computed from underlying inputs via a comparison procedure: not directly measured, not self-reported, not merely attested. **[ASSUMED]** Refused as a declaration today: `_DECLARABLE_EVIDENCE_CLASSES` (`classifier.py:1250-1273`) excludes this label from every registrant, trusted or not, so no local path can attach it to a record right now: that refusal is not a statement that the label is meaningless or that no server value fits, only that nothing currently emits it. | See "The causal-impact collapse" below: the single largest lossiness in this whole mapping. |
@@ -132,9 +132,13 @@ reserved for the causal-impact labels specifically because *their* figure
 comes from a statistical comparison across a treated and control
 population, not because a multiplication happened.
 
-## The hard case: MODEL_ESTIMATED_DEMO
+## The hard case: MODEL_ESTIMATED
 
-`MODEL_ESTIMATED_DEMO` maps to no server provenance value on either surface
+This class was labelled `MODEL_ESTIMATED_DEMO` on records written before
+quick-261017-nck. Those records are read as `MODEL_ESTIMATED`, and the wire always
+carries the new label.
+
+`MODEL_ESTIMATED` maps to no server provenance value on either surface
 and that is a decision, not an omission: it stays unmappable because mapping
 it anywhere would hand it exactly the legitimacy Phase 53's reportability
 gate withholds.
@@ -143,7 +147,7 @@ gate withholds.
 facts-and-outcome-metrics surface's four values names *who* or *how* a real
 quantity was obtained: a customer declared a rate, a system measured one, a
 stakeholder signed off on one, a reporter self-reported one, a computation
-derived one, an attestation confirmed one. `MODEL_ESTIMATED_DEMO` names that
+derived one, an attestation confirmed one. `MODEL_ESTIMATED` names that
 no quantity was obtained at all: it is a hypothesis about a counterfactual, a
 number a model invented rather than a number anything observed (see
 [Why a model-estimated value is a hypothesis](claim-distinctions-and-evidence-boundaries.md#why-a-model-estimated-value-is-a-hypothesis)
@@ -155,9 +159,9 @@ them asserts that *some* rate-obtaining or quantity-obtaining process ran
 and for this label none did.
 
 That is the sentence this section exists to state in writing: mapping
-`MODEL_ESTIMATED_DEMO` onto any server value would not merely mislabel it, it
+`MODEL_ESTIMATED` onto any server value would not merely mislabel it, it
 would widen what Phase 53's reportability gate permits. The gate withholds
-the *value*: a `MODEL_ESTIMATED_DEMO` record becomes `reportable` only on an
+the *value*: a `MODEL_ESTIMATED` record becomes `reportable` only on an
 install that sets `reportModelEstimates`, so by default its figure never reaches
 Revenium at all. This mapping withholds the
 *provenance claim*, even in the hypothetical world where the gate's
@@ -216,7 +220,7 @@ reused verbatim in each subsection below:
 - `Disposition: Fatal to this entry — its premise is gone, so the row must be re-decided rather than amended.`
 - `Disposition: Revise before shipping — not fatal to the entry.`
 
-"Fatal" here means fatal to *this entry* (the `MODEL_ESTIMATED_DEMO` row and
+"Fatal" here means fatal to *this entry* (the `MODEL_ESTIMATED` row and
 the argument above it), never fatal to a feature. This page has no feature to
 close, which is why, unlike the precedent this section's shape is drawn from,
 it carries no closure-mechanism section after its falsifiers: there is no
@@ -266,7 +270,7 @@ recorded against the reason that narrowed.
 ### Falsifier 3 — the reportability gate widens
 
 **The observation.** `_REPORTABLE_EVIDENCE_CLASSES` is widened in code to
-admit `MODEL_ESTIMATED_DEMO`.
+admit `MODEL_ESTIMATED`.
 
 **What already covers it and what does not.** This is a code change and a
 review by Phase 53's own design, never a configuration flip: the gate's own
@@ -282,7 +286,7 @@ justified the widening.
 
 ### Falsifier 4 — a non-LLM evaluator supersedes the naked-LLM path
 
-**The observation.** `MODEL_ESTIMATED_DEMO` stops being produced by a single
+**The observation.** `MODEL_ESTIMATED` stops being produced by a single
 known path: a second producer besides the naked-LLM evaluator starts
 emitting it.
 
@@ -290,7 +294,7 @@ emitting it.
 [`skills/revenium/references/job-declaration.md`](../skills/revenium/references/job-declaration.md)
 already requires a future non-LLM evaluator to report its own, different
 evidence class rather than widen this one, so the mapping for whatever still
-produces `MODEL_ESTIMATED_DEMO` under that rule is unaffected. What this does
+produces `MODEL_ESTIMATED` under that rule is unaffected. What this does
 not cover: a mixed population, where some records still carry the label from
 the original naked-LLM path and others arrive by some route this rule did not
 anticipate: that population is not named by the existing rule and is not

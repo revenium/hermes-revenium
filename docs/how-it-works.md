@@ -339,7 +339,7 @@ names where the other four are written, rather than attempting to show them.
 **Live verification against a real tenant (2026-08-24).** A real Hermes session against an
 isolated development tenant produced an inferred job and reported its outcome exactly once
 across two cron ticks. `revenium jobs roi <id>` returned the value but omitted
-`evidence_class: MODEL_ESTIMATED_DEMO`, evaluator, confidence and other provenance. That
+`evidence_class: MODEL_ESTIMATED`, evaluator, confidence and other provenance. That
 metadata was visible through `jobs outcome-history` only. The primary ROI view therefore
 does not distinguish this model estimate from a measured value.
 

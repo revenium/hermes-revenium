@@ -184,7 +184,7 @@ class WiringTests(unittest.TestCase):
         self._attach(c, job, tmp)
         self.assertIn('assessment', job)
         self.assertEqual(375.0, job['assessment']['estimated_value'])
-        self.assertEqual('MODEL_ESTIMATED_DEMO', job['assessment']['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', job['assessment']['evidence_class'])
 
     def test_gate_off_attaches_nothing(self):
         tmp, _, env = self._env()
@@ -226,7 +226,7 @@ class WiringTests(unittest.TestCase):
                               'basis': 'b', 'assumptions': {},
                               'confidence': 0.5, 'evaluator': 'stub',
                               'evaluator_version': '1',
-                              'evidence_class': 'MODEL_ESTIMATED_DEMO'}}
+                              'evidence_class': 'MODEL_ESTIMATED'}}
         path = c._write_job_marker('sid-1', job)
         rec = json.loads(path.read_text().strip())
         self.assertIn('assessment', rec)

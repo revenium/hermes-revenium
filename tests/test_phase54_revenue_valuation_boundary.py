@@ -1713,10 +1713,10 @@ class AttributionSheddingTests(_ValuationBoundaryTestCase):
     def test_evidence_class_refused_record_sheds_attribution_pair(self):
         """Behavior 3: a record refused by the SECOND refusal branch (a
         recognized-but-not-reportable evidence_class, e.g.
-        MODEL_ESTIMATED_DEMO) also sheds both keys, regardless of
+        MODEL_ESTIMATED) also sheds both keys, regardless of
         reportability_status."""
         record = self._revenue_sidecar(
-            'p54-06-mod-001', 'reportable', 'MODEL_ESTIMATED_DEMO')
+            'p54-06-mod-001', 'reportable', 'MODEL_ESTIMATED')
         argv = self._run_one_outcome('p54-06-sid-mod', 'p54-06-mod-001', record)
         meta = json.loads(self._metadata_value(argv))
         self.assertNotIn('attribution_fraction', meta)
@@ -3009,7 +3009,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
         got_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
         self.assertIsNotNone(got_default)
         self.assertEqual(200.0, got_default['estimated_value'])
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got_default['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got_default['evidence_class'])
 
         mod_revenue = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
         cfg_revenue = mod_revenue._llm_evaluation_config()
@@ -3026,7 +3026,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
             'sanity: this must actually be the delegated builtin product',
         )
         self.assertEqual(
-            'MODEL_ESTIMATED_DEMO', got_revenue['evidence_class'],
+            'MODEL_ESTIMATED', got_revenue['evidence_class'],
             'a delegated builtin result must carry the BUILTIN\'s declared '
             'evidence_class, not the configured boundary name\'s -- '
             'labelling it CUSTOMER_CONFIGURED is the defect this test guards',
@@ -3040,7 +3040,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
         record_revenue = mod_revenue._build_job_assessment(
             job, got_revenue, raw, cfg_revenue, 'stub', 'v1')
         self.assertIsNotNone(record_revenue)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record_revenue['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record_revenue['evidence_class'])
 
     def test_genuine_revenue_card_match_still_carries_customer_configured(self):
         """The fix must not over-correct: a REAL revenue valuation (not a
@@ -3095,7 +3095,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
                'status': 'SUCCESS'}
         record = mod._build_job_assessment(job, got, raw, cfg, 'stub', 'v1')
         self.assertIsNotNone(record)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record['evidence_class'])
         self.assertEqual(
             mod.REPORTABILITY_CANDIDATE, record['reportability_status'],
             'a delegated builtin result reached REPORTABILITY_REPORTABLE -- '

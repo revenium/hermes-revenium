@@ -190,7 +190,7 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         record = mod._build_job_assessment(
             self._valid_job('p50-default-001'), validated, raw, cfg, 'stub', 'v1')
         self.assertIsNotNone(record)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record['evidence_class'])
         # Task 2 <behavior> pin: the all-forced fallback authority is
         # 'evaluator', asserted explicitly so the default arm is pinned
         # rather than incidental.
@@ -220,7 +220,7 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         body = _extract_outcome_metadata_heredoc(script_text)
         self.assertIsNotNone(body)
         record = {
-            'evidence_class': 'MODEL_ESTIMATED_DEMO',
+            'evidence_class': 'MODEL_ESTIMATED',
             'evidence_class_authority': 'attacker-supplied',
         }
         result = _run_forwarder(body, _assessment_env(record))
@@ -230,13 +230,13 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         # The record's evidence_class itself still ships -- an out-of-set
         # authority word is a correctness bug in ONE field, not a reason to
         # withhold the rest of the row.
-        self.assertEqual('MODEL_ESTIMATED_DEMO', meta.get('evidence_class'))
+        self.assertEqual('MODEL_ESTIMATED', meta.get('evidence_class'))
 
     def test_absent_evidence_class_authority_key_adds_no_key_to_metadata(self):
         script_text = HERMES_REPORT_SH.read_text()
         body = _extract_outcome_metadata_heredoc(script_text)
         self.assertIsNotNone(body)
-        record = {'evidence_class': 'MODEL_ESTIMATED_DEMO'}
+        record = {'evidence_class': 'MODEL_ESTIMATED'}
         result = _run_forwarder(body, _assessment_env(record))
         self.assertEqual(0, result.returncode, result.stderr)
         meta = json.loads(result.stdout.strip())
@@ -249,8 +249,8 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         unaffected (D-02's explicit compatibility requirement)."""
         mod = self._load(boundaries=None)
         forced = mod._forced_evidence_class()
-        self.assertEqual('MODEL_ESTIMATED_DEMO', mod._declared_evidence_class('llm'))
-        self.assertEqual('MODEL_ESTIMATED_DEMO', mod._declared_evidence_class('stub'))
+        self.assertEqual('MODEL_ESTIMATED', mod._declared_evidence_class('llm'))
+        self.assertEqual('MODEL_ESTIMATED', mod._declared_evidence_class('stub'))
         self.assertEqual(forced, mod._declared_evidence_class('never-registered'))
         self.assertEqual(forced, mod._declared_evidence_class(None))
         self.assertEqual(forced, mod._declared_evidence_class(42))
@@ -288,7 +288,7 @@ class PrecedenceWalkTests(_DeclarationAuthorityTestCase):
         cfg = mod._llm_evaluation_config()
         got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
         self.assertIsNotNone(got)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got['evidence_class'])
 
     def test_validate_assessment_resolves_valuation_impl_name_exactly_once(self):
         """Task 3 Test 4: the existing resolution at _validate_assessment's
@@ -327,7 +327,7 @@ class PrecedenceWalkTests(_DeclarationAuthorityTestCase):
         cfg_b = mod_b._llm_evaluation_config()
         got_b = mod_b._validate_assessment(self._raw(), cfg_b, 'stub', 'v1')
         self.assertIsNotNone(got_b)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got_b['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got_b['evidence_class'])
         self.assertNotEqual(got_a['evidence_class'], got_b['evidence_class'])
 
         # And the FIRST module, called again with the SAME config, still
@@ -503,7 +503,7 @@ class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
         name = self._register_causal_label_valuation()
         mod = self._load(boundaries={'valuation': name})
         record = self._run_hostile(mod, _hostile_evaluator_response())
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record['evidence_class'])
         # The all-forced fallback authority is 'evaluator' -- never
         # 'valuation' with a causal label smuggled through.
         self.assertEqual('evaluator', record['evidence_class_authority'])
@@ -529,7 +529,7 @@ class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
         _write_config(second_config, boundaries=None)
         mod_b = _load_classifier({'REVENIUM_CONFIG_FILE': str(second_config)})
         record_b = self._run_hostile(mod_b, _hostile_evaluator_response(), job_id='p50-n2-b')
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record_b['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record_b['evidence_class'])
         self.assertEqual('evaluator', record_b['evidence_class_authority'])
         self.assertNotEqual(record_a['evidence_class'], record_b['evidence_class'])
 
@@ -562,7 +562,7 @@ class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
         mod_evaluator = _load_classifier({'REVENIUM_CONFIG_FILE': str(evaluator_config)})
         record_3 = self._run_hostile(
             mod_evaluator, _hostile_evaluator_response(), job_id='p50-n3-evaluator')
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record_3['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record_3['evidence_class'])
         self.assertEqual('evaluator', record_3['evidence_class_authority'])
 
         # None of the three leaks into either of the others.
@@ -1240,7 +1240,7 @@ class BoundaryCaseTests(_DeclarationAuthorityTestCase):
         mod = self._load(boundaries=None)
         got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
         self.assertIsNotNone(got)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got['evidence_class'])
         self.assertEqual('evaluator', got['evidence_class_authority'])
 
     # -- Exactly-one-declares: that class, that authority, no conflict shape -
