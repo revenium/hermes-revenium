@@ -238,7 +238,11 @@ in this project before this phase; Phase 49 exercised only the ordinary
   (`assessment_schema_version`, `sequence`, `prior_value_low`,
   `prior_value_base`, `prior_value_high`, `prior_currency`,
   `economic_mechanism`) came back byte-exact: parsed-dict equality `True`,
-  the same terms Phase 49 established for the ordinary verb.
+  the same terms Phase 49 established for the ordinary verb. (Historical: these are the
+  v1 flat keys this proof observed. Since 2026-10-18 `correct-assessment.sh` ships the
+  `schema_version` 2 envelope instead, so a new correction carries `corrected`,
+  `correction_sequence`, `value`, `basis.mechanism` and `prior`; see
+  [Value and ROI](value-and-roi.md). This section is not re-run.)
 - **Failure posture: unprobed.** Both the preview and the real invocation
   succeeded (exit 0 both times) on this arm; no rejection occurred
   naturally and per this plan's own prohibition none was manufactured to

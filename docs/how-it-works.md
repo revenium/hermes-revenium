@@ -243,7 +243,11 @@ always carries the new label.
   `FAILED` arc's short cause, or the fixed reporter-written reason on an undetermined
   `CANCELLED` arc), `outcome_basis` (`undetermined`, on that same `CANCELLED` arc), `corrected`
   (present only on an operator correction) and `metadata_truncated` (present only when the
-  byte ceiling removed something). These are base metering and are never dropped.
+  byte ceiling removed something). These are base metering and are never dropped. The
+  operator correction verb, `jobs outcome-update`, ships the same vocabulary from
+  `correct-assessment.sh`: `schema_version`, `corrected`, `correction_sequence`, `value`
+  (`reported`, `currency`, `attribution`), `basis.mechanism` and a `prior` group. It has no
+  byte ceiling or `metadata_truncated`. See [Value and ROI](value-and-roi.md).
 - **The value family**: `value`, `value.attribution`, `basis.role`, `basis.hours_saved`,
   `basis.hourly_rate` and `costs`. The economic estimate, its inputs and the costs set
   against it. The attribution is in this family rather than the provenance one on purpose:

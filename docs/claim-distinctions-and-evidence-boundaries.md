@@ -242,9 +242,13 @@ not just a new number replacing an old one.
 The corrected bound is what ships: the observed test confirms the wire call's
 `--outcome-value` equals the appended record's own corrected low bound, read off the record
 that was just written: never a value retyped anywhere else. The wire call's `--metadata`
-carries the same `sequence` number and the same prior-value fields the local record carries: this is the marker a downstream consumer uses to tell a revision from an original, since an
-ordinary, uncorrected `jobs outcome` payload never carries a `sequence` key at all. (The
-`jobs outcome` envelope marks a correction with `corrected` and `correction_sequence`.)
+is the `schema_version` 2 envelope, the same vocabulary `jobs outcome` uses. It carries the
+local record's sequence as `correction_sequence`, marks the revision with `corrected: true`,
+and carries the superseded values as a `prior` group (`low`, `base`, `high`, `currency`): this
+is the marker a downstream consumer uses to tell a revision from an original, since an
+ordinary, uncorrected `jobs outcome` payload carries neither `corrected` nor
+`correction_sequence`. Corrections filed before this change keep the v1 flat keys
+(`sequence`, `prior_value_*`, `prior_currency`) in Revenium.
 
 The per-minute cron pipeline cannot reach the correction path:
 `correct-assessment.sh` is never named in `cron.sh` or `install-cron.sh`. Only a human

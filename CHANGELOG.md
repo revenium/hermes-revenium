@@ -76,8 +76,25 @@ this repository.
   this change and `MODEL_ESTIMATED` on new ones. A sidecar already on disk with the old
   label is read as `MODEL_ESTIMATED`, gated and reported identically, and the wire always
   carries the new label. The `jobs outcome-update` metadata written by
-  `correct-assessment.sh` is unchanged. Anything that reads `outcomeMetadata` and keys on the
-  v1 names needs the table above.
+  `correct-assessment.sh` moves to the same schema in the next entry below. Anything that
+  reads `outcomeMetadata` and keys on the v1 names needs the table above.
+- Operator corrections now ship `schema_version` 2 metadata too. `correct-assessment.sh`
+  sent v1 flat keys to `jobs outcome-update --metadata`, so the two verbs spoke different
+  schemas and a reader had to decode both. The correction blob is now compact JSON in a fixed
+  order, with absent members omitted: `schema_version` (`2`), `corrected` (`true`),
+  `correction_sequence`, then `value` (`reported`, the exact `--outcome-value` the call sends,
+  with `currency` and `attribution` as `fraction` and `basis`), `basis.mechanism`, and
+  `prior` (`low`, `base`, `high`, `currency`: what the correction superseded). A
+  mechanism-only correction sends no `--outcome-value`, so it has no `value` group. The key
+  map is `assessment_schema_version` and `sequence` to `schema_version` and
+  `correction_sequence`, `prior_value_low`/`_base`/`_high` and `prior_currency` to
+  `prior.low`/`.base`/`.high`/`.currency`, `economic_mechanism` to `basis.mechanism`,
+  `attribution_fraction` and `attribution_basis` to `value.attribution.fraction` and `.basis`,
+  and the `--outcome-value` and `--outcome-currency` sent to `value.reported` and
+  `value.currency` (both newly sent). Corrections already filed in Revenium keep the v1 keys;
+  `schema_version` tells the two apart. The local sidecar correction record is unchanged.
+  Whether Revenium replaces or merges `metadata` on an update is not documented, so a reader
+  should treat each revision's metadata as that revision's own.
 
 - The cron tick no longer re-derives every historical session every minute. `hermes-report.sh`
   and the shadow pass of `api-event-report.sh` visited every session with tokens on every

@@ -1153,21 +1153,35 @@ class TestPhase47EndToEnd(unittest.TestCase):
         self.assertIsNotNone(correction_metadata_raw, correction_argv)
         correction_meta = json.loads(correction_metadata_raw)
         # The correction MARKER a downstream consumer greps for to tell a
-        # revision from an original: `sequence`, present here and absent
-        # from every ordinary `jobs outcome` --metadata payload this module
-        # asserts elsewhere (e.g.
+        # revision from an original: `corrected` plus `correction_sequence`,
+        # present here and absent from every ordinary `jobs outcome`
+        # --metadata payload this module asserts elsewhere (e.g.
         # test_valued_happy_path_ships_outcome_value_and_model_estimated_demo's
-        # `meta`, which has no 'sequence' key at all).
-        self.assertEqual(correction_meta.get('sequence'), correction_record['sequence'], correction_meta)
+        # `meta`, which has no 'correction_sequence' key at all). Both verbs
+        # speak the schema_version 2 vocabulary.
+        self.assertEqual(meta_path(correction_meta, 'schema_version'), 2, correction_meta)
+        self.assertIs(meta_path(correction_meta, 'corrected'), True, correction_meta)
         self.assertEqual(
-            correction_meta.get('prior_value_low'), original_record['value_low'], correction_meta,
+            meta_path(correction_meta, 'correction_sequence'),
+            correction_record['sequence'], correction_meta,
         )
         self.assertEqual(
-            correction_meta.get('prior_value_base'), original_record['value_base'], correction_meta,
+            meta_path(correction_meta, 'value.reported'),
+            float(correction_argv[correction_argv.index('--outcome-value') + 1]),
+            correction_meta,
         )
         self.assertEqual(
-            correction_meta.get('prior_value_high'), original_record['value_high'], correction_meta,
+            meta_path(correction_meta, 'prior.low'), original_record['value_low'], correction_meta,
         )
+        self.assertEqual(
+            meta_path(correction_meta, 'prior.base'), original_record['value_base'], correction_meta,
+        )
+        self.assertEqual(
+            meta_path(correction_meta, 'prior.high'), original_record['value_high'], correction_meta,
+        )
+        for _v1_key in ('sequence', 'assessment_schema_version', 'prior_value_low',
+                        'prior_value_base', 'prior_value_high', 'prior_currency'):
+            self.assertNotIn(_v1_key, correction_meta)
 
         # Structural idempotency check backing the docstring's empirical
         # finding: a further ordinary tick must ship NOTHING further for

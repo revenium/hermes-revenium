@@ -179,7 +179,13 @@ class OperatorMechanismTests(unittest.TestCase):
                 self._seed(f'job-w-{m}')
                 r = self._run('--job-id', f'job-w-{m}', '--mechanism', m, '--reason', 'x')
                 self.assertEqual(r.returncode, 0, r.stderr)
-                self.assertIn(f'"economic_mechanism":"{m}"', self.argv_log.read_text())
+                # v2 envelope: the mechanism rides as basis.mechanism, and the
+                # argv line for THIS job (earlier iterations log earlier jobs)
+                # must carry it.
+                line = [l for l in self.argv_log.read_text().splitlines()
+                        if f'outcome-update job-w-{m} ' in l][-1]
+                self.assertIn(f'"basis":{{"mechanism":"{m}"}}', line)
+                self.assertNotIn('economic_mechanism', line)
 
     def test_mechanism_only_ships_no_empty_outcome_value(self):
         """--outcome-value is a float64 flag; passing "" would be a
@@ -212,8 +218,11 @@ class OperatorMechanismTests(unittest.TestCase):
         self.assertEqual(c['attribution_basis'], '15% per policy REV-2024-03')
         self.assertEqual(c['value_base'], 102.0)
         wire = self.argv_log.read_text()
-        self.assertIn('"attribution_fraction":0.15', wire)
-        self.assertIn('attribution_basis', wire)
+        self.assertIn(
+            '"attribution":{"fraction":0.15,"basis":"15% per policy REV-2024-03"}', wire)
+        self.assertIn('"value":{"reported":102.0,"currency":"USD","attribution":', wire)
+        self.assertNotIn('attribution_fraction', wire)
+        self.assertNotIn('attribution_basis', wire)
 
     def test_no_gross_figure_is_derived_or_stored(self):
         """D-05: the operator supplies the already-attributed value. The
