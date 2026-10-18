@@ -1122,7 +1122,9 @@ class ReporterStripTests(unittest.TestCase):
         record = _cost_sidecar_record('rs44-job-002', reportability_status='reportable')
         argv = self._run_one_outcome('rs44-sid-002', 'rs44-job-002', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta_path(meta, 'value.net'), 85.0)
+        # value.reported (100.0, the low bound) less human_review 25.0; the
+        # sidecar's base-derived net_value (85.0) is not forwarded.
+        self.assertEqual(meta_path(meta, 'value.net'), 75.0)
         self.assertIn('subtracted', meta['costs'])
         self.assertIn('not_counted', meta['costs'])
 

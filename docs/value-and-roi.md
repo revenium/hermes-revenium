@@ -448,7 +448,10 @@ Worked example, matching the pinned golden fixture:
 
 `estimated_value` is the gross figure. `net_value` is a sibling
 field that subtracts every operator-supplied cost category from the
-gross estimate.
+gross estimate. On the wire, `value.net` is not this field: the reporter recomputes
+it as `value.reported` (the low bound it sent) less the same costs, so the
+net Revenium shows is never above the value it shows. In this example that
+is 446.25 − 25 = 421.25, not 500.00.
 
 ### The four categories
 
@@ -684,10 +687,10 @@ Two properties enforce this separation:
   confirmation workflow may decide that a real estimate is reportable; it can
   never decide that an absent one is.
 - Withholding the two CLI flags alone does not withhold the value. `value_low`, `value_base`,
-  `value_high`, `bounds_source`, `currency`, `estimated_value`, `assumptions` and
-  `net_value` each reach `--metadata` (as `value.low`, `value.base`, `value.high`,
-  `value.currency`, `value.net` and the `basis.role`, `basis.hours_saved` and
-  `basis.hourly_rate` scalars) and `assumptions` alone carries
+  `value_high`, `bounds_source`, `currency`, `estimated_value` and `assumptions` each
+  reach `--metadata` (as `value.low`, `value.base`, `value.high`, `value.currency` and the
+  `basis.role`, `basis.hours_saved` and `basis.hourly_rate` scalars), and `value.net` is
+  derived from the reported value and the supplied costs, and `assumptions` alone carries
   the hours and rate used to calculate the estimate, plus the inferred role. A
   non-reportable record is therefore
   sanitized at the source: one shared stripper deletes the whole family before any
@@ -899,7 +902,7 @@ most 4096 bytes.
 | `corrected`, `correction_sequence` | an operator correction and its sequence | `kind`, `sequence` |
 | `value.reported` | the exact `--outcome-value` sent; absent when the flag was not sent | the flag |
 | `value.low`, `.base`, `.high`, `.currency` | the range and its currency | `value_low`, `value_base`, `value_high`, `currency` |
-| `value.net` | the value less supplied costs; only when at least one non-zero cost was subtracted | `net_value` |
+| `value.net` | `value.reported` less every supplied cost; only when a value was reported and at least one non-zero cost was subtracted | computed by the reporter (the sidecar's `net_value` is base-derived and not forwarded) |
 | `value.attribution` | `fraction` and `basis`, validated together | `attribution_fraction`, `attribution_basis` |
 | `basis.evidence`, `.mechanism` | the evidence class, the economic mechanism | `evidence_class`, `economic_mechanism` |
 | `basis.role`, `.hours_saved`, `.hourly_rate` | the model's assumptions | `assumptions` |

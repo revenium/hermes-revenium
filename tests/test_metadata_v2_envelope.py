@@ -50,7 +50,7 @@ ALLOWED_BASIS_KEYS = {
 # CUSTOMER_CONFIGURED, authority 'valuation', no study).
 EXPECTED_GOLDEN_BLOB = (
     '{"schema_version":2,"source":"test","status":"reportable","session":"g38-sid-002",'
-    '"value":{"reported":446.25,"low":446.25,"base":525.0,"high":603.75,"currency":"USD","net":500.0},'
+    '"value":{"reported":446.25,"low":446.25,"base":525.0,"high":603.75,"currency":"USD","net":421.25},'
     '"basis":{"evidence":"CUSTOMER_CONFIGURED","mechanism":"labor_substitution",'
     '"role":"senior software engineer","hours_saved":3.5,"hourly_rate":150.0,"confidence":0.8},'
     '"costs":{"subtracted":{"human_review":25.0},'
@@ -230,21 +230,40 @@ class CostsAndNetTests(_ForwarderCase):
         return _golden_record(supplied_costs=supplied, cost_coverage=cov, net_value=500.0)
 
     def test_empty_supplied_costs_gives_empty_subtracted_and_no_net(self):
-        meta = self._meta(self._costs({}))
+        meta = self._meta(self._costs({}), value_sent='446.25')
         self.assertEqual({}, meta['costs']['subtracted'])
         self.assertNotIn('net', meta['value'])
         self.assertNotIn('known_zero', meta['costs'])
         self.assertNotIn('not_counted', meta['costs'])
 
     def test_a_zero_cost_is_listed_but_does_not_produce_net(self):
-        meta = self._meta(self._costs({'human_review': 0.0}, known_zero=['human_review']))
+        meta = self._meta(self._costs({'human_review': 0.0}, known_zero=['human_review']),
+                          value_sent='446.25')
         self.assertEqual({'human_review': 0.0}, meta['costs']['subtracted'])
         self.assertEqual(['human_review'], meta['costs']['known_zero'])
         self.assertNotIn('net', meta['value'])
 
-    def test_a_real_cost_produces_net(self):
+    def test_a_real_cost_produces_net_from_the_reported_value(self):
+        # net is value.reported less the subtracted costs, never the
+        # sidecar's base-derived net_value (500.0 here): a net above the
+        # reported value would read as more value than Revenium displays.
+        meta = self._meta(self._costs({'human_review': 25.0}), value_sent='446.25')
+        self.assertEqual(421.25, meta['value']['net'])
+        self.assertLessEqual(meta['value']['net'], meta['value']['reported'])
+
+    def test_net_subtracts_every_cost_exactly(self):
+        meta = self._meta(self._costs({'human_review': 0.1, 'handoff': 0.2}),
+                          value_sent='0.3')
+        self.assertEqual(0.0, meta['value']['net'])
+
+    def test_no_reported_value_means_no_net(self):
         meta = self._meta(self._costs({'human_review': 25.0}))
-        self.assertEqual(500.0, meta['value']['net'])
+        self.assertNotIn('reported', meta.get('value', {}))
+        self.assertNotIn('net', meta.get('value', {}))
+
+    def test_net_may_go_negative_when_costs_exceed_the_value(self):
+        meta = self._meta(self._costs({'human_review': 25.0}), value_sent='10')
+        self.assertEqual(-15.0, meta['value']['net'])
 
     def test_unknown_categories_and_bad_amounts_are_filtered(self):
         meta = self._meta(self._costs(

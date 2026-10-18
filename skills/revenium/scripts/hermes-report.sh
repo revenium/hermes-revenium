@@ -6641,6 +6641,7 @@ print('true' if ok else 'false')
         ASSESSMENT_JSON="${outcome_assessment_json}" \
         python3 - <<'PY' 2>/dev/null || true
 import json, os, re
+from decimal import Decimal
 
 # Phase 46 (EGV-19, D-01/D-03/D-11): the --metadata envelope's own byte
 # ceiling, enforced HERE and only here -- this is the single emit site
@@ -6908,18 +6909,21 @@ if assessment_raw:
         currency_raw = record.get('currency')
         if isinstance(currency_raw, str) and re.fullmatch(r'[A-Z]{3}', currency_raw.strip().upper()):
             value['currency'] = currency_raw.strip().upper()
-        # C-6: the classifier writes net_value on every success path, even
-        # with no costs (net == gross), so its presence proves nothing. Net is
-        # shipped only when a cost was actually subtracted: at least one
-        # non-zero amount. A supplied 0 stays listed in costs.subtracted (and
-        # costs.known_zero) but does not by itself produce value.net.
-        net_value_raw = record.get('net_value')
-        if (net_value_raw is not None and subtracted
+        # C-6: net ships only when a cost was actually subtracted: at least
+        # one non-zero amount. A supplied 0 stays listed in costs.subtracted
+        # (and costs.known_zero) but does not by itself produce value.net.
+        # value.net is value.reported less the subtracted costs, so it sits
+        # next to the number Revenium displays and is never above it. The
+        # sidecar's net_value is deliberately NOT forwarded: the classifier
+        # computes it from value_base (Phase 44), and pairing a base-derived
+        # net with a low-bound reported value read as a net above the value
+        # (446.25 reported, 500.0 net). No reported value, no net.
+        if ('reported' in value and subtracted
                 and any(v != 0 for v in subtracted.values())):
-            try:
-                value['net'] = float(net_value_raw)
-            except (TypeError, ValueError):
-                pass
+            _net = Decimal(repr(value['reported']))
+            for _amount in subtracted.values():
+                _net -= Decimal(repr(_amount))
+            value['net'] = float(_net.quantize(Decimal('0.01')))
         # Phase 51 (D-05/D-07): the attribution pair, forwarded from a
         # correction record. Forwarded, never derived: the operator supplied
         # an already attributed value and nothing here multiplies. The

@@ -49,7 +49,7 @@ this repository.
   | `double_counting_group` | `session` |
   | `value_low`, `value_base`, `value_high` | `value.low`, `value.base`, `value.high` |
   | the `--outcome-value` sent | `value.reported` (new) |
-  | `net_value` | `value.net` |
+  | `net_value` | not forwarded; `value.net` is now `value.reported` less `costs.subtracted` |
   | `attribution_fraction`, `attribution_basis` | `value.attribution.fraction`, `value.attribution.basis` |
   | `evidence_class` | `basis.evidence` |
   | `economic_mechanism` | `basis.mechanism` |
@@ -66,7 +66,9 @@ this repository.
 
   Dropped from the wire: `bounds_source` and `evidence_class_authority` (both stay in the
   sidecar) and `cost_coverage.included` (it always equalled the keys of `costs.subtracted`).
-  `value.net` appears only when a non-zero cost was subtracted. `schema_version` is written
+  `value.net` is `value.reported` less the subtracted costs, not v1's base-derived
+  `net_value`, so it is never above the reported value; it appears only when a value was
+  reported and a non-zero cost was subtracted. `schema_version` is written
   whenever assessment content is present; a blob with no assessment record (a `FAILED` arc's
   `source` and `failure_reason`, for instance) is byte-identical to before. `basis.evidence`
   says who priced the value, and `basis.hours_saved` and `basis.hourly_rate` are always the

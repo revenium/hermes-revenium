@@ -157,7 +157,8 @@ been since v1.5, byte-unchanged. A reader looking for `net_value`,
 `supplied_costs`, `cost_coverage`, `economic_mechanism` or
 `double_counting_group` on the marker line will not find them there; they
 live on the sidecar record `hermes-report.sh` reads to build `--metadata`, where they ship
-under `value.net`, `costs.subtracted`, `costs`, `basis.mechanism` and `session`.
+under `costs.subtracted`, `costs`, `basis.mechanism` and `session`. `net_value` is not
+forwarded: `value.net` is computed by the reporter as `value.reported` less `costs.subtracted`.
 
 One field of that record's prose reaches the wire: `assumptions.inferred_role` ships as
 `basis.role` on a **reportable** record. A candidate record strips `assumptions`, and with

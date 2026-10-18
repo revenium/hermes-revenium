@@ -206,10 +206,11 @@ object is compact single-line JSON of at most 4096 bytes.
 
 - `value` holds `reported` (the exact `--outcome-value` this call sent, absent when the flag
   was not sent), `low`, `base`, `high`, `currency`, `net` and `attribution` (an object with
-  `fraction` and `basis`). `net` appears only when a cost was actually subtracted, meaning at
-  least one non-zero amount in `costs.subtracted`: the classifier writes a net value on every
-  success path, so its presence alone proves nothing. A supplied zero is still listed in
-  `costs.subtracted` and `costs.known_zero`.
+  `fraction` and `basis`). `net` is `reported` less every amount in `costs.subtracted`, so it
+  is never above the value Revenium displays. It appears only when `reported` is present and a
+  cost was actually subtracted, meaning at least one non-zero amount in `costs.subtracted`. A
+  supplied zero is still listed in `costs.subtracted` and `costs.known_zero`. The sidecar's
+  own `net_value` is not forwarded: the classifier computes it from the base estimate.
 - `basis` holds `evidence`, `mechanism`, `role`, `hours_saved`, `hourly_rate`, `confidence`
   and `study` (an object with `id` and `version`, both or neither). `evidence` says who priced
   the value: `CUSTOMER_CONFIGURED` for an operator-configured valuation boundary,
