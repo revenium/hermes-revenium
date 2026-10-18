@@ -6606,10 +6606,15 @@ print('true' if ok else 'false')
       # CR-01: gated on OUTCOME_VALUE_CLI_CAPABLE -- an older CLI predating
       # these two flags must still receive the rest of the `jobs outcome`
       # call (fail OPEN), not have the whole call rejected.
+      # quick-261017-nck: value.reported in --metadata is the exact value this
+      # call sent, so it is recorded only when the flag was actually appended
+      # (an older CLI, a withheld value or no value at all leaves it empty).
+      local outcome_value_sent=""
       if [[ "${OUTCOME_VALUE_CLI_CAPABLE}" == "true" \
             && -n "${outcome_value}" && -n "${outcome_currency}" ]]; then
         outcome_cmd+=(--outcome-value "${outcome_value}")
         outcome_cmd+=(--outcome-currency "${outcome_currency}")
+        outcome_value_sent="${outcome_value}"
       fi
       # Phase 24 (quick-260531-n4i): attach --metadata JSON. source (deployment
       # environment from the session source column) rides on every outcome when
@@ -6632,9 +6637,10 @@ print('true' if ok else 'false')
         OUTCOME_STATUS="${outcome_status}" \
         OUTCOME_BASIS="${outcome_basis}" \
         OUTCOME_FAILURE_REASON="${outcome_failure_reason}" \
+        OUTCOME_VALUE_SENT="${outcome_value_sent}" \
         ASSESSMENT_JSON="${outcome_assessment_json}" \
         python3 - <<'PY' 2>/dev/null || true
-import json, os
+import json, os, re
 
 # Phase 46 (EGV-19, D-01/D-03/D-11): the --metadata envelope's own byte
 # ceiling, enforced HERE and only here -- this is the single emit site
@@ -6678,68 +6684,122 @@ _METADATA_CEILING_BYTES = 4096
 # (CLI drift item V2-13).
 _UNDETERMINED_OUTCOME_REASON = 'Outcome not determined: the arc ended without checkable evidence of success or failure, so it was reported as CANCELLED by default. No guardrail halt was recorded for this job.'
 
-# The two ordered drop tiers, in the order they are popped below: the
-# enrichment yields before base metering ever does (D-02). `source`,
-# `failure_reason` and (Phase 66) `outcome_basis` are the base metering keys and
-# are never in either tuple.
+# quick-261017-nck (LD-1/LD-2): the --metadata blob is schema_version 2, a
+# set of NESTED groups (value, basis, costs, estimator) beside the base keys.
+# The v1 blob was one flat list of 30-odd prefixed keys; Revenium shows it
+# as an opaque string, so a flat namespace made every new field a new
+# top-level name. Key order is part of the contract (the golden pins it):
+#   schema_version, source, status, session, failure_reason, outcome_basis,
+#   corrected, correction_sequence, value, basis, costs, estimator,
+#   metadata_truncated
+# Hard switch, no dual-emit: a job reported before this change keeps its v1
+# blob in Revenium, a new one gets v2, and schema_version tells them apart.
+#
+# schema_version is emitted ONLY when an assessment record was parsed (C-1).
+# A base-only blob (source / failure_reason / outcome_basis, no sidecar) keeps
+# the exact bytes it always had, because tests/fixtures/compat/
+# jobs-outcome.golden.json is one of the four immutable v1.x goldens and pins
+# `{"source":"test"}`; those three keys mean the same thing in v1 and v2, so
+# the blob is unambiguous to a reader without a version.
+#
+# The sidecar keeps its v1 names (assessment_schema_version, value_low,
+# economic_mechanism, ...): this heredoc is the only place that renames
+# them. evidence_class_authority and bounds_source are sidecar-only (LD-3).
+# There is deliberately no label for WHO SET THE RATE: basis.evidence already
+# says who priced the value, and hours_saved / hourly_rate are always the
+# MODEL's assumptions even when an operator rate card replaced the hours x
+# rate product (config-schema.md "rateCard").
+#
+# D-04 (prose guard): the evaluator's own sentences -- the sidecar's top-level
+# `basis`, candidate_downstream_outcome, counterfactual_assumption -- are
+# never read here. The wire `basis` group below is a different object built
+# only from allow-listed scalars. inferred_role is the one prose field that
+# ships (quick-261017-kb1).
+
+# The two ordered drop tiers, as DOTTED PATHS, in the order they are popped
+# below: the enrichment yields before base metering ever does (D-02).
+# `schema_version`, `source`, `failure_reason`, `outcome_basis`,
+# `metadata_truncated` and `corrected` are never in either tuple. The elements
+# stay plain strings so tests/test_repository.py's extractor keeps working.
 _VALUE_FAMILY_META_KEYS = (
-    'value_low', 'value_base', 'value_high', 'bounds_source',
-    'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
-    # Phase 51 (D-07): the attribution pair joins the VALUE tier, not the
-    # provenance tier, and the tier ordering is the whole reason. Tier 1
-    # sheds value and tier 2 sheds provenance, so provenance OUTLIVES value.
-    # In provenance these would survive the value they document, leaving a
-    # fraction attributing nothing. In the value family they shed TOGETHER,
-    # which is what D-07 actually requires: the failure to prevent is a
-    # surviving value whose attribution has vanished.
-    'attribution_fraction', 'attribution_basis',
+    # Phase 51 (D-07): value.attribution sheds WITH value, never after it, so
+    # a surviving value never loses the attribution that documents it. The
+    # whole `value` group goes first; the attribution path is listed so the
+    # inventory names it and so a record that has attribution without the
+    # rest of the group still sheds it.
+    'value', 'value.attribution',
+    'basis.role', 'basis.hours_saved', 'basis.hourly_rate',
+    'costs',
 )
 _PROVENANCE_FAMILY_META_KEYS = (
-    'evaluator', 'evaluator_version', 'model', 'evidence_class',
-    'reportability_status', 'study_id', 'study_version', 'confidence',
-    'economic_mechanism', 'double_counting_group', 'correction_sequence',
-    # Phase 46 (EGV-21, D-06/D-07, plan 46-02 Task 4, checkpoint decision
-    # ship-both): the two locality facts join the provenance tier, not the
-    # value tier and not the always-kept set -- they describe WHERE the
-    # evaluation was configured to run, the same footing as evaluator/model
-    # above, so a truncated record still says where inference was
-    # configured to go for as long as any provenance survives, and only
-    # yields alongside the rest of provenance at tier 2.
-    'inference_provider', 'inference_address_class',
-    # Phase 50 (DECL-05, D-04): names WHICH boundary's declaration decided
-    # evidence_class above -- provenance tier, not the value tier, per D-04:
-    # it describes WHO decided, the same footing as evaluator/model, not a
-    # monetary value.
-    'evidence_class_authority',
+    'basis.evidence', 'basis.mechanism', 'basis.confidence', 'basis.study',
+    'estimator', 'session', 'status', 'correction_sequence',
 )
 
-meta = {}
+# quick-261017-nck (LD-4): the evidence class MODEL_ESTIMATED was written as
+# MODEL_ESTIMATED_DEMO before this change. The sidecar re-read already rewrites
+# it; this is the emit-site defense in depth, so the wire carries one label
+# even if a record reaches this heredoc by another route. Hand-synced with the
+# same dict in the sidecar re-read heredoc (tests/test_metadata_v2_envelope.py
+# pins the pair equal).
+_LEGACY_EVIDENCE_CLASS_ALIASES = {'MODEL_ESTIMATED_DEMO': 'MODEL_ESTIMATED'}
+
+
+def _shed(node, dotted):
+    """Pop the leaf of a dotted path, a no-op when any part is missing."""
+    parts = dotted.split('.')
+    for _part in parts[:-1]:
+        node = node.get(_part) if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return
+    node.pop(parts[-1], None)
+
+
+def _drop_empty_groups(node):
+    """A group left empty by shedding is removed, never emitted as {}."""
+    for _k in [k for k, v in node.items() if isinstance(v, dict) and not v]:
+        del node[_k]
+
+
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 source = os.environ.get('OUTCOME_SOURCE', '').strip()
-if source:
-    meta['source'] = source
 status = os.environ.get('OUTCOME_STATUS', '').strip().upper()
 reason = os.environ.get('OUTCOME_FAILURE_REASON', '').strip()
+failure_reason_out = ''
+outcome_basis_out = ''
 if status == 'FAILED' and reason:
-    meta['failure_reason'] = reason
+    failure_reason_out = reason
 # Phase 66 (TRU-04): the discriminator lives in bash (it needs the id and the
 # job_type); this is the defence-in-depth status gate. Base metering: neither
-# key is in a shed tuple below, so the ceiling never drops them.
+# key is in a shed tuple above, so the ceiling never drops them.
 if (status == 'CANCELLED'
         and os.environ.get('OUTCOME_BASIS', '').strip() == 'undetermined'):
-    meta['failure_reason'] = _UNDETERMINED_OUTCOME_REASON
-    meta['outcome_basis'] = 'undetermined'
+    failure_reason_out = _UNDETERMINED_OUTCOME_REASON
+    outcome_basis_out = 'undetermined'
+
+# The groups, each built only from fields that pass their own discipline. A
+# group with no keys is never attached (conditional-emit rule).
+schema_version_out = None
+status_out = ''
+session_out = ''
+corrected_out = False
+correction_sequence_out = None
+value = {}
+basis = {}
+costs = {}
+estimator = {}
 
 # Phase 42 (C-04): the sidecar's resolved assessment record, parsed once
 # from ASSESSMENT_JSON. Present whenever the sidecar re-read above found
-# one. NOT SUCCESS-only since Phase 44 Plan 03: that gate was widened from
-# `outcome_status == "SUCCESS"` to `-n "${outcome_sid}"` precisely so a
-# FAILED/CANCELLED job's non-evaluated abstention record (which carries
-# costs and coverage and omits the whole value family) reaches this block
-# too. Every consumer below is status-agnostic by construction, so no
-# status test belongs here — an empty/malformed blob degrades to an empty
-# contribution here, never crashes the heredoc (2>/dev/null || true above
-# is the outer belt; the try/except is the inner suspenders). Conditional-
-# emit rule preserved: a field absent from the record adds no key to meta.
+# one. NOT SUCCESS-only since Phase 44 Plan 03: a FAILED/CANCELLED job's
+# non-evaluated abstention record (which carries costs and coverage and omits
+# the whole value family) reaches this block too. Every consumer below is
+# status-agnostic by construction. An empty/malformed blob degrades to an
+# empty contribution here, never crashes the heredoc (2>/dev/null || true
+# above is the outer belt; the try/except is the inner suspenders).
 assessment_raw = os.environ.get('ASSESSMENT_JSON', '').strip()
 if assessment_raw:
     try:
@@ -6747,337 +6807,130 @@ if assessment_raw:
     except (json.JSONDecodeError, ValueError):
         record = None
     if isinstance(record, dict):
-        # Phase 42 (D-08/D-09/EGV-07, Plan 04): the full bound family plus
-        # its source and the schema version that produced it -- so the
-        # range is recoverable from what was actually reported, whether or
-        # not the D-09 second site accepted it for --outcome-value above.
-        # Same conditional-emit rule as every other field here: a field
-        # absent from the record adds no key to meta.
-        for _bound_key in ('value_low', 'value_base', 'value_high'):
-            _bound_raw = record.get(_bound_key)
-            if _bound_raw is not None:
-                try:
-                    meta[_bound_key] = float(_bound_raw)
-                except (TypeError, ValueError):
-                    pass
-        bounds_source = record.get('bounds_source')
-        if isinstance(bounds_source, str) and bounds_source:
-            meta['bounds_source'] = bounds_source[:16]
-        schema_version = record.get('assessment_schema_version')
-        if isinstance(schema_version, (int, float)) and not isinstance(schema_version, bool):
-            meta['assessment_schema_version'] = schema_version
-        # EGV-07 (Phase 42 Plan 05): the sibling provenance-version fields
-        # the requirement names alongside the schema version -- taxonomy,
-        # prompt, and policy versions must survive a deferred create and a
-        # retry exactly like assessment_schema_version already does. Same
-        # conditional-emit rule: absent from the record, absent from meta.
-        taxonomy_version = record.get('taxonomy_version')
-        if isinstance(taxonomy_version, (int, float)) and not isinstance(taxonomy_version, bool):
-            meta['taxonomy_version'] = taxonomy_version
-        prompt_version = record.get('prompt_version')
-        if isinstance(prompt_version, (int, float)) and not isinstance(prompt_version, bool):
-            meta['prompt_version'] = prompt_version
-        policy_version = record.get('policy_version')
-        if isinstance(policy_version, (int, float)) and not isinstance(policy_version, bool):
-            meta['policy_version'] = policy_version
-        evidence_class = record.get('evidence_class')
-        if isinstance(evidence_class, str) and evidence_class:
-            meta['evidence_class'] = evidence_class[:32]
-        # Phase 50 (DECL-05, D-04): forwards WHICH boundary's declaration
-        # decided evidence_class immediately above -- an auditor otherwise
-        # cannot tell "a declaration won" from "which one." Unlike
-        # evidence_class's own forwarder (whose single allow-list check
-        # already ran upstream in classifier.py's precedence walk, so this
-        # forwarder simply trusts the already-sanitized record), an
-        # out-of-set evidence_class_authority here would be a CORRECTNESS
-        # bug, not a cosmetic one -- it would misname the authority that
-        # decided a billing-adjacent record -- so this allow-list check
-        # lives AT THE FORWARDER, mirroring economic_mechanism's own
-        # allow-list-then-drop shape below rather than evidence_class's
-        # trust-the-record shape. Hand-synced against classifier.py's
-        # _EVIDENCE_CLASS_AUTHORITIES; this heredoc is its own independent
-        # python3 process (a separate subshell, never a shared Python
-        # namespace), so the vocabulary is declared fresh here, the same
-        # reasoning _ECONOMIC_MECHANISMS below already documents for
-        # itself. FOUR words, not three: the Task 1 checkpoint decision
-        # (50-01-SUMMARY.md, "option-b") widened the classifier's walk to
-        # include the classification boundary, and this set must name every
-        # authority the walk can return. Clamped to 16 bytes -- the longest
-        # member, 'classification', is 14 bytes, comfortably under the
-        # clamp but close enough that a fifth authority word must re-check
-        # it, not assume headroom.
-        _EVIDENCE_CLASS_AUTHORITIES = frozenset({
-            'evidence', 'valuation', 'classification', 'evaluator',
-        })
-        evidence_class_authority = record.get('evidence_class_authority')
-        if (
-            isinstance(evidence_class_authority, str)
-            and evidence_class_authority in _EVIDENCE_CLASS_AUTHORITIES
-        ):
-            meta['evidence_class_authority'] = evidence_class_authority[:16]
+        schema_version_out = 2
+
         # Phase 43 (EGV-18, T-43-04): forwards the reportability decision
-        # itself, not just its effect -- without this, a row withheld by
-        # the gate above is indistinguishable on the tenant from a row
-        # dropped for bounds or schema reasons. Same conditional-emit rule:
-        # absent from the record (or already stripped/dropped by the gate
-        # above for an unrecognized value) adds no key to meta. 16 bytes is
-        # ample for both locked D-05 words ("reportable"/"candidate").
+        # itself, not just its effect -- without this, a row withheld by the
+        # gate is indistinguishable on the tenant from a row dropped for
+        # bounds or schema reasons. 16 bytes is ample for both locked D-05
+        # words ("reportable"/"candidate").
         reportability_status = record.get('reportability_status')
         if isinstance(reportability_status, str) and reportability_status:
-            meta['reportability_status'] = reportability_status[:16]
-        # Phase 44 (EGV-05, D-01/D-03, T-44-02): the economic-mechanism
-        # forwarder block this plan opens. Plans 44-02 (net_value,
-        # supplied_costs, cost_coverage) and 44-03 (double_counting_group)
-        # append to this SAME contiguous block, in that order, immediately
-        # below -- meter-completion-assessment.golden.json pins --metadata's
-        # key order with an anchored pattern, so appending here keeps every
-        # plan's re-pin a pure insertion instead of three competing
-        # reorderings.
-        #
-        # Unlike evidence_class above (whose single allow-list check lives
-        # upstream in the sidecar re-read stage, and whose forwarder simply
-        # trusts the already-sanitized record), T-44-02's mitigation puts
-        # this allow-list AT THE FORWARDER: an out-of-set economic_mechanism
-        # drops silently from --metadata (no key added at all), while the
-        # rest of the record -- value, currency, every other provenance
-        # field -- still ships normally. That is a deliberately different
-        # shape from evidence_class's whole-record rejection, so it cannot
-        # reuse that stage's check. This heredoc is its own independent
-        # python3 process (a separate subshell from the sidecar re-read
-        # heredoc above, connected only through shell variables, never
-        # through a shared Python namespace), so the six-string vocabulary
-        # is declared fresh here rather than "shared" from that heredoc --
-        # there is no runtime mechanism by which it could be. Hand-synced
-        # against classifier.py's ECONOMIC_MECHANISMS; the drift test in
-        # tests/test_phase44_economic_mechanisms.py::MechanismDriftTests is
-        # what holds the two declarations equal, and its own extractor
-        # requires this exact anchor to appear exactly once in this file --
-        # so this is the ONLY declaration of _ECONOMIC_MECHANISMS in
-        # hermes-report.sh.
-        _ECONOMIC_MECHANISMS = frozenset({
-            'labor_substitution', 'augmentation_capacity_expansion',
-            'newly_enabled_work', 'quality_decision_improvement',
-            'risk_avoidance', 'incremental_revenue',
-        })
+            status_out = reportability_status[:16]
+        # Phase 44 (EGV-16, D-12/D-13, T-44-12): caller-supplied structural
+        # identity (a Hermes session id), never a monetary claim, so it ships
+        # regardless of reportability_status. No allow-list: a free-form
+        # identifier, bounded by the slice.
+        double_counting_group = record.get('double_counting_group')
+        if isinstance(double_counting_group, str) and double_counting_group:
+            session_out = double_counting_group[:64]
 
+        # Phase 43 (D-06, T-43-17): a correction stays reportable by
+        # construction, but `jobs roi` surfaces the corrected value
+        # indistinguishably from an original. With this marker the
+        # distinguishing signal exists in data Revenium HOLDS rather than
+        # only in the local sidecar (C-06's compensating control). Emitted
+        # ONLY for a correction record: an ORIGINAL assessment must never
+        # carry a marker saying it is not one.
+        if record.get('kind') == 'correction':
+            corrected_out = True
+            sequence_raw = record.get('sequence')
+            if _is_num(sequence_raw):
+                correction_sequence_out = int(sequence_raw)
+
+        # ---- costs (operator input, not model output) -------------------
         # Phase 44 (EGV-14/EGV-15, D-05/D-06, T-44-09): the same four cost
         # categories classifier.py declares as COST_CATEGORIES, hand-synced
-        # exactly like _ECONOMIC_MECHANISMS immediately above -- a TUPLE,
-        # not a frozenset, because emission order is part of the contract
-        # (EGV-14's ordering probe edge) and
-        # tests/test_phase44_economic_mechanisms.py::CostCategoryDriftTests
-        # compares the two as an ORDERED sequence, not a set (unlike
-        # MechanismDriftTests' set comparison). This is the ONLY
-        # declaration of _COST_CATEGORIES in hermes-report.sh.
+        # -- a TUPLE, not a frozenset, because emission order is part of the
+        # contract and tests/test_phase44_economic_mechanisms.py::
+        # CostCategoryDriftTests compares the two as an ORDERED sequence.
+        # This is the ONLY declaration of _COST_CATEGORIES in hermes-report.sh.
         _COST_CATEGORIES = (
             'human_review', 'rework_or_error', 'handoff', 'training_or_change',
         )
-        economic_mechanism = record.get('economic_mechanism')
-        if (
-            isinstance(economic_mechanism, str)
-            and economic_mechanism in _ECONOMIC_MECHANISMS
-        ):
-            meta['economic_mechanism'] = economic_mechanism[:64]
-
-        # Phase 44 (EGV-14/EGV-15, D-06/D-07/D-08): APPENDED to the same
-        # contiguous Phase 44 forwarder block plan 44-01 opened above, in
-        # the fixed order net_value / supplied_costs / cost_coverage --
-        # order and placement are contract, not style:
-        # meter-completion-assessment.golden.json's anchored pattern pins
-        # --metadata's key order, so appending here keeps this plan's
-        # re-pin a pure insertion.
-        #
-        # net_value survives to this point ONLY when the record was
-        # reportable -- D-07 strips it from `record` through the single
-        # shared _strip_value_family(), never a second per-forwarder gate.
-        net_value_raw = record.get('net_value')
-        if net_value_raw is not None:
-            try:
-                meta['net_value'] = float(net_value_raw)
-            except (TypeError, ValueError):
-                pass
-
-        # supplied_costs and cost_coverage are OPERATOR input, not model
-        # output, and are deliberately NEVER in _VALUE_OMIT_FAMILY (D-07's
-        # second half) -- they ship regardless of reportability, because
-        # withholding them is what would make a null ROI unreadable.
-        # T-44-09: an allow-list rebuild against _COST_CATEGORIES, key by
-        # key, so a hand-edited sidecar cannot smuggle an unknown key or a
-        # non-numeric value onto the wire; a value that fails float() is
-        # dropped rather than crashing this heredoc.
+        # supplied_costs and cost_coverage are deliberately NEVER in
+        # _VALUE_OMIT_FAMILY (D-07's second half) -- they ship regardless of
+        # reportability, because withholding them is what would make a null
+        # ROI unreadable. T-44-09: an allow-list rebuild against
+        # _COST_CATEGORIES, key by key, so a hand-edited sidecar cannot
+        # smuggle an unknown key or a non-numeric value onto the wire; a value
+        # that fails float() is dropped rather than crashing this heredoc.
+        # Emitted whenever supplied_costs is a dict, {} included: an empty
+        # `subtracted` says "no costs were supplied", which is information.
+        subtracted = None
         supplied_costs_raw = record.get('supplied_costs')
         if isinstance(supplied_costs_raw, dict):
-            _rebuilt_costs = {}
+            subtracted = {}
             for _category in _COST_CATEGORIES:
                 if _category not in supplied_costs_raw:
                     continue
                 try:
-                    _rebuilt_costs[_category] = float(supplied_costs_raw[_category])
+                    subtracted[_category] = float(supplied_costs_raw[_category])
                 except (TypeError, ValueError):
                     continue
-            if _rebuilt_costs:
-                meta['supplied_costs'] = _rebuilt_costs
-
+            costs['subtracted'] = subtracted
         cost_coverage_raw = record.get('cost_coverage')
         if isinstance(cost_coverage_raw, dict):
-            _COST_COVERAGE_EXCLUDED_AI = 'metered_ai_cost'
-            _rebuilt_coverage = {}
-            for _list_key in ('included', 'known_zero', 'unknown'):
+            # `included` is not forwarded (C-7): it always equals the key set
+            # of costs.subtracted, so it would say nothing new.
+            for _list_key, _wire_key in (('unknown', 'not_counted'),
+                                         ('known_zero', 'known_zero')):
                 _raw_list = cost_coverage_raw.get(_list_key)
                 if isinstance(_raw_list, list):
                     _filtered = [v for v in _raw_list if v in _COST_CATEGORIES]
                     if _filtered:
-                        _rebuilt_coverage[_list_key] = _filtered
+                        costs[_wire_key] = _filtered
             _raw_excluded = cost_coverage_raw.get('excluded')
-            if isinstance(_raw_excluded, list):
-                _filtered_excluded = [
-                    v for v in _raw_excluded if v == _COST_COVERAGE_EXCLUDED_AI
-                ]
-                if _filtered_excluded:
-                    _rebuilt_coverage['excluded'] = _filtered_excluded
-            if _rebuilt_coverage:
-                meta['cost_coverage'] = _rebuilt_coverage
+            if isinstance(_raw_excluded, list) and 'metered_ai_cost' in _raw_excluded:
+                costs['ai_cost'] = 'metered_separately'
 
-        # Phase 44 (EGV-16, D-12/D-13, T-44-12): APPENDED to the END of the
-        # contiguous Phase 44 forwarder block plans 44-01/44-02 built above
-        # -- this closes the block; no later field in this phase follows
-        # it. double_counting_group is caller-supplied structural identity
-        # (a Hermes session id), never a monetary claim, so it is not in
-        # _VALUE_OMIT_FAMILY and ships regardless of reportability_status,
-        # exactly like supplied_costs/cost_coverage above. No allow-list
-        # applies here -- unlike economic_mechanism's fixed six-value set,
-        # this is a free-form identifier -- so this forwarder relies on the
-        # isinstance/non-empty check plus the 64-byte slice, plus the
-        # existing _s() transport sanitiser downstream.
-        double_counting_group = record.get('double_counting_group')
-        if isinstance(double_counting_group, str) and double_counting_group:
-            meta['double_counting_group'] = double_counting_group[:64]
-        # Phase 43 (D-06, T-43-17): a correction stays reportable by
-        # construction -- the reader's carve-out above never consults the
-        # reportability gate for it -- but Finding 4 / C-06 established that
-        # `jobs roi` surfaces the corrected value indistinguishably from an
-        # original. `jobs roi` will not surface this marker either, but with
-        # it the distinguishing signal exists in data Revenium HOLDS rather
-        # than only in the local sidecar, which is the compensating control
-        # C-06 asked this phase for. Emitted ONLY when the resolved record's
-        # kind is a correction -- same conditional-emit rule as every other
-        # field here: a key absent from the record adds no key to meta, and
-        # an ORIGINAL assessment must never carry a marker saying it is not
-        # one. `sequence` guarded by the same non-bool numeric check the
-        # version fields above already use.
-        if record.get('kind') == 'correction':
-            meta['corrected'] = True
-            sequence_raw = record.get('sequence')
-            if isinstance(sequence_raw, (int, float)) and not isinstance(sequence_raw, bool):
-                meta['correction_sequence'] = int(sequence_raw)
-        evaluator = record.get('evaluator')
-        if isinstance(evaluator, str) and evaluator:
-            meta['evaluator'] = evaluator[:64]
-        evaluator_version = record.get('evaluator_version')
-        if isinstance(evaluator_version, str) and evaluator_version:
-            meta['evaluator_version'] = evaluator_version[:16]
-        # EGV-07: the fifth named provenance field -- which MODEL produced
-        # the assessment (Phase 45/EGV-08 owns real semantics; today's
-        # value is PROVENANCE_MODEL_UNKNOWN, but the field still crosses
-        # the wire so a later phase's real value survives the same path
-        # without another edit here).
-        model_field = record.get('model')
-        if isinstance(model_field, str) and model_field:
-            meta['model'] = model_field[:64]
-        # Phase 46 (EGV-21, D-06/D-07, plan 46-02 Task 4, checkpoint
-        # decision ship-both): the two locality facts, immediately after
-        # model above -- same caller-supplied-provenance footing, forwarded
-        # under two different disciplines. inference_provider mirrors
-        # evaluator's isinstance + non-empty + slice shape (32 bytes,
-        # matching classifier.py's INFERENCE_PROVIDER_MAX_BYTES). A hand-
-        # edited or corrupt sidecar value that is a non-empty non-string
-        # (or simply absent) adds no key -- same conditional-emit rule as
-        # every other field here.
-        inference_provider = record.get('inference_provider')
-        if isinstance(inference_provider, str) and inference_provider:
-            meta['inference_provider'] = inference_provider[:32]
-        # inference_address_class uses an allow-list-then-drop discipline,
-        # exactly like _ECONOMIC_MECHANISMS above (T-46-02): an out-of-set
-        # string, an empty string, a non-string, or a hand-edited/corrupt
-        # sidecar value is DROPPED SILENTLY -- never passed through. Unlike
-        # _ECONOMIC_MECHANISMS' six-string vocabulary, this frozenset is not
-        # hand-synced against classifier.py by a drift test -- it mirrors
-        # classifier.py's own _ADDRESS_CLASSES literally (D-12: exactly
-        # four values, no fifth "unknown" bucket).
-        _INFERENCE_ADDRESS_CLASSES = frozenset({'loopback', 'private', 'public', 'unset'})
-        inference_address_class = record.get('inference_address_class')
-        if (
-            isinstance(inference_address_class, str)
-            and inference_address_class in _INFERENCE_ADDRESS_CLASSES
-        ):
-            meta['inference_address_class'] = inference_address_class
-        confidence_raw = record.get('confidence')
-        if confidence_raw is not None:
+        # ---- value ------------------------------------------------------
+        # value.reported is the exact --outcome-value this call sent, so the
+        # blob and the flag cannot disagree. Absent when the flag was not sent
+        # (withheld, no CLI support, or no value at all).
+        _sent = os.environ.get('OUTCOME_VALUE_SENT', '').strip()
+        if _sent:
             try:
-                meta['confidence'] = float(confidence_raw)
+                value['reported'] = float(_sent)
             except (TypeError, ValueError):
                 pass
-        assumptions_raw = record.get('assumptions')
-        assumptions = {}
-        if isinstance(assumptions_raw, dict):
-            hours_raw = assumptions_raw.get('estimated_hours_saved')
-            if hours_raw is not None:
+        # Phase 42 (D-08/D-09/EGV-07): the bound family, so the range is
+        # recoverable from what was reported whether or not the D-09 second
+        # site accepted it for --outcome-value.
+        for _bound_key, _wire_key in (('value_low', 'low'), ('value_base', 'base'),
+                                      ('value_high', 'high')):
+            _bound_raw = record.get(_bound_key)
+            if _bound_raw is not None:
                 try:
-                    assumptions['estimated_hours_saved'] = float(hours_raw)
+                    value[_wire_key] = float(_bound_raw)
                 except (TypeError, ValueError):
                     pass
-            rate_raw = assumptions_raw.get('assumed_loaded_rate')
-            if rate_raw is not None:
-                try:
-                    assumptions['assumed_loaded_rate'] = float(rate_raw)
-                except (TypeError, ValueError):
-                    pass
-            # quick-261017-kb1: forward the evaluator's inferred_role (and
-            # ONLY that field of its prose) so a Revenium row names the
-            # human role behind the value. quick-261017-kb1 narrows Phase 46
-            # D-04 for this one field; `basis`, `candidate_downstream_outcome`
-            # and `counterfactual_assumption` stay unforwarded.
-            #
-            # The value-family tier is INHERITED, not added: the role rides
-            # inside `assumptions`, which is already in _VALUE_OMIT_FAMILY
-            # (stripped on candidate, abstention and CF-2 refusal) and in
-            # _VALUE_FAMILY_META_KEYS (tier-1 shed). So neither tuple
-            # changes and the docs inventory guard is unaffected.
-            #
-            # 60 mirrors classifier.py's _INFERRED_ROLE_CLAMP (a
-            # serialized-byte clamp), so the slice is a no-op for a
-            # classifier-written role and only bounds a hand-edited sidecar.
-            # The producer already strips pipe, newline and CR, and
-            # json.dumps escapes anything a hand edit adds, so no second
-            # sanitiser is needed.
-            #
-            # APPENDED after assumed_loaded_rate so the golden changes by
-            # pure insertion.
-            role_raw = assumptions_raw.get('inferred_role')
-            if isinstance(role_raw, str) and role_raw.strip():
-                assumptions['inferred_role'] = role_raw[:60]
-        if assumptions:
-            meta['assumptions'] = assumptions
-
+        currency_raw = record.get('currency')
+        if isinstance(currency_raw, str) and re.fullmatch(r'[A-Z]{3}', currency_raw.strip().upper()):
+            value['currency'] = currency_raw.strip().upper()
+        # C-6: the classifier writes net_value on every success path, even
+        # with no costs (net == gross), so its presence proves nothing. Net is
+        # shipped only when a cost was actually subtracted: at least one
+        # non-zero amount. A supplied 0 stays listed in costs.subtracted (and
+        # costs.known_zero) but does not by itself produce value.net.
+        net_value_raw = record.get('net_value')
+        if (net_value_raw is not None and subtracted
+                and any(v != 0 for v in subtracted.values())):
+            try:
+                value['net'] = float(net_value_raw)
+            except (TypeError, ValueError):
+                pass
         # Phase 51 (D-05/D-07): the attribution pair, forwarded from a
-        # correction record. APPENDED last --
-        # meter-completion-assessment.golden.json's anchored pattern pins
-        # --metadata's key order, so a new key goes at the end or every
-        # existing golden shifts.
-        #
-        # Forwarded, never derived. The operator supplied an already
-        # attributed value; nothing here multiplies, and no gross figure
-        # exists in this record to multiply. The fraction is an operator
-        # ASSERTION validated only for shape -- a real, finite number in
-        # [0, 1] -- because there is nothing here to check it against.
-        # attribution_basis is what makes it auditable, which is why
-        # correct-assessment.sh refuses a fraction without one; the basis is
-        # therefore only forwarded alongside a valid fraction, never alone.
+        # correction record. Forwarded, never derived: the operator supplied
+        # an already attributed value and nothing here multiplies. The
+        # fraction is an operator ASSERTION validated only for shape -- a
+        # real, finite number in [0, 1]. Greptile (PR #110): the PAIR is
+        # validated together, never the fraction alone: a legacy or
+        # hand-edited sidecar can carry a valid fraction with no basis, and a
+        # naked fraction on the wire defeats the one constraint the design
+        # rests on. An absent attribution is honest, a naked one is not.
         attribution_fraction = record.get('attribution_fraction')
-        if (
-            isinstance(attribution_fraction, (int, float))
-            and not isinstance(attribution_fraction, bool)
-        ):
+        if _is_num(attribution_fraction):
             try:
                 _af = float(attribution_fraction)
             except OverflowError:
@@ -7088,56 +6941,186 @@ if assessment_raw:
                 and _af not in (float('inf'), float('-inf'))
                 and 0.0 <= _af <= 1.0
             ):
-                # Greptile (PR #110): the PAIR is validated together, never
-                # the fraction alone. correct-assessment.sh refuses a
-                # fraction without a basis, but the reporter reads whatever
-                # is on disk -- a legacy, hand-edited, or partially-written
-                # sidecar can carry a valid fraction with no basis, and
-                # shipping it would put a naked number on the wire, defeating
-                # the one constraint the whole design rests on. A fraction
-                # whose basis is missing is not forwarded at all: an absent
-                # attribution is honest, a naked one is not.
                 attribution_basis = record.get('attribution_basis')
                 if isinstance(attribution_basis, str) and attribution_basis.strip():
-                    meta['attribution_fraction'] = _af
-                    meta['attribution_basis'] = attribution_basis[:500]
+                    value['attribution'] = {
+                        'fraction': _af,
+                        'basis': attribution_basis[:500],
+                    }
+
+        # ---- basis ------------------------------------------------------
+        evidence_class = record.get('evidence_class')
+        if isinstance(evidence_class, str) and evidence_class:
+            basis['evidence'] = _LEGACY_EVIDENCE_CLASS_ALIASES.get(
+                evidence_class, evidence_class)[:32]
+        # Phase 44 (EGV-05, D-01/D-03, T-44-02): this allow-list lives AT THE
+        # FORWARDER: an out-of-set economic_mechanism drops silently from
+        # --metadata while the rest of the record still ships. This heredoc is
+        # its own python3 process, so the six-string vocabulary is declared
+        # fresh here. Hand-synced against classifier.py's ECONOMIC_MECHANISMS
+        # (tests/test_phase44_economic_mechanisms.py::MechanismDriftTests); the
+        # drift test's extractor requires this to be the ONLY declaration of
+        # _ECONOMIC_MECHANISMS in hermes-report.sh.
+        _ECONOMIC_MECHANISMS = frozenset({
+            'labor_substitution', 'augmentation_capacity_expansion',
+            'newly_enabled_work', 'quality_decision_improvement',
+            'risk_avoidance', 'incremental_revenue',
+        })
+        economic_mechanism = record.get('economic_mechanism')
+        if (
+            isinstance(economic_mechanism, str)
+            and economic_mechanism in _ECONOMIC_MECHANISMS
+        ):
+            basis['mechanism'] = economic_mechanism[:64]
+        assumptions_raw = record.get('assumptions')
+        if isinstance(assumptions_raw, dict):
+            # quick-261017-kb1: inferred_role is the one field of the
+            # evaluator's prose that ships, so a Revenium row names the human
+            # role behind the value. 60 mirrors classifier.py's
+            # _INFERRED_ROLE_CLAMP, so the slice is a no-op for a classifier-
+            # written role and only bounds a hand-edited sidecar. The value
+            # tier is INHERITED: assumptions is in _VALUE_OMIT_FAMILY (stripped
+            # on candidate, abstention and CF-2 refusal) and basis.role sheds
+            # at tier 1.
+            role_raw = assumptions_raw.get('inferred_role')
+            if isinstance(role_raw, str) and role_raw.strip():
+                basis['role'] = role_raw[:60]
+            hours_raw = assumptions_raw.get('estimated_hours_saved')
+            if hours_raw is not None:
+                try:
+                    basis['hours_saved'] = float(hours_raw)
+                except (TypeError, ValueError):
+                    pass
+            rate_raw = assumptions_raw.get('assumed_loaded_rate')
+            if rate_raw is not None:
+                try:
+                    basis['hourly_rate'] = float(rate_raw)
+                except (TypeError, ValueError):
+                    pass
+        confidence_raw = record.get('confidence')
+        if confidence_raw is not None:
+            try:
+                basis['confidence'] = float(confidence_raw)
+            except (TypeError, ValueError):
+                pass
+        # C-5: the study reference is forwarded for the first time. Both halves
+        # or neither, mirroring the classifier's all-or-none rule: a half
+        # reference could never name a real ImpactStudyResult.
+        study_id = record.get('study_id')
+        study_version = record.get('study_version')
+        if (
+            isinstance(study_id, str) and study_id.strip()
+            and isinstance(study_version, int) and not isinstance(study_version, bool)
+            and study_version >= 1
+        ):
+            basis['study'] = {'id': study_id[:100], 'version': study_version}
+
+        # ---- estimator (who produced the assessment, and where it ran) ---
+        evaluator = record.get('evaluator')
+        if isinstance(evaluator, str) and evaluator:
+            estimator['name'] = evaluator[:64]
+        # EGV-07: which MODEL produced the assessment (today
+        # PROVENANCE_MODEL_UNKNOWN, but a later phase's real value survives
+        # the same path without another edit here).
+        model_field = record.get('model')
+        if isinstance(model_field, str) and model_field:
+            estimator['model'] = model_field[:64]
+        # Phase 46 (EGV-21, D-06/D-07): the two locality facts. provider
+        # mirrors evaluator's isinstance + non-empty + slice shape (32 bytes,
+        # classifier.py's INFERENCE_PROVIDER_MAX_BYTES).
+        inference_provider = record.get('inference_provider')
+        if isinstance(inference_provider, str) and inference_provider:
+            estimator['provider'] = inference_provider[:32]
+        # inference_address_class uses an allow-list-then-drop discipline,
+        # exactly like _ECONOMIC_MECHANISMS (T-46-02): an out-of-set value is
+        # DROPPED SILENTLY, never passed through. Mirrors classifier.py's
+        # _ADDRESS_CLASSES literally (D-12: exactly four values, no fifth).
+        _INFERENCE_ADDRESS_CLASSES = frozenset({'loopback', 'private', 'public', 'unset'})
+        inference_address_class = record.get('inference_address_class')
+        if (
+            isinstance(inference_address_class, str)
+            and inference_address_class in _INFERENCE_ADDRESS_CLASSES
+        ):
+            estimator['endpoint'] = inference_address_class
+        # EGV-07: the sibling provenance versions, so taxonomy, prompt and
+        # policy survive a deferred create and a retry.
+        # Literal record.get() calls, not a loop over key names: the fixture-
+        # fidelity extractor (_extract_forwarder_record_keys) only sees
+        # literal arguments.
+        versions = {}
+        prompt_version = record.get('prompt_version')
+        if _is_num(prompt_version):
+            versions['prompt'] = prompt_version
+        taxonomy_version = record.get('taxonomy_version')
+        if _is_num(taxonomy_version):
+            versions['taxonomy'] = taxonomy_version
+        policy_version = record.get('policy_version')
+        if _is_num(policy_version):
+            versions['policy'] = policy_version
+        evaluator_version = record.get('evaluator_version')
+        if isinstance(evaluator_version, str) and evaluator_version:
+            versions['evaluator'] = evaluator_version[:16]
+        if versions:
+            estimator['versions'] = versions
+
+meta = {}
+if schema_version_out is not None:
+    meta['schema_version'] = schema_version_out
+if source:
+    meta['source'] = source
+if status_out:
+    meta['status'] = status_out
+if session_out:
+    meta['session'] = session_out
+if failure_reason_out:
+    meta['failure_reason'] = failure_reason_out
+if outcome_basis_out:
+    meta['outcome_basis'] = outcome_basis_out
+if corrected_out:
+    meta['corrected'] = True
+if correction_sequence_out is not None:
+    meta['correction_sequence'] = correction_sequence_out
+for _group_name, _group in (('value', value), ('basis', basis),
+                            ('costs', costs), ('estimator', estimator)):
+    if _group:
+        meta[_group_name] = _group
 
 # Phase 46 (EGV-19, D-01/D-02/D-03): bounded emit -- the single place the
 # actual wire bytes are measured before the payload leaves the machine.
-# Base metering (source, failure_reason, outcome_basis) is NEVER popped; only the Phase
-# 42-45 enrichment yields, value family first, then provenance, in that
-# order (D-02: metering never breaks, the enrichment is what gives way).
+# Base metering (schema_version, source, failure_reason, outcome_basis) and
+# `corrected` are NEVER popped; only the enrichment yields, the value tier
+# first, then provenance, in that order (D-02: metering never breaks, the
+# enrichment is what gives way). Shedding walks dotted paths into the nested
+# groups and removes a group it has emptied, so no `{}` is ever emitted.
 # metadata_truncated marks a partial payload so a consumer can distinguish
-# "this job had no net_value" (both keys absent) from "net_value did not
-# fit" (net_value absent, metadata_truncated present) -- an unmarked
-# partial record is the silent substitution this milestone exists to
-# prevent. AMEND-D-02: this key lives ONLY in this transport dict -- never
-# in the sidecar record and never in _VALUE_OMIT_FAMILY, which governs an
-# earlier pipeline stage that can never see it.
+# "this job had no value.net" (both keys absent) from "value.net did not fit"
+# (absent, metadata_truncated present) -- an unmarked partial record is the
+# silent substitution this milestone exists to prevent. AMEND-D-02: this key
+# lives ONLY in this transport dict -- never in the sidecar record and never
+# in _VALUE_OMIT_FAMILY, which governs an earlier pipeline stage that can
+# never see it.
 #
 # CR-01 (46-REVIEW.md): the marker must be set ONLY when a tier actually
-# removed a key. Before source (above) was clamped, an over-ceiling blob
-# with no value-family/provenance-family keys present (e.g. driven entirely
-# by an outsized source) still walked into this branch, popped nothing from
-# either tier, and got `metadata_truncated: True` unconditionally -- a false
-# "value did not fit" signal on a record that dropped nothing. Compare
-# `meta`'s key set before/after each pop loop and only flip the marker when
-# it actually shrank; a `set(meta)` snapshot is cheap here (single digits of
-# keys) and reads as the intent directly, unlike diffing pop() return values.
+# removed something. An over-ceiling blob driven entirely by an outsized
+# `source` pops nothing from either tier and must not claim "value did not
+# fit". Compare the serialized dict before and after each tier and flip the
+# marker only when it changed.
 if meta:
     blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
     if len(blob) > _METADATA_CEILING_BYTES:
-        _before_tier1 = set(meta)
+        _before_tier1 = json.dumps(meta, separators=(',', ':'))
         for _k in _VALUE_FAMILY_META_KEYS:
-            meta.pop(_k, None)
-        if set(meta) != _before_tier1:
+            _shed(meta, _k)
+        _drop_empty_groups(meta)
+        if json.dumps(meta, separators=(',', ':')) != _before_tier1:
             meta['metadata_truncated'] = True
         blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
         if len(blob) > _METADATA_CEILING_BYTES:
-            _before_tier2 = set(meta)
+            _before_tier2 = json.dumps(meta, separators=(',', ':'))
             for _k in _PROVENANCE_FAMILY_META_KEYS:
-                meta.pop(_k, None)
-            if set(meta) != _before_tier2:
+                _shed(meta, _k)
+            _drop_empty_groups(meta)
+            if json.dumps(meta, separators=(',', ':')) != _before_tier2:
                 meta['metadata_truncated'] = True
             blob = json.dumps(meta, separators=(',', ':')).encode('utf-8')
     print(blob.decode('utf-8'))

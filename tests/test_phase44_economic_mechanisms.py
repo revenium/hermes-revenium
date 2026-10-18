@@ -48,6 +48,7 @@ from pathlib import Path
 from tests._compat_helpers import (
     build_shim,
     build_state_db,
+    meta_path,
     run_script,
     SCRIPTS_DIR,
 )
@@ -552,8 +553,9 @@ class MechanismWireTests(unittest.TestCase):
         self.assertIn('--result', argv)
         self.assertEqual(argv[argv.index('--result') + 1], 'SUCCESS')
         meta = json.loads(self._metadata_value(argv))
+        # quick-261017-nck: v2 wire path basis.mechanism.
         self.assertEqual(
-            meta.get('economic_mechanism'), 'augmentation_capacity_expansion')
+            meta_path(meta, 'basis.mechanism'), 'augmentation_capacity_expansion')
 
     def test_out_of_set_mechanism_is_dropped_but_arc_still_reports(self):
         """T-44-02: a hand-edited or corrupt sidecar naming a value outside
@@ -564,11 +566,11 @@ class MechanismWireTests(unittest.TestCase):
         self.assertIn('--result', argv)
         self.assertEqual(argv[argv.index('--result') + 1], 'SUCCESS')
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('economic_mechanism', meta)
+        self.assertNotIn('mechanism', meta['basis'])
         # The rest of the record still ships -- an out-of-set mechanism is
         # not treated like an out-of-set evidence_class (which strips the
         # whole value family); only the mechanism key itself is withheld.
-        self.assertIn('value_low', meta)
+        self.assertIn('low', meta['value'])
 
 
 class MechanismAuthorityTests(unittest.TestCase):
@@ -1109,19 +1111,20 @@ class ReporterStripTests(unittest.TestCase):
         record = _cost_sidecar_record('rs44-job-001', reportability_status='candidate')
         argv = self._run_one_outcome('rs44-sid-001', 'rs44-job-001', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('net_value', meta)
-        self.assertIn('supplied_costs', meta)
-        self.assertIn('cost_coverage', meta)
-        self.assertEqual(meta['supplied_costs'], {'human_review': 25.0})
+        # v2: the candidate strip removes the whole `value` group (net
+        # included); costs are operator input and still ship.
+        self.assertNotIn('value', meta)
+        self.assertIn('subtracted', meta['costs'])
+        self.assertIn('not_counted', meta['costs'])
+        self.assertEqual(meta['costs']['subtracted'], {'human_review': 25.0})
 
     def test_reportable_row_ships_net_value_too(self):
         record = _cost_sidecar_record('rs44-job-002', reportability_status='reportable')
         argv = self._run_one_outcome('rs44-sid-002', 'rs44-job-002', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertIn('net_value', meta)
-        self.assertEqual(meta['net_value'], 85.0)
-        self.assertIn('supplied_costs', meta)
-        self.assertIn('cost_coverage', meta)
+        self.assertEqual(meta_path(meta, 'value.net'), 85.0)
+        self.assertIn('subtracted', meta['costs'])
+        self.assertIn('not_counted', meta['costs'])
 
     def test_double_counting_group_ships_on_a_candidate_row(self):
         # Plan 44-03: unlike net_value, double_counting_group is caller-
@@ -1133,9 +1136,9 @@ class ReporterStripTests(unittest.TestCase):
             double_counting_group='rs44-sid-007')
         argv = self._run_one_outcome('rs44-sid-007', 'rs44-job-007', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('net_value', meta)
-        self.assertIn('double_counting_group', meta)
-        self.assertEqual(meta['double_counting_group'], 'rs44-sid-007')
+        self.assertNotIn('value', meta)
+        self.assertIn('session', meta)
+        self.assertEqual(meta['session'], 'rs44-sid-007')
 
     def test_double_counting_group_ships_on_a_reportable_row(self):
         record = _cost_sidecar_record(
@@ -1143,9 +1146,9 @@ class ReporterStripTests(unittest.TestCase):
             double_counting_group='rs44-sid-008')
         argv = self._run_one_outcome('rs44-sid-008', 'rs44-job-008', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertIn('net_value', meta)
-        self.assertIn('double_counting_group', meta)
-        self.assertEqual(meta['double_counting_group'], 'rs44-sid-008')
+        self.assertIn('net', meta['value'])
+        self.assertIn('session', meta)
+        self.assertEqual(meta['session'], 'rs44-sid-008')
 
     def test_evidence_class_rejected_row_still_ships_costs_not_net_value(self):
         record = _cost_sidecar_record(
@@ -1153,9 +1156,9 @@ class ReporterStripTests(unittest.TestCase):
             evidence_class='NOT_A_REAL_EVIDENCE_CLASS')
         argv = self._run_one_outcome('rs44-sid-003', 'rs44-job-003', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('net_value', meta)
-        self.assertIn('supplied_costs', meta)
-        self.assertIn('cost_coverage', meta)
+        self.assertNotIn('value', meta)
+        self.assertIn('subtracted', meta['costs'])
+        self.assertIn('not_counted', meta['costs'])
 
     def test_unknown_cost_category_key_dropped_from_metadata(self):
         record = _cost_sidecar_record(
@@ -1163,8 +1166,8 @@ class ReporterStripTests(unittest.TestCase):
             supplied_costs={'human_review': 25.0, 'made_up_category': 999.0})
         argv = self._run_one_outcome('rs44-sid-004', 'rs44-job-004', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('made_up_category', meta['supplied_costs'])
-        self.assertIn('human_review', meta['supplied_costs'])
+        self.assertNotIn('made_up_category', meta['costs']['subtracted'])
+        self.assertIn('human_review', meta['costs']['subtracted'])
 
     def test_cost_coverage_unknown_category_entry_dropped(self):
         record = _cost_sidecar_record(
@@ -1177,10 +1180,14 @@ class ReporterStripTests(unittest.TestCase):
             })
         argv = self._run_one_outcome('rs44-sid-005', 'rs44-job-005', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('not_a_real_category', meta['cost_coverage']['unknown'])
-        self.assertIn('rework_or_error', meta['cost_coverage']['unknown'])
-        self.assertNotIn('not_the_ai_literal', meta['cost_coverage']['excluded'])
-        self.assertIn('metered_ai_cost', meta['cost_coverage']['excluded'])
+        # v2: cost_coverage.unknown -> costs.not_counted; excluded
+        # 'metered_ai_cost' -> costs.ai_cost 'metered_separately'; `included`
+        # is dropped (it equals costs.subtracted's key set).
+        self.assertNotIn('not_a_real_category', meta['costs']['not_counted'])
+        self.assertIn('rework_or_error', meta['costs']['not_counted'])
+        self.assertEqual('metered_separately', meta['costs']['ai_cost'])
+        self.assertNotIn('not_the_ai_literal', json.dumps(meta))
+        self.assertNotIn('included', meta['costs'])
 
     def test_non_numeric_supplied_cost_value_dropped_without_crashing(self):
         record = _cost_sidecar_record(
@@ -1190,7 +1197,9 @@ class ReporterStripTests(unittest.TestCase):
         # the arc still reports -- exactly one jobs outcome invocation is
         # already asserted inside _run_one_outcome.
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('supplied_costs', meta)
+        # v2: supplied_costs was a dict, so costs.subtracted is emitted, empty
+        # because the one amount failed float() and was dropped.
+        self.assertEqual(meta_path(meta, 'costs.subtracted'), {})
 
 
 def _extract_tuple_from_module(tree, target_name):
@@ -1827,13 +1836,12 @@ class NonSuccessReportabilityTests(unittest.TestCase):
         record = _non_success_sidecar_record('ns44-job-002', execution_status='FAILED')
         argv = self._run_one_outcome('ns44-sid-002', 'ns44-job-002', record, status='FAILED')
         meta = json.loads(self._metadata_value(argv))
-        self.assertIn('supplied_costs', meta)
-        self.assertIn('cost_coverage', meta)
-        self.assertIn('double_counting_group', meta)
-        for key in (
-            'net_value', 'estimated_value', 'value_low', 'value_base', 'value_high',
-        ):
-            self.assertNotIn(key, meta)
+        self.assertIn('subtracted', meta['costs'])
+        self.assertIn('not_counted', meta['costs'])
+        self.assertIn('session', meta)
+        self.assertNotIn('value', meta)
+        for key in ('net_value', 'estimated_value', 'value_low', 'value_base', 'value_high'):
+            self.assertNotIn(key, json.dumps(meta))
 
     def test_cancelled_arc_also_reports_with_its_real_status_no_value(self):
         record = _non_success_sidecar_record('ns44-job-003', execution_status='CANCELLED')
@@ -1842,8 +1850,8 @@ class NonSuccessReportabilityTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--result') + 1], 'CANCELLED')
         self.assertNotIn('--outcome-value', argv)
         meta = json.loads(self._metadata_value(argv))
-        self.assertIn('supplied_costs', meta)
-        self.assertNotIn('net_value', meta)
+        self.assertIn('subtracted', meta['costs'])
+        self.assertNotIn('value', meta)
 
 
 class GroupIdStructuralTests(unittest.TestCase):

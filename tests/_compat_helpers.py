@@ -644,3 +644,60 @@ def run_script(script_path, env, invocations_log):
                     continue
                 invocations.append(shlex.split(line))
     return result.returncode, invocations, result.stdout + result.stderr
+
+
+# quick-261017-nck: `jobs outcome --metadata` is schema_version 2, a set of
+# nested groups. METADATA_V1_TO_V2 maps every key the v1 flat blob carried to
+# its v2 dotted path, or None when v2 dropped it. It exists so a retargeted
+# assertion names the v2 path it checks; it is deliberately a lookup table and
+# NOT a flatten-back shim, so a v1 name can never keep passing against a v2
+# blob. The SIDECAR keeps the v1 names (the table's keys); only the wire moved.
+METADATA_V1_TO_V2 = {
+    'source': 'source',
+    'failure_reason': 'failure_reason',
+    'outcome_basis': 'outcome_basis',
+    'assessment_schema_version': 'schema_version',
+    'reportability_status': 'status',
+    'double_counting_group': 'session',
+    'corrected': 'corrected',
+    'correction_sequence': 'correction_sequence',
+    'value_low': 'value.low',
+    'value_base': 'value.base',
+    'value_high': 'value.high',
+    'net_value': 'value.net',
+    'attribution_fraction': 'value.attribution.fraction',
+    'attribution_basis': 'value.attribution.basis',
+    'evidence_class': 'basis.evidence',
+    'economic_mechanism': 'basis.mechanism',
+    'confidence': 'basis.confidence',
+    'supplied_costs': 'costs.subtracted',
+    'cost_coverage': 'costs',
+    'evaluator': 'estimator.name',
+    'model': 'estimator.model',
+    'inference_provider': 'estimator.provider',
+    'inference_address_class': 'estimator.endpoint',
+    'prompt_version': 'estimator.versions.prompt',
+    'taxonomy_version': 'estimator.versions.taxonomy',
+    'policy_version': 'estimator.versions.policy',
+    'evaluator_version': 'estimator.versions.evaluator',
+    'study_id': 'basis.study.id',
+    'study_version': 'basis.study.version',
+    # `assumptions` split into three basis scalars.
+    'assumptions': 'basis.role / basis.hours_saved / basis.hourly_rate',
+    # Sidecar-only since LD-3, and nothing replaced them on the wire.
+    'bounds_source': None,
+    'evidence_class_authority': None,
+}
+
+
+def meta_path(meta, dotted, default=None):
+    """Read a dotted path out of a parsed v2 --metadata blob.
+
+    `meta_path(meta, 'basis.evidence')` is `meta['basis']['evidence']`, or
+    `default` when any part is missing or a non-dict is walked through."""
+    node = meta
+    for part in dotted.split('.'):
+        if not isinstance(node, dict) or part not in node:
+            return default
+        node = node[part]
+    return node

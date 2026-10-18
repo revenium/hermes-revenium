@@ -191,30 +191,65 @@ session was open ships this way too if no re-judge replaced it before the sessio
 ### The bounded `--metadata` envelope (D-01/D-02/D-03, EGV-19)
 
 `--metadata` is not a new transport: it is the existing, real `jobs outcome` CLI flag
-above, carrying one flat JSON object. This section formalizes what already ships; no API
+above, carrying one JSON object. This section formalizes what already ships; no API
 capability is invented here.
 
-**Key inventory.** Three groups of keys can appear in the object:
+**The shape is `schema_version` 2.** The object is a short list of base keys followed by
+four nested groups: `value`, `basis`, `costs` and `estimator`. Version 1 was one flat list
+of about thirty prefixed keys, and each new field became a new top-level name; the groups
+replace that. Key order is part of the contract, because a golden pins it: `schema_version`,
+`source`, `status`, `session`, `failure_reason`, `outcome_basis`, `corrected`,
+`correction_sequence`, `value`, `basis`, `costs`, `estimator`, `metadata_truncated`. The
+object is compact single-line JSON of at most 4096 bytes.
 
-- **Base keys**: `source` (the deployment source), `failure_reason` (a `FAILED` arc's
-  short cause, or the fixed reporter-written reason on an undetermined `CANCELLED` arc) and
-  `outcome_basis` (`undetermined`, on that same `CANCELLED` arc). These are base metering and
-  are never dropped.
-- **The value family**: `value_low`, `value_base`, `value_high`, `bounds_source`,
-  `net_value`, `assumptions`, `supplied_costs`, `cost_coverage`, `attribution_fraction`,
-  `attribution_basis`. The economic estimate and its inputs. The attribution pair is in
-  this family rather than the provenance one on purpose: the value family sheds first, so
-  an attribution recorded here can never outlive the value it documents. The assumptions
-  also carry the inferred role, the one piece of evaluator prose that reaches the wire, and
-  it is shed and stripped along with them.
-- **The provenance family**: `evaluator`, `evaluator_version`, `model`, `evidence_class`,
-  `evidence_class_authority`, `reportability_status`, `study_id`, `study_version`,
-  `confidence`, `economic_mechanism`, `double_counting_group`, `correction_sequence`,
-  `inference_provider` and `inference_address_class`. Who or what produced the estimate
-  and where it was configured to run. `evidence_class_authority` names which of the four
-  boundaries in the cross-boundary precedence walk (evidence, valuation, classification or
-  evaluator) decided `evidence_class`: see
-  [Evidence-class precedence and declaration authority](evidence-class-precedence.md).
+- `value` holds `reported` (the exact `--outcome-value` this call sent, absent when the flag
+  was not sent), `low`, `base`, `high`, `currency`, `net` and `attribution` (an object with
+  `fraction` and `basis`). `net` appears only when a cost was actually subtracted, meaning at
+  least one non-zero amount in `costs.subtracted`: the classifier writes a net value on every
+  success path, so its presence alone proves nothing. A supplied zero is still listed in
+  `costs.subtracted` and `costs.known_zero`.
+- `basis` holds `evidence`, `mechanism`, `role`, `hours_saved`, `hourly_rate`, `confidence`
+  and `study` (an object with `id` and `version`, both or neither). `evidence` says who priced
+  the value: `CUSTOMER_CONFIGURED` for an operator-configured valuation boundary,
+  `MODEL_ESTIMATED` for the model's own estimate. `hours_saved` and `hourly_rate` are always
+  the model's assumptions, even when a rate card replaced the hours times rate product.
+- `costs` holds `subtracted`, `not_counted`, `known_zero` and `ai_cost` (always the literal
+  `metered_separately`). Which cost categories were listed as included is not sent; it always
+  equalled the keys of `subtracted`.
+- `estimator` holds `name`, `model`, `provider`, `endpoint` and `versions` (an object with
+  `prompt`, `taxonomy`, `policy` and `evaluator`).
+
+`schema_version` is written whenever assessment content is present. A blob with no assessment
+record, such as a `FAILED` arc's `source` and `failure_reason`, carries no `schema_version` and
+is byte-identical to what it always was: those keys mean the same thing in both versions, and
+the immutable `jobs-outcome` golden pins that shape.
+
+Two things stay in the sidecar and never ship: `evidence_class_authority` (which boundary
+decided the class: see
+[Evidence-class precedence and declaration authority](evidence-class-precedence.md)) and
+`bounds_source`. The sidecar's own top-level `basis` sentence, the evaluator's prose, never
+ships either; the wire `basis` group above is a different, allow-listed object built from
+scalars. Records written before the rename to `MODEL_ESTIMATED` may carry the old
+`MODEL_ESTIMATED_DEMO` label on disk; the reporter reads it as `MODEL_ESTIMATED` and the wire
+always carries the new label.
+
+**Key inventory.** Three groups of keys can appear in the object. Paths below are dotted:
+`basis.role` is the `role` key inside `basis`.
+
+- **Base keys**: `schema_version`, `source` (the deployment source), `failure_reason` (a
+  `FAILED` arc's short cause, or the fixed reporter-written reason on an undetermined
+  `CANCELLED` arc), `outcome_basis` (`undetermined`, on that same `CANCELLED` arc), `corrected`
+  (present only on an operator correction) and `metadata_truncated` (present only when the
+  byte ceiling removed something). These are base metering and are never dropped.
+- **The value family**: `value`, `value.attribution`, `basis.role`, `basis.hours_saved`,
+  `basis.hourly_rate` and `costs`. The economic estimate, its inputs and the costs set
+  against it. The attribution is in this family rather than the provenance one on purpose:
+  the value family sheds first, so an attribution recorded here can never outlive the value it
+  documents. The inferred role, the one piece of evaluator prose that reaches the wire, is
+  shed and stripped along with the other assumption-derived scalars.
+- **The provenance family**: `basis.evidence`, `basis.mechanism`, `basis.confidence`,
+  `basis.study`, `estimator`, `session`, `status` and `correction_sequence`. Who or what
+  produced the estimate, whether it was reportable, and where it was configured to run.
 
 **A byte ceiling is enforced once, in the reporter, at emit.** The ceiling is 4096 bytes
 and is pinned by test to `_METADATA_CEILING_BYTES` in
@@ -231,8 +266,10 @@ convenience for the reader, with the guard preventing drift. It is not a second 
 
 When a payload exceeds the ceiling, the value family is dropped first, the provenance
 family second and base metering is never dropped: metering never breaks, only the
-enrichment yields. A record whose payload was cut carries `metadata_truncated: true`, so a
-consumer can tell "this job had no value" (both value keys and the marker absent) from "the
+enrichment yields. Shedding walks the dotted paths into the nested groups and removes a group
+it has emptied, so an empty `{}` is never sent. A record whose payload was cut carries
+`metadata_truncated: true`, so a
+consumer can tell "this job had no value" (the `value` group and the marker absent) from "the
 value did not fit" (`metadata_truncated` present). An unmarked partial record would be the
 silent substitution this milestone exists to prevent.
 

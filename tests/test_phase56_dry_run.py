@@ -439,10 +439,17 @@ class DryRunReportableValuedRowTests(_DryRunClassifierTestCase, _DryRunReporterM
             '--outcome-value must equal the value the real valuation path produced')
         self.assertIn('--metadata', argv)
         meta = json.loads(argv[argv.index('--metadata') + 1])
+        # quick-261017-nck (v2 wire): the envelope's value.reported is the
+        # exact --outcome-value this call sent, so the blob and the flag
+        # cannot disagree for a reportable record.
+        value_reported = (meta.get('value') or {}).get('reported')
         self.assertIsNotNone(
-            meta.get('net_value'),
-            'the --metadata envelope must carry a non-null value field for a '
+            value_reported,
+            'the --metadata envelope must carry value.reported for a '
             'reportable record')
+        self.assertEqual(
+            value_reported, float(argv[argv.index('--outcome-value') + 1]),
+            'value.reported must equal the --outcome-value flag')
 
     def test_3_same_tick_aux_invocation_attributed_to_the_same_job(self):
         _mod, record = self._produce_record()

@@ -61,6 +61,7 @@ from unittest import mock
 from tests._compat_helpers import (
     build_shim,
     build_state_db,
+    meta_path,
     ROOT,
     SCRIPTS_DIR,
 )
@@ -180,13 +181,19 @@ def _extract_forwarder_record_keys(script_text):
 #
 # Determined EMPIRICALLY (per this plan's own instruction), not guessed:
 # _extract_forwarder_record_keys(script_text) against the live
-# hermes-report.sh returns exactly 21 keys --
+# hermes-report.sh returned exactly 21 keys at Phase 47 --
 #   bounds_source, assessment_schema_version, taxonomy_version,
 #   prompt_version, policy_version, evidence_class, reportability_status,
 #   economic_mechanism, net_value, supplied_costs, cost_coverage,
 #   double_counting_group, evaluator, evaluator_version, model,
 #   inference_provider, inference_address_class, confidence, assumptions,
 #   kind, sequence
+# quick-261017-nck (v2 wire) re-measured it: the v2 forwarder still reads the
+# sidecar by those literal names, minus bounds_source and
+# assessment_schema_version (sidecar-only / replaced by the envelope's own
+# schema_version) and plus currency, study_id, study_version (newly forwarded,
+# all three written by classifier.py on every record). The empirical result
+# below is unchanged: still the same two operator-only exemptions.
 # -- and a record produced by driving the real classifier through
 # _drive_produced_arc's SUCCESS/reportable path (below) carries every one
 # of those 21 keys, INCLUDING 'sequence' (classifier.py's
@@ -194,9 +201,10 @@ def _extract_forwarder_record_keys(script_text):
 # builds, job_assessment and abstention alike -- not correction-only, the
 # way test_phase38_reporter_path.py's HAND-AUTHORED _sidecar_record()
 # fixture implies via its own _SEQUENCE_ONLY_ON_CORRECTIONS exemption).
-# 'study_id'/'study_version' are NOT in the extracted list at all (the
-# forwarder heredoc has no literal record.get('study_id') call today), so
-# they are not a candidate for this set either way.
+# 'study_id'/'study_version' were NOT in the extracted list when this was
+# measured (the forwarder had no literal record.get('study_id') call); v2
+# forwards them as basis.study, and classifier.py writes both unconditionally,
+# so they need no exemption either.
 #
 # The empirical result is therefore an EMPTY set: every literally-keyed
 # forwarder the reporter reads IS present on a classifier-produced,
@@ -654,19 +662,23 @@ class TestPhase47EndToEnd(unittest.TestCase):
         metadata_raw = _metadata_of(argv)
         self.assertIsNotNone(metadata_raw, argv)
         meta = json.loads(metadata_raw)
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED', meta)
-        self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
+        # quick-261017-nck: v2 wire paths (the sidecar keeps its v1 names).
+        self.assertEqual(meta_path(meta, 'basis.evidence'), 'MODEL_ESTIMATED', meta)
+        self.assertEqual(meta.get('status'), 'candidate', meta)
         # Provenance survives the withholding -- Phase 43's rule that
         # withholding the VALUE must not withhold the FACT that an estimate
         # happened. An auditor still sees a model produced a judgment here.
-        self.assertEqual(meta.get('evaluator'), 'llm', meta)
-        self.assertIn('evaluator_version', meta, meta)
-        self.assertEqual(meta.get('model'), 'claude-sonnet-4-6', meta)
-        self.assertIn('confidence', meta, meta)
-        # ...and the value family is gone, all of it, not just the CLI scalars.
-        for k in ('value_low', 'value_base', 'value_high', 'estimated_value',
-                  'net_value', 'bounds_source', 'assumptions'):
-            self.assertNotIn(k, meta, f'{k} rode out on a refused record: {meta!r}')
+        self.assertEqual(meta_path(meta, 'estimator.name'), 'llm', meta)
+        self.assertIsNotNone(meta_path(meta, 'estimator.versions.evaluator'), meta)
+        self.assertEqual(meta_path(meta, 'estimator.model'), 'claude-sonnet-4-6', meta)
+        self.assertIsNotNone(meta_path(meta, 'basis.confidence'), meta)
+        # ...and the value family is gone, all of it, not just the CLI scalars:
+        # no `value` group, no assumption-derived basis scalars.
+        self.assertNotIn('value', meta, f'value group rode out on a refused record: {meta!r}')
+        for k in ('role', 'hours_saved', 'hourly_rate'):
+            self.assertNotIn(k, meta['basis'], f'basis.{k} rode out on a refused record: {meta!r}')
+        for k in ('estimated_value', 'bounds_source', 'net_value'):
+            self.assertNotIn(k, json.dumps(meta), f'{k} rode out on a refused record: {meta!r}')
 
     def test_no_transcript_text_reaches_any_captured_argv(self):
         """T-47-03 (EGV-20 posture, carried into the produced-artifact
@@ -784,8 +796,8 @@ class TestPhase47EndToEnd(unittest.TestCase):
         metadata_raw = _metadata_of(argv)
         self.assertIsNotNone(metadata_raw, argv)
         meta = json.loads(metadata_raw)
-        self.assertIn('evaluator', meta, meta)
-        self.assertIn('evaluator_version', meta, meta)
+        self.assertIsNotNone(meta_path(meta, 'estimator.name'), meta)
+        self.assertIsNotNone(meta_path(meta, 'estimator.versions.evaluator'), meta)
 
     # -- Plan 47-02 Task 2: the withheld/candidate path (D-07 path 3) ------
 
@@ -851,11 +863,11 @@ class TestPhase47EndToEnd(unittest.TestCase):
         metadata_raw = _metadata_of(argv)
         self.assertIsNotNone(metadata_raw, argv)
         meta = json.loads(metadata_raw)
-        self.assertIn('evidence_class', meta, meta)
-        self.assertIn('evaluator', meta, meta)
-        self.assertIn('evaluator_version', meta, meta)
-        self.assertIn('model', meta, meta)
-        self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
+        self.assertIsNotNone(meta_path(meta, 'basis.evidence'), meta)
+        self.assertIsNotNone(meta_path(meta, 'estimator.name'), meta)
+        self.assertIsNotNone(meta_path(meta, 'estimator.versions.evaluator'), meta)
+        self.assertIsNotNone(meta_path(meta, 'estimator.model'), meta)
+        self.assertEqual(meta.get('status'), 'candidate', meta)
 
     # -- Plan 47-02 Task 3: the negative/zero net-value path (D-07 path 4) -
 
@@ -943,14 +955,14 @@ class TestPhase47EndToEnd(unittest.TestCase):
         # and the wire says plainly that an estimate happened and was withheld.
         # A reader can still tell this job from one that was never valued,
         # which is the substitution EGV-17 prevents.
-        self.assertEqual(meta.get('reportability_status'), 'candidate', meta)
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED', meta)
-        self.assertEqual(meta.get('evaluator'), 'llm', meta)
-        for k in ('net_value', 'value_low', 'value_base', 'value_high',
-                  'estimated_value'):
-            self.assertNotIn(k, meta, f'{k} rode out on a refused record: {meta!r}')
-        self.assertIn('supplied_costs', meta, meta)
-        self.assertIn('cost_coverage', meta, meta)
+        self.assertEqual(meta.get('status'), 'candidate', meta)
+        self.assertEqual(meta_path(meta, 'basis.evidence'), 'MODEL_ESTIMATED', meta)
+        self.assertEqual(meta_path(meta, 'estimator.name'), 'llm', meta)
+        self.assertNotIn('value', meta, f'value group rode out on a refused record: {meta!r}')
+        for k in ('net_value', 'estimated_value'):
+            self.assertNotIn(k, json.dumps(meta), f'{k} rode out on a refused record: {meta!r}')
+        self.assertIn('subtracted', meta['costs'], meta)
+        self.assertIn('not_counted', meta['costs'], meta)
 
     # -- Plan 47-03 Task 1: the correction path (D-18) ----------------------
 

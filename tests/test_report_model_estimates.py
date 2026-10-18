@@ -23,6 +23,7 @@ from unittest import mock
 from tests import test_phase38_reporter_path as p38
 from tests import test_phase53_reportable_class_gate as p53
 from tests import test_outcome_metrics_report as om
+from tests._compat_helpers import meta_path
 
 MODEL = 'MODEL_ESTIMATED'
 OPTED_IN = {'experimentalReportEstimates': True, 'reportModelEstimates': True}
@@ -92,8 +93,8 @@ class ReporterOptInTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), MODEL)
-        self.assertEqual(meta.get('value_low'), 446.25)
+        self.assertEqual(meta_path(meta, 'basis.evidence'), MODEL)
+        self.assertEqual(meta_path(meta, 'value.low'), 446.25)
 
     def test_without_the_opt_in_the_value_is_withheld_but_provenance_ships(self):
         for config in (
@@ -108,8 +109,8 @@ class ReporterOptInTests(unittest.TestCase):
                 self.assertNotIn('--outcome-value', argv)
                 self.assertNotIn('--outcome-currency', argv)
                 meta = json.loads(self._metadata_value(argv))
-                self.assertEqual(meta.get('evidence_class'), MODEL)
-                self.assertNotIn('value_low', meta)
+                self.assertEqual(meta_path(meta, 'basis.evidence'), MODEL)
+                self.assertNotIn('value', meta)
 
     def test_opt_in_does_not_promote_a_candidate_record(self):
         """The reporter only obeys reportability_status; the switch alone does

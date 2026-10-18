@@ -444,8 +444,10 @@ class ReporterAttributionAndValueTests(unittest.TestCase):
         wire, defeating the single constraint the design rests on."""
         src = self._forwarder_src()
         i = src.index("attribution_fraction = record.get('attribution_fraction')")
-        block = src[i:i + 1400]
-        frac_at = block.index("meta['attribution_fraction']")
+        block = src[i:i + 1800]
+        # quick-261017-nck (v2 wire): the pair is inserted together as
+        # value['attribution'] = {'fraction': ..., 'basis': ...}.
+        frac_at = block.index("value['attribution']")
         basis_guard = block.index("attribution_basis.strip()")
         self.assertLess(
             basis_guard, frac_at,

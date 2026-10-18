@@ -575,7 +575,8 @@ class QueueShiftGuardTests(unittest.TestCase):
             sidecar=_non_success_sidecar_record(job_id, execution_status='CANCELLED'))
         self.assertNotIn('--outcome-value', argv)
         meta = json.loads(_metadata_value(argv))
-        self.assertIn('supplied_costs', meta)
+        # quick-261017-nck: v2 wire path costs.subtracted.
+        self.assertIn('subtracted', meta['costs'])
         self.assertEqual(meta.get('failure_reason'), reason)
         self.assertEqual(meta.get('outcome_basis'), 'undetermined')
 
@@ -669,8 +670,9 @@ class CeilingTests(unittest.TestCase):
         # Tier 1 only: the value family is shed, provenance survives.
         meta = self._shed_case(3400)
         self.assertTrue(meta.get('metadata_truncated'))
-        self.assertNotIn('net_value', meta)
-        self.assertIn('evaluator', meta)
+        # quick-261017-nck: v2 paths -- the value tier is the `value` group.
+        self.assertNotIn('value', meta)
+        self.assertIn('name', meta['estimator'])
         self.assertEqual(meta.get('outcome_basis'), 'undetermined')
         self.assertEqual(meta.get('failure_reason'), self.reason)
 
@@ -678,9 +680,8 @@ class CeilingTests(unittest.TestCase):
         # family is shed too. The two Phase 66 keys must still survive.
         meta = self._shed_case(3800)
         self.assertTrue(meta.get('metadata_truncated'))
-        self.assertNotIn('net_value', meta)
-        self.assertNotIn('evaluator', meta)
-        self.assertNotIn('model', meta)
+        self.assertNotIn('value', meta)
+        self.assertNotIn('estimator', meta)
         self.assertEqual(meta.get('outcome_basis'), 'undetermined')
         self.assertEqual(meta.get('failure_reason'), self.reason)
 

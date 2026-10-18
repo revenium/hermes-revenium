@@ -259,7 +259,8 @@ class LearnedRoleCardTracerTests(_Harness):
         result = _run_forwarder(body, record)
         self.assertEqual(result.returncode, 0, result.stderr)
         meta = json.loads(result.stdout.strip())
-        self.assertEqual(meta['assumptions']['inferred_role'], 'Senior Software Engineer')
+        # quick-261017-nck: v2 wire path basis.role.
+        self.assertEqual(meta['basis']['role'], 'Senior Software Engineer')
 
     def test_a_valid_new_role_is_persisted_with_the_models_collapsed_spelling(self):
         self.seed_real()

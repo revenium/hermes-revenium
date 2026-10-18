@@ -24,6 +24,7 @@ from unittest import mock
 from tests import test_outcome_metrics_report as om
 from tests import test_phase38_reporter_path as p38
 from tests import test_phase53_reportable_class_gate as p53
+from tests._compat_helpers import meta_path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_DIR = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
@@ -35,8 +36,8 @@ OPTED_IN = {'experimentalReportEstimates': True, 'reportModelEstimates': True}
 
 def _wire_evidence(meta):
     """The evidence label as the --metadata blob carries it. The one place
-    that knows the wire path of the label."""
-    return meta.get('evidence_class')
+    that knows the wire path of the label (v2: basis.evidence)."""
+    return meta_path(meta, 'basis.evidence')
 
 
 class _Runner:
