@@ -462,7 +462,7 @@ class SourceSwapTests(_ValuationSeamTestCase):
         mod = self._load(boundaries=None)
         val_mod = mod._load_valuation_module()
         self.assertEqual(
-            'MODEL_ESTIMATED_DEMO',
+            'MODEL_ESTIMATED',
             val_mod.resolve_evidence_class('baselines_valuation_fixture'),
         )
         self.assertNotIn(
@@ -484,7 +484,7 @@ class SourceFailureFallbackTests(_ValuationSeamTestCase):
         expected = round(raw['estimated_hours_saved'] * raw['assumed_loaded_rate'], 2)
         self.assertIsNotNone(result)
         self.assertEqual(expected, result['estimated_value'])
-        self.assertEqual('MODEL_ESTIMATED_DEMO', result['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', result['evidence_class'])
         self.assertEqual(
             'hours_times_rate',
             mod._valuation_evidence_impl_name('baselines_valuation_fixture', False, True),

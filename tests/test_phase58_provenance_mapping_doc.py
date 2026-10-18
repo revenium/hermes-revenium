@@ -409,7 +409,7 @@ class ProvenanceMappingCoverageShapeTests(unittest.TestCase):
         where a real reporter exists ("the same reading that makes
         SELF_REPORTED the correct value for CUSTOMER_CONFIGURED in Table
         B"). One incidental mention is not a restatement; enumerating the
-        gate's membership would be. Note MODEL_ESTIMATED_DEMO is
+        gate's membership would be. Note MODEL_ESTIMATED is
         deliberately NOT a member of _REPORTABLE_EVIDENCE_CLASSES -- Phase
         53's gate refuses it -- so the section's own heading, which names
         the label, can never itself trip this assertion.

@@ -964,7 +964,7 @@ _ROLE_VOCABULARY_BUDGET_CHARS = 4096
 # 2. A learned rate is a prompt anchor and NEVER an operator rateCard. It
 #    never enters config, _validate_assessment, the valuation boundary or
 #    reportability, so it cannot change evidence_class (it stays
-#    MODEL_ESTIMATED_DEMO, authority evaluator) or make a value reportable.
+#    MODEL_ESTIMATED, authority evaluator) or make a value reportable.
 #    An operator rateCard (#140) disables learned mode entirely.
 # 3. PROMPT_VERSION is NOT bumped. Its comment ties a bump to "the taxonomy
 #    shape, the job-inference prompt, or the outcome-evaluation policy"; it
@@ -1704,7 +1704,7 @@ LLM_EVALUATOR_VERSION = "1"
 # literal, duplicated from EVIDENCE_CLASS_MODEL_ESTIMATED (declared and
 # pinned equal to this literal further down this module), rather than a
 # reference to that not-yet-defined name.
-_LLM_EVIDENCE_CLASS_LITERAL = "MODEL_ESTIMATED_DEMO"
+_LLM_EVIDENCE_CLASS_LITERAL = "MODEL_ESTIMATED"
 _register_llm_evaluator()
 
 
@@ -1757,7 +1757,7 @@ def _register_classification_impl() -> None:
     # SAME forced literal _register_llm_evaluator() already established for
     # exactly this reason, rather than the not-yet-defined name -- see that
     # function's own comment for the identical constraint. The naked-LLM
-    # classifier's honest evidence class is the same MODEL_ESTIMATED_DEMO
+    # classifier's honest evidence class is the same MODEL_ESTIMATED
     # value either way.
     _cl.register("llm", _llm_classify, LLM_EVALUATOR_VERSION,
                  evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
@@ -1822,7 +1822,7 @@ def _register_valuation_impl() -> None:
     # _register_llm_evaluator's own comment for the identical constraint.
     # Deriving from a model's own hours-and-rate assumptions is a model
     # estimate whatever the arithmetic, so the honest class either way is
-    # MODEL_ESTIMATED_DEMO.
+    # MODEL_ESTIMATED.
     _val.register("hours_times_rate", _hours_times_rate, "1",
                   evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
 
@@ -1831,7 +1831,7 @@ def _register_valuation_impl() -> None:
     # not the not-yet-defined EVIDENCE_CLASS_MODEL_ESTIMATED global -- see
     # this function's own comment on the `hours_times_rate` registration
     # for the identical constraint (this call runs before that global
-    # exists). D-05: MODEL_ESTIMATED_DEMO is the one class
+    # exists). D-05: MODEL_ESTIMATED is the one class
     # _REPORTABLE_EVIDENCE_CLASSES refuses, so this fixture can never
     # manufacture a reportable row however it is configured.
     _val.register("baselines_valuation_fixture", _val._baselines_valuation_fixture,
@@ -1898,7 +1898,7 @@ def _register_evidence_impl() -> None:
     # exactly this reason, rather than the not-yet-defined name -- see
     # _register_llm_evaluator's own comment for the identical constraint.
     # The built-in config-opt-in policy is a fixed rule over model-derived
-    # numbers, so the honest class either way is MODEL_ESTIMATED_DEMO.
+    # numbers, so the honest class either way is MODEL_ESTIMATED.
     _evd.register("config_opt_in", _config_opt_in, "1",
                   evidence_class=_LLM_EVIDENCE_CLASS_LITERAL)
 
@@ -2152,7 +2152,7 @@ def _fold_jobs_into_one(valid_jobs: list) -> list:
 # `evidence_class` is FORCED here, never read from evaluator output: provenance
 # that a model can assert is not provenance. A future non-LLM evaluator reports a
 # DIFFERENT evidence class and must not reuse this one.
-EVIDENCE_CLASS_MODEL_ESTIMATED = "MODEL_ESTIMATED_DEMO"
+EVIDENCE_CLASS_MODEL_ESTIMATED = "MODEL_ESTIMATED"
 
 # EGV-10 (D-01): the nine claim labels, as a flat, unordered frozenset --
 # an explicit allow-list, matching SUPPORTED_CURRENCIES' declaration shape
@@ -2178,7 +2178,7 @@ EVIDENCE_CLASSES = frozenset({
     "ACTIVITY_MEASURED",
     "OUTPUT_OBSERVED",
     "OUTCOME_OBSERVED",
-    "MODEL_ESTIMATED_DEMO",
+    "MODEL_ESTIMATED",
     "CUSTOMER_CONFIGURED",
     "CUSTOMER_CONFIRMED",
     "ASSOCIATIONAL",
@@ -2289,7 +2289,7 @@ assert len(_DECLARABLE_EVIDENCE_CLASSES) == 6, (
 # never hand-listed -- so it cannot drift from the vocabulary the way a third
 # hand-synced list would.
 #
-# WHY MODEL_ESTIMATED_DEMO IS REFUSED, and why that is not a ranking:
+# WHY MODEL_ESTIMATED IS REFUSED, and why that is not a ranking:
 # `revenium jobs roi <id>` surfaces no evidence_class, no evaluator and no
 # confidence, in either its JSON or its table output -- established by live
 # verification and recorded in docs/claim-distinctions-and-evidence-boundaries.md.
@@ -2309,7 +2309,7 @@ assert len(_DECLARABLE_EVIDENCE_CLASSES) == 6, (
 # Phase 50 chose over policy wherever both were available. ONE narrow exception
 # sits beside the set rather than in it: llmOutcomeEvaluation.reportModelEstimates,
 # together with experimentalReportEstimates (both literal true), admits
-# MODEL_ESTIMATED_DEMO and nothing else -- see _model_estimates_opted_in. It
+# MODEL_ESTIMATED and nothing else -- see _model_estimates_opted_in. It
 # exists for installs with no customer-supplied rates, revenue cards or
 # confirmations, where the model's estimate is the only value; the read-surface
 # risk above applies in full once it is on. hermes-report.sh's outcome gate and
@@ -2329,7 +2329,7 @@ assert (
     "constant is the whole point of this constant existing separately"
 )
 assert EVIDENCE_CLASS_MODEL_ESTIMATED not in _REPORTABLE_EVIDENCE_CLASSES, (
-    "MODEL_ESTIMATED_DEMO is a member of _REPORTABLE_EVIDENCE_CLASSES -- the "
+    "MODEL_ESTIMATED is a member of _REPORTABLE_EVIDENCE_CLASSES -- the "
     "one label this gate exists to refuse has drifted back into it"
 )
 assert len(_REPORTABLE_EVIDENCE_CLASSES) == 5, (
@@ -2675,7 +2675,7 @@ def _valuation_evidence_impl_name(
 
     Returns "hours_times_rate" -- the builtin's own registered name,
     whose registration (classifier.py's `_register_valuation_impl`) fixes
-    its declared class at MODEL_ESTIMATED_DEMO -- whenever this call's
+    its declared class at MODEL_ESTIMATED -- whenever this call's
     value came from the builtin:
       * `fall_back_to_builtin`: the configured implementation could not
         be resolved, or raised, so `_validate_assessment` computed
@@ -2702,7 +2702,7 @@ def _valuation_evidence_impl_name(
     bound. Evidence_class resolution treats `None` as "assume builtin"
     instead, because the risk here runs the other way: shipping a model
     estimate as CUSTOMER_CONFIGURED (reportable) is the defect this fixes;
-    treating a genuinely customer-configured value as MODEL_ESTIMATED_DEMO
+    treating a genuinely customer-configured value as MODEL_ESTIMATED
     (non-reportable) on mere doubt about an identity check is a lost row,
     never a provenance lie.
     """
@@ -3760,7 +3760,7 @@ def _resolve_finish_reason(response) -> str:
 
 
 def _model_estimates_opted_in(cfg: "dict | None") -> bool:
-    """The one operator switch that admits MODEL_ESTIMATED_DEMO past the
+    """The one operator switch that admits MODEL_ESTIMATED past the
     evidence-class gate: `reportModelEstimates` AND `experimentalReportEstimates`,
     both the literal JSON boolean true, identity-compared like every other
     money switch here, so a near-miss ("true", 1) cannot turn it on.
@@ -3768,7 +3768,7 @@ def _model_estimates_opted_in(cfg: "dict | None") -> bool:
     This narrows D-02 rather than discarding it. _REPORTABLE_EVIDENCE_CLASSES
     is unchanged and still refuses the forced constant by default; only an
     install that names this key explicitly ships model estimates, which then
-    still carry evidence_class=MODEL_ESTIMATED_DEMO and the full provenance
+    still carry evidence_class=MODEL_ESTIMATED and the full provenance
     family in --metadata. The motive is an install with no customer-supplied
     rates, revenue cards or confirmations, where the estimate is the only
     value there is. hermes-report.sh applies the same rule at its own gate,

@@ -30,7 +30,7 @@ import sys as _sys
 import tempfile
 import unittest
 
-from tests._compat_helpers import ROOT, SCRIPTS_DIR
+from tests._compat_helpers import ROOT, SCRIPTS_DIR, meta_path
 
 PLUGIN_DIR = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
 HERMES_REPORT_SH = SCRIPTS_DIR / 'hermes-report.sh'
@@ -100,7 +100,7 @@ _TYPICAL_ASSESSMENT = {
     'assumptions': {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
     'evaluator': 'naked-llm-evaluator', 'evaluator_version': 'v1.0.0',
     'model': 'some-model-string-id',
-    'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+    'evidence_class': 'MODEL_ESTIMATED', 'reportability_status': 'reportable',
     'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
 }
 
@@ -133,19 +133,21 @@ def _over_ceiling_assessment():
         },
         'evaluator': 'naked-llm-evaluator-name', 'evaluator_version': 'v1.0.0',
         'model': 'some-model-string-id',
-        'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+        'evidence_class': 'MODEL_ESTIMATED', 'reportability_status': 'reportable',
         'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
         'double_counting_group': 'g' * 64,
     }
 
 
 _OVER_CEILING_FAILURE_REASON_LEN = 3500
+# quick-261017-nck: v2 dotted wire paths. hermes-report.sh's own tier tuples
+# are the source of truth; these name what this module asserts on.
 _VALUE_FAMILY_KEYS = (
-    'value_low', 'value_base', 'value_high', 'bounds_source',
-    'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
+    'value', 'costs', 'basis.role', 'basis.hours_saved', 'basis.hourly_rate',
 )
 _KEPT_PROVENANCE_KEYS = (
-    'evaluator', 'evaluator_version', 'model', 'evidence_class', 'reportability_status',
+    'estimator.name', 'estimator.versions.evaluator', 'estimator.model',
+    'basis.evidence', 'status',
 )
 
 
@@ -216,9 +218,9 @@ class MetadataEnvelopeTruncationTests(unittest.TestCase):
         meta = json.loads(out)
         self.assertIs(meta.get('metadata_truncated'), True)
         for key in _VALUE_FAMILY_KEYS:
-            self.assertNotIn(key, meta, f'{key} (value family) survived truncation')
+            self.assertIsNone(meta_path(meta, key), f'{key} (value family) survived truncation')
         for key in _KEPT_PROVENANCE_KEYS:
-            self.assertIn(key, meta, f'{key} (provenance) was dropped when only the value family should yield')
+            self.assertIsNotNone(meta_path(meta, key), f'{key} (provenance) was dropped when only the value family should yield')
         self.assertIn('source', meta)
         self.assertIn('failure_reason', meta)
 
@@ -844,29 +846,32 @@ class RoleForwarderTests(unittest.TestCase):
         record['assumptions'].update(assumption_overrides)
         return record
 
-    def test_role_is_appended_after_hours_and_rate(self):
-        """(a) Order: the role is the LAST key of the forwarded assumptions."""
+    def test_role_precedes_hours_and_rate_in_basis(self):
+        """(a) Order: basis.role, basis.hours_saved, basis.hourly_rate."""
         meta = json.loads(self._ship(self._record()))
+        # v2: the role leads basis' assumption-derived scalars
+        # (basis.role, basis.hours_saved, basis.hourly_rate).
+        keys = list(meta['basis'])
         self.assertEqual(
-            list(meta['assumptions']),
-            ['estimated_hours_saved', 'assumed_loaded_rate', 'inferred_role'],
+            keys[keys.index('role'):keys.index('role') + 3],
+            ['role', 'hours_saved', 'hourly_rate'],
         )
-        self.assertEqual(meta['assumptions']['inferred_role'], 'Senior Software Engineer')
+        self.assertEqual(meta_path(meta, 'basis.role'), 'Senior Software Engineer')
 
     def test_overlong_hand_edited_role_ships_first_60_characters(self):
         """(b) A hand-edited 100-char role is bounded at 60 characters."""
         role = ''.join(chr(ord('a') + (i % 26)) for i in range(100))
         meta = json.loads(self._ship(self._record(inferred_role=role)))
-        self.assertEqual(meta['assumptions']['inferred_role'], role[:60])
+        self.assertEqual(meta_path(meta, 'basis.role'), role[:60])
 
     def test_blank_or_non_string_role_adds_no_key_but_hours_and_rate_ship(self):
         """(c) '', whitespace, a number, None and a list add no role key."""
         for bad in ('', '   ', 42, None, ['x']):
             with self.subTest(bad=bad):
                 meta = json.loads(self._ship(self._record(inferred_role=bad)))
-                self.assertNotIn('inferred_role', meta['assumptions'])
-                self.assertEqual(meta['assumptions']['estimated_hours_saved'], 3.5)
-                self.assertEqual(meta['assumptions']['assumed_loaded_rate'], 150.0)
+                self.assertNotIn('role', meta['basis'])
+                self.assertEqual(meta_path(meta, 'basis.hours_saved'), 3.5)
+                self.assertEqual(meta_path(meta, 'basis.hourly_rate'), 150.0)
 
     def test_producer_to_wire_role_is_sanitised_by_the_real_classifier(self):
         """(d) The real _validate_assessment + _build_job_assessment turn
@@ -891,7 +896,7 @@ class RoleForwarderTests(unittest.TestCase):
             double_counting_group='g', model='m')
         self.assertIsNotNone(rec)
         meta = json.loads(self._ship(rec))
-        self.assertEqual(meta['assumptions']['inferred_role'], 'a b c')
+        self.assertEqual(meta_path(meta, 'basis.role'), 'a b c')
 
     def test_basis_and_narrative_pair_never_reach_the_wire(self):
         """(e) Top-level basis / candidate_downstream_outcome /
@@ -903,13 +908,21 @@ class RoleForwarderTests(unittest.TestCase):
         record['counterfactual_assumption'] = 'KB1-CF-CANARY'
         out = self._ship(record)
         meta = json.loads(out)
-        for key in ('basis', 'candidate_downstream_outcome', 'counterfactual_assumption'):
+        # C-3: the wire now HAS a `basis` group, so absence of the key is no
+        # longer the proof. The sidecar's prose `basis` string is absent
+        # (canary check below) and the wire basis is an allow-listed dict.
+        self.assertIsInstance(meta['basis'], dict)
+        self.assertLessEqual(
+            set(meta['basis']),
+            {'evidence', 'mechanism', 'role', 'hours_saved', 'hourly_rate',
+             'confidence', 'study'})
+        for key in ('candidate_downstream_outcome', 'counterfactual_assumption'):
             self.assertNotIn(key, meta)
         for canary in ('KB1-BASIS-CANARY', 'KB1-OUTCOME-CANARY', 'KB1-CF-CANARY'):
             self.assertNotIn(canary, out)
 
     def test_over_ceiling_record_sheds_the_role_with_the_rest_of_assumptions(self):
-        """(f) The role is inside `assumptions`, so tier 1 sheds it with the
+        """(f) basis.role is in the value tier, so tier 1 sheds it with the
         value family; truncation is marked and provenance survives."""
         record = _over_ceiling_assessment()
         record['assumptions'] = dict(
@@ -918,11 +931,11 @@ class RoleForwarderTests(unittest.TestCase):
             record, status='FAILED',
             failure_reason='r' * _OVER_CEILING_FAILURE_REASON_LEN)
         meta = json.loads(out)
-        self.assertNotIn('assumptions', meta)
+        self.assertIsNone(meta_path(meta, 'basis.role'))
         self.assertNotIn('Senior Software Engineer', out)
         self.assertIs(meta.get('metadata_truncated'), True)
         for key in _KEPT_PROVENANCE_KEYS:
-            self.assertIn(key, meta)
+            self.assertIsNotNone(meta_path(meta, key))
 
 
 if __name__ == '__main__':

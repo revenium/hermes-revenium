@@ -324,7 +324,7 @@ for path in sorted(glob.glob(os.path.join(os.environ["ASSESS_DIR"], "*.jsonl")))
             except ValueError: continue
             if r.get("kind")!="job_assessment": continue
             if r.get("reportability_status")!="reportable": continue
-            if r.get("evidence_class")=="MODEL_ESTIMATED_DEMO" and not model_ok: continue
+            if r.get("evidence_class") in ("MODEL_ESTIMATED", "MODEL_ESTIMATED_DEMO") and not model_ok: continue
             t=r.get("job_type") or ""
             if t and t not in seen:
                 seen.add(t); print(t)
@@ -473,9 +473,12 @@ for path in sorted(glob.glob(os.path.join(assess_dir, '*.jsonl'))):
 # stand in for a newer withheld estimate, and append a superseded value
 # permanently. A job whose latest assessment is a withheld model estimate
 # appends nothing this tick.
+# quick-261017-nck (LD-4): MODEL_ESTIMATED_DEMO is the label sidecars carried
+# before the rename; both labels are one class. A tuple, not a set, so an
+# unhashable hand-edited value compares unequal instead of raising.
 if not model_estimates_ok:
     records = {jid: r for jid, r in records.items()
-               if r.get('evidence_class') != 'MODEL_ESTIMATED_DEMO'}
+               if r.get('evidence_class') not in ('MODEL_ESTIMATED', 'MODEL_ESTIMATED_DEMO')}
 
 emitted = 0
 for jid, r in sorted(records.items()):

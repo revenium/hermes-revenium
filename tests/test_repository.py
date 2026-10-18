@@ -897,10 +897,10 @@ class RepositoryTests(unittest.TestCase):
         Both files below SHIP INSIDE the skill bundle, so the contract reaches
         every host. This guard also pins the evidence-class semantics, which are
         the whole reason the field exists: a later edit must not quietly widen
-        MODEL_ESTIMATED_DEMO to cover measured value.
+        MODEL_ESTIMATED to cover measured value.
         """
         jd = (SKILL / 'references' / 'job-declaration.md').read_text(errors='ignore')
-        for needle in ('MODEL_ESTIMATED_DEMO', 'estimated_value', 'assumed_loaded_rate',
+        for needle in ('MODEL_ESTIMATED', 'estimated_value', 'assumed_loaded_rate',
                        'estimated_hours_saved', 'evidence_class', 'assessment'):
             self.assertIn(needle, jd,
                           f'job-declaration.md no longer documents {needle!r}')
@@ -911,7 +911,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertIn(
             'different evidence class', jd,
             'the rule that a non-LLM evaluator reports its OWN evidence class '
-            'is what stops MODEL_ESTIMATED_DEMO being widened to cover measured value',
+            'is what stops MODEL_ESTIMATED being widened to cover measured value',
         )
 
         cs = (SKILL / 'references' / 'config-schema.md').read_text(errors='ignore')
@@ -2249,7 +2249,7 @@ exit 0
         required = [
             ('docs/how-it-works.md', 'Live verification against a real tenant',
              'the section marking this claim as a real, dated live run must survive edits'),
-            ('docs/how-it-works.md', 'MODEL_ESTIMATED_DEMO',
+            ('docs/how-it-works.md', 'MODEL_ESTIMATED',
              'a reader must be able to see, in the record itself, that the '
              'reported number is a model estimate, not a measurement'),
             ('docs/how-it-works.md', 'revenium jobs roi',

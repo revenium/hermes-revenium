@@ -32,7 +32,7 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from tests._compat_helpers import ROOT
+from tests._compat_helpers import ROOT, meta_path
 
 PLUGIN_DIR = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
 
@@ -393,13 +393,14 @@ class WireForwardingTests(unittest.TestCase):
     # value.
     def test_loopback_address_class_forwarded(self):
         meta = self._forward({'inference_address_class': 'loopback'})
-        self.assertEqual(meta.get('inference_address_class'), 'loopback')
+        # quick-261017-nck: v2 wire path estimator.endpoint.
+        self.assertEqual(meta_path(meta, 'estimator.endpoint'), 'loopback')
 
     def test_private_and_public_address_classes_forwarded(self):
         for value in ('private', 'public', 'unset'):
             with self.subTest(value):
                 meta = self._forward({'inference_address_class': value})
-                self.assertEqual(meta.get('inference_address_class'), value)
+                self.assertEqual(meta_path(meta, 'estimator.endpoint'), value)
 
     # Behavior 2: an out-of-set value is DROPPED -- the key is absent from
     # meta, never passed through.
@@ -407,8 +408,8 @@ class WireForwardingTests(unittest.TestCase):
         for bad in ('LOCAL', 'intranet', '', 'Loopback', 'loopback ', 123, None, [], {}):
             with self.subTest(repr(bad)):
                 meta = self._forward({'inference_address_class': bad})
-                self.assertNotIn(
-                    'inference_address_class', meta,
+                self.assertIsNone(
+                    meta_path(meta, 'estimator.endpoint'),
                     f'out-of-set value {bad!r} was forwarded, not dropped',
                 )
 
@@ -416,19 +417,19 @@ class WireForwardingTests(unittest.TestCase):
     # string and byte-sliced at 32; a non-string or empty value adds no key.
     def test_provider_forwarded_and_sliced_at_32(self):
         meta = self._forward({'inference_provider': 'openrouter'})
-        self.assertEqual(meta.get('inference_provider'), 'openrouter')
+        self.assertEqual(meta_path(meta, 'estimator.provider'), 'openrouter')
 
         overlong = 'p' * 100
         meta = self._forward({'inference_provider': overlong})
-        self.assertEqual(meta.get('inference_provider'), 'p' * 32)
-        self.assertEqual(len(meta['inference_provider'].encode('utf-8')), 32)
+        self.assertEqual(meta_path(meta, 'estimator.provider'), 'p' * 32)
+        self.assertEqual(len(meta['estimator']['provider'].encode('utf-8')), 32)
 
     def test_empty_or_non_string_provider_not_forwarded(self):
         for bad in ('', 123, None, [], {}):
             with self.subTest(repr(bad)):
                 meta = self._forward({'inference_provider': bad})
-                self.assertNotIn(
-                    'inference_provider', meta,
+                self.assertIsNone(
+                    meta_path(meta, 'estimator.provider'),
                     f'empty/non-string provider {bad!r} was forwarded, not dropped',
                 )
 
@@ -458,7 +459,7 @@ class WireForwardingTests(unittest.TestCase):
             },
             'evaluator': 'naked-llm-evaluator-name', 'evaluator_version': 'v1.0.0',
             'model': 'some-model-string-id',
-            'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+            'evidence_class': 'MODEL_ESTIMATED', 'reportability_status': 'reportable',
             'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
             'double_counting_group': 'g' * 64,
             'inference_provider': 'openrouter',
@@ -467,13 +468,13 @@ class WireForwardingTests(unittest.TestCase):
         reason = 'r' * 3500  # matches plan 46-01's _OVER_CEILING_FAILURE_REASON_LEN
         meta = self._forward(record, status='FAILED', failure_reason=reason)
         self.assertIs(meta.get('metadata_truncated'), True)
-        # Value family gone (tier 1 popped).
-        for key in ('value_low', 'value_base', 'value_high', 'net_value'):
-            self.assertNotIn(key, meta, f'{key} (value family) survived truncation')
+        # Value tier gone (tier 1 popped): the whole value group and the costs.
+        for key in ('value', 'costs'):
+            self.assertNotIn(key, meta, f'{key} (value tier) survived truncation')
         # Provenance -- including the two locality keys -- still present.
-        self.assertEqual(meta.get('inference_provider'), 'openrouter')
-        self.assertEqual(meta.get('inference_address_class'), 'public')
-        self.assertIn('evaluator', meta)
+        self.assertEqual(meta_path(meta, 'estimator.provider'), 'openrouter')
+        self.assertEqual(meta_path(meta, 'estimator.endpoint'), 'public')
+        self.assertIn('name', meta['estimator'])
 
     def test_dropped_only_at_provenance_stage_two(self):
         """A record big enough that even the value-family-only drop is not
@@ -488,7 +489,7 @@ class WireForwardingTests(unittest.TestCase):
             'assumptions': {'estimated_hours_saved': 3.5, 'assumed_loaded_rate': 150.0},
             'evaluator': 'naked-llm-evaluator-name', 'evaluator_version': 'v1.0.0',
             'model': 'some-model-string-id',
-            'evidence_class': 'MODEL_ESTIMATED_DEMO', 'reportability_status': 'reportable',
+            'evidence_class': 'MODEL_ESTIMATED', 'reportability_status': 'reportable',
             'confidence': 0.789, 'economic_mechanism': 'augmentation_capacity_expansion',
             'double_counting_group': 'g' * 64,
             'inference_provider': 'openrouter',
@@ -497,10 +498,8 @@ class WireForwardingTests(unittest.TestCase):
         reason = 'r' * (self.ceiling + 2000)  # dwarfs the ceiling by itself
         meta = self._forward(record, status='FAILED', failure_reason=reason)
         self.assertIs(meta.get('metadata_truncated'), True)
-        self.assertNotIn('inference_provider', meta)
-        self.assertNotIn('inference_address_class', meta)
-        self.assertNotIn('evaluator', meta)
-        self.assertNotIn('value_low', meta)
+        self.assertNotIn('estimator', meta)
+        self.assertNotIn('value', meta)
         # Base metering never yields, even though the final blob is still
         # over the ceiling (the failure_reason alone exceeds it) -- D-02.
         self.assertIn('source', meta)

@@ -12,9 +12,9 @@ this repository.
 ### Added
 
 - The evaluator's inferred role now reaches Revenium, and a role learned over time keeps it
-  consistent. `jobs outcome --metadata` carries `assumptions.inferred_role` (60 characters at
-  most, after `assumed_loaded_rate`) on a reportable record only; a candidate record carries
-  no `assumptions`, so no role. `basis` and the narrative fields stay local. With no `rateCard`
+  `jobs outcome --metadata` carries the role as `basis.role` (60 characters at
+  most, before `basis.hours_saved`) on a reportable record only; a candidate record carries
+  no `assumptions`, so no role. The sidecar's `basis` sentence and the narrative fields stay local. With no `rateCard`
   configured, the built-in `llm` evaluator now sees a learned role card: `role-taxonomy.json`,
   seeded with about 24 common roles and grown by the classifier. The prompt lists the known
   roles most-used first and asks the model to copy one verbatim or propose a new short title.
@@ -30,6 +30,54 @@ this repository.
   card learns from empty.
 
 ### Changed
+
+- `jobs outcome --metadata` is now `schema_version` 2, and the evidence class
+  `MODEL_ESTIMATED_DEMO` is renamed `MODEL_ESTIMATED`. This is a hard switch with no
+  dual-emit: every new job's `outcomeMetadata` in Revenium is v2, and jobs reported before
+  this change keep their v1 blob. Version 1 was one flat list of about thirty keys; version 2
+  groups them into `value`, `basis`, `costs` and `estimator`, in a fixed order:
+  `schema_version`, `source`, `status`, `session`, `failure_reason`, `outcome_basis`,
+  `corrected`, `correction_sequence`, `value`, `basis`, `costs`, `estimator`,
+  `metadata_truncated`. The object is still compact JSON of at most 4096 bytes, and the byte
+  ceiling now sheds nested paths (the value tier first, then provenance) and never leaves an
+  empty group. The key map:
+
+  | v1 key | v2 path |
+  |---|---|
+  | `assessment_schema_version` | `schema_version` (always `2`) |
+  | `reportability_status` | `status` |
+  | `double_counting_group` | `session` |
+  | `value_low`, `value_base`, `value_high` | `value.low`, `value.base`, `value.high` |
+  | the `--outcome-value` sent | `value.reported` (new) |
+  | `net_value` | not forwarded; `value.net` is now `value.reported` less `costs.subtracted` |
+  | `attribution_fraction`, `attribution_basis` | `value.attribution.fraction`, `value.attribution.basis` |
+  | `evidence_class` | `basis.evidence` |
+  | `economic_mechanism` | `basis.mechanism` |
+  | `assumptions.inferred_role`, `.estimated_hours_saved`, `.assumed_loaded_rate` | `basis.role`, `basis.hours_saved`, `basis.hourly_rate` |
+  | `confidence` | `basis.confidence` |
+  | `study_id`, `study_version` | `basis.study.id`, `basis.study.version` (newly sent) |
+  | `supplied_costs` | `costs.subtracted` |
+  | `cost_coverage.unknown`, `.known_zero`, `.excluded` | `costs.not_counted`, `costs.known_zero`, `costs.ai_cost` (`metered_separately`) |
+  | the currency | `value.currency` (newly sent) |
+  | `evaluator`, `model` | `estimator.name`, `estimator.model` |
+  | `inference_provider`, `inference_address_class` | `estimator.provider`, `estimator.endpoint` |
+  | `prompt_version`, `taxonomy_version`, `policy_version`, `evaluator_version` | `estimator.versions.prompt`, `.taxonomy`, `.policy`, `.evaluator` |
+  | `corrected`, `correction_sequence` | unchanged |
+
+  Dropped from the wire: `bounds_source` and `evidence_class_authority` (both stay in the
+  sidecar) and `cost_coverage.included` (it always equalled the keys of `costs.subtracted`).
+  `value.net` is `value.reported` less the subtracted costs, not v1's base-derived
+  `net_value`, so it is never above the reported value; it appears only when a value was
+  reported and a non-zero cost was subtracted. `schema_version` is written
+  whenever assessment content is present; a blob with no assessment record (a `FAILED` arc's
+  `source` and `failure_reason`, for instance) is byte-identical to before. `basis.evidence`
+  says who priced the value, and `basis.hours_saved` and `basis.hourly_rate` are always the
+  model's assumptions. Revenium will show `MODEL_ESTIMATED_DEMO` on jobs reported before
+  this change and `MODEL_ESTIMATED` on new ones. A sidecar already on disk with the old
+  label is read as `MODEL_ESTIMATED`, gated and reported identically, and the wire always
+  carries the new label. The `jobs outcome-update` metadata written by
+  `correct-assessment.sh` is unchanged. Anything that reads `outcomeMetadata` and keys on the
+  v1 names needs the table above.
 
 - The cron tick no longer re-derives every historical session every minute. `hermes-report.sh`
   and the shadow pass of `api-event-report.sh` visited every session with tokens on every
@@ -86,7 +134,7 @@ this repository.
 ### Added
 
 - `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's
-  estimates (`MODEL_ESTIMATED_DEMO`) to Revenium. The evidence-class gate added in v1.8
+  estimates (`MODEL_ESTIMATED`) to Revenium. The evidence-class gate added in v1.8
   withheld every model estimate's value with no way to turn that off, so an install without
   rate cards, revenue cards or confirmations could never send a job value. The key must be
   a literal `true` and works only with `experimentalReportEstimates: true`; when it is off, nothing

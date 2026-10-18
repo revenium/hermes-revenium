@@ -357,19 +357,19 @@ class OperatorMechanismTests(unittest.TestCase):
         """MECH-03: mechanism and evidence label are orthogonal (EGV-10)."""
         for m in OPERATOR_ONLY + EVALUATOR_THREE:
             with self.subTest(mechanism=m):
-                p = self._seed('job-ec', evidence_class='MODEL_ESTIMATED_DEMO')
+                p = self._seed('job-ec', evidence_class='MODEL_ESTIMATED')
                 self._run('--job-id', 'job-ec', '--mechanism', m, '--reason', 'x')
                 c = self._corrections(p)[-1]
                 self.assertNotIn('evidence_class', c)
                 first = json.loads(p.read_text().splitlines()[0])
-                self.assertEqual(first['evidence_class'], 'MODEL_ESTIMATED_DEMO')
+                self.assertEqual(first['evidence_class'], 'MODEL_ESTIMATED')
 
     def test_attribution_never_moves_evidence_class(self):
         """D-06: a declared fraction is an operator assertion, not evidence.
         Not even a fraction of 1 promotes the label."""
         for f in ('0', '0.5', '1'):
             with self.subTest(fraction=f):
-                p = self._seed('job-ec2', evidence_class='MODEL_ESTIMATED_DEMO')
+                p = self._seed('job-ec2', evidence_class='MODEL_ESTIMATED')
                 self._run('--job-id', 'job-ec2', '--value', '5', '--currency', 'USD',
                           '--reason', 'x', '--attribution-fraction', f,
                           '--attribution-basis', 'b')
@@ -380,7 +380,7 @@ class OperatorMechanismTests(unittest.TestCase):
         """The three labels Phase 43 shut off and Phase 48's Falsifier 3
         guards must be unreachable from any operator flag."""
         reserved = ('ASSOCIATIONAL', 'QUASI_EXPERIMENTAL_IMPACT', 'EXPERIMENTAL_IMPACT')
-        p = self._seed('job-res', evidence_class='MODEL_ESTIMATED_DEMO')
+        p = self._seed('job-res', evidence_class='MODEL_ESTIMATED')
         self._run('--job-id', 'job-res', '--value', '5', '--currency', 'USD',
                   '--mechanism', 'incremental_revenue', '--reason', 'x',
                   '--attribution-fraction', '1', '--attribution-basis', 'b')
@@ -391,7 +391,7 @@ class OperatorMechanismTests(unittest.TestCase):
     def test_attribution_does_not_set_customer_configured(self):
         """Letting an operator flag move the label is the coupling Phases
         43-48 exist to prevent -- including toward CUSTOMER_CONFIGURED."""
-        p = self._seed('job-cc', evidence_class='MODEL_ESTIMATED_DEMO')
+        p = self._seed('job-cc', evidence_class='MODEL_ESTIMATED')
         self._run('--job-id', 'job-cc', '--value', '5', '--currency', 'USD',
                   '--reason', 'x', '--attribution-fraction', '0.5',
                   '--attribution-basis', 'b')
@@ -444,8 +444,10 @@ class ReporterAttributionAndValueTests(unittest.TestCase):
         wire, defeating the single constraint the design rests on."""
         src = self._forwarder_src()
         i = src.index("attribution_fraction = record.get('attribution_fraction')")
-        block = src[i:i + 1400]
-        frac_at = block.index("meta['attribution_fraction']")
+        block = src[i:i + 1800]
+        # quick-261017-nck (v2 wire): the pair is inserted together as
+        # value['attribution'] = {'fraction': ..., 'basis': ...}.
+        frac_at = block.index("value['attribution']")
         basis_guard = block.index("attribution_basis.strip()")
         self.assertLess(
             basis_guard, frac_at,

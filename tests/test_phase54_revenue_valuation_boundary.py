@@ -37,7 +37,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests._compat_helpers import build_shim, build_state_db, run_script, SCRIPTS_DIR
+from tests._compat_helpers import build_shim, build_state_db, meta_path, run_script, SCRIPTS_DIR
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / 'skills' / 'revenium' / 'plugins' / 'revenium-classifier'
@@ -245,7 +245,8 @@ class DerivationTests(_ValuationBoundaryTestCase):
         lines = [l for l in result.stdout.splitlines() if l.strip()]
         self.assertEqual(1, len(lines))
         meta = json.loads(lines[0])
-        self.assertEqual('incremental_revenue', meta.get('economic_mechanism'))
+        # quick-261017-nck: v2 wire path basis.mechanism.
+        self.assertEqual('incremental_revenue', meta_path(meta, 'basis.mechanism'))
 
     def test_default_install_unchanged(self):
         """With no `boundaries` object and no revenue card,
@@ -1466,8 +1467,8 @@ class RevenuePathFidelityTests(_ValuationBoundaryTestCase):
         lines = [l for l in result.stdout.splitlines() if l.strip()]
         self.assertEqual(1, len(lines))
         meta = json.loads(lines[0])
-        self.assertEqual(0.2, meta.get('attribution_fraction'))
-        self.assertEqual('q3 loyalty capture rate', meta.get('attribution_basis'))
+        self.assertEqual(0.2, meta_path(meta, 'value.attribution.fraction'))
+        self.assertEqual('q3 loyalty capture rate', meta_path(meta, 'value.attribution.basis'))
 
     def test_representation_parity_with_the_cli_path(self):
         """The record's two keys are byte-comparable with the pair
@@ -1695,10 +1696,12 @@ class AttributionSheddingTests(_ValuationBoundaryTestCase):
             'p54-06-cand-001', 'candidate', 'CUSTOMER_CONFIGURED')
         argv = self._run_one_outcome('p54-06-sid-cand', 'p54-06-cand-001', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('attribution_fraction', meta)
-        self.assertNotIn('attribution_basis', meta)
-        self.assertNotIn('value_low', meta)
-        self.assertNotIn('estimated_value', meta)
+        # v2: the attribution pair lives at value.attribution, and the whole
+        # `value` group sheds with the candidate strip.
+        self.assertIsNone(meta_path(meta, 'value.attribution'))
+        self.assertNotIn('value', meta)
+        self.assertNotIn('attribution', json.dumps(meta))
+        self.assertNotIn('estimated_value', json.dumps(meta))
 
     def test_reportable_revenue_record_ships_attribution_pair(self):
         """Behavior 2: reportability_status="reportable" with a permitted
@@ -1707,20 +1710,21 @@ class AttributionSheddingTests(_ValuationBoundaryTestCase):
             'p54-06-rep-001', 'reportable', 'CUSTOMER_CONFIGURED')
         argv = self._run_one_outcome('p54-06-sid-rep', 'p54-06-rep-001', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(0.2, meta.get('attribution_fraction'))
-        self.assertEqual('q3 loyalty capture rate', meta.get('attribution_basis'))
+        self.assertEqual(0.2, meta_path(meta, 'value.attribution.fraction'))
+        self.assertEqual('q3 loyalty capture rate', meta_path(meta, 'value.attribution.basis'))
 
     def test_evidence_class_refused_record_sheds_attribution_pair(self):
         """Behavior 3: a record refused by the SECOND refusal branch (a
         recognized-but-not-reportable evidence_class, e.g.
-        MODEL_ESTIMATED_DEMO) also sheds both keys, regardless of
+        MODEL_ESTIMATED) also sheds both keys, regardless of
         reportability_status."""
         record = self._revenue_sidecar(
-            'p54-06-mod-001', 'reportable', 'MODEL_ESTIMATED_DEMO')
+            'p54-06-mod-001', 'reportable', 'MODEL_ESTIMATED')
         argv = self._run_one_outcome('p54-06-sid-mod', 'p54-06-mod-001', record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('attribution_fraction', meta)
-        self.assertNotIn('attribution_basis', meta)
+        self.assertIsNone(meta_path(meta, 'value.attribution'))
+        self.assertNotIn('value', meta)
+        self.assertNotIn('attribution', json.dumps(meta))
 
     def test_correction_record_still_ships_attribution_pair_unchanged(self):
         """Behavior 4: a kind:"correction" record carrying the pair still
@@ -1750,8 +1754,8 @@ class AttributionSheddingTests(_ValuationBoundaryTestCase):
         }
         argv = self._run_one_outcome('p54-06-sid-corr', job_id, correction)
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(0.15, meta.get('attribution_fraction'))
-        self.assertEqual('15% per policy REV-2024-03', meta.get('attribution_basis'))
+        self.assertEqual(0.15, meta_path(meta, 'value.attribution.fraction'))
+        self.assertEqual('15% per policy REV-2024-03', meta_path(meta, 'value.attribution.basis'))
 
     def test_revenue_configured_install_with_report_estimates_off_is_reachable_and_sheds(self):
         """Behavior 5: establishing reachability by reading, not assuming.
@@ -1802,9 +1806,9 @@ class AttributionSheddingTests(_ValuationBoundaryTestCase):
 
         argv = self._run_one_outcome('p54-06-sid-driven', job_id, record)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('attribution_fraction', meta)
-        self.assertNotIn('attribution_basis', meta)
-        self.assertNotIn('value_low', meta)
+        self.assertIsNone(meta_path(meta, 'value.attribution'))
+        self.assertNotIn('value', meta)
+        self.assertNotIn('attribution', json.dumps(meta))
 
     def test_value_omit_family_contains_the_attribution_pair(self):
         """Drift guard: extract `_VALUE_OMIT_FAMILY` from the live script
@@ -3009,7 +3013,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
         got_default = mod_default._validate_assessment(raw, cfg_default, 'stub', 'v1')
         self.assertIsNotNone(got_default)
         self.assertEqual(200.0, got_default['estimated_value'])
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got_default['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got_default['evidence_class'])
 
         mod_revenue = self._load(boundaries={'valuation': 'revenue_card_valuation_fixture'})
         cfg_revenue = mod_revenue._llm_evaluation_config()
@@ -3026,7 +3030,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
             'sanity: this must actually be the delegated builtin product',
         )
         self.assertEqual(
-            'MODEL_ESTIMATED_DEMO', got_revenue['evidence_class'],
+            'MODEL_ESTIMATED', got_revenue['evidence_class'],
             'a delegated builtin result must carry the BUILTIN\'s declared '
             'evidence_class, not the configured boundary name\'s -- '
             'labelling it CUSTOMER_CONFIGURED is the defect this test guards',
@@ -3040,7 +3044,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
         record_revenue = mod_revenue._build_job_assessment(
             job, got_revenue, raw, cfg_revenue, 'stub', 'v1')
         self.assertIsNotNone(record_revenue)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record_revenue['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record_revenue['evidence_class'])
 
     def test_genuine_revenue_card_match_still_carries_customer_configured(self):
         """The fix must not over-correct: a REAL revenue valuation (not a
@@ -3095,7 +3099,7 @@ class EvidenceClassDelegationTests(_ValuationBoundaryTestCase):
                'status': 'SUCCESS'}
         record = mod._build_job_assessment(job, got, raw, cfg, 'stub', 'v1')
         self.assertIsNotNone(record)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record['evidence_class'])
         self.assertEqual(
             mod.REPORTABILITY_CANDIDATE, record['reportability_status'],
             'a delegated builtin result reached REPORTABILITY_REPORTABLE -- '

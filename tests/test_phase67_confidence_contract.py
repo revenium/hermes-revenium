@@ -22,7 +22,12 @@ violation. A guard that cannot fail is not a guard.
 SC3, the AST pins. `LABEL_RE`, `TRIVIAL_BLOCKLIST`, the reportability gate, the
 evidence-class tables and precedence walk, and the evaluator contract
 (validator, parser, call budget, `PROMPT_VERSION`) are compared node by node
-against `classifier.py` at the phase-start commit. The comparison runs
+against `classifier.py` at the phase-start commit, MODULO ONE SANCTIONED
+RENAME (see `_SC3_SANCTIONED_RENAMES`): quick-261017-nck renamed the evidence
+class MODEL_ESTIMATED_DEMO to MODEL_ESTIMATED, and two pinned nodes carry the
+literal. The rename is applied to the baseline text, is proven to touch exactly
+those two nodes, and is proven directional, so it cannot launder any other
+change. The comparison runs
 in-process against `git show` of an immutable `origin/main` commit. That is
 deliberate. A hardcoded sha256 of `ast.dump` output would change with the
 Python version (`ast.dump`'s defaults changed in 3.13), and a guard whose
@@ -68,6 +73,25 @@ RECORD_PATH = ROOT / 'docs' / 'confidence-omission-experiment.md'
 # Immutable by construction, and reachable after any merge style because it is
 # already on main. Move it only deliberately, in a reviewed change.
 _SC3_BASELINE_SHA = '8c4f9e01618388645ebb9f85a1b24caaebbc18db'
+
+# quick-261017-nck (LD-4): the one sanctioned deviation from the phase-start
+# baseline. The evidence class label MODEL_ESTIMATED_DEMO became
+# MODEL_ESTIMATED; the literal sits in two pinned nodes (the EVIDENCE_CLASSES
+# member and the _model_estimates_opted_in docstring). Each pair is
+# (old text, new text), applied to the BASELINE source before comparison.
+# Adding a pair here weakens SC3, so ContractPinTests proves the set is exactly
+# one pair, that it touches exactly the two named nodes, and that undoing the
+# rename in the current source is still reported.
+_SC3_SANCTIONED_RENAMES = (
+    ('MODEL_ESTIMATED_DEMO', 'MODEL_ESTIMATED'),
+)
+
+
+def _apply_sanctioned_renames(source):
+    for old, new in _SC3_SANCTIONED_RENAMES:
+        source = source.replace(old, new)
+    return source
+
 
 INSTRUMENT_FORMAT = (
     'revenium-classifier: rejected assessment, confidence outside [0,1]: %r'
@@ -701,7 +725,36 @@ class ContractPinTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.current = CLASSIFIER_PATH.read_text()
-        cls.baseline = _source_at(_SC3_BASELINE_SHA)
+        cls.baseline_raw = _source_at(_SC3_BASELINE_SHA)
+        cls.baseline = _apply_sanctioned_renames(cls.baseline_raw)
+
+    def test_the_sanctioned_rename_set_is_exactly_one_pair(self):
+        self.assertEqual(
+            _SC3_SANCTIONED_RENAMES,
+            (('MODEL_ESTIMATED_DEMO', 'MODEL_ESTIMATED'),))
+
+    def test_the_sanctioned_rename_is_bounded_to_two_pinned_nodes(self):
+        """Non-vacuous: without the rename the raw baseline differs from the
+        current source in EXACTLY the two nodes that carry the literal."""
+        self.assertEqual(
+            _pin_violations(self.baseline, self.baseline_raw, _PINNED_NODES),
+            ['EVIDENCE_CLASSES', '_model_estimates_opted_in'])
+
+    def test_undoing_the_rename_in_the_current_source_is_still_reported(self):
+        needle = "    \"MODEL_ESTIMATED\",\n"
+        self.assertEqual(self.current.count(needle), 1)
+        mutated = self.current.replace(needle, "    \"MODEL_ESTIMATED_DEMO\",\n", 1)
+        self.assertEqual(
+            _pin_violations(mutated, self.baseline, _PINNED_NODES),
+            ['EVIDENCE_CLASSES'])
+
+    def test_dropping_an_evidence_class_member_is_still_reported(self):
+        needle = "    \"ASSOCIATIONAL\",\n"
+        self.assertEqual(self.current.count(needle), 1)
+        mutated = self.current.replace(needle, "", 1)
+        self.assertEqual(
+            _pin_violations(mutated, self.baseline, _PINNED_NODES),
+            ['EVIDENCE_CLASSES'])
 
     def test_fifteen_pinned_names(self):
         self.assertEqual(len(_PINNED_NODES), 15)

@@ -89,7 +89,7 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
    "confidence":0.6,
    "evaluator":"llm",
    "evaluator_version":"1",
-   "evidence_class":"MODEL_ESTIMATED_DEMO"
+   "evidence_class":"MODEL_ESTIMATED"
  }}
 ```
 
@@ -103,15 +103,15 @@ abstained. A disabled-path marker is therefore byte-identical to a pre-v1.5 one.
 | `assumptions.assumed_loaded_rate` | number | Finite, `0 < r <= maxLoadedRate` (default 500). |
 | `confidence` | number | `[0, 1]`. |
 | `evaluator`, `evaluator_version` | string | Recorded from the resolved evaluator, never read from its output. |
-| `evidence_class` | string | Resolved from the boundary registry for whichever evaluator ran, never read from its output. On the naked-LLM path that resolution always yields `MODEL_ESTIMATED_DEMO`. |
+| `evidence_class` | string | Resolved from the boundary registry for whichever evaluator ran, never read from its output. On the naked-LLM path that resolution always yields `MODEL_ESTIMATED`. |
 
 Every string field has `|`, newline and carriage return replaced with a space
 before persistence. The cron's job-outcome queue is `IFS='|'`-parsed and one
 pipe reaching that tuple shifts every following field.
 
-### What `MODEL_ESTIMATED_DEMO` means
+### What `MODEL_ESTIMATED` means
 
-`MODEL_ESTIMATED_DEMO` is an unverified model estimate. It is not measured, observed,
+`MODEL_ESTIMATED` is an unverified model estimate. It is not measured, observed,
 customer-confirmed or defensible ROI. Revenium computes a displayed ROI
 from this reported value and the metered cost; the value's quality is the
 model's and the feature is labelled experimental for that reason.
@@ -126,9 +126,9 @@ distinguishable after the fact.
 
 `evidence_class` is one of nine flat, unordered labels, never a confidence
 ladder: `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`,
-`MODEL_ESTIMATED_DEMO`, `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`,
+`MODEL_ESTIMATED`, `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`,
 `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`, `EXPERIMENTAL_IMPACT`. The
-naked-LLM path documented above always emits `MODEL_ESTIMATED_DEMO`; no label
+naked-LLM path documented above always emits `MODEL_ESTIMATED`; no label
 is ranked above or below another.
 
 ### Failed and cancelled arcs
@@ -156,12 +156,15 @@ JSON example above; its `assessment` key stays the same 9-key summary it has
 been since v1.5, byte-unchanged. A reader looking for `net_value`,
 `supplied_costs`, `cost_coverage`, `economic_mechanism` or
 `double_counting_group` on the marker line will not find them there; they
-live on the sidecar record `hermes-report.sh` reads to build `--metadata`.
+live on the sidecar record `hermes-report.sh` reads to build `--metadata`, where they ship
+under `costs.subtracted`, `costs`, `basis.mechanism` and `session`. `net_value` is not
+forwarded: `value.net` is computed by the reporter as `value.reported` less `costs.subtracted`.
 
-One field of that record does reach the wire: `assumptions.inferred_role` rides inside
-`assumptions` on a **reportable** record, after `assumed_loaded_rate`. A candidate record
-strips `assumptions`, and with it the role. `basis` and the two narrative fields
-(`candidate_downstream_outcome`, `counterfactual_assumption`) stay local.
+One field of that record's prose reaches the wire: `assumptions.inferred_role` ships as
+`basis.role` on a **reportable** record. A candidate record strips `assumptions`, and with
+it the role. The sidecar's own `basis` sentence and the two narrative fields
+(`candidate_downstream_outcome`, `counterfactual_assumption`) stay local; the wire `basis`
+group is a different, allow-listed object (`schema_version` 2).
 
 ### The six economic mechanisms (EGV-05)
 

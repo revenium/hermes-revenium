@@ -259,7 +259,8 @@ class LearnedRoleCardTracerTests(_Harness):
         result = _run_forwarder(body, record)
         self.assertEqual(result.returncode, 0, result.stderr)
         meta = json.loads(result.stdout.strip())
-        self.assertEqual(meta['assumptions']['inferred_role'], 'Senior Software Engineer')
+        # quick-261017-nck: v2 wire path basis.role.
+        self.assertEqual(meta['basis']['role'], 'Senior Software Engineer')
 
     def test_a_valid_new_role_is_persisted_with_the_models_collapsed_spelling(self):
         self.seed_real()
@@ -360,14 +361,14 @@ class EvidenceInvarianceTests(_Harness):
 
     def test_enabled_only(self):
         accepted, fields = self._assert_invariant('enabled-only', EVAL_BASE, expect_accepted=True)
-        self.assertEqual(fields['evidence_class'], 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(fields['evidence_class'], 'MODEL_ESTIMATED')
         self.assertEqual(fields['evidence_class_authority'], 'evaluator')
         # 3.5h x $150, NOT the learned $400-440 anchor.
         self.assertEqual(fields['estimated_value'], 525.0)
 
     def test_opted_in_to_model_estimates(self):
         _accepted, fields = self._assert_invariant('opted-in', EVAL_OPT_IN, expect_accepted=True)
-        self.assertEqual(fields['evidence_class'], 'MODEL_ESTIMATED_DEMO')
+        self.assertEqual(fields['evidence_class'], 'MODEL_ESTIMATED')
         self.assertEqual(fields['evidence_class_authority'], 'evaluator')
 
     def test_rate_card_valuation_fixture_boundary_with_no_rate_card(self):

@@ -25,7 +25,7 @@ the design in `classifier.py`, `evaluators.py` and `evidence.py`.
 **`classifier.py:1160`'s threat-model argument is the record that stands.
 `docs/internal-milestones.md:110`'s EGV-02 deferral note is the record that is corrected.** A
 registration-time declaration by trusted code MAY raise the recorded `evidence_class` above
-`MODEL_ESTIMATED_DEMO`, because it is a different threat model from the untrusted model output
+`MODEL_ESTIMATED`, because it is a different threat model from the untrusted model output
 `_forced_evidence_class()` defends against: not, as the EGV-02 note argued, "the same
 mechanism" reached from a different source.
 
@@ -90,18 +90,18 @@ against the current tree:
 
 | # | file:line | Registrant name | Registry (boundary) | Declared `evidence_class` |
 |---|-----------|------------------|----------------------|----------------------------|
-| 1 | `evaluators.py:179` | `stub` | `output_assessment` (evaluators) | `_br.MASQUERADE_CLASS` (`MODEL_ESTIMATED_DEMO`) |
+| 1 | `evaluators.py:179` | `stub` | `output_assessment` (evaluators) | `_br.MASQUERADE_CLASS` (`MODEL_ESTIMATED`) |
 | 2 | `evaluators.py:222-226` | `system_of_record_assessment_fixture` | `output_assessment` | `OUTCOME_OBSERVED` |
 | 3 | `classification.py:367-371` | `keyword_classification_fixture` | `classification` | `ACTIVITY_MEASURED` |
 | 4 | `valuation.py:315-319` | `rate_card_valuation_fixture` | `valuation` | `CUSTOMER_CONFIGURED` |
 | 5 | `evidence.py:320-324` | `confirmation_workflow_evidence_fixture` | `evidence` | `CUSTOMER_CONFIRMED` |
-| 6 | `classifier.py:750-751` | `llm` | `output_assessment` (evaluators) | `_LLM_EVIDENCE_CLASS_LITERAL` (`MODEL_ESTIMATED_DEMO`) |
+| 6 | `classifier.py:750-751` | `llm` | `output_assessment` (evaluators) | `_LLM_EVIDENCE_CLASS_LITERAL` (`MODEL_ESTIMATED`) |
 | 7 | `classifier.py:815-816` | `llm` | `classification` | `_LLM_EVIDENCE_CLASS_LITERAL` |
 | 8 | `classifier.py:879-880` | `hours_times_rate` | `valuation` | `_LLM_EVIDENCE_CLASS_LITERAL` |
 | 9 | `classifier.py:943-944` | `config_opt_in` | `evidence` | `_LLM_EVIDENCE_CLASS_LITERAL` |
 
 Rows 6-9 are `classifier.py` registering the shipped built-ins into the four other boundaries'
-registries at its own import time, all forced to `MODEL_ESTIMATED_DEMO`. This is a real
+registries at its own import time, all forced to `MODEL_ESTIMATED`. This is a real
 invariant worth stating: the built-in default registrant for every one of these four
 boundaries declares the same class the naked-LLM path already forces, so the built-in default
 never conflicts with the forced constant. A conflict can only arise once an operator
@@ -170,7 +170,7 @@ are that fifth consideration, discovered while building, not while falsifying.
 **Fact 1: the built-in default registrant would win on every install under a literal
 "first-non-empty" reading.** `classifier.py:943-944` registers the evidence boundary's fail-open
 default registrant, `config_opt_in`, with `evidence_class=_LLM_EVIDENCE_CLASS_LITERAL`
-(`MODEL_ESTIMATED_DEMO`): a non-empty string. A walk that stops at the first *non-empty*
+(`MODEL_ESTIMATED`): a non-empty string. A walk that stops at the first *non-empty*
 declaration, exactly as originally written above, would therefore stop at the `evidence` boundary
 on 100% of installs, because its built-in default always has something non-empty to say. Neither
 `CUSTOMER_CONFIGURED` (declared on `valuation`) nor `OUTCOME_OBSERVED` (declared on the evaluator)
@@ -206,7 +206,7 @@ is met, not superseded or narrowed: there is no supersession line to write for i
 
 ### Why the other two candidates were rejected
 
-**Weakest-declared floor** (`MODEL_ESTIMATED_DEMO` as an absolute floor, with a separate
+**Weakest-declared floor** (`MODEL_ESTIMATED` as an absolute floor, with a separate
 selection rule above it) is not a complete rule on its own. It answers "is the declaration the
 forced constant or not," but says nothing about which of two *different*, non-forced
 declarations wins: the shape RESEARCH.md §4 shows the registrant set already produces today
@@ -241,7 +241,7 @@ hold; it happens to make fixed boundary priority easy to implement without viola
 The three causal-impact labels (`ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT` and
 `EXPERIMENTAL_IMPACT`) are refused at the allow-list even when a trusted registrant declares
 one, while `ACTIVITY_MEASURED`, `OUTCOME_OBSERVED`, `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`,
-`OUTPUT_OBSERVED` and `MODEL_ESTIMATED_DEMO` stay declarable. The exact insertion point for
+`OUTPUT_OBSERVED` and `MODEL_ESTIMATED` stay declarable. The exact insertion point for
 this refusal is the `allowed` argument at `classifier.py:1218`, narrowed from the full
 `EVIDENCE_CLASSES` frozenset, inside the existing `evidence.resolve_declared_class(declared,
 allowed, default)` call (`evidence.py:226`), not a new gate, a narrower argument to the one
@@ -272,13 +272,12 @@ because a lower-priority boundary only ever wins when every higher-priority leg 
 is one of `_EVIDENCE_CLASS_AUTHORITIES = ("evidence", "valuation", "classification", "evaluator")`
 (`classifier.py:1174`): four words, not the three this document's pre-implementation text
 assumed, because the walk itself widened to four legs (see the amendment above). The value is
-validated against this exact set at the forwarder in `hermes-report.sh` before being placed on the
-`--metadata` envelope and clamped to 16 bytes: `classification` is the longest member at 14
-bytes, leaving 2 bytes of headroom that a future fifth authority word must re-check rather than
-assume. The forwarder's allow-list check runs before truncation, so a legal value is never
-silently cut and an out-of-set value is dropped rather than forwarded: a correctness discipline,
-not a cosmetic one, because misnaming who set an evidence label on a billing-adjacent record would
-itself be a false audit trail.
+written to the sidecar record, where an auditor reads it. As of quick-261017-nck it no longer
+rides the `jobs outcome --metadata` wire: `evidence_class_authority` stays in the sidecar, and the
+`schema_version` 2 envelope carries only `basis.evidence`, the class itself. `classification` is
+the longest member at 14 bytes, a width a future fifth authority word must re-check rather than
+assume. The reason the value is validated against this exact set is unchanged: misnaming who set
+an evidence label on a billing-adjacent record would itself be a false audit trail.
 
 ### The plumbing consequence
 

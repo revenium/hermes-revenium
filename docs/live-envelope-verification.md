@@ -1,5 +1,7 @@
 # Live envelope verification (LIVE-01)
 
+> Note (quick-261017-nck, 2026-10-17): the envelope verified here is the v1 shape; `schema_version` 2 has not been live-verified. The premise that Revenium stores `outcomeMetadata` as an opaque string is relied on, not re-proven.
+
 This record establishes whether a real Revenium API accepts the bounded
 `--metadata` envelope shipped in phases 42 and 46. Verification ran against a
 live tenant on 2026-08-29.

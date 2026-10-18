@@ -261,7 +261,7 @@ def _cohort_estimator_impact_fixture(cohort: dict, config: dict) -> "dict | None
     with every narrative field passed through _clamp_text.
 
     This function declares QUASI_EXPERIMENTAL_IMPACT at registration, not
-    MODEL_ESTIMATED_DEMO: the estimate rests on a comparison across a
+    MODEL_ESTIMATED: the estimate rests on a comparison across a
     cohort's treated and control groups, not on a model's guess, but it
     also does not establish individual causality for any ONE job -- that is
     exactly the property EGV-13's non-inheritance rule (see the module

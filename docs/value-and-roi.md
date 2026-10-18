@@ -73,7 +73,7 @@ null.
 ## 2. What the number is, and is not
 
 The naked-LLM path always produces an unverified model estimate, labelled
-`MODEL_ESTIMATED_DEMO` in every record it writes.
+`MODEL_ESTIMATED` in every record it writes.
 
 | It is | It is not |
 |---|---|
@@ -128,7 +128,7 @@ Five live inside `llmOutcomeEvaluation` in
 |---|---|---|---|
 | `enabled` | inside `llmOutcomeEvaluation` | Whether evaluation happens at all | `false` |
 | `experimentalReportEstimates` | inside `llmOutcomeEvaluation` | Whether a computed value may leave the machine | `false` |
-| `reportModelEstimates` | inside `llmOutcomeEvaluation` | Whether a model estimate (`MODEL_ESTIMATED_DEMO`) may leave it too; effective only with the key above | `false` |
+| `reportModelEstimates` | inside `llmOutcomeEvaluation` | Whether a model estimate (`MODEL_ESTIMATED`) may leave it too; effective only with the key above | `false` |
 | `costs` | inside `llmOutcomeEvaluation` | Operator-supplied non-AI costs that net against the estimate | `{}` |
 | `studyId` / `studyVersion` | inside `llmOutcomeEvaluation` | A reference to an impact study; never changes an assessment's own evidence class | absent |
 | `boundaries` | top level, a sibling of `llmOutcomeEvaluation` | Which registered implementation serves each pluggable contract | built-ins |
@@ -344,14 +344,14 @@ evaluate(job: dict, transcript: str, config: dict) -> dict | None
 Returning `None` abstains. The registry
 lives in `evaluators.py`. Registration also declares the evaluator's own `version` and its
 own `evidence_class`, so a future non-LLM evaluator reports its actual class rather than
-borrowing `MODEL_ESTIMATED_DEMO`.
+borrowing `MODEL_ESTIMATED`.
 
 Three implementations ship today:
 
 | Name | Evidence class | Makes a model call? |
 |---|---|---|
-| `llm` (default) | `MODEL_ESTIMATED_DEMO` | yes |
-| `stub` | `MODEL_ESTIMATED_DEMO` | no; fixed 2.5 h at 150/h |
+| `llm` (default) | `MODEL_ESTIMATED` | yes |
+| `stub` | `MODEL_ESTIMATED` | no; fixed 2.5 h at 150/h |
 | `system_of_record_assessment_fixture` | `OUTCOME_OBSERVED` | no; reads hours/rate from `config["systemOfRecord"]` |
 
 ## 6. Validation and abstention
@@ -428,8 +428,9 @@ ordered (`low ≤ base ≤ high`; equal bounds are a valid point estimate, not a
 
 `--outcome-value` carries `value_low`, not `value_base`. The estimate understates by
 design rather than overstating, which means the figure on a Revenium dashboard is
-deliberately the floor of the range. All three bounds and `bounds_source` still ride in
-`--metadata`, so the full range stays recoverable from what was actually reported.
+deliberately the floor of the range. All three bounds still ride in `--metadata` as
+`value.low`, `value.base` and `value.high`, next to `value.reported`, the exact figure the
+call sent, so the full range stays recoverable from what was actually reported.
 
 Worked example, matching the pinned golden fixture:
 
@@ -447,7 +448,10 @@ Worked example, matching the pinned golden fixture:
 
 `estimated_value` is the gross figure. `net_value` is a sibling
 field that subtracts every operator-supplied cost category from the
-gross estimate.
+gross estimate. On the wire, `value.net` is not this field: the reporter recomputes
+it as `value.reported` (the low bound it sent) less the same costs, so the
+net Revenium shows is never above the value it shows. In this example that
+is 446.25 − 25 = 421.25, not 500.00.
 
 ### The four categories
 
@@ -631,7 +635,7 @@ default.
 
 `evidence_class` is one of nine flat, unordered labels:
 
-`ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`, `MODEL_ESTIMATED_DEMO`,
+`ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`, `MODEL_ESTIMATED`,
 `CUSTOMER_CONFIGURED`, `CUSTOMER_CONFIRMED`, `ASSOCIATIONAL`, `QUASI_EXPERIMENTAL_IMPACT`,
 `EXPERIMENTAL_IMPACT`.
 
@@ -643,7 +647,7 @@ way, which is why the labels sit side by side rather than in rank order.
 
 The class is read from the resolved evaluator's registration-time declaration, not from
 evaluator output. A model cannot name its own evidence class. On the naked-LLM path that
-resolution always yields `MODEL_ESTIMATED_DEMO`.
+resolution always yields `MODEL_ESTIMATED`.
 
 The reporter then applies its own independent allow-list immediately before the value is
 emitted. A record carrying a class outside the nine has the field dropped *and* its whole
@@ -669,12 +673,12 @@ field and applies the evidence-class gate a second time before it sends.
 
 The evidence-class gate (Phase 53, ROI-01) admits `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`,
 `OUTCOME_OBSERVED`, `CUSTOMER_CONFIGURED` and `CUSTOMER_CONFIRMED`. Every estimate from the
-`llm` and `stub` evaluators is `MODEL_ESTIMATED_DEMO`, which the gate withholds unless
+`llm` and `stub` evaluators is `MODEL_ESTIMATED`, which the gate withholds unless
 `reportModelEstimates` is also literally `true`. That key exists for installs with no
 customer-supplied rates, revenue cards or confirmations, where the model's estimate is the
 only value. `revenium jobs roi` shows no evidence class, so a reported estimate appears there
 with the same weight as a measurement; `--metadata` still carries
-`evidence_class: MODEL_ESTIMATED_DEMO`.
+`basis.evidence: MODEL_ESTIMATED`.
 
 Two properties enforce this separation:
 
@@ -683,12 +687,15 @@ Two properties enforce this separation:
   confirmation workflow may decide that a real estimate is reportable; it can
   never decide that an absent one is.
 - Withholding the two CLI flags alone does not withhold the value. `value_low`, `value_base`,
-  `value_high`, `bounds_source`, `currency`, `estimated_value`, `assumptions` and
-  `net_value` each have their own `--metadata` forwarder and `assumptions` alone carries
+  `value_high`, `bounds_source`, `currency`, `estimated_value` and `assumptions` each
+  reach `--metadata` (as `value.low`, `value.base`, `value.high`, `value.currency` and the
+  `basis.role`, `basis.hours_saved` and `basis.hourly_rate` scalars), and `value.net` is
+  derived from the reported value and the supplied costs, and `assumptions` alone carries
   the hours and rate used to calculate the estimate, plus the inferred role. A
   non-reportable record is therefore
   sanitized at the source: one shared stripper deletes the whole family before any
-  forwarder runs.
+  forwarder runs, so a candidate record ships no `value` group and none of those three
+  `basis` scalars.
 
 `supplied_costs` and `cost_coverage` are not in that family. They are operator input, not
 model output and ship regardless of reportability so a null ROI remains interpretable.
@@ -721,7 +728,7 @@ abstained. A disabled-path marker is byte-identical to a pre-feature one.
    "confidence":0.6,
    "evaluator":"llm",
    "evaluator_version":"1",
-   "evidence_class":"MODEL_ESTIMATED_DEMO"
+   "evidence_class":"MODEL_ESTIMATED"
  }}
 ```
 
@@ -871,38 +878,70 @@ value or an unsupported currency drops both, never one alone.
 
 ### The `--metadata` envelope
 
-The existing `jobs outcome --metadata` flag carries one flat JSON object with three key
-groups:
+The existing `jobs outcome --metadata` flag carries one JSON object in the
+`schema_version` 2 shape: a few base keys and four nested groups. Version 1 was a flat list
+of about thirty prefixed keys. The sidecar described in section 12 keeps its own v1 field
+names; only the wire changed, and `hermes-report.sh` is the one place that renames them.
 
 | Group | Keys | Dropped under pressure? |
 |---|---|---|
-| Base metering | `source`, `failure_reason`, `outcome_basis` | never |
-| Value family | `value_low`, `value_base`, `value_high`, `bounds_source`, `net_value`, `assumptions`, `supplied_costs`, `cost_coverage` | first |
-| Provenance family | `evaluator`, `evaluator_version`, `model`, `evidence_class`, `reportability_status`, `study_id`, `study_version`, `confidence`, `economic_mechanism`, `double_counting_group`, `correction_sequence`, `inference_provider`, `inference_address_class` | second |
+| Base metering | `schema_version`, `source`, `failure_reason`, `outcome_basis`, `corrected`, `metadata_truncated` | never |
+| Value family | `value`, `value.attribution`, `basis.role`, `basis.hours_saved`, `basis.hourly_rate`, `costs` | first |
+| Provenance family | `basis.evidence`, `basis.mechanism`, `basis.confidence`, `basis.study`, `estimator`, `session`, `status`, `correction_sequence` | second |
 
-The version fields (`assessment_schema_version`, `taxonomy_version`, `prompt_version`,
-`policy_version`) and `corrected` also ride in the envelope.
+Key order is part of the contract: `schema_version`, `source`, `status`, `session`,
+`failure_reason`, `outcome_basis`, `corrected`, `correction_sequence`, `value`, `basis`,
+`costs`, `estimator`, `metadata_truncated`. The object is compact single-line JSON of at
+most 4096 bytes.
+
+| v2 path | Carries | From the sidecar |
+|---|---|---|
+| `schema_version` | `2`, whenever assessment content is present | constant |
+| `status` | `reportable` or `candidate` | `reportability_status` |
+| `session` | the id of the session whose transcript produced several jobs | `double_counting_group` |
+| `corrected`, `correction_sequence` | an operator correction and its sequence | `kind`, `sequence` |
+| `value.reported` | the exact `--outcome-value` sent; absent when the flag was not sent | the flag |
+| `value.low`, `.base`, `.high`, `.currency` | the range and its currency | `value_low`, `value_base`, `value_high`, `currency` |
+| `value.net` | `value.reported` less every supplied cost; only when a value was reported and at least one non-zero cost was subtracted | computed by the reporter (the sidecar's `net_value` is base-derived and not forwarded) |
+| `value.attribution` | `fraction` and `basis`, validated together | `attribution_fraction`, `attribution_basis` |
+| `basis.evidence`, `.mechanism` | the evidence class, the economic mechanism | `evidence_class`, `economic_mechanism` |
+| `basis.role`, `.hours_saved`, `.hourly_rate` | the model's assumptions | `assumptions` |
+| `basis.confidence`, `basis.study` | confidence; study `id` and `version`, both or neither | `confidence`, `study_id`, `study_version` |
+| `costs.subtracted`, `.not_counted`, `.known_zero`, `.ai_cost` | supplied costs; categories never configured; categories configured as zero; the literal `metered_separately` | `supplied_costs`, `cost_coverage` |
+| `estimator.name`, `.model`, `.provider`, `.endpoint` | who produced the estimate and where it ran | `evaluator`, `model`, `inference_provider`, `inference_address_class` |
+| `estimator.versions` | `prompt`, `taxonomy`, `policy`, `evaluator` | the four version fields |
+
+`basis.evidence` says who priced the value: `CUSTOMER_CONFIGURED` for an operator-configured
+valuation boundary, `MODEL_ESTIMATED` for the model's own estimate. `basis.hours_saved` and
+`basis.hourly_rate` are always the model's assumptions, even when an operator rate card
+replaced the hours times rate product.
+
+What is not on the wire. `assessment_schema_version` is replaced by `schema_version`.
+`bounds_source` and `evidence_class_authority` stay in the sidecar. `cost_coverage.included`
+is not sent, because it always equals the keys of `costs.subtracted`. The sidecar's own
+`basis` sentence (the evaluator's prose), `candidate_downstream_outcome` and
+`counterfactual_assumption` never ship; the wire `basis` group is a different object, built
+only from the scalars above. A blob with no assessment record (a `FAILED` arc's `source` and
+`failure_reason`, say) carries no `schema_version` and is unchanged from v1. Jobs reported
+before this change keep their v1 blob in Revenium; a `MODEL_ESTIMATED_DEMO` label there is
+the old name of `MODEL_ESTIMATED`.
 
 An absent sidecar field adds no key to the payload. This conditional-emit rule applies to
-every field.
+every field, and a group with no keys is not sent.
 
 A fully populated payload looks like this (this is the pinned golden shape, key order
 included):
 
 ```json
-{"source":"test","value_low":446.25,"value_base":525.0,"value_high":603.75,
- "bounds_source":"derived","assessment_schema_version":1,"taxonomy_version":1,
- "prompt_version":1,"policy_version":1,"evidence_class":"CUSTOMER_CONFIGURED",
- "evidence_class_authority":"valuation","reportability_status":"reportable",
- "economic_mechanism":"labor_substitution","net_value":500.0,
- "supplied_costs":{"human_review":25.0},
- "cost_coverage":{"included":["human_review"],
-                  "unknown":["rework_or_error","handoff","training_or_change"],
-                  "excluded":["metered_ai_cost"]},
- "double_counting_group":"g38-sid-002","evaluator":"llm","evaluator_version":"v1",
- "model":"unknown","inference_provider":"openrouter","inference_address_class":"public",
- "confidence":0.8,"assumptions":{"estimated_hours_saved":3.5,"assumed_loaded_rate":150.0,
-                "inferred_role":"senior software engineer"}}
+{"schema_version":2,"source":"test","status":"reportable","session":"g38-sid-002",
+ "value":{"reported":446.25,"low":446.25,"base":525.0,"high":603.75,"currency":"USD","net":500.0},
+ "basis":{"evidence":"CUSTOMER_CONFIGURED","mechanism":"labor_substitution",
+          "role":"senior software engineer","hours_saved":3.5,"hourly_rate":150.0,"confidence":0.8},
+ "costs":{"subtracted":{"human_review":25.0},
+          "not_counted":["rework_or_error","handoff","training_or_change"],
+          "ai_cost":"metered_separately"},
+ "estimator":{"name":"llm","model":"unknown","provider":"openrouter","endpoint":"public",
+              "versions":{"prompt":1,"taxonomy":1,"policy":1,"evaluator":"v1"}}}
 ```
 
 ### The byte ceiling and the two drop tiers
@@ -921,8 +960,10 @@ When a payload exceeds it:
 2. If still over, the provenance family is popped second.
 3. Base metering is never dropped. Metering continues without the enrichment.
 
-A record whose payload was cut carries `metadata_truncated: true`, so a consumer can tell
-"this job had no value" (both value keys and the marker absent) from "the value did not
+Shedding walks the dotted paths into the nested groups and removes a group it has emptied,
+so an empty `{}` is never sent. A record whose payload was cut carries
+`metadata_truncated: true`, so a consumer can tell
+"this job had no value" (the `value` group and the marker absent) from "the value did not
 fit" (`metadata_truncated` present). An unmarked partial record would be exactly the silent
 substitution this design exists to prevent.
 
@@ -939,7 +980,7 @@ Between the sidecar and the wire, the reporter re-checks everything it is about 
 | `reportability_status` equals `reportable` (or the record is a correction) | Strip the value family |
 | `reportability_status` is one of the two known literals | Drop the key rather than forward an unexamined word |
 | `value_low` parses as a float and currency is supported | Drop both flags together |
-| `evidence_class` present and inside the nine (absence permitted only on a correction) | Drop the field and strip the value family |
+| `evidence_class` present and inside the nine (absence permitted only on a correction; the old `MODEL_ESTIMATED_DEMO` label is read as `MODEL_ESTIMATED`) | Drop the field and strip the value family |
 | `supplied_costs` / `cost_coverage` rebuilt key-by-key against the known category names | Unknown keys and non-numeric values dropped, never forwarded |
 | `economic_mechanism` and `inference_address_class` against their allow-lists | Out-of-set value dropped silently |
 
@@ -959,7 +1000,7 @@ reportable `job_assessment` sidecar:
 `recordedAt` is the assessment's `job_ended_at`, falling back to its `ts`, rendered in UTC.
 Every entry uses the platform provenance value `DERIVED`. That value describes how the
 metric entry was produced; it does not replace or promote the assessment's
-`evidence_class`. A `MODEL_ESTIMATED_DEMO` assessment remains a model estimate.
+`evidence_class`. A `MODEL_ESTIMATED` assessment remains a model estimate.
 
 The stage processes only original records with `kind: "job_assessment"` and
 `reportability_status: "reportable"`. It does not read `candidate` assessments or operator
@@ -1082,7 +1123,9 @@ understate. If neither bound flag was given, base and low are the same figure.
 
 The `--metadata` payload carries the same `sequence` and prior-value fields as the local
 record. The `sequence` key distinguishes a revision from an original because an ordinary
-`jobs outcome` payload never carries one.
+`jobs outcome` payload never carries one. This is the `jobs outcome-update` verb's payload,
+built by `correct-assessment.sh`, and it keeps its own keys; it is not the `schema_version` 2
+envelope above.
 
 ### Failure posture — deliberately loud
 
@@ -1257,7 +1300,7 @@ reporter re-reads the sidecar at outcome time and reports status-only when it fi
 | Nothing at all in the sidecar directory | No plugin, a stale plugin or a non-root session | `plugin-status.sh`; compare the installed plugin's sha256 with the skill tree's |
 | `outcome deferred: id=` repeating | The matching `JOB:<id>:created` line has not been confirmed yet | `grep '^JOB:<id>:' revenium-jobs.ledger` |
 | `wedged job (no create confirmed after …)` | The create never succeeded, usually because of a missing team id or auth | `revenium config show`; check for `teamId not configured` in the log |
-| `--metadata` has `metadata_truncated: true` | The payload exceeded 4096 bytes; a family was dropped | Look for an unusually long `basis`, `double_counting_group` or provider name |
+| `--metadata` has `metadata_truncated: true` | The payload exceeded 4096 bytes; a family was dropped | Look for an unusually long `failure_reason`, `source`, `session` or `estimator.provider` |
 | Value flags dropped although the record looks valid | Currency not in the supported set, `value_low` non-numeric or `evidence_class` outside the nine; all drop both flags | Read the sidecar line directly |
 | A correction saved locally but exit code 1 | The installed CLI has no `jobs outcome-update` | `revenium jobs outcome-update --help`, upgrade, re-run the same command |
 | `revenium jobs roi <id>` shows a value with no provenance | Expected; that surface carries none. See [§2](#2-what-the-number-is-and-is-not) | `revenium jobs outcome-history <id>` |

@@ -161,7 +161,7 @@ Absent from `config.json` is the same as disabled.
 | `revenueCardKey` | `""` | The non-empty string naming which `revenueCard` entry applies on this host, read from configuration only. |
 | `maxRevenueValue` | absent | Optional ceiling on a configured revenue amount, consulted only when the producing registrant declared and had accepted an operator-only mechanism for the call. See "`maxRevenueValue`" below. |
 | `experimentalReportEstimates` | `false` | Must be a **literal JSON boolean** `true`, same discipline as `enabled`. Governs EGV-18's `reportability_status`, not whether an estimate is computed. **As of Phase 53 this flag alone is necessary but no longer sufficient**: see "Reporting the estimate's value" below for the record's evidence-class gate this flag now composes with. |
-| `reportModelEstimates` | `false` | Must be a **literal JSON boolean** `true`. Together with `experimentalReportEstimates: true`, admits `MODEL_ESTIMATED_DEMO` past the evidence-class gate, so a naked-LLM estimate ships its value. Off, model estimates stay local as before. See "Opting model estimates in" below. |
+| `reportModelEstimates` | `false` | Must be a **literal JSON boolean** `true`. Together with `experimentalReportEstimates: true`, admits `MODEL_ESTIMATED` past the evidence-class gate, so a naked-LLM estimate ships its value. Off, model estimates stay local as before. See "Opting model estimates in" below. |
 | `studyId` | `""` | A non-empty string naming an `ImpactStudyResult` this install's job assessments reference. Recorded on every assessment this install produces; never changes an assessment's own `evidence_class` (EGV-13, D-08). |
 | `studyVersion` | `0` | A plain integer >= 1, paired with `studyId`. The pair is **all-or-none in both directions**: if either field is missing or malformed (a blank `studyId`, a non-integer or `< 1` `studyVersion`), both resolve to their absent defaults. A half-reference could never name a real `ImpactStudyResult`, so none is recorded. |
 | `costs` | `{}` | An object keyed by job type (EGV-14). Each job type's value is an object whose keys are drawn from the four `COST_CATEGORIES` names: `human_review`, `rework_or_error`, `handoff`, `training_or_change`. There is **no fleet-wide default bucket**: an absent job-type key means every category is unknown for that job type, exactly as if `costs` were absent entirely. A supplied `0` is knowledge and participates in the subtraction as a known zero; an absent category is unknown and does not participate (D-10). A malformed, non-numeric, boolean or negative value resolves that category to unknown, never to zero. |
@@ -227,7 +227,7 @@ so a role is spelled the same way from one job to the next without any configura
 - **Never a priced card.** A learned rate is a prompt anchor only. It never enters
   `config.json`, the validator, the valuation boundary or reportability, and it never
   changes `evidence_class` or `reportability_status`: a value stays
-  `MODEL_ESTIMATED_DEMO` unless an operator-configured boundary says otherwise.
+  `MODEL_ESTIMATED` unless an operator-configured boundary says otherwise.
 - **When it is off.** A configured `rateCard` disables the learned card entirely (no read,
   no write). So does a disabled `llmOutcomeEvaluation` and any evaluator other than the
   built-in `llm`.
@@ -379,16 +379,17 @@ Abstention falls back to the existing status-only outcome path.
 
 The value produced is an **unverified model estimate**. See the assessment
 contract in [`job-declaration.md`](job-declaration.md) for what
-`MODEL_ESTIMATED_DEMO` means.
+`MODEL_ESTIMATED` means.
 
 ### Reporting the estimate's value (EGV-18)
 
 `experimentalReportEstimates` is a second, independent opt-in on top of `enabled`. With it
 absent or not a literal `true`, an estimate is still computed and recorded locally in the
 job-assessments sidecar, but its `reportability_status` resolves to `candidate`: the outcome
-arc still reports to Revenium and provenance (`evidence_class`, `evaluator`,
-`evaluator_version`, `model` and the version family) still ships in `--metadata`, but no
-bound, no `bounds_source` and no `assumptions` cross the wire. The number stays on this
+arc still reports to Revenium and provenance (`basis.evidence`, `estimator.name`,
+`estimator.model` and `estimator.versions` in the `schema_version` 2 `--metadata`) still ships,
+but no `value` group and none of `basis.role`, `basis.hours_saved` or `basis.hourly_rate`
+cross the wire. The number stays on this
 machine. Set it to a literal JSON `true` and `reportability_status` resolves to `reportable`
 **only if the record's evidence class also clears the gate described below**,
 shipping the estimate exactly as the value flags and `--metadata` describe above. An
@@ -402,7 +403,7 @@ Setting `experimentalReportEstimates` to `true` is necessary but not sufficient
 to report a value. The record must also carry one of these evidence classes:
 `ACTIVITY_MEASURED`, `OUTPUT_OBSERVED`, `OUTCOME_OBSERVED`,
 `CUSTOMER_CONFIGURED` or `CUSTOMER_CONFIRMED`. The default naked-LLM evaluator
-(`"evaluator": "llm"`) produces `MODEL_ESTIMATED_DEMO`, which the gate refuses
+(`"evaluator": "llm"`) produces `MODEL_ESTIMATED`, which the gate refuses
 unless the install opts model estimates in (below).
 
 The permitted set is a code constant, not a config key (D-02). Widening it
@@ -419,7 +420,7 @@ standing request that this gate substitutes for.
 Without a customer-supplied rate card, revenue card or confirmation,
 an install has only the model's value estimate. `reportModelEstimates: true`, together
 with `experimentalReportEstimates: true`, both literal JSON booleans inside
-`llmOutcomeEvaluation`, admits `MODEL_ESTIMATED_DEMO` wherever a value can
+`llmOutcomeEvaluation`, admits `MODEL_ESTIMATED` wherever a value can
 leave the host: the classifier writes `reportable`; `hermes-report.sh` ships the
 outcome's value; and `outcome-metrics-report.sh` appends it to the Outcome
 timeline. Both scripts re-read the two keys from `config.json` when they send,
@@ -430,8 +431,13 @@ append still waiting. On a multiplexed host the outcome's check reads the
 It admits that one class and nothing else. The permitted set above is
 unchanged, malformed and causal-impact classes stay refused and an abstained
 assessment is never reportable. The record still carries
-`evidence_class: MODEL_ESTIMATED_DEMO` and the full provenance family in
+`basis.evidence: MODEL_ESTIMATED` and the full provenance family in
 `--metadata`.
+
+The label was `MODEL_ESTIMATED_DEMO` before quick-261017-nck. A sidecar written
+before that change still carries the old label on disk; `hermes-report.sh` and
+`outcome-metrics-report.sh` read it as `MODEL_ESTIMATED`, apply the same gate,
+and the wire always carries the new label.
 
 With this gate on, `revenium jobs roi`
 shows the estimate with the same weight as a measurement and nothing on that
@@ -457,7 +463,7 @@ experimental. Six settings govern separate parts of the opt-in feature:
 |---|---|
 | `enabled` | Whether evaluation happens at all. |
 | `experimentalReportEstimates` | Whether a computed value is *reportable* to Revenium: independent of `enabled`, because a value can be computed and withheld from the wire. |
-| `reportModelEstimates` | Whether a `MODEL_ESTIMATED_DEMO` value may be reported at all. Effective only with `experimentalReportEstimates`. |
+| `reportModelEstimates` | Whether a `MODEL_ESTIMATED` value may be reported at all. Effective only with `experimentalReportEstimates`. |
 | `boundaries` | Which registered implementation serves each pluggable contract (classification, valuation, evidence). |
 | `costs` | Operator-supplied inputs that net against a computed estimate. |
 | `studyId` / `studyVersion` | Reference an impact study; referencing one never changes an assessment's own evidence class. |
@@ -528,7 +534,9 @@ job-id-keyed sidecar file, `${STATE_DIR}/job-assessments/<sanitized_job_id>.json
 `JobAssessment`, distinct from the job marker's existing 9-key `assessment` summary
 (`markers/<sid>.jsonl`), which stays a pointer-and-summary and is byte-unchanged. The
 outcome stage in `hermes-report.sh` reads the sidecar, never the marker's summary, to
-resolve `--outcome-value`/`--outcome-currency` and `--metadata` provenance. An absent,
+resolve `--outcome-value`/`--outcome-currency` and `--metadata` provenance (the sidecar keeps
+its own field names; the wire renames them into the `schema_version` 2 groups, see
+[`value-and-roi.md`](../../../docs/value-and-roi.md)). An absent,
 unreadable, oversized or pruned sidecar record reports the outcome status-only, with no
 value flags.
 

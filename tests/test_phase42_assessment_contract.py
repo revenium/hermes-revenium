@@ -354,7 +354,7 @@ import unittest.mock
 
 from tests._compat_helpers import (
     assert_argv_matches_golden, build_shim, build_state_db,
-    jobs_create_help_lines, load_golden,
+    jobs_create_help_lines, load_golden, meta_path,
 )
 
 PLUGIN_DIR = SKILL / 'plugins' / 'revenium-classifier'
@@ -413,7 +413,7 @@ def _tracer_assessment_record(job_id, **overrides):
         # absent evidence_class on a job_assessment, which is what
         # surfaced the gap.
         #
-        # Phase 53 (ROI-01): the default moved from MODEL_ESTIMATED_DEMO to
+        # Phase 53 (ROI-01): the default moved from MODEL_ESTIMATED to
         # CUSTOMER_CONFIGURED, for the same reason the identical helpers in
         # tests/test_phase44_economic_mechanisms.py did. This helper's whole
         # job is driving a VALUE down the outcome path, and after the
@@ -531,9 +531,10 @@ class SidecarTracerTests(unittest.TestCase):
             self.assertEqual(argv[argv.index('--outcome-value') + 1], '525.0')
             self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
             meta = json.loads(_metadata_of(argv))
-            self.assertEqual(meta.get('evaluator'), 'llm')
-            self.assertEqual(meta.get('evaluator_version'), 'v1')
-            self.assertEqual(meta.get('confidence'), 0.8)
+            # quick-261017-nck: v2 wire paths (the sidecar keeps its v1 names).
+            self.assertEqual(meta_path(meta, 'estimator.name'), 'llm')
+            self.assertEqual(meta_path(meta, 'estimator.versions.evaluator'), 'v1')
+            self.assertEqual(meta_path(meta, 'basis.confidence'), 0.8)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -547,7 +548,7 @@ class SidecarTracerTests(unittest.TestCase):
             'assumptions': {'inferred_role': 'x', 'estimated_hours_saved': 1.0,
                              'assumed_loaded_rate': 999.0},
             'confidence': 0.9, 'evaluator': 'llm', 'evaluator_version': 'v1',
-            'evidence_class': 'MODEL_ESTIMATED_DEMO',
+            'evidence_class': 'MODEL_ESTIMATED',
         }
         tmpdir, env, jobs_log = self._build_tree(
             sid, job_id, sidecar_lines=None, marker_assessment=marker_assessment,
@@ -1659,9 +1660,12 @@ class FailClosedTests(unittest.TestCase):
             self.assertNotIn('--outcome-value', argv)
             self.assertNotIn('--outcome-currency', argv)
             meta = json.loads(_metadata_of(argv))
-            self.assertNotIn('evidence_class', meta)
-            self.assertNotIn('value_low', meta)
-            self.assertNotIn('assessment_schema_version', meta)
+            # Fail-closed: no assessment reached the forwarder, so the blob is
+            # the base-only shape (no schema_version, no groups at all).
+            self.assertIsNone(meta_path(meta, 'basis.evidence'))
+            self.assertNotIn('value', meta)
+            self.assertNotIn('basis', meta)
+            self.assertNotIn('schema_version', meta)
             log_content = _read_log(state_dir)
             self.assertEqual(
                 log_content.count('schema unrecognized'), 1,
@@ -1753,7 +1757,7 @@ class FailClosedTests(unittest.TestCase):
             'assumptions': {'inferred_role': 'x', 'estimated_hours_saved': 1.0,
                              'assumed_loaded_rate': 999.0},
             'confidence': 0.9, 'evaluator': 'llm', 'evaluator_version': 'v1',
-            'evidence_class': 'MODEL_ESTIMATED_DEMO',
+            'evidence_class': 'MODEL_ESTIMATED',
         }
         tmpdir, env, jobs_log, state_dir = _build_outcome_tree(
             sid, job_id, sidecar_lines=None, marker_assessment=marker_assessment,
@@ -1892,11 +1896,15 @@ class SecondSiteBoundsTests(unittest.TestCase):
             self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
             self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
             meta = json.loads(_metadata_of(argv))
-            self.assertEqual(meta.get('value_low'), 446.25)
-            self.assertEqual(meta.get('value_base'), 525.0)
-            self.assertEqual(meta.get('value_high'), 603.75)
-            self.assertEqual(meta.get('bounds_source'), 'derived')
-            self.assertEqual(meta.get('assessment_schema_version'), 1)
+            self.assertEqual(meta_path(meta, 'value.low'), 446.25)
+            self.assertEqual(meta_path(meta, 'value.base'), 525.0)
+            self.assertEqual(meta_path(meta, 'value.high'), 603.75)
+            # value.reported is the exact --outcome-value this call sent.
+            self.assertEqual(meta_path(meta, 'value.reported'), 446.25)
+            # LD-3: bounds_source stays in the sidecar; the sidecar's own
+            # schema version (1) is replaced on the wire by schema_version 2.
+            self.assertNotIn('bounds_source', json.dumps(meta))
+            self.assertEqual(meta.get('schema_version'), 2)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

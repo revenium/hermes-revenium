@@ -56,6 +56,7 @@ from tests.test_phase46_metadata_envelope import (  # noqa: E402
     _run_forwarder,
 )
 from tests.test_phase43_evidence_grading import _hostile_evaluator_response  # noqa: E402
+from tests._compat_helpers import meta_path  # noqa: E402
 
 
 def _load_classifier(env: "dict | None" = None):
@@ -190,13 +191,18 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         record = mod._build_job_assessment(
             self._valid_job('p50-default-001'), validated, raw, cfg, 'stub', 'v1')
         self.assertIsNotNone(record)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record['evidence_class'])
         # Task 2 <behavior> pin: the all-forced fallback authority is
         # 'evaluator', asserted explicitly so the default arm is pinned
         # rather than incidental.
         self.assertEqual('evaluator', record['evidence_class_authority'])
 
-    def test_evidence_class_authority_survives_into_the_real_metadata_wire(self):
+    def test_evidence_class_authority_is_in_the_sidecar_and_absent_from_the_wire(self):
+        """quick-261017-nck (LD-3): evidence_class_authority names which
+        boundary decided evidence_class. It is written to the sidecar record
+        by the classifier and read by auditors there; it no longer rides the
+        `jobs outcome --metadata` wire, where basis.evidence alone says what
+        the class is and who priced the value."""
         mod = self._load(boundaries={'evidence': 'confirmation_workflow_evidence_fixture'})
         cfg = mod._llm_evaluation_config()
         raw = self._raw()
@@ -212,35 +218,39 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         result = _run_forwarder(body, _assessment_env(record))
         self.assertEqual(0, result.returncode, result.stderr)
         meta = json.loads(result.stdout.strip())
-        self.assertEqual('evidence', meta.get('evidence_class_authority'))
-        self.assertEqual('CUSTOMER_CONFIRMED', meta.get('evidence_class'))
+        # Sidecar: the decision is recorded.
+        self.assertEqual('evidence', record['evidence_class_authority'])
+        # Wire: the class rides, the authority does not, anywhere.
+        self.assertEqual('CUSTOMER_CONFIRMED', meta_path(meta, 'basis.evidence'))
+        self.assertNotIn('evidence_class_authority', json.dumps(meta))
+        self.assertNotIn('authority', json.dumps(meta))
 
-    def test_out_of_set_evidence_class_authority_is_dropped_not_forwarded(self):
+    def test_out_of_set_evidence_class_authority_never_reaches_the_wire(self):
         script_text = HERMES_REPORT_SH.read_text()
         body = _extract_outcome_metadata_heredoc(script_text)
         self.assertIsNotNone(body)
         record = {
-            'evidence_class': 'MODEL_ESTIMATED_DEMO',
+            'evidence_class': 'MODEL_ESTIMATED',
             'evidence_class_authority': 'attacker-supplied',
         }
         result = _run_forwarder(body, _assessment_env(record))
         self.assertEqual(0, result.returncode, result.stderr)
         meta = json.loads(result.stdout.strip())
-        self.assertNotIn('evidence_class_authority', meta)
-        # The record's evidence_class itself still ships -- an out-of-set
-        # authority word is a correctness bug in ONE field, not a reason to
-        # withhold the rest of the row.
-        self.assertEqual('MODEL_ESTIMATED_DEMO', meta.get('evidence_class'))
+        self.assertNotIn('evidence_class_authority', json.dumps(meta))
+        self.assertNotIn('attacker-supplied', json.dumps(meta))
+        # The record's evidence_class itself still ships -- the authority is
+        # not read at all, so a hostile value in it cannot withhold the row.
+        self.assertEqual('MODEL_ESTIMATED', meta_path(meta, 'basis.evidence'))
 
     def test_absent_evidence_class_authority_key_adds_no_key_to_metadata(self):
         script_text = HERMES_REPORT_SH.read_text()
         body = _extract_outcome_metadata_heredoc(script_text)
         self.assertIsNotNone(body)
-        record = {'evidence_class': 'MODEL_ESTIMATED_DEMO'}
+        record = {'evidence_class': 'MODEL_ESTIMATED'}
         result = _run_forwarder(body, _assessment_env(record))
         self.assertEqual(0, result.returncode, result.stderr)
         meta = json.loads(result.stdout.strip())
-        self.assertNotIn('evidence_class_authority', meta)
+        self.assertNotIn('evidence_class_authority', json.dumps(meta))
 
     def test_declared_evidence_class_single_argument_calls_unchanged(self):
         """The five calls tests/test_phase45_boundary_registry.py:264-284
@@ -249,8 +259,8 @@ class TracerEndToEndTests(_DeclarationAuthorityTestCase):
         unaffected (D-02's explicit compatibility requirement)."""
         mod = self._load(boundaries=None)
         forced = mod._forced_evidence_class()
-        self.assertEqual('MODEL_ESTIMATED_DEMO', mod._declared_evidence_class('llm'))
-        self.assertEqual('MODEL_ESTIMATED_DEMO', mod._declared_evidence_class('stub'))
+        self.assertEqual('MODEL_ESTIMATED', mod._declared_evidence_class('llm'))
+        self.assertEqual('MODEL_ESTIMATED', mod._declared_evidence_class('stub'))
         self.assertEqual(forced, mod._declared_evidence_class('never-registered'))
         self.assertEqual(forced, mod._declared_evidence_class(None))
         self.assertEqual(forced, mod._declared_evidence_class(42))
@@ -288,7 +298,7 @@ class PrecedenceWalkTests(_DeclarationAuthorityTestCase):
         cfg = mod._llm_evaluation_config()
         got = mod._validate_assessment(self._raw(), cfg, 'stub', 'v1')
         self.assertIsNotNone(got)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got['evidence_class'])
 
     def test_validate_assessment_resolves_valuation_impl_name_exactly_once(self):
         """Task 3 Test 4: the existing resolution at _validate_assessment's
@@ -327,7 +337,7 @@ class PrecedenceWalkTests(_DeclarationAuthorityTestCase):
         cfg_b = mod_b._llm_evaluation_config()
         got_b = mod_b._validate_assessment(self._raw(), cfg_b, 'stub', 'v1')
         self.assertIsNotNone(got_b)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got_b['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got_b['evidence_class'])
         self.assertNotEqual(got_a['evidence_class'], got_b['evidence_class'])
 
         # And the FIRST module, called again with the SAME config, still
@@ -503,7 +513,7 @@ class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
         name = self._register_causal_label_valuation()
         mod = self._load(boundaries={'valuation': name})
         record = self._run_hostile(mod, _hostile_evaluator_response())
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record['evidence_class'])
         # The all-forced fallback authority is 'evaluator' -- never
         # 'valuation' with a causal label smuggled through.
         self.assertEqual('evaluator', record['evidence_class_authority'])
@@ -529,7 +539,7 @@ class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
         _write_config(second_config, boundaries=None)
         mod_b = _load_classifier({'REVENIUM_CONFIG_FILE': str(second_config)})
         record_b = self._run_hostile(mod_b, _hostile_evaluator_response(), job_id='p50-n2-b')
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record_b['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record_b['evidence_class'])
         self.assertEqual('evaluator', record_b['evidence_class_authority'])
         self.assertNotEqual(record_a['evidence_class'], record_b['evidence_class'])
 
@@ -562,7 +572,7 @@ class PromotionUnderPrecedenceTests(_DeclarationAuthorityTestCase):
         mod_evaluator = _load_classifier({'REVENIUM_CONFIG_FILE': str(evaluator_config)})
         record_3 = self._run_hostile(
             mod_evaluator, _hostile_evaluator_response(), job_id='p50-n3-evaluator')
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record_3['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record_3['evidence_class'])
         self.assertEqual('evaluator', record_3['evidence_class_authority'])
 
         # None of the three leaks into either of the others.
@@ -790,30 +800,30 @@ class SignatureGuardTests(unittest.TestCase):
 
 
 class AuthorityWordClampTests(unittest.TestCase):
-    """DECL-05 precision backstop (must_haves): the 16-byte clamp on
-    evidence_class_authority (hermes-report.sh's forwarder) cannot truncate
-    a legal value. Asserted against classifier.py's own live
-    _EVIDENCE_CLASS_AUTHORITIES enum, never against a hardcoded width --
-    if a future fifth authority word is added, this test fails loudly
-    rather than letting the wire silently truncate it.
+    """DECL-05 precision backstop (must_haves): the authority enum is exactly
+    the four boundary words of the cross-boundary walk, each short enough to
+    sit in the sidecar's compact provenance fields. Asserted against
+    classifier.py's own live _EVIDENCE_CLASS_AUTHORITIES enum, never against
+    a hardcoded list -- if a future fifth authority word is added, this test
+    fails loudly so the change is deliberate.
 
-    Under the Task 1 "option-b" decision the longest member is
-    'classification' at 14 bytes -- 2 bytes of headroom under the 16-byte
-    clamp. That margin is intentionally noted here as thin: a sixth
-    boundary joining the walk with a name longer than 16 bytes would need
-    either a shorter authority word or a widened clamp, not a silent
-    truncation.
+    quick-261017-nck (LD-3) removed hermes-report.sh's forwarder and its
+    16-byte clamp: evidence_class_authority stays in the sidecar and no
+    longer rides the `jobs outcome --metadata` wire, so no wire clamp
+    applies to it any more. The width check below is kept as a plain
+    discipline on the enum's words (the longest, 'classification', is 14
+    bytes), not as a statement about a wire truncation.
     """
 
-    def test_every_authority_word_fits_the_16_byte_clamp(self):
+    def test_every_authority_word_fits_the_16_byte_width(self):
         mod = _load_classifier()
         authorities = mod._EVIDENCE_CLASS_AUTHORITIES
         self.assertEqual(4, len(authorities), 'option-b widens the walk to four authorities')
         longest = max(authorities, key=lambda w: len(w.encode('utf-8')))
         self.assertLessEqual(
             len(longest.encode('utf-8')), 16,
-            f'{longest!r} ({len(longest.encode("utf-8"))} bytes) would be truncated by '
-            "hermes-report.sh's 16-byte evidence_class_authority clamp",
+            f'{longest!r} ({len(longest.encode("utf-8"))} bytes) exceeds the 16-byte '
+            'width this enum has always kept its authority words under',
         )
 
     def test_declarable_evidence_classes_excludes_the_three_causal_impact_labels(self):
@@ -1240,7 +1250,7 @@ class BoundaryCaseTests(_DeclarationAuthorityTestCase):
         mod = self._load(boundaries=None)
         got = mod._validate_assessment(self._raw(), mod._llm_evaluation_config(), 'stub', 'v1')
         self.assertIsNotNone(got)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', got['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', got['evidence_class'])
         self.assertEqual('evaluator', got['evidence_class_authority'])
 
     # -- Exactly-one-declares: that class, that authority, no conflict shape -

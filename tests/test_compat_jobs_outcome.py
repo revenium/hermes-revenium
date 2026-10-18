@@ -29,6 +29,7 @@ from tests._compat_helpers import (
     build_shim,
     build_state_db,
     load_golden,
+    meta_path,
     run_script,
     SCRIPTS_DIR,
 )
@@ -316,7 +317,21 @@ def _build_over_ceiling_sidecar_record(job_id):
         # is what upper-bounds value_high above at a value production could
         # actually compute, not an arbitrary large number.
         'assumptions': {'estimated_hours_saved': 39.75, 'assumed_loaded_rate': 499.75},
-        'economic_mechanism': 'augmentation_capacity_expansion',
+        # quick-261017-nck (C-10): v2 dropped bounds_source (16 emoji, 192
+        # bytes), cost_coverage.included and some key length, so the SHIPPED
+        # pre-shed blob (the driven tick clamps `source` to 5 emoji) fell to
+        # ~3.7 KB, under the ceiling, and the truncation golden would have
+        # stopped testing truncation. The ballast is value-tier and
+        # production-reachable: the attribution pair a revenue arm carries,
+        # with attribution_basis at the 500 characters the forwarder allows.
+        # 'incremental_revenue' is the mechanism that pairs coherently with an
+        # attribution pair (a configured-revenue record). value.attribution
+        # sheds at tier 1 with the rest of `value`, so none of it reaches the
+        # asserted post-shed payload. Measured against the real forwarder:
+        # pre-shed 4250 bytes, post-tier-1 3264.
+        'attribution_fraction': 0.35,
+        'attribution_basis': 'B' * 500,
+        'economic_mechanism': 'incremental_revenue',
         'net_value': 15000.25,
         # The cost floats carry extra significant digits purely as ballast.
         # This record has to clear _METADATA_CEILING_BYTES *before* the
@@ -356,13 +371,14 @@ def _build_over_ceiling_sidecar_record(job_id):
     }
 
 
+# quick-261017-nck: v2 dotted wire paths (hermes-report.sh's own tier tuples
+# are the source of truth; these are the paths this fixture asserts on).
 _VALUE_FAMILY_META_KEYS = (
-    'value_low', 'value_base', 'value_high', 'bounds_source',
-    'net_value', 'assumptions', 'supplied_costs', 'cost_coverage',
+    'value', 'costs', 'basis.role', 'basis.hours_saved', 'basis.hourly_rate',
 )
 _SURVIVING_PROVENANCE_META_KEYS = (
-    'evaluator', 'evaluator_version', 'model', 'evidence_class',
-    'reportability_status', 'inference_provider', 'inference_address_class',
+    'estimator.name', 'estimator.versions.evaluator', 'estimator.model',
+    'basis.evidence', 'status', 'estimator.provider', 'estimator.endpoint',
 )
 
 
@@ -542,8 +558,8 @@ class TestCompatJobsOutcomeMetadataTruncated(unittest.TestCase):
 
         # Test 4: every value-family key was popped.
         for key in _VALUE_FAMILY_META_KEYS:
-            self.assertNotIn(
-                key, meta,
+            self.assertIsNone(
+                meta_path(meta, key),
                 f'{key} (value family) survived a truncation this test drove '
                 f'the record to trigger',
             )
@@ -551,8 +567,8 @@ class TestCompatJobsOutcomeMetadataTruncated(unittest.TestCase):
         # Test 5: base + surviving provenance keys are intact.
         self.assertIn('source', meta)
         for key in _SURVIVING_PROVENANCE_META_KEYS:
-            self.assertIn(
-                key, meta,
+            self.assertIsNotNone(
+                meta_path(meta, key),
                 f'{key} (provenance) was dropped when only the value family '
                 f'should have yielded at this record\'s size',
             )

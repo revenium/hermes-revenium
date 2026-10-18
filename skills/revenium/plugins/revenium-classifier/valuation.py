@@ -351,7 +351,7 @@ def _finite_number(value) -> "float | None":
 # slot: an operator's approved rate card, keyed by inferred role, prices
 # the work with no model call anywhere in the derivation.
 #
-# It declares CUSTOMER_CONFIGURED, not MODEL_ESTIMATED_DEMO: the amount
+# It declares CUSTOMER_CONFIGURED, not MODEL_ESTIMATED: the amount
 # comes from a rate card the operator approved, so the honest claim is that
 # the value was CONFIGURED, not that a model estimated it. The honest limit
 # of that claim, matching the vocabulary's own definition: configuration
@@ -958,12 +958,12 @@ register(
 # caller" demonstration needs a registrant that prices the SAME shape of
 # arithmetic from DIFFERENT numbers, not a differently-shaped one.
 #
-# Why it declares MODEL_ESTIMATED_DEMO rather than CUSTOMER_CONFIGURED
+# Why it declares MODEL_ESTIMATED rather than CUSTOMER_CONFIGURED
 # (D-05), as its own paragraph: a fixture able to produce a REPORTABLE
 # value is one misconfiguration away from shipping a fixture number as
 # customer-configured, which is the provenance lie
 # classifier._valuation_evidence_impl_name exists to stop. This is a
-# MEMBERSHIP decision -- MODEL_ESTIMATED_DEMO is the one label
+# MEMBERSHIP decision -- MODEL_ESTIMATED is the one label
 # classifier._REPORTABLE_EVIDENCE_CLASSES refuses -- not a claim that one
 # evidence-class label is stronger or weaker than another (EGV-10).
 #
@@ -1001,7 +1001,7 @@ def _baselines_valuation_fixture(assumptions: dict, config: dict) -> "dict | Non
     delegating to the built-in `hours_times_rate` derivation whenever no
     usable source figures were resolved -- see the module comment above
     for the full two-outcome split and why D-05 forces this registrant to
-    declare MODEL_ESTIMATED_DEMO.
+    declare MODEL_ESTIMATED.
     """
     if not isinstance(assumptions, dict) or not isinstance(config, dict):
         return None
@@ -1029,5 +1029,5 @@ def _baselines_valuation_fixture(assumptions: dict, config: dict) -> "dict | Non
 
 # Registered from classifier._register_valuation_impl (not here) -- see
 # that function's own comment for why registration lives in classifier.py
-# rather than in valuation.py, and for the forced MODEL_ESTIMATED_DEMO
+# rather than in valuation.py, and for the forced MODEL_ESTIMATED
 # literal it declares.

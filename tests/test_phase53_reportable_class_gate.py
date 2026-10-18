@@ -14,7 +14,7 @@ docs/claim-distinctions-and-evidence-boundaries.md. A model-estimated value
 displayed there is visually indistinguishable from a measured one.
 
 So the gate: a value may reach the wire only when something other than a model
-constituted it. `MODEL_ESTIMATED_DEMO` -- the one label meaning "a model guessed
+constituted it. `MODEL_ESTIMATED` -- the one label meaning "a model guessed
 this" -- is refused.
 
 THIS IS A PARTITION, NOT A RANKING. EGV-10 (D-01) forbids treating the nine
@@ -95,24 +95,24 @@ class PermittedSetTests(unittest.TestCase):
         """D-02: not operator-widenable, by construction.
 
         A value-reporting gate an operator can configure away is not a gate.
-        Every permitted class must resolve reportable and MODEL_ESTIMATED_DEMO
+        Every permitted class must resolve reportable and MODEL_ESTIMATED
         must not, under configs that variously try to widen it.
         """
         hostile_cfgs = (
             {'experimentalReportEstimates': True},
             {'experimentalReportEstimates': True,
-             'reportableEvidenceClasses': ['MODEL_ESTIMATED_DEMO']},
+             'reportableEvidenceClasses': ['MODEL_ESTIMATED']},
             {'experimentalReportEstimates': True,
-             'reportable_evidence_classes': ['MODEL_ESTIMATED_DEMO']},
+             'reportable_evidence_classes': ['MODEL_ESTIMATED']},
             {'experimentalReportEstimates': True,
-             'evidenceClasses': ['MODEL_ESTIMATED_DEMO']},
+             'evidenceClasses': ['MODEL_ESTIMATED']},
         )
         for cfg in hostile_cfgs:
             with self.subTest(cfg=cfg):
                 self.assertEqual(
                     self.mod.REPORTABILITY_CANDIDATE,
                     self.mod._resolve_reportability_status(
-                        cfg, False, evidence_class='MODEL_ESTIMATED_DEMO'),
+                        cfg, False, evidence_class='MODEL_ESTIMATED'),
                 )
 
 
@@ -136,7 +136,7 @@ class ClassifierGateTests(unittest.TestCase):
         self.assertEqual(
             self.mod.REPORTABILITY_CANDIDATE,
             self.mod._resolve_reportability_status(
-                self.cfg, False, evidence_class='MODEL_ESTIMATED_DEMO'),
+                self.cfg, False, evidence_class='MODEL_ESTIMATED'),
         )
 
     def test_omitted_evidence_class_fails_closed(self):
@@ -169,7 +169,7 @@ class ClassifierGateTests(unittest.TestCase):
         """THE ADVERSARIAL CASE (ROI-01's prohibition).
 
         A registered evidence implementation that returns `reportable` for a
-        MODEL_ESTIMATED_DEMO record must not obtain it. This is the
+        MODEL_ESTIMATED record must not obtain it. This is the
         elevation-of-privilege the gate's position exists to prevent: it is
         checked unconditionally BEFORE any implementation is consulted, so a
         registrant has no path to it.
@@ -199,7 +199,7 @@ class ClassifierGateTests(unittest.TestCase):
             self.assertEqual(
                 mod.REPORTABILITY_CANDIDATE,
                 mod._resolve_reportability_status(
-                    self.cfg, False, evidence_class='MODEL_ESTIMATED_DEMO'),
+                    self.cfg, False, evidence_class='MODEL_ESTIMATED'),
                 'a registered implementation obtained reportable for a '
                 'model-estimated record -- the gate was reached around',
             )
@@ -218,7 +218,7 @@ class ClassifierGateTests(unittest.TestCase):
     def test_end_to_end_record_construction_refuses_the_naked_llm_path(self):
         """Through the REAL construction path, not the resolver alone.
 
-        The naked-LLM evaluator forces MODEL_ESTIMATED_DEMO, so a record built
+        The naked-LLM evaluator forces MODEL_ESTIMATED, so a record built
         this way can never be reportable however the config is set.
         """
         mod = self.mod
@@ -241,7 +241,7 @@ class ClassifierGateTests(unittest.TestCase):
             valid, assessment, raw, {'experimentalReportEstimates': True},
             'llm', 'v1')
         self.assertIsNotNone(record)
-        self.assertEqual('MODEL_ESTIMATED_DEMO', record['evidence_class'])
+        self.assertEqual('MODEL_ESTIMATED', record['evidence_class'])
         self.assertEqual(mod.REPORTABILITY_CANDIDATE,
                          record['reportability_status'])
         # Provenance is KEPT. Withholding the value must not withhold the fact

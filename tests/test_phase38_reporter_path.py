@@ -46,6 +46,7 @@ from tests._compat_helpers import (
     build_state_db,
     jobs_create_help_lines,
     load_golden,
+    meta_path,
     run_script,
     ROOT,
     SCRIPTS_DIR,
@@ -69,7 +70,7 @@ ASSESSMENT_FIXTURE = {
     "confidence": 0.8,
     "evaluator": "llm",
     "evaluator_version": "v1",
-    "evidence_class": "MODEL_ESTIMATED_DEMO",
+    "evidence_class": "MODEL_ESTIMATED",
 }
 
 
@@ -111,6 +112,12 @@ def _sidecar_record(job_id, **overrides):
         # rather than an invented placeholder.
         "inference_provider": "openrouter",
         "inference_address_class": "public",
+        # quick-261017-nck (C-5): the v2 forwarder reads study_id/study_version
+        # (basis.study). classifier.py's _build_job_assessment writes both on
+        # every record, unset as "" / 0, so the fixture carries them -- the
+        # WR-04 fixture-fidelity rule, never a widened exemption set.
+        "study_id": "",
+        "study_version": 0,
         "value_low": 446.25,
         "value_base": 525.0,
         "value_high": 603.75,
@@ -120,7 +127,7 @@ def _sidecar_record(job_id, **overrides):
         "evaluator": "llm",
         "evaluator_version": "v1",
         "confidence": 0.8,
-        "evidence_class": "MODEL_ESTIMATED_DEMO",
+        "evidence_class": "MODEL_ESTIMATED",
         # Phase 50 (DECL-05, D-04): classifier.py's _build_job_assessment
         # (and _validate_assessment) populate this key UNCONDITIONALLY on
         # every record they build, and this plan makes hermes-report.sh
@@ -128,7 +135,7 @@ def _sidecar_record(job_id, **overrides):
         # the same way every prior recurrence was: SidecarFixtureFidelityTests'
         # _sidecar_record() gains the fixture key, never a widened exemption
         # set. "evaluator" is the honest value for this fixture's own
-        # "MODEL_ESTIMATED_DEMO" evidence_class immediately above: no
+        # "MODEL_ESTIMATED" evidence_class immediately above: no
         # boundary votes on the default/unconfigured arm, so the
         # cross-boundary precedence walk falls through to
         # _forced_evidence_class() with authority "evaluator".
@@ -193,8 +200,8 @@ def _sidecar_record(job_id, **overrides):
         #
         # Phase 53 (ROI-01) CHANGED THIS DEFAULT from "reportable" to
         # "candidate", and the reason matters more than the value. This
-        # fixture's evidence_class is MODEL_ESTIMATED_DEMO (above), and after
-        # Phase 53's class gate a MODEL_ESTIMATED_DEMO record can NEVER be
+        # fixture's evidence_class is MODEL_ESTIMATED (above), and after
+        # Phase 53's class gate a MODEL_ESTIMATED record can NEVER be
         # reportable -- production resolves it to candidate. The old pairing
         # described a record production cannot emit, which is precisely what
         # FixtureFidelityTests exists to catch; it caught this one.
@@ -251,6 +258,20 @@ def _correction_sidecar_record(job_id, sequence=1, **overrides):
     }
     record.update(overrides)
     return record
+
+
+def _assert_value_family_withheld(test, meta, message):
+    """quick-261017-nck (v2 wire): the value family is withheld when there is
+    no `value` group and basis carries none of the assumption-derived scalars
+    (role, hours_saved, hourly_rate). The sidecar-only names (bounds_source,
+    currency, estimated_value) appear nowhere in the blob."""
+    test.assertNotIn('value', meta, f'{message}: {meta}')
+    for key in ('role', 'hours_saved', 'hourly_rate'):
+        test.assertNotIn(key, meta.get('basis', {}), f'{message}: {meta}')
+    blob = json.dumps(meta)
+    for key in ('bounds_source', 'estimated_value', 'value_low', 'value_base',
+                'value_high', 'assumptions'):
+        test.assertNotIn(key, blob, f'{message}: {meta}')
 
 
 class TestPhase38ReporterPath(unittest.TestCase):
@@ -454,7 +475,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'o38-job-001',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -464,30 +485,32 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
 
         meta = json.loads(self._metadata_value(argv))
+        # quick-261017-nck (LD-2): the wire is schema_version 2 with nested
+        # groups; the sidecar fixture keeps its v1 names.
         self.assertEqual(meta.get('source'), 'test')
-        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
-        self.assertEqual(meta.get('evaluator'), 'llm')
-        self.assertEqual(meta.get('evaluator_version'), 'v1')
-        self.assertEqual(meta.get('confidence'), 0.8)
+        self.assertEqual(meta_path(meta, 'basis.evidence'), 'CUSTOMER_CONFIGURED')
+        self.assertEqual(meta_path(meta, 'estimator.name'), 'llm')
+        self.assertEqual(meta_path(meta, 'estimator.versions.evaluator'), 'v1')
+        self.assertEqual(meta_path(meta, 'basis.confidence'), 0.8)
+        self.assertEqual(meta_path(meta, 'basis.role'), 'senior software engineer')
+        self.assertEqual(meta_path(meta, 'basis.hours_saved'), 3.5)
+        self.assertEqual(meta_path(meta, 'basis.hourly_rate'), 150.0)
         self.assertEqual(
-            meta.get('assumptions'),
-            {
-                'estimated_hours_saved': 3.5,
-                'assumed_loaded_rate': 150.0,
-                'inferred_role': 'senior software engineer',
-            },
+            list(meta['basis']),
+            ['evidence', 'mechanism', 'role', 'hours_saved', 'hourly_rate', 'confidence'],
         )
-        self.assertEqual(
-            list(meta['assumptions']),
-            ['estimated_hours_saved', 'assumed_loaded_rate', 'inferred_role'],
-        )
-        # quick-261017-kb1: basis stays local even on a reportable record.
-        self.assertNotIn('basis', meta)
-        self.assertEqual(meta.get('value_low'), 446.25)
-        self.assertEqual(meta.get('value_base'), 525.0)
-        self.assertEqual(meta.get('value_high'), 603.75)
-        self.assertEqual(meta.get('bounds_source'), 'derived')
-        self.assertEqual(meta.get('assessment_schema_version'), 1)
+        # quick-261017-kb1: the evaluator's `basis` SENTENCE stays local even
+        # on a reportable record. The wire `basis` is a different object: a
+        # dict of allow-listed scalars, never that prose (C-3).
+        self.assertIsInstance(meta['basis'], dict)
+        self.assertNotIn('3.5 hours of senior engineer review time', json.dumps(meta))
+        self.assertEqual(meta_path(meta, 'value.reported'), 446.25)
+        self.assertEqual(meta_path(meta, 'value.low'), 446.25)
+        self.assertEqual(meta_path(meta, 'value.base'), 525.0)
+        self.assertEqual(meta_path(meta, 'value.high'), 603.75)
+        # LD-3: bounds_source stays in the sidecar.
+        self.assertNotIn('bounds_source', json.dumps(meta))
+        self.assertEqual(meta.get('schema_version'), 2)
         # D-08 executable proof: the shipped value is the LOW bound, never
         # the marker's estimated_value (525.0) or the sidecar's own base.
         self.assertNotEqual(argv[argv.index('--outcome-value') + 1], '525.0')
@@ -516,24 +539,29 @@ class TestPhase38ReporterPath(unittest.TestCase):
         # including the assumptions object whose
         # estimated_hours_saved * assumed_loaded_rate product IS the
         # estimate this gate exists to withhold.
-        for stripped_key in (
-            'value_low', 'value_base', 'value_high', 'bounds_source',
-            'currency', 'estimated_value', 'assumptions', 'basis',
-        ):
-            self.assertNotIn(stripped_key, meta, f'{stripped_key!r} must not cross the wire on a candidate record')
+        # (v2: the whole `value` group is absent, and basis carries none of
+        # the assumption-derived scalars.)
+        self.assertNotIn('value', meta, 'the value group must not cross the wire on a candidate record')
+        for stripped_key in ('role', 'hours_saved', 'hourly_rate'):
+            self.assertNotIn(
+                stripped_key, meta['basis'],
+                f'basis.{stripped_key} must not cross the wire on a candidate record')
+        for sidecar_only in ('estimated_value', 'currency', 'bounds_source'):
+            self.assertNotIn(sidecar_only, json.dumps(meta))
+        self.assertIsInstance(meta['basis'], dict)
         # D-05: provenance still ships even though the value did not.
-        self.assertEqual(meta.get('evidence_class'), 'MODEL_ESTIMATED_DEMO')
-        self.assertEqual(meta.get('evaluator'), 'llm')
-        self.assertEqual(meta.get('evaluator_version'), 'v1')
-        self.assertEqual(meta.get('model'), 'unknown')
-        self.assertEqual(meta.get('assessment_schema_version'), 1)
-        self.assertEqual(meta.get('taxonomy_version'), 1)
-        self.assertEqual(meta.get('prompt_version'), 1)
-        self.assertEqual(meta.get('policy_version'), 1)
+        self.assertEqual(meta_path(meta, 'basis.evidence'), 'MODEL_ESTIMATED')
+        self.assertEqual(meta_path(meta, 'estimator.name'), 'llm')
+        self.assertEqual(meta_path(meta, 'estimator.versions.evaluator'), 'v1')
+        self.assertEqual(meta_path(meta, 'estimator.model'), 'unknown')
+        self.assertEqual(meta.get('schema_version'), 2)
+        self.assertEqual(meta_path(meta, 'estimator.versions.taxonomy'), 1)
+        self.assertEqual(meta_path(meta, 'estimator.versions.prompt'), 1)
+        self.assertEqual(meta_path(meta, 'estimator.versions.policy'), 1)
         # T-43-04: the reportability decision itself rides in --metadata too
         # -- a withheld row must be distinguishable from a row dropped for
         # bounds or schema reasons.
-        self.assertEqual(meta.get('reportability_status'), 'candidate')
+        self.assertEqual(meta.get('status'), 'candidate')
 
     def test_reportable_reportability_ships_exactly_as_before(self):
         """Phase 43 (EGV-18): a record whose reportability_status is
@@ -545,7 +573,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'r43-job-001',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -553,21 +581,15 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('value_low'), 446.25)
-        self.assertEqual(meta.get('value_base'), 525.0)
-        self.assertEqual(meta.get('value_high'), 603.75)
-        self.assertEqual(meta.get('bounds_source'), 'derived')
-        self.assertEqual(
-            meta.get('assumptions'),
-            {
-                'estimated_hours_saved': 3.5,
-                'assumed_loaded_rate': 150.0,
-                'inferred_role': 'senior software engineer',
-            },
-        )
-        self.assertNotIn('basis', meta)
-        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
-        self.assertEqual(meta.get('reportability_status'), 'reportable')
+        self.assertEqual(meta_path(meta, 'value.low'), 446.25)
+        self.assertEqual(meta_path(meta, 'value.base'), 525.0)
+        self.assertEqual(meta_path(meta, 'value.high'), 603.75)
+        self.assertNotIn('bounds_source', json.dumps(meta))
+        self.assertEqual(meta_path(meta, 'basis.role'), 'senior software engineer')
+        self.assertEqual(meta_path(meta, 'basis.hours_saved'), 3.5)
+        self.assertEqual(meta_path(meta, 'basis.hourly_rate'), 150.0)
+        self.assertEqual(meta_path(meta, 'basis.evidence'), 'CUSTOMER_CONFIGURED')
+        self.assertEqual(meta.get('status'), 'reportable')
 
     def test_role_is_the_only_evaluator_prose_on_a_reportable_wire(self):
         """quick-261017-kb1: on a REPORTABLE record the evaluator's
@@ -591,7 +613,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         )
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(
-            meta['assumptions']['inferred_role'], canary.EVALUATOR_ROLE_CANARY,
+            meta['basis']['role'], canary.EVALUATOR_ROLE_CANARY,
         )
         joined = '\n'.join(argv)
         for other in (
@@ -624,7 +646,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         meta = json.loads(self._metadata_value(argv))
         self.assertEqual(meta.get('source'), 'test')
         self.assertEqual(meta.get('failure_reason'), 'boom')
-        self.assertNotIn('evidence_class', meta)
+        self.assertIsNone(meta_path(meta, 'basis.evidence'))
 
     def test_outcome_cancelled_never_carries_a_value(self):
         argv = self._run_one_outcome(
@@ -663,7 +685,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('evidence_class', meta)
+        self.assertIsNone(meta_path(meta, 'basis.evidence'))
 
     def test_evidence_class_non_string_is_not_forwarded(self):
         """Behavior 2: a numeric evidence_class is rejected the same way a
@@ -679,7 +701,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('evidence_class', meta)
+        self.assertIsNone(meta_path(meta, 'basis.evidence'))
 
     def test_absent_evidence_class_on_a_job_assessment_is_refused(self):
         """WR-02 (43-REVIEW.md): absence is permissible only for the record
@@ -706,14 +728,10 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
         meta = json.loads(self._metadata_value(argv))
-        for leaked in ('value_low', 'value_base', 'value_high',
-                       'bounds_source', 'currency', 'estimated_value',
-                       'assumptions'):
-            self.assertNotIn(
-                leaked, meta,
-                f'WR-02: {leaked!r} shipped for a job_assessment whose '
-                f'evidence_class was deleted: {meta}',
-            )
+        _assert_value_family_withheld(
+            self, meta,
+            'WR-02: value family shipped for a job_assessment whose '
+            'evidence_class was deleted')
 
     def test_rejected_evidence_class_also_withholds_the_value_family(self):
         """CR-01 (43-REVIEW.md): a record REJECTED by the allow-list must
@@ -745,16 +763,12 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertNotIn('--outcome-value', argv)
         self.assertNotIn('--outcome-currency', argv)
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('evidence_class', meta)
-        for leaked in ('value_low', 'value_base', 'value_high',
-                       'bounds_source', 'currency', 'estimated_value',
-                       'assumptions'):
-            self.assertNotIn(
-                leaked, meta,
-                f'CR-01: {leaked!r} rode into --metadata on a record the '
-                f'allow-list rejected -- the value was refused at the flags '
-                f'and shipped in the blob: {meta}',
-            )
+        self.assertIsNone(meta_path(meta, 'basis.evidence'))
+        _assert_value_family_withheld(
+            self, meta,
+            'CR-01: the value family rode into --metadata on a record the '
+            'allow-list rejected -- the value was refused at the flags and '
+            'shipped in the blob')
 
     def test_absent_evidence_class_is_not_a_rejection(self):
         """Behavior 3 -- the trap this check exists to avoid inverting
@@ -790,11 +804,11 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '100.0')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         meta = json.loads(self._metadata_value(argv))
-        self.assertNotIn('evidence_class', meta)
+        self.assertIsNone(meta_path(meta, 'basis.evidence'))
 
     def test_nominal_evidence_class_still_ships_unaffected_by_the_new_check(self):
         """Behavior 4, the accept-branch regression pin: the nominal
-        fixture's MODEL_ESTIMATED_DEMO still forwards both value flags and
+        fixture's MODEL_ESTIMATED still forwards both value flags and
         the label itself, unchanged by the new allow-list. Tests 3 and 4
         are not padding -- they are what stops Test 1 from being satisfied
         by an over-broad check that rejects everything, including absence
@@ -804,7 +818,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'ec43-job-004',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -812,7 +826,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
         self.assertEqual(argv[argv.index('--outcome-value') + 1], '446.25')
         self.assertEqual(argv[argv.index('--outcome-currency') + 1], 'USD')
         meta = json.loads(self._metadata_value(argv))
-        self.assertEqual(meta.get('evidence_class'), 'CUSTOMER_CONFIGURED')
+        self.assertEqual(meta_path(meta, 'basis.evidence'), 'CUSTOMER_CONFIGURED')
 
     # -- Task 3: the new golden, and pre-v1.5 backward compatibility ------
 
@@ -834,7 +848,7 @@ class TestPhase38ReporterPath(unittest.TestCase):
             sidecar=_sidecar_record(
                 'assessment-golden-job',
                 # Phase 53 (ROI-01): this test asserts a VALUE on the wire, so it
-                # needs a coherent value-shipping pair. MODEL_ESTIMATED_DEMO +
+                # needs a coherent value-shipping pair. MODEL_ESTIMATED +
                 # reportable is no longer a record production can emit.
                 reportability_status='reportable', evidence_class='CUSTOMER_CONFIGURED',
                 evidence_class_authority='valuation'),
@@ -1072,6 +1086,14 @@ def _extract_forwarder_record_keys(script_text):
     this ast walk over literal string arguments cannot see it -- those
     three are already covered by meter-completion-assessment.golden.json's
     own anchored pattern.
+
+    quick-261017-nck (v2 wire): the heredoc now emits nested groups, but it
+    still reads the SIDECAR through literal `record.get('<sidecar key>')`
+    calls (the three estimator versions were deliberately left as literals
+    rather than looped, for this guard's sake), so every key it finds must
+    still exist in `_sidecar_record()`. Reads of the nested `assumptions`
+    object go through `assumptions_raw.get(...)`, not `record`, and are not
+    seen here.
     """
     anchor = 'outcome_metadata=$('
     start_marker = script_text.find(anchor)
@@ -1685,10 +1707,17 @@ class TestPhase38MultiTick(unittest.TestCase):
             # not just the in-memory dict the fixture built.
             with open(sidecar_path) as f:
                 on_disk_before = json.loads(f.read().strip())
-            provenance_fields = (
-                'assessment_schema_version', 'taxonomy_version', 'prompt_version',
-                'policy_version', 'model', 'evaluator', 'evaluator_version',
-            )
+            # quick-261017-nck: the SIDECAR keeps its v1 names; each one
+            # rides the v2 wire at the dotted path named here.
+            provenance_wire_paths = {
+                'taxonomy_version': 'estimator.versions.taxonomy',
+                'prompt_version': 'estimator.versions.prompt',
+                'policy_version': 'estimator.versions.policy',
+                'model': 'estimator.model',
+                'evaluator': 'estimator.name',
+                'evaluator_version': 'estimator.versions.evaluator',
+            }
+            provenance_fields = ('assessment_schema_version',) + tuple(provenance_wire_paths)
             expected = {field: on_disk_before[field] for field in provenance_fields}
 
             # Tick 1: jobs create fails -> OUTCOME-04's defer branch. No
@@ -1721,7 +1750,7 @@ class TestPhase38MultiTick(unittest.TestCase):
 
             # Phase 53 (ROI-01): this record is built by the REAL constructor
             # (_build_real_sidecar_record), so its evidence_class is the forced
-            # MODEL_ESTIMATED_DEMO of the naked-LLM path -- and the class gate
+            # MODEL_ESTIMATED of the naked-LLM path -- and the class gate
             # withholds the value family from the wire for exactly that class.
             #
             # D-08's meaning is UNCHANGED and still asserted, just one level in:
@@ -1735,16 +1764,21 @@ class TestPhase38MultiTick(unittest.TestCase):
             self.assertNotIn('--outcome-currency', argv2, argv2)
 
             meta2 = json.loads(_metadata_of(argv2))
-            for field in provenance_fields:
-                self.assertIn(
-                    field, meta2,
-                    f'provenance field {field!r} is missing from tick 2 --metadata: {meta2}',
+            # The sidecar's schema version (1) is replaced on the wire by the
+            # envelope's own schema_version (2); the sidecar value is still
+            # asserted unchanged by the on-disk comparison below.
+            self.assertEqual(meta2.get('schema_version'), 2, meta2)
+            for field, wire_path in provenance_wire_paths.items():
+                self.assertIsNotNone(
+                    meta_path(meta2, wire_path),
+                    f'provenance field {field!r} ({wire_path}) is missing from '
+                    f'tick 2 --metadata: {meta2}',
                 )
                 self.assertEqual(
-                    meta2[field], expected[field],
+                    meta_path(meta2, wire_path), expected[field],
                     f'provenance field {field!r} changed across the deferral: '
                     f'sidecar held {expected[field]!r} before tick 1, '
-                    f'tick 2 shipped {meta2[field]!r}',
+                    f'tick 2 shipped {meta_path(meta2, wire_path)!r}',
                 )
 
             ledger_text = open(jobs_ledger).read()
@@ -2959,7 +2993,15 @@ class TestPhase38Canary(unittest.TestCase):
                     'estimated_hours_saved': 39.75, 'assumed_loaded_rate': 499.75,
                     'inferred_role': role_canary + '|role\nbreak\r' + ('Y' * 20),
                 },
-                'economic_mechanism': 'augmentation_capacity_expansion',
+                # quick-261017-nck (C-10): v2 dropped bounds_source,
+                # cost_coverage.included and some key length, so this
+                # fixture needs value-tier ballast to clear the ceiling
+                # BEFORE the tier-1 drop -- the same production-reachable
+                # attribution pair, and the mechanism that pairs coherently
+                # with it, as tests/test_compat_jobs_outcome.py's fixture.
+                'attribution_fraction': 0.35,
+                'attribution_basis': 'B' * 500,
+                'economic_mechanism': 'incremental_revenue',
                 'net_value': 15000.25,
                 # Extra significant digits are ballast, not precision.
                 # This fixture must clear _METADATA_CEILING_BYTES BEFORE the
@@ -3047,6 +3089,16 @@ class TestPhase38Canary(unittest.TestCase):
                 meta.get('metadata_truncated'), True,
                 'this record was sized to exceed the ceiling -- if metadata_truncated '
                 f'is absent, the truncation path is invisible to this sweep, got: {meta!r}',
+            )
+            # quick-261017-nck (C-3): the wire `basis` group survives tier 1
+            # in part, so assert it is the allow-listed object and carries
+            # none of the evaluator's prose.
+            self.assertIsInstance(meta.get('basis'), dict, meta)
+            self.assertLessEqual(
+                set(meta['basis']),
+                {'evidence', 'mechanism', 'role', 'hours_saved', 'hourly_rate',
+                 'confidence', 'study'},
+                meta,
             )
 
             for canary in prose_canaries:
