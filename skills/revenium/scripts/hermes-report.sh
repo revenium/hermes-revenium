@@ -2805,9 +2805,33 @@ main() {
 
   # G-03 sentinel-or-aged filter (D-21): drop sessions younger than SETTLE_SECONDS
   # that have no plugin sentinel at MARKERS_READY_DIR/<sid>. Sessions WITH a sentinel
-  # OR older than the settle window pass through unchanged. The downstream while-loop
-  # below is byte-identical to pre-edit. Soft-fail: on heredoc error, the original
-  # ${sessions} flows through unfiltered (legacy behavior).
+  # OR older than the settle window pass through unless the live-unclassified hold
+  # below applies. The downstream while-loop below is byte-identical to pre-edit.
+  # Soft-fail: on heredoc error, the original ${sessions} flows through unfiltered
+  # (legacy behavior).
+  #
+  # Live-unclassified hold (pre-marker leak, 2026-10-18). The window is meant to
+  # bound job-inference latency AFTER the classifier fires, but it was measured
+  # from started_at and the plugin fires at the END of a session's first turn, so
+  # a first turn longer than the window was shipped markerless on every tick while
+  # it was still running (20.5% of tokens on the measured fleet). A session that
+  # has no sentinel and is past the window is now held while ALL of these hold:
+  #   - a healthy classifier is registered (plugin-status.json), else nothing is
+  #     coming and a metering-only install keeps today's timing;
+  #   - it is younger than REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS (0 = off), so
+  #     a classifier that never fires strands nothing for longer than that;
+  #   - it has no marker file yet and is LIVE: sessions.last_activity_at (Hermes
+  #     stamps it mid-turn, at most once a minute) or ended_at is less than the
+  #     settle window old. NULL or a missing column degrades to started_at, i.e.
+  #     to today's behaviour. A locked state.db defers: a markerless ship cannot
+  #     be taken back, a held tick costs one tick (same rule as the CANCELLED
+  #     open-session hold).
+  # A classification that landed AFTER the old window had closed gets the window
+  # to finish its job inference, measured from its first record, unless a job
+  # record or the sentinel is already there. A marker inside the window leaves a
+  # session exactly as it was: gateway sessions mid-chat have markers but no
+  # sentinel until their boundary, and holding them would delay budget
+  # visibility for no linkage benefit.
   local sentinel_skipped
   sentinel_skipped=$(mktemp 2>/dev/null || echo "/tmp/hermes-sentinel-skipped.$$")
   local filtered_sessions
@@ -2816,13 +2840,20 @@ main() {
     MARKERS_DIR="${MARKERS_DIR}" \
     MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
     REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}" \
+    REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS="${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}" \
+    PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" \
+    STATE_DB="${STATE_DB}" \
     SKIPPED_LOG="${sentinel_skipped}" \
     SCRIPT_DIR="${SCRIPT_DIR}" \
     python3 - <<'PY' 2>/dev/null
+import json
+import math
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '600'))
@@ -2832,10 +2863,21 @@ except (TypeError, ValueError):
     # age-fallback before the job marker exists and orphan permanently (BUG-1).
     settle_seconds = 600
 
+# Same rule for the hold cap: a malformed or negative override takes the
+# default rather than switching the hold off. Only an explicit 0 does that.
+try:
+    max_hold_seconds = int(os.environ.get('REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS', '7200'))
+    if max_hold_seconds < 0:
+        max_hold_seconds = 7200
+except (TypeError, ValueError):
+    max_hold_seconds = 7200
+
 process_markers_dir = os.environ.get('MARKERS_DIR', '')
 markers_ready_dir = Path(os.environ.get('MARKERS_READY_DIR', ''))
 skipped_log = os.environ.get('SKIPPED_LOG', '')
 sessions_data = os.environ.get('SESSIONS', '')
+plugin_status_file = os.environ.get('PLUGIN_STATUS_FILE', '')
+state_db = os.environ.get('STATE_DB', '')
 
 # Phase 28 (TRACE-03): per-row markers-directory resolution, so a namespaced
 # session is no longer deferred to the settle-window fallback purely because
@@ -2868,21 +2910,174 @@ except Exception:
     _sidecar_resolver = None
 
 
-def _ready_dir_for(row_sid):
-    """The ready (.ready) directory for a candidate row's OWNING profile, or
-    the process-level MARKERS_READY_DIR when the row resolves to the
-    process-level markers directory (preserving today's value, including any
-    independent REVENIUM_MARKERS_READY_DIR override) or when resolution is
-    unavailable."""
+def _dirs_for(row_sid):
+    """(markers_dir, ready_dir) for a candidate row's OWNING profile. Both come
+    from one resolution, so the marker lookup below can never disagree with the
+    sentinel lookup about whose directory owns the session. A row that resolves
+    to the process-level markers directory (or whose resolution is unavailable)
+    keeps today's values, including any independent
+    REVENIUM_MARKERS_READY_DIR override; markers_dir is None when this process
+    has no markers directory at all."""
+    process_dirs = (Path(process_markers_dir) if process_markers_dir else None,
+                    markers_ready_dir)
     if _sidecar_resolver is None:
-        return markers_ready_dir
+        return process_dirs
     try:
         resolved = _sidecar_resolver(row_sid, process_markers_dir or None)
     except Exception:
-        return markers_ready_dir
+        return process_dirs
     if resolved == process_markers_dir:
-        return markers_ready_dir
-    return Path(resolved) / '.ready'
+        return process_dirs
+    return Path(resolved), Path(resolved) / '.ready'
+
+
+def _ready_dir_for(row_sid):
+    """The ready (.ready) directory for a candidate row's OWNING profile, or
+    the process-level MARKERS_READY_DIR (see _dirs_for)."""
+    return _dirs_for(row_sid)[1]
+
+
+_classifier_registered = None
+
+
+def _classifier_expected():
+    """True only on POSITIVE evidence that a healthy classifier is registered:
+    plugin-status.json exists, says healthy, and does not say unregistered.
+    Absent, unreadable or unhealthy (unregistered or registered but not firing)
+    all mean nothing is going to classify the session, so there is nothing to
+    hold it for. Deliberately the opposite default to the hooks' fail-open
+    reads: an unwarranted hold DELAYS metering, whereas the cost of an
+    unwarranted release is only today's behaviour."""
+    global _classifier_registered
+    if _classifier_registered is None:
+        try:
+            with open(plugin_status_file, encoding='utf-8') as fh:
+                doc = json.load(fh)
+            _classifier_registered = (
+                isinstance(doc, dict)
+                and doc.get('healthy') is True
+                and doc.get('registered') is not False
+            )
+        except Exception:
+            _classifier_registered = False
+    return _classifier_registered
+
+
+def _marker_state(markers_dir, row_sid):
+    """(exists, first_ts, has_job) for the session's own marker file. first_ts
+    is the ts of the first record that has one, i.e. when the first
+    classification landed, or None when no record does (the caller then has no
+    evidence of WHEN it landed and releases the row); has_job is True once a job
+    record carrying an id is present. Never raises."""
+    path = markers_dir / (row_sid + '.jsonl')
+    if not path.exists():
+        return (False, None, False)
+    first_ts = None
+    has_job = False
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ts = rec.get('ts')
+                if (first_ts is None and isinstance(ts, (int, float))
+                        and not isinstance(ts, bool) and math.isfinite(ts)):
+                    first_ts = float(ts)
+                if rec.get('kind') == 'job' and rec.get('agentic_job_id'):
+                    has_job = True
+                if first_ts is not None and has_job:
+                    break
+    except OSError:
+        pass
+    return (True, first_ts, has_job)
+
+
+_db_conn = None
+_db_opened = False
+_activity_column_absent = False
+
+
+def _last_activity_at(row_sid):
+    """(last_activity_at or None, contended). None means unknown: the column is
+    absent (older Hermes), the value is NULL or unusable, or the row is gone;
+    all of them degrade to started_at. contended is True only when state.db was
+    momentarily locked, which the caller treats as 'hold one more tick'."""
+    global _db_conn, _db_opened, _activity_column_absent
+    if _activity_column_absent or not state_db:
+        return (None, False)
+    try:
+        if not _db_opened:
+            _db_opened = True
+            _db_conn = sqlite3.connect(
+                'file:' + quote(state_db) + '?mode=ro', uri=True, timeout=1.5)
+        if _db_conn is None:
+            return (None, False)
+        row = _db_conn.execute(
+            'SELECT last_activity_at FROM sessions WHERE id = ? LIMIT 1',
+            (row_sid,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if 'locked' in msg or 'busy' in msg:
+            return (None, True)
+        if 'no such column' in msg:
+            _activity_column_absent = True
+        return (None, False)
+    except Exception:
+        return (None, False)
+    if not row or isinstance(row[0], bool):
+        return (None, False)
+    try:
+        value = float(row[0])
+    except (TypeError, ValueError):
+        return (None, False)
+    if not math.isfinite(value) or value <= 0:
+        return (None, False)
+    return (value, False)
+
+
+def _hold_reason(row_sid, started_at, ended_at, age):
+    """None to release the row (today's behaviour), else (kind, detail) for the
+    skip log: ('live', quiet_seconds) or ('job', seconds_since_first_marker).
+    See the block comment above the filter for the contract. Never raises."""
+    # A cap of 0 switches the hold off: every age is >= 0.
+    if age >= max_hold_seconds:
+        return None
+    if not _classifier_expected():
+        return None
+    markers_dir = _dirs_for(row_sid)[0]
+    if markers_dir is None:
+        return None
+    exists, first_ts, has_job = _marker_state(markers_dir, row_sid)
+    if exists:
+        # Classified. Leave it alone unless the classification landed after the
+        # window had already closed (a long first turn) and its job inference
+        # may still be running.
+        if first_ts is None or has_job or first_ts - started_at < settle_seconds:
+            return None
+        since_marker = now - first_ts
+        if since_marker < settle_seconds:
+            return ('job', int(max(0, since_marker)))
+        return None
+    # Not classified yet. Live = recent activity, or recently ended.
+    activity, contended = _last_activity_at(row_sid)
+    if contended:
+        return ('live', 0)
+    latest = started_at
+    if activity is not None and activity <= now + 300:
+        latest = max(latest, activity)
+    if ended_at is not None and ended_at <= now + 300:
+        latest = max(latest, ended_at)
+    quiet = now - latest
+    if quiet < settle_seconds:
+        return ('live', int(max(0, quiet)))
+    return None
 
 
 now = int(time.time())
@@ -2920,14 +3115,27 @@ for raw_line in sessions_data.split('\n'):
             has_sentinel = (row_ready_dir / sid).exists() if str(row_ready_dir) else False
         except OSError:
             has_sentinel = False
-        if has_sentinel or age >= settle_seconds:
+        hold = None
+        if not has_sentinel and age >= settle_seconds:
+            # Only a row the age fallback would release can be held. ended_at is
+            # index 11; NULL prints as an empty string, and 0 is not a time.
+            try:
+                ended_at_val = float(parts[11]) if len(parts) > 11 and parts[11] else None
+                if ended_at_val is not None and not (math.isfinite(ended_at_val) and ended_at_val > 0):
+                    ended_at_val = None
+            except (TypeError, ValueError):
+                ended_at_val = None
+            hold = _hold_reason(sid, started_at_int, ended_at_val, age)
+        if hold is None and (has_sentinel or age >= settle_seconds):
             print(line)
-        else:
-            if skip_out is not None:
-                try:
+        elif skip_out is not None:
+            try:
+                if hold is None:
                     skip_out.write(f"{sid}\t{age}\t{settle_seconds}\n")
-                except OSError:
-                    pass
+                else:
+                    skip_out.write(f"{sid}\t{age}\t{settle_seconds}\t{hold[0]}\t{hold[1]}\n")
+            except OSError:
+                pass
     except Exception:
         # Belt: any unexpected error → pass the row through unmodified.
         print(line)
@@ -2938,15 +3146,31 @@ if skip_out is not None:
         skip_out.close()
     except OSError:
         pass
+if _db_conn is not None:
+    try:
+        _db_conn.close()
+    except Exception:
+        pass
 PY
   ) || filtered_sessions="${sessions}"
 
   # Emit one info log line per skipped session via the existing info helper
   # so the cron log captures the proper timestamp + [INFO ] [revenium] prefix.
   if [[ -s "${sentinel_skipped}" ]]; then
-    while IFS=$'\t' read -r skip_sid skip_age skip_settle; do
+    while IFS=$'\t' read -r skip_sid skip_age skip_settle skip_kind skip_detail; do
       [[ -z "${skip_sid}" ]] && continue
-      info "skipping ${skip_sid} — awaiting plugin sentinel (age=${skip_age}s < settle=${skip_settle}s)"
+      case "${skip_kind:-}" in
+        live)
+          # One line per held session per tick, bounded by the hold cap.
+          info "holding ${skip_sid} — live session awaiting its first classification (age=${skip_age}s, quiet=${skip_detail}s < settle=${skip_settle}s; shipped once the markers land or after ${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}s)"
+          ;;
+        job)
+          info "holding ${skip_sid} — first classification landed ${skip_detail}s ago, after the settle window closed; waiting for its job marker (settle=${skip_settle}s)"
+          ;;
+        *)
+          info "skipping ${skip_sid} — awaiting plugin sentinel (age=${skip_age}s < settle=${skip_settle}s)"
+          ;;
+      esac
     done < "${sentinel_skipped}"
   fi
   rm -f "${sentinel_skipped}" 2>/dev/null || true

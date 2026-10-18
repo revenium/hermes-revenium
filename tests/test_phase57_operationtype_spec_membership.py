@@ -797,11 +797,18 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # (+27 above the aux site and both main() sites), its call (+1 above
         # both main() sites) and the one-append ledger write (+4 above the
         # markerless site): 2203->2230, 5293->5321, 5553->5585. Pure shift.
+        # Live-unclassified hold in the G-03 filter (2026-10-18): the filter's
+        # helpers, hold evaluation and log lines (+224 in hermes-report.sh) sit
+        # between the aux site and both main() emission sites, so the aux site
+        # (2230) and api-event-report.sh (2248) do not move: 5321->5545,
+        # 5585->5809. Pure shift, re-measured with
+        # `grep -n -- '--operation-type'`; the COUNT (4) and the emitted VALUE
+        # expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2230),
-            ('hermes-report.sh', 5321),
-            ('hermes-report.sh', 5585),
+            ('hermes-report.sh', 5545),
+            ('hermes-report.sh', 5809),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

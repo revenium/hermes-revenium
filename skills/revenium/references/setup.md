@@ -184,8 +184,11 @@ a `~/.hermes` reset) are reconciled automatically on the next `install-cron.sh`.
 The reporter defers a session's completions until the classifier plugin's
 `.ready` sentinel lands (the **authoritative** gate, which the plugin writes only
 *after* it has written the `kind:"job"` marker) or until the session ages past
-`REVENIUM_CRON_SETTLE_SECONDS`. This age-fallback exists only for installs with
-**no** classifier plugin (no sentinel ever arrives).
+`REVENIUM_CRON_SETTLE_SECONDS`. This age-fallback exists for installs with
+**no** classifier plugin (no sentinel ever arrives) and as the safety net when
+the plugin fails. The plugin classifies at the end of a session's first turn and
+writes the sentinel only at a session boundary, so a classified session that
+stays open (a gateway session mid-chat) is metered on the age-fallback.
 
 The default is **600 seconds**. It **must exceed worst-case job-inference
 latency**. The classifier's job-inference LLM call can take ~200s under
@@ -195,6 +198,29 @@ exists and per-muid dedup then permanently **orphans** them from the job created
 a tick later (`revenium jobs transactions <id>` shows "No transactions found").
 Metering-only installs (no classifier plugin, no job markers) can safely lower it
 because there is nothing to wait for.
+
+### Long first turns: `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`
+
+The settle window is counted from the session **start**, but the classifier
+fires at the **end** of the first turn. A first turn longer than the window
+would be metered while it is still running, with no task type and no job link,
+and only the spend after the turn ends would reach the job. To prevent that,
+while a healthy classifier plugin is registered the reporter keeps holding a
+session that has no marker yet and is still live (running, or ended less than
+`REVENIUM_CRON_SETTLE_SECONDS` ago), for at most
+`REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default **7200**) from its start. Once
+the markers land the held spend ships in one completion, linked to the job. A
+classification that lands after the window had closed is given a settle window
+to finish job inference, so size `REVENIUM_CRON_SETTLE_SECONDS` for that too.
+
+The trade-off is budget visibility. Spend from a first turn longer than the
+settle window reaches Revenium when the turn ends, not after 10 minutes, so a
+budget rule cannot halt such a turn mid-flight. On a fleet where the longest
+first turn was 35 minutes, the default delayed the spend that used to leak by a
+median of 3 minutes (p90 12 minutes, at most 25). Lower the cap if you would rather see
+long-running spend sooner than have it linked to its job, or set it to `0` for
+the previous behaviour. Metering-only installs are unaffected: with no healthy
+classifier registered there is nothing to wait for.
 
 ### Headless gateways: `hooks_auto_accept`
 

@@ -178,6 +178,13 @@ LLM call) that neither the sentinel nor the marker lands before the settle windo
 reporter reports the session as `uncategorized` and never revisits it, even after the marker
 eventually shows up.
 
+A session whose **first turn** outlasts the settle window is a different case: the classifier
+only fires when that turn ends, so the window would elapse while the session was still running.
+While a healthy classifier is registered, the reporter keeps holding such a live session until its
+markers land, for at most `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default 7200) from its start;
+the log shows `holding <sid> — live session awaiting its first classification`. A session past that
+cap, or one whose classifier never answered, still falls back as described here.
+
 Check the settle window in force on your host; do not assume the default:
 
 ```bash

@@ -170,6 +170,18 @@ this repository.
 
 ### Fixed
 
+- A session whose first turn runs past the settle window is no longer metered before its
+  classifier marker lands. The settle fallback measured age from `started_at`, so a turn
+  longer than 600 seconds (typically a Hermes cron job) was treated as having no classifier
+  while it was still running, and each tick shipped its growing delta as `unclassified` with
+  no `--agentic-job-id`. Only the last delta reached the job, which made its cost a few cents
+  and its ROI absurd (on ent, `reconcile_slack_gmail_todos_e00c` showed 1,713,686% with 2,306
+  of 219,680 tokens linked; 15.4% of classified-session tokens shipped this way). The reporter
+  now holds a live, markerless session while a healthy classifier is registered, bounded by
+  the new `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default 7200; `0` disables the hold). The
+  trade-off: a long first turn's spend reaches Revenium, and budget rules, when the turn ends
+  or the cap passes rather than minute by minute. Installs without the plugin keep today's
+  timing. Rows already shipped stay unlinked.
 - The economics contract the outcome-metrics stage declares for a job type with none no longer
   carries a monetization rule. The 1.0 USD per-unit rate made Revenium compute every job's
   Value as rate x units = $1.00, ignoring the reported `outcomeValue` and skewing ROI (on ent,

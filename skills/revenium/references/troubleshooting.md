@@ -57,6 +57,13 @@ For the raw log on its own:
 tail -f ~/.hermes/state/revenium/revenium-metering.log
 ```
 
+A long-running session (a Hermes cron job, a long one-shot) can legitimately show nothing for a
+while: its completions are held until its first turn ends and the classifier writes its markers, so
+that all of its spend ships linked to its job. Look for `holding <sid> — live session awaiting its
+first classification` in the log. The hold lasts at most `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`
+(default 7200) from the session start, and ends sooner when the session goes idle for
+`REVENIUM_CRON_SETTLE_SECONDS`; set it to `0` to meter long turns as they run.
+
 Then verify:
 
 - `~/.hermes/state.db` exists
