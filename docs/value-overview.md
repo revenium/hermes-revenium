@@ -328,20 +328,22 @@ The arithmetic:
 On the wire, alongside the job's outcome:
 
 ```json
-{"value_low":280.5,"value_base":330.0,"value_high":379.5,"bounds_source":"derived",
- "evidence_class":"MODEL_ESTIMATED","reportability_status":"reportable",
- "economic_mechanism":"labor_substitution","net_value":285.0,
- "supplied_costs":{"human_review":45.0,"handoff":0.0},
- "cost_coverage":{"included":["human_review","handoff"],"known_zero":["handoff"],
-                  "unknown":["rework_or_error","training_or_change"],
-                  "excluded":["metered_ai_cost"]},
- "evaluator":"llm","confidence":0.7,
- "assumptions":{"estimated_hours_saved":1.5,"assumed_loaded_rate":220.0}}
+{"schema_version":2,"source":"hermes","status":"reportable","session":"sess-1",
+ "value":{"reported":280.5,"low":280.5,"base":330.0,"high":379.5,"currency":"USD","net":285.0},
+ "basis":{"evidence":"MODEL_ESTIMATED","mechanism":"labor_substitution",
+          "role":"backend engineer","hours_saved":1.5,"hourly_rate":220.0,"confidence":0.7},
+ "costs":{"subtracted":{"human_review":45.0,"handoff":0.0},
+          "not_counted":["rework_or_error","training_or_change"],
+          "known_zero":["handoff"],"ai_cost":"metered_separately"},
+ "estimator":{"name":"llm","model":"unknown","provider":"openrouter","endpoint":"public",
+              "versions":{"prompt":1,"taxonomy":1,"policy":1,"evaluator":"v1"}}}
 ```
 
-The `cost_coverage` block says that two categories were counted, one was a real zero, two were
-never configured and metered AI cost was omitted because Revenium already has it. The block
-makes the partial subtraction explicit.
+The `costs` group says that two categories were counted (`subtracted`), one was a real zero
+(`known_zero`), two were never configured (`not_counted`) and metered AI cost was omitted
+because Revenium already has it (`ai_cost`). The group makes the partial subtraction
+explicit. `basis.evidence` says who priced the value (here the model's own estimate), and
+`basis.hours_saved` and `basis.hourly_rate` are always the model's assumptions.
 
 On the Revenium side, that `$280.50` is combined with the job's metered AI cost, typically
 cents for an arc like this, to produce the displayed ratio. It is an estimated ROI under stated assumptions

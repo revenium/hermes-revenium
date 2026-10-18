@@ -107,10 +107,15 @@ The skill's `--metadata` payload and this documentation are the only places that
 value is an unverified model estimate; Revenium's primary read-back surfaces do not.
 Revenium's product does not draw the
 distinction this page draws; nothing downstream of the wire enforces it. If this skill's
-`--metadata` payload ever stopped carrying `evidence_class` or if a reader never opened this
+`--metadata` payload ever stopped carrying `basis.evidence` (the `schema_version` 2 name for the
+evidence class) or if a reader never opened this
 page, an estimate and a measurement would be visually indistinguishable to anyone looking at
 `jobs roi`. That is the boundary: the product tells the truth only as far as this skill's own
 metadata and documentation carry it and no further.
+
+What the wire carries about the class is `basis.evidence` alone. `evidence_class_authority`, which
+names which boundary decided the class, stays in the local sidecar record and no longer rides the
+wire; see [Evidence-class precedence](evidence-class-precedence.md).
 
 ## Why a model-estimated value is a hypothesis
 
@@ -238,7 +243,8 @@ The corrected bound is what ships: the observed test confirms the wire call's
 `--outcome-value` equals the appended record's own corrected low bound, read off the record
 that was just written: never a value retyped anywhere else. The wire call's `--metadata`
 carries the same `sequence` number and the same prior-value fields the local record carries: this is the marker a downstream consumer uses to tell a revision from an original, since an
-ordinary, uncorrected `jobs outcome` payload never carries a `sequence` key at all.
+ordinary, uncorrected `jobs outcome` payload never carries a `sequence` key at all. (The
+`jobs outcome` envelope marks a correction with `corrected` and `correction_sequence`.)
 
 The per-minute cron pipeline cannot reach the correction path:
 `correct-assessment.sh` is never named in `cron.sh` or `install-cron.sh`. Only a human

@@ -272,13 +272,12 @@ because a lower-priority boundary only ever wins when every higher-priority leg 
 is one of `_EVIDENCE_CLASS_AUTHORITIES = ("evidence", "valuation", "classification", "evaluator")`
 (`classifier.py:1174`): four words, not the three this document's pre-implementation text
 assumed, because the walk itself widened to four legs (see the amendment above). The value is
-validated against this exact set at the forwarder in `hermes-report.sh` before being placed on the
-`--metadata` envelope and clamped to 16 bytes: `classification` is the longest member at 14
-bytes, leaving 2 bytes of headroom that a future fifth authority word must re-check rather than
-assume. The forwarder's allow-list check runs before truncation, so a legal value is never
-silently cut and an out-of-set value is dropped rather than forwarded: a correctness discipline,
-not a cosmetic one, because misnaming who set an evidence label on a billing-adjacent record would
-itself be a false audit trail.
+written to the sidecar record, where an auditor reads it. As of quick-261017-nck it no longer
+rides the `jobs outcome --metadata` wire: `evidence_class_authority` stays in the sidecar, and the
+`schema_version` 2 envelope carries only `basis.evidence`, the class itself. `classification` is
+the longest member at 14 bytes, a width a future fifth authority word must re-check rather than
+assume. The reason the value is validated against this exact set is unchanged: misnaming who set
+an evidence label on a billing-adjacent record would itself be a false audit trail.
 
 ### The plumbing consequence
 

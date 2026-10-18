@@ -463,6 +463,7 @@ protocol works.
 - **`revenium-hermes.ledger`**: `HERMES:<session_id>:<total_tokens>:<unix_ts>:<muid>`, read with `grep "^HERMES:${sid}:"`. The colon-delimited shape and the `HERMES:` prefix are part of the idempotency contract.
 - **`revenium-jobs.ledger`**: `JOB:<id>:created:<ts>` and `JOB:<id>:outcome:<ts>:<status>`.
 - **Marker JSONL**: `{muid, ts, sid, task_type, operation_type, trace_id}` plus optional `agentic_job_id`; a `GUARDRAIL` and a `CHAT` record per classification, under 1024 bytes per line. Schema pinned by `test_marker_file_schema`.
+- **`jobs outcome --metadata`**: `schema_version` 2, built only by the `outcome_metadata` heredoc in `hermes-report.sh`. Base keys (`schema_version`, `source`, `status`, `session`, `failure_reason`, `outcome_basis`, `corrected`, `correction_sequence`, `metadata_truncated`) plus the nested groups `value`, `basis`, `costs` and `estimator`, at most 4096 bytes, shed value-tier first by dotted path. A blob with no assessment record stays the v1 base-only shape with no `schema_version`. The sidecar keeps its v1 field names. The evidence class is `MODEL_ESTIMATED`; a sidecar already on disk with the old `MODEL_ESTIMATED_DEMO` label is read as the new one and the wire always carries the new label.
 - **Golden argv fixtures**: `tests/fixtures/compat/*.golden.json` pin the exact wire shape of `meter completion`, `meter tool-event`, `jobs create` and `jobs outcome`, including the markerless baseline. Changing argv means changing a golden, deliberately.
 
 ### Module design

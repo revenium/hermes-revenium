@@ -1,5 +1,7 @@
 # Internal milestone closeouts
 
+> Note (quick-261017-nck, 2026-10-17): the label is `MODEL_ESTIMATED` since quick-261017-nck; records above predate the rename and keep the old `MODEL_ESTIMATED_DEMO` name as written.
+
 This file tracks engineering evidence for shipped planning milestones. The
 planning tree (`.planning/`) and evidence tree (`docs/internal/`) are gitignored,
 so closeouts stored only there disappear with the working tree, as the 2026-06-06

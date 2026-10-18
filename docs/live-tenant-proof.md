@@ -1,5 +1,7 @@
 # Live-tenant proof (LIVE-02 through LIVE-06, plus D-02 and D-03)
 
+> Note (quick-261017-nck, 2026-10-17): the label is `MODEL_ESTIMATED` since quick-261017-nck; records above predate the rename and keep the old `MODEL_ESTIMATED_DEMO` name as measured.
+
 This record tests declaration authority, operator mechanisms and their sidecar
 carrier against a real tenant. Verification ran on 2026-08-31 against the host
 and pre-prod tenant used in Phase 49.

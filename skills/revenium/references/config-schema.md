@@ -386,9 +386,10 @@ contract in [`job-declaration.md`](job-declaration.md) for what
 `experimentalReportEstimates` is a second, independent opt-in on top of `enabled`. With it
 absent or not a literal `true`, an estimate is still computed and recorded locally in the
 job-assessments sidecar, but its `reportability_status` resolves to `candidate`: the outcome
-arc still reports to Revenium and provenance (`evidence_class`, `evaluator`,
-`evaluator_version`, `model` and the version family) still ships in `--metadata`, but no
-bound, no `bounds_source` and no `assumptions` cross the wire. The number stays on this
+arc still reports to Revenium and provenance (`basis.evidence`, `estimator.name`,
+`estimator.model` and `estimator.versions` in the `schema_version` 2 `--metadata`) still ships,
+but no `value` group and none of `basis.role`, `basis.hours_saved` or `basis.hourly_rate`
+cross the wire. The number stays on this
 machine. Set it to a literal JSON `true` and `reportability_status` resolves to `reportable`
 **only if the record's evidence class also clears the gate described below**,
 shipping the estimate exactly as the value flags and `--metadata` describe above. An
@@ -430,7 +431,7 @@ append still waiting. On a multiplexed host the outcome's check reads the
 It admits that one class and nothing else. The permitted set above is
 unchanged, malformed and causal-impact classes stay refused and an abstained
 assessment is never reportable. The record still carries
-`evidence_class: MODEL_ESTIMATED` and the full provenance family in
+`basis.evidence: MODEL_ESTIMATED` and the full provenance family in
 `--metadata`.
 
 The label was `MODEL_ESTIMATED_DEMO` before quick-261017-nck. A sidecar written
@@ -533,7 +534,9 @@ job-id-keyed sidecar file, `${STATE_DIR}/job-assessments/<sanitized_job_id>.json
 `JobAssessment`, distinct from the job marker's existing 9-key `assessment` summary
 (`markers/<sid>.jsonl`), which stays a pointer-and-summary and is byte-unchanged. The
 outcome stage in `hermes-report.sh` reads the sidecar, never the marker's summary, to
-resolve `--outcome-value`/`--outcome-currency` and `--metadata` provenance. An absent,
+resolve `--outcome-value`/`--outcome-currency` and `--metadata` provenance (the sidecar keeps
+its own field names; the wire renames them into the `schema_version` 2 groups, see
+[`value-and-roi.md`](../../../docs/value-and-roi.md)). An absent,
 unreadable, oversized or pruned sidecar record reports the outcome status-only, with no
 value flags.
 

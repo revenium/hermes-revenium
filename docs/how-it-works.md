@@ -182,8 +182,10 @@ and the re-judge read the cut as an incomplete delivery and answered `FAILED`.
 
 Every outcome also carries a `--metadata` blob holding the deployment `source`, taken from
 the session's source column. `FAILED` arcs add a `failure_reason`: a short plain-text cause
-inferred by the classifier. `SUCCESS` arcs and genuine halt cancellations (a `guardrail-halt-*`
-job id, or job type `interrupted`) carry source alone. Any other `CANCELLED` arc adds a
+inferred by the classifier. `SUCCESS` arcs with no assessment and genuine halt cancellations (a
+`guardrail-halt-*` job id, or job type `interrupted`) carry source alone. An arc that has an
+assessment record also carries `schema_version` 2 and the nested groups described under the
+envelope below. Any other `CANCELLED` arc adds a
 reporter-written `failure_reason` and `outcome_basis: undetermined`, because the classifier
 uses `CANCELLED` when it cannot tell how an arc ended. A `CANCELLED` outcome held while its
 session was open ships this way too if no re-judge replaced it before the session ended.

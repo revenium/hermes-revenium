@@ -156,12 +156,14 @@ JSON example above; its `assessment` key stays the same 9-key summary it has
 been since v1.5, byte-unchanged. A reader looking for `net_value`,
 `supplied_costs`, `cost_coverage`, `economic_mechanism` or
 `double_counting_group` on the marker line will not find them there; they
-live on the sidecar record `hermes-report.sh` reads to build `--metadata`.
+live on the sidecar record `hermes-report.sh` reads to build `--metadata`, where they ship
+under `value.net`, `costs.subtracted`, `costs`, `basis.mechanism` and `session`.
 
-One field of that record does reach the wire: `assumptions.inferred_role` rides inside
-`assumptions` on a **reportable** record, after `assumed_loaded_rate`. A candidate record
-strips `assumptions`, and with it the role. `basis` and the two narrative fields
-(`candidate_downstream_outcome`, `counterfactual_assumption`) stay local.
+One field of that record's prose reaches the wire: `assumptions.inferred_role` ships as
+`basis.role` on a **reportable** record. A candidate record strips `assumptions`, and with
+it the role. The sidecar's own `basis` sentence and the two narrative fields
+(`candidate_downstream_outcome`, `counterfactual_assumption`) stay local; the wire `basis`
+group is a different, allow-listed object (`schema_version` 2).
 
 ### The six economic mechanisms (EGV-05)
 
