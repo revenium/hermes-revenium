@@ -168,8 +168,12 @@ grep "^HERMES:<root-session-id>:" ~/.hermes/state/revenium/revenium-hermes.ledge
 The ledger line is **5 colon-delimited fields**, not 4: `HERMES:<session_id>:<total_tokens>:
 <timestamp>:<muid>`. The timestamp is **field 4** (a millisecond-precision float, e.g.
 `1785250329.656`), not the last field. The 5th field is a per-completion marker id (or, on the
-zero-marker fallback path, a synthetic `unclassified-<timestamp>` value with no dots). If you are
-comparing this timestamp against something else to check a timing race, use field 4.
+zero-marker fallback path, a synthetic `unclassified-<timestamp>` value with no dots). That
+synthetic muid means **no marker muid was consumed** by the row: it is written for a markerless
+session, and also for a classified session's later growth, which now ships its latest
+classification (`--task-type`, trace and job link) instead of `unclassified`. Look at the
+`Reported:` log line to tell them apart: a carried row ends in ` carried_from=<muid> job=<id|none>`.
+If you are comparing this timestamp against something else to check a timing race, use field 4.
 
 The reporter defers a session until either the classifier's `.ready` sentinel
 lands under the markers directory's `.ready/` subdirectory or the session ages past a settle

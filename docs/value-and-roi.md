@@ -1279,7 +1279,7 @@ tick into three buckets and emits one reconciliation line per tick into
 
 | Bucket | Meaning |
 |---|---|
-| `classified` | Metered cost split across real markers carrying an attribution |
+| `classified` | Metered cost split across real markers carrying an attribution, or carried forward from a classified session's latest one |
 | `unclassified` | Metered cost on a session with no marker at all |
 | `unallocated` | Metered cost observed but not attributed this tick |
 

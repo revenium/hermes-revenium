@@ -148,6 +148,29 @@ this repository.
   `window=` figure counts classifications, so it reads half what it used to for the same
   session. No change to the classifier or its markers.
 
+- The later turns of a classified session now carry its latest task type and its job. The
+  classifier labels a session once, so after that first pair was reported every later delta
+  shipped `--task-type unclassified` with no `--agentic-job-id` (one ent session: a single
+  marked row at 480,675 tokens, then five unclassified rows to 515,535). Job cost was
+  understated, job ROI inflated and task analytics lost the label. A later delta of a session
+  that has classification markers now ships with that session's latest one (its task type,
+  `CHAT`, its trace) and the job the reporter would link for it: a root's own latest job, a
+  subagent's root job. A `guardrail-halt-*` job is never the link. Accepted bias: an unrelated
+  later turn is charged to the earlier job, which understates that job's ROI rather than
+  overstating it. A job is linked only while it is live: its `jobs create` is ledgered, and it
+  is open or its outcome was reported no more than `REVENIUM_JOBS_STALE_SECONDS` (600 seconds)
+  earlier. Beyond that, for a guardrail-halt job and for a job that was never created, the row
+  ships unlinked and the task type still carries; the log says why, once per job
+  (`Carried completion shipping WITHOUT --agentic-job-id`). Revenium accepting a completion
+  linked to an already-closed job is not shown against a live tenant yet, and an earlier
+  replay of old links resurrected long-closed jobs as nameless pending rows, so the window
+  stays at 600 seconds until a live check says otherwise. Widening it later is a change to one
+  function (`_carry_link_window`). Transaction ids and ledger lines keep their shape
+  (`<session>-<total>` and an `unclassified-<digits>` muid, which now means that no marker
+  muid was consumed), so re-running the cron never double-reports. A session with no
+  classification at all meters exactly as before. Rows already shipped are unchanged, with no
+  backfill. No change to the classifier or its markers.
+
 ### Added
 
 - `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's

@@ -44,7 +44,8 @@ double-reports.
 
 The labels come from the `revenium-classifier` plugin, which reads session data directly
 rather than asking the agent to classify its own turns. A session with no markers falls
-back to `--task-type unclassified`.
+back to `--task-type unclassified`. A session that has markers, but none left to report,
+carries its latest classification (and its job) onto its later growth instead.
 
 The plugin registers four hooks, because no single one covers every session shape:
 

@@ -263,7 +263,8 @@ EGV-17's second half is the metered-cost reconciliation, produced by
 partitions the metered cost it observed into three `ATTRIBUTION_BUCKETS`:
 
 - `classified`: metered cost the reporter split across real markers
-  carrying an attribution.
+  carrying an attribution, or carried forward from a classified session's
+  latest classification onto its later growth.
 - `unclassified`: metered cost on a session with no marker at all.
 - `unallocated`: metered cost the reporter observed but did not attribute
   this tick.

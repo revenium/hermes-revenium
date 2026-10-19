@@ -117,6 +117,22 @@ reporter the same rule, at the ship sites only:
   a job only if the job was created and is open or closed within
   `REVENIUM_JOBS_STALE_SECONDS`. Both checks apply on top of the root gate, never
   instead of it.
+- It composes with carry-forward (2026-10-18). The classifier labels a session
+  once, so once its marker pair was reported every later delta shipped
+  `unclassified` with no job (ent: one marked row, then five unlinked rows). A later
+  delta of a classified session now carries its latest classification and the job the
+  reporter would link for it: a root's own latest non-halt job, a subagent's root job.
+  The same guards apply on top of the root gate: the create must be ledgered, a
+  subagent waits on the same RC-2 hold, and an outcome already ledgered links only
+  within `REVENIUM_JOBS_STALE_SECONDS` (600s), the one bound this change leaves
+  widenable (`_carry_link_window`, which the auxiliary bound and the RC-2 bound do not
+  read). Otherwise the row ships unlinked with its task type. A completion linked to an
+  already-closed job is not shown against a live tenant: RC-1 saw 151 long-closed jobs
+  come back as nameless PENDING rows when old links were replayed, which is why the
+  window is short until a live check says otherwise. Of ~35M post-marker tokens on one
+  ent profile, 600s links 7.5% and carries the task type only for the rest; a one-day
+  window would link 69%. The accepted cost: an unrelated later turn is charged to the
+  earlier job, which understates that job's ROI rather than overstating it.
 
 On the reference host the gate was checked read-only on 2026-10-08 before it was
 written: the column is present, 9,769 sessions, none cyclic, so it flips no
