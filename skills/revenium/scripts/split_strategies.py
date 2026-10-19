@@ -27,6 +27,9 @@ from the bash heredocs and from the tests):
     latest_transaction_id         -- rebuilds the wire transaction id of a
         session's most recent main-loop completion from the ledger, for
         --parent-transaction-id.
+    select_carry_classification   -- the classification a classified session's
+    select_carry_job                 later growth carries, and the job it links
+        to (carry-forward, quick-261018-s0b).
 
 Phase 44 Plan 04 (EGV-17/D-15) adds a second, INVERSE conservation invariant
 owned by this file: equal_split() conserves DOWNWARD — one observed delta is
@@ -430,6 +433,150 @@ def resolve_trace_name(markers_path):
     except (OSError, UnicodeDecodeError):
         return ""
     return job_name or first_task
+
+
+# The reader heredoc in hermes-report.sh drops a marker line longer than this;
+# a job the reader cannot see is a job `jobs create` never ran for, so the carry
+# selector must not link to one either.
+_MAX_MARKER_LINE_CHARS = 4096
+# The reader's D-16 set: characters a job id may not carry into the jobs ledger
+# or argv. Mirrored here, not shared, because the heredoc cannot import this
+# module's private names and the two must agree on the id they name.
+_JOB_ID_BAD_CHARS = (":", " ", "\t", "\n", "\r")
+_JOB_REQUIRED_KEYS = ("agentic_job_id", "job_type", "status")
+
+
+def _rank_ts(value):
+    """A marker ts as a sortable float. A ts that is missing, boolean or not
+    finite ranks 0.0 (oldest), the `_reduce_job_outcome_queue` ordering in
+    hermes-report.sh, so one malformed record cannot win a "latest" contest."""
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        rank = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if rank != rank or rank in (float("inf"), float("-inf")):
+        return 0.0
+    return rank
+
+
+def select_carry_classification(task_markers):
+    """The classification a session's later growth should carry, or None.
+
+    LD-1 (hermes-report.sh, the zero-marker branch): the classifier latches
+    after a session's first marker pair, so once those muids are ledgered every
+    later delta used to ship `--task-type unclassified` with no job link --
+    measured on ent as one marked row at 480,675 tokens followed by five
+    unclassified rows to 515,535. A delta of a session that HAS classification
+    markers now ships with the session's latest one.
+
+    `task_markers` is every valid task marker the reader parsed, in file order,
+    consumed or not: by the time carry applies they are all consumed, and a
+    carried label describes the session, not what is left to ship. A marker
+    qualifies when its task_type is a non-empty str outside the trivial blocklist
+    (a greeting never labels work). The winner has the greatest ts, a tie going to
+    the later line; a missing, boolean or non-finite ts ranks 0.0. An
+    `unclassified` pair is still a classification: it carries `unclassified`
+    together with the session's job link.
+
+    Returns the winning marker dict itself. Never raises: anything that is not a
+    list of dicts selects nothing, and the caller then ships exactly what it
+    shipped before this existed.
+    """
+    best = None
+    best_rank = None
+    try:
+        for marker in task_markers or ():
+            if not isinstance(marker, dict):
+                continue
+            label = marker.get("task_type")
+            if not isinstance(label, str) or not label or label in _TRIVIAL_TASK_TYPES:
+                continue
+            rank = _rank_ts(marker.get("ts"))
+            if best_rank is None or rank >= best_rank:
+                best, best_rank = marker, rank
+    except Exception:  # noqa: BLE001 - the contract is "never raises"
+        return None
+    return best
+
+
+def select_carry_job(markers_path):
+    """The job a carried row should link to: `(id, name, type, ts)` or None.
+
+    Reads the marker file of the session that OWNS the job -- the session's own
+    file for a root, the root's file for a subagent. Keeps `kind: "job"` records
+    that carry an id and all of agentic_job_id, job_type and status (the
+    reader's acceptance test, so the job is one `jobs create` really saw), and
+    reduces them to the one with the greatest ts, a tie going to the later line.
+    That is `_reduce_job_outcome_queue`'s ordering, and on a real file it is the
+    last job record, the one `resolve_trace_name` reads: the trace's name and
+    the carried link name the same job. A job re-judged from CANCELLED to
+    SUCCESS has two records and one id, so it stays one job. A folded job is one
+    record whose name already carries `(also: ...)` and passes through.
+
+    A synthetic `guardrail-halt-*` job is never selected, even when it is the
+    last record: it describes the halt, not the work, and linking cost to it
+    would charge a real arc's spend to an interruption marker.
+
+    Id, name and type leave here safe for a `|`-delimited KEY=value line and for
+    argv: the id has the reader's D-16 characters replaced by `_` (a record whose
+    id still holds `|` is dropped), name and type have `|`, newline and carriage
+    return replaced by `_`. `ts` is an int, or None when the record's ts is not
+    a usable non-negative number; the child-hold bound treats None as "cannot
+    prove the job is recent".
+
+    Returns None for a missing, unreadable or undecodable file and when nothing
+    qualifies. Never raises.
+    """
+    best = None
+    best_rank = None
+    try:
+        with open(markers_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line or len(line) > _MAX_MARKER_LINE_CHARS:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("kind") != "job":
+                    continue
+                job_id = rec.get("agentic_job_id")
+                if not isinstance(job_id, str) or not job_id:
+                    continue
+                if not all(key in rec for key in _JOB_REQUIRED_KEYS):
+                    continue
+                if job_id.startswith(_HALT_JOB_ID_PREFIX):
+                    continue
+                clean_id = job_id
+                for bad in _JOB_ID_BAD_CHARS:
+                    clean_id = clean_id.replace(bad, "_")
+                if "|" in clean_id:
+                    continue
+                name = str(rec.get("job_name", "") or "")
+                job_type = str(rec.get("job_type", "") or "")
+                for bad in ("|", "\n", "\r"):
+                    name = name.replace(bad, "_")
+                    job_type = job_type.replace(bad, "_")
+                rank = _rank_ts(rec.get("ts"))
+                if best_rank is None or rank >= best_rank:
+                    ts = rec.get("ts")
+                    usable = (
+                        not isinstance(ts, bool)
+                        and isinstance(ts, (int, float))
+                        and ts == ts
+                        and ts not in (float("inf"), float("-inf"))
+                        and ts >= 0
+                    )
+                    best = (clean_id, name, job_type, int(ts) if usable else None)
+                    best_rank = rank
+    except (OSError, UnicodeDecodeError):
+        return None
+    except Exception:  # noqa: BLE001 - the contract is "never raises"
+        return None
+    return best
 
 
 def latest_transaction_id(ledger_path, sid):
