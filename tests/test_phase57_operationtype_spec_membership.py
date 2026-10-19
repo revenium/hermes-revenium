@@ -821,11 +821,20 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # re-measured with `grep -n -- '--operation-type'`; the COUNT (4) is
         # unchanged and the zero-marker site still sends the literal "CHAT" on
         # its one line.
+        # Carry-forward, subagent path and RC-2 helper (2026-10-18):
+        # _child_job_link_hold (+63, beside _job_child_hold_age, above the aux
+        # site) takes the per-marker RC-2 gate's body out of the emit loop
+        # (-25 net there) and the subagent link decision is added to the
+        # zero-marker branch (+20 net): the aux site moves 2296->2359,
+        # per-marker 5912->5950, markerless 6252->6310. api-event-report.sh
+        # (2248) does not move. Pure shift, re-measured with
+        # `grep -n -- '--operation-type'`; the COUNT (4) and the emitted VALUE
+        # expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2296),
-            ('hermes-report.sh', 5912),
-            ('hermes-report.sh', 6252),
+            ('hermes-report.sh', 2359),
+            ('hermes-report.sh', 5950),
+            ('hermes-report.sh', 6310),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

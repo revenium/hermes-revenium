@@ -1365,6 +1365,69 @@ _job_child_hold_age() {
   printf '%s' $(( now_s - began ))
 }
 
+# RC-2: should a SUBAGENT's completion that would link to `job_id` wait? Called
+# when the root's `jobs create` for that id is not ledgered. 0 = HOLD (the caller
+# skips the session and retries next tick, nothing ledgered); 1 = ship the row
+# WITHOUT the job link. Never calls `continue` itself.
+#
+# Shared by the per-marker path (the job is the root's latest job record) and the
+# carry path (the root's latest non-halt job), so both log once per job under
+# the same `child-hold` / `child-unlinked` flag keys, and neither can drift from
+# the other. Arguments: job_id job_ts root_sid sid, where job_ts is the job
+# marker's ts as an integer ("" when it has none).
+#
+# It reads main()'s `sessions` by dynamic scope, as _note_root_gate_deferral
+# reads its counters, rather than taking a multi-line argument. The bound is
+# REVENIUM_JOBS_STALE_SECONDS read directly: never the carry link window, so
+# widening that window cannot lengthen how long spend is held.
+#
+# What the bound is measured from depends on whether the root is going to run
+# its create:
+#   - root is in this tick's session set: it creates when its own iteration
+#     comes round, so wait, counting the time during which holds were
+#     continuously renewed (_job_child_hold_age, persisted -- this is what ends
+#     the wait if the create fails on every tick, and what keeps a gap between
+#     ticks from expiring it before the root has had its retry);
+#   - root is NOT in the set (zero tokens so the session query never returns
+#     it, or still inside the settle window): nothing will create the job this
+#     tick, so count from the root's job marker instead, for at least the
+#     settle window. A marker with no usable ts cannot prove it is recent and
+#     takes the unlinked path.
+_child_job_link_hold() {
+  local job_id="$1" job_ts="$2" root_sid="$3" sid="$4"
+  local root_job_wait_limit="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+  [[ "${root_job_wait_limit}" =~ ^[0-9]{1,9}$ ]] || root_job_wait_limit=600
+  root_job_wait_limit=$(( 10#${root_job_wait_limit} ))
+  local root_job_age=""
+  case $'\n'"${sessions}" in
+    *$'\n'"${root_sid}|"*)
+      root_job_age="$(_job_child_hold_age "${job_id}" "${root_job_wait_limit}")" || root_job_age=""
+      ;;
+    *)
+      # Nothing will create the job this tick. The wait must at least
+      # cover the settle window the root could still be inside.
+      local root_settle="${REVENIUM_CRON_SETTLE_SECONDS:-600}"
+      if [[ "${root_settle}" =~ ^[0-9]{1,9}$ && $(( 10#${root_settle} )) -gt "${root_job_wait_limit}" ]]; then
+        root_job_wait_limit=$(( 10#${root_settle} ))
+      fi
+      if [[ "${job_ts}" =~ ^[0-9]{1,12}$ ]]; then
+        root_job_age=$(( $(date +%s) - 10#${job_ts} ))
+      fi
+      ;;
+  esac
+  # A negative age (a marker ts from the future: clock step, wrong unit)
+  # proves nothing about recency, so it is unusable, not "very recent".
+  [[ "${root_job_age}" =~ ^[0-9]+$ ]] || root_job_age=""
+  if [[ -n "${root_job_age}" && "${root_job_age}" -lt "${root_job_wait_limit}" ]]; then
+    _job_outcome_log_once "${job_id}" "child-hold" info \
+      "Subagent completions held: root job ${job_id} has no confirmed create yet (session=${sid}); retried next tick, nothing ledgered"
+    return 0
+  fi
+  _job_outcome_log_once "${job_id}" "child-unlinked" warn \
+    "Subagent completions shipping WITHOUT --agentic-job-id: root job ${job_id} still has no confirmed create after ${root_job_age:-unknown}s (session=${sid}); linking now would make Revenium create it nameless"
+  return 1
+}
+
 # 0 = DEFER: the session is still open (sessions.ended_at IS NULL) and has not
 # been idle for REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS, or the database is
 # momentarily locked. 1 = report now: the session has ended, has been
@@ -5753,37 +5816,12 @@ PY
       # create cannot leave them nameless.
       if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${root_sid}" != "${sid}" && -n "${root_aid}" ]] \
          && ! _job_create_ledgered "${root_aid}"; then
-        local root_job_wait_limit="${REVENIUM_JOBS_STALE_SECONDS:-600}"
-        [[ "${root_job_wait_limit}" =~ ^[0-9]{1,9}$ ]] || root_job_wait_limit=600
-        root_job_wait_limit=$(( 10#${root_job_wait_limit} ))
-        local root_job_age=""
-        case $'\n'"${sessions}" in
-          *$'\n'"${root_sid}|"*)
-            root_job_age="$(_job_child_hold_age "${root_aid}" "${root_job_wait_limit}")" || root_job_age=""
-            ;;
-          *)
-            # Nothing will create the job this tick. The wait must at least
-            # cover the settle window the root could still be inside.
-            local root_settle="${REVENIUM_CRON_SETTLE_SECONDS:-600}"
-            if [[ "${root_settle}" =~ ^[0-9]{1,9}$ && $(( 10#${root_settle} )) -gt "${root_job_wait_limit}" ]]; then
-              root_job_wait_limit=$(( 10#${root_settle} ))
-            fi
-            if [[ "${resolved_aid_ts}" =~ ^[0-9]{1,12}$ ]]; then
-              root_job_age=$(( $(date +%s) - 10#${resolved_aid_ts} ))
-            fi
-            ;;
-        esac
-        # A negative age (a marker ts from the future: clock step, wrong unit)
-        # proves nothing about recency, so it is unusable, not "very recent".
-        [[ "${root_job_age}" =~ ^[0-9]+$ ]] || root_job_age=""
-        if [[ -n "${root_job_age}" && "${root_job_age}" -lt "${root_job_wait_limit}" ]]; then
-          _job_outcome_log_once "${root_aid}" "child-hold" info \
-            "Subagent completions held: root job ${root_aid} has no confirmed create yet (session=${sid}); retried next tick, nothing ledgered"
+        # The decision, its bound and its two log lines live in
+        # _child_job_link_hold, shared with the carry path.
+        if _child_job_link_hold "${root_aid}" "${resolved_aid_ts}" "${root_sid}" "${sid}"; then
           ((skipped_count++)) || true
           continue
         fi
-        _job_outcome_log_once "${root_aid}" "child-unlinked" warn \
-          "Subagent completions shipping WITHOUT --agentic-job-id: root job ${root_aid} still has no confirmed create after ${root_job_age:-unknown}s (session=${sid}); linking now would make Revenium create it nameless"
         root_aid=""
       fi
 
@@ -6210,6 +6248,26 @@ PY
               fi
             elif ! _job_create_ledgered "${carry_job_id}"; then
               carry_unlinked_reason="was never created"
+            else
+              carry_unlinked_reason="closed more than ${_CARRY_WINDOW_LAST}s ago"
+            fi
+          else
+            # A subagent links its ROOT's job (carry_job_id was read from the
+            # root's marker file, never from the child's own, whose job records
+            # would be orphan references: JOB-02 suppresses their create) and
+            # ships the id only, as the per-marker subagent rows do. A child is
+            # always visited before its root, so a create that is not ledgered
+            # yet goes through the same RC-2 hold the per-marker path uses:
+            # held while the root's create is pending, unlinked once the bound
+            # passes. Only a ledgered create reaches the link predicate.
+            if ! _job_create_ledgered "${carry_job_id}"; then
+              if _child_job_link_hold "${carry_job_id}" "${carry_job_ts}" "${root_sid}" "${sid}"; then
+                ((skipped_count++)) || true
+                continue
+              fi
+              carry_unlinked_reason="was never created"
+            elif _carry_job_linkable "${carry_job_id}"; then
+              carry_link_id="${carry_job_id}"
             else
               carry_unlinked_reason="closed more than ${_CARRY_WINDOW_LAST}s ago"
             fi
