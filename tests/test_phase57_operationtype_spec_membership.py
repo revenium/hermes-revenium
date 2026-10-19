@@ -797,11 +797,49 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # (+27 above the aux site and both main() sites), its call (+1 above
         # both main() sites) and the one-append ledger write (+4 above the
         # markerless site): 2203->2230, 5293->5321, 5553->5585. Pure shift.
+        # Live-unclassified hold in the G-03 filter (2026-10-18): the filter's
+        # helpers, hold evaluation and log lines (+224 in hermes-report.sh) sit
+        # between the aux site and both main() emission sites, so the aux site
+        # (2230) and api-event-report.sh (2248) do not move: 5321->5545,
+        # 5585->5809. Pure shift, re-measured with
+        # `grep -n -- '--operation-type'`; the COUNT (4) and the emitted VALUE
+        # expressions are unchanged.
+        # Subagent job-link hold in the same filter (2026-10-18): the root
+        # lookups, the shared-connection helper, the shipped-total check and
+        # the per-root log line (+233 net in hermes-report.sh) sit between the
+        # aux site and both main() emission sites, so the aux site (2230) and
+        # api-event-report.sh (2248) do not move: 5545->5778, 5809->6042. Pure
+        # shift, re-measured with `grep -n -- '--operation-type'`; the COUNT
+        # (4) and the emitted VALUE expressions are unchanged.
+        # Carry-forward, root path (2026-10-18): the carry link-window helpers
+        # (_carry_link_window, _carry_job_linkable, +66) sit beside
+        # _job_linkable_for_aux, above the aux site, so all three
+        # hermes-report.sh sites move: 2230->2296, 5778->5912 (the helpers, the
+        # reader's CARRY_* block and its bash parse, +134 in all), 6042->6252
+        # (also the zero-marker branch's carry resolution, +76 above its
+        # cmd array). api-event-report.sh (2248) does not move. Pure shift,
+        # re-measured with `grep -n -- '--operation-type'`; the COUNT (4) is
+        # unchanged and the zero-marker site still sends the literal "CHAT" on
+        # its one line.
+        # Carry-forward, subagent path and RC-2 helper (2026-10-18):
+        # _child_job_link_hold (+63, beside _job_child_hold_age, above the aux
+        # site) takes the per-marker RC-2 gate's body out of the emit loop
+        # (-25 net there) and the subagent link decision is added to the
+        # zero-marker branch (+20 net): the aux site moves 2296->2359,
+        # per-marker 5912->5950, markerless 6252->6310. api-event-report.sh
+        # (2248) does not move. Pure shift, re-measured with
+        # `grep -n -- '--operation-type'`; the COUNT (4) and the emitted VALUE
+        # expressions are unchanged.
+        # Open-session carry window (2026-10-18): _carry_link_window gains
+        # the open-session branch and its probe evidence (+23, above the aux
+        # site) and the zero-marker branch derives the session state (+4):
+        # the aux site moves 2359->2382, per-marker 5950->5973, markerless
+        # 6310->6337. api-event-report.sh (2248) does not move. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2230),
-            ('hermes-report.sh', 5321),
-            ('hermes-report.sh', 5585),
+            ('hermes-report.sh', 2382),
+            ('hermes-report.sh', 5973),
+            ('hermes-report.sh', 6337),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

@@ -1187,6 +1187,95 @@ _job_linkable_for_aux() {
   [[ $(( 10#${now_s} - 10#${outcome_ts} )) -le $(( 10#${grace} )) ]]
 }
 
+# How long after a job's outcome was ledgered a CARRIED completion may still
+# link to it, in seconds. Prints one decimal integer.
+#
+# LD-2 (quick-261018-s0b, user decision 2026-10-18): REVENIUM_JOBS_STALE_SECONDS
+# (600s by default) shipped first, pending a live-tenant probe of whether
+# Revenium attaches a late completion to a closed job WITHOUT reopening or
+# recreating it. The probe ran on 2026-10-18 (job carry-forward-probe-1792369594):
+# a linked completion sent 13 minutes after the SUCCESS outcome added its cost
+# to the job (1 -> 2 transactions, $0.005 -> $0.010), the status stayed SUCCESS,
+# the name and type survived, and no second or PENDING row appeared. RC-1's 151
+# nameless PENDING rows were links to ids Revenium had no create for, which the
+# ledgered-create check in _carry_job_linkable already refuses.
+#
+# So the window widens while the row's own session is still open ($1 == open):
+# a later turn in an open session is the session the job came from, and its
+# cost belongs on that job however long ago the outcome was reported. The open
+# window is REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS (one day by default, the
+# same bound the CANCELLED open-session hold uses), never less than the stale
+# window: a long-lived desktop session reused days later does not reach back
+# to a job from last week. A closed session (or an unknown state) keeps the
+# stale window.
+#
+# That is the point of having a function: it is read by _carry_job_linkable
+# only. _job_linkable_for_aux (the auxiliary rows) and the RC-2 bound in
+# _child_job_link_hold keep reading REVENIUM_JOBS_STALE_SECONDS directly, so
+# widening this window cannot loosen either of them. No new env tunable is
+# added (zero-config); tests redefine the function itself.
+_carry_link_window() {
+  local window="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+  [[ "${window}" =~ ^[0-9]{1,9}$ ]] || window=600
+  window=$(( 10#${window} ))
+  if [[ "${1:-}" == "open" ]]; then
+    local open_window="${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS:-86400}"
+    [[ "${open_window}" =~ ^[0-9]{1,9}$ ]] || open_window=86400
+    open_window=$(( 10#${open_window} ))
+    if (( open_window > window )); then
+      window=${open_window}
+    fi
+  fi
+  printf '%s' "${window}"
+}
+
+# 0 when a CARRIED completion (a classified session's later delta, see the
+# zero-marker branch) may carry --agentic-job-id for this job: the create is
+# ledgered AND the job is either still open or its outcome was ledgered no more
+# than $(_carry_link_window) seconds ago. A link to a job that is not live is a
+# create (RC-1/RC-2), and a late create 409s and loses the job's name for good,
+# so every doubt withholds: no created line, an outcome line whose timestamp
+# does not parse, a clock that cannot be read. The spend still ships, with its
+# task type, unlinked.
+#
+# The outcome-age arithmetic duplicates _job_linkable_for_aux's ON PURPOSE. The
+# two bounds must be able to diverge (that is what LD-2 asks for), and folding
+# them into a shared core would also break the named-function extraction
+# tests/test_job_lifecycle_phantom_jobs.py runs against _job_linkable_for_aux.
+#
+# The window it judged against is left in _CARRY_WINDOW_LAST (this is called in
+# the current shell, never a subshell) so the caller's log line can name the
+# bound without a second call to _carry_link_window: this function is that
+# function's ONLY reader, which is what the isolation tests assert.
+#
+# $2 is the row's session state, "open" or anything else, passed straight to
+# _carry_link_window.
+_CARRY_WINDOW_LAST=""
+_carry_job_linkable() {
+  local ledger_id
+  ledger_id="$(_job_ledger_id "$1")"
+  [[ -n "${ledger_id}" ]] || return 1
+  _CARRY_WINDOW_LAST="$(_carry_link_window "${2:-}")"
+  _job_create_ledgered "$1" || return 1
+
+  local outcome_line
+  outcome_line="$(grep -F -- "JOB:${ledger_id}:outcome:" "${JOBS_LEDGER_FILE}" 2>/dev/null | tail -1)"
+  [[ -n "${outcome_line}" ]] || return 0
+
+  # JOB:<id>:outcome:<ts>:<status> -- the id carries no ':' (see
+  # _job_ledger_id), so the timestamp is always field 4.
+  local outcome_ts
+  outcome_ts="$(printf '%s\n' "${outcome_line}" | cut -d: -f4)"
+  outcome_ts="${outcome_ts%%.*}"
+  [[ "${outcome_ts}" =~ ^[0-9]{1,12}$ ]] || return 1
+
+  local now_s
+  now_s="$(date +%s)"
+  [[ "${now_s}" =~ ^[0-9]{1,12}$ ]] || return 1
+  # 10# so a zero-padded value is read as decimal, not (invalid) octal.
+  [[ $(( 10#${now_s} - 10#${outcome_ts} )) -le $(( 10#${_CARRY_WINDOW_LAST} )) ]]
+}
+
 # One log line per (job, reason), bounded by OUTCOME_WARN_FLAGS_DIR -- the
 # same sentinel directory (and key shape) the outcome stage uses, so this is
 # not a new state path. `level` is info for an expected, self-resolving hold
@@ -1297,6 +1386,69 @@ _job_child_hold_age() {
   mkdir -p "${OUTCOME_WARN_FLAGS_DIR}" 2>/dev/null || return 1
   { printf '%s\n%s\n' "${began}" "${now_s}" > "${flag_path}"; } 2>/dev/null || return 1
   printf '%s' $(( now_s - began ))
+}
+
+# RC-2: should a SUBAGENT's completion that would link to `job_id` wait? Called
+# when the root's `jobs create` for that id is not ledgered. 0 = HOLD (the caller
+# skips the session and retries next tick, nothing ledgered); 1 = ship the row
+# WITHOUT the job link. Never calls `continue` itself.
+#
+# Shared by the per-marker path (the job is the root's latest job record) and the
+# carry path (the root's latest non-halt job), so both log once per job under
+# the same `child-hold` / `child-unlinked` flag keys, and neither can drift from
+# the other. Arguments: job_id job_ts root_sid sid, where job_ts is the job
+# marker's ts as an integer ("" when it has none).
+#
+# It reads main()'s `sessions` by dynamic scope, as _note_root_gate_deferral
+# reads its counters, rather than taking a multi-line argument. The bound is
+# REVENIUM_JOBS_STALE_SECONDS read directly: never the carry link window, so
+# widening that window cannot lengthen how long spend is held.
+#
+# What the bound is measured from depends on whether the root is going to run
+# its create:
+#   - root is in this tick's session set: it creates when its own iteration
+#     comes round, so wait, counting the time during which holds were
+#     continuously renewed (_job_child_hold_age, persisted -- this is what ends
+#     the wait if the create fails on every tick, and what keeps a gap between
+#     ticks from expiring it before the root has had its retry);
+#   - root is NOT in the set (zero tokens so the session query never returns
+#     it, or still inside the settle window): nothing will create the job this
+#     tick, so count from the root's job marker instead, for at least the
+#     settle window. A marker with no usable ts cannot prove it is recent and
+#     takes the unlinked path.
+_child_job_link_hold() {
+  local job_id="$1" job_ts="$2" root_sid="$3" sid="$4"
+  local root_job_wait_limit="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+  [[ "${root_job_wait_limit}" =~ ^[0-9]{1,9}$ ]] || root_job_wait_limit=600
+  root_job_wait_limit=$(( 10#${root_job_wait_limit} ))
+  local root_job_age=""
+  case $'\n'"${sessions}" in
+    *$'\n'"${root_sid}|"*)
+      root_job_age="$(_job_child_hold_age "${job_id}" "${root_job_wait_limit}")" || root_job_age=""
+      ;;
+    *)
+      # Nothing will create the job this tick. The wait must at least
+      # cover the settle window the root could still be inside.
+      local root_settle="${REVENIUM_CRON_SETTLE_SECONDS:-600}"
+      if [[ "${root_settle}" =~ ^[0-9]{1,9}$ && $(( 10#${root_settle} )) -gt "${root_job_wait_limit}" ]]; then
+        root_job_wait_limit=$(( 10#${root_settle} ))
+      fi
+      if [[ "${job_ts}" =~ ^[0-9]{1,12}$ ]]; then
+        root_job_age=$(( $(date +%s) - 10#${job_ts} ))
+      fi
+      ;;
+  esac
+  # A negative age (a marker ts from the future: clock step, wrong unit)
+  # proves nothing about recency, so it is unusable, not "very recent".
+  [[ "${root_job_age}" =~ ^[0-9]+$ ]] || root_job_age=""
+  if [[ -n "${root_job_age}" && "${root_job_age}" -lt "${root_job_wait_limit}" ]]; then
+    _job_outcome_log_once "${job_id}" "child-hold" info \
+      "Subagent completions held: root job ${job_id} has no confirmed create yet (session=${sid}); retried next tick, nothing ledgered"
+    return 0
+  fi
+  _job_outcome_log_once "${job_id}" "child-unlinked" warn \
+    "Subagent completions shipping WITHOUT --agentic-job-id: root job ${job_id} still has no confirmed create after ${root_job_age:-unknown}s (session=${sid}); linking now would make Revenium create it nameless"
+  return 1
 }
 
 # 0 = DEFER: the session is still open (sessions.ended_at IS NULL) and has not
@@ -2805,9 +2957,57 @@ main() {
 
   # G-03 sentinel-or-aged filter (D-21): drop sessions younger than SETTLE_SECONDS
   # that have no plugin sentinel at MARKERS_READY_DIR/<sid>. Sessions WITH a sentinel
-  # OR older than the settle window pass through unchanged. The downstream while-loop
-  # below is byte-identical to pre-edit. Soft-fail: on heredoc error, the original
-  # ${sessions} flows through unfiltered (legacy behavior).
+  # OR older than the settle window pass through unless the live-unclassified hold
+  # below applies. The downstream while-loop below is byte-identical to pre-edit.
+  # Soft-fail: on heredoc error, the original ${sessions} flows through unfiltered
+  # (legacy behavior).
+  #
+  # Live-unclassified hold (pre-marker leak, 2026-10-18). The window is meant to
+  # bound job-inference latency AFTER the classifier fires, but it was measured
+  # from started_at and the plugin fires at the END of a session's first turn, so
+  # a first turn longer than the window was shipped markerless on every tick while
+  # it was still running (20.5% of tokens on the measured fleet). A session that
+  # has no sentinel and is past the window is now held while ALL of these hold:
+  #   - a healthy classifier is registered (plugin-status.json), else nothing is
+  #     coming and a metering-only install keeps today's timing;
+  #   - it is younger than REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS (0 = off), so
+  #     a classifier that never fires strands nothing for longer than that;
+  #   - it has no marker file yet and is LIVE: sessions.last_activity_at (Hermes
+  #     stamps it mid-turn, at most once a minute) or ended_at is less than the
+  #     settle window old. NULL or a missing column degrades to started_at, i.e.
+  #     to today's behaviour. A locked state.db defers: a markerless ship cannot
+  #     be taken back, a held tick costs one tick (same rule as the CANCELLED
+  #     open-session hold).
+  # A classification that landed AFTER the old window had closed gets the window
+  # to finish its job inference, measured from its first record, unless a job
+  # record or the sentinel is already there. A marker inside the window leaves a
+  # session exactly as it was: gateway sessions mid-chat have markers but no
+  # sentinel until their boundary, and holding them would delay budget
+  # visibility for no linkage benefit.
+  #
+  # Subagent hold (subagent-job-link-leak, 2026-10-18). A child session is
+  # classified, and gets its sentinel, when ITS turn ends, which is long before
+  # its ROOT's turn ends and the root's job marker (the only source of the
+  # --agentic-job-id a child carries) is written. The per-marker emit gate
+  # below only waits for the root's `jobs create` once the root's job marker
+  # exists, so a child that went ready first shipped with an empty root_aid:
+  # unlinked, and unlinkable later (a link to a job that is not live is a
+  # create, and no CLI verb attaches a shipped transaction to a job). Measured
+  # on the ent profile since 2026-10-10: 82% of subagent tokens. A row that
+  # would otherwise ship is therefore held while ALL of these hold:
+  #   - it is a child session (parent_session_id chain, root != itself);
+  #   - a healthy classifier is registered and the cap is not 0, as above;
+  #   - the ROOT is younger than REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS, has no
+  #     sentinel (it has not reached a session boundary), has no job record in
+  #     its OWNING profile's markers directory, and is LIVE by the same
+  #     definition as above. A pair marker alone does not release the child:
+  #     on a long root the pair can land mid-turn and the job 20 minutes later.
+  # A root with a job record is the RC-2 gate's business (it waits for the
+  # create); a root that is idle, ended, finalised, over the cap, unreadable
+  # or unclassifiable releases the child, i.e. today's behaviour. The price is
+  # the same one the hold above charges: a subagent's spend reaches Revenium
+  # when its root's job marker lands (plus the create tick) instead of when the
+  # subagent ends.
   local sentinel_skipped
   sentinel_skipped=$(mktemp 2>/dev/null || echo "/tmp/hermes-sentinel-skipped.$$")
   local filtered_sessions
@@ -2816,13 +3016,21 @@ main() {
     MARKERS_DIR="${MARKERS_DIR}" \
     MARKERS_READY_DIR="${MARKERS_READY_DIR}" \
     REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}" \
+    REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS="${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}" \
+    PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" \
+    STATE_DB="${STATE_DB}" \
+    LEDGER_FILE="${LEDGER_FILE}" \
     SKIPPED_LOG="${sentinel_skipped}" \
     SCRIPT_DIR="${SCRIPT_DIR}" \
     python3 - <<'PY' 2>/dev/null
+import json
+import math
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     settle_seconds = int(os.environ.get('REVENIUM_CRON_SETTLE_SECONDS', '600'))
@@ -2832,10 +3040,22 @@ except (TypeError, ValueError):
     # age-fallback before the job marker exists and orphan permanently (BUG-1).
     settle_seconds = 600
 
+# Same rule for the hold cap: a malformed or negative override takes the
+# default rather than switching the hold off. Only an explicit 0 does that.
+try:
+    max_hold_seconds = int(os.environ.get('REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS', '7200'))
+    if max_hold_seconds < 0:
+        max_hold_seconds = 7200
+except (TypeError, ValueError):
+    max_hold_seconds = 7200
+
 process_markers_dir = os.environ.get('MARKERS_DIR', '')
 markers_ready_dir = Path(os.environ.get('MARKERS_READY_DIR', ''))
 skipped_log = os.environ.get('SKIPPED_LOG', '')
 sessions_data = os.environ.get('SESSIONS', '')
+plugin_status_file = os.environ.get('PLUGIN_STATUS_FILE', '')
+state_db = os.environ.get('STATE_DB', '')
+ledger_file = os.environ.get('LEDGER_FILE', '')
 
 # Phase 28 (TRACE-03): per-row markers-directory resolution, so a namespaced
 # session is no longer deferred to the settle-window fallback purely because
@@ -2868,21 +3088,350 @@ except Exception:
     _sidecar_resolver = None
 
 
-def _ready_dir_for(row_sid):
-    """The ready (.ready) directory for a candidate row's OWNING profile, or
-    the process-level MARKERS_READY_DIR when the row resolves to the
-    process-level markers directory (preserving today's value, including any
-    independent REVENIUM_MARKERS_READY_DIR override) or when resolution is
-    unavailable."""
+def _dirs_for(row_sid):
+    """(markers_dir, ready_dir) for a candidate row's OWNING profile. Both come
+    from one resolution, so the marker lookup below can never disagree with the
+    sentinel lookup about whose directory owns the session. A row that resolves
+    to the process-level markers directory (or whose resolution is unavailable)
+    keeps today's values, including any independent
+    REVENIUM_MARKERS_READY_DIR override; markers_dir is None when this process
+    has no markers directory at all."""
+    process_dirs = (Path(process_markers_dir) if process_markers_dir else None,
+                    markers_ready_dir)
     if _sidecar_resolver is None:
-        return markers_ready_dir
+        return process_dirs
     try:
         resolved = _sidecar_resolver(row_sid, process_markers_dir or None)
     except Exception:
-        return markers_ready_dir
+        return process_dirs
     if resolved == process_markers_dir:
-        return markers_ready_dir
-    return Path(resolved) / '.ready'
+        return process_dirs
+    return Path(resolved), Path(resolved) / '.ready'
+
+
+def _ready_dir_for(row_sid):
+    """The ready (.ready) directory for a candidate row's OWNING profile, or
+    the process-level MARKERS_READY_DIR (see _dirs_for)."""
+    return _dirs_for(row_sid)[1]
+
+
+_classifier_registered = None
+
+
+def _classifier_expected():
+    """True only on POSITIVE evidence that a healthy classifier is registered:
+    plugin-status.json exists, says healthy, and does not say unregistered.
+    Absent, unreadable or unhealthy (unregistered or registered but not firing)
+    all mean nothing is going to classify the session, so there is nothing to
+    hold it for. Deliberately the opposite default to the hooks' fail-open
+    reads: an unwarranted hold DELAYS metering, whereas the cost of an
+    unwarranted release is only today's behaviour."""
+    global _classifier_registered
+    if _classifier_registered is None:
+        try:
+            with open(plugin_status_file, encoding='utf-8') as fh:
+                doc = json.load(fh)
+            _classifier_registered = (
+                isinstance(doc, dict)
+                and doc.get('healthy') is True
+                and doc.get('registered') is not False
+            )
+        except Exception:
+            _classifier_registered = False
+    return _classifier_registered
+
+
+def _marker_state(markers_dir, row_sid):
+    """(exists, first_ts, has_job) for the session's own marker file. first_ts
+    is the ts of the first record that has one, i.e. when the first
+    classification landed, or None when no record does (the caller then has no
+    evidence of WHEN it landed and releases the row); has_job is True once a job
+    record carrying an id is present. Never raises."""
+    path = markers_dir / (row_sid + '.jsonl')
+    if not path.exists():
+        return (False, None, False)
+    first_ts = None
+    has_job = False
+    try:
+        with open(path, encoding='utf-8', errors='replace') as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    rec = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ts = rec.get('ts')
+                if (first_ts is None and isinstance(ts, (int, float))
+                        and not isinstance(ts, bool) and math.isfinite(ts)):
+                    first_ts = float(ts)
+                if rec.get('kind') == 'job' and rec.get('agentic_job_id'):
+                    has_job = True
+                if first_ts is not None and has_job:
+                    break
+    except OSError:
+        pass
+    return (True, first_ts, has_job)
+
+
+_db_conn = None
+_db_opened = False
+_activity_column_absent = False
+
+
+def _get_db():
+    """The read-only state.db connection the lookups below share, opened once
+    per run; None when it cannot be opened (no file, no path). Never raises."""
+    global _db_conn, _db_opened
+    if not _db_opened:
+        _db_opened = True
+        if state_db:
+            try:
+                _db_conn = sqlite3.connect(
+                    'file:' + quote(state_db) + '?mode=ro', uri=True, timeout=1.5)
+            except Exception:
+                _db_conn = None
+    return _db_conn
+
+
+def _last_activity_at(row_sid):
+    """(last_activity_at or None, contended). None means unknown: the column is
+    absent (older Hermes), the value is NULL or unusable, or the row is gone;
+    all of them degrade to started_at. contended is True only when state.db was
+    momentarily locked, which the caller treats as 'hold one more tick'."""
+    global _activity_column_absent
+    if _activity_column_absent or not state_db:
+        return (None, False)
+    try:
+        conn = _get_db()
+        if conn is None:
+            return (None, False)
+        row = conn.execute(
+            'SELECT last_activity_at FROM sessions WHERE id = ? LIMIT 1',
+            (row_sid,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if 'locked' in msg or 'busy' in msg:
+            return (None, True)
+        if 'no such column' in msg:
+            _activity_column_absent = True
+        return (None, False)
+    except Exception:
+        return (None, False)
+    if not row or isinstance(row[0], bool):
+        return (None, False)
+    try:
+        value = float(row[0])
+    except (TypeError, ValueError):
+        return (None, False)
+    if not math.isfinite(value) or value <= 0:
+        return (None, False)
+    return (value, False)
+
+
+def _hold_reason(row_sid, started_at, ended_at, age):
+    """None to release the row (today's behaviour), else (kind, detail) for the
+    skip log: ('live', quiet_seconds) or ('job', seconds_since_first_marker).
+    See the block comment above the filter for the contract. Never raises."""
+    # A cap of 0 switches the hold off: every age is >= 0.
+    if age >= max_hold_seconds:
+        return None
+    if not _classifier_expected():
+        return None
+    markers_dir = _dirs_for(row_sid)[0]
+    if markers_dir is None:
+        return None
+    exists, first_ts, has_job = _marker_state(markers_dir, row_sid)
+    if exists:
+        # Classified. Leave it alone unless the classification landed after the
+        # window had already closed (a long first turn) and its job inference
+        # may still be running.
+        if first_ts is None or has_job or first_ts - started_at < settle_seconds:
+            return None
+        since_marker = now - first_ts
+        if since_marker < settle_seconds:
+            return ('job', int(max(0, since_marker)))
+        return None
+    # Not classified yet. Live = recent activity, or recently ended.
+    quiet, contended = _quiet_seconds(row_sid, started_at, ended_at)
+    if contended:
+        return ('live', 0)
+    if quiet < settle_seconds:
+        return ('live', int(max(0, quiet)))
+    return None
+
+
+def _quiet_seconds(row_sid, started_at, ended_at):
+    """(seconds since the session last showed life, contended). Life is the
+    latest of started_at, last_activity_at and ended_at; a stamp more than five
+    minutes in the future (a clock step) is ignored. contended is True only when
+    state.db was momentarily locked and the caller must hold one more tick."""
+    activity, contended = _last_activity_at(row_sid)
+    if contended:
+        return (0, True)
+    latest = started_at
+    if activity is not None and activity <= now + 300:
+        latest = max(latest, activity)
+    if ended_at is not None and ended_at <= now + 300:
+        latest = max(latest, ended_at)
+    return (now - latest, False)
+
+
+_parents = None
+
+
+def _parent_map():
+    """{session id: parent_session_id} for every session that HAS a parent.
+    Empty when state.db has no parent_session_id column (older Hermes), cannot
+    be read or is locked: no row is then recognised as a child and the subagent
+    hold is simply off for the tick, i.e. today's behaviour."""
+    global _parents
+    if _parents is None:
+        _parents = {}
+        conn = _get_db()
+        if conn is not None:
+            try:
+                for rid, rparent in conn.execute(
+                        'SELECT id, parent_session_id FROM sessions '
+                        'WHERE parent_session_id IS NOT NULL'):
+                    if rid is not None and rparent is not None:
+                        _parents[str(rid)] = str(rparent)
+            except Exception:
+                _parents = {}
+    return _parents
+
+
+def _root_of(row_sid):
+    """The root delegator of a session, walking at most ten parent links. The
+    same walk as get-root-session-id.py: a session with no parent, or one whose
+    parent has no row, is its own root, and a chain longer than ten hops stops
+    where it is."""
+    parents = _parent_map()
+    current = row_sid
+    for _ in range(10):
+        parent = parents.get(current)
+        if parent is None:
+            return current
+        current = parent
+    return current
+
+
+def _session_times(row_sid):
+    """(started_at, ended_at) of a session row, or None when there is no usable
+    row. ended_at is None for NULL or a non-time. Never raises."""
+    conn = _get_db()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            'SELECT started_at, ended_at FROM sessions WHERE id = ? LIMIT 1',
+            (row_sid,)).fetchone()
+    except Exception:
+        return None
+    if not row or isinstance(row[0], bool):
+        return None
+    try:
+        started = float(row[0])
+        ended = float(row[1]) if row[1] is not None and not isinstance(row[1], bool) else None
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(started) or started <= 0:
+        return None
+    if ended is not None and not (math.isfinite(ended) and ended > 0):
+        ended = None
+    return (started, ended)
+
+
+_root_pending_cache = {}
+
+
+def _root_pending(root_sid):
+    """None when the root's job is not worth waiting for, else ('root',
+    quiet_seconds): the root is still running (or only just ended), has not
+    reached a session boundary and has no job record yet. One answer per root
+    per run, so a root with fifty children costs one marker read."""
+    if root_sid in _root_pending_cache:
+        return _root_pending_cache[root_sid]
+    answer = None
+    try:
+        answer = _root_pending_uncached(root_sid)
+    except Exception:
+        answer = None
+    _root_pending_cache[root_sid] = answer
+    return answer
+
+
+def _root_pending_uncached(root_sid):
+    times = _session_times(root_sid)
+    if times is None:
+        return None
+    started_at, ended_at = times
+    # The same cap as the hold above, measured from the ROOT's start: past it
+    # the root's own spend ships markerless, and its children go with it.
+    if now - started_at >= max_hold_seconds:
+        return None
+    markers_dir, ready_dir = _dirs_for(root_sid)
+    if markers_dir is None:
+        return None
+    # A sentinel is the plugin saying it has finished with the root, job
+    # inference included: if no job record exists by now none is coming.
+    try:
+        if str(ready_dir) and (ready_dir / root_sid).exists():
+            return None
+    except OSError:
+        pass
+    # A job record hands the child to the RC-2 gate (wait for the create).
+    # Deliberately NOT released by a pair marker alone: on a long root the pair
+    # can land mid-turn and the job twenty minutes later.
+    if _marker_state(markers_dir, root_sid)[2]:
+        return None
+    quiet, contended = _quiet_seconds(root_sid, started_at, ended_at)
+    if contended:
+        return ('root', 0)
+    if quiet < settle_seconds:
+        return ('root', int(max(0, quiet)))
+    return None
+
+
+_ledger_text = None
+
+
+def _already_shipped(row_sid, total):
+    """True when the session's CURRENT token total is already ledgered, i.e. the
+    per-session loop would skip it as having nothing new to ship. The same
+    needle the loop greps for (`^HERMES:<sid>:<total>:`). Holding such a row
+    protects nothing, so it is passed through instead of being counted and
+    logged as waiting. Never raises; an unreadable ledger says 'not shipped'."""
+    global _ledger_text
+    if _ledger_text is None:
+        _ledger_text = ''
+        if ledger_file:
+            try:
+                with open(ledger_file, encoding='utf-8', errors='replace') as fh:
+                    _ledger_text = '\n' + fh.read()
+            except OSError:
+                _ledger_text = ''
+    return ('\nHERMES:%s:%d:' % (row_sid, total)) in _ledger_text
+
+
+def _root_hold_reason(row_sid):
+    """None to release a row that would otherwise ship, else ('root',
+    quiet_seconds, root_sid) when it is a child session whose root's job marker
+    is still to come. See the block comment above the filter. Never raises."""
+    if max_hold_seconds <= 0:
+        return None
+    if not _classifier_expected():
+        return None
+    root_sid = _root_of(row_sid)
+    if not root_sid or root_sid == row_sid:
+        return None
+    pending = _root_pending(root_sid)
+    if pending is None:
+        return None
+    return (pending[0], pending[1], root_sid)
 
 
 now = int(time.time())
@@ -2891,6 +3440,8 @@ try:
     skip_out = open(skipped_log, 'w', encoding='utf-8') if skipped_log else None
 except OSError:
     skip_out = None
+
+root_holds = {}
 
 for raw_line in sessions_data.split('\n'):
     line = raw_line.rstrip('\n').rstrip('\r')
@@ -2920,23 +3471,65 @@ for raw_line in sessions_data.split('\n'):
             has_sentinel = (row_ready_dir / sid).exists() if str(row_ready_dir) else False
         except OSError:
             has_sentinel = False
-        if has_sentinel or age >= settle_seconds:
-            print(line)
-        else:
-            if skip_out is not None:
+        hold = None
+        if not has_sentinel and age >= settle_seconds:
+            # Only a row the age fallback would release can be held. ended_at is
+            # index 11; NULL prints as an empty string, and 0 is not a time.
+            try:
+                ended_at_val = float(parts[11]) if len(parts) > 11 and parts[11] else None
+                if ended_at_val is not None and not (math.isfinite(ended_at_val) and ended_at_val > 0):
+                    ended_at_val = None
+            except (TypeError, ValueError):
+                ended_at_val = None
+            hold = _hold_reason(sid, started_at_int, ended_at_val, age)
+        if hold is None and (has_sentinel or age >= settle_seconds):
+            # The row would ship. A subagent whose root's job marker is still
+            # to come waits for it (see the block comment above the filter).
+            root_hold = _root_hold_reason(sid)
+            if root_hold is not None:
                 try:
+                    row_total = int(parts[3] or 0) + int(parts[4] or 0)
+                except (IndexError, TypeError, ValueError):
+                    row_total = -1
+                if not _already_shipped(sid, row_total):
+                    held = root_holds.setdefault(root_hold[2], [0, root_hold[1]])
+                    held[0] += 1
+                    continue
+            print(line)
+        elif skip_out is not None:
+            try:
+                if hold is None:
                     skip_out.write(f"{sid}\t{age}\t{settle_seconds}\n")
-                except OSError:
-                    pass
+                else:
+                    skip_out.write(f"{sid}\t{age}\t{settle_seconds}\t{hold[0]}\t{hold[1]}\n")
+            except OSError:
+                pass
     except Exception:
         # Belt: any unexpected error → pass the row through unmodified.
         print(line)
         continue
 
+# One line per held ROOT, not per held child: a root fanning out to fifty
+# subagents would otherwise log fifty identical lines a minute for as long as it
+# runs. Fields: root sid, root age, settle, kind, root quiet seconds, children.
+if skip_out is not None and root_holds:
+    for held_root, (held_count, held_quiet) in root_holds.items():
+        try:
+            held_times = _session_times(held_root)
+            held_age = int(now - held_times[0]) if held_times else 0
+            skip_out.write(
+                f"{held_root}\t{held_age}\t{settle_seconds}\troot\t{held_quiet}\t{held_count}\n")
+        except Exception:
+            pass
 if skip_out is not None:
     try:
         skip_out.close()
     except OSError:
+        pass
+if _db_conn is not None:
+    try:
+        _db_conn.close()
+    except Exception:
         pass
 PY
   ) || filtered_sessions="${sessions}"
@@ -2944,9 +3537,25 @@ PY
   # Emit one info log line per skipped session via the existing info helper
   # so the cron log captures the proper timestamp + [INFO ] [revenium] prefix.
   if [[ -s "${sentinel_skipped}" ]]; then
-    while IFS=$'\t' read -r skip_sid skip_age skip_settle; do
+    while IFS=$'\t' read -r skip_sid skip_age skip_settle skip_kind skip_detail skip_extra; do
       [[ -z "${skip_sid}" ]] && continue
-      info "skipping ${skip_sid} — awaiting plugin sentinel (age=${skip_age}s < settle=${skip_settle}s)"
+      case "${skip_kind:-}" in
+        live)
+          # One line per held session per tick, bounded by the hold cap.
+          info "holding ${skip_sid} — live session awaiting its first classification (age=${skip_age}s, quiet=${skip_detail}s < settle=${skip_settle}s; shipped once the markers land or after ${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}s)"
+          ;;
+        job)
+          info "holding ${skip_sid} — first classification landed ${skip_detail}s ago, after the settle window closed; waiting for its job marker (settle=${skip_settle}s)"
+          ;;
+        root)
+          # skip_sid is the ROOT here, skip_age its age, skip_extra how many of
+          # its subagent sessions are waiting. One line per held root per tick.
+          info "holding ${skip_extra:-?} subagent session(s) of ${skip_sid} — its job marker has not landed yet (root age=${skip_age}s, root quiet=${skip_detail}s < settle=${skip_settle}s; shipped once the job marker lands or the root passes ${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}s)"
+          ;;
+        *)
+          info "skipping ${skip_sid} — awaiting plugin sentinel (age=${skip_age}s < settle=${skip_settle}s)"
+          ;;
+      esac
     done < "${sentinel_skipped}"
   fi
   rm -f "${sentinel_skipped}" 2>/dev/null || true
@@ -4574,6 +5183,10 @@ else:
     local marker_output=""
     local jobs_json=""
     local read_err=""
+    # Carry-forward (LD-1): the session's latest classification and job, read
+    # from the reader heredoc below. All empty unless the reader printed them.
+    local carry_task_type="" carry_trace_id="" carry_muid=""
+    local carry_job_id="" carry_job_name="" carry_job_type="" carry_job_ts=""
     marker_output=$(
       MARKERS_DIR="${session_markers_dir}" \
       SID="${sid}" \
@@ -4581,6 +5194,7 @@ else:
       DELTA_TOTAL="${delta_total}" \
       SCRIPT_DIR="${SCRIPT_DIR}" \
       LEDGER_PATH="${LEDGER_FILE}" \
+      CARRY_JOB_MARKERS_PATH="${root_markers_dir}/${root_sid}.jsonl" \
       python3 - <<'PY' 2>&1
 import json
 import os
@@ -4828,6 +5442,54 @@ print(f"MARKERS_JSON={json.dumps(markers, separators=(',', ':'))}")
 # Phase 7 (SCHEMA-03): emit collected job declarations for Phase 9 consumption.
 # jobs_by_id is always defined (initialized before is_file() check — Pitfall 2).
 print(f"JOBS_JSON={json.dumps(list(jobs_by_id.values()), separators=(',', ':'))}")
+
+# Carry-forward (LD-1, quick-261018-s0b). Every marker of this session is already
+# ledgered (n == 0), yet the session has a classification: its later growth must
+# ship with that classification and the job link, not as `unclassified` with no
+# job. The selection lives in split_strategies (one implementation, unit-tested);
+# this block only prints it as KEY=value lines for the zero-marker branch.
+#
+# Its own try, and its own import: any failure here costs the carry and nothing
+# else -- no CARRY_ line is printed, and the session ships exactly what a
+# markerless one always shipped. The values are bounded and stripped of '|', CR
+# and LF, so a hand-edited marker cannot forge a second KEY=value line. The job
+# comes from CARRY_JOB_MARKERS_PATH, which is the root's file (this session's own
+# file for a root) and is read with .get: test_repository.py drives this heredoc
+# with a smaller environment.
+if read_ok and n == 0:
+    try:
+        from split_strategies import (
+            _SAFE_MUID_RE, select_carry_classification, select_carry_job,
+        )
+
+        def _carry_clean(value, cap=128):
+            if not isinstance(value, str):
+                return ''
+            for _bad in ('|', '\n', '\r'):
+                value = value.replace(_bad, '_')
+            return value[:cap]
+
+        carried = select_carry_classification([task for task, _eligible in all_tasks])
+        if carried is not None:
+            carry_lines = [
+                f"CARRY_TASK_TYPE={_carry_clean(carried.get('task_type'))}",
+                f"CARRY_TRACE_ID={_carry_clean(carried.get('trace_id'))}",
+            ]
+            carry_muid = carried.get('muid')
+            if isinstance(carry_muid, str) and _SAFE_MUID_RE.match(carry_muid):
+                carry_lines.append(f"CARRY_MUID={carry_muid}")
+            carry_job = select_carry_job(os.environ.get('CARRY_JOB_MARKERS_PATH', ''))
+            if carry_job is not None:
+                carry_job_id, carry_job_name, carry_job_type, carry_job_ts = carry_job
+                carry_lines.append(f"CARRY_JOB_ID={_carry_clean(carry_job_id, 256)}")
+                carry_lines.append(f"CARRY_JOB_NAME={_carry_clean(carry_job_name, 512)}")
+                carry_lines.append(f"CARRY_JOB_TYPE={_carry_clean(carry_job_type, 256)}")
+                if carry_job_ts is not None:
+                    carry_lines.append(f"CARRY_JOB_TS={carry_job_ts}")
+            for carry_line in carry_lines:
+                print(carry_line)
+    except Exception:
+        pass
 PY
     ) || marker_output=""
 
@@ -4850,6 +5512,21 @@ PY
     else
       warn "marker-read fall-through: session=${sid} reason=empty-output"
       n_markers=0
+    fi
+
+    # Carry-forward (LD-1): the reader prints CARRY_* only when this session has
+    # a classification and none of its markers is left to ship. The glob test
+    # is a builtin, so every session WITHOUT a classification (the common
+    # markerless case, and the whole NO_MARKER_SPAWN_CEILING budget) pays no
+    # sed or head for it.
+    if [[ "${read_ok}" == "true" && "${n_markers}" -eq 0 && "${marker_output}" == *$'\n'CARRY_TASK_TYPE=* ]]; then
+      carry_task_type=$(echo "${marker_output}" | sed -n 's/^CARRY_TASK_TYPE=//p' | head -1)
+      carry_trace_id=$(echo "${marker_output}" | sed -n 's/^CARRY_TRACE_ID=//p' | head -1)
+      carry_muid=$(echo "${marker_output}" | sed -n 's/^CARRY_MUID=//p' | head -1)
+      carry_job_id=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_ID=//p' | head -1)
+      carry_job_name=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_NAME=//p' | head -1)
+      carry_job_type=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_TYPE=//p' | head -1)
+      carry_job_ts=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_TS=//p' | head -1)
     fi
 
     if [[ -n "${s2_info_line}" ]]; then
@@ -5162,37 +5839,12 @@ PY
       # create cannot leave them nameless.
       if [[ "${JOBS_CLI_CAPABLE}" == "true" && "${root_sid}" != "${sid}" && -n "${root_aid}" ]] \
          && ! _job_create_ledgered "${root_aid}"; then
-        local root_job_wait_limit="${REVENIUM_JOBS_STALE_SECONDS:-600}"
-        [[ "${root_job_wait_limit}" =~ ^[0-9]{1,9}$ ]] || root_job_wait_limit=600
-        root_job_wait_limit=$(( 10#${root_job_wait_limit} ))
-        local root_job_age=""
-        case $'\n'"${sessions}" in
-          *$'\n'"${root_sid}|"*)
-            root_job_age="$(_job_child_hold_age "${root_aid}" "${root_job_wait_limit}")" || root_job_age=""
-            ;;
-          *)
-            # Nothing will create the job this tick. The wait must at least
-            # cover the settle window the root could still be inside.
-            local root_settle="${REVENIUM_CRON_SETTLE_SECONDS:-600}"
-            if [[ "${root_settle}" =~ ^[0-9]{1,9}$ && $(( 10#${root_settle} )) -gt "${root_job_wait_limit}" ]]; then
-              root_job_wait_limit=$(( 10#${root_settle} ))
-            fi
-            if [[ "${resolved_aid_ts}" =~ ^[0-9]{1,12}$ ]]; then
-              root_job_age=$(( $(date +%s) - 10#${resolved_aid_ts} ))
-            fi
-            ;;
-        esac
-        # A negative age (a marker ts from the future: clock step, wrong unit)
-        # proves nothing about recency, so it is unusable, not "very recent".
-        [[ "${root_job_age}" =~ ^[0-9]+$ ]] || root_job_age=""
-        if [[ -n "${root_job_age}" && "${root_job_age}" -lt "${root_job_wait_limit}" ]]; then
-          _job_outcome_log_once "${root_aid}" "child-hold" info \
-            "Subagent completions held: root job ${root_aid} has no confirmed create yet (session=${sid}); retried next tick, nothing ledgered"
+        # The decision, its bound and its two log lines live in
+        # _child_job_link_hold, shared with the carry path.
+        if _child_job_link_hold "${root_aid}" "${resolved_aid_ts}" "${root_sid}" "${sid}"; then
           ((skipped_count++)) || true
           continue
         fi
-        _job_outcome_log_once "${root_aid}" "child-unlinked" warn \
-          "Subagent completions shipping WITHOUT --agentic-job-id: root job ${root_aid} still has no confirmed create after ${root_job_age:-unknown}s (session=${sid}); linking now would make Revenium create it nameless"
         root_aid=""
       fi
 
@@ -5554,6 +6206,106 @@ PY
       # B4: --transaction-id stays as ${sid}-${total_tokens} — the synthetic muid that
       # appears in the v2 ledger row's field 5 is a LEDGER-SIDE identifier only, NEVER
       # in the wire transaction-id. Extending --transaction-id here would break SC3.
+      #
+      # CARRY-FORWARD (LD-1, quick-261018-s0b). This branch is also where a
+      # CLASSIFIED session's later growth lands: the classifier latches after a
+      # session's first marker pair, so once those muids are ledgered every
+      # later delta has no marker to ship against. Measured on ent (session
+      # 20261018_134109_5d0360): one marked row at 480,675 tokens, then five
+      # `unclassified` rows with no job to 515,535 -- job cost understated, ROI
+      # inflated, task analytics without the label. The reader prints CARRY_*
+      # when the session has a classification, and the delta then ships with the
+      # session's latest task type and trace, plus the job link below. Accepted
+      # bias: an unrelated later turn is charged to the earlier job, which
+      # understates that job's ROI rather than overstating it.
+      #
+      # Only the label, the trace and the optional job flags change. The
+      # transaction id and the ledger line keep their markerless shape on
+      # purpose (rejected alternative: a new muid prefix). The `^HERMES:<sid>:
+      # <total>:` skip lets each (sid, total) ship at most once, and a per-marker
+      # id always has a third `-<muid>` segment, so the two cannot collide;
+      # drain-status.sh's muid check, parse_prior_state and
+      # latest_transaction_id already read the `unclassified-<digits>` shape
+      # (the last one maps it to exactly this row's wire id), whereas a new
+      # prefix would be read as corruption. The cost: `unclassified-` now means
+      # "no marker muid was consumed by this row", not "shipped as unclassified".
+      #
+      # Every carried row is built here, behind the unchanged G-03 filter, so a
+      # carried row never ships EARLIER than the markerless row it replaces.
+      # Two guards can only delay it: the RC-2 child hold (a subagent) and the
+      # Phase 68 CR-01 root-gate deferral of one tick.
+      local row_task_type="${carry_task_type:-unclassified}"
+      local row_trace_id="${carry_trace_id:-${root_sid}}"
+      local carry_link_id="" carry_link_name="" carry_link_type="" carry_log_suffix=""
+      local carry_bucket="unclassified"
+      if [[ -n "${carry_task_type}" ]]; then
+        carry_bucket="classified"
+        # A job id is linked only when it is provably live (C-15): a link to a
+        # job Revenium has not seen is a create, and a late create loses the
+        # job's name for good. Every doubt ships the row UNLINKED -- the task
+        # type still carries. A root also needs a ledgered create, which is
+        # stricter than the per-marker root rows (they carry name and type
+        # and link without it): the in-loop create ran earlier in this very
+        # iteration, so the line is there unless the create failed, and a failed
+        # create ships the label unlinked rather than holding the spend.
+        if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${carry_job_id}" ]]; then
+          local carry_unlinked_reason=""
+          # ended_at is empty for a NULL column: the session is still open,
+          # which widens the link window (see _carry_link_window).
+          local carry_session_state="closed"
+          [[ -z "${ended_at:-}" ]] && carry_session_state="open"
+          if [[ "${root_sid}" == "${sid}" ]]; then
+            if _carry_job_linkable "${carry_job_id}" "${carry_session_state}"; then
+              # Phase 68 (D-17): positive root evidence, exactly as the per-marker
+              # root rows require. A gate that could not read state.db (CR-01)
+              # defers the session: a completion shipped without its job id is
+              # ledgered and never re-shipped.
+              if ! _resolve_root_gate "${sid}"; then
+                _note_root_gate_deferral "${sid}"
+                ((skipped_count++)) || true
+                continue
+              fi
+              if [[ "${root_confirmed}" == "true" ]]; then
+                carry_link_id="${carry_job_id}"
+                carry_link_name="${carry_job_name}"
+                carry_link_type="${carry_job_type}"
+              else
+                _parent_column_absent_warn_once
+                carry_unlinked_reason="has an unconfirmed root"
+              fi
+            elif ! _job_create_ledgered "${carry_job_id}"; then
+              carry_unlinked_reason="was never created"
+            else
+              carry_unlinked_reason="closed more than ${_CARRY_WINDOW_LAST}s ago"
+            fi
+          else
+            # A subagent links its ROOT's job (carry_job_id was read from the
+            # root's marker file, never from the child's own, whose job records
+            # would be orphan references: JOB-02 suppresses their create) and
+            # ships the id only, as the per-marker subagent rows do. A child is
+            # always visited before its root, so a create that is not ledgered
+            # yet goes through the same RC-2 hold the per-marker path uses:
+            # held while the root's create is pending, unlinked once the bound
+            # passes. Only a ledgered create reaches the link predicate.
+            if ! _job_create_ledgered "${carry_job_id}"; then
+              if _child_job_link_hold "${carry_job_id}" "${carry_job_ts}" "${root_sid}" "${sid}"; then
+                ((skipped_count++)) || true
+                continue
+              fi
+              carry_unlinked_reason="was never created"
+            elif _carry_job_linkable "${carry_job_id}" "${carry_session_state}"; then
+              carry_link_id="${carry_job_id}"
+            else
+              carry_unlinked_reason="closed more than ${_CARRY_WINDOW_LAST}s ago"
+            fi
+          fi
+          if [[ -n "${carry_unlinked_reason}" ]]; then
+            _job_outcome_log_once "${carry_job_id}" "carry-unlinked" info \
+              "Carried completion shipping WITHOUT --agentic-job-id: job ${carry_job_id} ${carry_unlinked_reason} (session=${sid}); the task type still carries"
+          fi
+        fi
+        carry_log_suffix=" carried_from=${carry_muid:-unknown} job=${carry_link_id:-none}"
+      fi
       local cmd=(
         revenium meter completion
         --model "${clean_model}"
@@ -5578,10 +6330,10 @@ PY
         # REVENIUM_AGENT_NAME on every current install.
         --agent "${root_agent_name:-${REVENIUM_AGENT_NAME}}"
         --transaction-id "${sid}-${total_tokens}"
-        --trace-id "${root_sid}"
+        --trace-id "${row_trace_id}"
         --is-streamed
         --quiet
-        --task-type "unclassified"
+        --task-type "${row_task_type}"
         --operation-type "CHAT"
       )
 
@@ -5611,6 +6363,20 @@ PY
       fi
       if [[ "${PARENT_TXN_CLI_CAPABLE}" == "true" && -n "${parent_txn_id}" ]]; then
         cmd+=(--parent-transaction-id "${parent_txn_id}")
+      fi
+      # Carry-forward: the per-marker path's --agentic-job-id slot (after the
+      # parent link, before the squad family). Empty for every row that carried
+      # no live job, which is every markerless session, so their argv is the
+      # golden's. A root gets id, name and type (each when non-empty); a
+      # subagent gets the id only, as on the per-marker path.
+      if [[ -n "${carry_link_id}" ]]; then
+        cmd+=(--agentic-job-id "${carry_link_id}")
+        if [[ -n "${carry_link_name}" ]]; then
+          cmd+=(--agentic-job-name "${carry_link_name}")
+        fi
+        if [[ -n "${carry_link_type}" ]]; then
+          cmd+=(--agentic-job-type "${carry_link_type}")
+        fi
       fi
 
       # Phase 29 (SQUAD-01/02/03 / D-03/D-04): identical gated squad append
@@ -5712,9 +6478,11 @@ PY
         echo "HERMES:${sid}:${total_tokens}:${now_ts}:${synthetic_muid}" >> "${LEDGER_FILE}"
         _txn_memo_forget "${sid}"
         ((reported_count++)) || true
-        info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}${subscriber_log_suffix}"
-        # Phase 44 Plan 04 (EGV-17): unclassified bucket -- the markerless path.
-        attribution_rows+="unclassified|${delta_input}|${delta_output}|${delta_cache_read}|${delta_cache_write}|${delta_total}|${delta_cost}"$'\n'
+        info "Reported: session=${sid} task_type=${row_task_type} model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}${carry_log_suffix}${subscriber_log_suffix}"
+        # Phase 44 Plan 04 (EGV-17): the markerless path books to the
+        # unclassified bucket; a carried row is attributed to a real marker's
+        # classification, so it books to classified, as the per-marker path does.
+        attribution_rows+="${carry_bucket}|${delta_input}|${delta_output}|${delta_cache_read}|${delta_cache_write}|${delta_total}|${delta_cost}"$'\n'
       else
         warn "Failed: session=${sid} exit=${cmd_exit} output=${cmd_output}"
         warn "Command: ${cmd[*]}"

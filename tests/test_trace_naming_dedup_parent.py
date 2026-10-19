@@ -253,7 +253,13 @@ class PairCollapseEndToEndTests(_Harness):
         """The absorbed GUARDRAIL muid is consumed. When the session later
         grows with no new markers, the delta ships on the markerless path --
         not as a lone GUARDRAIL row (which is what an un-ledgered absorbed muid
-        would produce)."""
+        would produce).
+
+        2026-10-18 (carry-forward, quick-261018-s0b): that growth delta now
+        ships on the zero-marker branch CARRYING the session's latest
+        classification instead of `unclassified`, so the `--task-type`
+        assertion names the fixture's label. Everything else is unchanged: one
+        CHAT row, never a GUARDRAIL row."""
         self._ent_fixture()
         self.tick()
         conn_sql = ("UPDATE sessions SET input_tokens = 61000, output_tokens = 1000 "
@@ -265,7 +271,7 @@ class PairCollapseEndToEndTests(_Harness):
         conn.close()
         grown = self.tick()
         self.assertEqual(len(grown['flags']), 1, grown['argv'])
-        self.assertEqual(grown['flags'][0]['--task-type'], 'unclassified')
+        self.assertEqual(grown['flags'][0]['--task-type'], 'draft_notification_guidance')
         self.assertEqual(grown['flags'][0]['--operation-type'], 'CHAT')
         self.assertNotIn('GUARDRAIL', ' '.join(grown['argv'][0]))
 
@@ -578,7 +584,11 @@ class TraceNameTests(_Harness):
         """Once a session's markers are all consumed, later growth ships on the
         markerless path (task type `unclassified`). It is still a row of a trace
         the root's marker file names, so it must carry that name -- or one trace
-        would show the name on some rows and "Unnamed trace" on others."""
+        would show the name on some rows and "Unnamed trace" on others.
+
+        2026-10-18 (carry-forward, quick-261018-s0b): the row now carries the
+        session's latest classification (`planning` here) rather than
+        `unclassified`; the trace-name assertion is unchanged."""
         import sqlite3
         self._ent(_pair(ENT_SID, ENT_G_MUID, ENT_C_MUID, 'planning', 1715515000.0)
                   + [_job(ENT_SID, 'job-ent-1', ENT_JOB_NAME)], True)
@@ -591,7 +601,7 @@ class TraceNameTests(_Harness):
         conn.close()
         grown = self.tick()
         self.assertEqual(len(grown['flags']), 1, grown['argv'])
-        self.assertEqual(grown['flags'][0]['--task-type'], 'unclassified')
+        self.assertEqual(grown['flags'][0]['--task-type'], 'planning')
         self.assertEqual(grown['flags'][0].get('--trace-name'), ENT_JOB_NAME)
 
     def test_markerless_install_sends_no_trace_name(self):

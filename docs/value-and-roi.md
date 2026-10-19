@@ -544,7 +544,8 @@ correct-assessment.sh --job-id <id> --mechanism incremental_revenue \
 correction is legal: mechanism and value are separate claims and "this job
 avoided a risk" is meaningful before anyone prices it. On that path the value
 family is absent from the correction, not null or zero, while
-`prior_value_*` still records what stood before.
+`prior_value_*` in the sidecar record (and `prior` on the wire) still records what stood
+before.
 
 A declared mechanism does not move `evidence_class`. The mechanism says what kind of value
 is claimed; the label says what evidence supports it. Neither implies the other.
@@ -1121,11 +1122,35 @@ Here, `--outcome-value` is the corrected `--value`, the base, rather than the lo
 operator explicitly authorizes the corrected number, so there is no model estimate to
 understate. If neither bound flag was given, base and low are the same figure.
 
-The `--metadata` payload carries the same `sequence` and prior-value fields as the local
-record. The `sequence` key distinguishes a revision from an original because an ordinary
-`jobs outcome` payload never carries one. This is the `jobs outcome-update` verb's payload,
-built by `correct-assessment.sh`, and it keeps its own keys; it is not the `schema_version` 2
-envelope above.
+The `--metadata` payload is `schema_version` 2, the same vocabulary the `jobs outcome`
+envelope above uses, so one reader decodes both verbs. It is compact JSON in a fixed key
+order, with absent members omitted:
+
+```json
+{"schema_version":2,"corrected":true,"correction_sequence":1,
+ "value":{"reported":500.0,"currency":"USD",
+          "attribution":{"fraction":0.15,"basis":"15% per policy REV-2024-03"}},
+ "basis":{"mechanism":"incremental_revenue"},
+ "prior":{"low":446.25,"base":525.0,"high":603.75,"currency":"USD"}}
+```
+
+- `corrected` and `correction_sequence` carry the local record's `sequence`. They distinguish
+  a revision from an original because an ordinary `jobs outcome` payload carries neither
+  unless it forwards a correction.
+- `value.reported` is the exact `--outcome-value` this call sends, and `value.currency` is
+  the `--outcome-currency` sent. A mechanism-only correction sends neither flag, so it has no
+  `value` group at all.
+- `value.attribution` is the pair `--attribution-fraction` and `--attribution-basis`. They
+  travel together, and the basis is capped at 500 serialized bytes.
+- `basis.mechanism` is the declared `--mechanism`.
+- `prior` is what the correction superseded, from the effective record before it. Members the
+  prior record never held are omitted, and a prior with none of them has no `prior` group.
+
+The local sidecar correction record above keeps its v1 field names; only this wire payload
+moved. Corrections filed before the change keep the v1 flat keys (`assessment_schema_version`,
+`sequence`, `prior_value_low`, `prior_value_base`, `prior_value_high`, `prior_currency`,
+`economic_mechanism`, `attribution_fraction`, `attribution_basis`) in Revenium, and
+`schema_version` tells the two apart.
 
 ### Failure posture — deliberately loud
 
@@ -1254,7 +1279,7 @@ tick into three buckets and emits one reconciliation line per tick into
 
 | Bucket | Meaning |
 |---|---|
-| `classified` | Metered cost split across real markers carrying an attribution |
+| `classified` | Metered cost split across real markers carrying an attribution, or carried forward from a classified session's latest one |
 | `unclassified` | Metered cost on a session with no marker at all |
 | `unallocated` | Metered cost observed but not attributed this tick |
 

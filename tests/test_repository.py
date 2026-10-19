@@ -725,6 +725,14 @@ class RepositoryTests(unittest.TestCase):
             # deliberately not `test_`-prefixed; Phase 70 re-runs it on a
             # model change.
             ROOT / 'tests' / 'confidence_replay_harness.py',
+            # quick-261018-s0b -- carry-forward of a classified session's
+            # latest classification and job onto its post-marker deltas. The
+            # golden is additive and outside the v1.x immutability contract
+            # (it sits beside meter-completion-markerless.golden.json); the
+            # module pins the carry rules, the link-window seam and the
+            # idempotency of a carried row.
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-carried.golden.json',
+            ROOT / 'tests' / 'test_carry_forward_classification.py',
         ]
         for path in expected:
             self.assertTrue(path.exists(), f'missing {path}')

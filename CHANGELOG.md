@@ -76,8 +76,25 @@ this repository.
   this change and `MODEL_ESTIMATED` on new ones. A sidecar already on disk with the old
   label is read as `MODEL_ESTIMATED`, gated and reported identically, and the wire always
   carries the new label. The `jobs outcome-update` metadata written by
-  `correct-assessment.sh` is unchanged. Anything that reads `outcomeMetadata` and keys on the
-  v1 names needs the table above.
+  `correct-assessment.sh` moves to the same schema in the next entry below. Anything that
+  reads `outcomeMetadata` and keys on the v1 names needs the table above.
+- Operator corrections now ship `schema_version` 2 metadata too. `correct-assessment.sh`
+  sent v1 flat keys to `jobs outcome-update --metadata`, so the two verbs spoke different
+  schemas and a reader had to decode both. The correction blob is now compact JSON in a fixed
+  order, with absent members omitted: `schema_version` (`2`), `corrected` (`true`),
+  `correction_sequence`, then `value` (`reported`, the exact `--outcome-value` the call sends,
+  with `currency` and `attribution` as `fraction` and `basis`), `basis.mechanism`, and
+  `prior` (`low`, `base`, `high`, `currency`: what the correction superseded). A
+  mechanism-only correction sends no `--outcome-value`, so it has no `value` group. The key
+  map is `assessment_schema_version` and `sequence` to `schema_version` and
+  `correction_sequence`, `prior_value_low`/`_base`/`_high` and `prior_currency` to
+  `prior.low`/`.base`/`.high`/`.currency`, `economic_mechanism` to `basis.mechanism`,
+  `attribution_fraction` and `attribution_basis` to `value.attribution.fraction` and `.basis`,
+  and the `--outcome-value` and `--outcome-currency` sent to `value.reported` and
+  `value.currency` (both newly sent). Corrections already filed in Revenium keep the v1 keys;
+  `schema_version` tells the two apart. The local sidecar correction record is unchanged.
+  Whether Revenium replaces or merges `metadata` on an update is not documented, so a reader
+  should treat each revision's metadata as that revision's own.
 
 - The cron tick no longer re-derives every historical session every minute. `hermes-report.sh`
   and the shadow pass of `api-event-report.sh` visited every session with tokens on every
@@ -131,6 +148,32 @@ this repository.
   `window=` figure counts classifications, so it reads half what it used to for the same
   session. No change to the classifier or its markers.
 
+- The later turns of a classified session now carry its latest task type and its job. The
+  classifier labels a session once, so after that first pair was reported every later delta
+  shipped `--task-type unclassified` with no `--agentic-job-id` (one ent session: a single
+  marked row at 480,675 tokens, then five unclassified rows to 515,535). Job cost was
+  understated, job ROI inflated and task analytics lost the label. A later delta of a session
+  that has classification markers now ships with that session's latest one (its task type,
+  `CHAT`, its trace) and the job the reporter would link for it: a root's own latest job, a
+  subagent's root job. A `guardrail-halt-*` job is never the link. Accepted bias: an unrelated
+  later turn is charged to the earlier job, which understates that job's ROI rather than
+  overstating it. A job is linked only while it is live: its `jobs create` is ledgered, and it
+  is open or its outcome was reported recently enough: within
+  `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` (one day) while the row's session is still open,
+  within `REVENIUM_JOBS_STALE_SECONDS` (600 seconds) once it has ended. A live check on
+  2026-10-18 showed Revenium adds a completion linked 13 minutes after the outcome to the
+  closed job's cost without reopening or duplicating it; the nameless pending rows an earlier
+  replay produced were links to jobs Revenium had never been told about, which the
+  ledgered-create check refuses. On one ent profile the open-session window links about 69% of
+  later-turn tokens, against 7.5% for 600 seconds alone. Beyond the window, for a guardrail-halt
+  job and for a job that was never created, the row ships unlinked and the task type still
+  carries; the log says why, once per job (`Carried completion shipping WITHOUT
+  --agentic-job-id`). The window is decided in one function (`_carry_link_window`). Transaction ids and ledger lines keep their shape
+  (`<session>-<total>` and an `unclassified-<digits>` muid, which now means that no marker
+  muid was consumed), so re-running the cron never double-reports. A session with no
+  classification at all meters exactly as before. Rows already shipped are unchanged, with no
+  backfill. No change to the classifier or its markers.
+
 ### Added
 
 - `llmOutcomeEvaluation.reportModelEstimates` lets an install report the `llm` evaluator's
@@ -170,6 +213,37 @@ this repository.
 
 ### Fixed
 
+- A subagent's spend now ships linked to its root session's job instead of unlinked. A subagent
+  is classified, and becomes ready to meter, when its own turn ends, which is well before its
+  root session's turn ends and the root's job marker (the only source of the job id) is
+  written. The reporter had nothing to link, so it shipped the completion with no
+  `--agentic-job-id`, and a shipped completion cannot be linked to a job afterwards. On ent,
+  82% of subagent tokens since the classifier stabilised (9.06M of 11.01M; 35% of the whole
+  history) shipped this way, so job cost omitted most delegated work and job ROI was inflated.
+  The reporter now holds a subagent while its root session is still running, has no job
+  record and has not reached a session boundary, bounded by the same
+  `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default 7200, counted from the root's start; `0`
+  disables it), and ships it once the root's job exists. A pair marker on the root does not
+  release it, because on a long root the pair can land mid-turn and the job twenty minutes
+  later. The trade-off: a subagent's spend reaches Revenium, and budget rules, when its root's
+  job marker lands rather than when the subagent ends (replayed on ent: median 10 minutes,
+  p90 20, at most 27 since 2026-10-10; with the 7200s cap, 84.8% of all leaked tokens recovered,
+  p99 57 minutes). The root's own spend is already held to the same moment. Installs without
+  the plugin, roots that go idle, finish without a job or pass the cap, and Hermes versions
+  without `parent_session_id` keep today's timing. Auxiliary rows and rows already shipped are
+  unchanged.
+- A session whose first turn runs past the settle window is no longer metered before its
+  classifier marker lands. The settle fallback measured age from `started_at`, so a turn
+  longer than 600 seconds (typically a Hermes cron job) was treated as having no classifier
+  while it was still running, and each tick shipped its growing delta as `unclassified` with
+  no `--agentic-job-id`. Only the last delta reached the job, which made its cost a few cents
+  and its ROI absurd (on ent, `reconcile_slack_gmail_todos_e00c` showed 1,713,686% with 2,306
+  of 219,680 tokens linked; 15.4% of classified-session tokens shipped this way). The reporter
+  now holds a live, markerless session while a healthy classifier is registered, bounded by
+  the new `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default 7200; `0` disables the hold). The
+  trade-off: a long first turn's spend reaches Revenium, and budget rules, when the turn ends
+  or the cap passes rather than minute by minute. Installs without the plugin keep today's
+  timing. Rows already shipped stay unlinked.
 - The economics contract the outcome-metrics stage declares for a job type with none no longer
   carries a monetization rule. The 1.0 USD per-unit rate made Revenium compute every job's
   Value as rate x units = $1.00, ignoring the reported `outcomeValue` and skewing ROI (on ent,

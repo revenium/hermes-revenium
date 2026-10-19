@@ -1,5 +1,5 @@
 {
-  "__note": "ADDITIVE sibling of jobs-outcome-update.golden.json (Phase 59 Plan 02, SSE-05, D-11). Pins the POSITIVE-probe arm ONLY -- a revenium CLI whose `jobs outcome-update --help` advertises --expected-entity-version. It does NOT supersede jobs-outcome-update.golden.json, which stays byte-identical and pins the feature-off shape every CLI in existence produces today (criterion 5). The --expected-entity-version spelling is INFERRED from OAS UpdateOutcomeRequest_Read.expectedEntityVersion via a kebab-case transliteration and has never been observed on a real --help; if a real CLI ships a different spelling, this fixture and the one constant probed in correct-assessment.sh change together.",
+  "__note": "ADDITIVE sibling of jobs-outcome-update.golden.json (Phase 59 Plan 02, SSE-05, D-11). Pins the POSITIVE-probe arm ONLY -- a revenium CLI whose `jobs outcome-update --help` advertises --expected-entity-version. It does NOT supersede jobs-outcome-update.golden.json, which stays byte-identical and pins the feature-off shape every CLI in existence produces today (criterion 5). The --expected-entity-version spelling is INFERRED from OAS UpdateOutcomeRequest_Read.expectedEntityVersion via a kebab-case transliteration and has never been observed on a real --help; if a real CLI ships a different spelling, this fixture and the one constant probed in correct-assessment.sh change together. 2026-10-18: --metadata pattern deliberately tightened from ^\\{.*\\}$ when correct-assessment.sh moved its correction metadata from v1 flat keys (assessment_schema_version, sequence, prior_value_low/base/high, prior_currency, economic_mechanism, attribution_fraction, attribution_basis) to the schema_version 2 envelope that `jobs outcome` already ships. Emitted by the golden scenario (--value 525.0 --currency USD, no mechanism, no attribution): {\"schema_version\":2,\"corrected\":true,\"correction_sequence\":1,\"value\":{\"reported\":525.0,\"currency\":\"USD\"},\"prior\":{\"low\":525.0,\"base\":525.0,\"high\":525.0,\"currency\":\"USD\"}} . Corrections already filed in Revenium keep their v1 keys; schema_version tells the two apart.",
   "verb": ["jobs", "outcome-update"],
   "exact_match_fields": {
     "__verb": "jobs",
@@ -13,7 +13,7 @@
     "--output": "json"
   },
   "pattern_fields": {
-    "--metadata": "^\\{.*\\}$"
+    "--metadata": "^\\{\"schema_version\":2,\"corrected\":true,\"correction_sequence\":[0-9]+,\"value\":\\{\"reported\":525\\.0,\"currency\":\"USD\"\\},.*\\}$"
   },
   "forbidden_fields": ["--budget-id", "--alert-id"]
 }

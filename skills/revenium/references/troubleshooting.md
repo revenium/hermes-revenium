@@ -57,6 +57,19 @@ For the raw log on its own:
 tail -f ~/.hermes/state/revenium/revenium-metering.log
 ```
 
+A long-running session (a Hermes cron job, a long one-shot) can legitimately show nothing for a
+while: its completions are held until its first turn ends and the classifier writes its markers, so
+that all of its spend ships linked to its job. Look for `holding <sid> — live session awaiting its
+first classification` in the log. The hold lasts at most `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`
+(default 7200) from the session start, and ends sooner when the session goes idle for
+`REVENIUM_CRON_SETTLE_SECONDS`; set it to `0` to meter long turns as they run.
+
+Subagent sessions show the same silence for a different reason: their spend waits for the
+delegating session's job marker, so it ships linked to that job. Look for `holding <n> subagent
+session(s) of <root>` in the log. The wait ends when the root's job record appears, when the root
+reaches a session boundary or goes idle for `REVENIUM_CRON_SETTLE_SECONDS`, or when the root is
+older than the same cap (counted from the root's start).
+
 Then verify:
 
 - `~/.hermes/state.db` exists
@@ -91,13 +104,15 @@ If you want a non-default filter scope (per-model, per-provider, etc.), pass `--
 
 ## Jobs on Revenium are nameless, stuck at PENDING or closed too early
 
-Four log lines in `revenium-metering.log` explain what the reporter held back or sent unlinked, and why. The first three are written once per job, not every tick; the fourth appears only on a tick that actually withheld a link.
+Six log lines in `revenium-metering.log` explain what the reporter held back or sent unlinked, and why. The first three and the fifth are written once per job, not every tick; the fourth is written once per held root per tick, bounded by `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`; the sixth appears only on a tick that actually withheld a link. A completion that carried its classification forward ends its `Reported:` line with ` carried_from=<muid> job=<id|none>`; `job=none` means the row shipped the task type without a job.
 
 | Log line | Meaning | What to do |
 |---|---|---|
 | `Subagent completions held: root job <id> has no confirmed create yet` | A subagent's completion was held because it would have named a job Revenium has not been told about yet. Revenium creates such a job with no name or type. The completion goes out on the next tick, once the root's `jobs create` is in `revenium-jobs.ledger`. | Nothing. |
 | `Subagent completions shipping WITHOUT --agentic-job-id: root job <id> still has no confirmed create after <n>s` | The create did not land within `REVENIUM_JOBS_STALE_SECONDS`, so the spend was shipped unlinked instead of waiting forever. | Find out why the create fails: `grep 'jobs create failed' revenium-metering.log` and `revenium config show` (team id, auth). |
 | `outcome held while session open: id=<id>` | A `CANCELLED` verdict was not reported because the session has no `ended_at` yet and is not idle. `CANCELLED` is the classifier's "uncertain" verdict. | Nothing. While the session is open the classifier re-checks a `CANCELLED` job on every turn, and if the work turns out to be finished it appends a `SUCCESS` marker for the same job id, which is reported instead. Otherwise `CANCELLED` is reported when the session ends, or after `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` of inactivity (default one day; `0` turns the hold off). A session that stays active never goes idle, so its job stays pending until the session ends. |
+| `holding <n> subagent session(s) of <root> — its job marker has not landed yet` | <n> subagent sessions have finished and are ready to meter, but the session that delegated to them is still running and has not written its job yet, so their spend is held to ship linked to that job (a completion that has shipped cannot be linked afterwards). It goes out within a tick or two of the root's job marker landing. The wait ends sooner if the root goes idle for `REVENIUM_CRON_SETTLE_SECONDS`, reaches a session boundary without a job, or is older than `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`. | Nothing. Set `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS=0` to meter subagents as they finish, unlinked. |
+| `Carried completion shipping WITHOUT --agentic-job-id: job <id> <reason> (session=<sid>); the task type still carries` | A later turn of a classified session shipped with its task type but no job link. `<reason>` is `was never created` (no `JOB:<id>:created:` line, so a link would make Revenium create the job nameless), `closed more than <n>s ago` (the job's outcome was reported longer ago than the carry window: `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS`, one day, while the session is open, or `REVENIUM_JOBS_STALE_SECONDS`, 600s, once it has ended; the row is most likely unrelated later work) or `has an unconfirmed root` (the session cannot be shown to be a root, see the `parent_session_id` warn). | Nothing for `closed more than`: the spend is counted and the label is right. For `was never created`: `grep 'jobs create failed' revenium-metering.log`. For `unconfirmed root`: check that `sessions.parent_session_id` exists in `state.db`. |
 | `Aux job link withheld on <n> row(s)` | Auxiliary usage was reported without a job link because the job is closed or was never created. This is expected on the first tick after an upgrade. | Nothing. The spend is counted either way. |
 
 A job that is already nameless on Revenium was created by an earlier version of the reporter. The local ledger records it as created, so the reporter will not create it again and the name and type are not backfilled. Correct it in Revenium.

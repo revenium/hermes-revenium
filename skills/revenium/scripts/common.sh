@@ -131,6 +131,23 @@ REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS="${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS
 # job-inference time. Metering-only installs (no classifier plugin, no job
 # markers) can safely lower it — there is nothing to wait for.
 REVENIUM_CRON_SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}"
+# Pre-marker leak (2026-10-18): the settle window above bounds job-inference
+# latency AFTER the classifier fires, but the plugin fires at the END of a
+# session's first turn and the window is measured from the session START. A
+# first turn longer than the window was therefore already "aged out" while it
+# was still running, and every tick shipped its growing delta markerless
+# (task_type unclassified, no --agentic-job-id): 20.5% of all tokens on the
+# measured fleet, 53% for cron sessions, inflating job ROI by orders of
+# magnitude. So a session that is still LIVE (open, or ended less than the
+# settle window ago) and has no classifier marker yet is held past the window,
+# for at most this long from its start. Beyond it the session ships markerless
+# exactly as before, so a classifier that never fires can strand nothing for
+# longer than this. The price is budget visibility: spend of a first turn longer
+# than the settle window reaches Revenium only when the turn ends (or at this
+# cap), not after 10 minutes. The hold applies only while a healthy classifier
+# is registered (plugin-status.json), so a metering-only install keeps today's
+# timing. 0 switches the hold off (today's behaviour). Env-overridable.
+REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS="${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}"
 # Phase 12: target file for install-hooks.sh (registers pre_llm_call/pre_tool_call hooks).
 HOOKS_CONFIG_FILE="${REVENIUM_HOOKS_CONFIG_FILE:-${HERMES_HOME}/config.yaml}"
 # Phase 14: tool-event capture state paths.

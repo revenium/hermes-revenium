@@ -184,8 +184,11 @@ a `~/.hermes` reset) are reconciled automatically on the next `install-cron.sh`.
 The reporter defers a session's completions until the classifier plugin's
 `.ready` sentinel lands (the **authoritative** gate, which the plugin writes only
 *after* it has written the `kind:"job"` marker) or until the session ages past
-`REVENIUM_CRON_SETTLE_SECONDS`. This age-fallback exists only for installs with
-**no** classifier plugin (no sentinel ever arrives).
+`REVENIUM_CRON_SETTLE_SECONDS`. This age-fallback exists for installs with
+**no** classifier plugin (no sentinel ever arrives) and as the safety net when
+the plugin fails. The plugin classifies at the end of a session's first turn and
+writes the sentinel only at a session boundary, so a classified session that
+stays open (a gateway session mid-chat) is metered on the age-fallback.
 
 The default is **600 seconds**. It **must exceed worst-case job-inference
 latency**. The classifier's job-inference LLM call can take ~200s under
@@ -195,6 +198,43 @@ exists and per-muid dedup then permanently **orphans** them from the job created
 a tick later (`revenium jobs transactions <id>` shows "No transactions found").
 Metering-only installs (no classifier plugin, no job markers) can safely lower it
 because there is nothing to wait for.
+
+### Long first turns: `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`
+
+The settle window is counted from the session **start**, but the classifier
+fires at the **end** of the first turn. A first turn longer than the window
+would be metered while it is still running, with no task type and no job link,
+and only the spend after the turn ends would reach the job. To prevent that,
+while a healthy classifier plugin is registered the reporter keeps holding a
+session that has no marker yet and is still live (running, or ended less than
+`REVENIUM_CRON_SETTLE_SECONDS` ago), for at most
+`REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default **7200**) from its start. Once
+the markers land the held spend ships in one completion, linked to the job. A
+classification that lands after the window had closed is given a settle window
+to finish job inference, so size `REVENIUM_CRON_SETTLE_SECONDS` for that too.
+
+The trade-off is budget visibility. Spend from a first turn longer than the
+settle window reaches Revenium when the turn ends, not after 10 minutes, so a
+budget rule cannot halt such a turn mid-flight. On a fleet where the longest
+first turn was 35 minutes, the default delayed the spend that used to leak by a
+median of 3 minutes (p90 12 minutes, at most 25). Lower the cap if you would rather see
+long-running spend sooner than have it linked to its job, or set it to `0` for
+the previous behaviour. Metering-only installs are unaffected: with no healthy
+classifier registered there is nothing to wait for.
+
+The same cap bounds a second wait, for **subagents**. A subagent ends, and is
+classified, long before the session that delegated to it ends and has its job
+recorded, and a completion that has shipped can never be linked to a job
+afterwards. So while the delegating (root) session is still running, has not
+reached a session boundary and has no job record yet, its subagents' spend is
+held too, counted from the root's start, and ships linked to the root's job once
+that job exists. Without this, most delegated work shipped unlinked: on one
+fleet, 82% of the subagent tokens since the classifier stabilised. The price is
+the same one: a subagent's spend reaches Revenium when the root's job marker
+lands (a median of 10 minutes after the subagent finishes, 27 minutes at most
+since the classifier stabilised on that fleet) instead of when the subagent ends. The log line is
+`holding <n> subagent session(s) of <root>`, one per held root per tick. The
+cap, `0` and metering-only installs behave exactly as above.
 
 ### Headless gateways: `hooks_auto_accept`
 
@@ -237,7 +277,7 @@ The cron emits two S2 telemetry log lines per session per tick to make this visi
 - `INFO: S2: window=<n>, mean_per_marker=<delta_total // n>`: every tick a session has at least one shippable marker. Reports how many classifications shared the session-delta this minute (a collapsed `GUARDRAIL`+`CHAT` pair counts once) and the floor-divided per-classification share of the total token delta.
 - `WARN: S2: classification-dominated window, attribution may be lossy`: fires when `n == 2` AND at least one shippable marker has `operation_type == GUARDRAIL`. A `GUARDRAIL` marker only survives to this point when it has no `CHAT` twin to fold into, so this marks a window where a bare classification marker shares the delta with a work marker, the case where the equal-split overstates the classification share the most.
 
-Attribution is driven entirely by the `task_type` and `operation_type` fields the classifier writes into each marker line (per the Phase 2 marker schema; see `references/task-taxonomy.md`). The cron does not infer task types from prompts or model output. Every classification maps to exactly one `revenium meter completion` call with those fields passed through verbatim (a collapsed pair ships the `CHAT` marker's). When a session window has zero markers (legacy install, missing marker file, all lines unparseable), the cron falls through to a single call with `--task-type unclassified` and `--operation-type CHAT` (Phase 4 / WIRE-01: Revenium server-side default for absent `operationType` is `CHAT`, verified by the D-22 research gate, so emitting it explicitly is idempotent for existing dashboards and budgets).
+Attribution is driven entirely by the `task_type` and `operation_type` fields the classifier writes into each marker line (per the Phase 2 marker schema; see `references/task-taxonomy.md`). The cron does not infer task types from prompts or model output. Every classification maps to exactly one `revenium meter completion` call with those fields passed through verbatim (a collapsed pair ships the `CHAT` marker's). When a session window has zero markers left to ship but the session has an earlier classification (every marker already reported), the call carries that session's latest `task_type`, trace and job link. When a session has no classification at all (legacy install, missing marker file, all lines unparseable), the cron falls through to a single call with `--task-type unclassified` and `--operation-type CHAT` (Phase 4 / WIRE-01: Revenium server-side default for absent `operationType` is `CHAT`, verified by the D-22 research gate, so emitting it explicitly is idempotent for existing dashboards and budgets).
 
 When markers carry different `agent` or `trace_id` values across a session, each Revenium meter call records the per-turn attribution; per-session aggregation happens dashboard-side.
 

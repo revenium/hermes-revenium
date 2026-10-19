@@ -108,10 +108,32 @@ reporter the same rule, at the ship sites only:
 - It composes with the separate phantom-jobs fix (PR #152, commit `d84d294`),
   which merged into this branch. A subagent's completion carries its root's job
   only once that job's `jobs create` is in the jobs ledger; until then it waits,
-  and if the create never ran it ships without the job. An auxiliary row carries
+  and if the create never ran it ships without the job. A subagent whose root has
+  no job record yet also waits, for the job record itself, while the root is
+  still running, has not reached a session boundary and is under
+  `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`: a subagent is classified when its own
+  turn ends, well before the root's job marker exists, and a completion that has
+  shipped cannot be linked to a job afterwards (2026-10-18). An auxiliary row carries
   a job only if the job was created and is open or closed within
   `REVENIUM_JOBS_STALE_SECONDS`. Both checks apply on top of the root gate, never
   instead of it.
+- It composes with carry-forward (2026-10-18). The classifier labels a session
+  once, so once its marker pair was reported every later delta shipped
+  `unclassified` with no job (ent: one marked row, then five unlinked rows). A later
+  delta of a classified session now carries its latest classification and the job the
+  reporter would link for it: a root's own latest non-halt job, a subagent's root job.
+  The same guards apply on top of the root gate: the create must be ledgered, a
+  subagent waits on the same RC-2 hold, and an outcome already ledgered links only
+  within `_carry_link_window`: `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` (one day) while
+  the row's session is open, `REVENIUM_JOBS_STALE_SECONDS` (600s) once it has ended. The
+  auxiliary bound and the RC-2 bound do not read it. Otherwise the row ships unlinked
+  with its task type. A live probe on 2026-10-18 (`carry-forward-probe-1792369594`)
+  showed Revenium adds a completion linked 13 minutes after the outcome to the closed
+  job's cost (1 to 2 transactions) without reopening or duplicating it; RC-1's 151
+  nameless PENDING rows were links to ids Revenium had no create for, which the
+  ledgered-create check refuses. Of ~35M post-marker tokens on one ent profile, 600s
+  alone links 7.5%; the open-session day links about 69%. The accepted cost: an unrelated later turn is charged to the
+  earlier job, which understates that job's ROI rather than overstating it.
 
 On the reference host the gate was checked read-only on 2026-10-08 before it was
 written: the column is present, 9,769 sessions, none cyclic, so it flips no

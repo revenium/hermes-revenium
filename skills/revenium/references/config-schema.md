@@ -589,7 +589,8 @@ and a silently-skipped correction is worse than a refused one.
 | `--dry-run` | no | Performs no writes, local or remote, on any path. |
 
 A mechanism-only correction omits the value family entirely rather than
-writing zeros or nulls; `prior_value_*` still records what stood before.
+writing zeros or nulls; `prior_value_*` in the sidecar record (and `prior` in the
+`schema_version` 2 `--metadata` the correction ships) still records what stood before.
 
 The attribution pair is recorded, never computed. What it does and does not
 establish is set out in the project's `docs/value-and-roi.md`, referenced by

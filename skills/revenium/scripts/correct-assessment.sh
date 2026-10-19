@@ -907,12 +907,15 @@ fi
 # convention. On a non-zero exit, the local record is already intact and
 # the command may be re-run -- no automatic retry.
 #
-# --metadata carries the same prior-value/sequence provenance the local
-# correction line records, so the revision on Revenium's side is
-# traceable back to what it superseded without a second round trip.
+# --metadata is the schema_version 2 envelope (see the heredoc below). It
+# carries the same prior-value/sequence provenance the local correction line
+# records, so the revision on Revenium's side is traceable back to what it
+# superseded without a second round trip.
 # --------------------------------------------------------------------------
 OUTCOME_UPDATE_METADATA=$(
   SEQUENCE_PY="${SEQUENCE}" \
+  OUTCOME_VALUE_SENT_PY="${VALUE}" \
+  OUTCOME_CURRENCY_SENT_PY="${CURRENCY}" \
   PRIOR_VALUE_LOW_PY="${CURRENT_VALUE_LOW}" \
   PRIOR_VALUE_BASE_PY="${CURRENT_VALUE_BASE}" \
   PRIOR_VALUE_HIGH_PY="${CURRENT_VALUE_HIGH}" \
@@ -932,40 +935,70 @@ def _num(raw):
         return None
 
 
+# quick-261018: the correction's --metadata is schema_version 2, the same
+# nested vocabulary the `jobs outcome` blob in hermes-report.sh ships, so one
+# reader decodes both verbs. Key order is part of the contract:
+#   schema_version, corrected, correction_sequence, value, basis, prior
+# A correction filed before this change keeps its v1 flat keys in Revenium
+# (assessment_schema_version, prior_value_*, economic_mechanism, ...);
+# schema_version tells the two apart. The local sidecar record is unchanged.
 meta = {
-    'assessment_schema_version': 1,
-    'sequence': int(os.environ.get('SEQUENCE_PY', '0') or '0'),
+    'schema_version': 2,
+    'corrected': True,
+    'correction_sequence': int(os.environ.get('SEQUENCE_PY', '0') or '0'),
 }
-for key, env_key in (
-    ('prior_value_low', 'PRIOR_VALUE_LOW_PY'),
-    ('prior_value_base', 'PRIOR_VALUE_BASE_PY'),
-    ('prior_value_high', 'PRIOR_VALUE_HIGH_PY'),
-):
-    v = _num(os.environ.get(env_key, ''))
-    if v is not None:
-        meta[key] = v
-prior_currency = os.environ.get('PRIOR_CURRENCY_PY', '')
-if prior_currency:
-    meta['prior_currency'] = prior_currency
+
+# value.reported is the exact --outcome-value this call sends, read from the
+# very shell variable the argv is built from, so the blob and the flag cannot
+# disagree. A mechanism-only correction sends no --outcome-value and no
+# --outcome-currency, so it carries no value group at all (D-08).
+value = {}
+_sent = _num(os.environ.get('OUTCOME_VALUE_SENT_PY', '').strip())
+if _sent is not None:
+    value['reported'] = _sent
+    currency = os.environ.get('OUTCOME_CURRENCY_SENT_PY', '').strip()
+    if currency:
+        value['currency'] = currency
+    # D-07: the attribution assumption travels with the value it
+    # documents. A value whose attribution is invisible downstream is
+    # exactly the failure the claim-distinctions doc warns about --
+    # the number travels and the caveat does not. The pair travels
+    # together: a fraction with no basis is never emitted.
+    fraction = _num(os.environ.get('ATTRIBUTION_FRACTION_PY', '').strip())
+    if fraction is not None:
+        basis_text = os.environ.get('ATTRIBUTION_BASIS_PY', '').strip()
+        for _bad in ('|', '\n', '\r'):
+            basis_text = basis_text.replace(_bad, ' ')
+        while len(json.dumps(basis_text, ensure_ascii=True).encode('utf-8')) > 500 and basis_text:
+            basis_text = basis_text[:-1]
+        if basis_text.strip():
+            value['attribution'] = {'fraction': fraction, 'basis': basis_text}
+if value:
+    meta['value'] = value
+
 # MECH-04: the declared mechanism travels with the correction, so the
 # revision filed at Revenium says WHY the value changed, not only that
 # it did. Validated against the six-member allow-list in the shell.
 mechanism = os.environ.get('MECHANISM_PY', '')
 if mechanism:
-    meta['economic_mechanism'] = mechanism
-# D-07: the attribution assumption travels with the value it
-# documents. A value whose attribution is invisible downstream is
-# exactly the failure the claim-distinctions doc warns about --
-# the number travels and the caveat does not.
-fraction = os.environ.get('ATTRIBUTION_FRACTION_PY', '')
-if fraction:
-    meta['attribution_fraction'] = float(fraction)
-    basis = os.environ.get('ATTRIBUTION_BASIS_PY', '').strip()
-    for _bad in ('|', '\n', '\r'):
-        basis = basis.replace(_bad, ' ')
-    while len(json.dumps(basis, ensure_ascii=True).encode('utf-8')) > 500 and basis:
-        basis = basis[:-1]
-    meta['attribution_basis'] = basis
+    meta['basis'] = {'mechanism': mechanism}
+
+# What the correction superseded, so the revision on Revenium's side is
+# traceable back without a second round trip. Replaces the v1 prior_* keys.
+prior = {}
+for key, env_key in (
+    ('low', 'PRIOR_VALUE_LOW_PY'),
+    ('base', 'PRIOR_VALUE_BASE_PY'),
+    ('high', 'PRIOR_VALUE_HIGH_PY'),
+):
+    v = _num(os.environ.get(env_key, ''))
+    if v is not None:
+        prior[key] = v
+prior_currency = os.environ.get('PRIOR_CURRENCY_PY', '')
+if prior_currency:
+    prior['currency'] = prior_currency
+if prior:
+    meta['prior'] = prior
 print(json.dumps(meta, separators=(',', ':')))
 PY
 )

@@ -34,7 +34,7 @@ the row's transaction identifier in Revenium:
 
 | Path | Transaction identifier shape | Granularity |
 |------|------------------------------|-------------|
-| Legacy (cron-reconstructed) | `<session_id>-<cumulative_total_tokens>-<muid>` (or `<session_id>-<cumulative_total_tokens>` for a markerless session) | One row per session-delta split, computed from `state.db` counters roughly a cron tick after the call |
+| Legacy (cron-reconstructed) | `<session_id>-<cumulative_total_tokens>-<muid>` (or `<session_id>-<cumulative_total_tokens>` for a markerless session, and for a classified session's later growth, which carries its latest classification) | One row per session-delta split, computed from `state.db` counters roughly a cron tick after the call |
 | Event-driven (this phase) | `event:<api_request_id>` | One row per API call, computed from the call that incurred it |
 
 When debugging a row, check the transaction identifier first.

@@ -168,8 +168,12 @@ grep "^HERMES:<root-session-id>:" ~/.hermes/state/revenium/revenium-hermes.ledge
 The ledger line is **5 colon-delimited fields**, not 4: `HERMES:<session_id>:<total_tokens>:
 <timestamp>:<muid>`. The timestamp is **field 4** (a millisecond-precision float, e.g.
 `1785250329.656`), not the last field. The 5th field is a per-completion marker id (or, on the
-zero-marker fallback path, a synthetic `unclassified-<timestamp>` value with no dots). If you are
-comparing this timestamp against something else to check a timing race, use field 4.
+zero-marker fallback path, a synthetic `unclassified-<timestamp>` value with no dots). That
+synthetic muid means **no marker muid was consumed** by the row: it is written for a markerless
+session, and also for a classified session's later growth, which now ships its latest
+classification (`--task-type`, trace and job link) instead of `unclassified`. Look at the
+`Reported:` log line to tell them apart: a carried row ends in ` carried_from=<muid> job=<id|none>`.
+If you are comparing this timestamp against something else to check a timing race, use field 4.
 
 The reporter defers a session until either the classifier's `.ready` sentinel
 lands under the markers directory's `.ready/` subdirectory or the session ages past a settle
@@ -177,6 +181,15 @@ window, whichever comes first. If job inference is slow enough (heavy concurrent
 LLM call) that neither the sentinel nor the marker lands before the settle window elapses, the
 reporter reports the session as `uncategorized` and never revisits it, even after the marker
 eventually shows up.
+
+A session whose **first turn** outlasts the settle window is a different case: the classifier
+only fires when that turn ends, so the window would elapse while the session was still running.
+While a healthy classifier is registered, the reporter keeps holding such a live session until its
+markers land, for at most `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default 7200) from its start;
+the log shows `holding <sid> — live session awaiting its first classification`. A session past that
+cap, or one whose classifier never answered, still falls back as described here. A subagent's
+completions are held on the same terms until its root session's job marker lands (`holding <n>
+subagent session(s) of <root>`), so they ship carrying the root's job.
 
 Check the settle window in force on your host; do not assume the default:
 
