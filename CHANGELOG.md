@@ -170,6 +170,25 @@ this repository.
 
 ### Fixed
 
+- A subagent's spend now ships linked to its root session's job instead of unlinked. A subagent
+  is classified, and becomes ready to meter, when its own turn ends, which is well before its
+  root session's turn ends and the root's job marker (the only source of the job id) is
+  written. The reporter had nothing to link, so it shipped the completion with no
+  `--agentic-job-id`, and a shipped completion cannot be linked to a job afterwards. On ent,
+  82% of subagent tokens since the classifier stabilised (9.06M of 11.01M; 35% of the whole
+  history) shipped this way, so job cost omitted most delegated work and job ROI was inflated.
+  The reporter now holds a subagent while its root session is still running, has no job
+  record and has not reached a session boundary, bounded by the same
+  `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default 7200, counted from the root's start; `0`
+  disables it), and ships it once the root's job exists. A pair marker on the root does not
+  release it, because on a long root the pair can land mid-turn and the job twenty minutes
+  later. The trade-off: a subagent's spend reaches Revenium, and budget rules, when its root's
+  job marker lands rather than when the subagent ends (replayed on ent: median 10 minutes,
+  p90 20, at most 27 since 2026-10-10; with the 7200s cap, 84.8% of all leaked tokens recovered,
+  p99 57 minutes). The root's own spend is already held to the same moment. Installs without
+  the plugin, roots that go idle, finish without a job or pass the cap, and Hermes versions
+  without `parent_session_id` keep today's timing. Auxiliary rows and rows already shipped are
+  unchanged.
 - A session whose first turn runs past the settle window is no longer metered before its
   classifier marker lands. The settle fallback measured age from `started_at`, so a turn
   longer than 600 seconds (typically a Hermes cron job) was treated as having no classifier

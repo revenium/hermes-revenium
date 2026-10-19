@@ -804,11 +804,18 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # 5585->5809. Pure shift, re-measured with
         # `grep -n -- '--operation-type'`; the COUNT (4) and the emitted VALUE
         # expressions are unchanged.
+        # Subagent job-link hold in the same filter (2026-10-18): the root
+        # lookups, the shared-connection helper, the shipped-total check and
+        # the per-root log line (+233 net in hermes-report.sh) sit between the
+        # aux site and both main() emission sites, so the aux site (2230) and
+        # api-event-report.sh (2248) do not move: 5545->5778, 5809->6042. Pure
+        # shift, re-measured with `grep -n -- '--operation-type'`; the COUNT
+        # (4) and the emitted VALUE expressions are unchanged.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
             ('hermes-report.sh', 2230),
-            ('hermes-report.sh', 5545),
-            ('hermes-report.sh', 5809),
+            ('hermes-report.sh', 5778),
+            ('hermes-report.sh', 6042),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

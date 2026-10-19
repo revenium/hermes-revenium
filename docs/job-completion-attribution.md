@@ -108,7 +108,12 @@ reporter the same rule, at the ship sites only:
 - It composes with the separate phantom-jobs fix (PR #152, commit `d84d294`),
   which merged into this branch. A subagent's completion carries its root's job
   only once that job's `jobs create` is in the jobs ledger; until then it waits,
-  and if the create never ran it ships without the job. An auxiliary row carries
+  and if the create never ran it ships without the job. A subagent whose root has
+  no job record yet also waits, for the job record itself, while the root is
+  still running, has not reached a session boundary and is under
+  `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS`: a subagent is classified when its own
+  turn ends, well before the root's job marker exists, and a completion that has
+  shipped cannot be linked to a job afterwards (2026-10-18). An auxiliary row carries
   a job only if the job was created and is open or closed within
   `REVENIUM_JOBS_STALE_SECONDS`. Both checks apply on top of the root gate, never
   instead of it.

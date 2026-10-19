@@ -183,7 +183,9 @@ only fires when that turn ends, so the window would elapse while the session was
 While a healthy classifier is registered, the reporter keeps holding such a live session until its
 markers land, for at most `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (default 7200) from its start;
 the log shows `holding <sid> — live session awaiting its first classification`. A session past that
-cap, or one whose classifier never answered, still falls back as described here.
+cap, or one whose classifier never answered, still falls back as described here. A subagent's
+completions are held on the same terms until its root session's job marker lands (`holding <n>
+subagent session(s) of <root>`), so they ship carrying the root's job.
 
 Check the settle window in force on your host; do not assume the default:
 

@@ -2832,6 +2832,30 @@ main() {
   # session exactly as it was: gateway sessions mid-chat have markers but no
   # sentinel until their boundary, and holding them would delay budget
   # visibility for no linkage benefit.
+  #
+  # Subagent hold (subagent-job-link-leak, 2026-10-18). A child session is
+  # classified, and gets its sentinel, when ITS turn ends, which is long before
+  # its ROOT's turn ends and the root's job marker (the only source of the
+  # --agentic-job-id a child carries) is written. The per-marker emit gate
+  # below only waits for the root's `jobs create` once the root's job marker
+  # exists, so a child that went ready first shipped with an empty root_aid:
+  # unlinked, and unlinkable later (a link to a job that is not live is a
+  # create, and no CLI verb attaches a shipped transaction to a job). Measured
+  # on the ent profile since 2026-10-10: 82% of subagent tokens. A row that
+  # would otherwise ship is therefore held while ALL of these hold:
+  #   - it is a child session (parent_session_id chain, root != itself);
+  #   - a healthy classifier is registered and the cap is not 0, as above;
+  #   - the ROOT is younger than REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS, has no
+  #     sentinel (it has not reached a session boundary), has no job record in
+  #     its OWNING profile's markers directory, and is LIVE by the same
+  #     definition as above. A pair marker alone does not release the child:
+  #     on a long root the pair can land mid-turn and the job 20 minutes later.
+  # A root with a job record is the RC-2 gate's business (it waits for the
+  # create); a root that is idle, ended, finalised, over the cap, unreadable
+  # or unclassifiable releases the child, i.e. today's behaviour. The price is
+  # the same one the hold above charges: a subagent's spend reaches Revenium
+  # when its root's job marker lands (plus the create tick) instead of when the
+  # subagent ends.
   local sentinel_skipped
   sentinel_skipped=$(mktemp 2>/dev/null || echo "/tmp/hermes-sentinel-skipped.$$")
   local filtered_sessions
@@ -2843,6 +2867,7 @@ main() {
     REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS="${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}" \
     PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" \
     STATE_DB="${STATE_DB}" \
+    LEDGER_FILE="${LEDGER_FILE}" \
     SKIPPED_LOG="${sentinel_skipped}" \
     SCRIPT_DIR="${SCRIPT_DIR}" \
     python3 - <<'PY' 2>/dev/null
@@ -2878,6 +2903,7 @@ skipped_log = os.environ.get('SKIPPED_LOG', '')
 sessions_data = os.environ.get('SESSIONS', '')
 plugin_status_file = os.environ.get('PLUGIN_STATUS_FILE', '')
 state_db = os.environ.get('STATE_DB', '')
+ledger_file = os.environ.get('LEDGER_FILE', '')
 
 # Phase 28 (TRACE-03): per-row markers-directory resolution, so a namespaced
 # session is no longer deferred to the settle-window fallback purely because
@@ -3004,22 +3030,34 @@ _db_opened = False
 _activity_column_absent = False
 
 
+def _get_db():
+    """The read-only state.db connection the lookups below share, opened once
+    per run; None when it cannot be opened (no file, no path). Never raises."""
+    global _db_conn, _db_opened
+    if not _db_opened:
+        _db_opened = True
+        if state_db:
+            try:
+                _db_conn = sqlite3.connect(
+                    'file:' + quote(state_db) + '?mode=ro', uri=True, timeout=1.5)
+            except Exception:
+                _db_conn = None
+    return _db_conn
+
+
 def _last_activity_at(row_sid):
     """(last_activity_at or None, contended). None means unknown: the column is
     absent (older Hermes), the value is NULL or unusable, or the row is gone;
     all of them degrade to started_at. contended is True only when state.db was
     momentarily locked, which the caller treats as 'hold one more tick'."""
-    global _db_conn, _db_opened, _activity_column_absent
+    global _activity_column_absent
     if _activity_column_absent or not state_db:
         return (None, False)
     try:
-        if not _db_opened:
-            _db_opened = True
-            _db_conn = sqlite3.connect(
-                'file:' + quote(state_db) + '?mode=ro', uri=True, timeout=1.5)
-        if _db_conn is None:
+        conn = _get_db()
+        if conn is None:
             return (None, False)
-        row = _db_conn.execute(
+        row = conn.execute(
             'SELECT last_activity_at FROM sessions WHERE id = ? LIMIT 1',
             (row_sid,)).fetchone()
     except sqlite3.OperationalError as exc:
@@ -3066,18 +3104,182 @@ def _hold_reason(row_sid, started_at, ended_at, age):
             return ('job', int(max(0, since_marker)))
         return None
     # Not classified yet. Live = recent activity, or recently ended.
-    activity, contended = _last_activity_at(row_sid)
+    quiet, contended = _quiet_seconds(row_sid, started_at, ended_at)
     if contended:
         return ('live', 0)
+    if quiet < settle_seconds:
+        return ('live', int(max(0, quiet)))
+    return None
+
+
+def _quiet_seconds(row_sid, started_at, ended_at):
+    """(seconds since the session last showed life, contended). Life is the
+    latest of started_at, last_activity_at and ended_at; a stamp more than five
+    minutes in the future (a clock step) is ignored. contended is True only when
+    state.db was momentarily locked and the caller must hold one more tick."""
+    activity, contended = _last_activity_at(row_sid)
+    if contended:
+        return (0, True)
     latest = started_at
     if activity is not None and activity <= now + 300:
         latest = max(latest, activity)
     if ended_at is not None and ended_at <= now + 300:
         latest = max(latest, ended_at)
-    quiet = now - latest
+    return (now - latest, False)
+
+
+_parents = None
+
+
+def _parent_map():
+    """{session id: parent_session_id} for every session that HAS a parent.
+    Empty when state.db has no parent_session_id column (older Hermes), cannot
+    be read or is locked: no row is then recognised as a child and the subagent
+    hold is simply off for the tick, i.e. today's behaviour."""
+    global _parents
+    if _parents is None:
+        _parents = {}
+        conn = _get_db()
+        if conn is not None:
+            try:
+                for rid, rparent in conn.execute(
+                        'SELECT id, parent_session_id FROM sessions '
+                        'WHERE parent_session_id IS NOT NULL'):
+                    if rid is not None and rparent is not None:
+                        _parents[str(rid)] = str(rparent)
+            except Exception:
+                _parents = {}
+    return _parents
+
+
+def _root_of(row_sid):
+    """The root delegator of a session, walking at most ten parent links. The
+    same walk as get-root-session-id.py: a session with no parent, or one whose
+    parent has no row, is its own root, and a chain longer than ten hops stops
+    where it is."""
+    parents = _parent_map()
+    current = row_sid
+    for _ in range(10):
+        parent = parents.get(current)
+        if parent is None:
+            return current
+        current = parent
+    return current
+
+
+def _session_times(row_sid):
+    """(started_at, ended_at) of a session row, or None when there is no usable
+    row. ended_at is None for NULL or a non-time. Never raises."""
+    conn = _get_db()
+    if conn is None:
+        return None
+    try:
+        row = conn.execute(
+            'SELECT started_at, ended_at FROM sessions WHERE id = ? LIMIT 1',
+            (row_sid,)).fetchone()
+    except Exception:
+        return None
+    if not row or isinstance(row[0], bool):
+        return None
+    try:
+        started = float(row[0])
+        ended = float(row[1]) if row[1] is not None and not isinstance(row[1], bool) else None
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(started) or started <= 0:
+        return None
+    if ended is not None and not (math.isfinite(ended) and ended > 0):
+        ended = None
+    return (started, ended)
+
+
+_root_pending_cache = {}
+
+
+def _root_pending(root_sid):
+    """None when the root's job is not worth waiting for, else ('root',
+    quiet_seconds): the root is still running (or only just ended), has not
+    reached a session boundary and has no job record yet. One answer per root
+    per run, so a root with fifty children costs one marker read."""
+    if root_sid in _root_pending_cache:
+        return _root_pending_cache[root_sid]
+    answer = None
+    try:
+        answer = _root_pending_uncached(root_sid)
+    except Exception:
+        answer = None
+    _root_pending_cache[root_sid] = answer
+    return answer
+
+
+def _root_pending_uncached(root_sid):
+    times = _session_times(root_sid)
+    if times is None:
+        return None
+    started_at, ended_at = times
+    # The same cap as the hold above, measured from the ROOT's start: past it
+    # the root's own spend ships markerless, and its children go with it.
+    if now - started_at >= max_hold_seconds:
+        return None
+    markers_dir, ready_dir = _dirs_for(root_sid)
+    if markers_dir is None:
+        return None
+    # A sentinel is the plugin saying it has finished with the root, job
+    # inference included: if no job record exists by now none is coming.
+    try:
+        if str(ready_dir) and (ready_dir / root_sid).exists():
+            return None
+    except OSError:
+        pass
+    # A job record hands the child to the RC-2 gate (wait for the create).
+    # Deliberately NOT released by a pair marker alone: on a long root the pair
+    # can land mid-turn and the job twenty minutes later.
+    if _marker_state(markers_dir, root_sid)[2]:
+        return None
+    quiet, contended = _quiet_seconds(root_sid, started_at, ended_at)
+    if contended:
+        return ('root', 0)
     if quiet < settle_seconds:
-        return ('live', int(max(0, quiet)))
+        return ('root', int(max(0, quiet)))
     return None
+
+
+_ledger_text = None
+
+
+def _already_shipped(row_sid, total):
+    """True when the session's CURRENT token total is already ledgered, i.e. the
+    per-session loop would skip it as having nothing new to ship. The same
+    needle the loop greps for (`^HERMES:<sid>:<total>:`). Holding such a row
+    protects nothing, so it is passed through instead of being counted and
+    logged as waiting. Never raises; an unreadable ledger says 'not shipped'."""
+    global _ledger_text
+    if _ledger_text is None:
+        _ledger_text = ''
+        if ledger_file:
+            try:
+                with open(ledger_file, encoding='utf-8', errors='replace') as fh:
+                    _ledger_text = '\n' + fh.read()
+            except OSError:
+                _ledger_text = ''
+    return ('\nHERMES:%s:%d:' % (row_sid, total)) in _ledger_text
+
+
+def _root_hold_reason(row_sid):
+    """None to release a row that would otherwise ship, else ('root',
+    quiet_seconds, root_sid) when it is a child session whose root's job marker
+    is still to come. See the block comment above the filter. Never raises."""
+    if max_hold_seconds <= 0:
+        return None
+    if not _classifier_expected():
+        return None
+    root_sid = _root_of(row_sid)
+    if not root_sid or root_sid == row_sid:
+        return None
+    pending = _root_pending(root_sid)
+    if pending is None:
+        return None
+    return (pending[0], pending[1], root_sid)
 
 
 now = int(time.time())
@@ -3086,6 +3288,8 @@ try:
     skip_out = open(skipped_log, 'w', encoding='utf-8') if skipped_log else None
 except OSError:
     skip_out = None
+
+root_holds = {}
 
 for raw_line in sessions_data.split('\n'):
     line = raw_line.rstrip('\n').rstrip('\r')
@@ -3127,6 +3331,18 @@ for raw_line in sessions_data.split('\n'):
                 ended_at_val = None
             hold = _hold_reason(sid, started_at_int, ended_at_val, age)
         if hold is None and (has_sentinel or age >= settle_seconds):
+            # The row would ship. A subagent whose root's job marker is still
+            # to come waits for it (see the block comment above the filter).
+            root_hold = _root_hold_reason(sid)
+            if root_hold is not None:
+                try:
+                    row_total = int(parts[3] or 0) + int(parts[4] or 0)
+                except (IndexError, TypeError, ValueError):
+                    row_total = -1
+                if not _already_shipped(sid, row_total):
+                    held = root_holds.setdefault(root_hold[2], [0, root_hold[1]])
+                    held[0] += 1
+                    continue
             print(line)
         elif skip_out is not None:
             try:
@@ -3141,6 +3357,18 @@ for raw_line in sessions_data.split('\n'):
         print(line)
         continue
 
+# One line per held ROOT, not per held child: a root fanning out to fifty
+# subagents would otherwise log fifty identical lines a minute for as long as it
+# runs. Fields: root sid, root age, settle, kind, root quiet seconds, children.
+if skip_out is not None and root_holds:
+    for held_root, (held_count, held_quiet) in root_holds.items():
+        try:
+            held_times = _session_times(held_root)
+            held_age = int(now - held_times[0]) if held_times else 0
+            skip_out.write(
+                f"{held_root}\t{held_age}\t{settle_seconds}\troot\t{held_quiet}\t{held_count}\n")
+        except Exception:
+            pass
 if skip_out is not None:
     try:
         skip_out.close()
@@ -3157,7 +3385,7 @@ PY
   # Emit one info log line per skipped session via the existing info helper
   # so the cron log captures the proper timestamp + [INFO ] [revenium] prefix.
   if [[ -s "${sentinel_skipped}" ]]; then
-    while IFS=$'\t' read -r skip_sid skip_age skip_settle skip_kind skip_detail; do
+    while IFS=$'\t' read -r skip_sid skip_age skip_settle skip_kind skip_detail skip_extra; do
       [[ -z "${skip_sid}" ]] && continue
       case "${skip_kind:-}" in
         live)
@@ -3166,6 +3394,11 @@ PY
           ;;
         job)
           info "holding ${skip_sid} — first classification landed ${skip_detail}s ago, after the settle window closed; waiting for its job marker (settle=${skip_settle}s)"
+          ;;
+        root)
+          # skip_sid is the ROOT here, skip_age its age, skip_extra how many of
+          # its subagent sessions are waiting. One line per held root per tick.
+          info "holding ${skip_extra:-?} subagent session(s) of ${skip_sid} — its job marker has not landed yet (root age=${skip_age}s, root quiet=${skip_detail}s < settle=${skip_settle}s; shipped once the job marker lands or the root passes ${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}s)"
           ;;
         *)
           info "skipping ${skip_sid} — awaiting plugin sentinel (age=${skip_age}s < settle=${skip_settle}s)"

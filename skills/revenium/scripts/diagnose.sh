@@ -216,7 +216,8 @@ if [[ "${PRE_STATE_EXISTED}" == "false" ]]; then
 fi
 echo "NOTE: a session with no .ready sentinel waits out the full settle window."
 echo "      A still-running session with no marker yet is held longer (up to REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS=${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS}s)."
-echo "      Look for 'holding <sid>' lines in the metering log."
+echo "      Look for 'holding <sid>' lines in the metering log. A subagent whose root session has no"
+echo "      job marker yet is held on the same cap ('holding <n> subagent session(s) of <root>')."
 echo "      Zero .ready files ever = the classifier plugin is not loaded."
 
 # ---------------------------------------------------------------------------

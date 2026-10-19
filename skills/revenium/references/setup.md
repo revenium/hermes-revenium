@@ -222,6 +222,20 @@ long-running spend sooner than have it linked to its job, or set it to `0` for
 the previous behaviour. Metering-only installs are unaffected: with no healthy
 classifier registered there is nothing to wait for.
 
+The same cap bounds a second wait, for **subagents**. A subagent ends, and is
+classified, long before the session that delegated to it ends and has its job
+recorded, and a completion that has shipped can never be linked to a job
+afterwards. So while the delegating (root) session is still running, has not
+reached a session boundary and has no job record yet, its subagents' spend is
+held too, counted from the root's start, and ships linked to the root's job once
+that job exists. Without this, most delegated work shipped unlinked: on one
+fleet, 82% of the subagent tokens since the classifier stabilised. The price is
+the same one: a subagent's spend reaches Revenium when the root's job marker
+lands (a median of 10 minutes after the subagent finishes, 27 minutes at most
+since the classifier stabilised on that fleet) instead of when the subagent ends. The log line is
+`holding <n> subagent session(s) of <root>`, one per held root per tick. The
+cap, `0` and metering-only installs behave exactly as above.
+
 ### Headless gateways: `hooks_auto_accept`
 
 Profile gateways are **headless** and never show Hermes' interactive hook-approval
