@@ -811,11 +811,21 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # api-event-report.sh (2248) do not move: 5545->5778, 5809->6042. Pure
         # shift, re-measured with `grep -n -- '--operation-type'`; the COUNT
         # (4) and the emitted VALUE expressions are unchanged.
+        # Carry-forward, root path (2026-10-18): the carry link-window helpers
+        # (_carry_link_window, _carry_job_linkable, +66) sit beside
+        # _job_linkable_for_aux, above the aux site, so all three
+        # hermes-report.sh sites move: 2230->2296, 5778->5912 (the helpers, the
+        # reader's CARRY_* block and its bash parse, +134 in all), 6042->6252
+        # (also the zero-marker branch's carry resolution, +76 above its
+        # cmd array). api-event-report.sh (2248) does not move. Pure shift,
+        # re-measured with `grep -n -- '--operation-type'`; the COUNT (4) is
+        # unchanged and the zero-marker site still sends the literal "CHAT" on
+        # its one line.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2230),
-            ('hermes-report.sh', 5778),
-            ('hermes-report.sh', 6042),
+            ('hermes-report.sh', 2296),
+            ('hermes-report.sh', 5912),
+            ('hermes-report.sh', 6252),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

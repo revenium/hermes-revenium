@@ -1187,6 +1187,72 @@ _job_linkable_for_aux() {
   [[ $(( 10#${now_s} - 10#${outcome_ts} )) -le $(( 10#${grace} )) ]]
 }
 
+# How long after a job's outcome was ledgered a CARRIED completion may still
+# link to it, in seconds. Prints one decimal integer.
+#
+# LD-2 (quick-261018-s0b, user decision 2026-10-18): the bound is
+# REVENIUM_JOBS_STALE_SECONDS, 600s by default, until a live-tenant probe
+# answers whether Revenium attaches a late completion to a closed job WITHOUT
+# reopening or recreating it. RC-1 measured the other outcome (151 long-closed
+# jobs came back as nameless PENDING rows when old links were replayed), so
+# the conservative bound ships first. If the probe is favourable, the follow-up
+# widens the window by changing THIS BODY and nothing else.
+#
+# That is the point of having a function: it is read by _carry_job_linkable
+# only. _job_linkable_for_aux (the auxiliary rows) and the RC-2 bound in
+# _child_job_link_hold keep reading REVENIUM_JOBS_STALE_SECONDS directly, so
+# widening this window cannot loosen either of them. No new env tunable is
+# added (zero-config); tests redefine the function itself.
+_carry_link_window() {
+  local window="${REVENIUM_JOBS_STALE_SECONDS:-600}"
+  [[ "${window}" =~ ^[0-9]{1,9}$ ]] || window=600
+  printf '%s' $(( 10#${window} ))
+}
+
+# 0 when a CARRIED completion (a classified session's later delta, see the
+# zero-marker branch) may carry --agentic-job-id for this job: the create is
+# ledgered AND the job is either still open or its outcome was ledgered no more
+# than $(_carry_link_window) seconds ago. A link to a job that is not live is a
+# create (RC-1/RC-2), and a late create 409s and loses the job's name for good,
+# so every doubt withholds: no created line, an outcome line whose timestamp
+# does not parse, a clock that cannot be read. The spend still ships, with its
+# task type, unlinked.
+#
+# The outcome-age arithmetic duplicates _job_linkable_for_aux's ON PURPOSE. The
+# two bounds must be able to diverge (that is what LD-2 asks for), and folding
+# them into a shared core would also break the named-function extraction
+# tests/test_job_lifecycle_phantom_jobs.py runs against _job_linkable_for_aux.
+#
+# The window it judged against is left in _CARRY_WINDOW_LAST (this is called in
+# the current shell, never a subshell) so the caller's log line can name the
+# bound without a second call to _carry_link_window: this function is that
+# function's ONLY reader, which is what the isolation tests assert.
+_CARRY_WINDOW_LAST=""
+_carry_job_linkable() {
+  local ledger_id
+  ledger_id="$(_job_ledger_id "$1")"
+  [[ -n "${ledger_id}" ]] || return 1
+  _CARRY_WINDOW_LAST="$(_carry_link_window)"
+  _job_create_ledgered "$1" || return 1
+
+  local outcome_line
+  outcome_line="$(grep -F -- "JOB:${ledger_id}:outcome:" "${JOBS_LEDGER_FILE}" 2>/dev/null | tail -1)"
+  [[ -n "${outcome_line}" ]] || return 0
+
+  # JOB:<id>:outcome:<ts>:<status> -- the id carries no ':' (see
+  # _job_ledger_id), so the timestamp is always field 4.
+  local outcome_ts
+  outcome_ts="$(printf '%s\n' "${outcome_line}" | cut -d: -f4)"
+  outcome_ts="${outcome_ts%%.*}"
+  [[ "${outcome_ts}" =~ ^[0-9]{1,12}$ ]] || return 1
+
+  local now_s
+  now_s="$(date +%s)"
+  [[ "${now_s}" =~ ^[0-9]{1,12}$ ]] || return 1
+  # 10# so a zero-padded value is read as decimal, not (invalid) octal.
+  [[ $(( 10#${now_s} - 10#${outcome_ts} )) -le $(( 10#${_CARRY_WINDOW_LAST} )) ]]
+}
+
 # One log line per (job, reason), bounded by OUTCOME_WARN_FLAGS_DIR -- the
 # same sentinel directory (and key shape) the outcome stage uses, so this is
 # not a new state path. `level` is info for an expected, self-resolving hold
@@ -5031,6 +5097,10 @@ else:
     local marker_output=""
     local jobs_json=""
     local read_err=""
+    # Carry-forward (LD-1): the session's latest classification and job, read
+    # from the reader heredoc below. All empty unless the reader printed them.
+    local carry_task_type="" carry_trace_id="" carry_muid=""
+    local carry_job_id="" carry_job_name="" carry_job_type="" carry_job_ts=""
     marker_output=$(
       MARKERS_DIR="${session_markers_dir}" \
       SID="${sid}" \
@@ -5038,6 +5108,7 @@ else:
       DELTA_TOTAL="${delta_total}" \
       SCRIPT_DIR="${SCRIPT_DIR}" \
       LEDGER_PATH="${LEDGER_FILE}" \
+      CARRY_JOB_MARKERS_PATH="${root_markers_dir}/${root_sid}.jsonl" \
       python3 - <<'PY' 2>&1
 import json
 import os
@@ -5285,6 +5356,54 @@ print(f"MARKERS_JSON={json.dumps(markers, separators=(',', ':'))}")
 # Phase 7 (SCHEMA-03): emit collected job declarations for Phase 9 consumption.
 # jobs_by_id is always defined (initialized before is_file() check — Pitfall 2).
 print(f"JOBS_JSON={json.dumps(list(jobs_by_id.values()), separators=(',', ':'))}")
+
+# Carry-forward (LD-1, quick-261018-s0b). Every marker of this session is already
+# ledgered (n == 0), yet the session has a classification: its later growth must
+# ship with that classification and the job link, not as `unclassified` with no
+# job. The selection lives in split_strategies (one implementation, unit-tested);
+# this block only prints it as KEY=value lines for the zero-marker branch.
+#
+# Its own try, and its own import: any failure here costs the carry and nothing
+# else -- no CARRY_ line is printed, and the session ships exactly what a
+# markerless one always shipped. The values are bounded and stripped of '|', CR
+# and LF, so a hand-edited marker cannot forge a second KEY=value line. The job
+# comes from CARRY_JOB_MARKERS_PATH, which is the root's file (this session's own
+# file for a root) and is read with .get: test_repository.py drives this heredoc
+# with a smaller environment.
+if read_ok and n == 0:
+    try:
+        from split_strategies import (
+            _SAFE_MUID_RE, select_carry_classification, select_carry_job,
+        )
+
+        def _carry_clean(value, cap=128):
+            if not isinstance(value, str):
+                return ''
+            for _bad in ('|', '\n', '\r'):
+                value = value.replace(_bad, '_')
+            return value[:cap]
+
+        carried = select_carry_classification([task for task, _eligible in all_tasks])
+        if carried is not None:
+            carry_lines = [
+                f"CARRY_TASK_TYPE={_carry_clean(carried.get('task_type'))}",
+                f"CARRY_TRACE_ID={_carry_clean(carried.get('trace_id'))}",
+            ]
+            carry_muid = carried.get('muid')
+            if isinstance(carry_muid, str) and _SAFE_MUID_RE.match(carry_muid):
+                carry_lines.append(f"CARRY_MUID={carry_muid}")
+            carry_job = select_carry_job(os.environ.get('CARRY_JOB_MARKERS_PATH', ''))
+            if carry_job is not None:
+                carry_job_id, carry_job_name, carry_job_type, carry_job_ts = carry_job
+                carry_lines.append(f"CARRY_JOB_ID={_carry_clean(carry_job_id, 256)}")
+                carry_lines.append(f"CARRY_JOB_NAME={_carry_clean(carry_job_name, 512)}")
+                carry_lines.append(f"CARRY_JOB_TYPE={_carry_clean(carry_job_type, 256)}")
+                if carry_job_ts is not None:
+                    carry_lines.append(f"CARRY_JOB_TS={carry_job_ts}")
+            for carry_line in carry_lines:
+                print(carry_line)
+    except Exception:
+        pass
 PY
     ) || marker_output=""
 
@@ -5307,6 +5426,21 @@ PY
     else
       warn "marker-read fall-through: session=${sid} reason=empty-output"
       n_markers=0
+    fi
+
+    # Carry-forward (LD-1): the reader prints CARRY_* only when this session has
+    # a classification and none of its markers is left to ship. The glob test
+    # is a builtin, so every session WITHOUT a classification (the common
+    # markerless case, and the whole NO_MARKER_SPAWN_CEILING budget) pays no
+    # sed or head for it.
+    if [[ "${read_ok}" == "true" && "${n_markers}" -eq 0 && "${marker_output}" == *$'\n'CARRY_TASK_TYPE=* ]]; then
+      carry_task_type=$(echo "${marker_output}" | sed -n 's/^CARRY_TASK_TYPE=//p' | head -1)
+      carry_trace_id=$(echo "${marker_output}" | sed -n 's/^CARRY_TRACE_ID=//p' | head -1)
+      carry_muid=$(echo "${marker_output}" | sed -n 's/^CARRY_MUID=//p' | head -1)
+      carry_job_id=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_ID=//p' | head -1)
+      carry_job_name=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_NAME=//p' | head -1)
+      carry_job_type=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_TYPE=//p' | head -1)
+      carry_job_ts=$(echo "${marker_output}" | sed -n 's/^CARRY_JOB_TS=//p' | head -1)
     fi
 
     if [[ -n "${s2_info_line}" ]]; then
@@ -6011,6 +6145,82 @@ PY
       # B4: --transaction-id stays as ${sid}-${total_tokens} — the synthetic muid that
       # appears in the v2 ledger row's field 5 is a LEDGER-SIDE identifier only, NEVER
       # in the wire transaction-id. Extending --transaction-id here would break SC3.
+      #
+      # CARRY-FORWARD (LD-1, quick-261018-s0b). This branch is also where a
+      # CLASSIFIED session's later growth lands: the classifier latches after a
+      # session's first marker pair, so once those muids are ledgered every
+      # later delta has no marker to ship against. Measured on ent (session
+      # 20261018_134109_5d0360): one marked row at 480,675 tokens, then five
+      # `unclassified` rows with no job to 515,535 -- job cost understated, ROI
+      # inflated, task analytics without the label. The reader prints CARRY_*
+      # when the session has a classification, and the delta then ships with the
+      # session's latest task type and trace, plus the job link below. Accepted
+      # bias: an unrelated later turn is charged to the earlier job, which
+      # understates that job's ROI rather than overstating it.
+      #
+      # Only the label, the trace and the optional job flags change. The
+      # transaction id and the ledger line keep their markerless shape on
+      # purpose (rejected alternative: a new muid prefix). The `^HERMES:<sid>:
+      # <total>:` skip lets each (sid, total) ship at most once, and a per-marker
+      # id always has a third `-<muid>` segment, so the two cannot collide;
+      # drain-status.sh's muid check, parse_prior_state and
+      # latest_transaction_id already read the `unclassified-<digits>` shape
+      # (the last one maps it to exactly this row's wire id), whereas a new
+      # prefix would be read as corruption. The cost: `unclassified-` now means
+      # "no marker muid was consumed by this row", not "shipped as unclassified".
+      #
+      # Every carried row is built here, behind the unchanged G-03 filter, so a
+      # carried row never ships EARLIER than the markerless row it replaces.
+      # Two guards can only delay it: the RC-2 child hold (a subagent) and the
+      # Phase 68 CR-01 root-gate deferral of one tick.
+      local row_task_type="${carry_task_type:-unclassified}"
+      local row_trace_id="${carry_trace_id:-${root_sid}}"
+      local carry_link_id="" carry_link_name="" carry_link_type="" carry_log_suffix=""
+      local carry_bucket="unclassified"
+      if [[ -n "${carry_task_type}" ]]; then
+        carry_bucket="classified"
+        # A job id is linked only when it is provably live (C-15): a link to a
+        # job Revenium has not seen is a create, and a late create loses the
+        # job's name for good. Every doubt ships the row UNLINKED -- the task
+        # type still carries. A root also needs a ledgered create, which is
+        # stricter than the per-marker root rows (they carry name and type
+        # and link without it): the in-loop create ran earlier in this very
+        # iteration, so the line is there unless the create failed, and a failed
+        # create ships the label unlinked rather than holding the spend.
+        if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${carry_job_id}" ]]; then
+          local carry_unlinked_reason=""
+          if [[ "${root_sid}" == "${sid}" ]]; then
+            if _carry_job_linkable "${carry_job_id}"; then
+              # Phase 68 (D-17): positive root evidence, exactly as the per-marker
+              # root rows require. A gate that could not read state.db (CR-01)
+              # defers the session: a completion shipped without its job id is
+              # ledgered and never re-shipped.
+              if ! _resolve_root_gate "${sid}"; then
+                _note_root_gate_deferral "${sid}"
+                ((skipped_count++)) || true
+                continue
+              fi
+              if [[ "${root_confirmed}" == "true" ]]; then
+                carry_link_id="${carry_job_id}"
+                carry_link_name="${carry_job_name}"
+                carry_link_type="${carry_job_type}"
+              else
+                _parent_column_absent_warn_once
+                carry_unlinked_reason="has an unconfirmed root"
+              fi
+            elif ! _job_create_ledgered "${carry_job_id}"; then
+              carry_unlinked_reason="was never created"
+            else
+              carry_unlinked_reason="closed more than ${_CARRY_WINDOW_LAST}s ago"
+            fi
+          fi
+          if [[ -n "${carry_unlinked_reason}" ]]; then
+            _job_outcome_log_once "${carry_job_id}" "carry-unlinked" info \
+              "Carried completion shipping WITHOUT --agentic-job-id: job ${carry_job_id} ${carry_unlinked_reason} (session=${sid}); the task type still carries"
+          fi
+        fi
+        carry_log_suffix=" carried_from=${carry_muid:-unknown} job=${carry_link_id:-none}"
+      fi
       local cmd=(
         revenium meter completion
         --model "${clean_model}"
@@ -6035,10 +6245,10 @@ PY
         # REVENIUM_AGENT_NAME on every current install.
         --agent "${root_agent_name:-${REVENIUM_AGENT_NAME}}"
         --transaction-id "${sid}-${total_tokens}"
-        --trace-id "${root_sid}"
+        --trace-id "${row_trace_id}"
         --is-streamed
         --quiet
-        --task-type "unclassified"
+        --task-type "${row_task_type}"
         --operation-type "CHAT"
       )
 
@@ -6068,6 +6278,20 @@ PY
       fi
       if [[ "${PARENT_TXN_CLI_CAPABLE}" == "true" && -n "${parent_txn_id}" ]]; then
         cmd+=(--parent-transaction-id "${parent_txn_id}")
+      fi
+      # Carry-forward: the per-marker path's --agentic-job-id slot (after the
+      # parent link, before the squad family). Empty for every row that carried
+      # no live job, which is every markerless session, so their argv is the
+      # golden's. A root gets id, name and type (each when non-empty); a
+      # subagent gets the id only, as on the per-marker path.
+      if [[ -n "${carry_link_id}" ]]; then
+        cmd+=(--agentic-job-id "${carry_link_id}")
+        if [[ -n "${carry_link_name}" ]]; then
+          cmd+=(--agentic-job-name "${carry_link_name}")
+        fi
+        if [[ -n "${carry_link_type}" ]]; then
+          cmd+=(--agentic-job-type "${carry_link_type}")
+        fi
       fi
 
       # Phase 29 (SQUAD-01/02/03 / D-03/D-04): identical gated squad append
@@ -6169,9 +6393,11 @@ PY
         echo "HERMES:${sid}:${total_tokens}:${now_ts}:${synthetic_muid}" >> "${LEDGER_FILE}"
         _txn_memo_forget "${sid}"
         ((reported_count++)) || true
-        info "Reported: session=${sid} task_type=unclassified model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}${subscriber_log_suffix}"
-        # Phase 44 Plan 04 (EGV-17): unclassified bucket -- the markerless path.
-        attribution_rows+="unclassified|${delta_input}|${delta_output}|${delta_cache_read}|${delta_cache_write}|${delta_total}|${delta_cost}"$'\n'
+        info "Reported: session=${sid} task_type=${row_task_type} model=${clean_model} provider=${provider} in=${delta_input} out=${delta_output} cost=${delta_cost}${carry_log_suffix}${subscriber_log_suffix}"
+        # Phase 44 Plan 04 (EGV-17): the markerless path books to the
+        # unclassified bucket; a carried row is attributed to a real marker's
+        # classification, so it books to classified, as the per-marker path does.
+        attribution_rows+="${carry_bucket}|${delta_input}|${delta_output}|${delta_cache_read}|${delta_cache_write}|${delta_total}|${delta_cost}"$'\n'
       else
         warn "Failed: session=${sid} exit=${cmd_exit} output=${cmd_output}"
         warn "Command: ${cmd[*]}"
