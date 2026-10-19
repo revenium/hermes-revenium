@@ -67,6 +67,28 @@ the entire v1.x release line.
   exceeding the new ceiling fails that test loudly rather than leaving
   this fixture silently unexercised).
 
+## meter-completion-carried.golden.json — a classified session's later delta (quick-261018-s0b)
+
+- **meter-completion-carried.golden.json**: an additional fixture, added with
+  the carry-forward change, that is NOT part of the immutability contract
+  above. Loaded by
+  `tests/test_carry_forward_classification.py::RootCarryTests`. It pins the
+  `revenium meter completion` argv a ROOT session ships when it grows after
+  every one of its classification markers is already ledgered: the zero-marker
+  branch of `hermes-report.sh` carries the session's latest classification
+  (`--task-type`, `--operation-type CHAT`, the marker's `--trace-id`) and the
+  job link the reporter resolves for it (`--agentic-job-id`,
+  `--agentic-job-name`, `--agentic-job-type`, placed after `--environment`
+  and before the squad family).
+
+  Written by hand from the carry contract, not recorded (Phase 20 D-02). Its
+  `--transaction-id` is `<sid>-<total>`, the markerless shape: a carried row
+  consumes no marker muid, so the id has no third segment and cannot collide
+  with a per-marker id. It has the same additive standing as
+  `meter-completion-markerless.golden.json`, which is the unchanged contrast:
+  a session with no classification at all still ships `unclassified` and no
+  job flag. It uses the `TIMESTAMP_SENTINEL` convention described below.
+
 ## Immutability contract
 
 These fixtures are **IMMUTABLE** across the v1.x line (v1.0 through
