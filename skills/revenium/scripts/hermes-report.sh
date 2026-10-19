@@ -1190,13 +1190,24 @@ _job_linkable_for_aux() {
 # How long after a job's outcome was ledgered a CARRIED completion may still
 # link to it, in seconds. Prints one decimal integer.
 #
-# LD-2 (quick-261018-s0b, user decision 2026-10-18): the bound is
-# REVENIUM_JOBS_STALE_SECONDS, 600s by default, until a live-tenant probe
-# answers whether Revenium attaches a late completion to a closed job WITHOUT
-# reopening or recreating it. RC-1 measured the other outcome (151 long-closed
-# jobs came back as nameless PENDING rows when old links were replayed), so
-# the conservative bound ships first. If the probe is favourable, the follow-up
-# widens the window by changing THIS BODY and nothing else.
+# LD-2 (quick-261018-s0b, user decision 2026-10-18): REVENIUM_JOBS_STALE_SECONDS
+# (600s by default) shipped first, pending a live-tenant probe of whether
+# Revenium attaches a late completion to a closed job WITHOUT reopening or
+# recreating it. The probe ran on 2026-10-18 (job carry-forward-probe-1792369594):
+# a linked completion sent 13 minutes after the SUCCESS outcome added its cost
+# to the job (1 -> 2 transactions, $0.005 -> $0.010), the status stayed SUCCESS,
+# the name and type survived, and no second or PENDING row appeared. RC-1's 151
+# nameless PENDING rows were links to ids Revenium had no create for, which the
+# ledgered-create check in _carry_job_linkable already refuses.
+#
+# So the window widens while the row's own session is still open ($1 == open):
+# a later turn in an open session is the session the job came from, and its
+# cost belongs on that job however long ago the outcome was reported. The open
+# window is REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS (one day by default, the
+# same bound the CANCELLED open-session hold uses), never less than the stale
+# window: a long-lived desktop session reused days later does not reach back
+# to a job from last week. A closed session (or an unknown state) keeps the
+# stale window.
 #
 # That is the point of having a function: it is read by _carry_job_linkable
 # only. _job_linkable_for_aux (the auxiliary rows) and the RC-2 bound in
@@ -1206,7 +1217,16 @@ _job_linkable_for_aux() {
 _carry_link_window() {
   local window="${REVENIUM_JOBS_STALE_SECONDS:-600}"
   [[ "${window}" =~ ^[0-9]{1,9}$ ]] || window=600
-  printf '%s' $(( 10#${window} ))
+  window=$(( 10#${window} ))
+  if [[ "${1:-}" == "open" ]]; then
+    local open_window="${REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS:-86400}"
+    [[ "${open_window}" =~ ^[0-9]{1,9}$ ]] || open_window=86400
+    open_window=$(( 10#${open_window} ))
+    if (( open_window > window )); then
+      window=${open_window}
+    fi
+  fi
+  printf '%s' "${window}"
 }
 
 # 0 when a CARRIED completion (a classified session's later delta, see the
@@ -1227,12 +1247,15 @@ _carry_link_window() {
 # the current shell, never a subshell) so the caller's log line can name the
 # bound without a second call to _carry_link_window: this function is that
 # function's ONLY reader, which is what the isolation tests assert.
+#
+# $2 is the row's session state, "open" or anything else, passed straight to
+# _carry_link_window.
 _CARRY_WINDOW_LAST=""
 _carry_job_linkable() {
   local ledger_id
   ledger_id="$(_job_ledger_id "$1")"
   [[ -n "${ledger_id}" ]] || return 1
-  _CARRY_WINDOW_LAST="$(_carry_link_window)"
+  _CARRY_WINDOW_LAST="$(_carry_link_window "${2:-}")"
   _job_create_ledgered "$1" || return 1
 
   local outcome_line
@@ -6227,8 +6250,12 @@ PY
         # create ships the label unlinked rather than holding the spend.
         if [[ "${JOBS_CLI_CAPABLE}" == "true" && -n "${carry_job_id}" ]]; then
           local carry_unlinked_reason=""
+          # ended_at is empty for a NULL column: the session is still open,
+          # which widens the link window (see _carry_link_window).
+          local carry_session_state="closed"
+          [[ -z "${ended_at:-}" ]] && carry_session_state="open"
           if [[ "${root_sid}" == "${sid}" ]]; then
-            if _carry_job_linkable "${carry_job_id}"; then
+            if _carry_job_linkable "${carry_job_id}" "${carry_session_state}"; then
               # Phase 68 (D-17): positive root evidence, exactly as the per-marker
               # root rows require. A gate that could not read state.db (CR-01)
               # defers the session: a completion shipped without its job id is
@@ -6266,7 +6293,7 @@ PY
                 continue
               fi
               carry_unlinked_reason="was never created"
-            elif _carry_job_linkable "${carry_job_id}"; then
+            elif _carry_job_linkable "${carry_job_id}" "${carry_session_state}"; then
               carry_link_id="${carry_job_id}"
             else
               carry_unlinked_reason="closed more than ${_CARRY_WINDOW_LAST}s ago"

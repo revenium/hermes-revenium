@@ -124,14 +124,15 @@ reporter the same rule, at the ship sites only:
   reporter would link for it: a root's own latest non-halt job, a subagent's root job.
   The same guards apply on top of the root gate: the create must be ledgered, a
   subagent waits on the same RC-2 hold, and an outcome already ledgered links only
-  within `REVENIUM_JOBS_STALE_SECONDS` (600s), the one bound this change leaves
-  widenable (`_carry_link_window`, which the auxiliary bound and the RC-2 bound do not
-  read). Otherwise the row ships unlinked with its task type. A completion linked to an
-  already-closed job is not shown against a live tenant: RC-1 saw 151 long-closed jobs
-  come back as nameless PENDING rows when old links were replayed, which is why the
-  window is short until a live check says otherwise. Of ~35M post-marker tokens on one
-  ent profile, 600s links 7.5% and carries the task type only for the rest; a one-day
-  window would link 69%. The accepted cost: an unrelated later turn is charged to the
+  within `_carry_link_window`: `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` (one day) while
+  the row's session is open, `REVENIUM_JOBS_STALE_SECONDS` (600s) once it has ended. The
+  auxiliary bound and the RC-2 bound do not read it. Otherwise the row ships unlinked
+  with its task type. A live probe on 2026-10-18 (`carry-forward-probe-1792369594`)
+  showed Revenium adds a completion linked 13 minutes after the outcome to the closed
+  job's cost (1 to 2 transactions) without reopening or duplicating it; RC-1's 151
+  nameless PENDING rows were links to ids Revenium had no create for, which the
+  ledgered-create check refuses. Of ~35M post-marker tokens on one ent profile, 600s
+  alone links 7.5%; the open-session day links about 69%. The accepted cost: an unrelated later turn is charged to the
   earlier job, which understates that job's ROI rather than overstating it.
 
 On the reference host the gate was checked read-only on 2026-10-08 before it was

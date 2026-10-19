@@ -158,14 +158,17 @@ this repository.
   subagent's root job. A `guardrail-halt-*` job is never the link. Accepted bias: an unrelated
   later turn is charged to the earlier job, which understates that job's ROI rather than
   overstating it. A job is linked only while it is live: its `jobs create` is ledgered, and it
-  is open or its outcome was reported no more than `REVENIUM_JOBS_STALE_SECONDS` (600 seconds)
-  earlier. Beyond that, for a guardrail-halt job and for a job that was never created, the row
-  ships unlinked and the task type still carries; the log says why, once per job
-  (`Carried completion shipping WITHOUT --agentic-job-id`). Revenium accepting a completion
-  linked to an already-closed job is not shown against a live tenant yet, and an earlier
-  replay of old links resurrected long-closed jobs as nameless pending rows, so the window
-  stays at 600 seconds until a live check says otherwise. Widening it later is a change to one
-  function (`_carry_link_window`). Transaction ids and ledger lines keep their shape
+  is open or its outcome was reported recently enough: within
+  `REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS` (one day) while the row's session is still open,
+  within `REVENIUM_JOBS_STALE_SECONDS` (600 seconds) once it has ended. A live check on
+  2026-10-18 showed Revenium adds a completion linked 13 minutes after the outcome to the
+  closed job's cost without reopening or duplicating it; the nameless pending rows an earlier
+  replay produced were links to jobs Revenium had never been told about, which the
+  ledgered-create check refuses. On one ent profile the open-session window links about 69% of
+  later-turn tokens, against 7.5% for 600 seconds alone. Beyond the window, for a guardrail-halt
+  job and for a job that was never created, the row ships unlinked and the task type still
+  carries; the log says why, once per job (`Carried completion shipping WITHOUT
+  --agentic-job-id`). The window is decided in one function (`_carry_link_window`). Transaction ids and ledger lines keep their shape
   (`<session>-<total>` and an `unclassified-<digits>` muid, which now means that no marker
   muid was consumed), so re-running the cron never double-reports. A session with no
   classification at all meters exactly as before. Rows already shipped are unchanged, with no

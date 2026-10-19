@@ -830,11 +830,16 @@ class SoleOtherEmitterTests(unittest.TestCase):
         # (2248) does not move. Pure shift, re-measured with
         # `grep -n -- '--operation-type'`; the COUNT (4) and the emitted VALUE
         # expressions are unchanged.
+        # Open-session carry window (2026-10-18): _carry_link_window gains
+        # the open-session branch and its probe evidence (+23, above the aux
+        # site) and the zero-marker branch derives the session state (+4):
+        # the aux site moves 2359->2382, per-marker 5950->5973, markerless
+        # 6310->6337. api-event-report.sh (2248) does not move. Pure shift.
         found_locations = {(f, l) for f, l, _v in found}
         expected_locations = {
-            ('hermes-report.sh', 2359),
-            ('hermes-report.sh', 5950),
-            ('hermes-report.sh', 6310),
+            ('hermes-report.sh', 2382),
+            ('hermes-report.sh', 5973),
+            ('hermes-report.sh', 6337),
             ('api-event-report.sh', 2248),
         }
         self.assertEqual(

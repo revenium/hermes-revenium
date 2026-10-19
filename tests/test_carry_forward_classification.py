@@ -566,6 +566,38 @@ class CarryLinkWindowTests(_ShellHarness):
                                         env={'REVENIUM_JOBS_STALE_SECONDS': value})
                     self.assertIn(f'w={expected}\n', out.stdout)
 
+    def test_an_open_session_widens_the_window_to_the_open_idle_bound(self):
+        # Live probe 2026-10-18 (carry-forward-probe-1792369594): a link sent
+        # after the outcome added cost to the closed job and did not reopen or
+        # recreate it, so an OPEN session links back for up to a day.
+        created = 'JOB:j:created:1.000'
+        self._ledger(created, self._outcome_line(3600))
+        self._each('_carry_job_linkable j open', 0)
+        self._each('_carry_job_linkable j closed', 1)
+        self._each('_carry_job_linkable j', 1)  # unknown state keeps the stale window
+        self._ledger(created, self._outcome_line(86400))
+        self._each('_carry_job_linkable j open', 0)
+        self._ledger(created, self._outcome_line(86401))
+        self._each('_carry_job_linkable j open', 1)
+        self._ledger(self._outcome_line(5))
+        self._each('_carry_job_linkable j open', 1)  # still needs a ledgered create
+
+    def test_open_window_prints_the_larger_of_the_two_bounds(self):
+        for bash in self.BASHES:
+            for stale, idle, expected in ((None, None, '86400'), ('600', '100', '600'),
+                                          ('600', '0', '600'), ('600', 'banana', '86400'),
+                                          ('90', '7200', '7200')):
+                with self.subTest(bash=bash, stale=stale, idle=idle):
+                    rc, out = self._run(bash, 'printf "w=%s\\n" "$(_carry_link_window open)"',
+                                        env={'REVENIUM_JOBS_STALE_SECONDS': stale,
+                                             'REVENIUM_OPEN_SESSION_MAX_IDLE_SECONDS': idle})
+                    self.assertIn(f'w={expected}\n', out.stdout)
+
+    def test_aux_isolation_the_open_window_does_not_move_the_aux_decision(self):
+        self._ledger('JOB:j:created:1.000', self._outcome_line(3600))
+        self._each('_carry_job_linkable j open', 0)
+        self._each('_job_linkable_for_aux j', 1)
+
     def test_the_window_follows_the_stale_setting(self):
         self._ledger('JOB:j:created:1.000', self._outcome_line(90))
         self._each('_carry_job_linkable j', 1, env={'REVENIUM_JOBS_STALE_SECONDS': '30'})
@@ -742,6 +774,28 @@ class RootCarryTests(_CarryHarness):
         self.assert_no_job_flags(second['flags'][0], 'second growth')
         line = f'{CARRY_UNLINKED}: job {JOB} closed more than 600s ago (session={ROOT_SID})'
         self.assertEqual(self.log_text().count(line), 1, self.log_text())
+
+    def test_an_open_session_links_a_job_closed_beyond_the_stale_window(self):
+        self.carried_root(_pair(ROOT_SID, G_MUID, C_MUID, LABEL, trace_id=TRACE) + [_job(ROOT_SID)],
+                          ended_at=None)
+        self.seed_job(created_ago=4200, outcome_ago=3600)
+        self.make_shim()
+        row = self.tick()['flags'][0]
+        self.assertEqual(row['--task-type'], LABEL)
+        self.assertEqual((row['--agentic-job-id'], row['--agentic-job-name'],
+                          row['--agentic-job-type']), (JOB, JOB_NAME, JOB_TYPE))
+        self.assertNotIn(CARRY_UNLINKED, self.log_text())
+
+    def test_an_open_session_does_not_reach_a_job_closed_over_a_day_ago(self):
+        self.carried_root(_pair(ROOT_SID, G_MUID, C_MUID, LABEL, trace_id=TRACE) + [_job(ROOT_SID)],
+                          ended_at=None)
+        self.seed_job(created_ago=90000, outcome_ago=86500)
+        self.make_shim()
+        row = self.tick()['flags'][0]
+        self.assertEqual(row['--task-type'], LABEL)
+        self.assert_no_job_flags(row, 'closed over a day ago')
+        self.assertIn(f'{CARRY_UNLINKED}: job {JOB} closed more than 86400s ago (session={ROOT_SID})',
+                      self.log_text())
 
     def test_a_job_closed_inside_the_window_links(self):
         self.carried_root(_pair(ROOT_SID, G_MUID, C_MUID, LABEL, trace_id=TRACE) + [_job(ROOT_SID)])
