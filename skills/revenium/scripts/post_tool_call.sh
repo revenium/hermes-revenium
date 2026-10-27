@@ -17,7 +17,7 @@ ensure_path
 payload="$(cat -)"
 
 # Capture the tool call: parse payload, resolve session_id, apply success heuristic,
-# append a compact 7-key JSONL record. Guarded with || true so any Python failure
+# append a compact 8-key JSONL record. Guarded with || true so any Python failure
 # exits 0 and never blocks the agent (TOOLCAP-03, TOOLCAP-04).
 TOOL_EVENTS_DIR="${TOOL_EVENTS_DIR}" HERMES_HOME="${HERMES_HOME}" \
   python3 - "${payload}" <<'PYEOF' || true
@@ -45,6 +45,14 @@ extra = payload.get("extra") or {}
 session_id = payload.get("session_id", "") or ""
 if session_id and not _SID_RE.match(session_id):
     session_id = ""
+# quick-261027-fib: record WHERE the session id came from. Only a sid Hermes
+# supplied in the payload ("payload") is evidence of which session ran the
+# tool; the Tier-2 "newest session file" scan and the Tier-3 pseudo sentinel are
+# guesses, and tool-event-report.sh must never let a guess pick a job (a wrong
+# --workflow-id charges one job's tools to another). This is the minimum
+# lifecycle metadata that rule needs; spool records written before it carry no
+# sid_source and are shipped unattributed.
+sid_source = "payload" if session_id else ""
 if not session_id:
     # Tier 2: scan ~/.hermes/sessions/ for the newest non-cron session file.
     sessions_dir = os.path.join(
@@ -64,11 +72,13 @@ if not session_id:
             # Tier-2 result must also pass the regex (belt-and-suspenders).
             if _SID_RE.match(raw):
                 session_id = raw
+                sid_source = "recent-session"
     except OSError:
         pass
 if not session_id:
     # Tier 3: pseudo sentinel — always non-empty, event still captured.
     session_id = "pseudo-" + str(int(time.time()))
+    sid_source = "pseudo"
 
 # Extract event-specific fields from extra.
 # tool_call_id: fall back to ms-timestamp if absent (Pitfall 6 — may not be guaranteed).
@@ -119,6 +129,7 @@ record = {
     "duration_ms": duration_ms,
     "success": success,
     "error": error_msg,
+    "sid_source": sid_source,
 }
 line = json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
 

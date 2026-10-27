@@ -510,5 +510,324 @@ class AttributionGateTests(unittest.TestCase):
         self.assertEqual([f.get('--workflow-id') for f in h.flags()], [JOB])
 
 
+
+# --------------------------------------------------------------------------
+# Task 2: bounded late-marker holds
+# --------------------------------------------------------------------------
+
+class LateMarkerPolicyTests(unittest.TestCase):
+    """A job record is written at the END of the turn whose tools it owns, so an
+    event usually ships (3-122s after capture, measured) before its job exists.
+    The policy: hold, bounded and logged once; never ledger a held row; always
+    end with a basis that separates intentionally-unassigned work from a marker
+    that never arrived."""
+
+    def _live_root(self, h, started=None, activity=None):
+        h.plugin_status()
+        h.session(ROOT_SID, started=started if started is not None else h.now - 300,
+                  ended=None, activity=activity if activity is not None else h.now - 10)
+
+    def test_job_pending_holds_then_attributes_exactly_once(self):
+        h = Harness(self)
+        self._live_root(h)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 30)])
+        for _ in range(2):
+            h.run()
+        self.assertEqual(h.argvs(), [])
+        self.assertEqual(h.ledger(), [])
+        log = h.log()
+        self.assertEqual(log.count('Tool events held (job-pending)'), 1, log)
+        self.assertIn('Held 1;', log)
+        # The marker and the create land.
+        h.write_markers(ROOT_SID, h.pair(ROOT_SID, h.now - 8) + [h.job(ROOT_SID, JOB, h.now - 5)])
+        h.created(JOB)
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [JOB])
+        h.run()
+        self.assertEqual(len(h.argvs()), 1, 'run 4 ships nothing')
+        self.assertEqual(len(h.ledger()), 1)
+
+    def test_cancelled_latest_record_ships_after_job_without_a_hold(self):
+        h = Harness(self)
+        self._live_root(h)
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, h.now - 100, 'CANCELLED')])
+        h.created(JOB)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 50)])
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+        self.assertIn('basis=after-job', h.log())
+        self.assertIn('Held 0;', h.log())
+        # A later re-judge for the same id does not reach back or extend ownership.
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, h.now - 10, 'SUCCESS')])
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc2', h.now - 40)])
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None, None])
+        self.assertEqual(len(h.ledger()), 2)
+
+    def test_success_latest_record_event_after_ships_at_once_unattributed(self):
+        h = Harness(self)
+        self._live_root(h)
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, h.now - 100, 'SUCCESS')])
+        h.created(JOB)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 20)])
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+        self.assertIn('basis=after-job', h.log())
+
+    def test_root_older_than_the_cap_ships_hold_expired_and_warns_once(self):
+        h = Harness(self)
+        self._live_root(h, started=h.now - 120, activity=h.now - 5)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 10)])
+        h.run(REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS=60)
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+        self.assertIn('basis=hold-expired', h.log())
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc2', h.now - 9)])
+        h.run(REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS=60)
+        self.assertEqual(h.log().count('WITHOUT --workflow-id (hold-expired)'), 1, h.log())
+
+    def test_no_job_releases_at_once(self):
+        scenarios = {
+            'sentinel': lambda h: (h.plugin_status(), h.session(ROOT_SID, started=h.now - 300, activity=h.now - 5),
+                                   h.ready(ROOT_SID)),
+            'idle root': lambda h: (h.plugin_status(),
+                                    h.session(ROOT_SID, started=h.now - 4000, activity=h.now - 3000)),
+            'no plugin status': lambda h: h.session(ROOT_SID, started=h.now - 300, activity=h.now - 5),
+            'unhealthy plugin': lambda h: (h.plugin_status(healthy=False),
+                                           h.session(ROOT_SID, started=h.now - 300, activity=h.now - 5)),
+        }
+        for name, setup in scenarios.items():
+            with self.subTest(name):
+                h = Harness(self)
+                setup(h)
+                h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 30)])
+                h.run()
+                self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+                self.assertIn('basis=no-job', h.log())
+                self.assertNotIn('Tool events held', h.log())
+
+    def test_cap_zero_switches_every_hold_off(self):
+        h = Harness(self)
+        self._live_root(h)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 30)])
+        h.run(REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS=0)
+        self.assertEqual(len(h.argvs()), 1)
+        h2 = Harness(self)
+        self._live_root(h2)
+        h2.write_markers(ROOT_SID, [h2.job(ROOT_SID, JOB, h2.now - 5)])       # no create
+        h2.write_spool(ROOT_SID, [h2.event(ROOT_SID, 'tc1', h2.now - 30)])
+        h2.run(REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS=0)
+        self.assertEqual([f.get('--workflow-id') for f in h2.flags()], [None])
+        self.assertNotIn('Tool events held', h2.log())
+
+    def test_create_pending_holds_then_ships_once_created(self):
+        h = Harness(self)
+        self._live_root(h)
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, h.now - 20)])
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 30)])
+        h.run()
+        h.run()
+        self.assertEqual(h.argvs(), [])
+        self.assertEqual(h.log().count('Tool events held (create-pending)'), 1, h.log())
+        h.created(JOB)
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [JOB])
+
+    def test_create_missing_after_the_bound_ships_unattributed_and_warns_once(self):
+        h = Harness(self)
+        self._live_root(h)
+        ts_job = h.now - 3000
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, ts_job)])
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', ts_job - 5)])
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+        self.assertIn('basis=create-missing', h.log())
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc2', ts_job - 4)])
+        h.run()
+        self.assertEqual(h.log().count('WITHOUT --workflow-id (create-missing)'), 1, h.log())
+        self.assertEqual(len(h.argvs()), 2)
+
+    def test_older_cli_ships_held_rows_unattributed_with_no_notice(self):
+        h = Harness(self, workflow_capable=False)
+        self._live_root(h)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', h.now - 30)])
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+        log = h.log()
+        self.assertIn('basis=cli-unsupported', log)
+        self.assertNotIn('Tool events held', log)
+        self.assertNotIn('WITHOUT --workflow-id', log)
+
+    def test_cli_failure_leaves_no_ledger_line_and_the_rerun_keeps_the_attribution(self):
+        h = Harness(self)
+        ts_job = h.now - 500
+        h.session(ROOT_SID, started=h.now - 2000, ended=h.now - 100)
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, ts_job)])
+        h.created(JOB)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', ts_job - 5)])
+        open(h.fail_flag, 'w').close()
+        h.run()
+        self.assertEqual(h.ledger(), [], 'a failed call must never ledger')
+        self.assertIn('Failed: sid=', h.log())
+        os.remove(h.fail_flag)
+        h.run()
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [JOB])
+        self.assertEqual(len(h.ledger()), 1)
+
+
+class SafetyTests(unittest.TestCase):
+
+    def test_overlapping_run_defers_to_the_lock_holder(self):
+        h = Harness(self)
+        ts_job = h.now - 500
+        h.session(ROOT_SID, started=h.now - 2000, ended=h.now - 100)
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, ts_job)])
+        h.created(JOB)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', ts_job - 5)])
+        with open(os.path.join(h.state, 'tool-events.lock'), 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            h.run()
+            self.assertEqual(h.argvs(), [])
+            self.assertIn('another run holds the lock', h.log())
+        h.run()
+        self.assertEqual(len(h.argvs()), 1, 'the next run, with the lock free, ships once')
+
+    def test_locked_state_db_holds_db_busy_then_ships_with_the_root_trace(self):
+        h = Harness(self)
+        ts_job = h.now - 500
+        child = '20261027_102629_864844'
+        h.session(ROOT_SID, started=h.now - 2000, ended=h.now - 100)
+        h.session(child, parent=ROOT_SID, started=h.now - 1900, ended=h.now - 120)
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, ts_job)])
+        h.created(JOB)
+        h.write_spool(child, [h.event(child, 'tcc1', ts_job - 5)])
+        blocker = sqlite3.connect(h.db, isolation_level=None)
+        blocker.execute('BEGIN EXCLUSIVE')
+        try:
+            h.run()
+            self.assertEqual(h.argvs(), [], 'a locked ancestry db must not ship under the wrong root')
+            self.assertEqual(h.ledger(), [])
+            self.assertEqual(h.log().count('Tool events held (db-busy)'), 1, h.log())
+        finally:
+            blocker.execute('ROLLBACK')
+            blocker.close()
+        h.run()
+        flags = h.flags()
+        self.assertEqual(len(flags), 1)
+        self.assertEqual((flags[0]['--trace-id'], flags[0]['--workflow-id']), (ROOT_SID, JOB))
+
+    def test_locked_state_db_past_the_cap_ships_with_the_sid_as_root(self):
+        h = Harness(self)
+        h.session('sess-old', started=h.now - 9000, ended=h.now - 8000)
+        h.write_spool('sess-old', [h.event('sess-old', 'tc1', h.now - 8500)])
+        blocker = sqlite3.connect(h.db, isolation_level=None)
+        blocker.execute('BEGIN EXCLUSIVE')
+        try:
+            h.run()
+        finally:
+            blocker.execute('ROLLBACK')
+            blocker.close()
+        self.assertEqual([f['--trace-id'] for f in h.flags()], ['sess-old'])
+        self.assertIn('basis=ancestry-unavailable', h.log())
+
+    def test_missing_state_db_ships_with_the_sid_as_trace_and_no_hold(self):
+        h = Harness(self)
+        os.remove(h.db)
+        h.write_spool('sess-a', [h.event('sess-a', 'tc1', h.now - 30)])
+        h.run()
+        self.assertEqual([f['--trace-id'] for f in h.flags()], ['sess-a'])
+        self.assertNotIn('Tool events held', h.log())
+
+    def test_unverified_sid_never_picks_a_job(self):
+        for source in (None, 'recent-session', 'pseudo', 'bogus'):
+            with self.subTest(source=source):
+                h = Harness(self)
+                ts_job = h.now - 500
+                h.session(ROOT_SID, started=h.now - 2000, ended=h.now - 100)
+                h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, ts_job)])
+                h.created(JOB)
+                h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', ts_job - 5, source=source)])
+                h.run()
+                self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+                self.assertIn('basis=sid-unverified', h.log())
+                self.assertIn('Tool events unattributed (sid-unverified)', h.log())
+                self.assertEqual(h.probes(), 0)
+
+    def test_traversal_shaped_parent_is_never_used_as_a_path(self):
+        h = Harness(self)
+        ts_job = h.now - 500
+        evil = '../x'
+        h.session('child-sess', parent=evil, started=h.now - 1900, ended=h.now - 120)
+        # A job file the traversal would reach: <markers>/../x.jsonl == <state>/x.jsonl
+        with open(os.path.join(h.state, 'x.jsonl'), 'w') as fh:
+            fh.write(json.dumps(h.job('x', JOB, ts_job)) + '\n')
+        h.created(JOB)
+        h.write_spool('child-sess', [h.event('child-sess', 'tc1', ts_job - 5)])
+        h.run()
+        self.assertEqual([f.get('--workflow-id') for f in h.flags()], [None])
+        self.assertIn('basis=bad-sid', h.log())
+
+    def test_events_ledgered_by_an_earlier_pass_are_never_reshipped(self):
+        h = Harness(self)
+        ts_job = h.now - 500
+        h.session(ROOT_SID, started=h.now - 2000, ended=h.now - 100)
+        h.write_markers(ROOT_SID, [h.job(ROOT_SID, JOB, ts_job)])
+        h.created(JOB)
+        h.write_spool(ROOT_SID, [h.event(ROOT_SID, 'tc1', ts_job - 5)])
+        h.run()
+        h.run()
+        self.assertEqual(len(h.argvs()), 1)
+        self.assertEqual(len(h.ledger()), 1)
+
+    def test_common_sh_declares_the_lock_before_mkdir(self):
+        text = (SCRIPTS_DIR / 'common.sh').read_text()
+        decl = text.index('TOOL_EVENTS_LOCK_FILE=')
+        self.assertLess(decl, text.index('mkdir -p "${STATE_DIR}"'))
+        self.assertIn('tool-events.lock', text)
+
+
+class HookProvenanceTests(unittest.TestCase):
+    """post_tool_call.sh stamps where the session id came from: only a sid
+    Hermes SUPPLIED (`payload`) may pick a job; a Tier-2/3 guess must not."""
+
+    def _run_hook(self, payload, sessions=()):
+        tmp = tempfile.mkdtemp(prefix='fib-hook-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        hh = os.path.join(tmp, 'hh')
+        os.makedirs(os.path.join(hh, 'sessions'))
+        for name in sessions:
+            open(os.path.join(hh, 'sessions', name), 'w').close()
+        env = {**os.environ, 'HOME': tmp, 'HERMES_HOME': hh,
+               'REVENIUM_STATE_DIR': os.path.join(hh, 'state', 'revenium')}
+        result = subprocess.run(['bash', str(SCRIPTS_DIR / 'post_tool_call.sh')], input=json.dumps(payload),
+                                env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        spool = os.path.join(hh, 'state', 'revenium', 'tool-events')
+        records = []
+        for name in os.listdir(spool):
+            with open(os.path.join(spool, name)) as fh:
+                records += [json.loads(l) for l in fh if l.strip()]
+        self.assertEqual(len(records), 1, records)
+        return records[0]
+
+    def test_payload_session_id_is_stamped_payload(self):
+        rec = self._run_hook({'tool_name': 'terminal', 'session_id': 'abc-123', 'extra': {'tool_call_id': 'x'}})
+        self.assertEqual((rec['sid'], rec['sid_source']), ('abc-123', 'payload'))
+
+    def test_recent_session_guess_is_stamped_recent_session(self):
+        rec = self._run_hook({'tool_name': 'terminal', 'session_id': '', 'extra': {'tool_call_id': 'x'}},
+                             sessions=['session_20261027_000000_ab12cd.json'])
+        self.assertEqual((rec['sid'], rec['sid_source']), ('20261027_000000_ab12cd', 'recent-session'))
+
+    def test_pseudo_sid_is_stamped_pseudo(self):
+        rec = self._run_hook({'tool_name': 'terminal', 'session_id': '', 'extra': {'tool_call_id': 'x'}})
+        self.assertTrue(rec['sid'].startswith('pseudo-'))
+        self.assertEqual(rec['sid_source'], 'pseudo')
+
+    def test_traversal_session_id_falls_through_and_is_not_payload(self):
+        rec = self._run_hook({'tool_name': 'terminal', 'session_id': '../../etc', 'extra': {'tool_call_id': 'x'}})
+        self.assertNotEqual(rec['sid_source'], 'payload')
+
+
 if __name__ == '__main__':
     unittest.main()

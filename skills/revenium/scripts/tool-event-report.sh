@@ -24,6 +24,24 @@ if ! revenium config show >/dev/null 2>&1; then
   exit 0
 fi
 
+# quick-261027-fib: serialise runs. cron.lock only covers runs made THROUGH
+# cron.sh; an operator running this script directly can overlap a tick, and both
+# would read the same unledgered rows and ship them before either ledgers them
+# (the ledger line is written AFTER the CLI call, so the per-row grep guard
+# narrows that window but cannot close it). Non-blocking: a second run defers to
+# the next tick. Same exec-fd + fcntl idiom as outcome-metrics-report.sh; a
+# `-c` one-liner, not a `python3 -` heredoc, so the one-pass spool read below
+# stays the only heredoc interpreter (test_spool_files_share_one_python_pass).
+exec 9>"${TOOL_EVENTS_LOCK_FILE}"
+if ! python3 -c 'import fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, BlockingIOError):
+    sys.exit(11)' 2>/dev/null; then
+  info "tool-event-report: another run holds the lock, skipping this tick"
+  exit 0
+fi
+
 touch "${TOOL_EVENTS_LEDGER_FILE}"
 
 ORG_NAME=""
@@ -89,6 +107,10 @@ main() {
     TOOL_EVENTS_DIR="${TOOL_EVENTS_DIR}" LEDGER_FILE="${TOOL_EVENTS_LEDGER_FILE}" \
     SCRIPT_DIR="${SCRIPT_DIR}" STATE_DB="${STATE_DB}" MARKERS_DIR="${MARKERS_DIR}" \
     MARKERS_READY_DIR="${MARKERS_READY_DIR}" JOBS_LEDGER_FILE="${JOBS_LEDGER_FILE}" \
+    PLUGIN_STATUS_FILE="${PLUGIN_STATUS_FILE}" \
+    SETTLE_SECONDS="${REVENIUM_CRON_SETTLE_SECONDS:-600}" \
+    MAX_HOLD_SECONDS="${REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS:-7200}" \
+    STALE_SECONDS="${REVENIUM_JOBS_STALE_SECONDS:-600}" \
     python3 - <<'PY' 2>/dev/null || true
 import glob
 import importlib.util
@@ -257,8 +279,39 @@ def _root_of(row_sid):
 process_markers_dir = os.environ.get("MARKERS_DIR", "")
 process_ready_dir = os.environ.get("MARKERS_READY_DIR", "")
 
+
+def _seconds_env(name, default):
+    """A tunable the sibling reporters already read; malformed takes its default."""
+    raw = os.environ.get(name, "")
+    return int(raw) if re.fullmatch(r"[0-9]{1,9}", raw or "") else default
+
+
+# Reused, none added (zero-config): hermes-report.sh's settle window, the
+# unclassified-hold cap (0 switches EVERY hold here off) and the job staleness
+# bound that _child_job_link_hold uses.
+settle_seconds = _seconds_env("SETTLE_SECONDS", 600)
+max_hold_seconds = _seconds_env("MAX_HOLD_SECONDS", 7200)
+stale_seconds = _seconds_env("STALE_SECONDS", 600)
+
 created = None
 root_info = {}
+_classifier_registered = None
+
+
+def _classifier_expected():
+    """True only on POSITIVE evidence that a healthy classifier is registered
+    (hermes-report.sh's _classifier_expected). Absent, unreadable or unhealthy
+    mean nothing is coming, so there is nothing to hold an event for."""
+    global _classifier_registered
+    if _classifier_registered is None:
+        try:
+            with open(os.environ.get("PLUGIN_STATUS_FILE", ""), encoding="utf-8") as pf:
+                doc = json.load(pf)
+            _classifier_registered = (
+                isinstance(doc, dict) and doc.get("healthy") is True and doc.get("registered") is not False)
+        except Exception:
+            _classifier_registered = False
+    return _classifier_registered
 
 
 def _created_ids():
@@ -279,13 +332,66 @@ def _created_ids():
     return created
 
 
+_activity_column_absent = False
+
+
+def _session_facts(root):
+    """(started_at, ended_at, last_activity_at, contended) of the ROOT's row, or
+    (None, None, None, contended) when it has no usable row. last_activity_at
+    degrades to None on an older Hermes (no column), as in hermes-report.sh.
+    contended is True only when state.db was momentarily locked."""
+    global _activity_column_absent
+    if conn is None:
+        return (None, None, None, False)
+    row = None
+    try:
+        if _activity_column_absent:
+            raise sqlite3.OperationalError("no such column: last_activity_at")
+        row = conn.execute(
+            "SELECT started_at, ended_at, last_activity_at FROM sessions WHERE id = ? LIMIT 1",
+            (root,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        msg = str(exc).lower()
+        if "locked" in msg or "busy" in msg:
+            return (None, None, None, True)
+        if "no such column" in msg:
+            _activity_column_absent = True
+            try:
+                row = conn.execute(
+                    "SELECT started_at, ended_at, NULL FROM sessions WHERE id = ? LIMIT 1",
+                    (root,)).fetchone()
+            except sqlite3.OperationalError as exc2:
+                m2 = str(exc2).lower()
+                return (None, None, None, "locked" in m2 or "busy" in m2)
+            except Exception:
+                return (None, None, None, False)
+    except Exception:
+        return (None, None, None, False)
+
+    def _stamp(value):
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return None
+        return f if f == f and f not in (float("inf"), float("-inf")) and f > 0 else None
+
+    if not row:
+        return (None, None, None, False)
+    started = _stamp(row[0])
+    if started is None:
+        return (None, None, None, False)
+    return (started, _stamp(row[1]), _stamp(row[2]), False)
+
+
 def _info_for(root):
     """Per-root facts, computed once per tick: only the ROOT's marker file is
     read (a subagent never ships its own job id), in the directory of the
     profile that OWNS the root."""
     if root in root_info:
         return root_info[root]
-    d = {"bad_sid": False, "arcs": None}
+    d = {"bad_sid": False, "arcs": None, "ready": False, "facts": None}
     if not _SID_RE.match(root):
         # A parent value from state.db or the spool is untrusted: never build
         # a path from anything that is not a plain session id.
@@ -297,7 +403,13 @@ def _info_for(root):
                 mdir = _resolver(root, process_markers_dir or None) or process_markers_dir
             except Exception:
                 mdir = process_markers_dir
+        ready_dir = (process_ready_dir if (mdir == process_markers_dir and process_ready_dir)
+                     else os.path.join(mdir, ".ready"))
         d["arcs"] = _ss.tool_event_job_arcs(os.path.join(mdir, root + ".jsonl"))
+        try:
+            d["ready"] = os.path.exists(os.path.join(ready_dir, root))
+        except OSError:
+            d["ready"] = False
     root_info[root] = d
     return d
 
@@ -308,25 +420,95 @@ def _sanitize(value):
     return value
 
 
+def _no_job_decision(root, d, event_ts):
+    """(hold, basis) for an event whose root has NO job record.
+
+    Hold (job-pending) exactly when hermes-report.sh's _root_pending_uncached
+    would hold a subagent for this root: a healthy classifier is expected, the
+    cap is on, the root has a row younger than the cap, no sentinel (the plugin
+    has not finished with it, job inference included) and it is live (or the
+    database is contended). The classifier writes at most ONE job per root and
+    only at a turn boundary, so "live and unfinished" is the one state in which
+    a marker may still arrive.
+
+    Released: `hold-expired` when the cap is the ONLY reason it is no longer
+    held (a marker that never came), else `no-job` (there is no classifier, the
+    sentinel was written, the root is idle, or it has no row: the classifier had
+    its chance and wrote no job, so the work is intentionally unassigned)."""
+    if max_hold_seconds <= 0 or not _classifier_expected() or d["ready"]:
+        return ("", "no-job")
+    started, ended, activity, contended = _session_facts(root)
+    if contended:
+        # Cannot tell how old or live the root is: hold one more tick, bounded
+        # by the event's own age so a database that stays locked cannot hold
+        # an event past the cap.
+        if 0 <= now - event_ts < max_hold_seconds:
+            return ("job-pending", "")
+        return ("", "hold-expired")
+    if started is None:
+        return ("", "no-job")
+    latest = started
+    if activity is not None and activity <= now + 300:
+        latest = max(latest, activity)
+    if ended is not None and ended <= now + 300:
+        latest = max(latest, ended)
+    if now - latest >= settle_seconds:
+        return ("", "no-job")
+    if now - started < max_hold_seconds:
+        return ("job-pending", "")
+    return ("", "hold-expired")
+
+
 def _decide(row):
-    """(root, workflow_id, basis, hold, notice) for one unledgered row."""
+    """(root, workflow_id, basis, hold, notice) for one unledgered row.
+
+    A held row carries a `hold` reason and an empty basis; every other row
+    carries a basis. Every hold has a bound: the cap on the root's (or the
+    event's) age, root liveness, the sentinel, or the create bound below."""
     sid = row["sid"]
-    root = _root_of(sid) or sid
+    root = sid if db_contended else (_root_of(sid) or sid)
+    ts = row["ts"]
+    if row["sid_source"] != "payload":
+        # Tier-2/3 session ids are guesses (and records from before the hook
+        # stamped provenance have none): a guess must never pick a job.
+        return (root, "", "sid-unverified", "", sid)
+    if db_contended:
+        # Ancestry unknown: shipping now would put a subagent's event under the
+        # wrong trace and, worse, the wrong job. Hold, bounded by the event's age.
+        age = now - ts
+        if max_hold_seconds > 0 and 0 <= age < max_hold_seconds:
+            return (root, "", "", "db-busy", "state.db")
+        return (root, "", "ancestry-unavailable", "", "")
     if _ss is None:
         return (root, "", "attribution-unavailable", "", "")
     d = _info_for(root)
     if d["bad_sid"]:
         return (root, "", "bad-sid", "", root)
-    ts = row["ts"]
     if ts > now + 300:
         return (root, "", "bad-ts", "", "")
     job_id, basis, arc = _ss.assign_tool_event_job(d["arcs"], ts)
     if job_id is None:
+        if basis == "no-job":
+            hold, released = _no_job_decision(root, d, ts)
+            if hold:
+                return (root, "", "", hold, root)
+            return (root, "", released, "", root if released == "hold-expired" else "")
         if basis in ("ambiguous-arcs", "invalid-job-id", "unplaceable-job", "markers-unreadable"):
             return (root, "", basis, "", root)
+        # after-job, bad-ts: intentionally unassigned, ship at once. Under
+        # first-record-only no later record can bring the event into an arc,
+        # and the classifier mints no second job for a root, so holding would
+        # only delay.
         return (root, "", basis, "", "")
     if job_id in _created_ids():
         return (root, job_id, "first-after", "", "")
+    # Owner found, create not ledgered: a link now would make Revenium create
+    # the job nameless. Wait for the root's create (hermes-report.sh runs it
+    # earlier in the same tick) for the bound _child_job_link_hold uses when the
+    # root is not in the tick's set; past it the event ships unattributed.
+    age = now - arc["first_ts"]
+    if max_hold_seconds > 0 and 0 <= age < max(stale_seconds, settle_seconds):
+        return (root, "", "", "create-pending", job_id)
     return (root, "", "create-missing", "", job_id)
 
 
@@ -382,6 +564,29 @@ PY
         hold=""
         notice=""
         basis="cli-unsupported"
+      fi
+
+      # quick-261027-fib: a held row is counted and skipped BEFORE the per-row
+      # grep, writes nothing to the ledger and is retried next tick. Each hold
+      # was bounded in the heredoc (cap, liveness, sentinel or create bound), so
+      # none can wait forever; the notice is logged once per (key, reason).
+      if [[ -n "${hold}" ]]; then
+        ((held_count++)) || true
+        case "${hold}" in
+          job-pending)
+            _tool_event_log_once "${notice}" "job-pending" info \
+              "Tool events held (job-pending): root=${notice} has no job marker yet and is still live; retried next tick, nothing ledgered"
+            ;;
+          create-pending)
+            _tool_event_log_once "${notice}" "create-pending" info \
+              "Tool events held (create-pending): job=${notice} has no confirmed create yet; retried next tick"
+            ;;
+          db-busy)
+            _tool_event_log_once "${notice}" "db-busy" info \
+              "Tool events held (db-busy): state.db locked while resolving ancestry; retried next tick"
+            ;;
+        esac
+        continue
       fi
 
       # Idempotency guard: skip if this (sid, tool_call_id) pair is already ledgered.
@@ -456,9 +661,13 @@ PY
               _tool_event_log_once "${notice}" "create-missing" warn \
                 "Tool events shipping WITHOUT --workflow-id (create-missing): job=${notice} has no confirmed create; linking now would make Revenium create it nameless"
               ;;
-            ambiguous-arcs|invalid-job-id|unplaceable-job|markers-unreadable|bad-sid)
+            hold-expired|ambiguous-arcs|invalid-job-id|unplaceable-job|markers-unreadable|bad-sid)
               _tool_event_log_once "${notice}" "${basis}" warn \
                 "Tool events shipping WITHOUT --workflow-id (${basis}): root=${notice} ownership could not be established; events keep the root trace"
+              ;;
+            sid-unverified)
+              _tool_event_log_once "${notice}" "sid-unverified" info \
+                "Tool events unattributed (sid-unverified): sid=${notice} session id was not supplied by Hermes"
               ;;
           esac
         fi
