@@ -229,7 +229,8 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
                 skill_capable=False, outcome_value_capable=True,
                 jobs_org_capable=False, subscriber_capable=False,
                 subscriber_email_capable=False, trace_name_capable=False,
-                parent_txn_capable=False, trace_type_capable=False):
+                parent_txn_capable=False, trace_type_capable=False,
+                workflow_capable=False):
     """Write a no-shift revenium shim at shim_path and chmod it 0o755.
 
     NO-SHIFT DESIGN (PATTERNS lines 202-226): the shim captures the FULL argv
@@ -298,6 +299,16 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
     type, instead of the standalone fallback a CLI with --trace-name but no
     --trace-type takes. Both resolutions must agree (tests/
     test_trace_naming_dedup_parent.py pins that).
+
+    workflow_capable=False (default) omits the --workflow-id help line, so
+    supports_flag "meter tool-event" "--workflow-id" resolves to a
+    DETERMINATE negative (the `meter ... --help` branch always echoes
+    non-empty help) and tool-event-report.sh ships the argv the unchanged
+    meter-tool-event.golden.json pins: the standing proof that the flag
+    fails open on an older CLI. True advertises it, modelling a CLI that
+    accepts --workflow-id on `meter tool-event` (quick-261027-fib). Placed
+    BEFORE the --agentic-job-id echo for the SIGPIPE-ordering reason
+    documented in the body below.
     """
     if squad_capable:
         squad_help_lines = (
@@ -393,6 +404,10 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         )
     else:
         outcome_value_help_lines = ''
+    workflow_help_lines = (
+        '      echo "--workflow-id string                  Workflow identifier"\n'
+        if workflow_capable else ''
+    )
     body = (
         '#!/usr/bin/env bash\n'
         'case "$1" in\n'
@@ -418,7 +433,8 @@ def build_shim(shim_path, invocations_log=None, jobs_log=None, meter_log=None, t
         + subscriber_email_help_lines
         + trace_name_help_lines
         + trace_type_help_lines
-        + parent_txn_help_lines +
+        + parent_txn_help_lines
+        + workflow_help_lines +
         '      echo "--agentic-job-id  Agentic job instance identifier"\n'
         '      exit 0\n'
         '    fi\n'

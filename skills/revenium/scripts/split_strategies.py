@@ -30,6 +30,9 @@ from the bash heredocs and from the tests):
     select_carry_classification   -- the classification a classified session's
     select_carry_job                 later growth carries, and the job it links
         to (carry-forward, quick-261018-s0b).
+    tool_event_job_arcs           -- the job arcs of a root's marker file, and
+    assign_tool_event_job            which job (if any) owns a tool event
+        captured at a given time (`--workflow-id`, quick-261027-fib).
 
 Phase 44 Plan 04 (EGV-17/D-15) adds a second, INVERSE conservation invariant
 owned by this file: equal_split() conserves DOWNWARD — one observed delta is
@@ -577,6 +580,154 @@ def select_carry_job(markers_path):
     except Exception:  # noqa: BLE001 - the contract is "never raises"
         return None
     return best
+
+
+# quick-261027-fib: the id a tool event may send as `--workflow-id`. This is the
+# slug shape every job id the reporter has ever created already has (all 389 ids
+# in the ent jobs ledger match). It is a REFUSAL test, never a rewrite: the
+# completion path's `_JOB_ID_BAD_CHARS` replacement would turn two different
+# ids into one ownership key, and an event must not be charged to a job whose
+# name it only resembles.
+_TOOL_EVENT_JOB_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+
+
+def _usable_event_ts(value):
+    """True for a finite number > 0 that is not a bool."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf")) and value > 0
+
+
+def tool_event_job_arcs(markers_path):
+    """The job arcs recorded in a ROOT session's marker file.
+
+    Returns `{"ok": bool, "unplaceable": bool, "arcs": [...]}`; each arc is
+    `{"id", "first_ts", "last_ts", "status", "id_valid"}`, sorted by `first_ts`
+    with ties going to file order.
+
+    Only `kind: "job"` records that pass `select_carry_job`'s acceptance test
+    count (a non-empty str `agentic_job_id`, every key of `_JOB_REQUIRED_KEYS`,
+    a line no longer than `_MAX_MARKER_LINE_CHARS`), and a `guardrail-halt-*`
+    id is skipped: it describes the interruption, not the work. Records group by
+    the RAW id (never rewritten; `id_valid` says whether it may be sent):
+
+      * `first_ts` is the ts of the id's FIRST record in file order. This is
+        hermes-report.sh's D-08 rule (only the first marker per job id is a
+        boundary), applied by time.
+      * `last_ts` and `status` come from the record with the greatest ts, a tie
+        going to the later line (`_reduce_job_outcome_queue`'s ordering). They
+        describe the arc; they do NOT extend ownership (see
+        assign_tool_event_job).
+
+    A qualifying record whose ts is unusable (bool, non-number, non-finite or
+    <= 0) cannot be placed in time: it sets `unplaceable` and is left out of
+    the arcs. A missing file is `ok` with no arcs; any other read failure is
+    `ok: False`. Never raises.
+    """
+    info = {"ok": True, "unplaceable": False, "arcs": []}
+    try:
+        groups = {}
+        with open(markers_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line or len(line) > _MAX_MARKER_LINE_CHARS:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or rec.get("kind") != "job":
+                    continue
+                job_id = rec.get("agentic_job_id")
+                if not isinstance(job_id, str) or not job_id:
+                    continue
+                if not all(key in rec for key in _JOB_REQUIRED_KEYS):
+                    continue
+                if job_id.startswith(_HALT_JOB_ID_PREFIX):
+                    continue
+                ts = rec.get("ts")
+                if not _usable_event_ts(ts):
+                    info["unplaceable"] = True
+                    continue
+                arc = groups.get(job_id)
+                if arc is None:
+                    groups[job_id] = {
+                        "id": job_id,
+                        "first_ts": ts,
+                        "last_ts": ts,
+                        "status": rec.get("status"),
+                        "id_valid": bool(_TOOL_EVENT_JOB_ID_RE.fullmatch(job_id)),
+                        "_order": len(groups),
+                    }
+                elif _rank_ts(ts) >= _rank_ts(arc["last_ts"]):
+                    arc["last_ts"] = ts
+                    arc["status"] = rec.get("status")
+    except FileNotFoundError:
+        return {"ok": True, "unplaceable": False, "arcs": []}
+    except Exception:  # noqa: BLE001 - OSError, UnicodeDecodeError, anything: never raises
+        return {"ok": False, "unplaceable": False, "arcs": []}
+    ordered = sorted(groups.values(), key=lambda a: (a["first_ts"], a["_order"]))
+    for arc in ordered:
+        del arc["_order"]
+    info["arcs"] = ordered
+    return info
+
+
+def assign_tool_event_job(arcs_info, event_ts):
+    """Which job owns a tool event captured at `event_ts`: `(job_id | None,
+    basis, arc | None)`.
+
+    OWNERSHIP IS FIRST-RECORD-ONLY (operator decision, 2026-10-27). A job record
+    is written at a turn boundary, after the turn's tools ran, so the events a
+    job owns are those captured at or before its FIRST record and after the
+    previous job's first record (D-08 by time). A later record for the same id
+    (a CANCELLED re-judge whose status moved) never extends that ownership: the
+    classifier's records carry no turn identity, and a re-judge that lands after
+    the user changed topic would charge the new turn's tools to the old job.
+
+    On the reproduction root (job `revenium_x_intelligence_scan_8e88`: first
+    record 14:34:00, re-judge 14:40:41, then a separate debugging turn) this
+    attributes 51 root + 73 subagent = 124 events. The 29 root events between
+    the first record and the re-judge, and the 82 debugging events, ship
+    without a workflow id (basis `after-job`). The rejected verdict-window rule
+    would have attributed 153; "latest job in the session" would also have
+    charged the debugging turn.
+
+    Decision order: an unreadable file -> `markers-unreadable`; an unplaceable
+    record -> `unplaceable-job`; a bad `event_ts` (a finite number > 0) ->
+    `bad-ts`; no arcs -> `no-job`. Then k is the first arc with
+    `first_ts >= event_ts`; if an EARLIER arc also covers the event
+    (`first_ts < event_ts <= last_ts`, its own later record) ownership is
+    genuinely unclear -> `ambiguous-arcs`; no k -> `after-job` (with the last
+    arc); k with an unsendable id -> `invalid-job-id` (ownership never shifts to
+    a neighbour); otherwise `(k.id, "first-after", k)`. Never raises.
+    """
+    try:
+        if not isinstance(arcs_info, dict) or arcs_info.get("ok") is not True:
+            return (None, "markers-unreadable", None)
+        if arcs_info.get("unplaceable"):
+            return (None, "unplaceable-job", None)
+        if not _usable_event_ts(event_ts):
+            return (None, "bad-ts", None)
+        arcs = arcs_info.get("arcs")
+        if not isinstance(arcs, list) or not arcs:
+            return (None, "no-job", None)
+        owner_idx = None
+        for idx, arc in enumerate(arcs):
+            if arc["first_ts"] >= event_ts:
+                owner_idx = idx
+                break
+        if owner_idx is None:
+            return (None, "after-job", arcs[-1])
+        for arc in arcs[:owner_idx]:
+            if arc["first_ts"] < event_ts <= arc["last_ts"]:
+                return (None, "ambiguous-arcs", None)
+        owner = arcs[owner_idx]
+        if not owner["id_valid"]:
+            return (None, "invalid-job-id", owner)
+        return (owner["id"], "first-after", owner)
+    except Exception:  # noqa: BLE001 - the contract is "never raises"
+        return (None, "markers-unreadable", None)
 
 
 def latest_transaction_id(ledger_path, sid):
