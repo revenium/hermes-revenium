@@ -437,7 +437,12 @@ def _no_job_decision(root, d, event_ts):
     its chance and wrote no job, so the work is intentionally unassigned)."""
     if max_hold_seconds <= 0 or not _classifier_expected() or d["ready"]:
         return ("", "no-job")
-    started, ended, activity, contended = _session_facts(root)
+    # Once per root per tick: a root with hundreds of held events would
+    # otherwise repeat the same sessions read for each one. A contended
+    # result is cached too, so a locked database costs one attempt per root.
+    if d["facts"] is None:
+        d["facts"] = _session_facts(root)
+    started, ended, activity, contended = d["facts"]
     if contended:
         # Cannot tell how old or live the root is: hold one more tick, bounded
         # by the event's own age so a database that stays locked cannot hold
