@@ -89,6 +89,25 @@ the entire v1.x release line.
   a session with no classification at all still ships `unclassified` and no
   job flag. It uses the `TIMESTAMP_SENTINEL` convention described below.
 
+## meter-tool-event-workflow.golden.json — an attributed tool event (quick-261027-fib)
+
+- **meter-tool-event-workflow.golden.json**: an additional fixture that is NOT
+  part of the immutability contract above. Loaded by
+  `tests/test_tool_event_job_attribution.py::RootEventTests`. It pins the
+  `revenium meter tool-event` argv a tool event ships when its owning job is
+  known and the job's `JOB:<id>:created:` line is ledgered: the unchanged
+  `meter-tool-event.golden.json` flag set plus `--workflow-id <job id>`, placed
+  after `--organization-name`. `--trace-id` stays the ROOT session. The tool
+  event contract is `--workflow-id`; the completion path's `--agentic-job-id`
+  family is forbidden here, as are `--transaction-id` (tool events never send
+  one), `--usage-metadata`, `--cost-usd` and `--operation`.
+
+  It has the same additive standing as `meter-completion-markerless.golden.json`.
+  `meter-tool-event.golden.json` stays byte-identical and is the unattributed
+  baseline: a tool event with no owner, a CLI that does not advertise
+  `--workflow-id`, or a session id Hermes did not supply must still ship exactly
+  that argv (pinned in the same test module).
+
 ## Immutability contract
 
 These fixtures are **IMMUTABLE** across the v1.x line (v1.0 through

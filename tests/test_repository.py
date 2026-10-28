@@ -534,6 +534,10 @@ class RepositoryTests(unittest.TestCase):
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-create.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'jobs-outcome.golden.json',
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-tool-event.golden.json',
+            # quick-261027-fib — the attributed tool-event wire shape (--workflow-id),
+            # additive to the immutability contract above
+            ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-tool-event-workflow.golden.json',
+            ROOT / 'tests' / 'test_tool_event_job_attribution.py',
             # Phase 29 Plan 03 — AGENT-01 no-observable-change baseline golden
             ROOT / 'tests' / 'fixtures' / 'compat' / 'meter-completion-markerless.golden.json',
             # Phase 23 — COMPAT-01/02 umbrella regression trip-wire (D-01)
@@ -2697,6 +2701,9 @@ exit 0
         self.assertIn('TOOL_EVENTS_LEDGER_FILE=', text)
         self.assertIn('tool-events', text)
         self.assertIn('revenium-tool-events.ledger', text)
+        # quick-261027-fib: tool-event-report.sh's run lock, declared only here.
+        self.assertIn('TOOL_EVENTS_LOCK_FILE=', text)
+        self.assertIn('tool-events.lock', text)
         # Phase 17: v1.3 guardrails-native paths and CLI capability helper.
         self.assertIn('GUARDRAIL_STATUS_FILE=', text)
         self.assertIn('guardrail-status.json', text)

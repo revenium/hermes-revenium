@@ -318,6 +318,14 @@ OUTCOME_METRICS_LEDGER_FILE="${REVENIUM_OUTCOME_METRICS_LEDGER_FILE:-${STATE_DIR
 # rather than merely wasteful.
 OUTCOME_METRICS_LOCK_FILE="${REVENIUM_OUTCOME_METRICS_LOCK_FILE:-${STATE_DIR}/outcome-metrics.lock}"
 
+# quick-261027-fib: serialises tool-event-report.sh. cron.lock only covers runs
+# made THROUGH cron.sh; an operator invoking the script directly can overlap a
+# tick, and both would read the same unledgered rows and ship them before either
+# ledgers them (the per-row grep guard narrows that window, it cannot close it:
+# the ledger line is written AFTER the CLI call). Non-blocking -- a second run
+# defers to the next tick.
+TOOL_EVENTS_LOCK_FILE="${REVENIUM_TOOL_EVENTS_LOCK_FILE:-${STATE_DIR}/tool-events.lock}"
+
 # Cross-tick no-op memo for the two per-session cron loops (hermes-report.sh
 # and api-event-report.sh). Each loop visits EVERY session with tokens on
 # EVERY tick, and a long-finished session costs 5-8 python3 spawns per visit

@@ -21,7 +21,7 @@ REPORTER = SKILL / 'scripts' / 'tool-event-report.sh'
 
 class ToolEventLedgerPrefilterTests(unittest.TestCase):
 
-    def _run(self, records, ledger_lines, files=None):
+    def _run(self, records, ledger_lines, files=None, prepare=None):
         tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmpdir, True)
         state_dir = os.path.join(tmpdir, 'state', 'revenium')
@@ -53,6 +53,9 @@ class ToolEventLedgerPrefilterTests(unittest.TestCase):
                     f'exec "{real_python}" "$@"\n')
         for name in ('revenium', 'python3'):
             os.chmod(os.path.join(bin_dir, name), 0o755)
+
+        if prepare is not None:
+            prepare(os.path.join(tmpdir, 'hh'), state_dir)
 
         env = {
             **os.environ,
@@ -142,6 +145,64 @@ class ToolEventLedgerPrefilterTests(unittest.TestCase):
         self.assertNotIn('toolu_a2', shipped, 'the rest of the bad file is dropped, as before')
         self.assertIn('toolu_b1', shipped, 'a later file must not be dropped with it')
         self.assertEqual(len(meter_calls), 2, meter_calls)
+
+
+    def test_fully_ledgered_tick_resolves_zero_roots_with_markers_and_db_present(self):
+        # quick-261027-fib: ownership resolution (state.db ancestry, marker
+        # arcs, the jobs ledger) is paid only for an UNLEDGERED row. A tick
+        # that ships nothing must read none of it, even when every input exists.
+        import sqlite3
+        ledgered = [f'toolu_{i:03d}' for i in range(50)]
+        records = [self._record(t) for t in ledgered]
+        ledger = [f'TOOL:sess_abc:{t}:1747700000.0' for t in ledgered]
+
+        def prepare(hermes_home, state_dir):
+            os.makedirs(hermes_home, exist_ok=True)
+            conn = sqlite3.connect(os.path.join(hermes_home, 'state.db'))
+            conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)')
+            conn.execute("INSERT INTO sessions VALUES ('sess_abc', NULL)")
+            conn.commit()
+            conn.close()
+            markers = os.path.join(state_dir, 'markers')
+            os.makedirs(markers, exist_ok=True)
+            with open(os.path.join(markers, 'sess_abc.jsonl'), 'w') as fh:
+                fh.write(json.dumps({'kind': 'job', 'ts': 1747700001.0, 'agentic_job_id': 'J1',
+                                     'job_type': 't', 'status': 'SUCCESS'}) + '\n')
+            with open(os.path.join(state_dir, 'plugin-status.json'), 'w') as fh:
+                json.dump({'healthy': True, 'registered': True}, fh)
+
+        meter_calls, python_calls, _, log = self._run(records, ledger, prepare=prepare)
+
+        self.assertEqual(meter_calls, [])
+        self.assertEqual([c for c in python_calls if c == '-'], ['-'],
+                         f'one heredoc pass expected; got {python_calls}')
+        self.assertIn('roots resolved 0', log)
+        self.assertIn('Reported 0, skipped 50', log)
+
+    def test_events_of_two_subagents_resolve_one_root_once(self):
+        import sqlite3
+        records_a = [dict(self._record(f'a{i:02d}'), sid='child_a', sid_source='payload') for i in range(25)]
+        records_b = [dict(self._record(f'b{i:02d}'), sid='child_b', sid_source='payload') for i in range(25)]
+
+        def prepare(hermes_home, state_dir):
+            os.makedirs(hermes_home, exist_ok=True)
+            conn = sqlite3.connect(os.path.join(hermes_home, 'state.db'))
+            conn.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT)')
+            conn.executemany('INSERT INTO sessions VALUES (?, ?)',
+                             [('root_r', None), ('child_a', 'root_r'), ('child_b', 'root_r')])
+            conn.commit()
+            conn.close()
+
+        meter_calls, python_calls, ledger_after, log = self._run(
+            [], [], files={'child_a.jsonl': records_a, 'child_b.jsonl': records_b}, prepare=prepare)
+
+        self.assertEqual(len(meter_calls), 50, meter_calls[:3])
+        self.assertTrue(all('--trace-id root_r' in c for c in meter_calls), meter_calls[:3])
+        self.assertEqual(len(ledger_after), 50)
+        self.assertIn('roots resolved 1', log)
+        self.assertEqual([c for c in python_calls if c == '-'], ['-'])
+        root_lookups = [c for c in python_calls if 'get-root-session-id.py' in c]
+        self.assertEqual(root_lookups, [])
 
 
 if __name__ == '__main__':

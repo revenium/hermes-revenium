@@ -26,7 +26,7 @@ bash install.sh
 bash ~/.hermes/skills/revenium/scripts/install.sh
 
 # Drive the runtime pieces manually after install
-bash ~/.hermes/skills/revenium/scripts/cron.sh              # one tick: all six stages
+bash ~/.hermes/skills/revenium/scripts/cron.sh              # one tick: all seven stages
 bash ~/.hermes/skills/revenium/scripts/hermes-report.sh     # completion metering only
 bash ~/.hermes/skills/revenium/scripts/guardrail-check.sh   # guardrail evaluation only
 bash ~/.hermes/skills/revenium/scripts/tool-event-report.sh # tool-event metering only
@@ -60,7 +60,7 @@ The skill has three parts. They communicate only through files under `~/.hermes/
 
 2. **State files (`~/.hermes/state/revenium/`).** The public interface consists of `config.json`, `guardrail-status.json`, `plugin-status.json`, `markers/`, `tool-events/`, the ledgers, the taxonomies and the log. Every process re-reads what it needs; there is no shared memory and no IPC.
 
-3. **The cron pipeline (every minute, out of process).** `cron.sh` takes `cron.lock`, then runs six stages: plugin health → completion metering → guardrail evaluation → tool-event metering → api-event metering → drain status. (A conditional legacy `alertId` migration runs first when one is present; it is not one of the six.) Only this pipeline calls the Revenium API or talks back to Hermes (via one `hermes chat` call on a new halt). The completion-metering stage also runs a post-loop auxiliary-usage pass inside `hermes-report.sh`. That pass is not one of the six stages.
+3. **The cron pipeline (every minute, out of process).** `cron.sh` takes `cron.lock`, then runs seven stages: plugin health → completion metering → guardrail evaluation → tool-event metering → api-event metering → outcome metrics → drain status. (A conditional legacy `alertId` migration runs first when one is present; it is not one of the seven.) Only this pipeline calls the Revenium API or talks back to Hermes (via one `hermes chat` call on a new halt). The completion-metering stage also runs a post-loop auxiliary-usage pass inside `hermes-report.sh`. That pass is not one of the seven stages.
 
 ```mermaid
 flowchart TB
@@ -88,7 +88,7 @@ flowchart TB
         ALED["revenium-aux.ledger"]
         TAX["task-taxonomy.json<br/>job-taxonomy.json<br/>role-taxonomy.json"]
         LOG["revenium-metering.log<br/>in-place rotation"]
-        LOCKS["cron.lock, rules.lock, prune.lock"]
+        LOCKS["cron.lock, rules.lock, prune.lock, tool-events.lock"]
     end
 
     subgraph CRON["cron pipeline (per minute, out of process)"]
@@ -136,7 +136,9 @@ flowchart TB
     GC --> GST
     GC -->|"on NEW halt: embed enforcement-event"| MSG
     TER --> TEV & TLED
-    TER -->|"meter tool-event"| RCLI
+    TER -->|"reads root markers, jobs ledger, plugin status"| MK & JLED & PST
+    TER -->|"read-only ancestry + root liveness"| DB
+    TER -->|"meter tool-event --trace-id root --workflow-id owning job"| RCLI
     PS --> PST
     CH --> GST
     PM --> MK
@@ -200,7 +202,7 @@ Provider inference (`anthropic` / `openai` / `google` / `xai` / `deepseek` / `me
 
 #### Auxiliary usage metering
 
-`report_auxiliary_usage` is a post-loop pass inside `hermes-report.sh`, running after the agentic-jobs outcome stage and before cost reconciliation. It is not a cron stage; the cron still runs six.
+`report_auxiliary_usage` is a post-loop pass inside `hermes-report.sh`, running after the agentic-jobs outcome stage and before cost reconciliation. It is not a cron stage; the cron still runs seven.
 
 It reads `session_model_usage` from `state.db`, read-only, and ships each row whose `task` column is non-empty as its own `revenium meter completion --operation-type AUX --task-type aux_<label>` from a fixed six-label vocabulary. An unrecognised `task` value ships as `aux_unclassified` rather than being dropped, so spend is preserved even without a recognised label. `_aux_warn_once` on `AUX_WARN_FLAGS_DIR` gates the warning.
 
@@ -219,6 +221,18 @@ Local proof establishes scope match at emission: an auxiliary row carries the sa
 ### Tool-event capture
 
 `post_tool_call.sh` is a pure observer: it appends a compact record per tool call to `tool-events/<sid>.jsonl`, makes no network call and exits 0 on any internal failure. `tool-event-report.sh` ships each unledgered record via `revenium meter tool-event` and records it in `revenium-tool-events.ledger`. All three hooks drain stdin as their first executable statement (Hermes blocks on stdin before reading stdout; an early exit hangs the hook) and fail open on a missing or corrupt status file.
+
+**Tool-event job attribution (quick-261027-fib).** `tool-event-report.sh` sends `--workflow-id <owning agentic job id>` on `revenium meter tool-event`, next to the unchanged root `--trace-id`. The flag is `--workflow-id`, never the completion path's `--agentic-job-id` family: it is the field the application's per-job tool-cost resolver (`get-job-tool-costs.ts`, `workflowId = agenticJobId`) joins on. Job `revenium_x_intelligence_scan_8e88` received 153 tool events with no job association because the reporter never sent it. Status after this change: *exporter association fixed; application visibility still pending* (the newer job-detail cost panel is deliberately unattributed and the job trace drawer reads AI calls only; neither is touched here). The argv with no owner is byte-identical to `meter-tool-event.golden.json`; an attributed one matches the additive `meter-tool-event-workflow.golden.json` (`--workflow-id` placed after `--organization-name`). Payloads stay minimal: no `--transaction-id` (pinned by `test_tool_event_reporter_omits_transaction_id`), no arguments, results, prompts or cost.
+
+*Ownership is per root and per job arc, by time, never "latest job in the session".* The root session (the `parent_session_id` walk, at most ten hops, loaded as ONE `state.db` read per tick instead of a python spawn per row) owns the job; a subagent's event inherits its root's job and trace, while its `TOOL:<sid>:<tcid>:` ledger key stays sid-scoped. Only the ROOT's marker file is read, in the directory of the profile that owns it (the `resolve-markers-dir.py` sidecar, as `hermes-report.sh` does), never a subagent's own file. `split_strategies.tool_event_job_arcs` groups the root's `kind:"job"` records by raw id (a `guardrail-halt-*` id is never an owner or a boundary); `assign_tool_event_job` returns the first arc whose FIRST record is at or after the event (D-08 by time: a job record is written at the end of the turn whose tools it owns), basis `first-after`. An event after the last arc's first record is `after-job`; an event that falls inside an earlier arc's own later-record span and before the next arc is `ambiguous-arcs`; an id that is not `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$` is `invalid-job-id` (refused, never rewritten, ownership never shifts to a neighbour); an unusable record ts is `unplaceable-job`; an unreadable file is `markers-unreadable`; a bad event ts is `bad-ts`; a root sid that is not `^[A-Za-z0-9_-]{1,128}$` is `bad-sid` and never builds a path. **First record only, by explicit operator decision (2026-10-27):** a later record for the same id (a `CANCELLED` re-judge whose status moved) never extends ownership. On the reproduction root (first record 14:34:00, same-id `SUCCESS` re-judge 14:40:41, then a separate debugging turn) that attributes 51 root + 73 subagent = **124** events; the **29** continuation events between the first record and the re-judge, and the **82** debugging events, ship without `--workflow-id` (`after-job`). The rejected verdict-window rule would have attributed 153; "latest job in the session" would also have charged the debugging turn. **The trade-off is under-attribution:** work done after a job's first record (a long arc's tail, those 29 events) is unassigned. A verdict window was rejected because a re-judge that moves a `CANCELLED` job after the user changed topic would charge that turn's tools to the old job, and the job records carry no turn identity. Closing the gap properly needs arc extents on job records.
+
+*The id is sent only once the job exists.* A link to a job Revenium has not seen CREATES it nameless (the same reason aux rows and subagent completions are gated), so `--workflow-id <id>` ships only when `JOB:<id>:created:` is in `revenium-jobs.ledger` (read once per tick). No outcome-age window applies, unlike `_carry_link_window`: that window bounds LD-1's carried-turn bias, which does not exist here; the event's own ts lies inside the arc, the create is ledgered so no phantom job can be minted, and a workflow id is an association on an immutable event, not a lifecycle verb.
+
+*Late markers are held, bounded and logged once.* A tool event ships 3 to 122 s after capture (measured) but its job record lands at the end of the turn, so most events used to ship before their job existed. Three holds, each ending in a distinct basis: **job-pending** (no job record yet) holds exactly when `_root_pending_uncached` would: a healthy classifier is registered (`plugin-status.json`), the cap `REVENIUM_UNCLASSIFIED_MAX_HOLD_SECONDS` (7200; `0` switches EVERY hold here off) is not reached from the root's `started_at`, there is no `.ready` sentinel and the root is live (latest of `started_at`, `last_activity_at`, `ended_at` under `REVENIUM_CRON_SETTLE_SECONDS`). Released as `hold-expired` (warned once per root) when the cap is the only reason, else `no-job` (no classifier, sentinel written, idle root, no row: the classifier had its chance, the work is intentionally unassigned). **create-pending** (owner found, create not ledgered) holds for `max(REVENIUM_JOBS_STALE_SECONDS, REVENIUM_CRON_SETTLE_SECONDS)` from the job's first record, then ships `create-missing` (warned once per job). **db-busy** (state.db locked while resolving ancestry) holds while the event is younger than the cap, then ships with the sid as its own root, `ancestry-unavailable`. `after-job` never holds: under first-record-only no later record can bring the event into an arc and the classifier mints no second job per root. No tunables were added. A held row is counted and skipped before the per-row ledger grep, ledgers nothing and is retried next tick.
+
+*Provenance.* `post_tool_call.sh` stamps `sid_source` on every new spool record: `payload` (Hermes supplied the session id), `recent-session` (the Tier-2 newest-session-file guess) or `pseudo`. Only `payload` sids may pick a job or be held; any other (and any record from before the stamp) ships `sid-unverified` with the root trace. A guessed id must never charge one job's tools to another.
+
+*Safety.* `--workflow-id` is probed lazily (`supports_flag "meter tool-event" "--workflow-id"`, at most once per run, and only when some row has an owner or a hold); a negative or indeterminate probe ships every row of the run unattributed, held rows included, with basis `cli-unsupported`, no holds and no notices, so an older CLI meters exactly as before. `tool-events.lock` (`TOOL_EVENTS_LOCK_FILE`, a non-blocking fcntl flock, `exec 9>` idiom of `outcome-metrics-report.sh`) stops an operator-run reporter from overlapping a cron tick. Ledger-after-success, failure retry and the `(sid, tool_call_id)` key are unchanged; delivery is at-least-once across a crash between the CLI ack and the ledger append (no server dedup contract for tool events is verified, so no `--transaction-id` is sent). A fully pre-ledgered tick resolves zero roots (`roots resolved 0`) and still runs one heredoc pass. Observability: the Done line reads `Reported R, skipped S. Held H; attributed A, unassigned U; roots resolved N.`, each shipped event logs `job=<id|none> basis=<basis>`, and the held / warned notices are logged once per (key, reason) through flags in `OUTCOME_WARN_FLAGS_DIR` (`<key>__tool-<reason>.flag`, already garbage-collected by `prune-markers.sh`). The 153 historical events are not repaired or replayed. Pinned by `tests/test_tool_event_job_attribution.py` and `tests/test_tool_event_report_ledger_prefilter.py`.
 
 ### Halt transitions
 
@@ -354,7 +368,7 @@ protocol works.
 - `task-taxonomy.json`, `job-taxonomy.json`: the controlled vocabularies, seeded from the skill dir and grown by the classifier. `role-taxonomy.json` is the learned role card (quick-261017-kb1): seeded the same way, grown by the classifier and read only by the classifier. It feeds the built-in `llm` evaluator's prompt with known roles and per-currency typical rates as a consistency anchor (never a priced card, never a change to `evidence_class` or reportability); a configured `rateCard` disables it. `aux-taxonomy.json` is the asymmetric exception: a fixed six-label vocabulary that lives in the SKILL dir (never copied into `STATE_DIR`) and is never grown by the classifier.
 - `revenium-metering.log`: cron log, truncated in place by `rotate_log_if_needed`.
 - `reporter-memo.jsonl`, `event-shadow-memo.jsonl`: cross-tick no-op caches for `hermes-report.sh` and the shadow pass of `api-event-report.sh`. A session whose inputs (state.db row, marker/owner/spool files, scripts, switches, ledgers) are unchanged since it was last a pure no-op is skipped without its per-session python3 spawns. Safe to delete; `REVENIUM_REPORTER_MEMO=disabled` turns both off. Pinned by `tests/test_reporter_memo.py` and `tests/test_event_shadow_memo.py`.
-- `cron.lock`, `rules.lock`, `prune.lock`: flock targets.
+- `cron.lock`, `rules.lock`, `prune.lock`, `tool-events.lock`: flock targets.
 
 ### Platform requirements
 - macOS or Linux with bash, python3, sqlite3 and the `revenium` CLI installed.
@@ -418,6 +432,7 @@ protocol works.
 | `LOG_FILE` | `${STATE_DIR}/revenium-metering.log` |
 | `ENV_FILE` | `${STATE_DIR}/env` |
 | `LOCK_FILE` / `RULES_LOCK_FILE` / `PRUNE_LOCK_FILE` | `${STATE_DIR}/cron.lock`, `rules.lock`, `prune.lock` |
+| `TOOL_EVENTS_LOCK_FILE` | `${STATE_DIR}/tool-events.lock` (`tool-event-report.sh`'s non-blocking run lock; `cron.lock` only covers runs made through `cron.sh`) |
 | `MIGRATION_NOTIFY_FILE` | `${STATE_DIR}/migration-notify-state` |
 | `HOOKS_CONFIG_FILE` | `${HERMES_HOME}/config.yaml` |
 | `STATE_DB` | `${HERMES_HOME}/state.db` |
@@ -493,7 +508,7 @@ The tables below complement the component and data-flow diagram under "Architect
 | Pre-tool hook | Block tool calls while halted; write a `CANCELLED` job marker | `skills/revenium/scripts/pre_tool_call.sh` |
 | Post-tool hook | Append a tool-event record; never blocks, never calls out | `skills/revenium/scripts/post_tool_call.sh` |
 | Path resolver / shared helpers | Single source of truth for state paths; `ensure_path`, logging, rotation, capability probes, session-identity helpers | `skills/revenium/scripts/common.sh` |
-| Cron orchestrator | Take `cron.lock`, source `env`, rotate the log, run the six stages with `\|\| true` | `skills/revenium/scripts/cron.sh` |
+| Cron orchestrator | Take `cron.lock`, source `env`, rotate the log, run the seven stages with `\|\| true` | `skills/revenium/scripts/cron.sh` |
 | Metering reporter | Read `state.db`, diff vs ledger, split the delta across markers, create/close jobs, ship completions, append ledgers, plus the post-loop auxiliary-usage pass | `skills/revenium/scripts/hermes-report.sh` |
 | Split strategies | Conservation-exact delta splitting across N markers | `skills/revenium/scripts/split_strategies.py` |
 | Guardrail checker | Poll rules, write `guardrail-status.json`, detect new halts, notify with the embedded enforcement event | `skills/revenium/scripts/guardrail-check.sh` |
@@ -553,7 +568,7 @@ The tables below complement the component and data-flow diagram under "Architect
 |-------------|---------|----------------|
 | `install.sh` (repo root) | human, after clone | copy the bundle, then delegate to the bundled installer |
 | `skills/revenium/scripts/install.sh` | human | credentials, plugin, hooks, rules, cron, gateway restart |
-| `scripts/cron.sh` | per-minute crontab entry | lock, rotate, migrate, then the six stages |
+| `scripts/cron.sh` | per-minute crontab entry | lock, rotate, migrate, then the seven stages |
 | `scripts/hermes-report.sh` | cron or direct | completion metering + agentic jobs |
 | `scripts/guardrail-check.sh` | cron or direct | guardrail state + halt notification |
 | `scripts/tool-event-report.sh` | cron or direct | tool-event metering |
