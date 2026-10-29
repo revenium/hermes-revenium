@@ -263,7 +263,9 @@ def _on_post_llm_call(
     on_session_end/on_session_finalize, which fire after the user already
     has their response. D-05 accepts this by choosing turn 1. Every
     subsequent turn in the same session short-circuits on Task 1's
-    permanent latch and costs only a marker-file read.
+    permanent latch and costs only a marker-file read. An evaluator answer
+    that omits `confidence` costs one more evaluator call on this same path,
+    bounded by the same per-call timeout.
 
     One exception (classifier-premature-cancel): while a root session's job
     is still CANCELLED -- the "uncertain" verdict a mid-session first pass

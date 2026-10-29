@@ -577,6 +577,15 @@ card does not list, so the fill rate can stay flat while the omission count
 falls. Each cause has its own line, and the instrument line is the one that
 measures this requirement.
 
+**Retry on omission shipped later, as control flow.** The retry rejected for
+TRU-03 above shipped afterwards (quick-261029-cay) and re-sends the identical
+prompt. The instrument line still fires once per answer that omits, so it
+remains a per-call count. Add a fourth count: the lines containing `retrying
+once`, which is the number of extra evaluator calls. An arc rescued by the retry
+logs the instrument line and then `outcome evaluated job=`, so the per-arc and
+per-call omission rates now differ. Do not compare either with the pre-retry
+baseline without that correction.
+
 **On the current model, read zero as no-regression.** The host serves a model
 that omitted on 0 of 25 arcs before any change. A zero count of the instrument
 line is a report of "no regression", never of "improvement". A forward

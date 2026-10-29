@@ -213,6 +213,14 @@ this repository.
 
 ### Fixed
 
+- A job's Value was occasionally missing in Revenium because the outcome evaluator's answer
+  left out `confidence` (2 of 98 jobs over 14 days on the reference host). The validator
+  rejected the answer and nothing asked again, so the miss was permanent. The classifier now
+  asks the evaluator once more with the same prompt. A valid second answer is used; anything
+  else keeps today's record. No completion budget changed, no confidence is defaulted or
+  inferred, and an answer that carries a confidence is handled exactly as before. The cost is
+  at most one extra evaluator call, only for those answers. Existing installs need the updated
+  classifier plugin: re-run `install.sh` from a fresh clone, or `install-plugin.sh` per profile.
 - A subagent's spend now ships linked to its root session's job instead of unlinked. A subagent
   is classified, and becomes ready to meter, when its own turn ends, which is well before its
   root session's turn ends and the root's job marker (the only source of the job id) is
