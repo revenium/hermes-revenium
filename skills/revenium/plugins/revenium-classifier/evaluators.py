@@ -33,6 +33,11 @@ evaluator cannot responsibly price the work, and callers must treat it as an
 ordinary outcome — the job still reports its execution status, just without a
 value (ROI-08).
 
+A returned dict whose `confidence` is missing or None, and that passes the checks
+that come before the confidence check, makes the classifier call the same
+evaluator once more with the same three arguments (classifier._attach_assessment).
+An evaluator must therefore tolerate being called twice for one job.
+
 RAW, NOT FINAL. An evaluator reports its *assumptions*; it does not report the
 money. `estimated_value` is DERIVED by classifier._validate_assessment from
 hours x rate, and a supplied total is discarded (ROI-05). This is deliberate: a
