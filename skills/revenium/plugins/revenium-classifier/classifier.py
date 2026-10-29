@@ -5796,6 +5796,58 @@ def _write_marker_pair(sid: str, task_type: str, paths: "_Paths | None" = None) 
     return marker_path
 
 
+def _confidence_omission_retryable(raw, cfg) -> bool:
+    """True when the confidence check is what `_validate_assessment` rejected `raw` on.
+
+    Mirrors the gates `_validate_assessment` runs before its confidence check
+    (mechanism, hours/rate, bounds). Re-validating a copy with a confidence
+    filled in would answer the same question, but that is the workaround the
+    Phase 67 SC2 fence forbids; mirroring is safe because `_validate_assessment`
+    is SC3 AST-pinned, so the two cannot drift silently. Pure, never raises.
+    """
+    try:
+        if not isinstance(raw, dict) or raw.get("confidence") is not None:
+            return False
+        if _resolve_economic_mechanism(raw) in (
+            ECONOMIC_MECHANISM_UNKNOWN, ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK,
+        ):
+            return False
+        hours = _finite_number(raw.get("estimated_hours_saved"))
+        rate = _finite_number(raw.get("assumed_loaded_rate"))
+        if hours is None or rate is None:
+            return False
+        limits = cfg if isinstance(cfg, dict) else {}
+        max_hours = _finite_number(limits.get("maxHoursSaved")) or DEFAULT_MAX_HOURS_SAVED
+        max_rate = _finite_number(limits.get("maxLoadedRate")) or DEFAULT_MAX_LOADED_RATE
+        return 0 < hours <= max_hours and 0 < rate <= max_rate
+    except Exception:
+        return False
+
+
+async def _retry_outcome_evaluation(fn, valid: dict, transcript: str, fn_cfg: dict):
+    """Call the evaluator again with the identical arguments.
+
+    Returns (answer, served_model), or None when the retry raised, answered with
+    a sentinel or a non-dict, or named newly_enabled_work. Logs nothing: a
+    registrant's exception text can carry transcript text (ROI-13).
+    """
+    try:
+        raw = fn(valid, transcript, fn_cfg)
+        if inspect.isawaitable(raw):
+            raw = await raw
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    served_model = PROVENANCE_MODEL_UNKNOWN
+    carrier = raw.pop(_SERVED_MODEL_KEY, None)
+    if isinstance(carrier, _ServedModel):
+        served_model = carrier.value
+    if _resolve_economic_mechanism(raw) == ECONOMIC_MECHANISM_NEWLY_ENABLED_WORK:
+        return None
+    return raw, served_model
+
+
 async def _attach_assessment(
     valid: dict, transcript: str, paths: "_Paths", double_counting_group: str = "",
 ) -> None:
@@ -6008,6 +6060,23 @@ async def _attach_assessment(
             )
             return
         assessment = _validate_assessment(raw, cfg, name, evaluator_version, paths=paths)
+        # The model leaves out the trailing field on about 2% of evaluations (2
+        # of 98 jobs on the reference host over 14 days); Phase 53-04 measured
+        # that it is not a token cap. The arguments are re-sent unchanged so the
+        # second answer answers the original prompt, not a "you forgot" prompt.
+        if not assessment and _confidence_omission_retryable(raw, cfg):
+            logger.info(
+                "revenium-classifier: outcome evaluation omitted confidence for "
+                "job=%s, retrying once",
+                valid.get("agentic_job_id", ""),
+            )
+            retried = await _retry_outcome_evaluation(fn, valid, transcript, fn_cfg)
+            if retried is not None:
+                retry_assessment = _validate_assessment(
+                    retried[0], cfg, name, evaluator_version, paths=paths)
+                if retry_assessment:
+                    raw, served_model = retried
+                    assessment = retry_assessment
         if assessment:
             if learning:
                 # quick-261017-kb1: canonicalize the role and record the
