@@ -37,6 +37,7 @@ bash ~/.hermes/skills/revenium/scripts/clear-halt.sh        # clear all halts (-
 bash ~/.hermes/skills/revenium/scripts/prune-markers.sh --dry-run   # marker + assessment GC (manual, never in cron)
 bash ~/.hermes/skills/revenium/scripts/correct-assessment.sh --job-id <id> --value <n> \
   --currency USD --reason <text> [--dry-run]   # append a correction (operator-only, never in cron)
+bash ~/.hermes/skills/revenium/scripts/declare-baseline.sh <job_type> [--dry-run]   # job-type baseline + overhead per unit (operator-only, never in cron; no flags = read-only report)
 
 # Per-concern install / diagnostics
 bash ~/.hermes/skills/revenium/scripts/install-plugin.sh    # classifier plugin into the profile's plugins/
@@ -516,6 +517,7 @@ The tables below complement the component and data-flow diagram under "Architect
 | Rule setup / migration | Create budget rules; migrate a legacy `alertId` to `ruleIds` | `skills/revenium/scripts/setup-guardrails.sh` |
 | Halt clearer | Clear `halted` (all rules, or one via `--rule-id`) | `skills/revenium/scripts/clear-halt.sh` |
 | Assessment corrector | Append a correction to a job's assessment, locally and via `revenium jobs outcome-update`; operator-only, never in cron | `skills/revenium/scripts/correct-assessment.sh` |
+| Baseline declarer | Append a job type's pre-AI baseline version and set its declared overhead per unit; suggests figures from the assessments, never applies them; operator-only, never in cron | `skills/revenium/scripts/declare-baseline.sh` |
 | Marker GC | Prune stale marker files by ledger timestamp, falling back to mtime | `skills/revenium/scripts/prune-markers.sh` |
 | Health checks | Report plugin registration and hook registration state | `skills/revenium/scripts/plugin-status.sh`, `hooks-status.sh` |
 | Installers | One-command setup and per-concern install/uninstall | `skills/revenium/scripts/install.sh`, `install-plugin.sh`, `install-hooks.sh`, `install-cron.sh` and their `uninstall-` pairs |
