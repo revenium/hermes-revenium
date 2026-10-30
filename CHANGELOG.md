@@ -11,6 +11,19 @@ this repository.
 
 ### Added
 
+- `declare-baseline.sh <job_type>`, an operator-only script for the job-type settings
+  Revenium's "Edit Job Type" dialog exposes and the cron never writes. It appends a pre-AI
+  baseline version (`revenium jobs types baselines append`: cost per unit, minutes per unit,
+  quality rate, hourly rate, currency, provenance, declared-by, evidence URL, effective
+  from) and sets the declared overhead per unit (`overheadPerUnit`/`overheadCurrency`) by
+  reading the economics contract and sending it back with only those keys changed. With no
+  flags it prints the current overhead, the baseline in force and suggested figures from the
+  evaluator's assessments; suggestions are never applied and `--provenance` is required,
+  because none of the three provenance values describes a model estimate. A baseline is
+  permanent, so a repeat is refused (local `revenium-baselines.ledger` and the server's
+  version in force) unless `--force`. Value per unit (monetization) is still never written
+  (#156); the quality guardrail has no CLI command yet. Needs a revenium CLI with
+  `jobs types baselines` (1.9.0).
 - The evaluator's inferred role now reaches Revenium, and a role learned over time keeps it
   `jobs outcome --metadata` carries the role as `basis.role` (60 characters at
   most, before `basis.hours_saved`) on a reportable record only; a candidate record carries

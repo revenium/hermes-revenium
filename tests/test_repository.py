@@ -444,6 +444,7 @@ class RepositoryTests(unittest.TestCase):
             SKILL / 'scripts' / 'post_tool_call.sh',    # Phase 14 — tool-event capture hook
             SKILL / 'scripts' / 'tool-event-report.sh',  # Phase 15 — tool-event reporter
             SKILL / 'scripts' / 'outcome-metrics-report.sh',  # quick-260919 — ROI outcome-metric appends
+            SKILL / 'scripts' / 'declare-baseline.sh',  # quick-261029-tyq — operator-only baselines + overhead
             SKILL / 'scripts' / 'install-plugin.sh',    # Closes tap-install plugin-discovery gap
             SKILL / 'scripts' / 'install.sh',           # quick-260606 — one-command end-to-end installer
             SKILL / 'scripts' / 'hooks-status.sh',      # Diagnose hooks-registered-but-inert footgun
@@ -2704,6 +2705,8 @@ exit 0
         # quick-261027-fib: tool-event-report.sh's run lock, declared only here.
         self.assertIn('TOOL_EVENTS_LOCK_FILE=', text)
         self.assertIn('tool-events.lock', text)
+        # quick-261029-tyq: declare-baseline.sh's permanent-append ledger.
+        self.assertRegex(text, r'BASELINES_LEDGER_FILE="\$\{REVENIUM_BASELINES_LEDGER_FILE:-\$\{STATE_DIR\}/revenium-baselines\.ledger\}"')
         # Phase 17: v1.3 guardrails-native paths and CLI capability helper.
         self.assertIn('GUARDRAIL_STATUS_FILE=', text)
         self.assertIn('guardrail-status.json', text)
