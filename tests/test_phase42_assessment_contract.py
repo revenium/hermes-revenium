@@ -2115,6 +2115,10 @@ def _build_correction_tree(sid, job_id, sidecar_lines=None, seed_outcome_line=Fa
         'TZ': 'UTC',
         'REVENIUM_ORGANIZATION_NAME': '',
     }
+    # resolve_team_id prefers REVENIUM_TEAM_ID over `revenium config show`, so
+    # an operator shell that exports it would skip the shim (and its
+    # config_show_fails branch) entirely.
+    env.pop('REVENIUM_TEAM_ID', None)
     return tmpdir, env, jobs_log, state_dir, sidecar_path, jobs_ledger
 
 
