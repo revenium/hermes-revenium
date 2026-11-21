@@ -401,6 +401,41 @@ Section 9 prints `enabled=` and `evaluator=` per profile. On a multi-profile hos
 profile you meant to configure. Editing the wrong one is the most common way this silently
 does nothing.
 
+## Declaring a job type's baseline and overhead
+
+Revenium's "Edit Job Type" dialog has fields the cron never writes: a pre-AI baseline
+version (cost per unit, human minutes per unit, quality rate, hourly rate, effective
+date, how it was obtained, an evidence URL) and a declared overhead per unit.
+`declare-baseline.sh` writes both from a terminal. Cron never runs it.
+
+```bash
+# Read-only: current overhead, the baseline in force, and suggestions from this host's assessments
+bash ~/.hermes/skills/revenium/scripts/declare-baseline.sh research
+
+# Append a baseline version (permanent) and set the overhead, previewing first
+bash ~/.hermes/skills/revenium/scripts/declare-baseline.sh research \
+  --minutes-per-unit 90 --hourly-rate 75 --currency USD --provenance MEASURED \
+  --evidence-url https://example.com/time-study --overhead-per-unit 4 --dry-run
+```
+
+The suggestions are medians of the evaluator's own estimates for that job type (hours
+saved and loaded rate, latest assessment per job). They are printed, never applied:
+a baseline is permanent and its provenance (`CUSTOMER_DECLARED`, `MEASURED`,
+`SIGNED_OFF`) says a person stands behind the numbers, which a model estimate cannot.
+`--provenance` is therefore required.
+
+A baseline can't be amended or deleted. The script refuses a repeat of values it has
+already appended (its own ledger, `revenium-baselines.ledger`) or that the version in
+force already declares; `--force` overrides both. The overhead is written by reading
+the whole economics contract and sending it back with only the two overhead keys
+changed. The type needs a contract first; the cron declares one the first time a
+reportable job of that type is appended.
+
+Value per unit is not offered. A per-unit rate makes Revenium compute every job's
+value as rate x units and ignore the reported value. An operator's existing rule is
+kept, and the read-only report warns when one is set. The quality guardrail has no
+CLI command yet.
+
 ## Two things people get wrong
 
 Nesting `boundaries` inside `llmOutcomeEvaluation`. The advanced `boundaries` block is a

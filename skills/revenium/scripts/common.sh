@@ -318,6 +318,17 @@ OUTCOME_METRICS_LEDGER_FILE="${REVENIUM_OUTCOME_METRICS_LEDGER_FILE:-${STATE_DIR
 # rather than merely wasteful.
 OUTCOME_METRICS_LOCK_FILE="${REVENIUM_OUTCOME_METRICS_LOCK_FILE:-${STATE_DIR}/outcome-metrics.lock}"
 
+# quick-261029-tyq: operator baseline appends (declare-baseline.sh, never cron).
+# A baseline version is permanent: the API appends, never amends or deletes. The
+# server can list versions, so the version in force is also checked, but only
+# this ledger catches a re-run whose effective date differs. Key domain:
+# BASELINE:<job type>:<digest of the declared values>:<unix ts>.
+BASELINES_LEDGER_FILE="${REVENIUM_BASELINES_LEDGER_FILE:-${STATE_DIR}/revenium-baselines.ledger}"
+# Serialises declare-baseline.sh's check -> append -> ledger sequence: two
+# overlapping runs could both pass the duplicate checks before either ledgers,
+# and the second permanent version could never be removed.
+BASELINES_LOCK_FILE="${REVENIUM_BASELINES_LOCK_FILE:-${STATE_DIR}/baselines.lock}"
+
 # quick-261027-fib: serialises tool-event-report.sh. cron.lock only covers runs
 # made THROUGH cron.sh; an operator invoking the script directly can overlap a
 # tick, and both would read the same unledgered rows and ship them before either
