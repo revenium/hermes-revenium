@@ -288,6 +288,38 @@ class BaselineAppendTests(_Base):
         self.assertIn('failed', r.stderr)
         self.assertEqual(self.ledger_lines(), [])
 
+    def test_overlapping_run_is_refused_before_any_check(self):
+        # Two runs that both pass the duplicate checks before either ledgers
+        # would append the same PERMANENT version twice: the lock must cover
+        # checks, append and ledger write, and a second run must not append.
+        import fcntl
+        lock_path = os.path.join(self.state_dir, 'baselines.lock')
+        with open(lock_path, 'w') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            r = self.run_script('t1', *BASELINE)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('another declare-baseline run', r.stderr)
+        self.assertEqual(self.writes(), [])
+        self.assertFalse(any(c.startswith('jobs types baselines list') for c in self.calls()))
+        self.assertEqual(self.ledger_lines(), [])
+
+    def test_lock_is_released_for_the_next_run(self):
+        r = self.run_script('t1', *BASELINE)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_script('t1', *BASELINE)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn('already appended', r.stderr)
+
+    def test_unwritable_ledger_fails_loud_after_the_append(self):
+        # A directory where the ledger should be makes the append fail.
+        os.makedirs(self.ledger)
+        r = self.run_script('t1', *BASELINE)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(len(self.writes()), 1)
+        self.assertIn('appended in Revenium', r.stderr)
+        self.assertIn('NOT saved', r.stderr)
+        self.assertNotIn('Appended baseline version', r.stdout)
+
     def test_dry_run_passes_dry_run_and_ledgers_nothing(self):
         r = self.run_script('t1', *BASELINE, '--dry-run')
         self.assertEqual(r.returncode, 0, r.stderr)

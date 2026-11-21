@@ -478,6 +478,25 @@ append_baseline() {
     return 1
   fi
 
+  # Held for the rest of the process: the duplicate checks, the append and the
+  # ledger write run as one unit, so an overlapping run sees the first run's
+  # ledger line instead of racing it to a second PERMANENT version.
+  # Non-blocking: an operator gets an answer, not a silent wait. Same exec-fd +
+  # fcntl pattern as outcome-metrics-report.sh.
+  mkdir -p "$(dirname "${BASELINES_LOCK_FILE}")" 2>/dev/null || true
+  exec 9>"${BASELINES_LOCK_FILE}"
+  if ! python3 - <<'LOCKPY'
+import fcntl, sys
+try:
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except (OSError, BlockingIOError):
+    sys.exit(11)
+LOCKPY
+  then
+    echo "error: another declare-baseline run is in progress; nothing appended. Retry when it finishes." >&2
+    return 1
+  fi
+
   local digest
   digest="$(
     COST_PER_UNIT="${COST_PER_UNIT}" MINUTES_PER_UNIT="${MINUTES_PER_UNIT}" \
@@ -579,7 +598,15 @@ PY
     return 0
   fi
   mkdir -p "$(dirname "${BASELINES_LEDGER_FILE}")" 2>/dev/null || true
-  printf 'BASELINE:%s:%s:%s\n' "${JOB_TYPE}" "${digest}" "$(date +%s)" >> "${BASELINES_LEDGER_FILE}"
+  # Checked explicitly: the caller runs this under `||`, which switches off
+  # set -e here, and a lost line removes the guard against re-running.
+  if ! printf 'BASELINE:%s:%s:%s\n' "${JOB_TYPE}" "${digest}" "$(date +%s)" \
+      >> "${BASELINES_LEDGER_FILE}" 2>/dev/null; then
+    echo "error: the baseline WAS appended in Revenium for ${JOB_TYPE} (effective ${EFFECTIVE_FROM}), but the local record was NOT saved to ${BASELINES_LEDGER_FILE}." >&2
+    echo "       Do not re-run with these values; the server's version-in-force check is now the only duplicate guard." >&2
+    warn "declare-baseline: appended baseline for job_type=${JOB_TYPE} digest=${digest} but the ledger write failed"
+    return 1
+  fi
   info "declare-baseline: appended baseline for job_type=${JOB_TYPE} digest=${digest} provenance=${PROVENANCE} effective_from=${EFFECTIVE_FROM}"
   echo "Appended baseline version to ${JOB_TYPE} (effective ${EFFECTIVE_FROM}, ${PROVENANCE})."
 }

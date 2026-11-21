@@ -2707,6 +2707,7 @@ exit 0
         self.assertIn('tool-events.lock', text)
         # quick-261029-tyq: declare-baseline.sh's permanent-append ledger.
         self.assertRegex(text, r'BASELINES_LEDGER_FILE="\$\{REVENIUM_BASELINES_LEDGER_FILE:-\$\{STATE_DIR\}/revenium-baselines\.ledger\}"')
+        self.assertRegex(text, r'BASELINES_LOCK_FILE="\$\{REVENIUM_BASELINES_LOCK_FILE:-\$\{STATE_DIR\}/baselines\.lock\}"')
         # Phase 17: v1.3 guardrails-native paths and CLI capability helper.
         self.assertIn('GUARDRAIL_STATUS_FILE=', text)
         self.assertIn('guardrail-status.json', text)
